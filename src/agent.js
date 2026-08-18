@@ -168,8 +168,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         }
       } else {
         io.endTurn();
-        // 最终纯文本回复同样回填消息历史（会话持久化与多轮上下文依赖它）
-        messages.push({ role: 'assistant', content: res.text || '' });
+        // 最终纯文本回复回填消息历史（会话持久化与多轮上下文依赖它）；
+        // 空文本不回填，避免个别 API 对 assistant 空 content 报错
+        if (res.text) {
+          messages.push({ role: 'assistant', content: res.text });
+        }
         return {
           text: res.text || '',
           reasoning: res.reasoning || '',

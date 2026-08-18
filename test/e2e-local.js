@@ -20,6 +20,7 @@ let requestCount = 0;
 let sawToolCall = false;
 let mockMode = 'write';
 let mockSummary = '计划文本';
+let lastPayload = null;
 
 function sse(res, payload) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -32,6 +33,7 @@ const server = http.createServer((req, res) => {
   req.on('data', (d) => (body += d));
   req.on('end', () => {
     const parsed = JSON.parse(body);
+    lastPayload = parsed;
 
     // 计划/摘要类请求（无工具）
     if (!parsed.tools || parsed.tools.length === 0) {
@@ -122,7 +124,7 @@ function runCli(args, opts = {}) {
     let err = '';
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (err += d));
-    if (opts.stdin) {
+    if (opts.stdin !== undefined) {
       child.stdin.write(opts.stdin);
       child.stdin.end();
     }
@@ -152,6 +154,7 @@ function ok(name) {
   assert.ok(r.out.includes('全部完成！'), '应输出最终文本');
   assert.ok(sawToolCall, '模型应发起工具调用');
   assert.ok(r.out.includes('result.txt'), '应显示工具调用目标');
+  assert.equal(lastPayload.stream, true, '请求必须携带 stream:true（防回归）');
   ok('HTTP/SSE → 工具执行 → 结果回填 → 最终输出');
 }
 
@@ -252,6 +255,19 @@ function ok(name) {
   assert.equal(j.session.endsWith('.jsonl'), true);
   assert.ok(typeof j.durationMs === 'number');
   ok('--format json 结构化输出');
+}
+
+// ---------- 10. JSON 模式 + ask 权限 + stdin EOF：stdout 恒为单行 JSON ----------
+{
+  writeConfig('ask');
+  resetMock('write');
+  const r = await runCli(['--format', 'json', '创建 result.txt'], { stdin: '' });
+  assert.equal(r.code, 2, 'stderr: ' + r.err);
+  const j = JSON.parse(r.out.trim());
+  assert.equal(j.ok, false);
+  assert.ok(String(j.error).includes('输入流'), '错误应说明输入流结束');
+  writeConfig('auto');
+  ok('JSON 模式 + ask + stdin EOF：stdout 单行 JSON 契约');
 }
 
 server.close();

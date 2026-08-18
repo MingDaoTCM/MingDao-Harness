@@ -532,7 +532,12 @@ export function createIO({ quiet = false } = {}) {
         // 非 TTY：优先消费已缓冲的行（接口关闭后仍可能有剩余行），不打印提示符
         if (lineQueue.length) return Promise.resolve(lineQueue.shift());
         if (closed) return Promise.reject(EOF_ERROR);
-        const r = io.ensureRl();
+        let r;
+        try {
+          r = io.ensureRl();
+        } catch (e) {
+          return Promise.reject(e); // 确保 ask 永远以 rejection 报告，不向调用方同步抛错
+        }
         if (r.closed) return Promise.reject(EOF_ERROR);
         return new Promise((resolve, reject) => {
           askQueue.push({ resolve, reject });

@@ -127,4 +127,54 @@ WebUI（io 接口已解耦，加 HTTP/SSE 适配器即可）→ MCP 客户端 �
 
 ---
 
-*报告生成：Hermes Agent · 基于全量源码走读、17 项针对性验证、smoke + e2e 回归测试*
+## 六、迭代复评（2026-08-18 晚 · 用户两轮修复后）
+
+> 第一节报告发出后，用户按建议完成两轮修复（第二轮 18:19–18:20，第三轮 18:21–18:23，版本升至 **0.5.0**）。以下为逐轮复评结论。
+
+### 6.1 第二轮复评：改进 6 项（全部正确实施 ✅）
+
+| 建议项 | 实施情况 | 核查结论 |
+| --- | --- | --- |
+| 费用计算逻辑统一（原五-小瑕疵） | 新建 `src/pricing.js`（`isPeakHour` / `estimateCost` / `estimateCostLabel`），cli.js 与 ui.js 均已接线、旧内联实现删除 | ✅ 完整，无死代码；计价口径与旧实现一致 |
+| 只读工具集合单一来源（原五-小瑕疵） | `READONLY_TOOLS` 移至 `src/tools/index.js` 导出，permissions.js 改为 import | ✅ 完整 |
+| 子代理权限确认加「（子任务）」标记（原 4.3.1） | `permission.check(name, args, label)` 新增 label 参数；子代理包装传入 `（子任务）` | ✅ 完整 |
+| undo 备份跨实例共享 | `createAgent` 新增 `undoStore` / `maxSteps` 参数；子代理与主代理共享同一 undo 仓；`SUBAGENT_MAX_STEPS`（12）真正接入（此前为未使用的死常量） | ✅ 完整，`/model` 切换、单次提问、JSON 模式三处 createAgent 调用均已传 `sessionUndoStore` |
+| 单次提问 `--format json`（原 4.3.3） | `parseArgs` 支持 `-f/--format json`；单次提问输出单行 JSON `{ok, text, reasoning, usage, durationMs, steps, finish, aborted, truncated, session}`；错误输出 `{ok:false, error}`；HELP 已更新 | ✅ 完整 |
+| 公共 API 补全 | `src/index.js` 导出 pricing 模块 | ✅（第三轮补） |
+
+### 6.2 第三轮复评：修复与改进 7 处
+
+| 文件 | 改动 | 评价 |
+| --- | --- | --- |
+| `src/agent.js` | **最终纯文本回复回填消息历史**（runTurn 结束 push assistant 消息） | 🔧 重要修复——此前会话文件只存 user 消息、丢失 assistant 回复，`--continue` 恢复后上下文残缺；smoke 新增断言覆盖 |
+| `src/providers/openai-compatible.js` | 请求体显式加 `payload.stream = true` | 🔧 重要修复——此前请求未带 `stream` 字段，所有网关返回**非流式** JSON（走 parseNonStream 分支），TUI 流式渲染/增量输出从未真正生效；同时修正 `stream_options` 与 `stream` 的一致性（此前无 stream 却发 stream_options，部分网关会 400） |
+| `src/cli.js` | 新增 `/title <别名>` 会话命名（含非法字符过滤、空文件 rename 保护），HELP 同步更新 | ✅ 新功能，实现稳健 |
+| `src/index.js` | 公共 API 补全：`estimateCost` / `estimateCostLabel` / `isPeakHour` | ✅ |
+| `package.json` | 版本升至 0.5.0 | ✅ |
+| `test/smoke.js` | 新增「最终纯文本回复应回填消息历史」断言 | ✅ |
+| `test/e2e-local.js` | **4 组扩至 9 组**，mock 升级为可编程三模式（write / task / plain） | ✅ 补齐原 4.2 测试缺口：ask 权限拒绝/放行闭环、`/plan` 计划→确认→执行、`/compact`、task 子代理真实往返、`--format json` 结构化输出 |
+
+### 6.3 复评验证结果（全绿）
+
+| 验证项 | 结果 |
+| --- | --- |
+| `npm test`（smoke） | ✅ **14 组断言**全部通过 |
+| `node test/e2e-local.js` | ✅ **9 项**全部通过（含新增 5 项） |
+| 6 个改动文件语法检查（node --check） | ✅ 全部通过 |
+| 手动实测：JSON 模式 + ask 权限 + stdin `y` | ✅ 放行→工具执行→stdout 单行纯净 JSON（`{ok:true,...}`），exit 0；非 TTY 下 `io.ask` 不打印提示符，**权限提示不会污染 stdout** |
+
+### 6.4 新观察项（非阻塞，供参考）
+
+1. **`/title` 重命名覆盖风险**（低）：`fs.renameSync` 会静默覆盖已存在的同名 `<别名>.jsonl`，两个会话命名相同别名时后者覆盖前者。建议 rename 前 `fs.existsSync` 检查或附加随机后缀。
+2. **空文本 assistant 消息**（极低）：`messages.push({ role:'assistant', content: res.text || '' })` 在模型返回空文本时也会回填空 content，个别 API 对 assistant 空 content 较严格。可改为仅 `res.text` 非空时 push。
+3. **JSON 模式 + ask + stdin EOF**（低）：stdin 关闭时权限确认的 EOF 错误会逃逸到 `main()` 顶层 catch（stderr 报错 + exit 1，stdout 无 JSON），破坏「JSON 模式 stdout 恒为单行 JSON」的脚本约定。建议在单次提问 catch 中捕获 EOF 并输出 `{ok:false, error}`。
+4. **发布前事项仍未处理**（原 4.1，已提两轮）：项目依然不是 git 仓库；`package.json` 缺 `repository` / `author` / `bugs` / `files` 字段；README 的 clone 地址仍是 `<your-org>` 占位符。
+5. **可选加固**：e2e mock 可加一条断言验证请求确实携带 `stream: true`（防止该修复回归）。
+
+### 6.5 复评小结
+
+两轮迭代后项目质量显著提升：两个「隐性失效」功能（会话回复持久化、真正流式传输）被修复，测试覆盖从 4 组 e2e 扩至 9 组并补齐交互类路径，公共 API 与代码复用（pricing / READONLY_TOOLS）更完善。剩余问题均不阻塞核心功能，优先级最高的是发布前事项（git 初始化 + npm 元数据）。
+
+---
+
+*报告生成：Hermes Agent · 基于全量源码走读、17 项针对性验证、smoke + e2e 回归测试（含三轮复评）*

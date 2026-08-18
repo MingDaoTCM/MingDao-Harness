@@ -486,9 +486,13 @@ async function main() {
           continue;
         }
         const safe = arg.replace(/[^\w\u4e00-\u9fa5.-]/g, '_').slice(0, 40);
-        const newFile = path.join(home, 'sessions', safe + '.jsonl');
+        let newFile = path.join(home, 'sessions', safe + '.jsonl');
         try {
           fs.appendFileSync(session.file, ''); // 确保文件已创建（尚未写消息时也可能重命名）
+          // 同名会话已存在时附加随机后缀，绝不静默覆盖
+          if (fs.existsSync(newFile)) {
+            newFile = path.join(home, 'sessions', safe + '-' + Math.random().toString(36).slice(2, 6) + '.jsonl');
+          }
           fs.renameSync(session.file, newFile);
           session.file = newFile;
           io.print(style(`✓ 会话已命名为 ${path.basename(newFile)}`, C.green));
