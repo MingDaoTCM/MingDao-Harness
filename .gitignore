@@ -1,0 +1,10 @@
+node_modules/
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# 密钥与本地环境（任何情况下都不入库）
+.env
+.env.*
+credentials.json

@@ -1,0 +1,260 @@
+// 端到端测试：本地 mock OpenAI 兼容服务器 + 完整 CLI 进程。
+// 覆盖：真实 HTTP/SSE、工具闭环、REPL、会话持久化、ask 权限交互、
+// /plan 计划模式、/compact 压缩、task 子代理真实往返、--format json。
+// 运行：node test/e2e-local.js
+
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// ---------- 可编程 mock 服务器 ----------
+// mockMode: 'write' 首请求返回 write 工具调用 | 'task' 首请求返回 task 工具调用 | 'plain' 无工具调用
+// tools 为空的请求（generatePlan / compactContext）返回 mockSummary 文本
+let requestCount = 0;
+let sawToolCall = false;
+let mockMode = 'write';
+let mockSummary = '计划文本';
+
+function sse(res, payload) {
+  res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+  res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  res.end('data: [DONE]\n\n');
+}
+
+const server = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (d) => (body += d));
+  req.on('end', () => {
+    const parsed = JSON.parse(body);
+
+    // 计划/摘要类请求（无工具）
+    if (!parsed.tools || parsed.tools.length === 0) {
+      sse(res, {
+        choices: [{ delta: { content: mockSummary }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 100, completion_tokens: 10 },
+      });
+      return;
+    }
+
+    requestCount += 1;
+    assert.ok(parsed.tools.length >= 6, '请求应携带工具 Schema');
+
+    if (mockMode === 'plain') {
+      sse(res, {
+        choices: [{ delta: { content: '这是回答' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 100, completion_tokens: 10 },
+      });
+      return;
+    }
+
+    if (requestCount === 1) {
+      sawToolCall = true;
+      const tc =
+        mockMode === 'task'
+          ? {
+              index: 0,
+              id: 'call_task',
+              type: 'function',
+              function: { name: 'task', arguments: JSON.stringify({ description: '测试子任务', prompt: '子任务内容' }) },
+            }
+          : {
+              index: 0,
+              id: 'call_e2e',
+              type: 'function',
+              function: { name: 'write', arguments: JSON.stringify({ path: 'result.txt', content: 'e2e 成功\n' }) },
+            };
+      sse(res, {
+        choices: [{ delta: { tool_calls: [tc] }, finish_reason: 'tool_calls' }],
+        usage: { prompt_tokens: 100, completion_tokens: 10 },
+      });
+      return;
+    }
+
+    // 后续请求（含子代理自己的请求）：最终文本
+    sse(res, {
+      choices: [{ delta: { content: '全部完成！' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 100, completion_tokens: 10 },
+    });
+  });
+});
+
+await new Promise((r) => server.listen(0, '127.0.0.1', r));
+const port = server.address().port;
+
+// ---------- 隔离环境 ----------
+const home = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-e2e-'));
+function writeConfig(permission) {
+  fs.writeFileSync(
+    path.join(home, 'config.json'),
+    JSON.stringify({
+      provider: 'custom',
+      model: 'test-model',
+      baseUrl: `http://127.0.0.1:${port}/v1`,
+      permission,
+      contextBudget: 32000,
+    })
+  );
+}
+writeConfig('auto');
+fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ custom: 'sk-test-1234567890abcdef' }), {
+  mode: 0o600,
+});
+
+function newWorkDir() {
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-work-'));
+}
+const work = newWorkDir();
+
+function runCli(args, opts = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [path.join(root, 'src', 'cli.js'), ...args], {
+      cwd: opts.cwd || work,
+      env: { ...process.env, MINGDAO_HOME: home },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', (d) => (out += d));
+    child.stderr.on('data', (d) => (err += d));
+    if (opts.stdin) {
+      child.stdin.write(opts.stdin);
+      child.stdin.end();
+    }
+    child.on('close', (code) => resolve({ code, out, err }));
+  });
+}
+
+function resetMock(mode, summary = '计划文本') {
+  requestCount = 0;
+  sawToolCall = false;
+  mockMode = mode;
+  mockSummary = summary;
+}
+
+let passed = 0;
+function ok(name) {
+  passed += 1;
+  console.log(`  ✓ e2e：${name}`);
+}
+
+// ---------- 1. 单次提问：完整工具闭环 ----------
+{
+  resetMock('write');
+  const r = await runCli(['创建 result.txt 并写入内容']);
+  assert.equal(r.code, 0, 'stderr: ' + r.err);
+  assert.equal(fs.readFileSync(path.join(work, 'result.txt'), 'utf8'), 'e2e 成功\n');
+  assert.ok(r.out.includes('全部完成！'), '应输出最终文本');
+  assert.ok(sawToolCall, '模型应发起工具调用');
+  assert.ok(r.out.includes('result.txt'), '应显示工具调用目标');
+  ok('HTTP/SSE → 工具执行 → 结果回填 → 最终输出');
+}
+
+// ---------- 2. 交互式 REPL：启动、/help、/exit ----------
+{
+  const r = await runCli([], { stdin: '/help\n/exit\n' });
+  assert.equal(r.code, 0, 'stderr: ' + r.err);
+  assert.ok(r.out.includes('MingDao 明道'), '应显示横幅');
+  assert.ok(r.out.includes('会话内命令'), '/help 应输出帮助');
+  ok('REPL 启动 / /help / /exit');
+}
+
+// ---------- 3. 会话持久化与 --continue ----------
+{
+  const files = fs.readdirSync(path.join(home, 'sessions')).filter((f) => f.endsWith('.jsonl'));
+  assert.ok(files.length >= 1, '应生成会话文件');
+  const r = await runCli(['--continue'], { stdin: '/exit\n' });
+  assert.equal(r.code, 0);
+  assert.ok(r.out.includes('已载入会话'), '--continue 应载入历史会话');
+  ok('会话持久化与 --continue');
+}
+
+// ---------- 4. 凭证管理命令：脱敏状态 ----------
+{
+  const r = await runCli(['key', 'status']);
+  assert.equal(r.code, 0, 'stderr: ' + r.err);
+  assert.ok(r.out.includes('custom: sk-tes…cdef'), 'key status 应脱敏显示凭证');
+  assert.ok(!r.out.includes('sk-test-1234567890abcdef'), 'key status 不得泄露完整密钥');
+  ok('mingdao key status 脱敏显示');
+}
+
+// ---------- 5. ask 权限模式交互闭环（拒绝 / 放行） ----------
+{
+  writeConfig('ask');
+  const w5 = newWorkDir();
+  resetMock('write');
+  const deny = await runCli(['创建 result.txt 并写入内容'], { cwd: w5, stdin: 'n\n' });
+  assert.equal(deny.code, 0, 'stderr: ' + deny.err);
+  assert.ok(!fs.existsSync(path.join(w5, 'result.txt')), '拒绝后文件不应创建');
+  assert.ok(deny.out.includes('未授权'), '应显示拒绝标记');
+
+  resetMock('write');
+  const w5b = newWorkDir();
+  const allow = await runCli(['创建 result.txt 并写入内容'], { cwd: w5b, stdin: 'y\n' });
+  assert.equal(allow.code, 0, 'stderr: ' + allow.err);
+  assert.equal(fs.readFileSync(path.join(w5b, 'result.txt'), 'utf8'), 'e2e 成功\n', '放行后文件应创建');
+  writeConfig('auto');
+  fs.rmSync(w5, { recursive: true, force: true });
+  fs.rmSync(w5b, { recursive: true, force: true });
+  ok('ask 权限模式：拒绝 / 放行闭环');
+}
+
+// ---------- 6. /plan 计划模式（管道驱动） ----------
+{
+  resetMock('write', '第一步：列出文件。第二步：汇报。');
+  const w6 = newWorkDir();
+  const r = await runCli([], { cwd: w6, stdin: '/plan\n列出文件\ny\n/exit\n' });
+  assert.equal(r.code, 0, 'stderr: ' + r.err);
+  assert.ok(r.out.includes('── 执行计划 ──'), '应显示计划');
+  assert.ok(r.out.includes('第一步：列出文件'), '计划内容应来自模型');
+  assert.equal(fs.readFileSync(path.join(w6, 'result.txt'), 'utf8'), 'e2e 成功\n', '确认后应执行计划');
+  fs.rmSync(w6, { recursive: true, force: true });
+  ok('/plan 计划模式：计划 → 确认 → 执行');
+}
+
+// ---------- 7. /compact 上下文压缩 ----------
+{
+  resetMock('plain', '压缩摘要：前两轮讨论了测试话题。');
+  const w7 = newWorkDir();
+  const r = await runCli([], { cwd: w7, stdin: '问题一\n问题二\n问题三\n/compact\n/exit\n' });
+  assert.equal(r.code, 0, 'stderr: ' + r.err);
+  assert.ok(r.out.includes('已压缩上下文'), '应输出压缩成功标记');
+  fs.rmSync(w7, { recursive: true, force: true });
+  ok('/compact 上下文压缩');
+}
+
+// ---------- 8. task 子代理真实往返 ----------
+{
+  resetMock('task');
+  const w8 = newWorkDir();
+  const r = await runCli(['完成子任务'], { cwd: w8 });
+  assert.equal(r.code, 0, 'stderr: ' + r.err);
+  assert.ok(r.out.includes('子任务'), '应显示子代理进度标记');
+  assert.ok(sawToolCall, '主代理应发起 task 调用');
+  fs.rmSync(w8, { recursive: true, force: true });
+  ok('task 子代理真实往返');
+}
+
+// ---------- 9. --format json 结构化输出 ----------
+{
+  resetMock('plain');
+  const r = await runCli(['--format', 'json', '一个问题']);
+  assert.equal(r.code, 0, 'stderr: ' + r.err);
+  const j = JSON.parse(r.out.trim());
+  assert.equal(j.ok, true);
+  assert.equal(j.text, '这是回答');
+  assert.equal(j.usage.prompt_tokens, 100);
+  assert.equal(j.session.endsWith('.jsonl'), true);
+  assert.ok(typeof j.durationMs === 'number');
+  ok('--format json 结构化输出');
+}
+
+server.close();
+fs.rmSync(home, { recursive: true, force: true });
+fs.rmSync(work, { recursive: true, force: true });
+console.log(`\n端到端测试全部通过：${passed} 项 ✓`);

@@ -1,0 +1,198 @@
+// Agent 核心循环：消息 → 模型（流式）→ PreToolUse 钩子 → 权限引擎 → 工具执行
+// → PostToolUse 钩子 → 结果回填 → 循环，直到模型给出纯文本回复。
+// 附带：子代理（task 工具）、todo 清单状态、undo 备份仓、Ctrl+C 中断。
+
+import { trimMessages, clampText } from './context.js';
+import { toolSchemas, dispatch } from './tools/index.js';
+import { modelPreset } from './models.js';
+import { createHooks } from './hooks.js';
+import { createIO, style, C } from './ui.js';
+
+const MAX_STEPS = 24;
+const SUBAGENT_MAX_STEPS = 12;
+
+export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps }) {
+  const preset = modelPreset(modelName) || {};
+  const budget = cfg.contextBudget || preset.budgetTokens || 128000;
+  const maxOutput = cfg.maxOutputTokens || preset.maxOutputTokens || 8192;
+  const temperature = cfg.temperature ?? preset.temperature ?? 0.6;
+  const hooks = createHooks(cfg.hooks, workingDir);
+  const todos = [];
+  // 会话级共享：调用方传入则复用（/model 切换、子代理均共享，undo 不丢失）
+  const undo = undoStore || { backups: new Map() };
+  const stepLimit = maxSteps || MAX_STEPS;
+
+  // 子代理：全新上下文 + 同一 Provider/权限（提示带「子任务」标记），独立完成子任务后汇报
+  async function spawnTask(prompt, { description = '' } = {}) {
+    const subIo = createIO({ quiet: true });
+    const subPermission = {
+      check: (name, args) => permission.check(name, args, '（子任务）'),
+    };
+    const subAgent = createAgent({
+      provider,
+      permission: subPermission,
+      io: subIo,
+      modelName,
+      workingDir,
+      cfg: { ...cfg, contextBudget: Math.min(budget, 64000) },
+      undoStore: undo,
+      maxSteps: SUBAGENT_MAX_STEPS,
+    });
+    const sys =
+      `你是主智能体 MingDao 派出的子代理，独立完成一项子任务。` +
+      `你与主线程共享同一台电脑与项目（工作目录：${workingDir}）。` +
+      `完成后用简洁中文汇报结果、关键结论与涉及的文件路径；不要向用户提问。`;
+    const messages = [
+      { role: 'system', content: sys },
+      { role: 'user', content: prompt },
+    ];
+    io.print(style(`  ↳ 子任务${description ? '：' + description : ''}`, C.magenta));
+    const t0 = Date.now();
+    const res = await subAgent.runTurn(messages);
+    const ms = Date.now() - t0;
+    const text = res.text || (res.truncated ? '（子任务达到步骤上限，未完成）' : '（子任务无输出）');
+    io.print(style(`  ↳ 子任务完成（${ms}ms）`, C.magenta));
+    return text;
+  }
+
+  function makeCtx() {
+    return {
+      cwd: workingDir,
+      io,
+      workingDir,
+      modelName,
+      provider,
+      permission,
+      cfg,
+      budget,
+      todos,
+      undoStore: undo,
+      spawnTask: (prompt, opts) => spawnTask(prompt, opts),
+    };
+  }
+
+  async function runTurn(messages) {
+    let steps = 0;
+    let finish = null;
+    const usage = { prompt_tokens: 0, completion_tokens: 0 };
+    const startedAt = Date.now();
+    let aborted = false;
+    const ctx = makeCtx();
+
+    while (steps < stepLimit) {
+      steps += 1;
+      const trimmed = trimMessages(messages, budget);
+
+      const ac = new AbortController();
+      const offSigint = io.onSigint(() => {
+        aborted = true;
+        ac.abort();
+      });
+      io.beginTurn();
+      io.startSpinner('正在思考…');
+
+      let res;
+      try {
+        res = await provider.chat({
+          model: modelName,
+          messages: trimmed,
+          tools: toolSchemas(),
+          temperature,
+          maxTokens: maxOutput,
+          signal: ac.signal,
+          onDelta(d) {
+            io.stopSpinner();
+            if (d.text) io.writeText(d.text);
+            if (d.reasoning) io.writeReasoning(d.reasoning);
+          },
+        });
+      } catch (err) {
+        io.stopSpinner();
+        io.endTurn();
+        if (aborted) {
+          return { text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: true, durationMs: Date.now() - startedAt };
+        }
+        throw err;
+      } finally {
+        offSigint();
+      }
+
+      finish = res.finish ?? finish;
+      if (res.usage) {
+        usage.prompt_tokens += res.usage.prompt_tokens || 0;
+        usage.completion_tokens += res.usage.completion_tokens || 0;
+      }
+
+      if (res.toolCalls?.length) {
+        io.endTurn();
+        const assistantMsg = { role: 'assistant', content: res.text || null, tool_calls: res.toolCalls };
+        messages.push(assistantMsg);
+        for (const tc of res.toolCalls) {
+          const name = tc.function?.name || '';
+          let args = {};
+          try {
+            args = JSON.parse(tc.function?.arguments || '{}') || {};
+          } catch {
+            args = {};
+          }
+
+          // PreToolUse 钩子
+          const hook = await hooks.pre(name, args);
+          if (hook.decision === 'block') {
+            io.renderToolDenied(name, args);
+            messages.push({ role: 'tool', tool_call_id: tc.id, content: `工具被 PreToolUse 钩子阻止：${hook.reason}` });
+            continue;
+          }
+
+          const allowed = await permission.check(name, args);
+          if (!allowed) {
+            io.renderToolDenied(name, args);
+            messages.push({ role: 'tool', tool_call_id: tc.id, content: '用户拒绝了该工具的执行权限。' });
+            continue;
+          }
+
+          const t0 = Date.now();
+          let result;
+          try {
+            result = await dispatch(name, args, ctx);
+          } catch (err) {
+            result = JSON.stringify({ ok: false, error: String(err?.message || err) });
+          }
+          const ms = Date.now() - t0;
+          io.renderTool(name, args, result, ms);
+          if (name === 'todo' && result?.todos) io.renderTodo(result.todos);
+          hooks.post(name, args, typeof result === 'string' ? { output: result } : result).catch(() => {});
+
+          const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+          messages.push({ role: 'tool', tool_call_id: tc.id, content: clampText(text) });
+        }
+      } else {
+        io.endTurn();
+        // 最终纯文本回复同样回填消息历史（会话持久化与多轮上下文依赖它）
+        messages.push({ role: 'assistant', content: res.text || '' });
+        return {
+          text: res.text || '',
+          reasoning: res.reasoning || '',
+          usage,
+          steps,
+          finish,
+          truncated: false,
+          aborted: false,
+          durationMs: Date.now() - startedAt,
+        };
+      }
+    }
+    io.endTurn();
+    return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, durationMs: Date.now() - startedAt };
+  }
+
+  return {
+    modelName,
+    budget,
+    maxOutput,
+    temperature,
+    runTurn,
+    spawnTask: (prompt, opts) => spawnTask(prompt, opts),
+    getTodos: () => todos.slice(),
+  };
+}

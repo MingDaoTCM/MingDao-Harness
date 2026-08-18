@@ -1,0 +1,81 @@
+// 会话持久化：JSONL 格式存放在 <mingdao-home>/sessions/。
+// 每轮自动追加；mingdao --continue 载入最近一次会话。
+
+import fs from 'node:fs';
+import path from 'node:path';
+
+export function listSessions(home) {
+  const dir = path.join(home, 'sessions');
+  try {
+    return fs
+      .readdirSync(dir)
+      .filter((f) => f.endsWith('.jsonl'))
+      .map((f) => {
+        const file = path.join(dir, f);
+        return { file, name: f, mtime: fs.statSync(file).mtimeMs };
+      })
+      .sort((a, b) => b.mtime - a.mtime);
+  } catch {
+    return [];
+  }
+}
+
+export function latestSession(home) {
+  return listSessions(home)[0] || null;
+}
+
+export function createSession(home) {
+  const dir = path.join(home, 'sessions');
+  fs.mkdirSync(dir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const rand = Math.random().toString(36).slice(2, 6);
+  const file = path.join(dir, `${stamp}-${rand}.jsonl`);
+  return { file, name: path.basename(file) };
+}
+
+export function appendMessages(file, messages) {
+  if (!messages?.length) return;
+  const lines = messages.map((m) => JSON.stringify(m)).join('\n') + '\n';
+  fs.appendFileSync(file, lines);
+}
+
+export function loadSession(file) {
+  const raw = fs.readFileSync(file, 'utf8');
+  const messages = [];
+  for (const line of raw.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const m = JSON.parse(line);
+      if (m && typeof m === 'object' && ['system', 'user', 'assistant', 'tool'].includes(m.role)) {
+        messages.push(m);
+      }
+    } catch {}
+  }
+  return { file, messages };
+}
+
+// 会话预览：第一条用户消息（用于会话选择器）
+export function sessionPreview(file) {
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      const m = JSON.parse(line);
+      if (m.role === 'user') {
+        const s = String(m.content).split('\n')[0].trim().slice(0, 60);
+        return s || '(空消息)';
+      }
+    }
+    return '(无内容)';
+  } catch {
+    return '(无法读取)';
+  }
+}
+
+export function relativeTime(mtime) {
+  const diff = Date.now() - mtime;
+  if (diff < 60000) return '刚刚';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)} 分钟前`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`;
+  return `${Math.floor(diff / 86400000)} 天前`;
+}
