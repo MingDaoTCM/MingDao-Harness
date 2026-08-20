@@ -17,6 +17,7 @@ import {
 } from './credentials.js';
 import { createProvider, resolveProviderConfig } from './providers/index.js';
 import { startMcpServers } from './mcp.js';
+import { startTask, listTasks, patchTask, killTask, formatTaskRow } from './tasks.js';
 import { createAgent } from './agent.js';
 import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
@@ -49,6 +50,8 @@ const HELP_LINES = [
   ['  mingdao --format json "…"  单次提问，输出结构化 JSON', null],
   ['  mingdao web [端口]        启动 WebUI（默认 http://127.0.0.1:3820）', null],
   ['  mingdao sessions search <词> 全文检索历史会话', null],
+  ['  mingdao run "<任务>"     后台启动任务（tasks 面板管理）', null],
+  ['  mingdao tasks [watch|kill <id>] 查看/实时刷新/停止后台任务', null],
   ['  mingdao --continue         继续最近一次会话', null],
   ['  mingdao --resume           从会话列表选择恢复', null],
   ['  mingdao --model <模型名>   指定模型，例如 deepseek-v4-pro', null],
@@ -210,6 +213,112 @@ async function handleKeyCommand(args) {
   }
 }
 
+// —— 后台任务 worker：独立进程执行一轮任务并写状态文件 ——
+async function runWorkerTask(id, question, { permission, model }) {
+  const home = ensureHome();
+  const finish = (patch) => patchTask(home, id, patch);
+  let mcpFacade = null;
+  try {
+    const cfg = loadConfig();
+    if (!cfg) throw new Error('未初始化配置，请先运行 mingdao init');
+    const modelName = model || cfg.model || 'deepseek-v4-flash';
+    const pc = resolveProviderConfig(cfg, modelName);
+    if (!pc.apiKey) throw new Error(`模型 ${modelName} 没有可用 API Key`);
+    const workingDir = process.cwd();
+    // 后台无交互：ask 权限降级为 readonly 并注明（需要写权限请 mingdao run --permission auto）
+    let perm = permission || cfg.permission || 'ask';
+    let note = '';
+    if (perm === 'ask') {
+      perm = 'readonly';
+      note = 'ask 权限下后台任务按只读执行';
+    }
+    const provider = await createProvider(cfg, modelName);
+    const io = createIO({ quiet: true });
+    const permissionObj = createPermission(perm, io);
+    let mcpManager = null;
+    if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) {
+      mcpFacade = {
+        toolSchemas: () => (mcpManager ? mcpManager.toolSchemas() : []),
+        call: (n, a) => (mcpManager ? mcpManager.call(n, a) : Promise.reject(new Error('MCP 未就绪'))),
+        isReadonly: (n) => (mcpManager ? mcpManager.isReadonly(n) : false),
+        stop: () => {
+          if (mcpManager) mcpManager.stop();
+        },
+      };
+      startMcpServers(cfg.mcpServers, workingDir).then((m) => (mcpManager = m)).catch(() => {});
+    }
+    const agent = createAgent({
+      provider,
+      permission: permissionObj,
+      io,
+      modelName,
+      workingDir,
+      cfg,
+      mcp: mcpFacade || undefined,
+    });
+    const session = createSession(home);
+    const messages = [
+      { role: 'system', content: buildSystemPrompt({ modelName, workingDir }) },
+      { role: 'user', content: question },
+    ];
+    appendMessages(session.file, messages);
+    const t0 = Date.now();
+    const res = await agent.runTurn(messages);
+    appendMessages(session.file, messages.slice(2));
+    if (cfg.autoTitle !== false && res.text) {
+      try {
+        const title = await generateTitle(provider, titleModel(cfg, modelName), question);
+        if (title) renameSessionFile(fs, path, home, session, title);
+      } catch {}
+    }
+    finish({
+      status: res.truncated ? 'failed' : res.aborted ? 'killed' : 'done',
+      text: (res.text || '').slice(0, 2000),
+      usage: res.usage,
+      durationMs: Date.now() - t0,
+      session: path.basename(session.file),
+      note,
+    });
+    process.exitCode = res.truncated ? 1 : 0;
+  } catch (err) {
+    finish({ status: 'failed', error: String(err?.message || err) });
+    process.exitCode = 2;
+  } finally {
+    if (mcpFacade) mcpFacade.stop();
+  }
+}
+
+function printTasks(home) {
+  const tasks = listTasks(home);
+  if (!tasks.length) {
+    console.log('暂无任务。启动：mingdao run "<任务>"');
+    return;
+  }
+  console.log(`任务面板（共 ${tasks.length} 个，新→旧）`);
+  for (const t of tasks.slice(0, 20)) console.log('  ' + formatTaskRow(t));
+  const running = tasks.filter((t) => t.status === 'running').length;
+  console.log(running ? `\n${running} 个运行中 · mingdao tasks watch 实时刷新 · kill <id> 停止` : '\n无运行中任务');
+}
+
+async function watchTasks(home) {
+  if (!process.stdout.isTTY) {
+    printTasks(home);
+    return;
+  }
+  for (;;) {
+    const tasks = listTasks(home);
+    console.log('\n\x1b[2J\x1b[H' + `任务面板 ${new Date().toLocaleTimeString()}`);
+    if (!tasks.length) console.log('  暂无任务。启动：mingdao run "<任务>"');
+    for (const t of tasks.slice(0, 20)) console.log('  ' + formatTaskRow(t));
+    const running = tasks.filter((t) => t.status === 'running');
+    if (!running.length) {
+      console.log('\n全部任务已结束');
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 2000));
+  }
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -224,6 +333,68 @@ async function main() {
   // 凭证管理子命令（无需配置即可使用）
   if (opts.prompt[0] === 'key') {
     await handleKeyCommand(opts.prompt.slice(1));
+    return;
+  }
+
+  // 后台任务 worker（内部入口，由 mingdao run 启动）
+  if (opts.prompt[0] === 'run-worker') {
+    const id = opts.prompt[1];
+    let question = '';
+    let permission = null;
+    let model = null;
+    for (let i = 2; i < opts.prompt.length; i++) {
+      const a = opts.prompt[i];
+      if (a === '--permission') permission = opts.prompt[++i];
+      else if (a === '--model') model = opts.prompt[++i];
+      else if (a === '--question') question = opts.prompt.slice(i + 1).join(' ');
+    }
+    await runWorkerTask(id, question, { permission, model });
+    return;
+  }
+
+  // 后台任务启动：mingdao run "<任务>" [--permission auto] [--model x]
+  if (opts.prompt[0] === 'run') {
+    const rest = opts.prompt.slice(1);
+    let question = '';
+    let permission = null;
+    let model = null;
+    for (let i = 0; i < rest.length; i++) {
+      const a = rest[i];
+      if (a === '--permission') permission = rest[++i];
+      else if (a === '--model') model = rest[++i];
+      else if (question === '') question = a;
+    }
+    if (!question) {
+      console.log('用法：mingdao run "<任务>" [--permission auto|readonly] [--model 模型名]');
+      process.exitCode = 1;
+      return;
+    }
+    const home0 = ensureHome();
+    const task = startTask(home0, question, { permission, model, cwd: process.cwd() });
+    console.log(`✓ 后台任务已启动 ${task.id}`);
+    console.log(`  查看：mingdao tasks · 实时刷新：mingdao tasks watch · 停止：mingdao tasks kill ${task.id}`);
+    return;
+  }
+
+  // 任务面板：mingdao tasks [watch|kill <id>]
+  if (opts.prompt[0] === 'tasks') {
+    const home0 = ensureHome();
+    const sub = opts.prompt[1];
+    if (sub === 'kill') {
+      const id = opts.prompt[2];
+      if (!id) {
+        console.log('用法：mingdao tasks kill <id>');
+        process.exitCode = 1;
+        return;
+      }
+      console.log(killTask(home0, id) ? `已请求停止任务 ${id}` : '任务不存在');
+      return;
+    }
+    if (sub === 'watch') {
+      await watchTasks(home0);
+      return;
+    }
+    printTasks(home0);
     return;
   }
 

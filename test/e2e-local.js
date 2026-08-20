@@ -270,6 +270,60 @@ function ok(name) {
   ok('JSON 模式 + ask + stdin EOF：stdout 单行 JSON 契约');
 }
 
+// ---------- 11. 后台任务：启动 → 完成 → 状态文件 → 任务面板列表 ----------
+{
+  writeConfig('auto');
+  resetMock('write');
+  const w9 = newWorkDir();
+  const r = await runCli(['run', '创建后台任务文件', '--permission', 'auto'], { cwd: w9 });
+  assert.equal(r.code, 0, 'stderr: ' + r.err);
+  assert.ok(r.out.includes('后台任务已启动'), '应提示任务已启动');
+  const id = (r.out.match(/已启动\s+(\S+)/) || [])[1];
+  assert.ok(id, '应返回任务 id');
+  const taskFile = path.join(home, 'tasks', id + '.json');
+  let task = null;
+  for (let i = 0; i < 40 && (!task || task.status === 'running'); i++) {
+    await new Promise((res) => setTimeout(res, 300));
+    try {
+      task = JSON.parse(fs.readFileSync(taskFile, 'utf8'));
+    } catch {}
+  }
+  assert.equal(task.status, 'done', '任务应完成：' + JSON.stringify(task));
+  assert.ok(String(task.text).includes('全部完成'), '任务文本应含最终回答');
+  assert.ok(task.usage && task.usage.prompt_tokens > 0, '应记录用量');
+  assert.ok(task.session && task.session.endsWith('.jsonl'), '应关联会话文件');
+  assert.equal(fs.readFileSync(path.join(w9, 'result.txt'), 'utf8'), 'e2e 成功\n', '后台任务应写入文件');
+  const list = await runCli(['tasks']);
+  assert.equal(list.code, 0);
+  assert.ok(list.out.includes('✓') && list.out.includes(id), '任务面板应列出已完成任务');
+  fs.rmSync(w9, { recursive: true, force: true });
+  ok('后台任务：启动/完成/状态文件/面板列表');
+}
+
+// ---------- 12. 后台任务：ask 权限降级只读 ----------
+{
+  writeConfig('ask');
+  resetMock('write');
+  const w10 = newWorkDir();
+  const r = await runCli(['run', '创建不应被写入的文件'], { cwd: w10 });
+  assert.equal(r.code, 0);
+  const id = (r.out.match(/已启动\s+(\S+)/) || [])[1];
+  const taskFile = path.join(home, 'tasks', id + '.json');
+  let task = null;
+  for (let i = 0; i < 40 && (!task || task.status === 'running'); i++) {
+    await new Promise((res) => setTimeout(res, 300));
+    try {
+      task = JSON.parse(fs.readFileSync(taskFile, 'utf8'));
+    } catch {}
+  }
+  assert.equal(task.status, 'done');
+  assert.ok(String(task.note).includes('只读'), 'ask 降级应注明');
+  assert.ok(!fs.existsSync(path.join(w10, 'result.txt')), '只读降级下不应写入文件');
+  writeConfig('auto');
+  fs.rmSync(w10, { recursive: true, force: true });
+  ok('后台任务：ask 权限降级只读');
+}
+
 server.close();
 fs.rmSync(home, { recursive: true, force: true });
 fs.rmSync(work, { recursive: true, force: true });

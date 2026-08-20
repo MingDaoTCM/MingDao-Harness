@@ -108,6 +108,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
   const MAX_CONCURRENT = 8;
   const tasks = new Map(); // taskId -> { res, send, abortHandler, pendingAsk, session, startedAt, status, message, durationMs }
   let taskSeq = 0;
+  let draftText = ''; // 外部注入的草稿（VS Code 插件选中代码发送）
 
   function pruneTasks() {
     if (tasks.size <= 100) return;
@@ -431,6 +432,18 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
           }
         }
       }
+      json(res, 200, { ok: true });
+      return;
+    }
+    if (req.method === 'GET' && p === '/api/draft') {
+      const text = draftText;
+      draftText = ''; // 读取即清除
+      json(res, 200, { ok: true, text });
+      return;
+    }
+    if (req.method === 'POST' && p === '/api/draft') {
+      const body = await readBody(req);
+      draftText = String(body.text ?? '').slice(0, 200000);
       json(res, 200, { ok: true });
       return;
     }

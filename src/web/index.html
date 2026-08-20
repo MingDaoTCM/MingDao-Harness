@@ -332,6 +332,10 @@ async function init(){
     const ms=$('#modelSel'); if(!ms.options.length){ const o=document.createElement('option'); o.textContent='加载失败，刷新重试'; ms.appendChild(o); }
   }
   refreshSessions();
+  try{
+    const dr=await fetch('/api/draft',{cache:'no-store'}); const dj=await dr.json();
+    if(dj.text){ input.value=dj.text; input.style.height=Math.min(input.scrollHeight,200)+'px'; input.focus(); }
+  }catch(e){}
 }
 $('#cfgBtn').onclick=()=>{ $('#cfgModal').style.display='flex'; };
 $('#cfgCancel').onclick=()=>{ $('#cfgModal').style.display='none'; };

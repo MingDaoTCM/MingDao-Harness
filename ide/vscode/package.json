@@ -1,8 +1,8 @@
 {
   "name": "mingdao-vscode",
   "displayName": "MingDao（明道）",
-  "description": "MingDao-Harness 的 VS Code 集成：一键启动 WebUI 并在浏览器中打开，复用终端中的智能体能力",
-  "version": "0.2.7",
+  "description": "MingDao-Harness 的 VS Code 深度集成：侧边栏内嵌 WebUI、选中代码右键发送、服务器自动管理",
+  "version": "0.3.0",
   "publisher": "mingdao",
   "license": "MIT",
   "engines": {
@@ -14,10 +14,30 @@
   ],
   "activationEvents": [
     "onCommand:mingdao.openWebUI",
-    "onCommand:mingdao.startServer"
+    "onCommand:mingdao.startServer",
+    "onCommand:mingdao.sendSelection",
+    "onView:mingdao.chatView"
   ],
   "main": "./extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "mingdao-sidebar",
+          "title": "MingDao 明道",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "mingdao-sidebar": [
+        {
+          "type": "webview",
+          "id": "mingdao.chatView",
+          "name": "对话"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "mingdao.openWebUI",
@@ -26,8 +46,21 @@
       {
         "command": "mingdao.startServer",
         "title": "MingDao: 启动服务器（终端）"
+      },
+      {
+        "command": "mingdao.sendSelection",
+        "title": "MingDao: 发送选中代码"
       }
     ],
+    "menus": {
+      "editor/context": [
+        {
+          "command": "mingdao.sendSelection",
+          "when": "editorHasSelection",
+          "group": "9_mingdao"
+        }
+      ]
+    },
     "configuration": {
       "title": "MingDao",
       "properties": {
@@ -39,7 +72,12 @@
         "mingdao.binary": {
           "type": "string",
           "default": "mingdao",
-          "description": "mingdao 命令路径（安装 npm 包后默认可直接使用，也可写绝对路径）"
+          "description": "mingdao/mdh 命令路径（安装 npm 包后默认可直接使用，也可写绝对路径）"
+        },
+        "mingdao.autoStopServer": {
+          "type": "boolean",
+          "default": true,
+          "description": "关闭 VS Code 时自动停止由本插件启动的服务器"
         }
       }
     }

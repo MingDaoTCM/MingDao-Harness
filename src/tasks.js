@@ -1,0 +1,110 @@
+// 多会话后台任务面板：mingdao run 启动独立 worker 子进程，状态落盘 <mingdao-home>/tasks/<id>.json。
+// 命令族：mingdao run "<任务>" · mingdao tasks · tasks watch · tasks kill <id>
+// worker 复用 Agent 核心（权限/模型/MCP/自动标题/会话持久化全部生效）。
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import { relativeTime } from './session.js';
+
+const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url));
+
+export function tasksDir(home) {
+  return path.join(home, 'tasks');
+}
+
+export function listTasks(home) {
+  const dir = tasksDir(home);
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith('.json'));
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const f of files) {
+    try {
+      const t = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+      if (t && t.id) out.push(t);
+    } catch {}
+  }
+  return out.sort((a, b) => b.startedAt - a.startedAt);
+}
+
+export function readTask(home, id) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(tasksDir(home), id + '.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+export function writeTask(home, task) {
+  fs.mkdirSync(tasksDir(home), { recursive: true });
+  fs.writeFileSync(path.join(tasksDir(home), task.id + '.json'), JSON.stringify(task, null, 2) + '\n');
+}
+
+export function startTask(home, question, { permission, model, cwd } = {}) {
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const task = {
+    id,
+    status: 'running',
+    question: String(question).slice(0, 80),
+    startedAt: Date.now(),
+    pid: null,
+    session: null,
+    text: '',
+    usage: null,
+    durationMs: null,
+    error: '',
+    note: '',
+  };
+  writeTask(home, task);
+  const args = [CLI_PATH, 'run-worker', id, '--question', String(question)];
+  if (permission) args.push('--permission', permission);
+  if (model) args.push('--model', model);
+  const child = spawn(process.execPath, args, {
+    cwd: cwd || process.cwd(),
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, MINGDAO_HOME: home },
+  });
+  task.pid = child.pid;
+  writeTask(home, task);
+  child.unref();
+  return task;
+}
+
+export function patchTask(home, id, patch) {
+  const t = readTask(home, id);
+  if (!t) return;
+  writeTask(home, { ...t, ...patch });
+}
+
+export function killTask(home, id) {
+  const t = readTask(home, id);
+  if (!t) return false;
+  if (t.status === 'running' && t.pid) {
+    try {
+      process.kill(t.pid, 'SIGTERM');
+    } catch {}
+  }
+  patchTask(home, id, { status: 'killed', durationMs: t.durationMs ?? Date.now() - t.startedAt });
+  return true;
+}
+
+const MARK = { running: '▶', done: '✓', failed: '✖', killed: '■' };
+
+export function formatTaskRow(t) {
+  const mark = MARK[t.status] || '?';
+  const elapsed =
+    t.status === 'running'
+      ? relativeTime(t.startedAt).replace('前', '')
+      : t.durationMs != null
+        ? `${(t.durationMs / 1000).toFixed(1)}s`
+        : '';
+  const session = t.session ? path.basename(t.session) : '';
+  const note = t.note ? `（${t.note}）` : '';
+  return `${mark} ${t.id}  ${elapsed.padEnd(6)}  ${session.padEnd(24)}  ${t.question}${note}`;
+}

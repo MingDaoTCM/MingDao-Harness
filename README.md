@@ -25,7 +25,8 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 - 🏷 **会话标题自动生成**：新会话首轮完成后自动生成中文标题并重命名（可 `"autoTitle": false` 关闭）
 - 🧵 **多会话并行任务面板**：WebUI 支持最多 8 个并发任务，各自流式输出、独立权限确认与中断，任务面板实时展示状态
 - 📲 **PWA**：WebUI 支持「安装到桌面」——浏览器地址栏安装后即可像本地应用一样双击打开
-- 🧩 **VS Code 插件**：`ide/vscode/` 一键启动服务器并打开 WebUI（命令面板搜 MingDao）
+- 🧩 **VS Code 深度集成**：侧边栏内嵌 WebUI（复用全部前端资产）、选中代码右键发送、服务器随面板自动启停
+- 🗂 **多会话后台任务面板**：`mingdao run` 后台启动任务、`tasks`/`tasks watch`/`tasks kill` 面板管理（独立进程、状态落盘、会话与标题自动生成）
 - 📋 **会话与任务管理**：`--resume` 会话选择器、`/compact` 上下文压缩、`/plan` 计划模式（先计划后执行）、`/init` 生成 AGENTS.md、`/memory` 用户记忆、todo 清单可视化、`undo` 撤销
 - 🎯 **DeepSeek-V4 优化**：内置 `deepseek-v4-pro` / `deepseek-v4-flash` 正式版预设（384K 上下文、温度、输出上限、推理内容流式展示），自动重试与超时
 - 🔌 **开放模型接入**：内置 DeepSeek / OpenAI / Qwen / GLM / Kimi / 自定义 OpenAI 兼容端点，支持自写 Provider 模块（[docs/PROVIDERS.md](docs/PROVIDERS.md)）
@@ -100,14 +101,32 @@ mingdao web 9000     # 指定端口
 - **PWA 安装**：Chrome/Edge 地址栏右侧「安装」图标 → 桌面出现 MingDao 图标，双击即用
 - 接口：`GET /api/state`、`POST /api/chat`（SSE）、`POST /api/permission`、`POST /api/abort`、`GET /api/sessions`、`GET /api/tasks`
 
-## IDE 集成（VS Code 插件）
+## IDE 集成（VS Code 深度集成）
 
 ```bash
 mkdir -p ~/.vscode/extensions/mingdao-vscode
 cp -r ide/vscode/. ~/.vscode/extensions/mingdao-vscode/
 ```
 
-重启 VS Code 后，命令面板（Ctrl+Shift+P）执行 **MingDao: 打开 WebUI**——自动探测/启动服务器并打开浏览器。详见 `ide/vscode/README.md`。
+重启 VS Code 后：
+
+- 活动栏出现 **MingDao 图标**，点击打开**侧边栏对话面板**（内嵌完整 WebUI，复用全部功能）
+- 服务器随面板自动启动、关闭 VS Code 自动停止（可配置 `mingdao.autoStopServer`）
+- 编辑器**选中代码 → 右键 →「MingDao: 发送选中代码」**，代码进入 WebUI 输入框
+- 命令面板：`MingDao: 打开 WebUI`（浏览器）、`MingDao: 启动服务器（终端）`
+
+## 多会话后台任务面板
+
+```bash
+mingdao run "重构 src 下的工具层并跑通测试" --permission auto   # 后台启动（独立进程）
+mingdao tasks                    # 面板列表（状态/耗时/会话/首句）
+mingdao tasks watch              # 实时刷新（终端面板）
+mingdao tasks kill <id>          # 停止任务
+```
+
+- 每个任务独立进程与状态文件（`~/.mingdao/tasks/`），完成/失败/中断均有记录与用量
+- 复用完整 Agent 能力（工具/权限/MCP/会话持久化/自动标题）；`ask` 权限下后台任务按只读降级并注明
+- 桌面应用评估见 [docs/DESKTOP-EVALUATION.md](docs/DESKTOP-EVALUATION.md)（结论：PWA 继续作为默认形态，触发条件满足后再立项）
 
 ## 沙箱执行与自动路由
 
@@ -276,9 +295,9 @@ node test/e2e-local.js   # 真实 HTTP：mock 服务器 + 完整 CLI 进程
 
 ## 路线图
 
-- [ ] VS Code 深度集成（侧边栏内嵌面板、选中代码右键发送给 MingDao）
-- [ ] 桌面应用（可选：当前 PWA 已覆盖主要体验）
-- [ ] 多会话 CLI 面板与任务队列
+- [ ] 桌面应用（已评估：PWA 覆盖现状，触发条件见 docs/DESKTOP-EVALUATION.md）
+- [ ] 任务队列与调度（定时任务、依赖编排）
+- [ ] JetBrains 插件（复用 VS Code 集成经验）
 
 ## License
 
