@@ -17,7 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
 import { createProvider, resolveProviderConfig } from '../providers/index.js';
-import { MODELS, modelPreset } from '../models.js';
+import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
 import { buildSystemPrompt } from '../prompts.js';
@@ -267,9 +267,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       const models = Object.keys(MODELS).map((name) => ({
         name,
         label: `${name} — ${MODELS[name].label || ''}`,
+        provider: MODELS[name].provider || 'custom',
+        providerLabel: PROVIDERS[MODELS[name].provider]?.label || '自定义',
       }));
       if (!models.some((m) => m.name === modelName)) {
-        models.unshift({ name: modelName, label: `${modelName}（当前配置）` });
+        models.unshift({ name: modelName, label: `${modelName}（当前配置）`, provider: 'custom', providerLabel: '自定义' });
       }
       json(res, 200, {
         ok: true,
@@ -279,7 +281,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         permission: cfg.permission ?? 'ask',
         sandbox: cfg.sandbox || 'off',
         sandboxSupported: detectSandbox() !== 'none',
-        routing: Boolean(cfg.routing?.enabled),
+        routing: cfg.routing?.enabled ? cfg.routing : null,
+        contextBudget: cfg.contextBudget || 128000,
         home,
         workingDir,
         mcp: mcpFacade.status(),
@@ -307,11 +310,36 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         }
         next.permission = perm;
       }
+      if (body.sandbox !== undefined) {
+        const sbx = String(body.sandbox);
+        if (!['off', 'readonly', 'safe'].includes(sbx)) {
+          return json(res, 400, { error: '沙箱模式必须是 off / readonly / safe' });
+        }
+        next.sandbox = sbx;
+        cfg.sandbox = sbx;
+      }
+      if (body.routing !== undefined) {
+        const on = body.routing === true || body.routing === 'on';
+        cfg.routing = {
+          enabled: on,
+          planner: cfg.routing?.planner || 'deepseek-v4-pro',
+          executor: cfg.routing?.executor || 'deepseek-v4-flash',
+        };
+        next.routing = on;
+      }
+      if (body.contextBudget !== undefined) {
+        const n = Number(body.contextBudget);
+        if (!Number.isInteger(n) || n < 1000) {
+          return json(res, 400, { error: '上下文预算必须是 ≥1000 的整数' });
+        }
+        next.contextBudget = n;
+        cfg.contextBudget = n;
+      }
       modelName = next.model;
       cfg.model = next.model;
       cfg.permission = next.permission;
       saveConfig(cfg);
-      json(res, 200, { ok: true, model: modelName, permission: cfg.permission });
+      json(res, 200, { ok: true, model: modelName, permission: cfg.permission, sandbox: cfg.sandbox, routing: cfg.routing?.enabled, contextBudget: cfg.contextBudget });
       return;
     }
     if (req.method === 'GET' && p === '/api/sessions') {
