@@ -419,5 +419,56 @@ const ctx = { cwd: tmp };
   ok('provider：外部 signal（Ctrl+C）可中断挂起的请求');
 }
 
+// ---------- 14. 精确 tokenizer ----------
+{
+  const { countTokens, heuristicTokens } = await import(path.join(srcDir, 'tokenizer.js'));
+  const en = countTokens('Hello world', 'deepseek-v4-flash');
+  assert.ok(en >= 1 && en <= 4, `英文短句 token 数应在合理范围（得到 ${en}）`);
+  const zh = countTokens('你好世界', 'deepseek-v4-flash');
+  assert.ok(zh >= 2 && zh <= 10, `中文短词 token 数应在合理范围（得到 ${zh}）`);
+  // 混合长文本：与真实 API 口径一致（真实系统提示实测 1344 字符 ≈ 2052 token，比率 < 1.7）
+  const long = '人工智能正在改变世界，MingDao 让每个人都拥有自己的智能体。MCP 连接外部工具，tokenizer 精确计量，WebUI 开箱即用。'.repeat(150);
+  const lt = countTokens(long, 'deepseek-v4-pro');
+  assert.ok(lt > long.length * 0.5 && lt < long.length * 2.0, `长文本计数应在真实口径区间（${lt}/${long.length}）`);
+  // 非 deepseek 模型回退启发式
+  assert.equal(countTokens('hello', 'gpt-4o'), heuristicTokens('hello'));
+  // 特殊 token 记 1
+  assert.equal(countTokens('<｜begin▁of▁sentence｜>', 'deepseek-chat'), 1);
+  ok('tokenizer：词表计数 / 回退启发式 / 特殊 token');
+}
+
+// ---------- 15. MCP 客户端 ----------
+{
+  const { startMcpServers } = await import(path.join(srcDir, 'mcp.js'));
+  const serverPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mock-mcp-server.mjs');
+  const mcp = await startMcpServers(
+    { mock: { command: process.execPath, args: [serverPath] } },
+    tmp
+  );
+  const status = mcp.status();
+  assert.equal(status.length, 1);
+  assert.equal(status[0].ok, true, 'mock 服务器应就绪');
+  const schemas = mcp.toolSchemas();
+  assert.equal(schemas.length, 2);
+  assert.equal(schemas[0].function.name, 'mcp__mock__echo');
+  assert.ok(schemas[0].function.description.includes('[MCP:mock]'));
+  const res = await mcp.call('mcp__mock__echo', { text: '你好' });
+  assert.ok(res.ok && res.output === 'echo:你好');
+  assert.equal(mcp.isReadonly('mcp__mock__readonly_peek'), true);
+  assert.equal(mcp.isReadonly('mcp__mock__echo'), false);
+  // 失败服务器不拖垮管理器，也不阻塞其余
+  const mcp2 = await startMcpServers(
+    { bad: { command: 'definitely-not-a-command-xyz' }, mock2: { command: process.execPath, args: [serverPath] } },
+    tmp
+  );
+  const s2 = mcp2.status();
+  assert.equal(s2.find((s) => s.name === 'bad').ok, false);
+  assert.equal(s2.find((s) => s.name === 'mock2').ok, true);
+  assert.equal(mcp2.toolSchemas().length, 2, '失败服务器不应影响可用工具');
+  mcp.stop();
+  mcp2.stop();
+  ok('mcp：握手 / 工具发现 / 调用 / 只读标注 / 容错');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);

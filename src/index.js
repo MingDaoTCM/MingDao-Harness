@@ -26,6 +26,8 @@ export {
   resolveApiKey,
 } from './credentials.js';
 export { estimateCost, estimateCostLabel, isPeakHour } from './pricing.js';
+export { countTokens, heuristicTokens, makeTokenCounter, isTokenizable } from './tokenizer.js';
+export { McpClient, startMcpServers } from './mcp.js';
 export {
   createSession,
   latestSession,

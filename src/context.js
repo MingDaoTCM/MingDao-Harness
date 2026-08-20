@@ -1,32 +1,25 @@
-// 上下文管理：token 估算与预算裁剪。
-//
-// MVP 阶段使用启发式估算（英文≈4 字符/token，CJK≈1 字符/token），
-// 避免引入笨重的分词器依赖；路线图中已规划可插拔的精确 tokenizer。
+// 上下文管理：token 计数与预算裁剪。
+// 计数优先级：DeepSeek 词表精确计数（tokenizer.js）→ 启发式估算（无词表模型回退）。
+
+import { heuristicTokens } from './tokenizer.js';
 
 export const TOOL_RESULT_LIMIT = 20000;
 
+// 兼容旧接口的启发式估算（英文≈4 字符/token，CJK≈1 字符/token）
 export function approxTokens(text) {
-  if (!text) return 0;
-  let ascii = 0;
-  let cjk = 0;
-  for (const ch of String(text)) {
-    const code = ch.codePointAt(0);
-    if (code < 128) ascii += 1;
-    else cjk += 1;
-  }
-  return Math.ceil(ascii / 4) + cjk;
+  return heuristicTokens(text);
 }
 
-function partTokens(msg) {
-  let total = approxTokens(msg.content || '');
+function partTokens(msg, count) {
+  let total = count(msg.content || '');
   for (const tc of msg.tool_calls || []) {
-    total += approxTokens(JSON.stringify(tc));
+    total += count(JSON.stringify(tc));
   }
   return total;
 }
 
-export function messageTokens(msg) {
-  return partTokens(msg) + 4; // 每条消息的协议开销
+export function messageTokens(msg, count = approxTokens) {
+  return partTokens(msg, count) + 4; // 每条消息的协议开销
 }
 
 // 从尾部向前保留消息，直到预算用尽；始终保留首条 system 消息。
@@ -53,15 +46,15 @@ function cleanToolPairing(kept) {
   return clean;
 }
 
-export function trimMessages(messages, budget) {
+export function trimMessages(messages, budget, count = approxTokens) {
   if (!messages.length) return [];
   const hasSystem = messages[0]?.role === 'system';
   const system = hasSystem ? [messages[0]] : [];
   const rest = hasSystem ? messages.slice(1) : messages;
-  let total = system.reduce((s, m) => s + messageTokens(m), 0);
+  let total = system.reduce((s, m) => s + messageTokens(m, count), 0);
   const tail = [];
   for (let i = rest.length - 1; i >= 0; i--) {
-    const t = messageTokens(rest[i]);
+    const t = messageTokens(rest[i], count);
     if (total + t > budget) break;
     total += t;
     tail.unshift(rest[i]);

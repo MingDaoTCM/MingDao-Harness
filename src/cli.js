@@ -16,6 +16,7 @@ import {
   getStoredKey,
 } from './credentials.js';
 import { createProvider, resolveProviderConfig } from './providers/index.js';
+import { startMcpServers } from './mcp.js';
 import { createAgent } from './agent.js';
 import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
@@ -59,8 +60,9 @@ const HELP_LINES = [
   ['  /compact     压缩上下文        /plan    计划模式（先计划后执行）', null],
   ['  /init        生成 AGENTS.md    /memory add <内容> 追加用户记忆', null],
   ['  /skills      列出技能          /status  会话状态 · /cost 累计费用', null],
-  ['  /sessions    历史会话          /title <别名> 会话命名 · /usage 上轮用量', null],
-  ['  /verbose     思考开关          /exit    退出 · Tab 补全 · Ctrl+C 中断生成', null],
+  ['  /mcp         MCP 服务器状态    /verbose 思考开关 · /title <别名> 会话命名', null],
+  ['  /sessions    历史会话          /usage   上轮用量 · /save 会话文件', null],
+  ['  /exit        退出              Tab 补全命令 · Ctrl+C 中断生成', null],
   ['', null],
   [`配置目录: ${mingdaoHome()}`, C.dim],
 ];
@@ -249,7 +251,29 @@ async function main() {
   const workingDir = process.cwd();
   // 会话级 undo 备份仓：模型切换、子代理均共享，撤销记录不丢失
   const sessionUndoStore = { backups: new Map() };
-  let agent = createAgent({ provider, permission, io, modelName, workingDir, cfg, undoStore: sessionUndoStore });
+  // MCP 服务器：后台启动（不阻塞交互），就绪后工具自动出现在后续轮次
+  let mcpManager = null;
+  const mcpFacade = {
+    toolSchemas: () => (mcpManager ? mcpManager.toolSchemas() : []),
+    call: (n, a) => (mcpManager ? mcpManager.call(n, a) : Promise.reject(new Error('MCP 未就绪'))),
+    isReadonly: (n) => (mcpManager ? mcpManager.isReadonly(n) : false),
+    status: () => (mcpManager ? mcpManager.status() : [{ name: '（连接中…）', ok: false, tools: 0, error: '' }]),
+    stop: () => {
+      if (mcpManager) mcpManager.stop();
+    },
+  };
+  if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) {
+    startMcpServers(cfg.mcpServers, workingDir)
+      .then((mgr) => {
+        mcpManager = mgr;
+        const ready = mgr.status().filter((s) => s.ok).length;
+        if (io && !opts.prompt.length) {
+          io.print(style(`✓ MCP 就绪：${ready}/${mgr.status().length} 个服务器，共 ${mgr.toolSchemas().length} 个工具`, C.dim));
+        }
+      })
+      .catch(() => {});
+  }
+  let agent = createAgent({ provider, permission, io, modelName, workingDir, cfg, undoStore: sessionUndoStore, mcp: mcpFacade });
   const preset = modelPreset(modelName);
 
   // —— 单次提问模式 ——
@@ -258,7 +282,7 @@ async function main() {
     // JSON 模式：关闭流式输出，结果以单行 JSON 输出（脚本/管道友好）
     const turnIo = jsonMode ? createIO({ quiet: true }) : io;
     const turnAgent = jsonMode
-      ? createAgent({ provider, permission, io: turnIo, modelName, workingDir, cfg, undoStore: sessionUndoStore })
+      ? createAgent({ provider, permission, io: turnIo, modelName, workingDir, cfg, undoStore: sessionUndoStore, mcp: mcpFacade })
       : agent;
     const session = createSession(home);
     const messages = [
@@ -298,6 +322,7 @@ async function main() {
       }
       process.exitCode = 2;
     }
+    mcpFacade.stop();
     io.close();
     return;
   }
@@ -370,7 +395,7 @@ async function main() {
       modelName = target;
       cfg.model = target;
       saveConfig(cfg);
-      agent = createAgent({ provider, permission, io, modelName, workingDir, cfg, undoStore: sessionUndoStore });
+      agent = createAgent({ provider, permission, io, modelName, workingDir, cfg, undoStore: sessionUndoStore, mcp: mcpFacade });
       messages[0] = { role: 'system', content: buildSystemPrompt({ modelName, workingDir }) };
       const p2 = modelPreset(modelName);
       io.print(style(`✓ 已切换到 ${C.bold}${modelName}${C.reset}${p2 ? `（${p2.label}）` : ''}`, C.green));
@@ -499,6 +524,20 @@ async function main() {
         } catch (err) {
           io.print(style('[错误] ' + (err?.message || err), C.red));
         }
+      } else if (cmd === '/mcp') {
+        const status = mcpFacade.status();
+        if (status.length === 1 && status[0].name === '（连接中…）' && !status[0].ok && !mcpManager) {
+          if (!cfg.mcpServers || !Object.keys(cfg.mcpServers).length) {
+            io.print(style('未配置 MCP 服务器（config.json 的 mcpServers 字段）。', C.dim));
+          } else {
+            io.print(style('MCP 服务器连接中…（npx 首次下载依赖可能较慢）', C.dim));
+          }
+          continue;
+        }
+        io.box(
+          `MCP 服务器（${status.length}）`,
+          status.map((s) => `${s.ok ? '✓' : '✖'} ${s.name}${s.ok ? ` · ${s.tools} 个工具` : `：${s.error}`}`)
+        );
       } else if (cmd === '/sessions') {
         const list = listSessions(home).slice(0, 10);
         if (!list.length) io.print('暂无历史会话。');
@@ -593,6 +632,7 @@ async function main() {
     }
   }
 
+  mcpFacade.stop();
   io.print('再见，明道与你同行。');
   io.close();
 }

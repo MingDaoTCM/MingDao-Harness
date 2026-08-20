@@ -12,13 +12,15 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 - 🧩 **Skills 技能系统**：SKILL.md 渐进式披露（清单注入系统提示，按需加载全文）；**内置 14 个常用技能**，支持用户级 + 项目级 + 内置三级来源与同名覆盖
 - 👥 **子代理**：`task` 工具把独立子任务委托给全新上下文子代理并回收汇报
 - 🪝 **Hooks 钩子**：PreToolUse（可阻止执行）/ PostToolUse，shell 命令 + JSON stdin/stdout 协议
+- 🔌 **MCP 客户端**：零依赖实现 Model Context Protocol（stdio + JSON-RPC），`mcpServers` 配置即接入任意 MCP 服务器（实测官方 `server-everything` 13 个工具），工具并入 Agent 循环、只读标注自动放行、`/mcp` 查看状态
+- 📏 **精确 tokenizer**：内置 DeepSeek 官方词表（128k vocab）字节级 BPE 计数，与真实 API 口径偏差 <8%；非 DeepSeek 模型回退启发式估算
 - 📋 **会话与任务管理**：`--resume` 会话选择器、`/compact` 上下文压缩、`/plan` 计划模式（先计划后执行）、`/init` 生成 AGENTS.md、`/memory` 用户记忆、todo 清单可视化、`undo` 撤销
 - 🎯 **DeepSeek-V4 优化**：内置 `deepseek-v4-pro` / `deepseek-v4-flash` 正式版预设（384K 上下文、温度、输出上限、推理内容流式展示），自动重试与超时
 - 🔌 **开放模型接入**：内置 DeepSeek / OpenAI / Qwen / GLM / Kimi / 自定义 OpenAI 兼容端点，支持自写 Provider 模块（[docs/PROVIDERS.md](docs/PROVIDERS.md)）
 - 🛡 **权限三档**：`ask`（默认，写文件/命令逐次确认）/ `auto` / `readonly`，另支持工具级 `allow`/`deny` 规则
 - 🔐 **密钥与配置分离**：API Key 存独立凭证库（权限 600、脱敏管理、`mingdao key` 命令族）；`config.json` 与仓库零密钥，任何人安装后配置自己的 Key
 - 💾 **会话持久化**：JSONL 自动保存，`mingdao --continue` 续聊
-- 📝 **上下文预算管理**：CJK 感知的 token 估算 + 尾部保留裁剪
+- 📝 **上下文预算管理**：精确 tokenizer 计数 + 尾部保留裁剪（配对完整性清洗）
 - 📋 **AGENTS.md**：自动读取工作目录的 AGENTS.md 注入系统提示（Claude Code / Codex 约定）
 - 🧩 **可编程**：核心能力以 ESM 库形式导出（`import { createAgent } from 'mingdao-harness'`）
 
@@ -129,6 +131,23 @@ mingdao key import               # 从环境变量（DEEPSEEK_API_KEY 等）批�
 
 此文件无任何密钥，团队内可安全共享、可提交仓库。技能放 `~/.mingdao/skills/<名>/SKILL.md`（用户级）或 `<项目>/.mingdao/skills/<名>/SKILL.md`（项目级）。
 
+## MCP 支持（接入任意 MCP 服务器）
+
+在 `config.json` 里配置 `mcpServers`（Claude Code 同款格式），MingDao 后台连接，工具自动并入 Agent 循环（命名 `mcp__<服务器>__<工具>`）：
+
+```json
+{
+  "mcpServers": {
+    "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/你的/目录"] },
+    "everything": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-everything"] }
+  }
+}
+```
+
+- 会话内 `/mcp` 查看各服务器状态与工具数；单个服务器启动失败不影响其他服务器与正常对话
+- 带 `readOnlyHint` 标注的工具自动放行，其余按权限模式处理（ask 模式逐次确认）
+- 可接入：文件系统、数据库、浏览器、Git、Docker、企业内部服务等任意 MCP 生态工具
+
 ## 内置技能（借鉴 DeepSeek-Harness 的 SKILL.md 格式）
 
 安装包自带 14 个常用技能，开箱即用，模型在相关任务时自动加载：
@@ -160,6 +179,7 @@ mingdao key import               # 从环境变量（DEEPSEEK_API_KEY 等）批�
 | 能力 | 说明 |
 | --- | --- |
 | 384K 上下文 | 预设 `contextWindow: 384000`（正式版规格，2026-08-17 起商用），`contextBudget` 按需调高 |
+| 精确 tokenizer | 内置 DeepSeek 词表字节级 BPE 计数（与真实 API 偏差 <8%），预算裁剪更精准 |
 | 推理流展示 | `reasoning_content` 增量渲染（dim 样式），不打断正文流 |
 | 模型分工 | flash（预算 128k/温度 0.6）日常问答，pro（预算 200k/温度 0.4）复杂规划，一键 `/model` 切换 |
 | 峰谷定价 | 用量统计展示 prompt/completion tokens，方便按峰谷时段（高峰 9:00–14:00 为闲时 2 倍）安排任务 |
@@ -175,6 +195,9 @@ src/
   tools/             read/write/edit/ls/glob/grep/bash + skill/task/todo/undo
   skills.js          Skills 技能系统（渐进式披露）
   hooks.js           PreToolUse/PostToolUse 生命周期钩子
+  mcp.js             MCP 客户端（stdio + JSON-RPC）
+  tokenizer.js       精确 tokenizer（DeepSeek 词表 BPE）
+  assets/            词表数据（tokenizer-data.json.gz，745KB）
   context.js         token 估算与预算裁剪
   permissions.js     权限引擎（模式 + 规则匹配）
   config.js          配置与向导（不含密钥）
@@ -199,8 +222,6 @@ node test/e2e-local.js   # 真实 HTTP：mock 服务器 + 完整 CLI 进程
 ## 路线图
 
 - [ ] WebUI（io 接口已是 UI 无关适配层，加一个 HTTP/SSE 适配器即可复用核心）
-- [ ] MCP 客户端（工具协议层预留）
-- [ ] 精确 tokenizer 与自动压缩（当前 /compact 手动触发）
 - [ ] 沙箱执行（bash 隔离）与 IDE 插件
 - [ ] 自动模型路由（规划用 pro / 执行用 flash）与多会话并行
 

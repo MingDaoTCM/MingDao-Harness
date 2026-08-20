@@ -5,13 +5,14 @@
 import { trimMessages, clampText } from './context.js';
 import { toolSchemas, dispatch } from './tools/index.js';
 import { modelPreset } from './models.js';
+import { makeTokenCounter } from './tokenizer.js';
 import { createHooks } from './hooks.js';
 import { createIO, style, C } from './ui.js';
 
 const MAX_STEPS = 24;
 const SUBAGENT_MAX_STEPS = 12;
 
-export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps }) {
+export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp }) {
   const preset = modelPreset(modelName) || {};
   const budget = cfg.contextBudget || preset.budgetTokens || 128000;
   const maxOutput = cfg.maxOutputTokens || preset.maxOutputTokens || 8192;
@@ -21,6 +22,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // 会话级共享：调用方传入则复用（/model 切换、子代理均共享，undo 不丢失）
   const undo = undoStore || { backups: new Map() };
   const stepLimit = maxSteps || MAX_STEPS;
+  // 精确 token 计数：DeepSeek 词表，其他模型回退启发式
+  const count = makeTokenCounter(modelName);
+  // MCP 工具集（每次取，服务器晚就绪也能在后续轮次出现）
+  const mcpSchemas = () => (mcp ? mcp.toolSchemas() : []);
 
   // 子代理：全新上下文 + 同一 Provider/权限（提示带「子任务」标记），独立完成子任务后汇报
   async function spawnTask(prompt, { description = '' } = {}) {
@@ -37,6 +42,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       cfg: { ...cfg, contextBudget: Math.min(budget, 64000) },
       undoStore: undo,
       maxSteps: SUBAGENT_MAX_STEPS,
+      mcp,
     });
     const sys =
       `你是主智能体 MingDao 派出的子代理，独立完成一项子任务。` +
@@ -81,7 +87,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
 
     while (steps < stepLimit) {
       steps += 1;
-      const trimmed = trimMessages(messages, budget);
+      const trimmed = trimMessages(messages, budget, count);
 
       const ac = new AbortController();
       const offSigint = io.onSigint(() => {
@@ -96,7 +102,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         res = await provider.chat({
           model: modelName,
           messages: trimmed,
-          tools: toolSchemas(),
+          tools: [...toolSchemas(), ...mcpSchemas()],
           temperature,
           maxTokens: maxOutput,
           signal: ac.signal,
@@ -144,7 +150,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             continue;
           }
 
-          const allowed = await permission.check(name, args);
+          const isMcp = name.startsWith('mcp__');
+          let allowed;
+          if (isMcp && mcp?.isReadonly(name)) {
+            allowed = true; // MCP 工具的只读标注自动放行
+          } else {
+            allowed = await permission.check(name, args);
+          }
           if (!allowed) {
             io.renderToolDenied(name, args);
             messages.push({ role: 'tool', tool_call_id: tc.id, content: '用户拒绝了该工具的执行权限。' });
@@ -154,7 +166,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           const t0 = Date.now();
           let result;
           try {
-            result = await dispatch(name, args, ctx);
+            if (isMcp) {
+              if (!mcp) throw new Error('MCP 工具未启用');
+              result = await mcp.call(name, args);
+            } else {
+              result = await dispatch(name, args, ctx);
+            }
           } catch (err) {
             result = JSON.stringify({ ok: false, error: String(err?.message || err) });
           }
