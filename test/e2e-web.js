@@ -155,6 +155,24 @@ let base = await startWeb(work1);
   ok('首页与 /api/state');
 }
 
+// ---------- 1.5 界面配置：模型与权限切换 ----------
+{
+  const cfg1 = await (await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ permission: 'readonly' }) })).json();
+  assert.equal(cfg1.ok, true, '权限切换应成功');
+  assert.equal(cfg1.permission, 'readonly');
+  const st1 = await (await fetch(base + '/api/state')).json();
+  assert.equal(st1.permission, 'readonly');
+  assert.ok(Array.isArray(st1.models) && st1.models.length >= 5, '应返回可选模型列表');
+  assert.ok(Array.isArray(st1.permissions) && st1.permissions.length === 3);
+  const bad = await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'qwen-max' }) });
+  const badJ = await bad.json();
+  assert.equal(bad.status, 400, '无 Key 的模型应拒绝');
+  assert.ok(String(badJ.error).includes('API Key'));
+  const back = await (await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'test-model', permission: 'auto' }) })).json();
+  assert.equal(back.ok, true);
+  ok('界面配置：权限切换 / 模型列表 / 无 Key 拒绝');
+}
+
 // ---------- 2. 聊天流：text + tool + done（auto 权限） ----------
 {
   requestCount = 0;

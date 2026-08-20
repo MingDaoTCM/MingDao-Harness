@@ -15,8 +15,9 @@ import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ensureHome, loadConfig, mingdaoHome } from '../config.js';
+import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
 import { createProvider, resolveProviderConfig } from '../providers/index.js';
+import { MODELS, modelPreset } from '../models.js';
 import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
 import { buildSystemPrompt } from '../prompts.js';
@@ -64,7 +65,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     process.exitCode = 1;
     return;
   }
-  const modelName = cfg.model || 'deepseek-v4-flash';
+  let modelName = cfg.model || 'deepseek-v4-flash';
   const pc = resolveProviderConfig(cfg, modelName);
   if (!pc.apiKey) {
     console.error(`[MingDao] 未找到 API Key：请运行 mingdao key set ${pc.name} 或 mingdao init`);
@@ -73,7 +74,15 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
   }
 
   const workingDir = process.cwd();
-  const provider = await createProvider(cfg, modelName);
+  // Provider 按模型懒加载缓存：界面切换模型后即时生效
+  const providerCache = new Map();
+  async function getProviderFor(m) {
+    if (!providerCache.has(m)) {
+      providerCache.set(m, await createProvider(cfg, m));
+    }
+    return providerCache.get(m);
+  }
+  const provider = await getProviderFor(modelName);
   const undoStore = { backups: new Map() };
 
   // MCP：后台启动，就绪后工具并入后续轮次
@@ -171,8 +180,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       },
     });
     const permission = createPermission(cfg.permission ?? 'ask', io);
+    const providerNow = await getProviderFor(modelName);
     const agent = createAgent({
-      provider,
+      provider: providerNow,
       permission,
       io,
       modelName,
@@ -202,7 +212,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       // 新会话自动标题（可配置关闭）
       if (isNew && cfg.autoTitle !== false && r.text) {
         try {
-          const title = await generateTitle(provider, titleModel(cfg, modelName), userMessage);
+          const title = await generateTitle(providerNow, titleModel(cfg, modelName), userMessage);
           if (title) renameSessionFile(fs, path, home, session, title);
         } catch {}
       }
@@ -254,9 +264,18 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       const sessions = listSessions(home)
         .slice(0, 30)
         .map((s) => ({ file: s.name, mtime: s.mtime, label: `${relativeTime(s.mtime)} · ${sessionPreview(s.file)}` }));
+      const models = Object.keys(MODELS).map((name) => ({
+        name,
+        label: `${name} — ${MODELS[name].label || ''}`,
+      }));
+      if (!models.some((m) => m.name === modelName)) {
+        models.unshift({ name: modelName, label: `${modelName}（当前配置）` });
+      }
       json(res, 200, {
         ok: true,
         model: modelName,
+        models,
+        permissions: ['ask', 'auto', 'readonly'],
         permission: cfg.permission ?? 'ask',
         sandbox: cfg.sandbox || 'off',
         sandboxSupported: detectSandbox() !== 'none',
@@ -266,6 +285,33 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         mcp: mcpFacade.status(),
         sessions,
       });
+      return;
+    }
+    if (req.method === 'POST' && p === '/api/config') {
+      const body = await readBody(req);
+      const next = { model: modelName, permission: cfg.permission ?? 'ask' };
+      if (body.model !== undefined) {
+        const target = String(body.model).trim();
+        if (!target) return json(res, 400, { error: '模型名不能为空' });
+        const tpc = resolveProviderConfig(cfg, target);
+        if (!tpc.apiKey) {
+          return json(res, 400, { error: `模型 ${target} 没有可用 API Key（服务商 ${tpc.name}），请先运行 mingdao key set ${tpc.name}` });
+        }
+        await getProviderFor(target); // 预热（失败会抛错）
+        next.model = target;
+      }
+      if (body.permission !== undefined) {
+        const perm = String(body.permission);
+        if (!['ask', 'auto', 'readonly'].includes(perm)) {
+          return json(res, 400, { error: '权限模式必须是 ask / auto / readonly' });
+        }
+        next.permission = perm;
+      }
+      modelName = next.model;
+      cfg.model = next.model;
+      cfg.permission = next.permission;
+      saveConfig(cfg);
+      json(res, 200, { ok: true, model: modelName, permission: cfg.permission });
       return;
     }
     if (req.method === 'GET' && p === '/api/sessions') {

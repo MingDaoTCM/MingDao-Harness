@@ -102,8 +102,14 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 <body>
 <header>
   <div class="logo">MingDao <span>明道</span></div>
-  <span class="badge" id="modelBadge">加载中…</span>
-  <span class="badge" id="permBadge"></span>
+  <select id="modelSel" title="切换模型"></select>
+  <select id="permSel" title="权限模式">
+    <option value="ask">权限 ask</option>
+    <option value="auto">权限 auto</option>
+    <option value="readonly">权限 readonly</option>
+  </select>
+  <span id="cfgMsg" class="badge" style="display:none"></span>
+  <span class="badge" id="envBadge"></span>
   <div class="spacer"></div>
   <input id="sessionSearch" placeholder="搜索会话…" title="关键词检索历史会话">
   <select id="sessions" title="历史会话"><option value="">＋ 新会话</option></select>
@@ -282,7 +288,33 @@ $('#tpClose').onclick=()=>{ $('#tasksPanel').style.display='none'; };
 async function refreshSessions(q){ const u=q?'/api/sessions?q='+encodeURIComponent(q):'/api/sessions'; const r=await fetch(u).catch(()=>null); if(!r)return; const j=await r.json(); const sel=$('#sessions'); sel.innerHTML='<option value="">＋ 新会话</option>'; for(const s of j.sessions){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; sel.appendChild(o); } if(currentSession&&!q) sel.value=currentSession; }
 let searchTimer=null;
 $('#sessionSearch').addEventListener('input',e=>{ clearTimeout(searchTimer); searchTimer=setTimeout(()=>refreshSessions(e.target.value.trim()),300); });
-async function init(){ try{ const r=await fetch('/api/state'); const j=await r.json(); $('#modelBadge').textContent='模型：'+j.model; $('#permBadge').textContent='权限：'+(j.permission||'ask')+(j.routing?' · 路由开':'')+(j.sandbox&&j.sandbox!=='off'?(j.sandboxSupported?' · 沙箱'+j.sandbox:' · 沙箱降级'):''); }catch(e){} refreshSessions(); }
+async function init(){
+  try{
+    const r=await fetch('/api/state'); const j=await r.json();
+    const ms=$('#modelSel'); ms.innerHTML='';
+    for(const m of j.models){ const o=document.createElement('option'); o.value=m.name; o.textContent=m.label; if(m.name===j.model) o.selected=true; ms.appendChild(o); }
+    $('#permSel').value=j.permission||'ask';
+    const env = (j.routing?'路由开 · ':'')+(j.sandbox&&j.sandbox!=='off'?(j.sandboxSupported?'沙箱'+j.sandbox:'沙箱降级'):'');
+    $('#envBadge').textContent=env; $('#envBadge').style.display=env?'':'none';
+  }catch(e){}
+  refreshSessions();
+}
+$('#modelSel').addEventListener('change', async e=>{
+  const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({model:e.target.value})});
+  const j=await r.json().catch(()=>({error:'请求失败'}));
+  const m=$('#cfgMsg');
+  if(j.ok){ m.textContent='✓ 已切换 '+j.model; m.style.color='var(--accent)'; }
+  else{ m.textContent='✖ '+j.error; m.style.color='var(--err'); e.target.value=(await (await fetch('/api/state')).json()).model; }
+  m.style.display=''; setTimeout(()=>{m.style.display='none';},4000);
+});
+$('#permSel').addEventListener('change', async e=>{
+  const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({permission:e.target.value})});
+  const j=await r.json().catch(()=>({error:'请求失败'}));
+  const m=$('#cfgMsg');
+  if(j.ok){ m.textContent='✓ 权限 '+j.permission; m.style.color='var(--accent)'; }
+  else{ m.textContent='✖ '+j.error; m.style.color='var(--err)'; e.target.value=(await (await fetch('/api/state')).json()).permission; }
+  m.style.display=''; setTimeout(()=>{m.style.display='none';},4000);
+});
 async function loadSession(file){ currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } scrollBottom(); }
 
 sendBtn.onclick=send; stopBtn.onclick=abort;
