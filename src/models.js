@@ -8,7 +8,7 @@ export const PROVIDERS = {
     kind: 'openai-compatible',
     baseUrl: 'https://api.deepseek.com/v1',
     envKey: 'DEEPSEEK_API_KEY',
-    models: ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-chat', 'deepseek-reasoner'],
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
     note: 'DeepSeek-V4 正式版（2026-08-17 起商用）：384K 上下文，峰谷定价（高峰 9:00–14:00 为闲时 2 倍），支持工具调用 / Responses API / Anthropic 兼容接口。',
   },
   openai: {
@@ -76,24 +76,6 @@ export const MODELS = {
       offpeak: { input: 1.5, output: 4.5 },
       peak: { input: 3, output: 9 },
     },
-  },
-  'deepseek-chat': {
-    label: 'DeepSeek-V3 通用对话',
-    provider: 'deepseek',
-    contextWindow: 131072,
-    budgetTokens: 96000,
-    maxOutputTokens: 8192,
-    temperature: 0.7,
-    supportsReasoning: false,
-  },
-  'deepseek-reasoner': {
-    label: 'DeepSeek-R1 深度推理',
-    provider: 'deepseek',
-    contextWindow: 131072,
-    budgetTokens: 64000,
-    maxOutputTokens: 32768,
-    temperature: 0.7,
-    supportsReasoning: true,
   },
   // —— 其他主流模型（OpenAI 兼容接入）——
   'gpt-4o': {

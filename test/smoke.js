@@ -433,7 +433,7 @@ const ctx = { cwd: tmp };
   // 非 deepseek 模型回退启发式
   assert.equal(countTokens('hello', 'gpt-4o'), heuristicTokens('hello'));
   // 特殊 token 记 1
-  assert.equal(countTokens('<｜begin▁of▁sentence｜>', 'deepseek-chat'), 1);
+  assert.equal(countTokens('<｜begin▁of▁sentence｜>', 'deepseek-v4-flash'), 1);
   ok('tokenizer：词表计数 / 回退启发式 / 特殊 token');
 }
 
