@@ -78,7 +78,8 @@ async function startWeb(workDir) {
     webChild.kill('SIGTERM');
     await new Promise((r) => webChild.once('close', r));
   }
-  const child = spawn(process.execPath, [path.join(root, 'src', 'cli.js'), 'web', '0'], {
+  const port = 40000 + Math.floor(Math.random() * 20000); // 随机端口，避免与常驻服务冲突
+  const child = spawn(process.execPath, [path.join(root, 'src', 'cli.js'), 'web', String(port)], {
     cwd: workDir,
     env: { ...process.env, MINGDAO_HOME: home },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -130,7 +131,7 @@ async function chatOnce(base, message, answerFn) {
         const pr = await fetch(base + '/api/permission', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ id: ev.id, answer }),
+          body: JSON.stringify({ id: ev.id, answer, taskId: ev.taskId }),
         });
         assert.equal(pr.status, 200, '应答权限确认应返回 200');
       }
@@ -196,13 +197,30 @@ let base = await startWeb(work1);
   ok('ask 权限模态：允许 → 工具执行');
 }
 
-// ---------- 5. 会话列表路由 ----------
+// ---------- 5. 多会话并行 + 任务面板 + 中断路由 ----------
+{
+  writeConfig('auto');
+  const workP = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-webpar-'));
+  base = await startWeb(workP);
+  requestCount = 0;
+  const [e1, e2] = await Promise.all([chatOnce(base, '并行任务一'), chatOnce(base, '并行任务二')]);
+  assert.ok(e1.some((e) => e.type === 'done') && e2.some((e) => e.type === 'done'), '两个任务都应完成');
+  assert.ok(e1[0].taskId && e2[0].taskId && e1[0].taskId !== e2[0].taskId, '任务应有独立 taskId');
+  const tp = await (await fetch(base + '/api/tasks')).json();
+  assert.ok(tp.tasks.length >= 2, '任务面板应列出任务');
+  const abortResp = await fetch(base + '/api/abort', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  assert.equal(abortResp.status, 200, '中断路由应可用');
+  ok('多会话并行：并发完成 + taskId 独立 + 任务面板 + 中断路由');
+}
+
+// ---------- 6. 会话列表路由 ----------
 {
   const st = await (await fetch(base + '/api/sessions')).json();
   assert.equal(st.ok, true);
   assert.ok(st.sessions.length >= 2, '应列出多个会话（含预览）');
-  assert.ok(st.sessions[0].label.includes('创建 web.txt'));
-  ok('会话列表与预览');
+  assert.ok(st.sessions.some((s) => s.label.includes('创建 web.txt')), '应能找到工具测试会话');
+  assert.ok(st.sessions.some((s) => s.file.startsWith('摘要')), '自动标题应将会话重命名为「摘要」');
+  ok('会话列表与预览 + 自动标题');
 }
 
 webChild.kill('SIGTERM');

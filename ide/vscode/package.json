@@ -1,0 +1,44 @@
+{
+  "name": "mingdao-vscode",
+  "displayName": "MingDao（明道）",
+  "description": "MingDao-Harness 的 VS Code 集成：一键启动 WebUI 并在浏览器中打开，复用终端中的智能体能力",
+  "version": "0.9.0",
+  "publisher": "mingdao",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["AI", "Other"],
+  "activationEvents": [
+    "onCommand:mingdao.openWebUI",
+    "onCommand:mingdao.startServer"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "mingdao.openWebUI",
+        "title": "MingDao: 打开 WebUI"
+      },
+      {
+        "command": "mingdao.startServer",
+        "title": "MingDao: 启动服务器（终端）"
+      }
+    ],
+    "configuration": {
+      "title": "MingDao",
+      "properties": {
+        "mingdao.port": {
+          "type": "number",
+          "default": 3820,
+          "description": "MingDao WebUI 端口"
+        },
+        "mingdao.binary": {
+          "type": "string",
+          "default": "mingdao",
+          "description": "mingdao 命令路径（安装 npm 包后默认可直接使用，也可写绝对路径）"
+        }
+      }
+    }
+  }
+}

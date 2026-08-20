@@ -53,9 +53,10 @@ export async function routeTask({ cfg, provider, currentModel, text }) {
       ],
       tools: [],
       temperature: 0,
-      maxTokens: 8,
+      maxTokens: 80, // 推理内容会占用 max_tokens，留足余量
     });
-    const t = String(res.text || '').trim().toLowerCase();
+    // 正文为空时用推理内容兜底（flash 可能先输出 reasoning 再输出正文）
+    const t = String(res.text || res.reasoning || '').trim().toLowerCase();
     if (t.includes('plan')) return rc.planner === currentModel ? { model: currentModel, reason: null } : { model: rc.planner, reason: '分类器判定：规划类' };
     if (t.includes('exec')) return rc.executor === currentModel ? { model: currentModel, reason: null } : { model: rc.executor, reason: '分类器判定：执行类' };
   } catch {

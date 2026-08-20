@@ -33,6 +33,7 @@ import {
 } from '../session.js';
 import { listSkills } from '../skills.js';
 import { detectSandbox } from '../tools/bash.js';
+import { generateTitle, renameSessionFile, titleModel } from '../titles.js';
 
 const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html');
 
@@ -94,24 +95,40 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     },
   };
 
-  // 单轮状态：同一时刻只允许一个生成任务；权限确认挂起在 pendingAsk
-  let busy = false;
-  let currentAbort = null;
-  let pendingAsk = null;
+  // 任务注册表：支持多会话并行——每个任务独立的 SSE 流、权限确认、中断控制
+  const MAX_CONCURRENT = 8;
+  const tasks = new Map(); // taskId -> { res, send, abortHandler, pendingAsk, session, startedAt, status, message, durationMs }
+  let taskSeq = 0;
+
+  function pruneTasks() {
+    if (tasks.size <= 100) return;
+    for (const [id, t] of tasks) {
+      if (t.status !== 'running') tasks.delete(id);
+      if (tasks.size <= 60) break;
+    }
+  }
 
   async function handleChat(res, body) {
+    const taskId = body.taskId || `t${++taskSeq}`;
+    const entry = { res, send: null, abortHandler: null, pendingAsk: null, session: null, startedAt: Date.now(), status: 'running', message: '', durationMs: 0 };
+    tasks.set(taskId, entry);
     const send = (obj) => {
       try {
-        res.write(`data: ${JSON.stringify(obj)}\n\n`);
+        res.write(`data: ${JSON.stringify({ ...obj, taskId })}\n\n`);
       } catch {}
     };
+    entry.send = send;
     const userMessage = String(body.message ?? '').trim();
+    entry.message = userMessage.slice(0, 40);
     if (!userMessage) {
-      json(res, 400, { error: '消息不能为空' });
+      entry.status = 'failed';
+      send({ type: 'error', message: '消息不能为空' });
+      res.end();
       return;
     }
 
     let session = null;
+    const isNew = !body.file;
     if (body.file) {
       try {
         const loaded = loadSession(path.join(home, 'sessions', path.basename(body.file)));
@@ -119,6 +136,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       } catch {}
     }
     if (!session) session = createSession(home);
+    entry.session = session;
 
     const systemPrompt = buildSystemPrompt({ modelName, workingDir });
     let messages =
@@ -130,11 +148,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     appendMessages(session.file, [messages[messages.length - 1]]);
     const persistedBefore = messages.length;
 
-    // 权限/选择类交互：发 ask 事件，等待 POST /api/permission 应答
+    // 权限/选择类交互：发 ask 事件（带 taskId），等待 POST /api/permission 应答
     const askHandler = ({ question, hidden, options, label, confirm }) =>
       new Promise((resolve) => {
         const id = Math.random().toString(36).slice(2);
-        pendingAsk = { id, resolve };
+        entry.pendingAsk = { id, resolve };
         send({
           type: 'ask',
           id,
@@ -149,7 +167,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       send,
       askHandler,
       setAbortHandler: (fn) => {
-        currentAbort = fn;
+        entry.abortHandler = fn;
       },
     });
     const permission = createPermission(cfg.permission ?? 'ask', io);
@@ -166,9 +184,14 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
 
     res.on('close', () => {
       // 浏览器断开：挂起的权限确认按拒绝处理
-      if (pendingAsk) {
-        pendingAsk.resolve('');
-        pendingAsk = null;
+      if (entry.pendingAsk) {
+        entry.pendingAsk.resolve('');
+        entry.pendingAsk = null;
+      }
+      if (entry.status === 'running') {
+        entry.status = 'failed';
+        entry.durationMs = Date.now() - entry.startedAt;
+        pruneTasks();
       }
     });
 
@@ -176,6 +199,15 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       const r = await agent.runTurn(messages);
       appendMessages(session.file, messages.slice(persistedBefore));
       io.printUsageLine({ modelName, usage: r.usage, durationMs: r.durationMs });
+      // 新会话自动标题（可配置关闭）
+      if (isNew && cfg.autoTitle !== false && r.text) {
+        try {
+          const title = await generateTitle(provider, titleModel(cfg, modelName), userMessage);
+          if (title) renameSessionFile(fs, path, home, session, title);
+        } catch {}
+      }
+      entry.status = r.aborted ? 'aborted' : 'done';
+      entry.durationMs = Date.now() - entry.startedAt;
       send({
         type: 'done',
         ok: true,
@@ -187,12 +219,15 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         session: path.basename(session.file),
       });
     } catch (err) {
+      entry.status = 'failed';
+      entry.durationMs = Date.now() - entry.startedAt;
       send({ type: 'error', message: String(err?.message || err) });
     } finally {
-      busy = false;
-      currentAbort = null;
-      pendingAsk = null;
+      entry.abortHandler = null;
+      entry.pendingAsk = null;
+      entry.send = null;
       res.end();
+      pruneTasks();
     }
   }
 
@@ -259,9 +294,24 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       json(res, 200, { ok: true, skills: listSkills(workingDir) });
       return;
     }
+    if (req.method === 'GET' && p === '/api/tasks') {
+      const running = [...tasks.values()].filter((t) => t.status === 'running').length;
+      const list = [...tasks.entries()].map(([id, t]) => ({
+        id,
+        status: t.status,
+        message: t.message,
+        startedAt: t.startedAt,
+        durationMs: t.status === 'running' ? Date.now() - t.startedAt : t.durationMs,
+        session: t.session ? path.basename(t.session.file) : null,
+      }));
+      json(res, 200, { ok: true, running, maxConcurrent: MAX_CONCURRENT, tasks: list });
+      return;
+    }
     if (req.method === 'POST' && p === '/api/chat') {
-      if (busy) return json(res, 409, { error: '已有任务进行中，请等待完成或中断' });
-      busy = true;
+      const running = [...tasks.values()].filter((t) => t.status === 'running').length;
+      if (running >= MAX_CONCURRENT) {
+        return json(res, 429, { error: `并发任务已达上限（${MAX_CONCURRENT}），请等待任务完成或中断` });
+      }
       res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache',
@@ -274,9 +324,10 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     }
     if (req.method === 'POST' && p === '/api/permission') {
       const body = await readBody(req);
-      if (!pendingAsk) return json(res, 409, { error: '没有挂起的权限确认' });
-      const pa = pendingAsk;
-      pendingAsk = null;
+      const entry = tasks.get(body.taskId);
+      if (!entry || !entry.pendingAsk) return json(res, 409, { error: '没有挂起的权限确认' });
+      const pa = entry.pendingAsk;
+      entry.pendingAsk = null;
       const answer = String(body.answer ?? '');
       if (pa.options && Array.isArray(pa.options)) {
         const opt = pa.options.find((o) => String(o.value) === answer);
@@ -288,12 +339,54 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       return;
     }
     if (req.method === 'POST' && p === '/api/abort') {
-      if (currentAbort) {
-        try {
-          currentAbort();
-        } catch {}
+      const body = await readBody(req);
+      if (body.taskId) {
+        const entry = tasks.get(body.taskId);
+        if (entry?.abortHandler) {
+          try {
+            entry.abortHandler();
+          } catch {}
+        }
+      } else {
+        // 未指定任务：中断全部运行中任务
+        for (const t of tasks.values()) {
+          if (t.status === 'running' && t.abortHandler) {
+            try {
+              t.abortHandler();
+            } catch {}
+          }
+        }
       }
       json(res, 200, { ok: true });
+      return;
+    }
+    // PWA 资源
+    if (req.method === 'GET' && p === '/manifest.webmanifest') {
+      res.writeHead(200, { 'Content-Type': 'application/manifest+json; charset=utf-8' });
+      res.end(
+        JSON.stringify({
+          name: 'MingDao 明道',
+          short_name: 'MingDao',
+          description: 'MingDao-Harness 智能体框架 WebUI',
+          start_url: '/',
+          display: 'standalone',
+          background_color: '#0f1115',
+          theme_color: '#0f1115',
+          icons: [{ src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }],
+        })
+      );
+      return;
+    }
+    if (req.method === 'GET' && p === '/icon.svg') {
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8' });
+      res.end(
+        `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#0f1115"/><path d="M18 20h6v24h-6zM29 20h6v24h-6zM40 20h6v24h-6z" fill="#3ddc97"/><circle cx="43" cy="18" r="5" fill="#22b8cf"/></svg>`
+      );
+      return;
+    }
+    if (req.method === 'GET' && p === '/sw.js') {
+      res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+      res.end(`self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(clients.claim()));self.addEventListener('fetch',e=>{if(e.request.method==='GET'&&new URL(e.request.url).origin===location.origin&&!e.request.url.includes('/api/')){e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open('mingdao-v1').then(cache=>cache.put(e.request,c));return r;}).catch(()=>caches.match(e.request).then(m=>m||caches.match('/'))));}});`);
       return;
     }
     json(res, 404, { error: 'Not found' });

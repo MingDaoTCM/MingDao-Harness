@@ -1,0 +1,59 @@
+// 会话标题自动生成：新会话首轮完成后，用 executor 模型生成简短中文标题并重命名会话文件。
+// 成本约几十 token；可配置 "autoTitle": false 关闭。
+
+import { modelPreset } from './models.js';
+import { routingConfig } from './routing.js';
+
+export function titleModel(cfg, currentModel) {
+  const rc = routingConfig(cfg);
+  if (rc) return rc.executor;
+  if (modelPreset('deepseek-v4-flash')) return 'deepseek-v4-flash';
+  return currentModel;
+}
+
+export async function generateTitle(provider, model, firstUserText) {
+  try {
+    const res = await provider.chat({
+      model,
+      messages: [
+        {
+          role: 'system',
+          content: '为下面的对话开头生成一个简短标题（≤12 字，中文，不要引号、句号、markdown 符号，直接输出标题本身）。',
+        },
+        { role: 'user', content: String(firstUserText).slice(0, 300) },
+      ],
+      tools: [],
+      temperature: 0.3,
+      maxTokens: 120, // 推理内容会占用 max_tokens，留足余量保证正文产出
+    });
+    const t = String(res.text || '')
+      .trim()
+      .replace(/["「」『』"'`*#\n\r]/g, '')
+      .slice(0, 20);
+    return t || null;
+  } catch {
+    return null;
+  }
+}
+
+export function sanitizeTitle(s) {
+  const clean = String(s).replace(/[^\w\u4e00-\u9fa5 .-]/g, '_').slice(0, 40).trim();
+  return clean || '会话';
+}
+
+// 重命名会话文件（与 /title 一致：确保存在、同名加随机后缀）
+export function renameSessionFile(fs, pathMod, home, session, title) {
+  const safe = sanitizeTitle(title);
+  let newFile = pathMod.join(home, 'sessions', safe + '.jsonl');
+  try {
+    fs.appendFileSync(session.file, '');
+    if (fs.existsSync(newFile)) {
+      newFile = pathMod.join(home, 'sessions', safe + '-' + Math.random().toString(36).slice(2, 6) + '.jsonl');
+    }
+    fs.renameSync(session.file, newFile);
+    session.file = newFile;
+    return newFile;
+  } catch {
+    return null;
+  }
+}

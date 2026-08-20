@@ -24,6 +24,7 @@ import { listSkills } from './skills.js';
 import { runWebServer } from './web/server.js';
 import { routeTask, routingConfig } from './routing.js';
 import { detectSandbox } from './tools/bash.js';
+import { generateTitle, renameSessionFile, titleModel } from './titles.js';
 import { estimateCost } from './pricing.js';
 import { createIO, style, C } from './ui.js';
 import {
@@ -40,7 +41,7 @@ import {
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
 const HELP_LINES = [
-  [`MingDao 明道 · AI 智能体框架 v${pkg.version}`, C.bold + C.cyan],
+  [`MingDao 明道 · AI 智能体框架 v${pkg.version}（命令：mingdao，简写 mdh）`, C.bold + C.cyan],
   ['', null],
   ['用法', C.bold + C.yellow],
   ['  mingdao                    交互式对话（TUI）', null],
@@ -336,6 +337,13 @@ async function main() {
     try {
       const res = await turnAgent.runTurn(messages);
       appendMessages(session.file, messages.slice(2));
+      if (!jsonMode && cfg.autoTitle !== false && res.text) {
+        const title = await generateTitle(provider, titleModel(cfg, modelName), question);
+        if (title) {
+          const renamed = renameSessionFile(fs, path, home, session, title);
+          if (renamed) io.print(style(`✓ 会话标题：${path.basename(renamed)}`, C.dim));
+        }
+      }
       if (jsonMode) {
         console.log(
           JSON.stringify({
@@ -429,6 +437,7 @@ async function main() {
   let lastUsage = null;
   let planMode = false;
   let routingEnabled = Boolean(routing);
+  let autoTitled = Boolean(session.messages?.length);
   const stats = { turns: 0, promptTokens: 0, completionTokens: 0 };
   io.setHistory(messages.filter((m) => m.role === 'user').map((m) => m.content));
 
@@ -699,6 +708,14 @@ async function main() {
       const fresh = messages.slice(persisted);
       appendMessages(session.file, fresh);
       persisted = messages.length;
+      if (!autoTitled && cfg.autoTitle !== false && res.text) {
+        autoTitled = true;
+        const title = await generateTitle(provider, titleModel(cfg, modelName), input);
+        if (title) {
+          const renamed = renameSessionFile(fs, path, home, session, title);
+          if (renamed) io.print(style(`✓ 会话标题：${path.basename(renamed)}`, C.dim));
+        }
+      }
       if (res.aborted) {
         io.print(style('（已中断）', C.dim));
       }

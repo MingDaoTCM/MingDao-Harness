@@ -1,6 +1,6 @@
 # MingDao-Harness（明道）
 
-> 开源智能体框架（Agent Harness）。零依赖、开箱即用，**针对 DeepSeek-V4 系列首发优化**，开放主流模型接入。
+> 开源智能体框架（Agent Harness）。零依赖、开箱即用，**针对 DeepSeek-V4 系列首发优化**，开放主流模型接入。命令：`mingdao`（简写 `mdh`）。
 
 MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale 的架构后设计：一个轻量的「模型循环 + 工具 + 权限」内核，TUI 起步，接口全部开放。详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
@@ -18,6 +18,10 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 - 🥷 **沙箱执行**：bash 工具三档隔离（`off`/`readonly` 全盘只读/`safe` 只读+断网），基于 Linux bubblewrap，不可用环境优雅降级并明示
 - 🧭 **自动模型路由**：规划类任务自动切 `deepseek-v4-pro`、执行类走 `deepseek-v4-flash`（启发式+分类器两级判定，子代理固定执行模型），`/route` 一键开关
 - 🔎 **会话检索**：`mingdao sessions search <词>` / `/sessions <关键词>` / WebUI 搜索框，全文检索历史会话并返回匹配片段
+- 🏷 **会话标题自动生成**：新会话首轮完成后自动生成中文标题并重命名（可 `"autoTitle": false` 关闭）
+- 🧵 **多会话并行任务面板**：WebUI 支持最多 8 个并发任务，各自流式输出、独立权限确认与中断，任务面板实时展示状态
+- 📲 **PWA**：WebUI 支持「安装到桌面」——浏览器地址栏安装后即可像本地应用一样双击打开
+- 🧩 **VS Code 插件**：`ide/vscode/` 一键启动服务器并打开 WebUI（命令面板搜 MingDao）
 - 📋 **会话与任务管理**：`--resume` 会话选择器、`/compact` 上下文压缩、`/plan` 计划模式（先计划后执行）、`/init` 生成 AGENTS.md、`/memory` 用户记忆、todo 清单可视化、`undo` 撤销
 - 🎯 **DeepSeek-V4 优化**：内置 `deepseek-v4-pro` / `deepseek-v4-flash` 正式版预设（384K 上下文、温度、输出上限、推理内容流式展示），自动重试与超时
 - 🔌 **开放模型接入**：内置 DeepSeek / OpenAI / Qwen / GLM / Kimi / 自定义 OpenAI 兼容端点，支持自写 Provider 模块（[docs/PROVIDERS.md](docs/PROVIDERS.md)）
@@ -257,9 +261,9 @@ node test/e2e-local.js   # 真实 HTTP：mock 服务器 + 完整 CLI 进程
 
 ## 路线图
 
-- [ ] IDE 插件（VS Code / JetBrains）
-- [ ] 会话标题自动生成
-- [ ] 多会话并行与任务面板
+- [ ] VS Code 深度集成（侧边栏内嵌面板、选中代码右键发送给 MingDao）
+- [ ] 桌面应用（可选：当前 PWA 已覆盖主要体验）
+- [ ] 多会话 CLI 面板与任务队列
 
 ## License
 
