@@ -4,6 +4,10 @@
 
 MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale 的架构后设计：一个轻量的「模型循环 + 工具 + 权限」内核，TUI 起步，接口全部开放。详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
+## 版本策略
+
+遵循语义化版本（SemVer）且保持克制：**修复 → 末位 +1**（0.2.7 → 0.2.8），**新子系统/大功能 → 中位 +1**（0.2 → 0.3），**首个 npm 稳定发布（API 冻结）→ 1.0.0**。当前 0.2.x 代表「功能活跃、接口可能调整」的诚实状态——不会出现一天一个大版本。
+
 ## 特性
 
 - ⚡ **零运行时依赖**：纯 Node.js ≥ 18，无构建步骤，安装即用
