@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MingDao 明道</title>
+<style>
+:root{
+  --bg:#0f1115; --bg2:#171a21; --bg3:#1f242e; --border:#2a303c;
+  --text:#e6e9ef; --dim:#9aa3b2; --faint:#5c6675;
+  --accent:#3ddc97; --accent2:#22b8cf; --warn:#e8b93d; --err:#e5534b;
+  --user:#1f3d57; --code:#11141a;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.65 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;display:flex;flex-direction:column}
+header{height:52px;display:flex;align-items:center;gap:12px;padding:0 18px;border-bottom:1px solid var(--border);background:var(--bg2);flex:none}
+header .logo{font-weight:700;font-size:16px;color:var(--accent);letter-spacing:.5px}
+header .logo span{color:var(--text)}
+header .badge{font-size:12px;color:var(--dim);background:var(--bg3);border:1px solid var(--border);padding:2px 10px;border-radius:20px}
+header .spacer{flex:1}
+select,button{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer}
+select:hover,button:hover{border-color:var(--accent2)}
+button.primary{background:var(--accent);color:#06231a;border:none;font-weight:600}
+button.danger{background:var(--err);color:#fff;border:none}
+button:disabled{opacity:.45;cursor:not-allowed}
+main{flex:1;overflow-y:auto;padding:22px 0 12px}
+#chat{max-width:860px;margin:0 auto;padding:0 18px;display:flex;flex-direction:column;gap:18px}
+.msg-user{display:flex;justify-content:flex-end}
+.msg-user .bubble{background:var(--user);border:1px solid #2c4a66;border-radius:14px 14px 4px 14px;padding:10px 14px;max-width:78%;white-space:pre-wrap;word-break:break-word}
+.msg-ai{display:flex;flex-direction:column;gap:10px}
+.msg-ai .content{white-space:normal;word-break:break-word}
+.msg-ai .content h1,.msg-ai .content h2,.msg-ai .content h3{font-size:1.05em;margin:.6em 0 .3em;color:var(--accent2)}
+.msg-ai .content h4{font-size:1em;margin:.5em 0 .2em}
+.msg-ai .content p{margin:.35em 0}
+.msg-ai .content ul,.msg-ai .content ol{margin:.3em 0;padding-left:1.4em}
+.msg-ai .content li{margin:.15em 0}
+.msg-ai .content blockquote{margin:.4em 0;padding-left:10px;border-left:3px solid var(--border);color:var(--dim)}
+.msg-ai .content code{background:var(--code);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#7ee0b8}
+.msg-ai .content pre{background:var(--code);border:1px solid var(--border);border-radius:10px;padding:12px 14px;overflow-x:auto;margin:.5em 0}
+.msg-ai .content pre code{background:none;border:none;padding:0;color:#c8d3e0}
+.msg-ai .content a{color:var(--accent2)}
+.msg-ai .content .hl-kw{color:#7aa2f7;font-weight:600}.hl-s{color:#9ece6a}.hl-n{color:#e0af68}.hl-c{color:#565f6e;font-style:italic}.hl-f{color:#7dcfff}
+.reasoning{margin:6px 0;border:1px dashed var(--border);border-radius:10px;background:var(--bg2)}
+.reasoning summary{cursor:pointer;color:var(--faint);font-size:12.5px;padding:6px 12px;list-style:none}
+.reasoning summary:after{content:"（点击展开）";margin-left:6px}
+.reasoning[open] summary:after{content:""}
+.reasoning .body{padding:8px 12px;color:var(--dim);font-size:13px;white-space:pre-wrap;max-height:260px;overflow-y:auto;border-top:1px solid var(--border)}
+.tool{border:1px solid var(--border);border-radius:10px;background:var(--bg2);overflow:hidden;margin:8px 0}
+.tool .head{padding:8px 14px;display:flex;gap:10px;align-items:center;font-size:13.5px}
+.tool .head .ico{width:22px;text-align:center}
+.tool .head .name{font-weight:600;color:#8ab4f8}
+.tool .head .args{color:var(--dim);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tool .head .st{font-size:12px;color:var(--dim)}
+.tool .head .st.ok{color:var(--accent)}.tool .head .st.bad{color:var(--err)}
+.tool .body{border-top:1px solid var(--border);padding:10px 14px;font-size:12.8px;overflow-x:auto}
+.tool .body pre{margin:0;font:12.5px/1.5 ui-monospace,Consolas,monospace;white-space:pre-wrap;word-break:break-all}
+.diff .l{display:block;padding:0 6px;border-radius:3px;white-space:pre-wrap}
+.diff .del{background:rgba(229,83,75,.12);color:#ff8f88}
+.diff .add{background:rgba(61,220,151,.12);color:#7ee2b8}
+.diff .ctx{color:var(--faint)}
+.todo{list-style:none;margin:6px 0;padding:0 4px}
+.todo li{padding:4px 0;color:var(--dim);display:flex;gap:8px}
+.todo li.done{color:var(--faint);text-decoration:line-through}
+.todo li.doing{color:var(--accent2)}
+.usage{font-size:12px;color:var(--faint);border-top:1px dashed var(--border);padding-top:6px}
+.banner{text-align:center;color:var(--faint);font-size:12.5px}
+.errline{color:var(--err);background:rgba(229,83,75,.08);border:1px solid rgba(229,83,75,.3);border-radius:10px;padding:10px 14px;font-size:13.5px}
+footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);padding:12px 18px}
+#composer{max-width:860px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
+#input{flex:1;background:var(--bg3);border:1px solid var(--border);border-radius:12px;color:var(--text);padding:10px 14px;font:14px/1.6 inherit;resize:none;min-height:44px;max-height:200px}
+#input:focus{outline:none;border-color:var(--accent2)}
+#hint{font-size:11.5px;color:var(--faint);margin-top:6px;max-width:860px;margin-left:auto;margin-right:auto}
+.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:50}
+.modal{background:var(--bg2);border:1px solid var(--border);border-radius:14px;width:min(520px,92vw);padding:18px}
+.modal h3{margin:0 0 8px;font-size:15px;color:var(--warn)}
+.modal .q{color:var(--text);font-size:14px;white-space:pre-wrap;word-break:break-all;max-height:220px;overflow-y:auto;margin-bottom:14px}
+.modal .opts{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
+.modal .opts button{text-align:left}
+.modal .row{display:flex;gap:10px;justify-content:flex-end}
+.spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">MingDao <span>明道</span></div>
+  <span class="badge" id="modelBadge">加载中…</span>
+  <span class="badge" id="permBadge"></span>
+  <div class="spacer"></div>
+  <select id="sessions" title="历史会话"><option value="">＋ 新会话</option></select>
+  <button id="newChat">新对话</button>
+  <button id="stopBtn" class="danger" style="display:none">■ 中断</button>
+</header>
+<main><div id="chat"></div></main>
+<footer>
+  <div id="composer">
+    <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送，Shift+Enter 换行）"></textarea>
+    <button id="sendBtn" class="primary">发送</button>
+  </div>
+  <div id="hint">工具执行与权限确认会实时展示；生成中可点「中断」停止。</div>
+</footer>
+<div id="modalRoot"></div>
+<script>
+const $ = (s) => document.querySelector(s);
+const chatEl = $('#chat'), input = $('#input'), sendBtn = $('#sendBtn'), stopBtn = $('#stopBtn');
+let busy = false, currentSession = null, thinking = null;
+
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+
+function highlight(code, lang){
+  const kws = new Set('const let var function return if else for while import from export class new await async try catch throw null undefined true false def elif raise with as lambda None True False self echo exit if then else fi done local function'.split(' '));
+  const re = /(\/\/[^\n]*|#[^\n]*|"(?:\\.|[^"\\])*"|'[^']*'|`[^`]*`|\b\d[\d._]*\b|[A-Za-z_$][\w$]*)/g;
+  return esc(code).replace(re, (tok)=>{
+    if(tok.startsWith('//')||tok.startsWith('#')) return '<span class="hl-c">'+tok+'</span>';
+    if(/^["'`]/.test(tok)) return '<span class="hl-s">'+tok+'</span>';
+    if(/^\d/.test(tok)) return '<span class="hl-n">'+tok+'</span>';
+    if(kws.has(tok)) return '<span class="hl-kw">'+tok+'</span>';
+    return tok;
+  });
+}
+function renderMarkdown(text){
+  const lines = String(text).split('\n'); let out='', code=null, codeLang='';
+  const flush=()=>{ if(code!==null){ out+='<pre><code class="lang-'+codeLang+'">'+highlight(code.join('\n'),codeLang)+'</code></pre>'; code=null; } };
+  for(const line of lines){
+    if(line.trim().startsWith('```')){
+      if(code===null){ code=[]; codeLang=(line.trim().slice(3).trim().split(/\s+/)[0]||''); }
+      else flush();
+      continue;
+    }
+    if(code!==null){ code.push(line); continue; }
+    let l = esc(line);
+    l = l.replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/\*([^*\s][^*]*)\*/g,'<i>$1</i>');
+    l = l.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank">$1</a>');
+    if(/^#{1,6}\s/.test(line.trim())){ const m=line.trim().match(/^(#+)\s+(.*)/); l='<h'+(m[1].length>3?3:m[1].length)+'>'+m[2]+'</h'+'>'; }
+    else if(/^\s*[-*+]\s/.test(line)) l='• '+l.replace(/^\s*[-*+]\s/,'');
+    else if(/^\s*\d+[.)]\s/.test(line)) l=l.replace(/^\s*(\d+)[.)]\s/,'<b>$1.</b> ');
+    else if(/^>\s?/.test(line)) l='<blockquote>'+l.replace(/^>\s?/,'')+'</blockquote>';
+    out+= l+'<br>';
+  }
+  flush();
+  return out;
+}
+function scrollBottom(){ chatEl.scrollTop = chatEl.scrollHeight; }
+
+function newAiMsg(){ const el=document.createElement('div'); el.className='msg-ai'; chatEl.appendChild(el); scrollBottom(); return el; }
+function aiContent(msg){ const c=msg.querySelector('.content'); return c || (()=>{const d=document.createElement('div');d.className='content';msg.appendChild(d);return d;})(); }
+function addReasoning(msg){ const d=document.createElement('details'); d.className='reasoning'; d.innerHTML='<summary>思考过程</summary><div class="body"></div>'; msg.appendChild(d); return d.querySelector('.body'); }
+
+function addUser(text){ const el=document.createElement('div'); el.className='msg-user'; el.innerHTML='<div class="bubble">'+esc(text)+'</div>'; chatEl.appendChild(el); scrollBottom(); }
+
+function renderToolEvent(ev){
+  const msg = newAiMsg();
+  const card=document.createElement('div'); card.className='tool';
+  const ico = {'read':'📄','write':'✏️','edit':'✎','bash':'⚙','grep':'🔎','glob':'🔎','ls':'📁','task':'👥','skill':'🧩','todo':'☑','undo':'↩'}[ev.name]||'🔌';
+  const args = ev.name==='bash'? (ev.args&&ev.args.command):(ev.args&&(ev.args.path||ev.args.pattern||''))||'';
+  card.innerHTML='<div class="head"><span class="ico">'+ico+'</span><span class="name">'+esc(ev.name)+'</span><span class="args">'+esc(args)+'</span><span class="st '+(ev.result&&ev.result.ok!==false?'ok':'bad')+'">'+(ev.result&&ev.result.ok!==false?'✓':'✖')+(ev.durationMs!=null?' '+ev.durationMs+'ms':'')+'</span></div>';
+  if(ev.result){
+    const body=document.createElement('div'); body.className='body';
+    const r=ev.result;
+    if(ev.name==='edit'&&r.diff){
+      body.classList.add('diff');
+      const a=(r.diff.before||'').split('\n'), b=(r.diff.after||'').split('\n');
+      const n=Math.max(a.length,b.length);
+      for(let i=0;i<n;i++){
+        if(a[i]===b[i]) body.insertAdjacentHTML('beforeend','<span class="l ctx"> '+esc(a[i]??'')+'</span>');
+        else{ if(a[i]!==undefined) body.insertAdjacentHTML('beforeend','<span class="l del">- '+esc(a[i])+'</span>'); if(b[i]!==undefined) body.insertAdjacentHTML('beforeend','<span class="l add">+ '+esc(b[i])+'</span>'); }
+      }
+    }else if(ev.name==='write'&&r.ok){
+      const lines=String(ev.args&&ev.args.content||'').split('\n');
+      body.innerHTML='<pre>'+esc(lines.slice(0,8).join('\n'))+(lines.length>8?'\n…（共 '+lines.length+' 行）':'')+'</pre>';
+    }else if(ev.name==='bash'&&r.ok){
+      body.innerHTML='<b style="color:'+(r.exitCode===0?'var(--accent)':'var(--err)')+'">'+(r.timedOut?'⏱ 超时':'exit '+r.exitCode)+'</b>'+(r.stdout?'<pre>'+esc(r.stdout.slice(-4000))+'</pre>':'')+(r.stderr?'<pre style="color:#ff9d97">'+esc(r.stderr.slice(-1500))+'</pre>':'');
+    }else if(r.output){
+      body.innerHTML='<pre>'+esc(String(r.output).slice(0,4000))+'</pre>';
+    }else if(r.error){ body.innerHTML='<span style="color:var(--err)">'+esc(r.error)+'</span>'; }
+    card.appendChild(body);
+  }
+  msg.appendChild(card);
+  if(ev.name==='todo'&&ev.result&&ev.result.todos) renderTodos(ev.result.todos, msg);
+  scrollBottom();
+}
+function renderTodos(todos,msg){
+  const ul=document.createElement('ul'); ul.className='todo';
+  for(const t of todos){ const li=document.createElement('li'); li.className=t.status==='completed'?'done':t.status==='in_progress'?'doing':''; li.innerHTML=(t.status==='completed'?'✓ ':'○ ')+esc(t.content); ul.appendChild(li); }
+  msg.appendChild(ul);
+}
+function renderBanner(ev){ const d=document.createElement('div'); d.className='banner'; d.textContent=ev.text||ev.title||''; chatEl.appendChild(d); scrollBottom(); }
+
+function askModal(ev){
+  return new Promise(resolve=>{
+    const root=$('#modalRoot');
+    const mask=document.createElement('div'); mask.className='modal-mask';
+    const m=document.createElement('div'); m.className='modal';
+    m.innerHTML='<h3>权限确认</h3><div class="q">'+esc(ev.question)+'</div><div class="opts"></div><div class="row"><button class="danger" data-a="n">拒绝</button><button class="primary" data-a="y">允许</button></div>';
+    if(ev.options&&ev.options.length){ m.querySelector('.opts').style.display='flex'; ev.options.forEach(o=>{ const b=document.createElement('button'); b.dataset.a=o.value; b.textContent=o.label||o.value; b.onclick=()=>finish(o.value); m.querySelector('.opts').appendChild(b); }); m.querySelector('.row').style.display='none'; }
+    m.querySelectorAll('[data-a]').forEach(b=>{ if(!b.onclick) b.onclick=()=>finish(b.dataset.a); });
+    function finish(a){ mask.remove(); resolve(a); }
+    mask.appendChild(m); root.appendChild(mask);
+  });
+}
+
+async function handleEvents(stream, onEvent){
+  const reader=stream.getReader(); const dec=new TextDecoder(); let buf='';
+  for(;;){ const {done,value}=await reader.read(); if(done) break; buf+=dec.decode(value,{stream:true});
+    let nl; while((nl=buf.indexOf('\n'))>=0){ const line=buf.slice(0,nl).trim(); buf=buf.slice(nl+1); if(!line.startsWith('data:'))continue; try{ onEvent(JSON.parse(line.slice(5))); }catch{} }
+  }
+}
+
+async function send(){
+  const text=input.value.trim(); if(!text||busy) return;
+  input.value=''; input.style.height='44px';
+  addUser(text);
+  busy=true; sendBtn.disabled=true; stopBtn.style.display='';
+  const msg=newAiMsg(); const content=aiContent(msg); let raw='';
+  let reason=null;
+  const update=()=>{ content.innerHTML=renderMarkdown(raw); scrollBottom(); };
+  const timer=setInterval(()=>{ if(raw) update(); },200);
+  try{
+    const resp=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text,file:currentSession})});
+    if(!resp.ok){ const j=await resp.json().catch(()=>({})); msg.innerHTML='<div class="errline">'+esc(j.error||('HTTP '+resp.status))+'</div>'; return; }
+    await handleEvents(resp.body, ev=>{
+      if(ev.type==='text'){ raw+=ev.delta; }
+      else if(ev.type==='reasoning'){ if(!reason) reason=addReasoning(msg); reason.textContent+=ev.delta; }
+      else if(ev.type==='code'){ const pre=document.createElement('pre'); pre.innerHTML='<code>'+highlight(ev.code,ev.lang)+'</code>'; content.appendChild(pre); }
+      else if(ev.type==='tool'){ update(); renderToolEvent(ev); msg.removeChild(content); if(!msg.querySelector('.content')){} }
+      else if(ev.type==='toolDenied'){ const d=document.createElement('div'); d.className='errline'; d.textContent='✖ 未授权：'+ev.name; msg.appendChild(d); }
+      else if(ev.type==='banner'){ renderBanner(ev); }
+      else if(ev.type==='ask'){ update(); askModal(ev).then(a=>fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:ev.id,answer:a})}).catch(()=>{})); }
+      else if(ev.type==='usage'){ const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; content.appendChild(u); }
+      else if(ev.type==='error'){ const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); }
+      else if(ev.type==='done'){ currentSession=ev.session; update(); refreshSessions(); }
+    });
+  }catch(e){ msg.innerHTML='<div class="errline">'+esc(e.message||'网络错误')+'</div>'; }
+  finally{ clearInterval(timer); update(); busy=false; sendBtn.disabled=false; stopBtn.style.display='none'; }
+}
+
+function abort(){ fetch('/api/abort',{method:'POST'}).catch(()=>{}); }
+
+async function refreshSessions(){ const r=await fetch('/api/sessions').catch(()=>null); if(!r)return; const j=await r.json(); const sel=$('#sessions'); sel.innerHTML='<option value="">＋ 新会话</option>'; for(const s of j.sessions){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; sel.appendChild(o); } if(currentSession) sel.value=currentSession; }
+async function loadSession(file){ currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } scrollBottom(); }
+async function init(){ try{ const r=await fetch('/api/state'); const j=await r.json(); $('#modelBadge').textContent='模型：'+j.model; $('#permBadge').textContent='权限：'+(j.permission||'ask'); }catch(e){} refreshSessions(); }
+
+sendBtn.onclick=send; stopBtn.onclick=abort;
+input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
+input.addEventListener('input',()=>{ input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; });
+$('#newChat').onclick=()=>{ currentSession=null; chatEl.innerHTML=''; refreshSessions(); };
+$('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { currentSession=null; chatEl.innerHTML=''; } };
+init();
+</script>
+</body>
+</html>

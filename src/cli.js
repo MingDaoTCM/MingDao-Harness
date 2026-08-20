@@ -21,6 +21,7 @@ import { createAgent } from './agent.js';
 import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
 import { listSkills } from './skills.js';
+import { runWebServer } from './web/server.js';
 import { estimateCost } from './pricing.js';
 import { createIO, style, C } from './ui.js';
 import {
@@ -42,6 +43,7 @@ const HELP_LINES = [
   ['  mingdao                    交互式对话（TUI）', null],
   ['  mingdao "你的问题"         单次提问（适合脚本与管道）', null],
   ['  mingdao --format json "…"  单次提问，输出结构化 JSON', null],
+  ['  mingdao web [端口]        启动 WebUI（默认 http://127.0.0.1:3820）', null],
   ['  mingdao --continue         继续最近一次会话', null],
   ['  mingdao --resume           从会话列表选择恢复', null],
   ['  mingdao --model <模型名>   指定模型，例如 deepseek-v4-pro', null],
@@ -216,6 +218,16 @@ async function main() {
   // 凭证管理子命令（无需配置即可使用）
   if (opts.prompt[0] === 'key') {
     await handleKeyCommand(opts.prompt.slice(1));
+    return;
+  }
+
+  // WebUI：mingdao web [端口]
+  if (opts.prompt[0] === 'web') {
+    const cfg0 = loadConfig();
+    const portArg = opts.prompt[1] !== undefined ? Number(opts.prompt[1]) : NaN;
+    const port = Number.isFinite(portArg) && portArg > 0 ? portArg : cfg0?.web?.port || 3820;
+    const host = cfg0?.web?.host || '127.0.0.1';
+    await runWebServer({ host, port });
     return;
   }
 

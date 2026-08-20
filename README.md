@@ -14,6 +14,7 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 - 🪝 **Hooks 钩子**：PreToolUse（可阻止执行）/ PostToolUse，shell 命令 + JSON stdin/stdout 协议
 - 🔌 **MCP 客户端**：零依赖实现 Model Context Protocol（stdio + JSON-RPC），`mcpServers` 配置即接入任意 MCP 服务器（实测官方 `server-everything` 13 个工具），工具并入 Agent 循环、只读标注自动放行、`/mcp` 查看状态
 - 📏 **精确 tokenizer**：内置 DeepSeek 官方词表（128k vocab）字节级 BPE 计数，与真实 API 口径偏差 <8%；非 DeepSeek 模型回退启发式估算
+- 🖥 **WebUI**：`mingdao web` 一键启动网页界面（零依赖 HTTP+SSE），流式输出、代码高亮、diff 预览、工具卡片、权限确认弹窗、会话切换，复用同一 Agent 核心
 - 📋 **会话与任务管理**：`--resume` 会话选择器、`/compact` 上下文压缩、`/plan` 计划模式（先计划后执行）、`/init` 生成 AGENTS.md、`/memory` 用户记忆、todo 清单可视化、`undo` 撤销
 - 🎯 **DeepSeek-V4 优化**：内置 `deepseek-v4-pro` / `deepseek-v4-flash` 正式版预设（384K 上下文、温度、输出上限、推理内容流式展示），自动重试与超时
 - 🔌 **开放模型接入**：内置 DeepSeek / OpenAI / Qwen / GLM / Kimi / 自定义 OpenAI 兼容端点，支持自写 Provider 模块（[docs/PROVIDERS.md](docs/PROVIDERS.md)）
@@ -73,6 +74,18 @@ git clone <repo> && cd MingDao-Harness
 node src/cli.js          # 直接运行，无需安装
 npm test                 # node test/smoke.js
 ```
+
+## WebUI（mingdao web）
+
+```bash
+mingdao web          # 默认 http://127.0.0.1:3820
+mingdao web 9000     # 指定端口
+```
+
+- 浏览器中对话：流式 Markdown 渲染、代码高亮、编辑 diff、工具执行卡片、思考过程折叠、权限确认弹窗（ask 模式）、历史会话切换、生成中断
+- 复用同一 Agent 核心与配置（模型/权限/MCP/技能全部生效）；服务器零依赖（node:http + SSE）
+- 多设备/远程使用：`"web": {"host": "0.0.0.0", "port": 3820}`（注意端口安全，仅本机使用请保持默认 127.0.0.1）
+- 接口：`GET /api/state`、`POST /api/chat`（SSE）、`POST /api/permission`、`POST /api/abort`、`GET /api/sessions`
 
 ## 快速开始
 
@@ -204,6 +217,7 @@ src/
   credentials.js     独立凭证库（Key 存储/解析/脱敏，权限 600）
   session.js         JSONL 会话持久化（预览/选择器）
   ui.js              TUI（流式渲染/高亮/diff/补全/中断/费用）
+  web/               WebUI（server.js + web-io.js + index.html，零依赖 HTTP+SSE）
   index.js           公共 API 导出
 test/
   smoke.js           离线冒烟测试（stub provider + 真实工具）
@@ -221,9 +235,9 @@ node test/e2e-local.js   # 真实 HTTP：mock 服务器 + 完整 CLI 进程
 
 ## 路线图
 
-- [ ] WebUI（io 接口已是 UI 无关适配层，加一个 HTTP/SSE 适配器即可复用核心）
 - [ ] 沙箱执行（bash 隔离）与 IDE 插件
 - [ ] 自动模型路由（规划用 pro / 执行用 flash）与多会话并行
+- [ ] 会话标题自动生成与检索
 
 ## License
 
