@@ -99,6 +99,8 @@ mingdao web 9000     # 指定端口
 - 多设备/远程使用：`"web": {"host": "0.0.0.0", "port": 3820}`（注意端口安全，仅本机使用请保持默认 127.0.0.1）
 - **并行任务**：连续发送多条消息即并发执行（上限 8），右上角「任务」打开任务面板查看状态/中断单个任务
 - **PWA 安装**：Chrome/Edge 地址栏右侧「安装」图标 → 桌面出现 MingDao 图标，双击即用
+- **调度面板**：设置（⚙）内可查看/添加（定时一次/周期/依赖）/暂停/恢复/删除调度任务
+- **自适应布局**：头部控件在窄屏自动换行收缩，无横向滚动条
 - 接口：`GET /api/state`、`POST /api/chat`（SSE）、`POST /api/permission`、`POST /api/abort`、`GET /api/sessions`、`GET /api/tasks`
 
 ## IDE 集成（VS Code 深度集成）
@@ -114,6 +116,10 @@ cp -r ide/vscode/. ~/.vscode/extensions/mingdao-vscode/
 - 服务器随面板自动启动、关闭 VS Code 自动停止（可配置 `mingdao.autoStopServer`）
 - 编辑器**选中代码 → 右键 →「MingDao: 发送选中代码」**，代码进入 WebUI 输入框
 - 命令面板：`MingDao: 打开 WebUI`（浏览器）、`MingDao: 启动服务器（终端）`
+
+**JetBrains 全家桶**（IntelliJ IDEA / PyCharm / WebStorm）：`ide/jetbrains/` 为 Kotlin 插件骨架（Tools 菜单「MingDao: 打开 WebUI」自动启动服务器并打开浏览器），构建方式见 `ide/jetbrains/README.md`（`./gradlew buildPlugin` 后从磁盘安装）。
+
+**桌面双击启动**（Linux/Windows/macOS 过渡方案）：`bash scripts/desktop/install-desktop.sh`（可选 `--autostart`）安装应用菜单图标；Windows 用 `start-mingdao.bat`，macOS 用 `mingdao-web.command`。见 `scripts/desktop/README.md`。
 
 ## 多会话后台任务面板
 
@@ -314,9 +320,9 @@ node test/e2e-local.js   # 真实 HTTP：mock 服务器 + 完整 CLI 进程
 
 ## 路线图
 
-- [ ] 桌面应用（已评估：PWA 覆盖现状，触发条件见 docs/DESKTOP-EVALUATION.md）
-- [ ] JetBrains 插件（复用 VS Code 集成经验）
-- [ ] WebUI 调度面板（可视化查看/管理调度队列）
+- [ ] 桌面应用（已提供双击启动过渡方案 scripts/desktop；完整桌面应用仍按 docs/DESKTOP-EVALUATION.md 触发条件立项）
+- [ ] JetBrains 深度集成（工具窗内嵌 WebUI、选中代码发送）
+- [ ] 调度面板增强（链式编排 UI、执行历史视图）
 
 ## License
 

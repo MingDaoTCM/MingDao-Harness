@@ -1,0 +1,20 @@
+<idea-plugin>
+  <id>org.mingdao.jetbrains</id>
+  <name>MingDao（明道）</name>
+  <vendor>MingDao-Harness Contributors</vendor>
+  <description><![CDATA[
+    MingDao-Harness 的 JetBrains 集成：Tools 菜单一键启动 WebUI 服务器并打开浏览器。
+    前提：已安装 mingdao-harness（mingdao / mdh 命令可用，npm install -g 或 bash install.sh）。
+  ]]></description>
+  <depends>com.intellij.modules.platform</depends>
+  <extensions defaultExtensionNs="com.intellij">
+    <service serviceImplementation="mingdao.MingDaoSettings"/>
+  </extensions>
+  <actions>
+    <group id="MingDao.ToolsMenu" text="MingDao" popup="true">
+      <add-to-group group-id="ToolsMenu" anchor="last"/>
+      <action id="mingdao.openWebUI" class="mingdao.OpenWebUIAction" text="MingDao: 打开 WebUI" description="启动（如未运行）并打开 MingDao WebUI"/>
+      <action id="mingdao.startServer" class="mingdao.StartServerAction" text="MingDao: 启动服务器" description="仅启动服务器（后台）"/>
+    </group>
+  </actions>
+</idea-plugin>

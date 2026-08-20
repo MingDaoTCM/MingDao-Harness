@@ -261,6 +261,27 @@ let base = await startWeb(work1);
   ok('草稿通道：写入 / 一次读取 / 自动清除');
 }
 
+// ---------- 8. 调度 API（面板可视化后端） ----------
+{
+  const empty = await (await fetch(base + '/api/schedule')).json();
+  assert.equal(empty.ok, true);
+  assert.ok(Array.isArray(empty.jobs));
+  const bad = await fetch(base + '/api/schedule', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', question: '' }) });
+  assert.equal(bad.status, 400, '空任务应拒绝');
+  const add = await (await fetch(base + '/api/schedule', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', question: '面板定时任务', every: '2s' }) })).json();
+  assert.equal(add.ok, true);
+  assert.ok(add.id);
+  const listed = await (await fetch(base + '/api/schedule')).json();
+  assert.ok(listed.jobs.some((j) => j.id === add.id));
+  const pause = await (await fetch(base + '/api/schedule', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'pause', id: add.id }) })).json();
+  assert.equal(pause.ok, true);
+  const rm = await (await fetch(base + '/api/schedule', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'remove', id: add.id }) })).json();
+  assert.equal(rm.ok, true);
+  const after = await (await fetch(base + '/api/schedule')).json();
+  assert.ok(!after.jobs.some((j) => j.id === add.id), '删除后应消失');
+  ok('调度 API：列表 / 添加 / 暂停 / 删除');
+}
+
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();

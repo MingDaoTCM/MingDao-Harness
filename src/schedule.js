@@ -78,8 +78,9 @@ export function writeSchedule(home, job) {
 export function addSchedule(home, question, { at, every, after, permission, model, cwd, anchor }) {
   const id = 'sc' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   const interval = every != null ? parseInterval(every) : null;
-  const hasAfter = after !== undefined && after !== null;
-  if (at == null && interval == null && !hasAfter) return { error: '需要 --at、--every 或 --after 之一' };
+  const afterList = Array.isArray(after) ? after.filter(Boolean).map(String) : after ? String(after).split(',').map((x) => x.trim()).filter(Boolean) : [];
+  const hasAfter = afterList.length > 0 || (after !== undefined && after !== null);
+  if (at == null && interval == null && !hasAfter && afterList.length === 0 && after === undefined) return { error: '需要 --at、--every 或 --after 之一' };
   if (at != null && parseAt(at) == null) return { error: `无法解析时间 "${at}"（格式：YYYY-MM-DD HH:MM 或 HH:MM）` };
   if (every != null && interval == null) return { error: `无法解析周期 "${every}"（格式：<数字>s|m|h|d）` };
   let nextRunAt = null;
@@ -104,7 +105,7 @@ export function addSchedule(home, question, { at, every, after, permission, mode
     question: String(question).slice(0, 300),
     interval: interval || null,
     anchor: anchor || null,
-    after: after.map(String),
+    after: afterList,
     permission: permission || null,
     model: model || null,
     cwd: cwd || process.cwd(),

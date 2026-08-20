@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=MingDao 明道
+Comment=MingDao-Harness WebUI（零依赖智能体框架）
+Exec=sh -c 'mingdao web 3820 >/dev/null 2>&1 & sleep 1; xdg-open http://127.0.0.1:3820'
+Icon=mingdao
+Terminal=false
+Categories=Development;Utility;
+StartupNotify=false

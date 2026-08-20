@@ -35,6 +35,15 @@ import {
 import { listSkills } from '../skills.js';
 import { detectSandbox } from '../tools/bash.js';
 import { generateTitle, renameSessionFile, titleModel } from '../titles.js';
+import {
+  addSchedule,
+  listSchedules,
+  removeSchedule,
+  pauseSchedule,
+  resumeSchedule,
+  chainSchedules,
+  reconcileSchedules,
+} from '../schedule.js';
 
 const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html');
 
@@ -446,6 +455,60 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       draftText = String(body.text ?? '').slice(0, 200000);
       json(res, 200, { ok: true });
       return;
+    }
+    if (req.method === 'GET' && p === '/api/schedule') {
+      reconcileSchedules(home);
+      const jobs = listSchedules(home).map((j) => ({
+        id: j.id,
+        status: j.status,
+        kind: j.kind,
+        question: j.question,
+        nextRunAt: j.nextRunAt,
+        lastRunAt: j.lastRunAt,
+        lastTaskId: j.lastTaskId,
+        runs: j.runs,
+        interval: j.interval,
+        anchor: j.anchor,
+        after: j.after,
+        note: j.note,
+      }));
+      json(res, 200, { ok: true, jobs });
+      return;
+    }
+    if (req.method === 'POST' && p === '/api/schedule') {
+      const body = await readBody(req);
+      const action = String(body.action || '');
+      try {
+        if (action === 'add') {
+          if (!body.question || !String(body.question).trim()) return json(res, 400, { error: '任务内容不能为空' });
+          const r = addSchedule(home, String(body.question).trim(), {
+            at: body.at || null,
+            every: body.every || null,
+            anchor: body.anchor || null,
+            after: Array.isArray(body.after) ? body.after.map(String) : body.after ? String(body.after).split(',').map((x) => x.trim()).filter(Boolean) : undefined,
+            permission: body.permission || null,
+            model: body.model || null,
+            cwd: workingDir,
+          });
+          if (r.error) return json(res, 400, { error: r.error });
+          return json(res, 200, { ok: true, id: r.id });
+        }
+        if (action === 'chain') {
+          const qs = Array.isArray(body.questions) ? body.questions.map(String).filter((q) => q.trim()) : [];
+          if (qs.length < 2) return json(res, 400, { error: '链式需要至少两个任务' });
+          const r = chainSchedules(home, qs, { permission: body.permission || null, model: body.model || null });
+          if (r.error) return json(res, 400, { error: r.error });
+          return json(res, 200, { ok: true, ids: r.ids });
+        }
+        const id = String(body.id || '');
+        if (!id) return json(res, 400, { error: '缺少 id' });
+        if (action === 'remove') return json(res, 200, { ok: removeSchedule(home, id) });
+        if (action === 'pause') return json(res, 200, { ok: pauseSchedule(home, id) });
+        if (action === 'resume') return json(res, 200, { ok: resumeSchedule(home, id) });
+        return json(res, 400, { error: '未知操作：add|chain|remove|pause|resume' });
+      } catch (err) {
+        return json(res, 500, { error: String(err?.message || err) });
+      }
     }
     // PWA 资源
     if (req.method === 'GET' && p === '/manifest.webmanifest') {
