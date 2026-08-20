@@ -92,7 +92,18 @@ mingdao web 9000     # 指定端口
 - 浏览器中对话：流式 Markdown 渲染、代码高亮、编辑 diff、工具执行卡片、思考过程折叠、权限确认弹窗（ask 模式）、历史会话切换、生成中断
 - 复用同一 Agent 核心与配置（模型/权限/MCP/技能全部生效）；服务器零依赖（node:http + SSE）
 - 多设备/远程使用：`"web": {"host": "0.0.0.0", "port": 3820}`（注意端口安全，仅本机使用请保持默认 127.0.0.1）
-- 接口：`GET /api/state`、`POST /api/chat`（SSE）、`POST /api/permission`、`POST /api/abort`、`GET /api/sessions`
+- **并行任务**：连续发送多条消息即并发执行（上限 8），右上角「任务」打开任务面板查看状态/中断单个任务
+- **PWA 安装**：Chrome/Edge 地址栏右侧「安装」图标 → 桌面出现 MingDao 图标，双击即用
+- 接口：`GET /api/state`、`POST /api/chat`（SSE）、`POST /api/permission`、`POST /api/abort`、`GET /api/sessions`、`GET /api/tasks`
+
+## IDE 集成（VS Code 插件）
+
+```bash
+mkdir -p ~/.vscode/extensions/mingdao-vscode
+cp -r ide/vscode/. ~/.vscode/extensions/mingdao-vscode/
+```
+
+重启 VS Code 后，命令面板（Ctrl+Shift+P）执行 **MingDao: 打开 WebUI**——自动探测/启动服务器并打开浏览器。详见 `ide/vscode/README.md`。
 
 ## 沙箱执行与自动路由
 
