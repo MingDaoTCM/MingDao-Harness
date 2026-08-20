@@ -27,7 +27,7 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 ### Linux / macOS
 
 ```bash
-git clone https://github.com/<your-org>/MingDao-Harness.git   # 或下载源码包
+git clone https://github.com/MingDaoTCM/MingDao-Harness.git   # 或下载源码包
 cd MingDao-Harness
 bash install.sh        # 自动装 Node.js（缺失时）→ 安装 mingdao 命令
 ```
@@ -35,7 +35,7 @@ bash install.sh        # 自动装 Node.js（缺失时）→ 安装 mingdao 命�
 发布后可一行安装：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<your-org>/MingDao-Harness/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main/install.sh | bash
 ```
 
 安装脚本会：① 检查 Node.js ≥ 18.17（缺失时通过 nvm 自动安装）→ ② 全局安装 `mingdao` 命令（无管理员权限时自动装到 `~/.local/bin`）→ ③ 给出下一步提示。
