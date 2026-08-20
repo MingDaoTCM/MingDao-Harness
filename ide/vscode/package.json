@@ -2,13 +2,16 @@
   "name": "mingdao-vscode",
   "displayName": "MingDao（明道）",
   "description": "MingDao-Harness 的 VS Code 集成：一键启动 WebUI 并在浏览器中打开，复用终端中的智能体能力",
-  "version": "0.9.0",
+  "version": "0.2.7",
   "publisher": "mingdao",
   "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
   },
-  "categories": ["AI", "Other"],
+  "categories": [
+    "AI",
+    "Other"
+  ],
   "activationEvents": [
     "onCommand:mingdao.openWebUI",
     "onCommand:mingdao.startServer"
