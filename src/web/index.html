@@ -290,13 +290,16 @@ let searchTimer=null;
 $('#sessionSearch').addEventListener('input',e=>{ clearTimeout(searchTimer); searchTimer=setTimeout(()=>refreshSessions(e.target.value.trim()),300); });
 async function init(){
   try{
-    const r=await fetch('/api/state'); const j=await r.json();
+    const r=await fetch('/api/state',{cache:'no-store'}); const j=await r.json();
     const ms=$('#modelSel'); ms.innerHTML='';
-    for(const m of j.models){ const o=document.createElement('option'); o.value=m.name; o.textContent=m.label; if(m.name===j.model) o.selected=true; ms.appendChild(o); }
+    for(const m of (j.models||[])){ const o=document.createElement('option'); o.value=m.name; o.textContent=m.label; if(m.name===j.model) o.selected=true; ms.appendChild(o); }
+    if(!(j.models||[]).length){ const o=document.createElement('option'); o.value=j.model; o.textContent=j.model; ms.appendChild(o); }
     $('#permSel').value=j.permission||'ask';
     const env = (j.routing?'路由开 · ':'')+(j.sandbox&&j.sandbox!=='off'?(j.sandboxSupported?'沙箱'+j.sandbox:'沙箱降级'):'');
     $('#envBadge').textContent=env; $('#envBadge').style.display=env?'':'none';
-  }catch(e){}
+  }catch(e){
+    const ms=$('#modelSel'); if(!ms.options.length){ const o=document.createElement('option'); o.textContent='加载失败，刷新重试'; ms.appendChild(o); }
+  }
   refreshSessions();
 }
 $('#modelSel').addEventListener('change', async e=>{

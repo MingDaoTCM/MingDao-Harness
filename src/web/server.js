@@ -39,7 +39,7 @@ import { generateTitle, renameSessionFile, titleModel } from '../titles.js';
 const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html');
 
 function json(res, code, obj) {
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8' });
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(obj));
 }
 
