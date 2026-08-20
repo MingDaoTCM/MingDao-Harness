@@ -18,6 +18,18 @@ import {
 import { createProvider, resolveProviderConfig } from './providers/index.js';
 import { startMcpServers } from './mcp.js';
 import { startTask, listTasks, patchTask, killTask, formatTaskRow } from './tasks.js';
+import {
+  addSchedule,
+  listSchedules,
+  readSchedule,
+  removeSchedule,
+  pauseSchedule,
+  resumeSchedule,
+  chainSchedules,
+  reconcileSchedules,
+  runSleeper,
+  formatScheduleRow,
+} from './schedule.js';
 import { createAgent } from './agent.js';
 import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
@@ -52,6 +64,7 @@ const HELP_LINES = [
   ['  mingdao sessions search <词> 全文检索历史会话', null],
   ['  mingdao run "<任务>"     后台启动任务（tasks 面板管理）', null],
   ['  mingdao tasks [watch|kill <id>] 查看/实时刷新/停止后台任务', null],
+  ['  mingdao schedule add/list/remove/pause/resume/chain 定时任务与依赖编排', null],
   ['  mingdao --continue         继续最近一次会话', null],
   ['  mingdao --resume           从会话列表选择恢复', null],
   ['  mingdao --model <模型名>   指定模型，例如 deepseek-v4-pro', null],
@@ -370,6 +383,7 @@ async function main() {
       return;
     }
     const home0 = ensureHome();
+    reconcileSchedules(home0);
     const task = startTask(home0, question, { permission, model, cwd: process.cwd() });
     console.log(`✓ 后台任务已启动 ${task.id}`);
     console.log(`  查看：mingdao tasks · 实时刷新：mingdao tasks watch · 停止：mingdao tasks kill ${task.id}`);
@@ -379,6 +393,7 @@ async function main() {
   // 任务面板：mingdao tasks [watch|kill <id>]
   if (opts.prompt[0] === 'tasks') {
     const home0 = ensureHome();
+    reconcileSchedules(home0);
     const sub = opts.prompt[1];
     if (sub === 'kill') {
       const id = opts.prompt[2];
@@ -395,6 +410,111 @@ async function main() {
       return;
     }
     printTasks(home0);
+    return;
+  }
+
+  // 调度器 worker（内部入口，由 schedule 系统启动的 sleeper 进程）
+  if (opts.prompt[0] === 'schedule-worker') {
+    const home0 = ensureHome();
+    await runSleeper(home0, opts.prompt[1]);
+    return;
+  }
+
+  // 任务队列与调度：mingdao schedule add/list/remove/pause/resume/chain
+  if (opts.prompt[0] === 'schedule') {
+    const home0 = ensureHome();
+    reconcileSchedules(home0);
+    const sub = opts.prompt[1];
+    const rest = opts.prompt.slice(2);
+    if (sub === 'add') {
+      let question = '';
+      let at = null;
+      let every = null;
+      let anchor = null;
+      let after = [];
+      let permission = null;
+      let model = null;
+      for (let i = 0; i < rest.length; i++) {
+        const a = rest[i];
+        if (a === '--at') at = rest[++i];
+        else if (a === '--every') every = rest[++i];
+        else if (a === '--anchor') anchor = rest[++i];
+        else if (a === '--after') after = String(rest[++i]).split(',').map((x) => x.trim()).filter(Boolean);
+        else if (a === '--permission') permission = rest[++i];
+        else if (a === '--model') model = rest[++i];
+        else if (question === '') question = a;
+      }
+      if (!question) {
+        console.log('用法：mingdao schedule add "<任务>" [--at "YYYY-MM-DD HH:MM" | --every 2h [--anchor 09:00]] [--after 任务ID,...] [--permission auto] [--model 名]');
+        process.exitCode = 1;
+        return;
+      }
+      const r = addSchedule(home0, question, { at, every, after, permission, model, cwd: process.cwd(), anchor });
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 调度任务已创建 ${r.id}`);
+      console.log(`  查看：mingdao schedule list · 删除：mingdao schedule remove ${r.id}`);
+      return;
+    }
+    if (sub === 'list') {
+      const jobs = listSchedules(home0);
+      if (!jobs.length) {
+        console.log('暂无调度任务。创建：mingdao schedule add "<任务>" --at "2026-08-21 09:00" 或 --every 2h');
+        return;
+      }
+      console.log(`调度队列（共 ${jobs.length} 个，按下次运行排序）`);
+      for (const j of jobs.slice(0, 30)) console.log('  ' + formatScheduleRow(j));
+      return;
+    }
+    if (sub === 'remove') {
+      const id = rest[0];
+      if (!id) {
+        console.log('用法：mingdao schedule remove <id>');
+        process.exitCode = 1;
+        return;
+      }
+      console.log(removeSchedule(home0, id) ? `已删除调度任务 ${id}` : '任务不存在');
+      return;
+    }
+    if (sub === 'pause') {
+      const id = rest[0];
+      if (!id) {
+        console.log('用法：mingdao schedule pause <id>');
+        process.exitCode = 1;
+        return;
+      }
+      console.log(pauseSchedule(home0, id) ? `已暂停 ${id}（mingdao schedule resume ${id} 恢复）` : '任务不存在或不可暂停');
+      return;
+    }
+    if (sub === 'resume') {
+      const id = rest[0];
+      if (!id) {
+        console.log('用法：mingdao schedule resume <id>');
+        process.exitCode = 1;
+        return;
+      }
+      console.log(resumeSchedule(home0, id) ? `已恢复 ${id}` : '任务不存在或未暂停');
+      return;
+    }
+    if (sub === 'chain') {
+      if (rest.length < 2) {
+        console.log('用法：mingdao schedule chain "任务A" "任务B" "任务C"（按顺序执行，后者依赖前者成功）');
+        process.exitCode = 1;
+        return;
+      }
+      const r = chainSchedules(home0, rest);
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 链式队列已创建：${r.ids.join(' → ')}`);
+      return;
+    }
+    console.log('用法：mingdao schedule add|list|remove|pause|resume|chain');
     return;
   }
 

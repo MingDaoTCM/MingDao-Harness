@@ -128,6 +128,25 @@ mingdao tasks kill <id>          # 停止任务
 - 复用完整 Agent 能力（工具/权限/MCP/会话持久化/自动标题）；`ask` 权限下后台任务按只读降级并注明
 - 桌面应用评估见 [docs/DESKTOP-EVALUATION.md](docs/DESKTOP-EVALUATION.md)（结论：PWA 继续作为默认形态，触发条件满足后再立项）
 
+## 任务队列与调度
+
+```bash
+# 定时任务（一次性）
+mingdao schedule add "生成周报" --at "2026-08-21 09:00"
+# 周期任务（每 2 小时 / 每天 09:00 锚点 / 每 30 秒）
+mingdao schedule add "同步数据" --every 2h
+mingdao schedule add "每日站会摘要" --every 1d --anchor 09:00
+# 依赖编排：B 等 A 成功后才运行（--after 也接受 mingdao run 返回的任务 id）
+mingdao schedule add "跑测试" --after <任务ID>
+mingdao schedule chain "构建" "测试" "部署"        # 链式顺序执行
+# 管理
+mingdao schedule list / remove <id> / pause <id> / resume <id>
+```
+
+- 每个调度任务由独立 sleeper 进程守候，到点（或依赖满足）自动拉起后台任务；状态落盘 `~/.mingdao/schedule/`
+- **重启自愈**：任何 `tasks` / `run` / `schedule` 命令触发时自动为到期且进程已失的任务重新挂起 sleeper
+- 周期任务按「完成时间 + 周期」续排（不追赶错过的档期）；任一依赖失败则跳过（标注 skipped）
+
 ## 沙箱执行与自动路由
 
 **沙箱**（`"sandbox": "off" | "readonly" | "safe"`，Linux + bubblewrap）：
@@ -296,8 +315,8 @@ node test/e2e-local.js   # 真实 HTTP：mock 服务器 + 完整 CLI 进程
 ## 路线图
 
 - [ ] 桌面应用（已评估：PWA 覆盖现状，触发条件见 docs/DESKTOP-EVALUATION.md）
-- [ ] 任务队列与调度（定时任务、依赖编排）
 - [ ] JetBrains 插件（复用 VS Code 集成经验）
+- [ ] WebUI 调度面板（可视化查看/管理调度队列）
 
 ## License
 
