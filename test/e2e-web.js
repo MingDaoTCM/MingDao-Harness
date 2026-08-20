@@ -250,6 +250,17 @@ let base = await startWeb(work1);
   ok('会话列表与预览 + 自动标题');
 }
 
+// ---------- 7. 草稿通道（VS Code 选中代码发送） ----------
+{
+  const post = await fetch(base + '/api/draft', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: '来自 VS Code 的代码片段' }) });
+  assert.equal(post.status, 200);
+  const g1 = await (await fetch(base + '/api/draft')).json();
+  assert.equal(g1.text, '来自 VS Code 的代码片段', '第一次读取应返回草稿');
+  const g2 = await (await fetch(base + '/api/draft')).json();
+  assert.equal(g2.text, '', '读取后应清除');
+  ok('草稿通道：写入 / 一次读取 / 自动清除');
+}
+
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();
