@@ -18,6 +18,8 @@ header{height:52px;display:flex;align-items:center;gap:12px;padding:0 18px;borde
 header .logo{font-weight:700;font-size:16px;color:var(--accent);letter-spacing:.5px}
 header .logo span{color:var(--text)}
 header .badge{font-size:12px;color:var(--dim);background:var(--bg3);border:1px solid var(--border);padding:2px 10px;border-radius:20px}
+#sessionSearch{width:150px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:13px}
+#sessionSearch:focus{outline:none;border-color:var(--accent2)}
 header .spacer{flex:1}
 select,button{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:13px;cursor:pointer}
 select:hover,button:hover{border-color:var(--accent2)}
@@ -88,6 +90,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
   <span class="badge" id="modelBadge">加载中…</span>
   <span class="badge" id="permBadge"></span>
   <div class="spacer"></div>
+  <input id="sessionSearch" placeholder="搜索会话…" title="关键词检索历史会话">
   <select id="sessions" title="历史会话"><option value="">＋ 新会话</option></select>
   <button id="newChat">新对话</button>
   <button id="stopBtn" class="danger" style="display:none">■ 中断</button>
@@ -237,9 +240,11 @@ async function send(){
 
 function abort(){ fetch('/api/abort',{method:'POST'}).catch(()=>{}); }
 
-async function refreshSessions(){ const r=await fetch('/api/sessions').catch(()=>null); if(!r)return; const j=await r.json(); const sel=$('#sessions'); sel.innerHTML='<option value="">＋ 新会话</option>'; for(const s of j.sessions){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; sel.appendChild(o); } if(currentSession) sel.value=currentSession; }
+async function refreshSessions(q){ const u=q?'/api/sessions?q='+encodeURIComponent(q):'/api/sessions'; const r=await fetch(u).catch(()=>null); if(!r)return; const j=await r.json(); const sel=$('#sessions'); sel.innerHTML='<option value="">＋ 新会话</option>'; for(const s of j.sessions){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; sel.appendChild(o); } if(currentSession&&!q) sel.value=currentSession; }
+let searchTimer=null;
+$('#sessionSearch').addEventListener('input',e=>{ clearTimeout(searchTimer); searchTimer=setTimeout(()=>refreshSessions(e.target.value.trim()),300); });
+async function init(){ try{ const r=await fetch('/api/state'); const j=await r.json(); $('#modelBadge').textContent='模型：'+j.model; $('#permBadge').textContent='权限：'+(j.permission||'ask')+(j.routing?' · 路由开':'')+(j.sandbox&&j.sandbox!=='off'?(j.sandboxSupported?' · 沙箱'+j.sandbox:' · 沙箱降级'):''); }catch(e){} refreshSessions(); }
 async function loadSession(file){ currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } scrollBottom(); }
-async function init(){ try{ const r=await fetch('/api/state'); const j=await r.json(); $('#modelBadge').textContent='模型：'+j.model; $('#permBadge').textContent='权限：'+(j.permission||'ask'); }catch(e){} refreshSessions(); }
 
 sendBtn.onclick=send; stopBtn.onclick=abort;
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });

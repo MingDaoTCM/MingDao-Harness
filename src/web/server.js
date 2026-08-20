@@ -29,8 +29,10 @@ import {
   appendMessages,
   sessionPreview,
   relativeTime,
+  searchSessions,
 } from '../session.js';
 import { listSkills } from '../skills.js';
+import { detectSandbox } from '../tools/bash.js';
 
 const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html');
 
@@ -221,6 +223,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         ok: true,
         model: modelName,
         permission: cfg.permission ?? 'ask',
+        sandbox: cfg.sandbox || 'off',
+        sandboxSupported: detectSandbox() !== 'none',
+        routing: Boolean(cfg.routing?.enabled),
         home,
         workingDir,
         mcp: mcpFacade.status(),
@@ -229,10 +234,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       return;
     }
     if (req.method === 'GET' && p === '/api/sessions') {
-      const sessions = listSessions(home)
-        .slice(0, 30)
-        .map((s) => ({ file: s.name, mtime: s.mtime, label: `${relativeTime(s.mtime)} · ${sessionPreview(s.file)}` }));
-      json(res, 200, { ok: true, sessions });
+      const q = url.searchParams.get('q');
+      const found = q
+        ? searchSessions(home, q, { limit: 30 }).map((s) => ({ file: s.name, mtime: s.mtime, label: `${relativeTime(s.mtime)} · ${s.snippet}` }))
+        : listSessions(home).slice(0, 30).map((s) => ({ file: s.name, mtime: s.mtime, label: `${relativeTime(s.mtime)} · ${sessionPreview(s.file)}` }));
+      json(res, 200, { ok: true, sessions: found });
       return;
     }
     if (req.method === 'GET' && p === '/api/session') {

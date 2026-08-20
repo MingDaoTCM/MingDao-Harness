@@ -470,5 +470,74 @@ const ctx = { cwd: tmp };
   ok('mcp：握手 / 工具发现 / 调用 / 只读标注 / 容错');
 }
 
+// ---------- 16. 沙箱执行（随环境能力自适应） ----------
+{
+  const { detectSandbox } = await import(path.join(srcDir, 'tools/bash.js'));
+  if (detectSandbox() === 'bwrap') {
+    const d16 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sbx-'));
+    const ctx16 = { cwd: d16, cfg: { sandbox: 'safe' } };
+    const r1 = await dispatch('bash', { command: 'echo hello-sandbox' }, ctx16);
+    assert.equal(r1.ok, true);
+    assert.equal(r1.sandbox, 'safe');
+    assert.ok(r1.stdout.includes('hello-sandbox'));
+    const r2 = await dispatch('bash', { command: 'touch /etc/mingdao-sbx-probe 2>&1; echo code=$?' }, ctx16);
+    assert.ok(!r2.stdout.includes('code=0'), 'safe 模式不应允许写 /etc');
+    const r3 = await dispatch('bash', { command: 'curl -s --max-time 3 http://example.com >/dev/null 2>&1 && echo NET-OK || echo NET-BLOCKED' }, ctx16);
+    assert.ok(r3.stdout.includes('NET-BLOCKED'), 'safe 模式应断网');
+    const ctxRo = { cwd: d16, cfg: { sandbox: 'readonly' } };
+    const r4 = await dispatch('bash', { command: 'echo x > ./probe-ro.txt 2>&1; echo code=$?' }, ctxRo);
+    assert.ok(!r4.stdout.includes('code=0'), 'readonly 模式不应允许写工作目录');
+    fs.rmSync(d16, { recursive: true, force: true });
+    ok('sandbox：safe 断网只读 / readonly 工作目录只读（bwrap）');
+  } else {
+    const r = await dispatch('bash', { command: 'echo plain' }, { cwd: tmp, cfg: { sandbox: 'safe' } });
+    assert.equal(r.ok, true);
+    assert.equal(r.sandbox, 'off', '无 bwrap 应降级为 off');
+    assert.ok(r.note && r.note.includes('降级'), '降级应注明');
+    ok('sandbox：无 bwrap 环境优雅降级');
+  }
+}
+
+// ---------- 17. 自动路由 ----------
+{
+  const { routeTask, heuristicRoute, routingConfig, subagentModel } = await import(path.join(srcDir, 'routing.js'));
+  const rc = routingConfig({ routing: { enabled: true } });
+  assert.ok(rc && rc.planner === 'deepseek-v4-pro' && rc.executor === 'deepseek-v4-flash');
+  assert.equal(heuristicRoute('帮我写个函数', rc), 'deepseek-v4-flash');
+  assert.equal(heuristicRoute('请设计这个系统的整体架构，梳理模块划分与数据流，并给出分阶段重构方案与风险评估与测试计划', rc), 'deepseek-v4-pro');
+  // 分类器路径（fake provider 返回 plan / execute）
+  const fake = { async chat() { return { text: 'plan' }; } };
+  const r1 = await routeTask({ cfg: { routing: { enabled: true } }, provider: fake, currentModel: 'deepseek-v4-flash', text: '这是一条用于触发分类器判定流程的测试消息，其内容需要足够长以超过六十个字符的启发式阈值，才能进入分类器环节进行判定，请务必用分类器来判定本条消息的类别' });
+  assert.equal(r1.model, 'deepseek-v4-pro');
+  const fake2 = { async chat() { return { text: 'execute' }; } };
+  const r2 = await routeTask({ cfg: { routing: { enabled: true } }, provider: fake2, currentModel: 'deepseek-v4-pro', text: '这是另一条用于触发分类器判定流程的测试消息，其内容同样需要足够长以超过六十个字符的启发式阈值，才能进入分类器环节进行判定，请务必用分类器判定类别' });
+  assert.equal(r2.model, 'deepseek-v4-flash');
+  // 路由池外模型不干预
+  const r3 = await routeTask({ cfg: { routing: { enabled: true } }, provider: fake, currentModel: 'qwen-max', text: '设计一个系统' });
+  assert.equal(r3.model, 'qwen-max');
+  assert.equal(subagentModel({ routing: { enabled: true } }, 'deepseek-v4-pro'), 'deepseek-v4-flash');
+  ok('routing：启发式 / 分类器 / 池外不干预 / 子代理 executor');
+}
+
+// ---------- 18. 会话检索 ----------
+{
+  const { searchSessions, createSession: cs18, appendMessages: ap18 } = await import(path.join(srcDir, 'session.js'));
+  const home18 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-srch-'));
+  const s1 = cs18(home18);
+  ap18(s1.file, [{ role: 'user', content: '帮我写一个快速排序，并且分析其时间复杂度' }]);
+  const s2 = cs18(home18);
+  ap18(s2.file, [{ role: 'user', content: '今天天气怎么样，适合去爬山吗' }]);
+  const hits = searchSessions(home18, '快速排序');
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0].name, s1.name);
+  assert.ok(hits[0].snippet.includes('快速排序'));
+  const miss = searchSessions(home18, '不存在的关键词xyz');
+  assert.equal(miss.length, 0);
+  const all = searchSessions(home18, '');
+  assert.equal(all.length, 2);
+  fs.rmSync(home18, { recursive: true, force: true });
+  ok('sessions：全文检索 / 片段 / 空关键词');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);

@@ -79,3 +79,42 @@ export function relativeTime(mtime) {
   if (diff < 86400000) return `${Math.floor(diff / 3600000)} 小时前`;
   return `${Math.floor(diff / 86400000)} 天前`;
 }
+
+// 全文检索历史会话：大小写不敏感子串匹配（按消息内容解析），返回命中会话与干净片段
+export function searchSessions(home, keyword, { limit = 20 } = {}) {
+  const kw = String(keyword ?? '').trim();
+  if (!kw) return listSessions(home).slice(0, limit);
+  const lower = kw.toLowerCase();
+  const out = [];
+  for (const s of listSessions(home)) {
+    if (out.length >= limit) break;
+    let lines;
+    try {
+      const st = fs.statSync(s.file);
+      if (st.size > 8 * 1024 * 1024) continue; // 超大文件跳过
+      lines = fs.readFileSync(s.file, 'utf8').split('\n');
+    } catch {
+      continue;
+    }
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      let m;
+      try {
+        m = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (typeof m.content !== 'string') continue;
+      const idx = m.content.toLowerCase().indexOf(lower);
+      if (idx === -1) continue;
+      const start = Math.max(0, idx - 30);
+      const snippet = m.content
+        .slice(start, idx + lower.length + 50)
+        .replace(/\s+/g, ' ')
+        .trim();
+      out.push({ ...s, snippet: `…${snippet}…` });
+      break; // 每个会话只取第一条命中
+    }
+  }
+  return out;
+}

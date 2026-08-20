@@ -15,6 +15,9 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 - 🔌 **MCP 客户端**：零依赖实现 Model Context Protocol（stdio + JSON-RPC），`mcpServers` 配置即接入任意 MCP 服务器（实测官方 `server-everything` 13 个工具），工具并入 Agent 循环、只读标注自动放行、`/mcp` 查看状态
 - 📏 **精确 tokenizer**：内置 DeepSeek 官方词表（128k vocab）字节级 BPE 计数，与真实 API 口径偏差 <8%；非 DeepSeek 模型回退启发式估算
 - 🖥 **WebUI**：`mingdao web` 一键启动网页界面（零依赖 HTTP+SSE），流式输出、代码高亮、diff 预览、工具卡片、权限确认弹窗、会话切换，复用同一 Agent 核心
+- 🥷 **沙箱执行**：bash 工具三档隔离（`off`/`readonly` 全盘只读/`safe` 只读+断网），基于 Linux bubblewrap，不可用环境优雅降级并明示
+- 🧭 **自动模型路由**：规划类任务自动切 `deepseek-v4-pro`、执行类走 `deepseek-v4-flash`（启发式+分类器两级判定，子代理固定执行模型），`/route` 一键开关
+- 🔎 **会话检索**：`mingdao sessions search <词>` / `/sessions <关键词>` / WebUI 搜索框，全文检索历史会话并返回匹配片段
 - 📋 **会话与任务管理**：`--resume` 会话选择器、`/compact` 上下文压缩、`/plan` 计划模式（先计划后执行）、`/init` 生成 AGENTS.md、`/memory` 用户记忆、todo 清单可视化、`undo` 撤销
 - 🎯 **DeepSeek-V4 优化**：内置 `deepseek-v4-pro` / `deepseek-v4-flash` 正式版预设（384K 上下文、温度、输出上限、推理内容流式展示），自动重试与超时
 - 🔌 **开放模型接入**：内置 DeepSeek / OpenAI / Qwen / GLM / Kimi / 自定义 OpenAI 兼容端点，支持自写 Provider 模块（[docs/PROVIDERS.md](docs/PROVIDERS.md)）
@@ -86,6 +89,24 @@ mingdao web 9000     # 指定端口
 - 复用同一 Agent 核心与配置（模型/权限/MCP/技能全部生效）；服务器零依赖（node:http + SSE）
 - 多设备/远程使用：`"web": {"host": "0.0.0.0", "port": 3820}`（注意端口安全，仅本机使用请保持默认 127.0.0.1）
 - 接口：`GET /api/state`、`POST /api/chat`（SSE）、`POST /api/permission`、`POST /api/abort`、`GET /api/sessions`
+
+## 沙箱执行与自动路由
+
+**沙箱**（`"sandbox": "off" | "readonly" | "safe"`，Linux + bubblewrap）：
+
+| 档位 | 文件系统 | 网络 | 适用 |
+| --- | --- | --- | --- |
+| `off` | 无隔离（默认） | 可用 | 日常使用 |
+| `readonly` | 全盘只读，仅 /tmp 可写 | 可用 | 信任度一般的命令 |
+| `safe` | 全盘只读 + 工作目录、/tmp 可写 | **断开** | 下载/执行不可信代码、外部工具 |
+
+非 Linux 或未安装 bubblewrap（`apt install bubblewrap` / `dnf install bubblewrap`）时自动降级为 off 并在结果中注明；TUI 横幅与 `/status` 实时显示当前沙箱状态。
+
+**自动路由**（`"routing": {"enabled": true, "planner": "deepseek-v4-pro", "executor": "deepseek-v4-flash"}`）：
+
+- 长文本+规划关键词（设计/架构/重构/审查…）→ 启发式直接路由到 planner；中等长度走 executor 模型做一次极简分类（约几十 token）；短指令直接执行模型
+- 子代理（task）固定走 executor——主线程规划、子线程执行，省成本又分工明确
+- 会话内 `/route on|off` 开关；路由发生时显示 `⤷ 自动路由 → 模型（原因）`
 
 ## 快速开始
 
@@ -209,6 +230,7 @@ src/
   skills.js          Skills 技能系统（渐进式披露）
   hooks.js           PreToolUse/PostToolUse 生命周期钩子
   mcp.js             MCP 客户端（stdio + JSON-RPC）
+  routing.js         自动模型路由（启发式 + 分类器）
   tokenizer.js       精确 tokenizer（DeepSeek 词表 BPE）
   assets/            词表数据（tokenizer-data.json.gz，745KB）
   context.js         token 估算与预算裁剪
@@ -235,9 +257,9 @@ node test/e2e-local.js   # 真实 HTTP：mock 服务器 + 完整 CLI 进程
 
 ## 路线图
 
-- [ ] 沙箱执行（bash 隔离）与 IDE 插件
-- [ ] 自动模型路由（规划用 pro / 执行用 flash）与多会话并行
-- [ ] 会话标题自动生成与检索
+- [ ] IDE 插件（VS Code / JetBrains）
+- [ ] 会话标题自动生成
+- [ ] 多会话并行与任务面板
 
 ## License
 

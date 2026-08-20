@@ -85,6 +85,21 @@ export async function runWizard(io) {
     { value: 'readonly', label: 'readonly — 只读模式，不允许修改或执行' },
   ]);
 
+  const sandbox = await io.choose('沙箱模式（bash 工具执行隔离，Linux + bubblewrap）：', [
+    { value: 'off', label: 'off — 直接执行（默认）' },
+    { value: 'readonly', label: 'readonly — 全盘只读（/tmp 可写，网络可用）' },
+    { value: 'safe', label: 'safe — 只读 + 断网（工作目录与 /tmp 可写，最安全）' },
+  ]);
+
+  let routing = null;
+  if (modelPreset('deepseek-v4-pro') && modelPreset('deepseek-v4-flash')) {
+    const routeChoice = await io.choose('自动模型路由（规划类任务→pro，执行类→flash）：', [
+      { value: 'on', label: 'on — 开启（省钱又高效，推荐）' },
+      { value: 'off', label: 'off — 关闭（始终用当前模型）' },
+    ]);
+    if (routeChoice === 'on') routing = { enabled: true, planner: 'deepseek-v4-pro', executor: 'deepseek-v4-flash' };
+  }
+
   const preset = modelPreset(model);
   const defaultBudget = preset?.budgetTokens ?? 128000;
   const budgetInput = await io.ask(`上下文预算 tokens（回车默认 ${defaultBudget}）：`);
@@ -96,14 +111,17 @@ export async function runWizard(io) {
     model,
     baseUrl: baseUrl || pp.baseUrl,
     permission: perm,
+    sandbox,
     contextBudget,
   };
+  if (routing) cfg.routing = routing;
   saveConfig(cfg);
   io.print('');
   io.box('配置完成 ✓', [
     `服务商  ${provider}（${pp.label}）`,
     `模型    ${model}`,
-    `权限    ${perm}`,
+    `权限    ${perm} · 沙箱  ${sandbox}`,
+    `路由    ${routing ? '自动（pro⇄flash）' : '关闭'}`,
     `密钥    ${apiKey ? '凭证库 ' + maskKey(apiKey) : '环境变量 ' + (pp.envKey || 'MINGDAO_API_KEY')}`,
     `保存于  ${configPath()}`,
   ]);

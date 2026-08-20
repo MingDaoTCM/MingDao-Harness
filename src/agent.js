@@ -8,6 +8,7 @@ import { modelPreset } from './models.js';
 import { makeTokenCounter } from './tokenizer.js';
 import { createHooks } from './hooks.js';
 import { createIO, style, C } from './ui.js';
+import { subagentModel } from './routing.js';
 
 const MAX_STEPS = 24;
 const SUBAGENT_MAX_STEPS = 12;
@@ -33,11 +34,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const subPermission = {
       check: (name, args) => permission.check(name, args, '（子任务）'),
     };
+    // 自动路由：子代理固定走 executor 模型（便宜的执行单元）
+    const subModel = subagentModel(cfg, modelName);
     const subAgent = createAgent({
       provider,
       permission: subPermission,
       io: subIo,
-      modelName,
+      modelName: subModel,
       workingDir,
       cfg: { ...cfg, contextBudget: Math.min(budget, 64000) },
       undoStore: undo,

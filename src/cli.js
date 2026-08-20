@@ -22,6 +22,8 @@ import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
 import { listSkills } from './skills.js';
 import { runWebServer } from './web/server.js';
+import { routeTask, routingConfig } from './routing.js';
+import { detectSandbox } from './tools/bash.js';
 import { estimateCost } from './pricing.js';
 import { createIO, style, C } from './ui.js';
 import {
@@ -32,6 +34,7 @@ import {
   listSessions,
   sessionPreview,
   relativeTime,
+  searchSessions,
 } from './session.js';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
@@ -44,6 +47,7 @@ const HELP_LINES = [
   ['  mingdao "你的问题"         单次提问（适合脚本与管道）', null],
   ['  mingdao --format json "…"  单次提问，输出结构化 JSON', null],
   ['  mingdao web [端口]        启动 WebUI（默认 http://127.0.0.1:3820）', null],
+  ['  mingdao sessions search <词> 全文检索历史会话', null],
   ['  mingdao --continue         继续最近一次会话', null],
   ['  mingdao --resume           从会话列表选择恢复', null],
   ['  mingdao --model <模型名>   指定模型，例如 deepseek-v4-pro', null],
@@ -62,8 +66,9 @@ const HELP_LINES = [
   ['  /compact     压缩上下文        /plan    计划模式（先计划后执行）', null],
   ['  /init        生成 AGENTS.md    /memory add <内容> 追加用户记忆', null],
   ['  /skills      列出技能          /status  会话状态 · /cost 累计费用', null],
-  ['  /mcp         MCP 服务器状态    /verbose 思考开关 · /title <别名> 会话命名', null],
-  ['  /sessions    历史会话          /usage   上轮用量 · /save 会话文件', null],
+  ['  /sessions    历史会话/检索    /route on|off 自动路由开关', null],
+  ['  /mcp         MCP 服务器状态  /verbose 思考开关 · /title <别名> 会话命名', null],
+  ['  /usage       上轮用量          /exit    退出 · /save 会话文件', null],
   ['  /exit        退出              Tab 补全命令 · Ctrl+C 中断生成', null],
   ['', null],
   [`配置目录: ${mingdaoHome()}`, C.dim],
@@ -231,6 +236,27 @@ async function main() {
     return;
   }
 
+  // 会话检索：mingdao sessions search <关键词>
+  if (opts.prompt[0] === 'sessions' && opts.prompt[1] === 'search') {
+    const kw = opts.prompt.slice(2).join(' ').trim();
+    if (!kw) {
+      console.log('用法：mingdao sessions search <关键词>');
+      process.exitCode = 1;
+      return;
+    }
+    const home0 = ensureHome();
+    const hits = searchSessions(home0, kw);
+    if (!hits.length) console.log(`未找到包含「${kw}」的会话。`);
+    else {
+      console.log(`找到 ${hits.length} 个会话：`);
+      for (const h of hits) {
+        console.log(`  ${h.name}（${relativeTime(h.mtime)}）\n    ${h.snippet}`);
+      }
+      console.log(`\n恢复：mingdao --resume（选择器中可见全部会话）`);
+    }
+    return;
+  }
+
   const home = ensureHome();
   let cfg = loadConfig();
   if (!cfg || opts.init) {
@@ -291,15 +317,20 @@ async function main() {
   // —— 单次提问模式 ——
   if (opts.prompt.length > 0) {
     const jsonMode = opts.format === 'json';
+    const question = opts.prompt.join(' ');
+    // 自动路由：规划类任务切 planner，执行类走 executor（JSON 模式静默）
+    const route = await routeTask({ cfg, provider, currentModel: modelName, text: question });
+    if (route.model !== modelName) {
+      if (!jsonMode) io.print(style(`⤷ 自动路由 → ${route.model}（${route.reason}）`, C.dim));
+      modelName = route.model;
+    }
     // JSON 模式：关闭流式输出，结果以单行 JSON 输出（脚本/管道友好）
     const turnIo = jsonMode ? createIO({ quiet: true }) : io;
-    const turnAgent = jsonMode
-      ? createAgent({ provider, permission, io: turnIo, modelName, workingDir, cfg, undoStore: sessionUndoStore, mcp: mcpFacade })
-      : agent;
+    const turnAgent = createAgent({ provider, permission, io: turnIo, modelName, workingDir, cfg, undoStore: sessionUndoStore, mcp: mcpFacade });
     const session = createSession(home);
     const messages = [
       { role: 'system', content: buildSystemPrompt({ modelName, workingDir }) },
-      { role: 'user', content: opts.prompt.join(' ') },
+      { role: 'user', content: question },
     ];
     appendMessages(session.file, messages);
     try {
@@ -343,10 +374,15 @@ async function main() {
   const storedKey = getStoredKey(pc0.name);
   const envKeyDetected = (pc0.envHint && process.env[pc0.envHint]) || process.env.MINGDAO_API_KEY;
   const keySource = envKeyDetected ? '环境变量' : storedKey ? `凭证库 ${maskKey(storedKey)}` : 'config 字段';
+  const sandboxMode = cfg.sandbox || 'off';
+  const sandboxLabel =
+    sandboxMode === 'off' ? 'off' : detectSandbox() === 'bwrap' ? sandboxMode : `${sandboxMode}（bwrap 缺失，已降级）`;
+  const routing = routingConfig(cfg);
   io.print('');
   io.box(`MingDao 明道 v${pkg.version}`, [
     `模型  ${modelName}${preset?.label ? '（' + preset.label + '）' : ''}`,
     `权限  ${permission.mode} · 密钥  ${keySource}`,
+    `沙箱  ${sandboxLabel}${routing ? ` · 路由  ${routing.planner}⇄${routing.executor}` : ''}`,
   ]);
   io.print(style('输入问题开始对话 · /help 查看命令 · Tab 补全 · Ctrl+C 中断生成\n', C.dim));
 
@@ -392,15 +428,16 @@ async function main() {
   let persisted = messages.length;
   let lastUsage = null;
   let planMode = false;
+  let routingEnabled = Boolean(routing);
   const stats = { turns: 0, promptTokens: 0, completionTokens: 0 };
   io.setHistory(messages.filter((m) => m.role === 'user').map((m) => m.content));
 
-  async function switchToModel(target) {
+  async function switchToModel(target, { silent = false } = {}) {
     try {
       const npc = resolveProviderConfig(cfg, target);
       if (!npc.apiKey) {
         io.print(style('该模型没有可用的 API Key，请先运行 mingdao init 配置。', C.red));
-        return;
+        return false;
       }
       const newProvider = await createProvider(cfg, target);
       provider = newProvider;
@@ -409,10 +446,14 @@ async function main() {
       saveConfig(cfg);
       agent = createAgent({ provider, permission, io, modelName, workingDir, cfg, undoStore: sessionUndoStore, mcp: mcpFacade });
       messages[0] = { role: 'system', content: buildSystemPrompt({ modelName, workingDir }) };
-      const p2 = modelPreset(modelName);
-      io.print(style(`✓ 已切换到 ${C.bold}${modelName}${C.reset}${p2 ? `（${p2.label}）` : ''}`, C.green));
+      if (!silent) {
+        const p2 = modelPreset(modelName);
+        io.print(style(`✓ 已切换到 ${C.bold}${modelName}${C.reset}${p2 ? `（${p2.label}）` : ''}`, C.green));
+      }
+      return true;
     } catch (err) {
       io.print(style('[错误] ' + (err?.message || err), C.red));
+      return false;
     }
   }
 
@@ -451,6 +492,14 @@ async function main() {
       } else if (cmd === '/plan') {
         planMode = !planMode;
         io.print(style(`✓ 计划模式：${planMode ? '开' : '关'}${planMode ? '（先出计划，确认后执行）' : ''}`, C.green));
+      } else if (cmd === '/route') {
+        if (!routing) {
+          io.print(style('未配置自动路由（config.json 的 routing 字段，如 {"enabled":true,"planner":"deepseek-v4-pro","executor":"deepseek-v4-flash"}）', C.dim));
+          continue;
+        }
+        if (arg === 'on' || arg === 'off') routingEnabled = arg === 'on';
+        else routingEnabled = !routingEnabled;
+        io.print(style(`✓ 自动路由：${routingEnabled ? '开' : '关'}（规划类→${routing.planner}，执行类→${routing.executor}）`, C.green));
       } else if (cmd === '/verbose') {
         io.setShowReasoning(!io.showReasoning);
         io.print(style(`✓ 思考过程显示：${io.showReasoning ? '开' : '关'}`, C.green));
@@ -551,11 +600,23 @@ async function main() {
           status.map((s) => `${s.ok ? '✓' : '✖'} ${s.name}${s.ok ? ` · ${s.tools} 个工具` : `：${s.error}`}`)
         );
       } else if (cmd === '/sessions') {
-        const list = listSessions(home).slice(0, 10);
-        if (!list.length) io.print('暂无历史会话。');
-        else {
-          io.box('历史会话（最近 10 个）', list.map((s) => `${relativeTime(s.mtime)} · ${sessionPreview(s.file)}`));
-          io.print(style(`恢复会话：退出后运行 mingdao --resume（文件：${path.join(home, 'sessions')}）`, C.dim));
+        if (arg) {
+          // 关键词全文检索历史会话
+          const hits = searchSessions(home, arg);
+          if (!hits.length) {
+            io.print(style(`未找到包含「${arg}」的会话。`, C.dim));
+          } else {
+            io.box(`会话检索：${arg}（${hits.length} 个命中）`, hits.map((h) => `${h.name}（${relativeTime(h.mtime)}）`));
+            for (const h of hits.slice(0, 5)) io.print(style(`  ${h.snippet}`, C.dim));
+            io.print(style('恢复：mingdao --resume（或 mingdao sessions search 命令）', C.dim));
+          }
+        } else {
+          const list = listSessions(home).slice(0, 10);
+          if (!list.length) io.print('暂无历史会话。');
+          else {
+            io.box('历史会话（最近 10 个）', list.map((s) => `${relativeTime(s.mtime)} · ${sessionPreview(s.file)}`));
+            io.print(style('检索：/sessions <关键词> · 恢复：mingdao --resume（文件：' + path.join(home, 'sessions') + '）', C.dim));
+          }
         }
       } else if (cmd === '/save') {
         io.print(`当前会话自动保存于：${session.file}`);
@@ -571,6 +632,7 @@ async function main() {
       } else if (cmd === '/status') {
         io.box('会话状态', [
           `模型  ${modelName} · 权限 ${permission.mode}`,
+          `沙箱  ${cfg.sandbox || 'off'}${routing ? ` · 自动路由  ${routingEnabled ? '开' : '关'}（${routing.planner}⇄${routing.executor}）` : ''}`,
           `会话  ${path.basename(session.file)}`,
           `轮次  ${stats.turns} · 消息 ${messages.length} 条`,
           `Tokens  ↑${stats.promptTokens} ↓${stats.completionTokens}`,
@@ -588,6 +650,15 @@ async function main() {
         io.print(style('未知命令，输入 /help 查看可用命令。', C.yellow));
       }
       continue;
+    }
+
+    // 自动路由：规划类任务切 planner，执行类走 executor
+    if (routingEnabled) {
+      const route = await routeTask({ cfg, provider, currentModel: modelName, text: input });
+      if (route.model !== modelName) {
+        const okSwitch = await switchToModel(route.model, { silent: true });
+        if (okSwitch) io.print(style(`⤷ 自动路由 → ${route.model}（${route.reason}）`, C.dim));
+      }
     }
 
     // 计划模式：先出计划，确认后执行
