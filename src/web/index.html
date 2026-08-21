@@ -883,6 +883,7 @@ async function applyConfig(payload, revertTarget){
     else if(payload.permission!==undefined) m.textContent='✓ 权限 '+j.permission;
     else m.textContent='✓ 设置已保存';
     m.style.color='var(--accent)';
+    reloadModels(); // 路由/沙箱等状态徽章实时刷新
   }else{
     m.textContent='✖ '+j.error; m.style.color='var(--err)';
     if(revertTarget){
