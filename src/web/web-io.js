@@ -8,6 +8,12 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
     isTTY: false,
     showReasoning: true,
     _pending: null,
+    _toolCount: 0,
+    _deliverables: [],
+    // 交付物与步数统计：写/编辑成功的文件路径（去重）
+    stats() {
+      return { toolCount: io._toolCount, deliverables: [...new Set(io._deliverables)] };
+    },
     setShowReasoning(v) {
       io.showReasoning = !!v;
     },
@@ -44,6 +50,10 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
       send({ type: 'code', code, lang });
     },
     renderTool(name, args, result, durationMs) {
+      io._toolCount += 1;
+      if ((name === 'write' || name === 'edit') && args?.path && result && result.ok !== false) {
+        io._deliverables.push(String(args.path));
+      }
       send({ type: 'tool', name, args, result, durationMs, seq: io._toolSeq });
     },
     // 工具开始执行：前端先渲染带旋转状态的卡片，完成后原地更新（seq 配对）

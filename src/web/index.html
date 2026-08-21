@@ -75,6 +75,10 @@ main{flex:1;overflow-y:auto;padding:18px 0 12px;min-width:0}
 #composer{display:flex;gap:8px;align-items:flex-end}
 #attachBtn{padding:10px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;cursor:pointer;font-size:15px}
 #attachList{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+.deliver{border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;background:var(--bg2);padding:8px 12px;margin:4px 0;font-size:12.5px}
+.deliver .t{color:var(--accent2);font-weight:600;margin-bottom:2px}
+.deliver .i{color:var(--dim);padding:1px 0;font-family:ui-monospace,Consolas,monospace}
+#hint.working{color:var(--accent2);animation:blink 1.6s infinite}
 .atchip{background:var(--bg3);border:1px solid var(--border);border-radius:14px;padding:3px 10px;font-size:12px;cursor:pointer;color:var(--dim)}
 .reasoning .body{padding:8px 12px;color:var(--dim);font-size:13px;white-space:pre-wrap;max-height:260px;overflow-y:auto;border-top:1px solid var(--border)}
 .tool{border:1px solid var(--border);border-radius:10px;background:var(--bg2);overflow:hidden;margin:8px 0}
@@ -468,6 +472,11 @@ async function send(){
   // 等待输出时的可见状态：脉动「正在思考…」（每轮生成重新显示）
   const think=document.createElement('div'); think.className='think'; think.textContent='💭 正在思考…'; msg.appendChild(think);
   const showThink=()=>{ if(!think.parentNode) msg.appendChild(think); };
+  // 工作指示：提示栏实时显示已工作时长与执行步数，让用户时刻感受到智能体在干活
+  let stepsCount=0; const workT0=Date.now();
+  const hintEl=$('#hint'); const defaultHint=hintEl.textContent;
+  hintEl.classList.add('working');
+  const hintTimer=setInterval(()=>{ hintEl.textContent='⏳ 正在工作 '+Math.round((Date.now()-workT0)/1000)+'s · 已执行 '+stepsCount+' 步 — 可点「■ 停止」中断'; },1000);
   const nearBottom=()=> chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 90;
   const scroll=()=>{ if(nearBottom()) chatEl.scrollTop = chatEl.scrollHeight; };
   let pending=false;
@@ -481,8 +490,8 @@ async function send(){
       if(ev.taskId) taskId=ev.taskId;
       if(ev.type==='text'){ onActivity(); raw+=ev.delta; update(); }
       else if(ev.type==='reasoning'){ if(!reason){ reason=addReasoning(msg); } if(!reason.parentElement.open) reason.parentElement.open=true; reason.parentElement.querySelector('summary').classList.add('live'); reason.textContent+=ev.delta; reason.scrollTop=reason.scrollHeight; scroll(); }
-      else if(ev.type==='turnStart'){ showThink(); scroll(); }
-      else if(ev.type==='toolStart'){ onActivity(); update(); renderToolStartEvent(ev); }
+      else if(ev.type==='turnStart'){ stepsCount+=1; showThink(); scroll(); }
+      else if(ev.type==='toolStart'){ stepsCount+=1; onActivity(); update(); renderToolStartEvent(ev); }
       else if(ev.type==='code'){ onActivity(); const pre=document.createElement('pre'); pre.innerHTML='<code>'+highlight(ev.code,ev.lang)+'</code>'; content.appendChild(pre); scroll(); }
       else if(ev.type==='tool'){ onActivity(); update(); const pending=runningTools.get(ev.seq); if(pending){ pending.remove(); runningTools.delete(ev.seq); } renderToolEvent(ev); }
       else if(ev.type==='toolDenied'){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent='✖ '+(ev.reason==='未授权'||!ev.reason?'未授权':ev.reason)+'：'+ev.name; msg.appendChild(d); scroll(); }
@@ -490,10 +499,10 @@ async function send(){
       else if(ev.type==='ask'){ update(); askModal(ev).then(a=>fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:ev.id,answer:a,taskId})}).catch(()=>{})); }
       else if(ev.type==='usage'){ onActivity(); const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; msg.appendChild(u); scroll(); }
       else if(ev.type==='error'){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); scroll(); }
-      else if(ev.type==='done'){ onActivity(); if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); } currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
+      else if(ev.type==='done'){ onActivity(); if(ev.stats&&ev.stats.deliverables&&ev.stats.deliverables.length){ const card=document.createElement('div'); card.className='deliver'; card.innerHTML='<div class="t">📦 交付物（'+ev.stats.deliverables.length+' 个文件）</div>'+ev.stats.deliverables.map(f=>'<div class="i">'+esc(f)+(f.toLowerCase().endsWith('.html')?' <span style="color:var(--accent2)">— 浏览器打开即可运行</span>':'')+'</div>').join(''); msg.appendChild(card); } if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); } currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
     });
   }catch(e){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=e.message||'网络错误'; msg.appendChild(d); scroll(); }
-  finally{ pending=false; content.innerHTML=renderMarkdown(raw); scroll(); updateTasksPanel(); }
+  finally{ clearInterval(hintTimer); hintEl.classList.remove('working'); hintEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); scroll(); updateTasksPanel(); }
 }
 
 function abort(){ fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(()=>updateTasksPanel()).catch(()=>{}); }
