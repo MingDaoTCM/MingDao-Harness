@@ -156,7 +156,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             args = JSON.parse(tc.function?.arguments || '{}');
           } catch {
             // 参数 JSON 解析失败：回填错误给模型，不拿空参数去执行工具
-            io.renderToolDenied(name, {});
+            io.renderToolDenied(name, {}, '参数解析失败（输出超限被截断？建议分块）');
             messages.push({ role: 'tool', tool_call_id: tc.id, content: '工具参数 JSON 解析失败，请重新输出合法参数。' });
             continue;
           }
@@ -165,7 +165,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           // PreToolUse 钩子
           const hook = await hooks.pre(name, args);
           if (hook.decision === 'block') {
-            io.renderToolDenied(name, args);
+            io.renderToolDenied(name, args, '被钩子阻止');
             messages.push({ role: 'tool', tool_call_id: tc.id, content: `工具被 PreToolUse 钩子阻止：${hook.reason}` });
             continue;
           }
@@ -182,7 +182,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             }
           }
           if (!allowed) {
-            io.renderToolDenied(name, args);
+            io.renderToolDenied(name, args, '未授权');
             messages.push({ role: 'tool', tool_call_id: tc.id, content: '用户拒绝了该工具的执行权限。' });
             continue;
           }

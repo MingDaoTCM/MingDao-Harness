@@ -51,8 +51,8 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
       io._toolSeq = (io._toolSeq || 0) + 1;
       send({ type: 'toolStart', name, args, seq: io._toolSeq });
     },
-    renderToolDenied(name, args) {
-      send({ type: 'toolDenied', name, args });
+    renderToolDenied(name, args, reason) {
+      send({ type: 'toolDenied', name, args, reason: reason || '未授权' });
     },
     renderTodo(todos) {
       send({ type: 'todo', todos });

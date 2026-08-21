@@ -525,9 +525,10 @@ export function createIO({ quiet = false } = {}) {
       io.print(style(`  ✓ 输出 ${out.length} 字符${ms}`, C.green));
     },
 
-    renderToolDenied(name, args) {
+    renderToolDenied(name, args, reason) {
       if (quiet) return;
-      io.print(style(`  ✖ 未授权，已跳过：${name}${summarizeArgs(name, args)}`, C.yellow));
+      const label = reason === '未授权' || !reason ? '未授权，已跳过' : reason;
+      io.print(style(`  ✖ ${label}：${name}${summarizeArgs(name, args)}`, C.yellow));
     },
 
     // —— 用量与费用状态行 ——
