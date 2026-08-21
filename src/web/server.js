@@ -51,7 +51,7 @@ import { currentWorkspace, listWorkspaces, addWorkspace, removeWorkspace, rename
 import { loadMemory, writeMemory, dedupeMemory } from '../memory.js';
 import { recordUsage, listCacheStats, summarizeCacheStats } from '../cachestats.js';
 import { presetList, buildPreset } from '../mcp-presets.js';
-import { syncStatus, syncLogin, syncLogout, syncPush, syncPull, syncRemoteList, maybeAutoSync } from '../sync.js';
+import { syncStatus, syncLogin, syncLogout, syncPush, syncPull, syncRemoteList, maybeAutoSync, syncChangePassword, syncShareCreate, syncShareList, syncShareAccept, syncShareRevoke, listSyncConflicts, resolveSyncConflict } from '../sync.js';
 
 const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html');
 
@@ -324,6 +324,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     }
     if (req.method === 'POST' && p === '/api/config') {
       const body = await readBody(req);
+      // 内存 cfg 可能比磁盘旧（如 CLI 改过同步地址）：先从磁盘刷新 sync，避免保存时回滚
+      cfg.sync = loadConfig()?.sync || cfg.sync;
       const next = { model: modelName, permission: cfg.permission ?? 'ask' };
       if (body.model !== undefined) {
         const target = String(body.model).trim();
@@ -820,7 +822,41 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         if (r.error) return json(res, 400, { error: r.error });
         return json(res, 200, { ok: true, pulled: r.pulled.length, conflicts: r.conflicts });
       }
-      return json(res, 400, { error: '未知操作：login|logout|push|pull' });
+      if (body.action === 'passwd') {
+        const r = await syncChangePassword({ oldPassword: body.oldPassword, newPassword: body.newPassword });
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true });
+      }
+      if (body.action === 'share') {
+        const r = await syncShareCreate(body.name);
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true, shareId: r.shareId, name: r.name });
+      }
+      if (body.action === 'shares') {
+        const r = await syncShareList();
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true, mine: r.mine, accepted: r.accepted });
+      }
+      if (body.action === 'accept') {
+        const r = await syncShareAccept(body.shareId);
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true, ...r });
+      }
+      if (body.action === 'unshare') {
+        const r = await syncShareRevoke(body.shareId);
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true });
+      }
+      if (body.action === 'resolveConflict') {
+        const r = resolveSyncConflict(body.base, body.choice);
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true, ...r });
+      }
+      return json(res, 400, { error: '未知操作：login|logout|push|pull|passwd|share|shares|accept|unshare|resolveConflict' });
+    }
+    if (req.method === 'GET' && p === '/api/sync-conflicts') {
+      json(res, 200, { ok: true, conflicts: listSyncConflicts() });
+      return;
     }
     // PWA 资源
     if (req.method === 'GET' && p === '/manifest.webmanifest') {
@@ -848,7 +884,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     }
     if (req.method === 'GET' && p === '/sw.js') {
       res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
-      res.end(`self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(clients.claim()));self.addEventListener('fetch',e=>{if(e.request.method==='GET'&&new URL(e.request.url).origin===location.origin&&!e.request.url.includes('/api/')){e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open('mingdao-v1').then(cache=>cache.put(e.request,c));return r;}).catch(()=>caches.match(e.request).then(m=>m||caches.match('/'))));}});`);
+      res.end(`self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(clients.claim()));self.addEventListener('fetch',e=>{if(e.request.method==='GET'&&new URL(e.request.url).origin===location.origin&&!e.request.url.includes('/api/')){e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open('mingdao-v2').then(cache=>cache.put(e.request,c));return r;}).catch(()=>caches.match(e.request).then(m=>m||caches.match('/'))));}});`);
       return;
     }
     json(res, 404, { error: 'Not found' });

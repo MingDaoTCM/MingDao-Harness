@@ -337,9 +337,11 @@ function ok(name) {
   assert.ok(s3.out.includes('email'), '列表应包含已安装技能');
   assert.ok(s3.out.includes('（用户级）'), '应标注用户级来源');
   assert.ok(s3.out.includes('技能库共'), '应提示技能库数量');
-  const s4 = await runCli(['skill', 'install', 'no-such-skill'], { env: { MINGDAO_REGISTRY_URL: 'http://127.0.0.1:1' } });
+  const offlineHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-offline-'));
+  const s4 = await runCli(['skill', 'install', 'no-such-skill'], { env: { MINGDAO_REGISTRY_URL: 'http://127.0.0.1:1', MINGDAO_HOME: offlineHome } });
   assert.equal(s4.code, 1);
   assert.ok(s4.out.includes('无法获取线上技能库'), '未知技能应回退线上 registry 并报告不可达');
+  fs.rmSync(offlineHome, { recursive: true, force: true });
   const badDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-badskill-'));
   fs.writeFileSync(path.join(badDir, 'SKILL.md'), '# 缺 frontmatter');
   const s7 = await runCli(['skill', 'install', badDir], { env: { MINGDAO_REGISTRY_URL: 'http://127.0.0.1:1' } });
@@ -374,14 +376,40 @@ function ok(name) {
   const p2 = await runCli(['sync', 'pull']);
   assert.equal(p2.code, 0, p2.err + p2.out);
   assert.ok(p2.out.includes('已拉取'), '拉取应成功');
+  // 改密码（stdin 输旧密码）
+  const pw = await runCli(['sync', 'passwd', 'newpassword456'], { stdin: 'password123\n' });
+  assert.equal(pw.code, 0, pw.err + pw.out);
+  assert.ok(pw.out.includes('已修改'), '密码修改应成功');
+  // 分享与撤销（用本地真实会话名）
+  const sessFiles = fs.readdirSync(path.join(home, 'sessions')).filter((f) => f.endsWith('.jsonl') && !f.includes('.server-') && !f.includes('.remote-'));
+  const sh = await runCli(['sync', 'share', sessFiles[0]]);
+  assert.equal(sh.code, 0, sh.err + sh.out);
+  const shareId = (sh.out.match(/分享码：(\S+)/) || [])[1];
+  assert.ok(shareId, '应输出分享码');
+  const un = await runCli(['sync', 'unshare', shareId]);
+  assert.equal(un.code, 0);
+  // 冲突三选一
+  fs.writeFileSync(path.join(home, 'sessions', 'cli-cf.server-123.jsonl'), '{"role":"user","content":"远端"}\n');
+  const cl = await runCli(['sync', 'conflicts']);
+  assert.ok(cl.out.includes('cli-cf.jsonl'), '冲突列表应显示');
+  const cr = await runCli(['sync', 'conflict-resolve', 'cli-cf.jsonl', 'both']);
+  assert.equal(cr.code, 0, cr.err + cr.out);
+  const cl2 = await runCli(['sync', 'conflicts']);
+  assert.ok(cl2.out.includes('暂无冲突'), '解决后应无冲突');
   const o1 = await runCli(['sync', 'logout']);
   assert.ok(o1.out.includes('已退出'), '退出应成功');
   const bad1 = await runCli(['sync', 'login', 'cli-user', 'wrongpass', syncUrl]);
   assert.equal(bad1.code, 1);
   assert.ok(bad1.out.includes('密码'), '错误密码应提示');
+  // 新密码在新设备登录
+  const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-newpw-'));
+  const ln = await runCli(['sync', 'login', 'cli-user', 'newpassword456', syncUrl], { env: { MINGDAO_HOME: tempHome } });
+  assert.equal(ln.code, 0, ln.err + ln.out);
+  assert.ok(ln.out.includes('已登录'), '新密码登录应成功');
+  fs.rmSync(tempHome, { recursive: true, force: true });
   srv.close();
   fs.rmSync(syncDir, { recursive: true, force: true });
-  ok('sync CLI：登录 / 推送 / 拉取 / 状态 / 退出');
+  ok('sync CLI：登录 / 推送 / 拉取 / 状态 / 退出 / 改密 / 分享 / 冲突');
 }
 
 server.close();

@@ -42,7 +42,7 @@ import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
 import { listSkills } from './skills.js';
 import { libraryList, searchLibrary, installSkill, uninstallSkill, reinstallSkill } from './skill-lib.js';
-import { syncLogin, syncLogout, syncPush, syncPull, syncStatus, syncRemoteList, maybeAutoSync } from './sync.js';
+import { syncLogin, syncLogout, syncPush, syncPull, syncStatus, syncRemoteList, maybeAutoSync, syncChangePassword, syncShareCreate, syncShareList, syncShareAccept, syncShareRevoke, listSyncConflicts, resolveSyncConflict } from './sync.js';
 import { runWebServer } from './web/server.js';
 import { routeTask, routingConfig } from './routing.js';
 import { detectSandbox } from './tools/bash.js';
@@ -712,6 +712,128 @@ async function main() {
     if (sub === 'logout') {
       syncLogout();
       console.log('✓ 已退出同步（配置保留，凭证已清除）');
+      return;
+    }
+    if (sub === 'passwd') {
+      const newPassword = opts.prompt[2];
+      if (!newPassword) {
+        console.log('用法：mingdao sync passwd <新密码>（将提示输入旧密码）');
+        process.exitCode = 1;
+        return;
+      }
+      const oldPassword = await new Promise((resolve) => {
+        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+        const orig = rl._writeToOutput;
+        rl._writeToOutput = () => {};
+        rl.question('旧密码：', (a) => {
+          if (typeof orig === 'function') rl._writeToOutput = orig;
+          rl.close();
+          resolve(a.trim());
+        });
+      });
+      const r = await syncChangePassword({ oldPassword, newPassword });
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log('✓ 密码已修改（其他设备下次登录用新密码）');
+      return;
+    }
+    if (sub === 'share') {
+      const name = opts.prompt[2];
+      if (!name) {
+        console.log('用法：mingdao sync share <会话文件名>（列出：mingdao sync shares）');
+        process.exitCode = 1;
+        return;
+      }
+      const r = await syncShareCreate(name);
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 已创建分享（会话 ${r.name}）`);
+      console.log(`  分享码：${r.shareId}`);
+      console.log(`  对方接受：mingdao sync accept ${r.shareId}`);
+      return;
+    }
+    if (sub === 'shares') {
+      const r = await syncShareList();
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`我分享的（${r.mine.length}）：`);
+      for (const s of r.mine) console.log(`  ${s.shareId.padEnd(12)} ${s.name} · 被接受 ${s.pulls} 次`);
+      console.log(`我接受的（${r.accepted.length}）：`);
+      for (const s of r.accepted) console.log(`  ${s.shareId.padEnd(12)} ${s.owner} 的 ${s.name} → 本地 ${s.savedAs}`);
+      if (!r.mine.length && !r.accepted.length) console.log('  暂无分享');
+      return;
+    }
+    if (sub === 'accept') {
+      const shareId = opts.prompt[2];
+      if (!shareId) {
+        console.log('用法：mingdao sync accept <分享码>');
+        process.exitCode = 1;
+        return;
+      }
+      const r = await syncShareAccept(shareId);
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 已接受分享 → 本地会话 ${r.savedAs}${r.conflict ? '（与你已有的同名会话不同，已另存副本）' : ''}`);
+      return;
+    }
+    if (sub === 'unshare') {
+      const shareId = opts.prompt[2];
+      if (!shareId) {
+        console.log('用法：mingdao sync unshare <分享码>');
+        process.exitCode = 1;
+        return;
+      }
+      const r = await syncShareRevoke(shareId);
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 已撤销分享 ${shareId}（已接受者保留副本）`);
+      return;
+    }
+    if (sub === 'conflicts') {
+      const list = listSyncConflicts();
+      if (!list.length) {
+        console.log('暂无冲突备份');
+        return;
+      }
+      console.log(`冲突备份（${list.length} 个会话）· 解决：mingdao sync conflict-resolve <会话名> local|remote|both`);
+      for (const c of list) {
+        const localLabel = c.localExists ? '本地有' : '本地无';
+        const newest = c.entries[0];
+        console.log(`  ${c.base.padEnd(44)} ${localLabel} · 备份 ${c.entries.length} 个（最新 ${newest.side}-${newest.ts}）`);
+      }
+      return;
+    }
+    if (sub === 'conflict-resolve') {
+      const base = opts.prompt[2];
+      const choice = opts.prompt[3];
+      if (!base || !['local', 'remote', 'both'].includes(choice)) {
+        console.log('用法：mingdao sync conflict-resolve <会话文件名> local|remote|both');
+        console.log('  local  保留本地，删除备份 · remote  采用远端版本覆盖本地 · both  两者都保留（备份转正）');
+        process.exitCode = 1;
+        return;
+      }
+      const r = resolveSyncConflict(base, choice);
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 已解决：${r.base} → ${choice === 'local' ? '保留本地' : choice === 'remote' ? '采用 ' + r.applied : '保留两者（' + r.kept + '）'}`);
       return;
     }
     if (sub === 'push') {

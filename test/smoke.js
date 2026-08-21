@@ -847,5 +847,91 @@ const ctx = { cwd: tmp };
   ok('sync：注册登录 / 推送拉取 / 双端冲突备份 / 退出 / 错误路径');
 }
 
+// ---------- 27. 云协作 M2：密码修改 / 会话分享 / 冲突解决 ----------
+{
+  const homeA = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-col-a-'));
+  const homeB = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-col-b-'));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-col-data-'));
+  const { runSyncServer } = await import(path.join(srcDir, 'sync-server.js'));
+  const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir });
+  await new Promise((r) => srv.once('listening', r));
+  const url = `http://127.0.0.1:${srv.address().port}`;
+  const { syncLogin, syncPush, syncPull, syncChangePassword, syncShareCreate, syncShareList, syncShareAccept, syncShareRevoke, listSyncConflicts, resolveSyncConflict } =
+    await import(path.join(srcDir, 'sync.js'));
+
+  // —— 密码修改 ——
+  process.env.MINGDAO_HOME = homeA;
+  await syncLogin({ url, username: 'alice', password: 'password123', deviceName: 'A' });
+  const wrongOld = await syncChangePassword({ oldPassword: 'wrong-old', newPassword: 'newpassword123' });
+  assert.ok(wrongOld.error && wrongOld.error.includes('旧密码'), '旧密码错误应拒绝');
+  const okPw = await syncChangePassword({ oldPassword: 'password123', newPassword: 'newpassword123' });
+  assert.equal(okPw.ok, true, okPw.error);
+  const loginOld = await syncLogin({ url, username: 'alice', password: 'password123', deviceName: 'A2' });
+  assert.ok(loginOld.error && loginOld.error.includes('密码'), '旧密码登录应失败');
+  const loginNew = await syncLogin({ url, username: 'alice', password: 'newpassword123', deviceName: 'A2' });
+  assert.equal(loginNew.ok, true, '新密码登录应成功');
+
+  // —— 会话分享与协作 ——
+  fs.mkdirSync(path.join(homeA, 'sessions'), { recursive: true });
+  fs.writeFileSync(path.join(homeA, 'sessions', 'alice-notes.jsonl'), '{"role":"user","content":"A的笔记"}\n');
+  await syncPush();
+  const sh = await syncShareCreate('alice-notes.jsonl');
+  assert.equal(sh.ok, true, sh.error);
+  assert.ok(/^[0-9a-f]{10}$/.test(sh.shareId), '分享码应为 10 位十六进制');
+  process.env.MINGDAO_HOME = homeB;
+  await syncLogin({ url, username: 'bob', password: 'password123', deviceName: 'B' });
+  const acc = await syncShareAccept(sh.shareId);
+  assert.equal(acc.ok, true, acc.error);
+  assert.ok(fs.existsSync(path.join(homeB, 'sessions', acc.savedAs)), '接受后本地应有副本');
+  const bl = await syncShareList();
+  assert.ok(bl.accepted.some((s) => s.shareId === sh.shareId), '接受列表应包含分享');
+  // A 更新后再接受 = 刷新
+  process.env.MINGDAO_HOME = homeA;
+  fs.appendFileSync(path.join(homeA, 'sessions', 'alice-notes.jsonl'), '{"role":"assistant","content":"A补充"}\n');
+  await syncPush();
+  process.env.MINGDAO_HOME = homeB;
+  const acc2 = await syncShareAccept(sh.shareId);
+  assert.equal(acc2.ok, true);
+  assert.ok(fs.readFileSync(path.join(homeB, 'sessions', acc.savedAs), 'utf8').includes('A补充'), '再次接受应刷新内容');
+  // 权限与撤销
+  const forbidden = await syncShareRevoke(sh.shareId);
+  assert.ok(forbidden.error && forbidden.error.includes('只能撤销'), '非拥有者撤销应 403');
+  process.env.MINGDAO_HOME = homeA;
+  const revoke = await syncShareRevoke(sh.shareId);
+  assert.equal(revoke.ok, true);
+  process.env.MINGDAO_HOME = homeB;
+  const accGone = await syncShareAccept(sh.shareId);
+  assert.ok(accGone.error && accGone.error.includes('不存在'), '撤销后接受应 404');
+
+  // —— 冲突图形化解决 ——
+  const base = 'conflict-demo.jsonl';
+  fs.mkdirSync(path.join(homeB, 'sessions'), { recursive: true });
+  fs.writeFileSync(path.join(homeB, 'sessions', base), '{"role":"user","content":"本地版"}\n');
+  fs.writeFileSync(path.join(homeB, 'sessions', 'conflict-demo.server-1000.jsonl'), '{"role":"user","content":"远端版"}\n');
+  fs.writeFileSync(path.join(homeB, 'sessions', 'conflict-demo.remote-2000.jsonl'), '{"role":"user","content":"拉取版"}\n');
+  let cl = listSyncConflicts();
+  assert.ok(cl.length === 1 && cl[0].base === base && cl[0].entries.length === 2, '应扫描出 2 个冲突备份');
+  const rl = resolveSyncConflict(base, 'local');
+  assert.equal(rl.ok, true);
+  assert.ok(!fs.existsSync(path.join(homeB, 'sessions', 'conflict-demo.server-1000.jsonl')), 'local 应删除备份');
+  fs.writeFileSync(path.join(homeB, 'sessions', 'conflict-demo.server-1000.jsonl'), '{"role":"user","content":"远端版"}\n');
+  const rr = resolveSyncConflict(base, 'remote');
+  assert.equal(rr.ok, true);
+  assert.ok(fs.readFileSync(path.join(homeB, 'sessions', base), 'utf8').includes('远端版'), 'remote 应采用最新远端备份覆盖');
+  fs.writeFileSync(path.join(homeB, 'sessions', 'conflict-demo.server-1000.jsonl'), '{"role":"user","content":"远端版2"}\n');
+  const rb = resolveSyncConflict(base, 'both');
+  assert.equal(rb.ok, true);
+  assert.ok(fs.existsSync(path.join(homeB, 'sessions', rb.kept)), 'both 应把备份转正为可见会话');
+  assert.ok(fs.readFileSync(path.join(homeB, 'sessions', base), 'utf8').includes('远端版'), 'both 应保留本地文件');
+  assert.ok(listSyncConflicts().length === 0, '解决后应无冲突');
+
+  srv.close();
+  delete process.env.MINGDAO_HOME;
+  fs.rmSync(homeA, { recursive: true, force: true });
+  fs.rmSync(homeB, { recursive: true, force: true });
+  fs.rmSync(dataDir, { recursive: true, force: true });
+  ok('sync-collab：密码修改 / 分享创建·接受·刷新·撤销 / 冲突三选一解决');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);

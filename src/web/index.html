@@ -177,6 +177,14 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
       <button id="syncLogin">登录/注册</button><button id="syncPush">立即同步</button><button id="syncLogout" class="danger">退出</button>
       <label style="font-size:12px"><input type="checkbox" id="syncAutoChk"> 会话结束自动同步</label>
     </div>
+    <div class="cfg-row" style="display:flex;gap:6px"><input id="oldPass" type="password" placeholder="旧密码" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"><input id="newPass" type="password" placeholder="新密码（≥8 位）" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"><button id="passwdBtn">改密码</button></div>
+    <div class="cfg-hint">分享与协作（分享码给对方，对方接受后进入自己的会话列表）：</div>
+    <div class="cfg-row" style="display:flex;gap:6px"><input id="shareName" placeholder="要分享的会话文件名（如 2026-08-21T10-00-00-aaaa.jsonl）" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"><button id="shareCreate">创建分享</button></div>
+    <div id="shareList" style="max-height:110px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div class="cfg-row" style="display:flex;gap:6px"><input id="acceptCode" placeholder="输入分享码，接受对方会话…" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"><button id="shareAccept">接受</button></div>
+    <div id="shareAccepted" style="max-height:90px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div class="cfg-hint">会话冲突（多设备同时修改同一会话时出现）：</div>
+    <div id="conflictList" style="max-height:120px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
     <div class="cfg-row"><label>沙箱模式（bash 执行隔离）</label>
       <select id="sbxSel">
         <option value="off">off — 直接执行</option>
@@ -428,7 +436,7 @@ async function init(){
 }
 $('#cfgBtn').onclick=()=>{ $('#cfgModal').style.display='flex'; };
 $('#cfgCancel').onclick=()=>{ $('#cfgModal').style.display='none'; };
-$('#cfgBtn').addEventListener('click', ()=>{ refreshModelsCfg(); refreshSyncUI(); refreshSchList(); refreshWorkspaces(); loadMemoryUI(); refreshCache(); refreshMcpPresets(); refreshSkillLib(''); });
+$('#cfgBtn').addEventListener('click', ()=>{ refreshModelsCfg(); refreshSyncUI(); refreshSyncShares(); refreshSyncConflicts(); refreshSchList(); refreshWorkspaces(); loadMemoryUI(); refreshCache(); refreshMcpPresets(); refreshSkillLib(''); });
 $('#schWhen').onchange=e=>{ const v=e.target.value; $('#schAtRow').style.display=v==='at'?'':'none'; $('#schEveryRow').style.display=v==='every'?'':'none'; $('#schAfterRow').style.display=v==='after'?'':'none'; $('#schChainRow').style.display=v==='chain'?'':'none'; };
 async function refreshSchList(){
   const r=await fetch('/api/schedule',{cache:'no-store'}).catch(()=>null); if(!r) return;
@@ -651,10 +659,64 @@ $('#syncPush').onclick=async ()=>{
   const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'push'})});
   const j=await r.json().catch(()=>({error:'请求失败'}));
   alert(j.ok?('✓ 已推送 '+j.pushed+' 个会话'+(j.conflicts?'，'+j.conflicts+' 个远端版本已备份 .server-*':'')):j.error);
-  refreshSyncUI();
+  refreshSyncUI(); refreshSyncConflicts();
 };
 $('#syncLogout').onclick=async ()=>{ await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'logout'})}); refreshSyncUI(); };
 $('#syncAutoChk').onchange=e=>{ applyConfig({syncAuto:e.target.checked}); };
+// —— 分享与协作 / 冲突 ——
+async function refreshSyncShares(){
+  const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'shares'})}).catch(()=>null); if(!r) return;
+  const j=await r.json();
+  const ml=$('#shareList'); ml.innerHTML='';
+  if(j.ok&&j.mine&&j.mine.length){
+    for(const s of j.mine){
+      const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border);font-size:12px';
+      div.innerHTML='<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><b>'+esc(s.shareId)+'</b> <span style="color:var(--faint)">'+esc(s.name)+' · 被接受 '+s.pulls+' 次</span></span>';
+      const b=document.createElement('button'); b.textContent='撤销'; b.className='danger'; b.style.cssText='padding:1px 8px;font-size:11px';
+      b.onclick=async()=>{ const rr=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'unshare',shareId:s.shareId})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok) refreshSyncShares(); else alert(jj.error||'撤销失败'); };
+      div.appendChild(b); ml.appendChild(div);
+    }
+  } else { ml.innerHTML='<div style="color:var(--faint);font-size:12px;padding:4px 2px">暂无分享（分享后此处显示分享码）</div>'; }
+  const al=$('#shareAccepted'); al.innerHTML='';
+  if(j.ok&&j.accepted&&j.accepted.length){
+    for(const s of j.accepted){
+      const div=document.createElement('div'); div.style.cssText='padding:4px 0;border-bottom:1px solid var(--border);font-size:12px;color:var(--dim)';
+      div.textContent='· '+s.owner+' 的 '+s.name+' → 本地 '+s.savedAs;
+      al.appendChild(div);
+    }
+  } else { al.innerHTML='<div style="color:var(--faint);font-size:12px;padding:4px 2px">未接受任何分享</div>'; }
+}
+$('#shareCreate').onclick=async ()=>{
+  const name=$('#shareName').value.trim(); if(!name){ alert('输入会话文件名'); return; }
+  const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'share',name})});
+  const j=await r.json().catch(()=>({error:'请求失败'}));
+  if(j.ok){ $('#shareName').value=''; refreshSyncShares(); } else alert(j.error||'创建失败');
+};
+$('#shareAccept').onclick=async ()=>{
+  const code=$('#acceptCode').value.trim(); if(!code){ alert('输入分享码'); return; }
+  const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'accept',shareId:code})});
+  const j=await r.json().catch(()=>({error:'请求失败'}));
+  if(j.ok){ $('#acceptCode').value=''; refreshSyncShares(); refreshSessions(); } else alert(j.error||'接受失败');
+};
+$('#passwdBtn').onclick=async ()=>{
+  const oldPass=$('#oldPass').value, newPass=$('#newPass').value;
+  if(!oldPass||!newPass){ alert('旧密码与新密码均必填'); return; }
+  const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'passwd',oldPassword:oldPass,newPassword:newPass})});
+  const j=await r.json().catch(()=>({error:'请求失败'}));
+  if(j.ok){ $('#oldPass').value=''; $('#newPass').value=''; alert('✓ 密码已修改'); } else alert(j.error||'修改失败');
+};
+async function refreshSyncConflicts(){
+  const r=await fetch('/api/sync-conflicts',{cache:'no-store'}).catch(()=>null); if(!r) return;
+  const j=await r.json(); const list=$('#conflictList'); list.innerHTML='';
+  if(!j.conflicts||!j.conflicts.length){ list.innerHTML='<div style="color:var(--faint);font-size:12px;padding:4px 2px">暂无冲突</div>'; return; }
+  for(const c of j.conflicts){
+    const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px';
+    div.innerHTML='<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(c.base)+' <span style="color:var(--faint)">'+(c.localExists?'本地有':'本地无')+' · 备份 '+c.entries.length+'</span></span>';
+    const mk=(label,choice,cls)=>{ const b=document.createElement('button'); b.textContent=label; if(cls) b.className=cls; b.style.cssText='padding:1px 8px;font-size:11px'; b.onclick=async()=>{ const rr=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'resolveConflict',base:c.base,choice})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok) refreshSyncConflicts(); else alert(jj.error||'解决失败'); }; return b; };
+    div.appendChild(mk('保留本地','local')); div.appendChild(mk('采用远端','remote','danger')); div.appendChild(mk('都保留','both'));
+    list.appendChild(div);
+  }
+}
 $('#cfgSave').onclick=()=>{ applyConfig({sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}); $('#cfgModal').style.display='none'; };
 async function applyConfig(payload, revertTarget){
   const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});

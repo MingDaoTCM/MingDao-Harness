@@ -253,6 +253,140 @@ export async function syncPull(name) {
   return { ok: true, pulled, conflicts };
 }
 
+// ---------- 密码修改 ----------
+export async function syncChangePassword({ oldPassword, newPassword }) {
+  const g = tokenGuard();
+  if (g.error) return { error: g.error };
+  if (!newPassword || newPassword.length < 8) return { error: '新密码至少 8 位' };
+  try {
+    const r = await apiCall(g.url, '/api/password', { oldPassword: oldPassword || '', newPassword }, g.token);
+    return r.ok ? { ok: true } : { error: r.error || '修改失败' };
+  } catch (e) {
+    if (e.status === 401) return { error: '旧密码错误' };
+    return { error: `修改失败：${e.message}` };
+  }
+}
+
+// ---------- 会话分享与协作 ----------
+export async function syncShareCreate(name) {
+  const g = tokenGuard();
+  if (g.error) return { error: g.error };
+  try {
+    const r = await apiCall(g.url, '/api/share/create', { name }, g.token);
+    return r.ok ? { ok: true, shareId: r.shareId, name: r.name } : { error: r.error };
+  } catch (e) {
+    return { error: `分享失败：${e.status === 404 ? '你还没有这个会话' : e.message}` };
+  }
+}
+
+export async function syncShareList() {
+  const g = tokenGuard();
+  if (g.error) return { error: g.error };
+  try {
+    const r = await apiCall(g.url, '/api/share/list', {}, g.token);
+    return { ok: true, mine: r.mine || [], accepted: r.accepted || [] };
+  } catch (e) {
+    return { error: `获取分享列表失败：${e.message}` };
+  }
+}
+
+export async function syncShareAccept(shareId) {
+  const g = tokenGuard();
+  if (g.error) return { error: g.error };
+  try {
+    const r = await apiCall(g.url, '/api/share/accept', { shareId }, g.token);
+    if (!r.ok) return { error: r.error };
+    // 服务端已决定落盘位置与冲突语义：直接写入本地会话目录并记录远端 mtime
+    const home = mingdaoHome();
+    fs.mkdirSync(path.join(home, 'sessions'), { recursive: true });
+    fs.writeFileSync(path.join(home, 'sessions', r.savedAs), r.content, { mode: 0o600 });
+    const state = readState();
+    state[r.savedAs] = { remoteMtime: r.mtime };
+    writeState(state);
+    return { ok: true, shareId, savedAs: r.savedAs, conflict: r.conflict || false };
+  } catch (e) {
+    return { error: `接受分享失败：${e.status === 404 ? '分享不存在（可能已撤销）' : e.message}` };
+  }
+}
+
+export async function syncShareRevoke(shareId) {
+  const g = tokenGuard();
+  if (g.error) return { error: g.error };
+  try {
+    const r = await apiCall(g.url, '/api/share/revoke', { shareId }, g.token);
+    return r.ok ? { ok: true } : { error: r.error };
+  } catch (e) {
+    return { error: `撤销失败：${e.status === 404 ? '分享不存在' : e.status === 403 ? '只能撤销自己的分享' : e.message}` };
+  }
+}
+
+// ---------- 冲突图形化选择 ----------
+// 扫描本地的 .server-*（远端版本）与 .remote-*（远端拉取版本）备份，按会话基础名分组
+export function listSyncConflicts() {
+  const home = mingdaoHome();
+  let files = [];
+  try {
+    files = fs.readdirSync(path.join(home, 'sessions'));
+  } catch {
+    return [];
+  }
+  const groups = new Map();
+  const m = /^(.+)\.(server|remote)-(\d+)\.jsonl$/;
+  for (const f of files) {
+    const mm = f.match(m);
+    if (!mm) continue;
+    const base = `${mm[1]}.jsonl`;
+    const entry = { file: f, side: mm[2], ts: Number(mm[3]) };
+    if (!groups.has(base)) groups.set(base, []);
+    groups.get(base).push(entry);
+  }
+  return [...groups.entries()]
+    .map(([base, entries]) => ({
+      base,
+      localExists: fs.existsSync(path.join(home, 'sessions', base)),
+      entries: entries.sort((a, b) => b.ts - a.ts),
+    }))
+    .sort((a, b) => a.base.localeCompare(b.base));
+}
+
+// choice: local（保留本地，删除备份）| remote（采用远端备份替换本地）| both（把最新备份转正为可见会话）
+export function resolveSyncConflict(base, choice) {
+  const home = mingdaoHome();
+  if (!/^[\w\u4e00-\u9fa5.-]{1,140}\.jsonl$/.test(base)) return { error: '会话名非法' };
+  const sessions = path.join(home, 'sessions');
+  const m = /^(.+)\.(server|remote)-(\d+)\.jsonl$/;
+  let files = [];
+  try {
+    files = fs.readdirSync(sessions);
+  } catch {
+    return { error: '会话目录不存在' };
+  }
+  const backups = files
+    .filter((f) => {
+      const mm = f.match(m);
+      return mm && `${mm[1]}.jsonl` === base;
+    })
+    .sort((a, b) => Number(b.match(m)[3]) - Number(a.match(m)[3]));
+  if (!backups.length) return { error: `没有找到 ${base} 的冲突备份` };
+  const newest = backups[0];
+  if (choice === 'local') {
+    for (const f of backups) fs.unlinkSync(path.join(sessions, f));
+    return { ok: true, base, choice, removed: backups.length };
+  }
+  if (choice === 'remote') {
+    fs.copyFileSync(path.join(sessions, newest), path.join(sessions, base));
+    for (const f of backups) fs.unlinkSync(path.join(sessions, f));
+    return { ok: true, base, choice, applied: newest };
+  }
+  if (choice === 'both') {
+    const keep = base.replace(/\.jsonl$/, `.merged-${Date.now()}.jsonl`);
+    fs.renameSync(path.join(sessions, newest), path.join(sessions, keep));
+    for (const f of backups.filter((f) => f !== newest)) fs.unlinkSync(path.join(sessions, f));
+    return { ok: true, base, choice, kept: keep };
+  }
+  return { error: 'choice 必须是 local / remote / both' };
+}
+
 // 会话结束后的静默自动同步（失败不打扰）
 export async function maybeAutoSync() {
   const s = syncSettings();

@@ -59,6 +59,12 @@ function sessionsDir(username) {
 function metaFile(username) {
   return path.join(userDir(username), 'meta.json');
 }
+function sharesFile() {
+  return path.join(ACTIVE_DIR, 'shares.json');
+}
+function acceptedFile() {
+  return path.join(ACTIVE_DIR, 'accepted.json');
+}
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 function hashPassword(password, salt) {
@@ -215,6 +221,117 @@ function doDelete(username, name) {
   return { ok: true, name };
 }
 
+// ---------- 密码修改 ----------
+function doChangePassword(username, body) {
+  const oldPassword = String(body.oldPassword || '');
+  const newPassword = String(body.newPassword || '');
+  if (newPassword.length < 8) return { error: '新密码至少 8 位' };
+  const users = readJson(usersFile(), {});
+  const u = users[username];
+  if (!u) return { unauthorized: '用户不存在' };
+  if (hashPassword(oldPassword, u.salt) !== u.hash) return { unauthorized: '旧密码错误' };
+  const salt = crypto.randomBytes(12).toString('hex');
+  users[username] = { ...u, salt, hash: hashPassword(newPassword, salt), updatedAt: Date.now() };
+  writeJson(usersFile(), users);
+  log('password-changed', username);
+  return { ok: true };
+}
+
+// ---------- 会话分享 ----------
+function doShareCreate(username, name) {
+  if (!isValidSessionName(name)) return { error: `会话名非法：${name}` };
+  if (!fs.existsSync(path.join(sessionsDir(username), name))) return { notFound: '你还没有这个会话' };
+  const shares = readJson(sharesFile(), {});
+  const shareId = crypto.randomBytes(5).toString('hex'); // 10 位分享码
+  shares[shareId] = { owner: username, name, createdAt: Date.now(), pulls: 0 };
+  writeJson(sharesFile(), shares);
+  log('share-create', username, name, shareId);
+  return { ok: true, shareId, name };
+}
+
+function doShareList(username) {
+  const shares = readJson(sharesFile(), {});
+  const accepted = readJson(acceptedFile(), {})[username] || {};
+  const mine = Object.entries(shares)
+    .filter(([, s]) => s.owner === username)
+    .map(([shareId, s]) => ({ shareId, name: s.name, createdAt: s.createdAt, pulls: s.pulls || 0 }));
+  const mineAccepted = Object.entries(accepted).map(([shareId, a]) => ({
+    shareId,
+    owner: a.owner,
+    name: a.name,
+    savedAs: a.savedAs,
+    acceptedAt: a.acceptedAt,
+  }));
+  return { ok: true, mine, accepted: mineAccepted };
+}
+
+function doShareRevoke(username, shareId) {
+  const shares = readJson(sharesFile(), {});
+  const s = shares[shareId];
+  if (!s) return { notFound: '分享不存在' };
+  if (s.owner !== username) return { forbidden: '只能撤销自己的分享' };
+  delete shares[shareId];
+  writeJson(sharesFile(), shares);
+  return { ok: true, shareId };
+}
+
+// 接受/刷新分享：克隆（或更新）到接受者自己的会话列表。
+//  - 首次接受 → 写入同名文件（同名已有不同内容则另存 .shared- 副本，绝不覆盖）
+//  - 再次接受：接受者未修改过副本 → 就地刷新；已修改 → 另存新副本（冲突保留双方）
+function doShareAccept(username, shareId) {
+  const shares = readJson(sharesFile(), {});
+  const s = shares[shareId];
+  if (!s) return { notFound: '分享不存在（可能已撤销）' };
+  if (s.owner === username) return { error: '不能接受自己的分享' };
+  const srcFile = path.join(sessionsDir(s.owner), s.name);
+  let content;
+  try {
+    content = fs.readFileSync(srcFile, 'utf8');
+  } catch {
+    return { notFound: '分享的会话已被删除' };
+  }
+  const accepted = readJson(acceptedFile(), {});
+  const prev = (accepted[username] || {})[shareId];
+  const prevName = prev?.savedAs || s.name;
+  const target = path.join(sessionsDir(username), prevName);
+  let existing = null;
+  try {
+    existing = fs.readFileSync(target, 'utf8');
+  } catch {}
+  let savedAs = prevName;
+  let conflict = false;
+  if (prev && existing !== null && sha(existing) === prev.copyHash && existing !== content) {
+    // 接受者未修改副本：就地刷新到最新
+    fs.writeFileSync(target, content, { mode: 0o600 });
+  } else if (existing !== null && existing !== content) {
+    // 目标名已有不同内容：另存时间戳副本（绝不覆盖）
+    savedAs = prevName.replace(/\.jsonl$/, `.shared-${Date.now()}.jsonl`);
+    fs.mkdirSync(sessionsDir(username), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(sessionsDir(username), savedAs), content, { mode: 0o600 });
+    conflict = true;
+  } else {
+    fs.mkdirSync(sessionsDir(username), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(target, content, { mode: 0o600 });
+  }
+  const meta = readJson(metaFile(username), {});
+  meta[savedAs] = { mtime: Date.now(), size: Buffer.byteLength(content) };
+  writeJson(metaFile(username), meta);
+  accepted[username] = accepted[username] || {};
+  accepted[username][shareId] = { owner: s.owner, name: s.name, savedAs, acceptedAt: Date.now(), copyHash: sha(content) };
+  writeJson(acceptedFile(), accepted);
+  shares[shareId].pulls = (shares[shareId].pulls || 0) + 1;
+  writeJson(sharesFile(), shares);
+  log('share-accept', username, shareId, savedAs, conflict ? '(conflict-copy)' : '(refresh)');
+  return {
+    ok: true,
+    shareId,
+    savedAs,
+    conflict,
+    content,
+    mtime: meta[savedAs]?.mtime || Date.now(),
+  };
+}
+
 // ---------- 路由 ----------
 async function handle(req, res) {
   const u = new URL(req.url, 'http://x');
@@ -276,6 +393,37 @@ async function handle(req, res) {
     if (req.method === 'POST' && p === '/api/sessions/delete') {
       const body = await parseBody(req);
       const r = doDelete(dev.username, String(body.name || '').trim());
+      if (r.notFound) return json(res, 404, r);
+      return json(res, 200, r);
+    }
+    if (req.method === 'POST' && p === '/api/password') {
+      const body = await parseBody(req);
+      const r = doChangePassword(dev.username, body);
+      if (r.error) return json(res, 400, r);
+      if (r.unauthorized) return json(res, 401, r);
+      return json(res, 200, r);
+    }
+    if (req.method === 'POST' && p === '/api/share/create') {
+      const body = await parseBody(req);
+      const r = doShareCreate(dev.username, String(body.name || '').trim());
+      if (r.error) return json(res, 400, r);
+      if (r.notFound) return json(res, 404, r);
+      return json(res, 200, r);
+    }
+    if (req.method === 'POST' && p === '/api/share/list') {
+      return json(res, 200, doShareList(dev.username));
+    }
+    if (req.method === 'POST' && p === '/api/share/revoke') {
+      const body = await parseBody(req);
+      const r = doShareRevoke(dev.username, String(body.shareId || '').trim());
+      if (r.notFound) return json(res, 404, r);
+      if (r.forbidden) return json(res, 403, r);
+      return json(res, 200, r);
+    }
+    if (req.method === 'POST' && p === '/api/share/accept') {
+      const body = await parseBody(req);
+      const r = doShareAccept(dev.username, String(body.shareId || '').trim());
+      if (r.error) return json(res, 400, r);
       if (r.notFound) return json(res, 404, r);
       return json(res, 200, r);
     }

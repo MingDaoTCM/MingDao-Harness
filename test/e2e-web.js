@@ -380,6 +380,40 @@ let base = await startWeb(work1);
   assert.ok(typeof push.pushed === 'number', '应返回推送数量');
   const bad = await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'login', url: syncUrl, username: 'webuser', password: 'short' }) });
   assert.equal(bad.status, 400, '弱密码应 400');
+  // 分享：webuser 创建 → bob 接受（用本机真实存在的会话名）
+  const localSessions = fs.readdirSync(path.join(home, 'sessions')).filter((f) => f.endsWith('.jsonl') && !f.includes('.server-') && !f.includes('.remote-'));
+  assert.ok(localSessions.length > 0, '应有可分享的本地会话');
+  const shareName = localSessions[0];
+  const sh = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'share', name: shareName }) })).json();
+  assert.equal(sh.ok, true, sh.error);
+  assert.ok(/^[0-9a-f]{10}$/.test(sh.shareId), '分享码格式');
+  const shares = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'shares' }) })).json();
+  assert.ok(shares.mine.some((s) => s.shareId === sh.shareId), '我的分享列表');
+  // 改密码（旧密码错 → 400；正确 → ok）
+  const pwBad = await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'passwd', oldPassword: 'wrong', newPassword: 'newpassword456' }) });
+  assert.equal(pwBad.status, 400, '旧密码错误应 400');
+  const pwOk = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'passwd', oldPassword: 'password123', newPassword: 'newpassword456' }) })).json();
+  assert.equal(pwOk.ok, true, pwOk.error);
+  // bob 登录接受
+  await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'logout' }) });
+  const lb = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'login', url: syncUrl, username: 'bobuser', password: 'password123', deviceName: 'bob-pc' }) })).json();
+  assert.equal(lb.ok, true, lb.error);
+  const acc = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'accept', shareId: sh.shareId }) })).json();
+  assert.equal(acc.ok, true, acc.error);
+  assert.ok(fs.existsSync(path.join(home, 'sessions', acc.savedAs)), '接受后本地应有会话文件');
+  // 换回 webuser（新密码）
+  await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'logout' }) });
+  const lw = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'login', url: syncUrl, username: 'webuser', password: 'newpassword456', deviceName: 'e2e-web' }) })).json();
+  assert.equal(lw.ok, true, '新密码登录应成功');
+  // 冲突面板：构造备份 → 列表 → 三选一解决
+  fs.writeFileSync(path.join(home, 'sessions', 'cf-demo.server-1000.jsonl'), '{"role":"user","content":"远端"}\n');
+  fs.writeFileSync(path.join(home, 'sessions', 'cf-demo.remote-2000.jsonl'), '{"role":"user","content":"拉取"}\n');
+  const cf = await (await fetch(base + '/api/sync-conflicts')).json();
+  assert.ok(cf.conflicts.some((c) => c.base === 'cf-demo.jsonl' && c.entries.length === 2), '冲突列表');
+  const rv = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'resolveConflict', base: 'cf-demo.jsonl', choice: 'both' }) })).json();
+  assert.equal(rv.ok, true, rv.error);
+  const cf2 = await (await fetch(base + '/api/sync-conflicts')).json();
+  assert.ok(!cf2.conflicts.some((c) => c.base === 'cf-demo.jsonl'), '解决后应消失');
   const out = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'logout' }) })).json();
   assert.equal(out.ok, true);
   const html = await (await fetch(base + '/')).text();
