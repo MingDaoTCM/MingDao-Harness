@@ -111,7 +111,7 @@ mingdao sync conflicts                                 # 查看跨设备冲突�
 ## 模型接入
 
 - **内置预设**：DeepSeek（v4-pro / v4-flash / **v4-flash-vision-exp 多模态视觉**）、OpenAI（GPT-5 系列）、Qwen（qwen3.7-max）、GLM（GLM-5）、Kimi（kimi-latest）
-- **自定义 OpenAI 兼容端点**：`mingdao init` 选 `custom`，或 WebUI 设置面板直接添加/修改/删除自定义模型（名称/标签/API 地址/Key），顶部下拉框即选即用
+- **自定义 OpenAI 兼容端点**：`mingdao init` 选 `custom`，或 WebUI 设置面板直接添加/修改/删除自定义模型（名称/标签/API 地址/Key），顶部下拉框即选即用；模型下拉框只列已设置 Key 的服务商，名单以官方 /models 接口线上拉取为准（缓存 1 小时，可手动刷新）
 - **其他协议**：在 `~/.mingdao/providers/<name>.mjs` 导出 `createProvider(cfg)`，详见 [docs/PROVIDERS.md](docs/PROVIDERS.md)
 
 ## 配置与安全
@@ -148,7 +148,7 @@ node test/e2e-schedule.js# 端到端：定时/周期/链式调度
 
 ## 版本
 
-语义化版本：修复 → 末位 +1，新子系统 → 中位 +1，首个 npm 稳定发布（API 冻结）→ 1.0.0。当前 **0.1.x**（最新 `v0.1.24`）。
+语义化版本：修复 → 末位 +1，新子系统 → 中位 +1，首个 npm 稳定发布（API 冻结）→ 1.0.0。当前 **0.1.x**（最新 `v0.1.25`）。
 
 ## License
 

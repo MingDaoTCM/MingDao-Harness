@@ -162,8 +162,10 @@ let base = await startWeb(work1);
   assert.equal(cfg1.permission, 'readonly');
   const st1 = await (await fetch(base + '/api/state')).json();
   assert.equal(st1.permission, 'readonly');
-  assert.ok(Array.isArray(st1.models) && st1.models.length >= 5, '应返回可选模型列表');
-  assert.ok(st1.models[0].providerLabel, '模型应带服务商分组标签');
+  // 模型列表按「已设 Key 的服务商」过滤：e2e 只配了 custom，故仅当前模型兜底条目
+  assert.ok(Array.isArray(st1.models) && st1.models.length >= 1, '应返回可选模型列表');
+  assert.ok(st1.models.some((m) => m.name === 'test-model'), '当前模型应兜底列出');
+  assert.ok(st1.models.every((m) => m.providerLabel), '模型应带服务商分组标签');
   assert.ok(Array.isArray(st1.permissions) && st1.permissions.length === 3);
   assert.ok(typeof st1.contextBudget === 'number');
   const set2 = await (await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sandbox: 'safe', routing: true, contextBudget: 50000 }) })).json();

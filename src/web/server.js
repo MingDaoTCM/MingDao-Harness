@@ -17,6 +17,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
 import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credentials.js';
+import { availableModels, fetchProviderModels, providerHasKey } from '../model-discovery.js';
 import { createProvider, resolveProviderConfig } from '../providers/index.js';
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { createAgent } from '../agent.js';
@@ -284,24 +285,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       const sessions = listSessions(home)
         .slice(0, 30)
         .map((s) => ({ file: s.name, mtime: s.mtime, label: `${relativeTime(s.mtime)} · ${sessionPreview(s.file)}` }));
-      const models = Object.keys(MODELS).map((name) => ({
-        name,
-        label: `${name} — ${MODELS[name].label || ''}`,
-        provider: MODELS[name].provider || 'custom',
-        providerLabel: PROVIDERS[MODELS[name].provider]?.label || '自定义',
-      }));
-      for (const [cmName, cm] of Object.entries(cfg.customModels || {})) {
-        models.push({
-          name: cmName,
-          label: `${cmName} — ${cm.label || '自定义模型'}`,
-          provider: 'custom',
-          providerLabel: '自定义',
-          custom: true,
-        });
-      }
-      if (!models.some((m) => m.name === modelName)) {
-        models.unshift({ name: modelName, label: `${modelName}（当前配置）`, provider: 'custom', providerLabel: '自定义' });
-      }
+      // 模型列表：只列已设置 Key 的服务商，名称以 /models 接口线上名单为准（预设仅回退与补价）
+      const models = await availableModels(cfg, modelName);
       json(res, 200, {
         ok: true,
         model: modelName,
@@ -438,7 +423,23 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         const key = String(body.key || '').trim();
         if (!key) return json(res, 400, { error: 'Key 不能为空（删除请用 removeProviderKey）' });
         setStoredKey(provider, key);
-        return json(res, 200, { ok: true, provider, keyMasked: maskKey(key) });
+        // 设置 Key 后立即拉取线上真实模型名单（失败不影响 Key 保存，回退预设）
+        const fr = provider === 'custom' ? { error: '自定义服务商无模型列表' } : await fetchProviderModels(cfg, provider, { force: true });
+        return json(res, 200, {
+          ok: true,
+          provider,
+          keyMasked: maskKey(key),
+          models: fr.models || [],
+          modelsNote: fr.error ? `模型列表暂用预设（拉取失败：${fr.error}），稍后可用「刷新模型」重试` : null,
+        });
+      }
+      if (action === 'refreshModels') {
+        const provider = String(body.provider || '').trim();
+        if (!PROVIDERS[provider] || provider === 'custom') return json(res, 400, { error: '未知服务商' });
+        if (!providerHasKey(provider)) return json(res, 400, { error: '该服务商未设置 API Key' });
+        const fr = await fetchProviderModels(cfg, provider, { force: true });
+        if (fr.error) return json(res, 400, { error: `拉取失败：${fr.error}` });
+        return json(res, 200, { ok: true, provider, models: fr.models, fromCache: fr.fromCache });
       }
       if (action === 'removeProviderKey') {
         const provider = String(body.provider || '').trim();

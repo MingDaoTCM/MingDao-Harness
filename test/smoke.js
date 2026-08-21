@@ -940,5 +940,62 @@ const ctx = { cwd: tmp };
   ok('sync-collab：密码修改 / 分享创建·接受·刷新·撤销 / 冲突三选一解决');
 }
 
+// ---------- 28. 模型动态发现（/models 线上名单，只列有 Key 的服务商） ----------
+{
+  const homeM = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-models-'));
+  process.env.MINGDAO_HOME = homeM;
+  const http = await import('node:http');
+  const srv = http.createServer((req, res) => {
+    if (req.url === '/v1/models') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(
+        JSON.stringify({
+          data: [
+            { id: 'deepseek-v4-flash', object: 'model' },
+            { id: 'deepseek-v4-pro', object: 'model' },
+            { id: 'deepseek-v4-flash-vision-exp', object: 'model' },
+            { id: 'brand-new-model-2026', object: 'model' },
+            { id: 'embedding-v1', object: 'model' },
+          ],
+        })
+      );
+      return;
+    }
+    res.writeHead(404);
+    res.end('nf');
+  });
+  await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+  const port = srv.address().port;
+  const { setStoredKey } = await import(path.join(srcDir, 'credentials.js'));
+  const { fetchProviderModels, availableModels, providerHasKey } = await import(path.join(srcDir, 'model-discovery.js'));
+  const cfg = { provider: 'deepseek', baseUrl: `http://127.0.0.1:${port}/v1`, model: 'deepseek-v4-flash' };
+  const before = await availableModels(cfg, 'deepseek-v4-flash');
+  assert.ok(before.every((m) => m.name !== 'deepseek-v4-flash' || m.providerLabel === '当前'), '无 Key 时不应列服务商模型（仅当前模型兜底）');
+  setStoredKey('deepseek', 'sk-test');
+  assert.ok(providerHasKey('deepseek'), 'providerHasKey 应识别凭证库 Key');
+  const f1 = await fetchProviderModels(cfg, 'deepseek');
+  assert.ok(f1.models.includes('brand-new-model-2026'), '应拉取线上模型名单');
+  assert.ok(!f1.models.includes('embedding-v1'), 'embedding 类应过滤');
+  const f2 = await fetchProviderModels(cfg, 'deepseek');
+  assert.ok(f2.fromCache, '第二次应命中缓存');
+  const f3 = await fetchProviderModels(cfg, 'deepseek', { force: true });
+  assert.ok(!f3.fromCache, 'force 应绕过缓存');
+  const list = await availableModels(cfg, 'deepseek-v4-flash');
+  assert.ok(list.some((m) => m.name === 'brand-new-model-2026' && m.dynamic), '动态模型应出现且标注 dynamic');
+  assert.ok(list.every((m) => m.provider !== 'openai'), '未设 Key 的服务商不应出现');
+  const list2 = await availableModels(cfg, 'unknown-current-model');
+  assert.ok(list2[0].name === 'unknown-current-model', '当前模型应兜底列出');
+  // 拉取失败 → 回退预设名单
+  setStoredKey('openai', 'sk-test');
+  const fail = await fetchProviderModels({ provider: 'openai', baseUrl: 'http://127.0.0.1:1/v1' }, 'openai');
+  assert.ok(fail.error, '网络失败应返回 error');
+  const list3 = await availableModels(cfg, 'deepseek-v4-flash');
+  assert.ok(list3.some((m) => m.name === 'gpt-5'), '拉取失败应回退预设名单');
+  srv.close();
+  delete process.env.MINGDAO_HOME;
+  fs.rmSync(homeM, { recursive: true, force: true });
+  ok('model-discovery：只列有 Key 服务商 / 线上名单优先 / 缓存与强制刷新 / 回退预设');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);
