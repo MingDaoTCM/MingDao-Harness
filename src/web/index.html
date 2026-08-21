@@ -357,7 +357,7 @@ async function init(){
     $('#budgetInput').value=j.contextBudget||128000;
     $('#autoStartChk').checked=Boolean(j.autostart);
     $('#notifyChk').checked=j.notify!==false;
-    const env = (j.routing?'路由开 · ':'')+(j.sandbox&&j.sandbox!=='off'?(j.sandboxSupported?'沙箱'+j.sandbox:'沙箱降级'):'');
+    const env = (j.workspace?'工作空间 '+j.workspace+' · ':'')+(j.routing?'路由开 · ':'')+(j.sandbox&&j.sandbox!=='off'?(j.sandboxSupported?'沙箱'+j.sandbox:'沙箱降级'):'');
     $('#envBadge').textContent=env; $('#envBadge').style.display=env?'':'none';
   }catch(e){
     const ms=$('#modelSel'); if(!ms.options.length){ const o=document.createElement('option'); o.textContent='加载失败，刷新重试'; ms.appendChild(o); }

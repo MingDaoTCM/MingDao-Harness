@@ -60,13 +60,8 @@ export function trimMessages(messages, budget, count = approxTokens) {
     tail.unshift(rest[i]);
   }
   const kept = cleanToolPairing(system.concat(tail));
-  const dropped = messages.length - kept.length;
-  if (dropped > 0) {
-    kept.splice(system.length, 0, {
-      role: 'system',
-      content: `[上下文管理：超出预算（${budget} tokens），已省略更早的 ${dropped} 条消息。]`,
-    });
-  }
+  // 静默裁剪：不向中间插入说明消息——保持消息前缀字节稳定，
+  // 让 DeepSeek 等支持上下文缓存的 API 最大化缓存命中（命中价仅为未命中的约 1/30）。
   return kept;
 }
 

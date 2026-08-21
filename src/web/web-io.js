@@ -50,7 +50,7 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
         modelName,
         usage,
         durationMs,
-        cost: estimateCostLabel(modelName, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0),
+        cost: estimateCostLabel(modelName, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0, usage),
       });
     },
     onSigint(fn) {

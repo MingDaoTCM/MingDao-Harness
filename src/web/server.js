@@ -45,6 +45,7 @@ import {
   reconcileSchedules,
 } from '../schedule.js';
 import { enableAutostart, disableAutostart, autostartStatus } from '../autostart.js';
+import { currentWorkspace } from '../workspace.js';
 
 const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html');
 
@@ -296,6 +297,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         contextBudget: cfg.contextBudget || 128000,
         autostart: autostartStatus(),
         notify: cfg.notify !== false,
+        workspace: currentWorkspace(workingDir)?.name || null,
         home,
         workingDir,
         mcp: mcpFacade.status(),

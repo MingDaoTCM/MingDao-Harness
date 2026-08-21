@@ -130,6 +130,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       if (res.usage) {
         usage.prompt_tokens += res.usage.prompt_tokens || 0;
         usage.completion_tokens += res.usage.completion_tokens || 0;
+        // 保留 DeepSeek 缓存命中/未命中字段（费用估算与命中率展示依赖）
+        if (Number.isFinite(res.usage.prompt_cache_hit_tokens)) {
+          usage.prompt_cache_hit_tokens = (usage.prompt_cache_hit_tokens || 0) + res.usage.prompt_cache_hit_tokens;
+        }
+        if (Number.isFinite(res.usage.prompt_cache_miss_tokens)) {
+          usage.prompt_cache_miss_tokens = (usage.prompt_cache_miss_tokens || 0) + res.usage.prompt_cache_miss_tokens;
+        }
       }
 
       if (res.toolCalls?.length) {

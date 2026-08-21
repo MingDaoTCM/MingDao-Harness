@@ -58,10 +58,10 @@ export const MODELS = {
     maxOutputTokens: 32768,
     temperature: 0.4,
     supportsReasoning: true,
-    // 峰谷定价（元/百万 tokens，缓存未命中口径；高峰 9:00–14:00 为闲时 2 倍）
+    // 峰谷定价（元/百万 tokens；input=缓存未命中，cacheHit=缓存命中约为未命中的 1/30）
     pricing: {
-      offpeak: { input: 4.5, output: 13.5 },
-      peak: { input: 9, output: 27 },
+      offpeak: { input: 4.5, output: 13.5, cacheHit: 0.15 },
+      peak: { input: 9, output: 27, cacheHit: 0.3 },
     },
   },
   'deepseek-v4-flash': {
@@ -73,8 +73,8 @@ export const MODELS = {
     temperature: 0.6,
     supportsReasoning: false,
     pricing: {
-      offpeak: { input: 1.5, output: 4.5 },
-      peak: { input: 3, output: 9 },
+      offpeak: { input: 1.5, output: 4.5, cacheHit: 0.05 },
+      peak: { input: 3, output: 9, cacheHit: 0.1 },
     },
   },
   // —— 其他主流模型（OpenAI 兼容接入，按 2026-08 官方当前型号）——

@@ -507,7 +507,7 @@ export function createIO({ quiet = false } = {}) {
       const c = usage?.completion_tokens ?? 0;
       const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
       const secs = ((durationMs ?? 0) / 1000).toFixed(1) + 's';
-      const costPart = estimateCostLabel(modelName, p, c);
+      const costPart = estimateCostLabel(modelName, p, c, usage);
       io.print(
         style(
           `[${C.bold}${modelName}${C.reset} · ${fmt(p)}↑/${fmt(c)}↓ tokens · ${secs}${costPart}]`,

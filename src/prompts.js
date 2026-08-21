@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { skillsRegistryBlock } from './skills.js';
 import { mingdaoHome } from './config.js';
+import { recentJournalBlock } from './memory.js';
 
 const BASE = `你是 MingDao（明道），一个由 MingDao-Harness 驱动的 AI 编程助手。你在用户的电脑上工作：通过工具读写文件、搜索代码、执行命令，帮助用户完成编程、调试与自动化任务。
 
@@ -32,11 +33,14 @@ export function buildSystemPrompt({ modelName, workingDir }) {
 
 当前工作目录：${workingDir}
 当前模型：${modelName}
-当前时间：${new Date().toISOString()}`;
+当前日期：${new Date().toISOString().slice(0, 10)}`;
 
-  // 用户级记忆（~/.mingdao/AGENTS.md，可用 /memory add 追加）
+  // 用户级记忆（~/.mingdao/AGENTS.md，/memory add 手动追加 + 会话结束自动提炼）
   const memory = loadFile(path.join(mingdaoHome(), 'AGENTS.md'), 8000);
   if (memory) prompt += `\n\n<user_memory>\n${memory}\n</user_memory>`;
+
+  // 最近会话日志（跨会话连续性：记得上次做到哪；每条会话结束写入）
+  prompt += recentJournalBlock(mingdaoHome());
 
   // 技能清单（渐进披露：仅名称+描述，按需加载全文）
   prompt += skillsRegistryBlock(workingDir);

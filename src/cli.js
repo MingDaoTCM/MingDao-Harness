@@ -21,6 +21,7 @@ import { startTask, listTasks, patchTask, killTask, formatTaskRow } from './task
 import { enableAutostart, disableAutostart, autostartStatus, autostartPath } from './autostart.js';
 import { notifyTaskDone } from './notify.js';
 import { addWorkspace, removeWorkspace, workspacePath, touchWorkspace, listWorkspaces, currentWorkspace } from './workspace.js';
+import { finalizeSession, extractMemory, loadMemory, appendMemory, recentJournal } from './memory.js';
 import {
   addSchedule,
   listSchedules,
@@ -726,6 +727,9 @@ async function main() {
           if (renamed) io.print(style(`✓ 会话标题：${path.basename(renamed)}`, C.dim));
         }
       }
+      try {
+        await finalizeSession({ cfg, provider, model: titleModel(cfg, modelName), home, workingDir, messages, turns: 1, lastText: res.text || '' });
+      } catch {}
       if (jsonMode) {
         console.log(
           JSON.stringify({
@@ -819,6 +823,7 @@ async function main() {
     : [{ role: 'system', content: systemPrompt }, ...loadedMsgs];
   let persisted = messages.length;
   let lastUsage = null;
+  let lastText = '';
   let planMode = false;
   let routingEnabled = Boolean(routing);
   let autoTitled = Boolean(session.messages?.length);
@@ -939,9 +944,32 @@ async function main() {
           }
           fs.appendFileSync(memPath, `- ${text}\n`);
           io.print(style(`✓ 已追加到用户记忆 ${memPath}（后续会话自动生效）`, C.green));
+        } else if (arg === 'extract') {
+          io.startSpinner('正在从当前对话提炼记忆…');
+          try {
+            const existing = loadMemory();
+            const lines = await extractMemory(provider, titleModel(cfg, modelName), messages, existing);
+            io.stopSpinner();
+            if (lines.length) {
+              appendMemory(lines);
+              io.print(style(`✓ 新增 ${lines.length} 条记忆：`, C.green));
+              for (const l of lines) io.print(style('  ' + l, C.dim));
+            } else {
+              io.print(style('没有发现新的值得记住的内容。', C.dim));
+            }
+          } catch (err) {
+            io.stopSpinner();
+            io.print(style('[错误] ' + (err?.message || err), C.red));
+          }
         } else {
           io.print(style(`用户记忆文件：${memPath}${fs.existsSync(memPath) ? '' : '（尚不存在）'}`, C.dim));
-          io.print('用法：/memory add <内容> 追加一条记忆');
+          if (fs.existsSync(memPath)) io.print(style(fs.readFileSync(memPath, 'utf8').slice(0, 2000), C.dim));
+          const journal = recentJournal(home, 5);
+          if (journal.length) {
+            io.print(style('最近会话：', C.bold));
+            for (const e of journal.reverse()) io.print(style(`  ${new Date(e.at).toISOString().slice(0, 10)} ${e.firstUser?.slice(0, 40)}`, C.dim));
+          }
+          io.print('用法：/memory add <内容> 追加 · /memory extract 从当前对话自动提炼');
         }
       } else if (cmd === '/skills') {
         const skills = listSkills(workingDir);
@@ -1086,6 +1114,7 @@ async function main() {
     try {
       const res = await agent.runTurn(messages);
       lastUsage = res.usage;
+      lastText = res.text || lastText;
       stats.turns += 1;
       stats.promptTokens += res.usage.prompt_tokens || 0;
       stats.completionTokens += res.usage.completion_tokens || 0;
@@ -1117,6 +1146,22 @@ async function main() {
   }
 
   mcpFacade.stop();
+  if (stats.turns > 0) {
+    io.startSpinner('正在沉淀会话记忆…');
+    try {
+      await finalizeSession({
+        cfg,
+        provider,
+        model: titleModel(cfg, modelName),
+        home,
+        workingDir,
+        messages,
+        turns: stats.turns,
+        lastText,
+      });
+    } catch {}
+    io.stopSpinner();
+  }
   io.print('再见，明道与你同行。');
   io.close();
 }

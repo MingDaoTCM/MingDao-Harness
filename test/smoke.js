@@ -37,7 +37,7 @@ function ok(name) {
   assert.equal(trimmed[0].role, 'system');
   assert.equal(trimmed[trimmed.length - 1].content, '最新的问题');
   assert.ok(trimmed.length < msgs.length, '应发生裁剪');
-  assert.ok(trimmed.some((m) => m.content?.includes('上下文管理')), '应插入裁剪说明');
+  assert.ok(!trimmed.some((m) => m.content?.includes('上下文管理')), '静默裁剪：不插入说明消息（保住缓存前缀）');
   assert.equal(clampText('abc', 100), 'abc');
   assert.ok(clampText('x'.repeat(3000), 100).includes('已截断'));
 
@@ -587,6 +587,48 @@ const ctx = { cwd: tmp };
   notifyTaskDone('测试任务', 'done');
   notifyTaskDone('失败任务', 'failed');
   ok('notify：调用不抛错（环境自适应静默）');
+}
+
+// ---------- 22. 长记忆：提取去重 + 会话日志 ----------
+{
+  const homeM = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-mem-'));
+  process.env.MINGDAO_HOME = homeM;
+  const { loadMemory, appendMemory, appendJournal, recentJournal, recentJournalBlock, extractMemory } = await import(path.join(srcDir, 'memory.js'));
+  appendMemory(['用户偏好简洁的中文回复']);
+  const existing = loadMemory();
+  assert.ok(existing.includes('简洁的中文回复'));
+  const fake = { async chat() { return { text: '- 用户偏好简洁的中文回复\n- 常用 pnpm 而不是 npm' }; } };
+  const msgs = [
+    { role: 'user', content: '帮我初始化项目' },
+    { role: 'assistant', content: '已用 pnpm 初始化完成' },
+  ];
+  const lines = await extractMemory(fake, 'deepseek-v4-flash', msgs, existing);
+  assert.ok(lines.length >= 1);
+  const added = appendMemory(lines);
+  assert.ok(added >= 1);
+  const fakeNone = { async chat() { return { text: '无新增' }; } };
+  const none = await extractMemory(fakeNone, 'deepseek-v4-flash', msgs, existing);
+  assert.equal(none.length, 0, '无新增应返回空');
+  appendJournal(homeM, { at: Date.now(), workspace: 'test', firstUser: '测试会话一', outcome: '完成', turns: 3 });
+  appendJournal(homeM, { at: Date.now(), workspace: 'test', firstUser: '测试会话二', outcome: '完成', turns: 3 });
+  assert.equal(recentJournal(homeM, 3).length, 2);
+  assert.ok(recentJournalBlock(homeM).includes('测试会话二'));
+  delete process.env.MINGDAO_HOME;
+  fs.rmSync(homeM, { recursive: true, force: true });
+  ok('memory：提取 / 追加 / 无新增 / 日志 / 最近块');
+}
+
+// ---------- 23. 缓存感知计价 ----------
+{
+  const { estimateCost, estimateCostLabel, cacheSplit } = await import(path.join(srcDir, 'pricing.js'));
+  const split = cacheSplit({ prompt_cache_hit_tokens: 600, prompt_cache_miss_tokens: 400 });
+  assert.deepEqual(split, { hit: 600, miss: 400, rate: 0.6 });
+  const withCache = estimateCost('deepseek-v4-flash', 1000, 100, { hit: 600, miss: 400 }, new Date('2026-08-21T03:00:00'));
+  const noCache = estimateCost('deepseek-v4-flash', 1000, 100, null, new Date('2026-08-21T03:00:00'));
+  assert.ok(withCache < noCache * 0.6, '缓存计价应显著低于全未命中 ' + withCache + ' vs ' + noCache);
+  const label = estimateCostLabel('deepseek-v4-flash', 1000, 100, { prompt_cache_hit_tokens: 600, prompt_cache_miss_tokens: 400 });
+  assert.ok(label.includes('缓存命中 60%'), label);
+  ok('pricing：缓存拆分 / 命中价 / 命中率标签');
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

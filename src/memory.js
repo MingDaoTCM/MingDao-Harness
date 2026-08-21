@@ -1,0 +1,137 @@
+// 长记忆与自主进化（借鉴 Hermes Agent）：
+//  - 用户记忆：~/.mingdao/AGENTS.md（/memory add 手动 + 会话结束自动提取用户偏好，去重追加）
+//  - 会话日志：~/.mingdao/journal.jsonl（跨会话连续性；最近 3 条注入系统提示，让 MingDao 记得上次做到哪）
+//  - 自动记忆提取用 executor 模型（约几十 token/会话），config.autoMemory 可关（默认开）
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { mingdaoHome, ensureHome } from './config.js';
+
+export function memoryFile() {
+  return path.join(mingdaoHome(), 'AGENTS.md');
+}
+
+export function journalFile() {
+  return path.join(mingdaoHome(), 'journal.jsonl');
+}
+
+export function loadMemory() {
+  try {
+    return fs.readFileSync(memoryFile(), 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+export function appendMemory(lines) {
+  const add = lines.map((l) => l.trim()).filter(Boolean);
+  if (!add.length) return 0;
+  ensureHome();
+  const date = new Date().toISOString().slice(0, 10);
+  fs.appendFileSync(memoryFile(), add.map((l) => (l.startsWith('-') ? `- [${date}] ${l.slice(1).trim()}` : `- [${date}] ${l}`)).join('\n') + '\n');
+  return add.length;
+}
+
+export function appendJournal(home, entry) {
+  try {
+    fs.mkdirSync(path.join(home, path.dirname(journalFile())), { recursive: true });
+    const lines = [];
+    try {
+      const raw = fs.readFileSync(journalFile(), 'utf8');
+      lines.push(...raw.split('\n').filter(Boolean));
+    } catch {}
+    lines.push(JSON.stringify(entry));
+    if (lines.length > 500) lines.splice(0, lines.length - 500);
+    fs.writeFileSync(journalFile(), lines.join('\n') + '\n');
+  } catch {}
+}
+
+export function recentJournal(home, n = 3) {
+  try {
+    const raw = fs.readFileSync(journalFile(), 'utf8');
+    return raw
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return null;
+        }
+      })
+      .filter(Boolean)
+      .slice(-n);
+  } catch {
+    return [];
+  }
+}
+
+export function recentJournalBlock(home) {
+  const entries = recentJournal(home, 3);
+  if (!entries.length) return '';
+  return (
+    '\n\n<recent_sessions>\n' +
+    entries
+      .map((e) => `- ${new Date(e.at).toISOString().slice(0, 10)} ${e.workspace || ''}：${e.firstUser?.slice(0, 40) ?? ''} → ${e.outcome?.slice(0, 40) ?? ''}`)
+      .join('\n') +
+    '\n</recent_sessions>'
+  );
+}
+
+// 自动记忆提取：从对话提炼值得长期记住的用户偏好/事实（去重：已有记忆会先提供给模型）
+export async function extractMemory(provider, model, messages, existingMemory) {
+  try {
+    const convo = messages
+      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .slice(-20)
+      .map((m) => `${m.role === 'user' ? '用户' : 'MingDao'}：${String(m.content || '').slice(0, 500)}`)
+      .join('\n');
+    const res = await provider.chat({
+      model,
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你是 MingDao 的记忆提取器。从对话中提取值得长期记住的用户偏好与事实（工具链、代码风格、项目背景、个人约定、常用指令等）。每条一行，以 - 开头，≤30 字，只输出新条目（与「已有记忆」重复或对话中未提及的不要输出）；没有新增就只输出「无新增」。\n已有记忆：\n' +
+            (existingMemory || '（空）'),
+        },
+        { role: 'user', content: convo.slice(0, 8000) },
+      ],
+      tools: [],
+      temperature: 0.2,
+      maxTokens: 300,
+    });
+    const text = String(res.text || '').trim();
+    if (!text || text.includes('无新增')) return [];
+    return text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.startsWith('-') || /^[·•]/.test(l))
+      .map((l) => l.replace(/^[·•]\s*/, '- '))
+      .slice(0, 10);
+  } catch {
+    return [];
+  }
+}
+
+// 会话收尾：写日志 + 自动记忆（turns 太少的一次性会话只记日志不提取）
+export async function finalizeSession({ cfg, provider, model, home, workingDir, messages, turns, lastText }) {
+  const firstUser = messages.find((m) => m.role === 'user')?.content || '';
+  try {
+    const wsName = null; // 由调用方通过 currentWorkspace 提供会更好，这里保持轻量
+    appendJournal(home, {
+      at: Date.now(),
+      workspace: wsName,
+      firstUser: firstUser.slice(0, 80),
+      outcome: lastText?.slice(0, 80) || '',
+      turns,
+    });
+  } catch {}
+  if (cfg?.autoMemory !== false && turns >= 3) {
+    try {
+      const existing = loadMemory();
+      const lines = await extractMemory(provider, model, messages, existing);
+      if (lines.length) appendMemory(lines);
+    } catch {}
+  }
+}
