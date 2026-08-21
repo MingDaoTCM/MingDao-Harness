@@ -301,6 +301,30 @@ let base = await startWeb(work1);
   ok('会话管理：重命名 / 删除 / 路径防护');
 }
 
+// ---------- 10. 技能库 API：列表 / 安装 / 卸载 ----------
+{
+  const lib = await (await fetch(base + '/api/skill-library')).json();
+  assert.equal(lib.ok, true);
+  assert.ok(Array.isArray(lib.library) && lib.library.length >= 20, '技能库应返回 20+ 技能');
+  assert.ok(lib.library.every((s) => s.name && s.description), '技能应含名称与描述');
+  assert.ok(Array.isArray(lib.installed), '应返回已安装列表');
+  const q = await (await fetch(base + '/api/skill-library?q=简历')).json();
+  assert.ok(q.library.some((s) => s.name === 'resume'), '关键词查询应命中 resume');
+  const ins = await (await fetch(base + '/api/skills', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'install', name: 'resume' }) })).json();
+  assert.equal(ins.ok, true, ins.error);
+  const lib2 = await (await fetch(base + '/api/skill-library')).json();
+  assert.ok(lib2.library.find((s) => s.name === 'resume').installed, '安装后应标记已安装');
+  const bad = await fetch(base + '/api/skills', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'install', name: 'nope' }) });
+  assert.equal(bad.status, 400, '未知技能应 400');
+  const un = await (await fetch(base + '/api/skills', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'uninstall', name: 'resume' }) })).json();
+  assert.equal(un.ok, true, un.error);
+  const lib3 = await (await fetch(base + '/api/skill-library')).json();
+  assert.ok(!lib3.library.find((s) => s.name === 'resume').installed, '卸载后应标记未安装');
+  const html = await (await fetch(base + '/')).text();
+  assert.ok(html.includes('skillLibList'), '前端应包含技能库面板');
+  ok('技能库 API：列表 / 搜索 / 安装 / 卸载');
+}
+
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();

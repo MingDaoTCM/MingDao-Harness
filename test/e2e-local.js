@@ -324,6 +324,31 @@ function ok(name) {
   ok('后台任务：ask 权限降级只读');
 }
 
+// ---------- 13. 技能库 CLI：搜索 / 安装 / 列表 / 卸载 ----------
+{
+  const s1 = await runCli(['skill', 'search', '邮件']);
+  assert.equal(s1.code, 0, s1.err);
+  assert.ok(s1.out.includes('email'), '关键词搜索应命中 email 技能');
+  const s2 = await runCli(['skill', 'install', 'email']);
+  assert.equal(s2.code, 0, s2.err);
+  assert.ok(s2.out.includes('✓ 已安装技能 email'), '安装应提示成功');
+  const s3 = await runCli(['skill', 'list']);
+  assert.equal(s3.code, 0, s3.err);
+  assert.ok(s3.out.includes('email'), '列表应包含已安装技能');
+  assert.ok(s3.out.includes('（用户级）'), '应标注用户级来源');
+  assert.ok(s3.out.includes('技能库共'), '应提示技能库数量');
+  const s4 = await runCli(['skill', 'install', 'no-such-skill']);
+  assert.equal(s4.code, 1);
+  assert.ok(s4.out.includes('技能库中没有'), '未知技能应有友好报错');
+  const s5 = await runCli(['skill', 'uninstall', 'email']);
+  assert.equal(s5.code, 0, s5.err);
+  assert.ok(s5.out.includes('✓ 已卸载 email'), '卸载应提示成功');
+  const s6 = await runCli(['skill', 'uninstall', 'email']);
+  assert.equal(s6.code, 1);
+  assert.ok(s6.out.includes('未安装'), '重复卸载应报错');
+  ok('skill CLI：搜索 / 安装 / 列表 / 卸载闭环');
+}
+
 server.close();
 fs.rmSync(home, { recursive: true, force: true });
 fs.rmSync(work, { recursive: true, force: true });

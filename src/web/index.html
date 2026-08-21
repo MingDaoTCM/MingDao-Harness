@@ -201,6 +201,10 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
       <input id="mcpArg" placeholder="参数（按提示，留空用默认）" style="flex:1;min-width:140px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
     </div>
     <div class="row" style="justify-content:flex-start"><button id="mcpAdd">＋ 接入 MCP 服务</button></div>
+    <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
+    <h4 style="margin:4px 0;color:var(--accent2)">技能库（搜索 / 一键安装，装到用户级可改可删）</h4>
+    <div class="cfg-row"><input id="skillSearch" placeholder="搜索技能…（留空显示全部）" style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"></div>
+    <div id="skillLibList" style="max-height:170px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
     <div class="row"><button id="cfgCancel">取消</button><button class="primary" id="cfgSave">保存</button></div>
   </div>
 </div>
@@ -394,7 +398,7 @@ async function init(){
 }
 $('#cfgBtn').onclick=()=>{ $('#cfgModal').style.display='flex'; };
 $('#cfgCancel').onclick=()=>{ $('#cfgModal').style.display='none'; };
-$('#cfgBtn').addEventListener('click', ()=>{ refreshSchList(); refreshWorkspaces(); loadMemoryUI(); refreshCache(); refreshMcpPresets(); });
+$('#cfgBtn').addEventListener('click', ()=>{ refreshSchList(); refreshWorkspaces(); loadMemoryUI(); refreshCache(); refreshMcpPresets(); refreshSkillLib(''); });
 $('#schWhen').onchange=e=>{ const v=e.target.value; $('#schAtRow').style.display=v==='at'?'':'none'; $('#schEveryRow').style.display=v==='every'?'':'none'; $('#schAfterRow').style.display=v==='after'?'':'none'; $('#schChainRow').style.display=v==='chain'?'':'none'; };
 async function refreshSchList(){
   const r=await fetch('/api/schedule',{cache:'no-store'}).catch(()=>null); if(!r) return;
@@ -501,6 +505,29 @@ $('#mcpAdd').onclick=async ()=>{
   const j=await r.json().catch(()=>({error:'请求失败'}));
   if(j.ok) alert('✓ 已接入 '+name+'（重启 mingdao web 后生效，/mcp 查看状态）'); else alert(j.error||'接入失败');
 };
+// —— 技能库 ——
+let skillSearchTimer=null;
+$('#skillSearch').addEventListener('input',e=>{ clearTimeout(skillSearchTimer); skillSearchTimer=setTimeout(()=>refreshSkillLib(e.target.value.trim()),300); });
+async function refreshSkillLib(q){
+  const u=q?'/api/skill-library?q='+encodeURIComponent(q):'/api/skill-library';
+  const r=await fetch(u,{cache:'no-store'}).catch(()=>null); if(!r) return;
+  const j=await r.json(); const list=$('#skillLibList'); list.innerHTML='';
+  if(!j.library||!j.library.length){ list.innerHTML='<div style="color:var(--faint);font-size:12px;padding:6px 2px">没有匹配的技能</div>'; return; }
+  for(const s of j.library){
+    const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px';
+    div.innerHTML='<span style="flex:1;min-width:0"><b>'+esc(s.name)+'</b> <span style="color:var(--faint)">'+esc(s.description||'')+'</span></span>';
+    const b=document.createElement('button');
+    if(s.installed){ b.textContent='卸载'; b.className='danger'; } else { b.textContent='安装'; }
+    b.style.cssText='padding:1px 8px;font-size:11px';
+    b.onclick=async()=>{
+      const body=s.installed?{action:'uninstall',name:s.name}:{action:'install',name:s.name};
+      const rr=await fetch('/api/skills',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+      const jj=await rr.json().catch(()=>({error:'请求失败'}));
+      if(jj.ok) refreshSkillLib($('#skillSearch').value.trim()); else alert(jj.error||'操作失败');
+    };
+    div.appendChild(b); list.appendChild(div);
+  }
+}
 $('#cfgSave').onclick=()=>{ applyConfig({sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}); $('#cfgModal').style.display='none'; };
 async function applyConfig(payload, revertTarget){
   const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});

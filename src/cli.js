@@ -40,6 +40,7 @@ import { createAgent } from './agent.js';
 import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
 import { listSkills } from './skills.js';
+import { libraryList, searchLibrary, installSkill, uninstallSkill, reinstallSkill } from './skill-lib.js';
 import { runWebServer } from './web/server.js';
 import { routeTask, routingConfig } from './routing.js';
 import { detectSandbox } from './tools/bash.js';
@@ -648,6 +649,75 @@ async function main() {
     return;
   }
 
+  // 技能库：mingdao skill list|search|install|uninstall|update
+  if (opts.prompt[0] === 'skill') {
+    const sub = opts.prompt[1] || 'list';
+    const arg = opts.prompt[2];
+    if (sub === 'search') {
+      const hits = searchLibrary(arg || '');
+      if (!hits.length) {
+        console.log(arg ? `没有匹配「${arg}」的技能（mingdao skill search 查看全部）` : '技能库为空');
+      } else {
+        console.log(`技能库匹配（${hits.length}）· 安装：mingdao skill install <名称>`);
+        for (const s of hits) console.log(`  ${s.name.padEnd(18)} ${s.description}${s.installed ? '（已安装）' : ''}`);
+      }
+      return;
+    }
+    if (sub === 'install') {
+      const r = await installSkill(arg);
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      if (r.names) {
+        console.log(`✓ 已从 git 仓库安装 ${r.names.length} 个技能：${r.names.join(', ')}`);
+      } else {
+        console.log(`✓ 已安装技能 ${r.name} → ~/.mingdao/skills/${r.name}/（可编辑/删除，下次会话生效）`);
+      }
+      return;
+    }
+    if (sub === 'uninstall') {
+      if (!arg) {
+        console.log('用法：mingdao skill uninstall <名称>');
+        process.exitCode = 1;
+        return;
+      }
+      const r = uninstallSkill(arg);
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 已卸载 ${r.name}（内置同名技能如有会自动重新可见）`);
+      return;
+    }
+    if (sub === 'update') {
+      if (!arg) {
+        console.log('用法：mingdao skill update <名称>');
+        process.exitCode = 1;
+        return;
+      }
+      const r = await reinstallSkill(arg);
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 已更新技能 ${r.name}`);
+      return;
+    }
+    const skills = listSkills(process.cwd());
+    console.log(`已安装技能（${skills.length}）· 三级来源：用户级 > 项目级 > 内置`);
+    for (const s of skills) {
+      const label = s.source === 'user' ? '（用户级）' : s.source === 'project' ? '（项目级）' : '（内置）';
+      console.log(`  ${s.name.padEnd(18)} ${s.description || ''}${label}`);
+    }
+    const lib = libraryList();
+    console.log(`\n技能库共 ${lib.length} 个可安装技能：mingdao skill search [关键词] 搜索，mingdao skill install <名称> 安装`);
+    return;
+  }
+
   // WebUI：mingdao web [端口]
   if (opts.prompt[0] === 'web') {
     const cfg0 = loadConfig();
@@ -1057,6 +1127,7 @@ async function main() {
           `已安装技能（${skills.length}）`,
           skills.map((s) => `${label(s)}：${s.description || '（无描述）'}`)
         );
+        io.print(style(`技能库安装：退出会话后运行 mingdao skill search [关键词] → mingdao skill install <名称>`, C.dim));
       } else if (cmd === '/title') {
         if (!arg) {
           io.print('用法：/title <别名>（给当前会话命名，便于 --resume 识别）');

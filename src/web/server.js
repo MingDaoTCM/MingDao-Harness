@@ -33,6 +33,7 @@ import {
   searchSessions,
 } from '../session.js';
 import { listSkills } from '../skills.js';
+import { libraryList, installSkill, uninstallSkill, installedUserSkillNames } from '../skill-lib.js';
 import { detectSandbox } from '../tools/bash.js';
 import { generateTitle, renameSessionFile, titleModel, sanitizeTitle } from '../titles.js';
 import {
@@ -615,6 +616,28 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       saveConfig(cfg);
       json(res, 200, { ok: true, name, note: '重启 mingdao web 后生效（/mcp 查看状态）' });
       return;
+    }
+    if (req.method === 'GET' && p === '/api/skill-library') {
+      const q = new URL(req.url, 'http://x').searchParams.get('q') || '';
+      const lib = q
+        ? libraryList().filter((s) => s.name.includes(q) || (s.description || '').includes(q))
+        : libraryList();
+      json(res, 200, { ok: true, library: lib, installed: [...installedUserSkillNames()] });
+      return;
+    }
+    if (req.method === 'POST' && p === '/api/skills') {
+      const body = await readBody(req);
+      if (body.action === 'install') {
+        const r = await installSkill(body.arg || body.name || '');
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true, name: r.name, names: r.names });
+      }
+      if (body.action === 'uninstall') {
+        const r = uninstallSkill(body.name);
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true, name: r.name });
+      }
+      return json(res, 400, { error: '未知操作：install|uninstall' });
     }
     // PWA 资源
     if (req.method === 'GET' && p === '/manifest.webmanifest') {

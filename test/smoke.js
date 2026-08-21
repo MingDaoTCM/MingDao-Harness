@@ -631,5 +631,89 @@ const ctx = { cwd: tmp };
   ok('pricing：缓存拆分 / 命中价 / 命中率标签');
 }
 
+// ---------- 24. 技能库与自定义安装 ----------
+{
+  const homeSk = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skilllib-'));
+  process.env.MINGDAO_HOME = homeSk;
+  const { libraryList, searchLibrary, installFromLibrary, installFromDir, installFromUrl, installFromGit, installSkill, uninstallSkill, reinstallSkill, installedUserSkillNames } =
+    await import(path.join(srcDir, 'skill-lib.js'));
+  const { listSkills } = await import(path.join(srcDir, 'skills.js'));
+
+  // 内置技能库目录
+  const lib = libraryList();
+  assert.ok(lib.length >= 20, `技能库应预置 20+ 技能（实际 ${lib.length}）`);
+  assert.ok(lib.every((s) => s.name && s.description), '库中技能均应有名称与描述');
+  const hits = searchLibrary('整理');
+  assert.ok(hits.some((s) => s.name === 'file-organize'), '关键词搜索应命中文件整理技能');
+
+  // 库名安装 → 用户级生效，进入技能清单
+  const r1 = installFromLibrary('sql');
+  assert.ok(r1.name === 'sql' && fs.existsSync(path.join(r1.dir, 'SKILL.md')), '库名安装应复制 SKILL.md');
+  assert.ok(fs.existsSync(path.join(r1.dir, '.mingdao-source.json')), '应写来源元数据');
+  const reg = listSkills(process.cwd());
+  const installed = reg.find((s) => s.name === 'sql');
+  assert.ok(installed && installed.source === 'user', '安装后应出现在技能清单且来源为用户级');
+  assert.ok(installedUserSkillNames().has('sql'), 'installedUserSkillNames 应包含 sql');
+
+  // 重复安装（覆盖更新）不报错
+  assert.ok(installFromLibrary('sql').name === 'sql', '重复安装应覆盖成功');
+
+  // 本地目录安装（frontmatter name 优先）
+  const dirSrc = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-dir-'));
+  fs.writeFileSync(path.join(dirSrc, 'SKILL.md'), '---\nname: my-custom\ndescription: 自定义技能\n---\n\n# 我的技能\n内容');
+  const r2 = installFromDir(dirSrc);
+  assert.ok(r2.name === 'my-custom', '目录安装应用 frontmatter 名称');
+  fs.rmSync(dirSrc, { recursive: true, force: true });
+
+  // 远程 URL 安装（本地 http 服务器，无外部网络）
+  const http = await import('node:http');
+  const srv = http.createServer((req, res) => {
+    if (req.url !== '/SKILL.md') {
+      res.writeHead(404);
+      res.end('not found');
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/markdown' });
+    res.end('---\nname: remote-skill\ndescription: 远程技能\n---\n\n# 远程\n来自 URL');
+  });
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+  const urlPort = srv.address().port;
+  const r3 = await installFromUrl(`http://127.0.0.1:${urlPort}/SKILL.md`);
+  assert.ok(r3.name === 'remote-skill', 'URL 安装应成功');
+  const badUrl = await installFromUrl(`http://127.0.0.1:${urlPort}/nope.md`);
+  assert.ok(badUrl.error && badUrl.error.includes('HTTP'), '非 200 应报错');
+  const badProto = await installFromUrl('file:///etc/passwd');
+  assert.ok(badProto.error && badProto.error.includes('http'), '非 http 协议应拒绝');
+  srv.close();
+
+  // 自动识别入口：库名 / 目录 / URL
+  const auto1 = await installSkill('regex');
+  assert.ok(auto1.name === 'regex', '自动识别库名');
+  const auto2 = await installSkill(path.join(homeSk, 'skills', 'sql'));
+  assert.ok(auto2.name === 'sql', '自动识别本地目录');
+  const notFound = await installSkill('no-such-skill');
+  assert.ok(notFound.error && notFound.error.includes('技能库中没有'), '未知名称应有友好提示');
+
+  // git 安装：无 git 环境优雅报错，不抛异常
+  const gitR = installFromGit('https://example.com/x.git');
+  assert.ok(gitR.names || gitR.error, 'git 安装应返回结果或错误而非抛出');
+
+  // 卸载：只卸载用户级；未安装报错；路径穿越拒绝
+  const rm1 = uninstallSkill('sql');
+  assert.ok(rm1.name === 'sql', '卸载用户级技能');
+  assert.ok(uninstallSkill('sql').error, '再次卸载应报错');
+  assert.ok(uninstallSkill('../../etc').error, '路径穿越名称应拒绝');
+
+  // update：按元数据重装
+  const up = await reinstallSkill('regex');
+  assert.ok(up.name === 'regex', '按来源元数据更新');
+
+  // 清理
+  for (const n of ['my-custom', 'remote-skill', 'regex']) uninstallSkill(n);
+  delete process.env.MINGDAO_HOME;
+  fs.rmSync(homeSk, { recursive: true, force: true });
+  ok('skill-lib：内置库 / 搜索 / 库名·目录·URL 安装 / 卸载 / 元数据更新');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);
