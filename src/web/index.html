@@ -474,7 +474,7 @@ async function send(){
     await handleEvents(resp.body, ev=>{
       if(ev.taskId) taskId=ev.taskId;
       if(ev.type==='text'){ onActivity(); raw+=ev.delta; update(); }
-      else if(ev.type==='reasoning'){ if(!reason){ reason=addReasoning(msg); } if(!reason.parentElement.open) reason.parentElement.open=true; reason.parentElement.querySelector('summary').classList.add('live'); reason.textContent+=ev.delta; scroll(); }
+      else if(ev.type==='reasoning'){ if(!reason){ reason=addReasoning(msg); } if(!reason.parentElement.open) reason.parentElement.open=true; reason.parentElement.querySelector('summary').classList.add('live'); reason.textContent+=ev.delta; reason.scrollTop=reason.scrollHeight; scroll(); }
       else if(ev.type==='turnStart'){ showThink(); scroll(); }
       else if(ev.type==='toolStart'){ onActivity(); update(); renderToolStartEvent(ev); }
       else if(ev.type==='code'){ onActivity(); const pre=document.createElement('pre'); pre.innerHTML='<code>'+highlight(ev.code,ev.lang)+'</code>'; content.appendChild(pre); scroll(); }
