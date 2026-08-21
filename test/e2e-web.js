@@ -173,7 +173,7 @@ let base = await startWeb(work1);
   assert.equal(set2.contextBudget, 50000);
   const badBudget = await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contextBudget: 100 }) });
   assert.equal(badBudget.status, 400, '预算过小应拒绝');
-  const bad = await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'qwen-max' }) });
+  const bad = await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'qwen3.7-max' }) });
   const badJ = await bad.json();
   assert.equal(bad.status, 400, '无 Key 的模型应拒绝');
   assert.ok(String(badJ.error).includes('API Key'));

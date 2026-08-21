@@ -18,6 +18,9 @@ import {
 import { createProvider, resolveProviderConfig } from './providers/index.js';
 import { startMcpServers } from './mcp.js';
 import { startTask, listTasks, patchTask, killTask, formatTaskRow } from './tasks.js';
+import { enableAutostart, disableAutostart, autostartStatus, autostartPath } from './autostart.js';
+import { notifyTaskDone } from './notify.js';
+import { addWorkspace, removeWorkspace, workspacePath, touchWorkspace, listWorkspaces, currentWorkspace } from './workspace.js';
 import {
   addSchedule,
   listSchedules,
@@ -65,6 +68,8 @@ const HELP_LINES = [
   ['  mingdao run "<任务>"     后台启动任务（tasks 面板管理）', null],
   ['  mingdao tasks [watch|kill <id>] 查看/实时刷新/停止后台任务', null],
   ['  mingdao schedule add/list/remove/pause/resume/chain 定时任务与依赖编排', null],
+  ['  mingdao autostart on|off    开机自启（登录后自动启动服务器）', null],
+  ['  mingdao workspace add/list/use/path/remove 工作空间（项目目录登记与快速切换）', null],
   ['  mingdao --continue         继续最近一次会话', null],
   ['  mingdao --resume           从会话列表选择恢复', null],
   ['  mingdao --model <模型名>   指定模型，例如 deepseek-v4-pro', null],
@@ -284,17 +289,20 @@ async function runWorkerTask(id, question, { permission, model }) {
         if (title) renameSessionFile(fs, path, home, session, title);
       } catch {}
     }
+    const finalStatus = res.truncated ? 'failed' : res.aborted ? 'killed' : 'done';
     finish({
-      status: res.truncated ? 'failed' : res.aborted ? 'killed' : 'done',
+      status: finalStatus,
       text: (res.text || '').slice(0, 2000),
       usage: res.usage,
       durationMs: Date.now() - t0,
       session: path.basename(session.file),
       note,
     });
+    if (cfg.notify !== false) notifyTaskDone(question, finalStatus === 'killed' ? 'failed' : finalStatus);
     process.exitCode = res.truncated ? 1 : 0;
   } catch (err) {
     finish({ status: 'failed', error: String(err?.message || err) });
+    if (cfg?.notify !== false) notifyTaskDone(question, 'failed');
     process.exitCode = 2;
   } finally {
     if (mcpFacade) mcpFacade.stop();
@@ -518,6 +526,89 @@ async function main() {
     return;
   }
 
+  // 开机自启：mingdao autostart on|off|status
+  if (opts.prompt[0] === 'autostart') {
+    const sub = opts.prompt[1] || 'status';
+    if (sub === 'on') {
+      console.log(enableAutostart() ? '✓ 已开启开机自启（登录后自动启动 mingdao web）' : '[错误] 设置失败');
+    } else if (sub === 'off') {
+      console.log(disableAutostart() ? '✓ 已关闭开机自启' : '[错误] 关闭失败');
+    } else {
+      console.log(autostartStatus() ? `✓ 开机自启已开启（${autostartPath()}）` : '✗ 未开启（mingdao autostart on 开启）');
+    }
+    return;
+  }
+
+  // 工作空间：mingdao workspace add|list|use|path|remove
+  if (opts.prompt[0] === 'workspace') {
+    const sub = opts.prompt[1] || 'list';
+    const name = opts.prompt[2];
+    if (sub === 'add') {
+      if (!name) {
+        console.log('用法：mingdao workspace add <名称> [目录]');
+        process.exitCode = 1;
+        return;
+      }
+      const r = addWorkspace(name, opts.prompt[3]);
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 已登记工作空间 ${r.name} → ${r.dir}`);
+      return;
+    }
+    if (sub === 'remove') {
+      if (!name) {
+        console.log('用法：mingdao workspace remove <名称>');
+        process.exitCode = 1;
+        return;
+      }
+      console.log(removeWorkspace(name) ? `✓ 已移除 ${name}` : '未找到该工作空间');
+      return;
+    }
+    if (sub === 'path') {
+      if (!name) {
+        console.log('用法：mingdao workspace path <名称>');
+        process.exitCode = 1;
+        return;
+      }
+      const p = workspacePath(name);
+      if (p) console.log(p);
+      else {
+        console.error('未找到该工作空间（mingdao workspace list 查看）');
+        process.exitCode = 1;
+      }
+      return;
+    }
+    if (sub === 'use') {
+      if (!name) {
+        console.log('用法：mingdao workspace use <名称>');
+        process.exitCode = 1;
+        return;
+      }
+      const p = workspacePath(name);
+      if (!p) {
+        console.log('未找到该工作空间（mingdao workspace list 查看）');
+        process.exitCode = 1;
+        return;
+      }
+      touchWorkspace(name);
+      console.log(`✓ 工作空间 ${name}：${p}`);
+      console.log(`  快速进入：cd "$(mingdao workspace path ${name})"（建议做成 shell 函数/别名，如 mdw() { cd "$(mingdao workspace path "$1")"; }）`);
+      return;
+    }
+    const ws = listWorkspaces();
+    if (!ws.length) {
+      console.log('暂无工作空间。添加：mingdao workspace add <名称> [目录]');
+    } else {
+      console.log('工作空间（最近使用优先）');
+      for (const w of ws) console.log(`  ${w.name.padEnd(16)} ${w.dir}`);
+      console.log('\n  进入：cd "$(mingdao workspace path <名称>)"');
+    }
+    return;
+  }
+
   // WebUI：mingdao web [端口]
   if (opts.prompt[0] === 'web') {
     const cfg0 = loadConfig();
@@ -677,12 +768,14 @@ async function main() {
   const sandboxLabel =
     sandboxMode === 'off' ? 'off' : detectSandbox() === 'bwrap' ? sandboxMode : `${sandboxMode}（bwrap 缺失，已降级）`;
   const routing = routingConfig(cfg);
+  const wsNow = currentWorkspace(workingDir);
   io.print('');
   io.box(`MingDao 明道 v${pkg.version}`, [
     `模型  ${modelName}${preset?.label ? '（' + preset.label + '）' : ''}`,
     `权限  ${permission.mode} · 密钥  ${keySource}`,
     `沙箱  ${sandboxLabel}${routing ? ` · 路由  ${routing.planner}⇄${routing.executor}` : ''}`,
-  ]);
+    wsNow ? `工作空间  ${wsNow.name}（${wsNow.dir}）` : '',
+  ].filter(Boolean));
   io.print(style('输入问题开始对话 · /help 查看命令 · Tab 补全 · Ctrl+C 中断生成\n', C.dim));
 
   let session = null;

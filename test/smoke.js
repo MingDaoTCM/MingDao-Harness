@@ -539,5 +539,55 @@ const ctx = { cwd: tmp };
   ok('sessions：全文检索 / 片段 / 空关键词');
 }
 
+// ---------- 19. 工作空间 ----------
+{
+  const homeW = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ws-'));
+  const projA = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-wsa-'));
+  process.env.MINGDAO_HOME = homeW;
+  const { addWorkspace, removeWorkspace, workspacePath, touchWorkspace, listWorkspaces, currentWorkspace } = await import(path.join(srcDir, 'workspace.js'));
+  const r1 = addWorkspace('项目A', projA);
+  assert.ok(r1.name === '项目A' && r1.dir === projA);
+  const bad = addWorkspace('', projA);
+  assert.ok(bad.error, '空名称应报错');
+  const bad2 = addWorkspace('不存在的目录', path.join(projA, 'nope'));
+  assert.ok(bad2.error, '目录不存在应报错');
+  assert.equal(workspacePath('项目A'), projA);
+  assert.equal(listWorkspaces().length, 1);
+  assert.ok(touchWorkspace('项目A'));
+  assert.ok(currentWorkspace(projA)?.name === '项目A', '当前目录应识别工作空间');
+  assert.equal(removeWorkspace('项目A'), true);
+  assert.equal(workspacePath('项目A'), null);
+  delete process.env.MINGDAO_HOME;
+  fs.rmSync(homeW, { recursive: true, force: true });
+  fs.rmSync(projA, { recursive: true, force: true });
+  ok('workspace：登记 / 校验 / 列表 / 识别当前 / 移除');
+}
+
+// ---------- 20. 开机自启（隔离 HOME） ----------
+{
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-home-'));
+  const oldHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+  const { enableAutostart, disableAutostart, autostartStatus, autostartPath } = await import(path.join(srcDir, 'autostart.js'));
+  assert.equal(autostartStatus(), false, '初始应为关');
+  assert.equal(enableAutostart(), true);
+  assert.equal(autostartStatus(), true, '开启后应为开');
+  assert.ok(fs.existsSync(autostartPath()), '应存在自启文件');
+  assert.equal(disableAutostart(), true);
+  assert.equal(autostartStatus(), false, '关闭后应为关');
+  process.env.HOME = oldHome;
+  fs.rmSync(fakeHome, { recursive: true, force: true });
+  ok('autostart：开 / 关 / 状态（隔离 HOME）');
+}
+
+// ---------- 21. 桌面通知（静默不抛） ----------
+{
+  const { notify, notifyTaskDone } = await import(path.join(srcDir, 'notify.js'));
+  notify('MingDao', '测试通知'); // 无桌面环境时静默忽略，绝不应抛错
+  notifyTaskDone('测试任务', 'done');
+  notifyTaskDone('失败任务', 'failed');
+  ok('notify：调用不抛错（环境自适应静默）');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);

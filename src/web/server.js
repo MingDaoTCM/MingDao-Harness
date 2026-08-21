@@ -44,6 +44,7 @@ import {
   chainSchedules,
   reconcileSchedules,
 } from '../schedule.js';
+import { enableAutostart, disableAutostart, autostartStatus } from '../autostart.js';
 
 const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html');
 
@@ -293,6 +294,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         sandboxSupported: detectSandbox() !== 'none',
         routing: cfg.routing?.enabled ? cfg.routing : null,
         contextBudget: cfg.contextBudget || 128000,
+        autostart: autostartStatus(),
+        notify: cfg.notify !== false,
         home,
         workingDir,
         mcp: mcpFacade.status(),
@@ -345,11 +348,21 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         next.contextBudget = n;
         cfg.contextBudget = n;
       }
+      let autostartChanged = false;
+      if (body.autostart !== undefined) {
+        autostartChanged = true;
+        const okAuto = body.autostart === true || body.autostart === 'on' ? enableAutostart() : disableAutostart();
+        if (!okAuto) return json(res, 500, { error: '开机自启设置失败' });
+      }
+      if (body.notify !== undefined) {
+        next.notify = body.notify === true || body.notify === 'on';
+        cfg.notify = next.notify;
+      }
       modelName = next.model;
       cfg.model = next.model;
       cfg.permission = next.permission;
       saveConfig(cfg);
-      json(res, 200, { ok: true, model: modelName, permission: cfg.permission, sandbox: cfg.sandbox, routing: cfg.routing?.enabled, contextBudget: cfg.contextBudget });
+      json(res, 200, { ok: true, model: modelName, permission: cfg.permission, sandbox: cfg.sandbox, routing: cfg.routing?.enabled, contextBudget: cfg.contextBudget, autostart: autostartChanged ? autostartStatus() : undefined, notify: cfg.notify !== false });
       return;
     }
     if (req.method === 'GET' && p === '/api/sessions') {

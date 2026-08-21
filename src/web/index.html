@@ -157,6 +157,8 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     </div>
     <div class="cfg-row"><label><input type="checkbox" id="routeChk"> 自动模型路由（规划→pro / 执行→flash）</label></div>
     <div class="cfg-row"><label>上下文预算 tokens <input type="number" id="budgetInput" min="1000" step="1000"></label></div>
+    <div class="cfg-row"><label><input type="checkbox" id="autoStartChk"> 开机自启（登录后自动启动服务器）</label></div>
+    <div class="cfg-row"><label><input type="checkbox" id="notifyChk"> 后台任务完成/失败时桌面通知</label></div>
     <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
     <h4 style="margin:4px 0;color:var(--accent2)">调度队列（定时 / 周期 / 依赖）</h4>
     <div id="schList" style="max-height:170px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
@@ -353,6 +355,8 @@ async function init(){
     $('#sbxHint').textContent=j.sandboxSupported?'':'当前环境未检测到 bubblewrap，readonly/safe 将自动降级为 off';
     $('#routeChk').checked=Boolean(j.routing);
     $('#budgetInput').value=j.contextBudget||128000;
+    $('#autoStartChk').checked=Boolean(j.autostart);
+    $('#notifyChk').checked=j.notify!==false;
     const env = (j.routing?'路由开 · ':'')+(j.sandbox&&j.sandbox!=='off'?(j.sandboxSupported?'沙箱'+j.sandbox:'沙箱降级'):'');
     $('#envBadge').textContent=env; $('#envBadge').style.display=env?'':'none';
   }catch(e){
@@ -396,7 +400,7 @@ $('#schAdd').onclick=async ()=>{
   const j=await r.json().catch(()=>({error:'请求失败'}));
   if(j.ok){ $('#schQuestion').value=''; refreshSchList(); } else { alert(j.error||'添加失败'); }
 };
-$('#cfgSave').onclick=()=>{ applyConfig({sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, contextBudget:Number($('#budgetInput').value)}); $('#cfgModal').style.display='none'; };
+$('#cfgSave').onclick=()=>{ applyConfig({sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}); $('#cfgModal').style.display='none'; };
 async function applyConfig(payload, revertTarget){
   const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const j=await r.json().catch(()=>({error:'请求失败'}));

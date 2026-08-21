@@ -29,7 +29,7 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 - 🗂 **多会话后台任务面板**：`mingdao run` 后台启动任务、`tasks`/`tasks watch`/`tasks kill` 面板管理（独立进程、状态落盘、会话与标题自动生成）
 - 📋 **会话与任务管理**：`--resume` 会话选择器、`/compact` 上下文压缩、`/plan` 计划模式（先计划后执行）、`/init` 生成 AGENTS.md、`/memory` 用户记忆、todo 清单可视化、`undo` 撤销
 - 🎯 **DeepSeek-V4 优化**：内置 `deepseek-v4-pro` / `deepseek-v4-flash` 正式版预设（384K 上下文、温度、输出上限、推理内容流式展示），自动重试与超时
-- 🔌 **开放模型接入**：内置 DeepSeek / OpenAI / Qwen / GLM / Kimi / 自定义 OpenAI 兼容端点，支持自写 Provider 模块（[docs/PROVIDERS.md](docs/PROVIDERS.md)）
+- 🔌 **开放模型接入**：内置 DeepSeek / OpenAI（GPT-5 系列）/ Qwen（qwen3.7-max）/ GLM（GLM-5）/ Kimi（kimi-latest）等当前型号 + 自定义 OpenAI 兼容端点，支持自写 Provider 模块（[docs/PROVIDERS.md](docs/PROVIDERS.md)）
 - 🛡 **权限三档**：`ask`（默认，写文件/命令逐次确认）/ `auto` / `readonly`，另支持工具级 `allow`/`deny` 规则
 - 🔐 **密钥与配置分离**：API Key 存独立凭证库（权限 600、脱敏管理、`mingdao key` 命令族）；`config.json` 与仓库零密钥，任何人安装后配置自己的 Key
 - 💾 **会话持久化**：JSONL 自动保存，`mingdao --continue` 续聊
@@ -171,6 +171,12 @@ mingdao schedule list / remove <id> / pause <id> / resume <id>
 - 长文本+规划关键词（设计/架构/重构/审查…）→ 启发式直接路由到 planner；中等长度走 executor 模型做一次极简分类（约几十 token）；短指令直接执行模型
 - 子代理（task）固定走 executor——主线程规划、子线程执行，省成本又分工明确
 - 会话内 `/route on|off` 开关；路由发生时显示 `⤷ 自动路由 → 模型（原因）`
+
+## 工作空间、自启与通知
+
+- **工作空间**（参考 WorkBuddy 的项目组织）：`mingdao workspace add <名称> [目录]` 登记常做项目，`list/use/path/remove` 管理，`cd "$(mingdao workspace path <名称>)"` 一键进入（可做成 shell 函数 `mdw()`）；TUI 横幅自动显示当前工作空间
+- **开机自启**：`mingdao autostart on`（登录后自动启动 WebUI 服务器，Linux/Windows/macOS 均支持），`off` 关闭，`status` 查看；WebUI 设置面板同款开关
+- **任务通知**：后台任务完成/失败自动弹桌面通知（Linux notify-send / macOS / Windows Popup，零依赖），config `"notify": false` 或 WebUI 设置面板关闭
 
 ## 快速开始
 
