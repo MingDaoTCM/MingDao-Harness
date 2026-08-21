@@ -187,6 +187,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           }
 
           const t0 = Date.now();
+          // 工具开始执行：终端/WebUI 先显示「执行中」状态（Web 端卡片带旋转动画）
+          io.renderToolStart?.(name, args);
           let result;
           try {
             if (isMcp) {

@@ -21,10 +21,18 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
     box(title, lines) {
       send({ type: 'banner', title, lines });
     },
+    // 每轮生成开始/结束：前端据此显示持续的「正在思考…」动态指示
     beginTurn() {},
     endTurn() {},
-    startSpinner() {},
-    stopSpinner() {},
+    startSpinner() {
+      if (!io._turnActive) {
+        io._turnActive = true;
+        send({ type: 'turnStart' });
+      }
+    },
+    stopSpinner() {
+      io._turnActive = false;
+    },
     writeText(t) {
       send({ type: 'text', delta: String(t) });
     },
@@ -36,7 +44,12 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
       send({ type: 'code', code, lang });
     },
     renderTool(name, args, result, durationMs) {
-      send({ type: 'tool', name, args, result, durationMs });
+      send({ type: 'tool', name, args, result, durationMs, seq: io._toolSeq });
+    },
+    // 工具开始执行：前端先渲染带旋转状态的卡片，完成后原地更新（seq 配对）
+    renderToolStart(name, args) {
+      io._toolSeq = (io._toolSeq || 0) + 1;
+      send({ type: 'toolStart', name, args, seq: io._toolSeq });
     },
     renderToolDenied(name, args) {
       send({ type: 'toolDenied', name, args });

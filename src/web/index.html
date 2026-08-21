@@ -314,6 +314,17 @@ function expandableBody(previewHtml, fullHtml){
   b.appendChild(prev); b.appendChild(full); b.appendChild(btn);
   return b;
 }
+const runningTools = new Map();
+function renderToolStartEvent(ev){
+  const msg = newAiMsg();
+  const card=document.createElement('div'); card.className='tool';
+  const ico = {'read':'📄','write':'✏️','edit':'✎','bash':'⚙','grep':'🔎','glob':'🔎','ls':'📁','task':'👥','skill':'🧩','todo':'☑','undo':'↩'}[ev.name]||'🔌';
+  const args = ev.name==='bash'? (ev.args&&ev.args.command):(ev.args&&(ev.args.path||ev.args.pattern||ev.args.name||''))||'';
+  card.innerHTML='<div class="head"><span class="ico">'+ico+'</span><span class="name">'+esc(ev.name)+'</span><span class="args">'+esc(args)+'</span><span class="st" style="animation:blink 1.2s infinite">执行中…</span></div>';
+  msg.appendChild(card);
+  runningTools.set(ev.seq, card);
+  scrollBottom();
+}
 function renderToolEvent(ev){
   const msg = newAiMsg();
   const card=document.createElement('div'); card.className='tool';
@@ -355,6 +366,12 @@ function renderToolEvent(ev){
     const full=badge+out;
     if((String(r.stdout||'').length+String(r.stderr||'').length)>1800) bodyWrap(expandableBody(badge+'<div style="color:var(--faint)">…（输出较长）</div>', full));
     else { const b=document.createElement('div'); b.className='body'; b.innerHTML=full; bodyWrap(b); }
+  }else if(ev.name==='ls'&&r.ok){
+    const out=String(r.output||''); const lines=out.split('\n').filter((x)=>x.trim());
+    const names=lines.slice(0,3).map((x)=>x.trim()).join('、');
+    const prev='<span style="color:var(--dim)">列出 <b>'+lines.length+'</b> 项'+(names?'：'+esc(names):'')+(lines.length>3?' 等':'')+'</span>';
+    if(lines.length>3) bodyWrap(expandableBody(prev, '<pre>'+esc(out)+'</pre>'));
+    else { const b=document.createElement('div'); b.className='body'; b.innerHTML=prev; bodyWrap(b); }
   }else if(r.output){
     const out=String(r.output);
     const max=400;
@@ -442,8 +459,9 @@ async function send(){
   addUser(text||(sentAttachments.map(a=>(a.type==='image'?'🖼 ':'📄 ')+a.name).join(' ')));
   const msg=newAiMsg(); const content=aiContent(msg); let raw='';
   let reason=null; let taskId=null;
-  // 等待首个输出时的可见状态：脉动「正在思考…」
+  // 等待输出时的可见状态：脉动「正在思考…」（每轮生成重新显示）
   const think=document.createElement('div'); think.className='think'; think.textContent='💭 正在思考…'; msg.appendChild(think);
+  const showThink=()=>{ if(!think.parentNode) msg.appendChild(think); };
   const nearBottom=()=> chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 90;
   const scroll=()=>{ if(nearBottom()) chatEl.scrollTop = chatEl.scrollHeight; };
   let pending=false;
@@ -456,9 +474,11 @@ async function send(){
     await handleEvents(resp.body, ev=>{
       if(ev.taskId) taskId=ev.taskId;
       if(ev.type==='text'){ onActivity(); raw+=ev.delta; update(); }
-      else if(ev.type==='reasoning'){ if(!reason){ reason=addReasoning(msg); reason.parentElement.open=true; reason.parentElement.querySelector('summary').classList.add('live'); } reason.textContent+=ev.delta; scroll(); }
+      else if(ev.type==='reasoning'){ if(!reason){ reason=addReasoning(msg); } if(!reason.parentElement.open) reason.parentElement.open=true; reason.parentElement.querySelector('summary').classList.add('live'); reason.textContent+=ev.delta; scroll(); }
+      else if(ev.type==='turnStart'){ showThink(); scroll(); }
+      else if(ev.type==='toolStart'){ onActivity(); update(); renderToolStartEvent(ev); }
       else if(ev.type==='code'){ onActivity(); const pre=document.createElement('pre'); pre.innerHTML='<code>'+highlight(ev.code,ev.lang)+'</code>'; content.appendChild(pre); scroll(); }
-      else if(ev.type==='tool'){ onActivity(); update(); renderToolEvent(ev); }
+      else if(ev.type==='tool'){ onActivity(); update(); const pending=runningTools.get(ev.seq); if(pending){ pending.remove(); runningTools.delete(ev.seq); } renderToolEvent(ev); }
       else if(ev.type==='toolDenied'){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent='✖ 未授权：'+ev.name; msg.appendChild(d); scroll(); }
       else if(ev.type==='banner'){ renderBanner(ev); }
       else if(ev.type==='ask'){ update(); askModal(ev).then(a=>fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:ev.id,answer:a,taskId})}).catch(()=>{})); }

@@ -499,6 +499,13 @@ export function createIO({ quiet = false } = {}) {
         return;
       }
 
+      if (name === 'ls') {
+        // 目录列表只给一行摘要 + 前几项，不整屏刷文件
+        const lines = String(r.output ?? '').split('\n').filter(Boolean);
+        io.print(style(`  📁 列出 ${lines.length} 项` + (lines.length ? '：' + lines.slice(0, 3).map((x) => x.trim()).join('、') + (lines.length > 3 ? ' 等' : '') : '') + ms, C.bold));
+        return;
+      }
+
       if (name === 'skill') {
         // 技能全文只供模型使用，终端只给一行摘要
         const out = String(r.output ?? '');
