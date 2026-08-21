@@ -5,6 +5,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import readline from 'node:readline';
 import { loadConfig, saveConfig, runWizard, ensureHome, mingdaoHome } from './config.js';
 import { modelPreset, PROVIDERS } from './models.js';
 import {
@@ -41,6 +42,7 @@ import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
 import { listSkills } from './skills.js';
 import { libraryList, searchLibrary, installSkill, uninstallSkill, reinstallSkill } from './skill-lib.js';
+import { syncLogin, syncLogout, syncPush, syncPull, syncStatus, syncRemoteList, maybeAutoSync } from './sync.js';
 import { runWebServer } from './web/server.js';
 import { routeTask, routingConfig } from './routing.js';
 import { detectSandbox } from './tools/bash.js';
@@ -85,6 +87,12 @@ const HELP_LINES = [
   ['  mingdao key set <服务商>   交互式保存 API Key（隐藏输入）', null],
   ['  mingdao key remove <服务商> 删除凭证', null],
   ['  mingdao key import         从环境变量导入所有可用 Key', null],
+  ['', null],
+  ['云同步与技能库（跨设备会话同步 / 技能安装）', C.bold + C.yellow],
+  ['  mingdao sync login <用户名> [密码] <服务器地址> 登录云同步（自动注册）', null],
+  ['  mingdao sync push|pull|status|logout  推送 / 拉取 / 状态 / 退出', null],
+  ['  mingdao sync-server [端口] 自建云同步服务器（数据目录 /var/lib/mingdao-sync）', null],
+  ['  mingdao skill search|install|uninstall|update <名称> 技能库（内置 + 线上 registry）', null],
   ['', null],
   ['会话内命令', C.bold + C.yellow],
   ['  /help        显示帮助          /clear   清空上下文', null],
@@ -304,6 +312,9 @@ async function runWorkerTask(id, question, { permission, model }) {
       note,
     });
     if (cfg.notify !== false) notifyTaskDone(question, finalStatus === 'killed' ? 'failed' : finalStatus);
+    try {
+      await maybeAutoSync();
+    } catch {}
     process.exitCode = res.truncated ? 1 : 0;
   } catch (err) {
     finish({ status: 'failed', error: String(err?.message || err) });
@@ -649,6 +660,98 @@ async function main() {
     return;
   }
 
+  // 云同步：mingdao sync login|logout|push|pull|status · 自建服务端 mingdao sync-server [端口]
+  if (opts.prompt[0] === 'sync-server') {
+    const { runSyncServer } = await import('./sync-server.js');
+    await runSyncServer({ port: Number(opts.prompt[1]) || undefined });
+    return;
+  }
+  if (opts.prompt[0] === 'sync') {
+    const sub = opts.prompt[1] || 'status';
+    if (sub === 'login') {
+      const username = opts.prompt[2];
+      if (!username) {
+        console.log('用法：mingdao sync login <用户名> [密码] [服务器地址]（地址默认取已配置项）');
+        process.exitCode = 1;
+        return;
+      }
+      const s0 = syncStatus();
+      const url = opts.prompt[4] || s0.url;
+      if (!url) {
+        console.log('缺少服务器地址：mingdao sync login <用户名> [密码] <http(s)://地址>');
+        process.exitCode = 1;
+        return;
+      }
+      let password = opts.prompt[3];
+      if (!password) {
+        password = await new Promise((resolve) => {
+          const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+          const orig = rl._writeToOutput;
+          rl._writeToOutput = () => {};
+          rl.question('密码（至少 8 位）：', (a) => {
+            if (typeof orig === 'function') rl._writeToOutput = orig;
+            rl.close();
+            resolve(a.trim());
+          });
+        });
+      }
+      const r = await syncLogin({ url, username, password, deviceName: opts.prompt[5] });
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 已登录 ${r.username}（设备 ${r.deviceName}）→ ${r.url}`);
+      console.log('  推送：mingdao sync push · 拉取：mingdao sync pull · 会话结束自动同步（config.sync.auto）');
+      return;
+    }
+    if (sub === 'logout') {
+      syncLogout();
+      console.log('✓ 已退出同步（配置保留，凭证已清除）');
+      return;
+    }
+    if (sub === 'push') {
+      const r = await syncPush(opts.prompt[2]);
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 已推送 ${r.pushed.length} 个会话${r.conflicts.length ? `，远端 ${r.conflicts.length} 个不同版本已备份为 .server-*（本地覆盖远端）` : ''}`);
+      return;
+    }
+    if (sub === 'pull') {
+      const r = await syncPull(opts.prompt[2]);
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 已拉取 ${r.pulled.length} 个会话${r.conflicts.length ? `，${r.conflicts.length} 个与本地不同：远端内容已存为 .remote-*（本地保留）` : ''}`);
+      return;
+    }
+    const st = syncStatus();
+    if (!st.configured) {
+      console.log('未配置云同步。登录：mingdao sync login <用户名> [密码] <http(s)://服务器地址>');
+      return;
+    }
+    console.log(`同步服务器  ${st.url}`);
+    console.log(`账号        ${st.username || '（未登录）'} · 设备 ${st.deviceName || '（未登录）'}`);
+    console.log(`状态        ${st.loggedIn ? '✓ 已登录' : '✗ 未登录'} · 自动同步 ${st.auto ? '开' : '关'}`);
+    if (st.loggedIn) {
+      const remote = await syncRemoteList();
+      if (remote.error) {
+        console.log(`远端会话    ${remote.error}`);
+      } else {
+        console.log(`远端会话    ${remote.sessions.length} 个`);
+        for (const s of remote.sessions.slice(0, 10)) {
+          console.log(`  ${s.name.padEnd(42)} ${new Date(s.mtime).toLocaleString()} · ${(s.size / 1024).toFixed(1)}KB`);
+        }
+      }
+    }
+    return;
+  }
+
   // 技能库：mingdao skill list|search|install|uninstall|update
   if (opts.prompt[0] === 'skill') {
     const sub = opts.prompt[1] || 'list';
@@ -846,6 +949,9 @@ async function main() {
       }
       try {
         await finalizeSession({ cfg, provider, model: titleModel(cfg, modelName), home, workingDir, messages, turns: 1, lastText: res.text || '' });
+      } catch {}
+      try {
+        await maybeAutoSync();
       } catch {}
       if (jsonMode) {
         console.log(
@@ -1329,6 +1435,9 @@ async function main() {
     } catch {}
     io.stopSpinner();
   }
+  try {
+    await maybeAutoSync();
+  } catch {}
   io.print('再见，明道与你同行。');
   io.close();
 }

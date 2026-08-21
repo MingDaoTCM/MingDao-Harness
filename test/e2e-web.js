@@ -364,6 +364,31 @@ let base = await startWeb(work1);
   ok('技能库 API：列表 / 搜索 / 安装 / 卸载');
 }
 
+// ---------- 11. 云同步 API：登录 / 状态 / 推送 / 退出 ----------
+{
+  const { runSyncServer } = await import(path.join(root, 'src', 'sync-server.js'));
+  const syncDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-websync-'));
+  const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: syncDir });
+  await new Promise((r) => srv.once('listening', r));
+  const syncUrl = `http://127.0.0.1:${srv.address().port}`;
+  const login = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'login', url: syncUrl, username: 'webuser', password: 'password123', deviceName: 'e2e-web' }) })).json();
+  assert.equal(login.ok, true, login.error);
+  const st = await (await fetch(base + '/api/sync')).json();
+  assert.ok(st.loggedIn && st.username === 'webuser' && st.url === syncUrl, '状态应显示已登录');
+  const push = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'push' }) })).json();
+  assert.equal(push.ok, true, push.error);
+  assert.ok(typeof push.pushed === 'number', '应返回推送数量');
+  const bad = await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'login', url: syncUrl, username: 'webuser', password: 'short' }) });
+  assert.equal(bad.status, 400, '弱密码应 400');
+  const out = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'logout' }) })).json();
+  assert.equal(out.ok, true);
+  const html = await (await fetch(base + '/')).text();
+  assert.ok(html.includes('syncLogin') && html.includes('syncAutoChk'), '前端应包含云同步面板');
+  srv.close();
+  fs.rmSync(syncDir, { recursive: true, force: true });
+  ok('云同步 API：登录 / 状态 / 推送 / 退出');
+}
+
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();

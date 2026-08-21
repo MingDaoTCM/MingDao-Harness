@@ -787,5 +787,65 @@ const ctx = { cwd: tmp };
   ok('skill-registry：远端搜索 / 安装 / 缓存与强制刷新 / 未知技能');
 }
 
+// ---------- 26. 云同步（服务端 + 客户端闭环） ----------
+{
+  const homeA = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sync-a-'));
+  const homeB = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sync-b-'));
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sync-data-'));
+  const { runSyncServer } = await import(path.join(srcDir, 'sync-server.js'));
+  const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir });
+  await new Promise((r) => srv.once('listening', r));
+  const syncPort = srv.address().port;
+  const { syncLogin, syncPush, syncPull, syncRemoteList, syncStatus, syncLogout } = await import(path.join(srcDir, 'sync.js'));
+
+  // 设备 A 注册登录 + 推送
+  process.env.MINGDAO_HOME = homeA;
+  const la = await syncLogin({ url: `http://127.0.0.1:${syncPort}`, username: 'smoketest', password: 'password123', deviceName: '设备A' });
+  assert.equal(la.ok, true, la.error);
+  fs.mkdirSync(path.join(homeA, 'sessions'), { recursive: true });
+  fs.writeFileSync(path.join(homeA, 'sessions', 'sync-smoke.jsonl'), '{"role":"user","content":"你好"}\n');
+  const pushA = await syncPush();
+  assert.ok(pushA.ok && pushA.pushed.includes('sync-smoke.jsonl'), '推送应成功');
+  const listA = await syncRemoteList();
+  assert.ok(listA.sessions.some((s) => s.name === 'sync-smoke.jsonl'), '远端清单应包含会话');
+
+  // 设备 B 登录 + 拉取
+  process.env.MINGDAO_HOME = homeB;
+  const lb = await syncLogin({ url: `http://127.0.0.1:${syncPort}`, username: 'smoketest', password: 'password123', deviceName: '设备B' });
+  assert.equal(lb.ok, true, lb.error);
+  const pullB = await syncPull();
+  assert.ok(pullB.pulled.includes('sync-smoke.jsonl'), '拉取应成功');
+  assert.ok(fs.readFileSync(path.join(homeB, 'sessions', 'sync-smoke.jsonl'), 'utf8').includes('你好'), '内容应一致');
+
+  // 冲突：B 改后推送（正常编辑流，无冲突）；A 不知情再改推送（远端已被 B 改过 → 冲突备份）；A 继续本地改后拉取（→ remote 副本）
+  fs.appendFileSync(path.join(homeB, 'sessions', 'sync-smoke.jsonl'), '{"role":"assistant","content":"B改"}\n');
+  const pushB = await syncPush();
+  assert.ok(pushB.conflicts.length === 0, 'B 常规编辑后推送不应报冲突');
+  process.env.MINGDAO_HOME = homeA;
+  fs.appendFileSync(path.join(homeA, 'sessions', 'sync-smoke.jsonl'), '{"role":"assistant","content":"A改"}\n');
+  const pushA2 = await syncPush();
+  assert.ok(pushA2.conflicts.includes('sync-smoke.jsonl'), 'A 推远端被 B 改过的会话应报冲突并备份');
+  assert.ok(fs.readdirSync(path.join(homeA, 'sessions')).some((f) => f.includes('.server-')), '应生成 .server- 备份');
+  fs.appendFileSync(path.join(homeA, 'sessions', 'sync-smoke.jsonl'), '{"role":"assistant","content":"A再改"}\n');
+  const pullA2 = await syncPull();
+  assert.ok(pullA2.conflicts.includes('sync-smoke.jsonl'), '本地有未推送改动时 pull 应报冲突');
+  assert.ok(fs.readdirSync(path.join(homeA, 'sessions')).some((f) => f.includes('.remote-')), '应生成 .remote- 副本');
+
+  // 错误路径与状态
+  const badPass = await syncLogin({ url: `http://127.0.0.1:${syncPort}`, username: 'smoketest', password: 'wrong-password', deviceName: 'x' });
+  assert.ok(badPass.error && badPass.error.includes('密码'), '错误密码应友好提示');
+  assert.ok(syncStatus().loggedIn, '状态应显示已登录');
+  const out = syncLogout();
+  assert.equal(out.ok, true);
+  assert.ok(!syncStatus().loggedIn, '退出后应未登录');
+
+  srv.close();
+  delete process.env.MINGDAO_HOME;
+  fs.rmSync(homeA, { recursive: true, force: true });
+  fs.rmSync(homeB, { recursive: true, force: true });
+  fs.rmSync(dataDir, { recursive: true, force: true });
+  ok('sync：注册登录 / 推送拉取 / 双端冲突备份 / 退出 / 错误路径');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);

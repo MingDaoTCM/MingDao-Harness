@@ -6,7 +6,7 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 
 ## 版本策略
 
-遵循语义化版本（SemVer）且保持克制：**修复 → 末位 +1**，**新子系统/大功能 → 中位 +1**，**首个 npm 稳定发布（API 冻结）→ 1.0.0**。正式上线前版本稳定在 **0.1.x**（补丁号递增，当前 0.1.19）——诚实反映「未正式发布、接口可能调整」的状态。
+遵循语义化版本（SemVer）且保持克制：**修复 → 末位 +1**，**新子系统/大功能 → 中位 +1**，**首个 npm 稳定发布（API 冻结）→ 1.0.0**。正式上线前版本稳定在 **0.1.x**（补丁号递增，当前 0.1.20）——诚实反映「未正式发布、接口可能调整」的状态。
 
 ## 特性
 
@@ -38,6 +38,7 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 - 🛡 **权限三档**：`ask`（默认，写文件/命令逐次确认）/ `auto` / `readonly`，另支持工具级 `allow`/`deny` 规则
 - 🔐 **密钥与配置分离**：API Key 存独立凭证库（权限 600、脱敏管理、`mingdao key` 命令族）；`config.json` 与仓库零密钥，任何人安装后配置自己的 Key
 - 💾 **会话持久化**：JSONL 自动保存，`mingdao --continue` 续聊
+- ☁️ **云同步**：跨设备会话同步（零依赖服务端 `mingdao sync-server` + 账号/设备 token + 冲突自动备份，WebUI 面板一键登录/同步，会话结束自动推送）
 - 📝 **上下文预算管理**：精确 tokenizer 计数 + 尾部保留裁剪（配对完整性清洗）
 - 📋 **AGENTS.md**：自动读取工作目录的 AGENTS.md 注入系统提示（Claude Code / Codex 约定）
 - 🧩 **可编程**：核心能力以 ESM 库形式导出（`import { createAgent } from 'mingdao-harness'`）
@@ -305,6 +306,31 @@ mingdao skill update sql         # 按来源元数据重装（更新）
 
 WebUI 设置面板亦有「技能库」区块：搜索、一键安装/卸载，与 CLI 共享同一用户级目录。
 
+## 云同步（跨设备会话同步）
+
+**服务端**（一台 Linux 服务器即可，零依赖）：
+
+```bash
+sudo mkdir -p /var/lib/mingdao-sync
+sudo node src/sync-server.js 443        # 或：mingdao sync-server 443
+# 推荐 HTTPS：SYNC_CERT=/etc/letsencrypt/live/域名/fullchain.pem SYNC_KEY=…/privkey.pem
+# systemd 示例见 docs/（ExecStart=node /opt/mingdao/sync-server.js 443）
+```
+
+**客户端**：
+
+```bash
+mingdao sync login <用户名> <密码> https://服务器地址   # 首次自动注册 + 设备配对
+mingdao sync push                                     # 推送本机全部会话
+mingdao sync pull                                     # 拉取远端会话
+mingdao sync status                                   # 状态与远端清单
+```
+
+- **多设备**：同账号在不同设备登录即为新设备（`/api/devices` 可查设备列表）；WebUI 设置面板亦有同步区块（登录/立即同步/自动同步开关）
+- **冲突绝不丢数据**：只有远端被其他设备改过才算冲突——push 前把远端备份为 `.server-*`，pull 时把远端存为 `.remote-*`，本地内容永远保留
+- **自动同步**：会话结束静默推送（`config.sync.auto: false` 关闭）；失败不打扰对话
+- **安全**：密码加盐哈希存储、设备 token 48 位随机（服务端只存哈希）、会话名白名单、单文件 20MB 上限、凭证仍走独立 600 权限凭证库；公网部署务必 HTTPS
+
 ## 接入其他模型
 
 - **OpenAI 兼容端点**（覆盖绝大多数模型）：`mingdao init` 选 `custom` 填地址即可；
@@ -348,6 +374,8 @@ src/
   config.js          配置与向导（不含密钥）
   credentials.js     独立凭证库（Key 存储/解析/脱敏，权限 600）
   session.js         JSONL 会话持久化（预览/选择器）
+  sync.js            云同步客户端（登录/推拉/冲突备份/自动同步）
+  sync-server.js     云同步服务端（账号/设备 token/会话存储，零依赖）
   ui.js              TUI（流式渲染/高亮/diff/补全/中断/费用）
   web/               WebUI（server.js + web-io.js + index.html，零依赖 HTTP+SSE）
   index.js           公共 API 导出

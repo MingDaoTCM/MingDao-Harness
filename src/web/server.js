@@ -51,6 +51,7 @@ import { currentWorkspace, listWorkspaces, addWorkspace, removeWorkspace, rename
 import { loadMemory, writeMemory, dedupeMemory } from '../memory.js';
 import { recordUsage, listCacheStats, summarizeCacheStats } from '../cachestats.js';
 import { presetList, buildPreset } from '../mcp-presets.js';
+import { syncStatus, syncLogin, syncLogout, syncPush, syncPull, syncRemoteList, maybeAutoSync } from '../sync.js';
 
 const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html');
 
@@ -227,6 +228,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       appendMessages(session.file, messages.slice(persistedBefore));
       io.printUsageLine({ modelName, usage: r.usage, durationMs: r.durationMs });
       recordUsage(modelName, r.usage);
+      maybeAutoSync().catch(() => {});
       // 新会话自动标题（可配置关闭）
       if (isNew && cfg.autoTitle !== false && r.text) {
         try {
@@ -377,6 +379,10 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       if (body.notify !== undefined) {
         next.notify = body.notify === true || body.notify === 'on';
         cfg.notify = next.notify;
+      }
+      if (body.syncAuto !== undefined) {
+        cfg.sync = cfg.sync || {};
+        cfg.sync.auto = body.syncAuto === true || body.syncAuto === 'on';
       }
       modelName = next.model;
       cfg.model = next.model;
@@ -754,7 +760,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         ? libraryList().filter((s) => s.name.includes(q) || (s.description || '').includes(q))
         : libraryList();
       const { searchRegistry } = await import('../skill-registry.js');
-      const remote = await searchRegistry(q || '', { force });
+      const remote = await searchRegistry(q || '', { force, allowNetwork: force });
       const localNames = new Set(local.map((s) => s.name));
       const registryEntries = remote.skills
         ? remote.skills.filter((s) => !localNames.has(s.name)).map((s) => ({ ...s, dir: null }))
@@ -782,6 +788,39 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         return json(res, 200, { ok: true, name: r.name });
       }
       return json(res, 400, { error: '未知操作：install|uninstall' });
+    }
+    if (req.method === 'GET' && p === '/api/sync') {
+      const st = syncStatus();
+      let remote = null;
+      if (st.loggedIn) {
+        const r = await syncRemoteList();
+        remote = r.ok ? { sessions: r.sessions.slice(0, 50) } : { error: r.error };
+      }
+      json(res, 200, { ok: true, ...st, remote });
+      return;
+    }
+    if (req.method === 'POST' && p === '/api/sync') {
+      const body = await readBody(req);
+      if (body.action === 'login') {
+        const r = await syncLogin({ url: body.url, username: body.username, password: body.password, deviceName: body.deviceName });
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true, ...r });
+      }
+      if (body.action === 'logout') {
+        syncLogout();
+        return json(res, 200, { ok: true });
+      }
+      if (body.action === 'push') {
+        const r = await syncPush(body.name);
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true, pushed: r.pushed.length, conflicts: r.conflicts });
+      }
+      if (body.action === 'pull') {
+        const r = await syncPull(body.name);
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true, pulled: r.pulled.length, conflicts: r.conflicts });
+      }
+      return json(res, 400, { error: '未知操作：login|logout|push|pull' });
     }
     // PWA 资源
     if (req.method === 'GET' && p === '/manifest.webmanifest') {

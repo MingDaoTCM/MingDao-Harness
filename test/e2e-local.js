@@ -355,6 +355,35 @@ function ok(name) {
   ok('skill CLI：搜索 / 安装 / 列表 / 卸载闭环');
 }
 
+// ---------- 14. 云同步 CLI：登录 / 推送 / 拉取 / 状态 / 退出 ----------
+{
+  const { runSyncServer } = await import(path.join(root, 'src', 'sync-server.js'));
+  const syncDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-clisync-'));
+  const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: syncDir });
+  await new Promise((r) => srv.once('listening', r));
+  const syncUrl = `http://127.0.0.1:${srv.address().port}`;
+  const l1 = await runCli(['sync', 'login', 'cli-user', 'password123', syncUrl]);
+  assert.equal(l1.code, 0, l1.err + l1.out);
+  assert.ok(l1.out.includes('已登录'), '登录应成功');
+  const p1 = await runCli(['sync', 'push']);
+  assert.equal(p1.code, 0, p1.err + p1.out);
+  assert.ok(p1.out.includes('已推送'), '推送应成功');
+  const st1 = await runCli(['sync', 'status']);
+  assert.equal(st1.code, 0);
+  assert.ok(st1.out.includes('已登录') && st1.out.includes('远端会话'), '状态应显示已登录与远端会话');
+  const p2 = await runCli(['sync', 'pull']);
+  assert.equal(p2.code, 0, p2.err + p2.out);
+  assert.ok(p2.out.includes('已拉取'), '拉取应成功');
+  const o1 = await runCli(['sync', 'logout']);
+  assert.ok(o1.out.includes('已退出'), '退出应成功');
+  const bad1 = await runCli(['sync', 'login', 'cli-user', 'wrongpass', syncUrl]);
+  assert.equal(bad1.code, 1);
+  assert.ok(bad1.out.includes('密码'), '错误密码应提示');
+  srv.close();
+  fs.rmSync(syncDir, { recursive: true, force: true });
+  ok('sync CLI：登录 / 推送 / 拉取 / 状态 / 退出');
+}
+
 server.close();
 fs.rmSync(home, { recursive: true, force: true });
 fs.rmSync(work, { recursive: true, force: true });
