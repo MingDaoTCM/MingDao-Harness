@@ -537,8 +537,8 @@ async function init(){
     $('#budgetInput').value=j.contextBudget||128000;
     $('#autoStartChk').checked=Boolean(j.autostart);
     $('#notifyChk').checked=j.notify!==false;
-    const env = (j.routing?'路由开 · ':'')+(j.sandbox&&j.sandbox!=='off'?(j.sandboxSupported?'沙箱'+j.sandbox:'沙箱降级'):'');
-    $('#envBadge').textContent=env; $('#envBadge').style.display=env?'':'none';
+    const env = ('路由'+(j.routing?'开':'关')+' · 沙箱'+((j.sandbox&&j.sandbox!=='off')?(j.sandboxSupported?j.sandbox:'降级'):'off'));
+    $('#envBadge').textContent=env; $('#envBadge').style.display='';
   }catch(e){
     const ms=$('#modelSel'); if(!ms.options.length){ const o=document.createElement('option'); o.textContent='加载失败，刷新重试'; ms.appendChild(o); }
   }
@@ -745,8 +745,8 @@ async function reloadModels(){
       ms.appendChild(og);
     }
     if(!(j.models||[]).length){ const o=document.createElement('option'); o.value=j.model; o.textContent=j.model; ms.appendChild(o); }
-    const env=(j.routing?'路由开 · ':'')+(j.sandbox&&j.sandbox!=='off'?(j.sandboxSupported?'沙箱'+j.sandbox:'沙箱降级'):'');
-    $('#envBadge').textContent=env; $('#envBadge').style.display=env?'':'none';
+    const env=('路由'+(j.routing?'开':'关')+' · 沙箱'+((j.sandbox&&j.sandbox!=='off')?(j.sandboxSupported?j.sandbox:'降级'):'off'));
+    $('#envBadge').textContent=env; $('#envBadge').style.display='';
   }catch(e){}
 }
 async function refreshModelsCfg(){

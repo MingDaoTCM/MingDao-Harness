@@ -1,6 +1,6 @@
 {
   "name": "mingdao-harness",
-  "version": "0.1.34",
+  "version": "0.1.35",
   "description": "明道 MingDao —— 开源智能体框架（Agent Harness）。零依赖、开箱即用，针对 DeepSeek-V4 系列优化，开放主流模型接入。",
   "type": "module",
   "bin": {
