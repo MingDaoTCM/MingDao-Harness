@@ -13,7 +13,8 @@ const out = path.join(root, 'assets', 'tokenizer-data.json.gz');
 
 const j = JSON.parse(fs.readFileSync(src, 'utf8'));
 
-// merges: ["a b", ...] —— 每对按 rank 顺序，转成字节 latin1 字符串对
+// merges: ["a b", ...] —— 每对按 rank 顺序拆分。保持 HF 原始表示（GPT-2 byte_to_unicode
+// 映射后的可打印字符），不做二次转换；运行时 countPiece 用同一映射表把字节转成该表示后查表。
 const merges = (j.model?.merges || []).map((m) => {
   const idx = m.indexOf(' ');
   return [m.slice(0, idx), m.slice(idx + 1)];

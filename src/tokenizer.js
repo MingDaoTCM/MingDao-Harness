@@ -9,8 +9,54 @@ import path from 'node:path';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 
-// GPT-4 家族字节级 BPE 的预分词正则（DeepSeek tokenizer 同源）
-const PRETOK = /'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+/gu;
+// DeepSeek 官方预分词（tokenizer.json 的 Split 序列，与 HF tokenizers 语义一致）：
+//   1. \p{N}{1,3}               数字按 1–3 位切成独立段
+//   2. [一-龥぀-ゟ゠-ヿ]+        中日韩表意文字/假名连续段
+//   3. 标点引导的词｜字母段（可带一个前导非字母）｜标点串｜换行｜空白
+// 每级 Split(Isolated) 对上一级全部片段再切分，匹配段与间隔段都保留为独立预分词。
+const SPLIT_RES = [
+  /\p{N}{1,3}/gu,
+  /[一-龥぀-ゟ゠-ヿ]+/gu,
+  /[!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+/gu,
+];
+
+function pretokenize(text) {
+  let pieces = [text];
+  for (const re of SPLIT_RES) {
+    const next = [];
+    for (const p of pieces) {
+      let last = 0;
+      for (const m of p.matchAll(re)) {
+        if (m.index > last) next.push(p.slice(last, m.index));
+        if (m[0]) next.push(m[0]);
+        last = m.index + m[0].length;
+      }
+      if (last < p.length) next.push(p.slice(last));
+    }
+    pieces = next;
+  }
+  return pieces;
+}
+
+// GPT-2 字节到 Unicode 的映射表（byte_to_unicode）。
+// HF tokenizer.json 的 merges/vocab 使用映射后的可打印字符表示：
+// 可打印区间（0x21-0x7E、0xA1-0xAC、0xAE-0xFF）映射为自身，
+// 其余字节（控制符、空格、0x7F-0xA0、0xAD）依次映射到 U+0100+n。
+// 运行时符号必须与词表同表示，否则 73% 的 merge 对（含映射字符）永远匹配不到，
+// 汉字会退化为逐字节计数（如「的」被计为 3 tokens 而非 1）。
+const BYTE_TO_UNICODE = (() => {
+  const m = new Array(256);
+  const self = (b) => (b >= 0x21 && b <= 0x7e) || (b >= 0xa1 && b <= 0xac) || (b >= 0xae);
+  let n = 0;
+  for (let b = 0; b < 256; b++) {
+    if (self(b)) m[b] = String.fromCharCode(b);
+    else {
+      m[b] = String.fromCharCode(256 + n);
+      n += 1;
+    }
+  }
+  return m;
+})();
 
 let data = null;
 let loadError = null;
@@ -58,7 +104,7 @@ export function heuristicTokens(text) {
 function countPiece(piece, d) {
   const bytes = Buffer.from(piece, 'utf8');
   const syms = [];
-  for (const b of bytes) syms.push(String.fromCharCode(b));
+  for (const b of bytes) syms.push(BYTE_TO_UNICODE[b]); // 与词表同表示（GPT-2 字节映射）
   if (syms.length <= 1) return syms.length;
 
   const alive = new Uint8Array(syms.length).fill(1);
@@ -173,12 +219,7 @@ export function countTokens(text, modelName) {
       if (i !== -1 && i < next) next = i;
     }
     const piece = s.slice(pos, next);
-    const matches = piece.match(PRETOK);
-    if (matches) {
-      for (const m of matches) total += countPiece(m, d);
-    } else {
-      total += countPiece(piece, d);
-    }
+    for (const m of pretokenize(piece)) total += countPiece(m, d);
     pos = next;
   }
   return total;

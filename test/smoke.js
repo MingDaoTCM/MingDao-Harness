@@ -492,19 +492,34 @@ const ctx = { cwd: tmp };
 // ---------- 14. 精确 tokenizer ----------
 {
   const { countTokens, heuristicTokens } = await import(path.join(srcDir, 'tokenizer.js'));
-  const en = countTokens('Hello world', 'deepseek-v4-flash');
-  assert.ok(en >= 1 && en <= 4, `英文短句 token 数应在合理范围（得到 ${en}）`);
-  const zh = countTokens('你好世界', 'deepseek-v4-flash');
-  assert.ok(zh >= 2 && zh <= 10, `中文短词 token 数应在合理范围（得到 ${zh}）`);
-  // 混合长文本：与真实 API 口径一致（真实系统提示实测 1344 字符 ≈ 2052 token，比率 < 1.7）
+  // 黄金值断言：全部数值取自 DeepSeek-V3 官方 tokenizer.json 用 HF tokenizers 库的真实输出，
+  // 覆盖字节映射（汉字必须合并成词表单 token，防 0x7F-0xA0 字节永不合并的回归）、
+  // 预分词（数字 1-3 位切段/标点引导词/空白与换行）、代码与中英混合长文本。
+  const GOLDEN = [
+    ['的', 1], // 最常见汉字：单 token（字节映射修复的探针，曾退化为 3）
+    ['你好', 1],
+    ['人工智能', 1],
+    ['你好世界', 2],
+    ['hello', 1],
+    ['Hello world', 2],
+    ["I don't think it's ready", 7],
+    ['1234567890 3.14 42', 10], // 数字 1–3 位切段
+    ['价格：¥1,299.00（含税）', 12],
+    ['emoji 🎉🚀 与 ©® 符号', 13],
+    ['const arr = [1, 22, 333, 4444];  // 注释 mixed 中文', 23],
+    ['前<｜begin▁of▁sentence｜>后', 3], // 特殊 token 嵌入正文：自身计 1
+  ];
+  for (const [s, want] of GOLDEN) {
+    assert.equal(countTokens(s, 'deepseek-v4-flash'), want, `黄金值不符：${JSON.stringify(s)} 应 ${want} tokens`);
+  }
+  // 混合长文本：官方口径 37 tokens/遍 × 150
   const long = '人工智能正在改变世界，MingDao 让每个人都拥有自己的智能体。MCP 连接外部工具，tokenizer 精确计量，WebUI 开箱即用。'.repeat(150);
-  const lt = countTokens(long, 'deepseek-v4-pro');
-  assert.ok(lt > long.length * 0.5 && lt < long.length * 2.0, `长文本计数应在真实口径区间（${lt}/${long.length}）`);
+  assert.equal(countTokens(long, 'deepseek-v4-pro'), 5550, '长文本计数应与官方 tokenizer 一致');
   // 非 deepseek 模型回退启发式
   assert.equal(countTokens('hello', 'gpt-4o'), heuristicTokens('hello'));
   // 特殊 token 记 1
   assert.equal(countTokens('<｜begin▁of▁sentence｜>', 'deepseek-v4-flash'), 1);
-  ok('tokenizer：词表计数 / 回退启发式 / 特殊 token');
+  ok('tokenizer：官方黄金值 12 组 / 长文本 / 回退启发式 / 特殊 token');
 }
 
 // ---------- 15. MCP 客户端 ----------
