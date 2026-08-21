@@ -135,7 +135,6 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
   <select id="sessions" title="历史会话"><option value="">历史会话</option></select>
   <button id="tasksBtn" title="任务面板">任务</button><button id="sessMgrBtn" title="管理会话（重命名/删除）">✎</button>
   <button id="newChat">新对话</button>
-  <button id="stopBtn" class="danger" style="display:none">■ 中断</button>
 </header>
 <aside id="tasksPanel" style="display:none">
   <div class="tp-head">任务面板 <span id="tpCount"></span><button id="tpClose" style="float:right">✕</button></div>
@@ -264,7 +263,8 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 </div>
 <script>
 const $ = (s) => document.querySelector(s);
-const chatEl = $('#chat'), input = $('#input'), sendBtn = $('#sendBtn'), stopBtn = $('#stopBtn');
+const chatEl = $('#chat'), input = $('#input'), sendBtn = $('#sendBtn');
+let generating = false; // 生成中：发送按钮复用为停止按钮
 let currentSession = null, thinking = null;
 
 function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
@@ -455,6 +455,7 @@ function renderAttachments(){
 }
 
 async function send(){
+  if(generating){ abort(); return; } // 生成中：同一按钮承担停止职责
   const text=input.value.trim(); if(!text && !attachments.length) return;
   input.value=''; input.style.height='44px';
   const payload={message:text,file:currentSession};
@@ -502,8 +503,10 @@ async function updateTasksPanel(){
   const r=await fetch('/api/tasks').catch(()=>null); if(!r) return;
   const j=await r.json(); const list=$('#tpList'); list.innerHTML='';
   $('#tpCount').textContent='（'+j.running+' 运行中 / 上限 '+j.maxConcurrent+'）';
-  // 有任务在生成时显示「■ 中断」停止键（点击中止全部运行中任务）
-  stopBtn.style.display = j.running > 0 ? '' : 'none';
+  // 发送按钮复用：生成中变「■ 停止」（点击中止全部运行中任务）
+  generating = j.running > 0;
+  sendBtn.textContent = generating ? '■ 停止' : '发送';
+  sendBtn.className = generating ? 'danger' : 'primary';
   for(const t of j.tasks){
     const div=document.createElement('div'); div.className='tp-item';
     const dot = t.status==='running'?'tp-run':(t.status==='done'?'tp-done':'tp-bad');
@@ -900,7 +903,7 @@ $('#modelSel').addEventListener('change', e=>{ applyConfig({model:e.target.value
 $('#permSel').addEventListener('change', e=>{ applyConfig({permission:e.target.value}, e.target); });
 async function loadSession(file){ currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } scrollBottom(); }
 
-sendBtn.onclick=send; stopBtn.onclick=abort;
+sendBtn.onclick=send;
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
 input.addEventListener('input',()=>{ input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; });
 $('#newChat').onclick=()=>{ currentSession=null; chatEl.innerHTML=''; refreshSessions(); };
