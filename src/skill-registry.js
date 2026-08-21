@@ -62,17 +62,21 @@ async function fetchText(url, timeoutMs = 20000) {
   }
 }
 
-// 取远端索引（缓存优先；force 强制刷新）
-export async function fetchRegistryIndex({ force = false } = {}) {
-  const cached = force ? null : loadCache();
-  if (cached && Date.now() - cached.fetchedAt < TTL_MS && cached.data?.skills) {
-    return { data: cached.data, host: cached.host, fromCache: true };
+// 取远端索引（缓存优先；force 强制刷新；allowNetwork=false 时只读缓存，用于 WebUI 常规加载避免阻塞）
+export async function fetchRegistryIndex({ force = false, allowNetwork = true } = {}) {
+  const cached = loadCache();
+  const fresh = cached && Date.now() - cached.fetchedAt < TTL_MS;
+  if (!force && (fresh || !allowNetwork)) {
+    if (cached?.data?.skills) return { data: cached.data, host: cached.host, fromCache: true, stale: !fresh };
+    if (!allowNetwork) {
+      return { error: '尚无线上技能库缓存（点击「刷新线上」拉取，或设置 MINGDAO_REGISTRY_URL 指向自建 registry）' };
+    }
   }
   const { hosts } = registryBase();
   let lastErr = null;
   for (const host of hosts) {
     try {
-      const text = await fetchText(`${host}/registry/index.json`);
+      const text = await fetchText(`${host}/registry/index.json`, 8000);
       const data = JSON.parse(text);
       if (!Array.isArray(data.skills)) throw new Error('索引缺少 skills 数组');
       saveCache(data, host);
@@ -87,8 +91,8 @@ export async function fetchRegistryIndex({ force = false } = {}) {
 }
 
 // 远端搜索（合并展示：name/description/source/installed）
-export async function searchRegistry(kw, { force = false } = {}) {
-  const r = await fetchRegistryIndex({ force });
+export async function searchRegistry(kw, { force = false, allowNetwork = true } = {}) {
+  const r = await fetchRegistryIndex({ force, allowNetwork });
   if (r.error) return { error: r.error };
   const k = String(kw || '').trim().toLowerCase();
   const installed = installedUserSkillNames();
