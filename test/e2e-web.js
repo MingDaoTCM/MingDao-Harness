@@ -19,11 +19,15 @@ function ok(name) {
 
 // ---------- mock Provider ----------
 let requestCount = 0;
+let lastPayload = null;
+let payloadLog = [];
 const mock = http.createServer((req, res) => {
   let body = '';
   req.on('data', (d) => (body += d));
   req.on('end', () => {
     const parsed = JSON.parse(body);
+    lastPayload = parsed;
+    payloadLog.push(parsed);
     const sse = (payload) => {
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       res.write(`data: ${JSON.stringify(payload)}\n\n`);
@@ -100,10 +104,11 @@ async function startWeb(workDir) {
 
 // 读取一条聊天 SSE 流；遇到 ask 事件时调用 answerFn(id)（返回答案）
 async function chatOnce(base, message, answerFn) {
+  const payload = typeof message === 'string' ? { message } : message;
   const resp = await fetch(base + '/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(payload),
   });
   assert.equal(resp.status, 200, 'chat 应返回 200');
   const events = [];
@@ -423,6 +428,34 @@ let base = await startWeb(work1);
   srv.close();
   fs.rmSync(syncDir, { recursive: true, force: true });
   ok('云同步 API：登录 / 状态 / 推送 / 退出');
+}
+
+// ---------- 12. 附件：文本内联 / 视觉门控 / 视觉模型图文数组 ----------
+{
+  requestCount = 0;
+  const ev1 = await chatOnce(base, { message: '总结这份文件', attachments: [{ type: 'text', name: 'notes.txt', content: '要点一\n要点二' }] });
+  assert.ok(ev1.some((e) => e.type === 'done'), '文本附件聊天应完成');
+  const lu1 = lastPayload.messages.find((m) => m.role === 'user' && typeof m.content === 'string' && m.content.includes('[文件 notes.txt]'));
+  assert.ok(lu1 && lu1.content.includes('要点一'), '文本附件应内联进模型消息');
+  // 非视觉模型 + 图片 → error 事件（test-model 无视觉能力）
+  const ev2 = await chatOnce(base, { message: '看图', attachments: [{ type: 'image', name: 'a.png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' }] });
+  assert.ok(ev2.some((e) => e.type === 'error' && String(e.message).includes('不支持图片')), '非视觉模型应拒绝图片');
+  // 视觉自定义模型（vision:true）→ 图文数组透传
+  const addV = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'addCustom', name: 'web-vision', label: '视觉', baseUrl: `http://127.0.0.1:${mockPort}/v1`, key: 'sk-web-vision-1234567890', vision: true }) })).json();
+  assert.equal(addV.ok, true, addV.error);
+  const swV = await (await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'web-vision' }) })).json();
+  assert.equal(swV.ok, true, swV.error);
+  requestCount = 0;
+  const ev3 = await chatOnce(base, { message: '描述这张图', attachments: [{ type: 'image', name: 'a.png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' }] });
+  assert.ok(ev3.some((e) => e.type === 'done'), '视觉模型聊天应完成');
+  const lu3 = payloadLog.find((pl) => pl.messages && pl.messages.some((m) => m.role === 'user' && Array.isArray(m.content) && m.content.some((p) => p.type === 'image_url')));
+  assert.ok(lu3, '视觉模型应收到图文数组（在请求日志中）');
+  const backM = await (await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'test-model' }) })).json();
+  assert.equal(backM.ok, true, backM.error);
+  await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'removeCustom', name: 'web-vision' }) });
+  const html = await (await fetch(base + '/')).text();
+  assert.ok(html.includes('attachBtn') && html.includes('fileInput'), '前端应包含上传入口');
+  ok('附件：文本内联 / 视觉门控 / 视觉模型图文数组');
 }
 
 webChild.kill('SIGTERM');

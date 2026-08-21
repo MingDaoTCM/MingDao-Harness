@@ -997,5 +997,27 @@ const ctx = { cwd: tmp };
   ok('model-discovery：只列有 Key 服务商 / 线上名单优先 / 缓存与强制刷新 / 回退预设');
 }
 
+// ---------- 29. 聊天附件构造（图片 / 文本文件） ----------
+{
+  const { buildUserContent } = await import(path.join(srcDir, 'web', 'attachments.js'));
+  const t1 = buildUserContent('你好', [{ type: 'text', name: 'a.txt', content: '文件内容' }], false);
+  assert.ok(typeof t1.content === 'string' && t1.content.includes('[文件 a.txt]') && t1.content.includes('文件内容'), '文本附件应内联进消息');
+  assert.ok(t1.persistText.includes('[文件：a.txt]'), '落盘文本应带文件名标注');
+  const t2 = buildUserContent('', [{ type: 'text', name: 'a.txt', content: '内容' }], false);
+  assert.ok(typeof t2.content === 'string' && t2.content.includes('内容'), '纯附件消息应可用');
+  assert.ok(buildUserContent('', [], false).error, '消息与附件全空应报错');
+  const t3 = buildUserContent('看图', [{ type: 'image', name: 'a.png', dataUrl: 'data:image/png;base64,AAA=' }], false);
+  assert.ok(t3.error && t3.error.includes('不支持图片'), '非视觉模型应拒绝图片');
+  const t4 = buildUserContent('看图', [{ type: 'image', name: 'a.png', dataUrl: 'data:image/png;base64,AAA=' }], true);
+  assert.ok(Array.isArray(t4.content) && t4.content[0].type === 'text' && t4.content[1].type === 'image_url' && t4.content[1].image_url.url.startsWith('data:image/png'), '视觉模型应生成图文数组');
+  assert.ok(t4.persistText.includes('[图片：a.png]'), '落盘应含图片标注');
+  assert.ok(buildUserContent('x', [{ type: 'image', name: 'a.png', dataUrl: 'data:text/html;base64,AAA=' }], true).error, '非图片 dataUrl 应拒绝');
+  assert.ok(buildUserContent('x', [{ type: 'image', name: 'big.png', dataUrl: 'data:image/png;base64,' + 'A'.repeat(7 * 1024 * 1024 + 10) }], true).error, '超 5MB 图片应拒绝');
+  assert.ok(buildUserContent('x', [{ type: 'text', name: 'big.txt', content: 'A'.repeat(201 * 1024) }], true).error, '超 200KB 文本应拒绝');
+  const five = buildUserContent('x', [1, 2, 3, 4, 5].map((i) => ({ type: 'text', name: i + '.txt', content: 'c' + i })), false);
+  assert.ok(!five.content.includes('c5'), '第 5 个附件应被忽略');
+  ok('attachments：文本内联 / 视觉门控 / 格式与大小校验 / 附件上限');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);

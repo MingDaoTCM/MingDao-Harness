@@ -20,6 +20,7 @@ import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credent
 import { availableModels, fetchProviderModels, providerHasKey } from '../model-discovery.js';
 import { createProvider, resolveProviderConfig } from '../providers/index.js';
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
+import { buildUserContent } from './attachments.js';
 import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
 import { buildSystemPrompt } from '../prompts.js';
@@ -147,10 +148,12 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     };
     entry.send = send;
     const userMessage = String(body.message ?? '').trim();
-    entry.message = userMessage.slice(0, 40);
-    if (!userMessage) {
+    entry.message = (userMessage || '[附件]').slice(0, 40);
+    const visionSupported = Boolean(modelPreset(modelName)?.supportsVision || cfg.customModels?.[modelName]?.vision);
+    const built = buildUserContent(userMessage, body.attachments, visionSupported);
+    if (built.error) {
       entry.status = 'failed';
-      send({ type: 'error', message: '消息不能为空' });
+      send({ type: 'error', message: built.error });
       res.end();
       return;
     }
@@ -172,8 +175,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         ? session.messages
         : [{ role: 'system', content: systemPrompt }, ...(session.messages || [])];
     messages[0] = { role: 'system', content: systemPrompt }; // 总是刷新 system（记忆/技能/AGENTS.md 最新）
-    messages.push({ role: 'user', content: userMessage });
-    appendMessages(session.file, [messages[messages.length - 1]]);
+    messages.push({ role: 'user', content: built.content });
+    // 落盘用文本版（图文数组只发给模型，会话文件保持字符串可渲染）
+    appendMessages(session.file, [{ role: 'user', content: built.persistText }]);
     const persistedBefore = messages.length;
 
     // 权限/选择类交互：发 ask 事件（带 taskId），等待 POST /api/permission 应答
@@ -233,7 +237,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       // 新会话自动标题（可配置关闭）
       if (isNew && cfg.autoTitle !== false && r.text) {
         try {
-          const title = await generateTitle(providerNow, titleModel(cfg, modelName), userMessage);
+          const title = await generateTitle(providerNow, titleModel(cfg, modelName), built.persistText);
           if (title) renameSessionFile(fs, path, home, session, title);
         } catch {}
       }
@@ -399,6 +403,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
           label: cm.label || '',
           baseUrl: cm.baseUrl || '',
           envKey: cm.envKey || null,
+          vision: Boolean(cm.vision),
           keyState: stored ? 'stored' : 'none',
           keyMasked: stored ? maskKey(stored) : null,
         };
@@ -467,7 +472,12 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
           return json(res, 400, { error: `自定义模型 ${name} 已存在（可修改）` });
         }
         cfg.customModels = cfg.customModels || {};
-        cfg.customModels[name] = { label, baseUrl, envKey: String(body.envKey || '').trim() || undefined };
+        cfg.customModels[name] = {
+          label,
+          baseUrl,
+          envKey: String(body.envKey || '').trim() || undefined,
+          vision: body.vision === true || body.vision === 'on' ? true : undefined,
+        };
         if (String(body.key || '').trim()) setStoredKey(`custom:${name}`, String(body.key).trim());
         saveConfig(cfg);
         return json(res, 200, { ok: true, name });

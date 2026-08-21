@@ -10,6 +10,7 @@
 - ✨ **产品级体验**：流式 Markdown + 代码高亮、编辑 diff 预览、思考过程暗显、`/` 命令 Tab 补全、Ctrl+C 中断、token/耗时/费用状态行（峰谷计价 + 缓存命中率）
 - 🤖 **工具 Agent 循环**：`read` / `write` / `edit` / `ls` / `glob` / `grep` / `bash` + `skill` / `task`（子代理）/ `todo` / `undo`，流式输出与工具执行交替
 - 🖥 **双界面**：TUI 与 `mingdao web` 一键启动的 WebUI（零依赖 HTTP+SSE，支持 PWA 装到桌面、多任务并行、全项设置面板）
+- 🖼 **多模态输入**：WebUI 输入框 📎 上传图片（视觉模型）与文本文件，图片转 base64 内联、文本自动并入消息，会话落盘保持可读文本
 - 🧩 **IDE 集成**：VS Code 侧边栏内嵌 WebUI + 选中代码右键发送；JetBrains 全家桶工具窗（JCEF）
 - 🧠 **Skills 技能系统**：内置 14 个常驻技能 + 22 个可安装技能库（线上 registry，见下文）；SKILL.md 渐进式披露，不占上下文
 - 🔌 **MCP 客户端**：零依赖实现 Model Context Protocol，`mcpServers` 配置即接入任意 MCP 服务器，工具自动并入 Agent 循环
@@ -148,7 +149,7 @@ node test/e2e-schedule.js# 端到端：定时/周期/链式调度
 
 ## 版本
 
-语义化版本：修复 → 末位 +1，新子系统 → 中位 +1，首个 npm 稳定发布（API 冻结）→ 1.0.0。当前 **0.1.x**（最新 `v0.1.25`）。
+语义化版本：修复 → 末位 +1，新子系统 → 中位 +1，首个 npm 稳定发布（API 冻结）→ 1.0.0。当前 **0.1.x**（最新 `v0.1.26`）。
 
 ## License
 
