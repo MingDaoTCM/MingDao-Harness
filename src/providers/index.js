@@ -17,6 +17,21 @@ import { mingdaoHome } from '../config.js';
 import { resolveApiKey } from '../credentials.js';
 
 export function resolveProviderConfig(cfg, modelName) {
+  // 自定义模型（config.customModels，WebUI 可增删改）：优先于内置预设
+  const cm = cfg?.customModels?.[modelName];
+  if (cm) {
+    const envKeys = [cm.envKey, 'MINGDAO_API_KEY'].filter(Boolean);
+    const apiKey = resolveApiKey(cfg, `custom:${modelName}`, envKeys[0]) || resolveApiKey(cfg, 'custom', envKeys[0]);
+    return {
+      name: `custom:${modelName}`,
+      kind: 'openai-compatible',
+      baseUrl: cm.baseUrl || cfg?.baseUrl || '',
+      apiKey,
+      envHint: envKeys[0] || 'MINGDAO_API_KEY',
+      isCustom: true,
+      modelName,
+    };
+  }
   const preset = modelPreset(modelName);
   const name = preset?.provider || cfg?.provider || 'deepseek';
   const pp = providerPreset(name) || { kind: 'openai-compatible' };
@@ -44,9 +59,9 @@ function isTransient(err) {
 export async function createProvider(cfg, modelName, { timeoutMs = 300000, retries = 2 } = {}) {
   const pc = resolveProviderConfig(cfg, modelName);
 
-  // 自定义 Provider 模块优先
+  // 自定义 Provider 模块优先（仅普通自定义端点；custom:<模型名> 走 OpenAI 兼容直连）
   const customFile = path.join(mingdaoHome(), 'providers', pc.name + '.mjs');
-  if (pc.isCustom && fs.existsSync(customFile)) {
+  if (pc.isCustom && !pc.name.includes(':') && fs.existsSync(customFile)) {
     const mod = await import(pathToFileURL(customFile).href + `?v=${Date.now()}`);
     if (typeof mod.createProvider !== 'function') {
       throw new Error(`自定义 Provider 模块 ${customFile} 未导出 createProvider(cfg)。`);

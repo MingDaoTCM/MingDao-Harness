@@ -87,6 +87,37 @@ export function searchLibrary(kw) {
   );
 }
 
+// 安装前 dry-run 校验 SKILL.md 格式（借鉴 npm 打包前的格式检查思路）：
+//  - 必须含合法 frontmatter（--- 起止）
+//  - name：字母/数字/连字符/点/下划线，1–64 位
+//  - description：非空且 ≤ 200 字
+// 校验失败返回具体错误，绝不装入技能目录。
+export function validateSkillMarkdown(text, hint) {
+  const src = hint ? `（${hint}）` : '';
+  if (!text || !String(text).trim()) return { error: `SKILL.md 为空${src}` };
+  const fm = String(text).match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
+  if (!fm) return { error: `缺少 frontmatter（应以 --- 开头并闭合）${src}` };
+  const name = fm[1].match(/^name:\s*(.+)$/m)?.[1]?.trim() || '';
+  if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name)) {
+    return { error: `frontmatter.name 非法：${name || '（缺失）'}（允许字母/数字/点/连字符/下划线，1–64 位）${src}` };
+  }
+  const desc = fm[1].match(/^description:\s*(.+)$/m)?.[1]?.trim() || '';
+  if (!desc) return { error: `frontmatter.description 缺失或为空${src}` };
+  if (desc.length > 200) return { error: `frontmatter.description 超过 200 字（当前 ${desc.length}）${src}` };
+  return { ok: true, name, description: desc };
+}
+
+export function validateSkillDir(dir, hint) {
+  const skillMd = path.join(dir, 'SKILL.md');
+  let text;
+  try {
+    text = fs.readFileSync(skillMd, 'utf8');
+  } catch {
+    return { error: `未找到 SKILL.md：${skillMd}` };
+  }
+  return validateSkillMarkdown(text, hint);
+}
+
 function copySkillIntoUser(dir, name, source, extra) {
   ensureHome();
   const target = path.join(userSkillsDir(), name);
@@ -94,6 +125,8 @@ function copySkillIntoUser(dir, name, source, extra) {
     // 源目录就是用户级安装位置：视为已安装，保持现状
     return { name, dir: target };
   }
+  const check = validateSkillDir(dir, name);
+  if (check.error) return { error: check.error };
   fs.rmSync(target, { recursive: true, force: true });
   fs.mkdirSync(target, { recursive: true });
   fs.cpSync(dir, target, { recursive: true });
@@ -149,6 +182,11 @@ export async function installFromUrl(url) {
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-'));
   fs.writeFileSync(path.join(tmp, 'SKILL.md'), text);
+  const check = validateSkillDir(tmp, url);
+  if (check.error) {
+    fs.rmSync(tmp, { recursive: true, force: true });
+    return { error: check.error };
+  }
   const meta = readSkillMeta(tmp);
   const r = copySkillIntoUser(tmp, meta.name, 'url', { url });
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -189,12 +227,19 @@ export function installFromGit(gitUrl) {
     return { error: '仓库中未找到含 SKILL.md 的技能目录' };
   }
   ensureHome();
-  const installed = found.map((d) => {
+  const installed = [];
+  const skipped = [];
+  for (const d of found) {
     const meta = readSkillMeta(d);
-    return copySkillIntoUser(d, meta.name, 'git', { url: gitUrl });
-  });
+    const r = copySkillIntoUser(d, meta.name, 'git', { url: gitUrl });
+    if (r.error) skipped.push(`${meta.name}：${r.error}`);
+    else installed.push(r);
+  }
   fs.rmSync(tmp, { recursive: true, force: true });
-  return { names: installed.map((i) => i.name), dirs: installed.map((i) => i.dir) };
+  if (!installed.length) {
+    return { error: `仓库中的技能均未通过校验${skipped.length ? '（' + skipped.join('；') + '）' : ''}` };
+  }
+  return { names: installed.map((i) => i.name), dirs: installed.map((i) => i.dir), skipped };
 }
 
 export function uninstallSkill(name) {
@@ -219,6 +264,10 @@ export async function reinstallSkill(name) {
   if (meta.source === 'url') return installFromUrl(meta.url);
   if (meta.source === 'git') return installFromGit(meta.url);
   if (meta.source === 'dir') return installFromDir(meta.from);
+  if (meta.source === 'registry') {
+    const { installFromRegistry } = await import('./skill-registry.js');
+    return installFromRegistry(name);
+  }
   return { error: `未知来源：${meta.source}` };
 }
 
@@ -234,6 +283,10 @@ export async function installSkill(arg) {
     return installFromGit(a);
   }
   if (/^git@/.test(a)) return installFromGit(a);
-  if (/^[A-Za-z0-9_.-]+$/.test(a)) return { error: `技能库中没有 ${a}（mingdao skill search 查看全部）` };
+  if (/^[A-Za-z0-9_.-]+$/.test(a)) {
+    // 本地库没有：回退线上 registry（离线时报错并给出提示）
+    const { installFromRegistry } = await import('./skill-registry.js');
+    return installFromRegistry(a);
+  }
   return { error: `无法识别安装来源：${a}（支持：技能库名 / 本地目录 / SKILL.md 的 http(s) URL / git 仓库地址）` };
 }

@@ -635,7 +635,7 @@ const ctx = { cwd: tmp };
 {
   const homeSk = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skilllib-'));
   process.env.MINGDAO_HOME = homeSk;
-  const { libraryList, searchLibrary, installFromLibrary, installFromDir, installFromUrl, installFromGit, installSkill, uninstallSkill, reinstallSkill, installedUserSkillNames } =
+  const { libraryList, searchLibrary, installFromLibrary, installFromDir, installFromUrl, installFromGit, installSkill, uninstallSkill, reinstallSkill, installedUserSkillNames, userSkillsDir } =
     await import(path.join(srcDir, 'skill-lib.js'));
   const { listSkills } = await import(path.join(srcDir, 'skills.js'));
 
@@ -691,8 +691,24 @@ const ctx = { cwd: tmp };
   assert.ok(auto1.name === 'regex', '自动识别库名');
   const auto2 = await installSkill(path.join(homeSk, 'skills', 'sql'));
   assert.ok(auto2.name === 'sql', '自动识别本地目录');
+  process.env.MINGDAO_REGISTRY_URL = 'http://127.0.0.1:1'; // 确定性离线
   const notFound = await installSkill('no-such-skill');
-  assert.ok(notFound.error && notFound.error.includes('技能库中没有'), '未知名称应有友好提示');
+  assert.ok(notFound.error && notFound.error.includes('无法获取线上技能库'), '离线时未知名称应回退 registry 并提示不可达');
+  delete process.env.MINGDAO_REGISTRY_URL;
+
+  // dry-run 校验：坏 frontmatter 一律拒绝且不落盘
+  const badDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-bad-'));
+  fs.writeFileSync(path.join(badDir, 'SKILL.md'), '# 无 frontmatter\n\n正文');
+  const bad1 = installFromDir(badDir);
+  assert.ok(bad1.error && bad1.error.includes('frontmatter'), '缺 frontmatter 应拒绝');
+  fs.writeFileSync(path.join(badDir, 'SKILL.md'), '---\nname: bad name!\ndescription: x\n---\n\n# 坏名字');
+  const bad2 = installFromDir(badDir);
+  assert.ok(bad2.error && bad2.error.includes('name 非法'), '非法 name 应拒绝');
+  fs.writeFileSync(path.join(badDir, 'SKILL.md'), '---\nname: good-name\n---\n\n# 缺描述');
+  const bad3 = installFromDir(badDir);
+  assert.ok(bad3.error && bad3.error.includes('description'), '缺 description 应拒绝');
+  assert.ok(!fs.existsSync(path.join(userSkillsDir(), 'good-name')), '校验失败不应写入技能目录');
+  fs.rmSync(badDir, { recursive: true, force: true });
 
   // git 安装：无 git 环境优雅报错，不抛异常
   const gitR = installFromGit('https://example.com/x.git');
@@ -713,6 +729,62 @@ const ctx = { cwd: tmp };
   delete process.env.MINGDAO_HOME;
   fs.rmSync(homeSk, { recursive: true, force: true });
   ok('skill-lib：内置库 / 搜索 / 库名·目录·URL 安装 / 卸载 / 元数据更新');
+}
+
+// ---------- 25. 技能线上 registry ----------
+{
+  const homeRg = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-reg-'));
+  process.env.MINGDAO_HOME = homeRg;
+  const regRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-regweb-'));
+  fs.mkdirSync(path.join(regRoot, 'registry'), { recursive: true });
+  fs.mkdirSync(path.join(regRoot, 'skills-lib', 'online-skill'), { recursive: true });
+  fs.writeFileSync(
+    path.join(regRoot, 'registry', 'index.json'),
+    JSON.stringify({
+      version: 1,
+      updatedAt: new Date().toISOString(),
+      total: 1,
+      skills: [{ name: 'online-skill', description: '线上技能', files: [{ path: 'SKILL.md', size: 1 }] }],
+    })
+  );
+  fs.writeFileSync(path.join(regRoot, 'skills-lib', 'online-skill', 'SKILL.md'), '---\nname: online-skill\ndescription: 线上技能\n---\n\n# 线上\n内容');
+  const http = await import('node:http');
+  const srv = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x').pathname;
+    if (u === '/registry/index.json') {
+      res.writeHead(200);
+      res.end(fs.readFileSync(path.join(regRoot, 'registry', 'index.json')));
+      return;
+    }
+    if (u.startsWith('/skills-lib/')) {
+      res.writeHead(200);
+      res.end(fs.readFileSync(path.join(regRoot, u.replace('/skills-lib/', 'skills-lib/'))));
+      return;
+    }
+    res.writeHead(404);
+    res.end('nf');
+  });
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+  process.env.MINGDAO_REGISTRY_URL = `http://127.0.0.1:${srv.address().port}`;
+  const { searchRegistry, installFromRegistry, fetchRegistryIndex } = await import(path.join(srcDir, 'skill-registry.js'));
+  const sr = await searchRegistry('online');
+  assert.ok(sr.skills.length === 1 && sr.skills[0].source === 'registry', '远端搜索应命中线上技能');
+  const ri = await installFromRegistry('online-skill');
+  assert.ok(ri.name === 'online-skill' && fs.existsSync(path.join(ri.dir, 'SKILL.md')), 'registry 安装应成功');
+  const meta = JSON.parse(fs.readFileSync(path.join(ri.dir, '.mingdao-source.json'), 'utf8'));
+  assert.equal(meta.source, 'registry', '来源元数据应为 registry');
+  const ri2 = await fetchRegistryIndex();
+  assert.ok(ri2.fromCache, '第二次取索引应命中本地缓存');
+  const ri3 = await fetchRegistryIndex({ force: true });
+  assert.ok(!ri3.fromCache, 'force 应绕过缓存重新拉取');
+  const miss = await installFromRegistry('not-there');
+  assert.ok(miss.error && miss.error.includes('没有'), '远端未知技能应报错');
+  srv.close();
+  delete process.env.MINGDAO_REGISTRY_URL;
+  delete process.env.MINGDAO_HOME;
+  fs.rmSync(homeRg, { recursive: true, force: true });
+  fs.rmSync(regRoot, { recursive: true, force: true });
+  ok('skill-registry：远端搜索 / 安装 / 缓存与强制刷新 / 未知技能');
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

@@ -654,12 +654,20 @@ async function main() {
     const sub = opts.prompt[1] || 'list';
     const arg = opts.prompt[2];
     if (sub === 'search') {
-      const hits = searchLibrary(arg || '');
-      if (!hits.length) {
-        console.log(arg ? `没有匹配「${arg}」的技能（mingdao skill search 查看全部）` : '技能库为空');
+      const local = searchLibrary(arg || '');
+      const { searchRegistry } = await import('./skill-registry.js');
+      const remote = await searchRegistry(arg || '');
+      const localNames = new Set(local.map((s) => s.name));
+      const remoteOnly = remote.skills ? remote.skills.filter((s) => !localNames.has(s.name)) : [];
+      console.log(
+        `技能库匹配：内置 ${local.length}${remote.error ? '' : ` + 线上 ${remoteOnly.length}`} · 安装：mingdao skill install <名称>`
+      );
+      for (const s of local) console.log(`  ${s.name.padEnd(18)} ${s.description}${s.installed ? '（已安装）' : ''}  [内置]`);
+      if (remote.error) {
+        console.log(`  ✗ 线上 registry 不可达：${remote.error}`);
       } else {
-        console.log(`技能库匹配（${hits.length}）· 安装：mingdao skill install <名称>`);
-        for (const s of hits) console.log(`  ${s.name.padEnd(18)} ${s.description}${s.installed ? '（已安装）' : ''}`);
+        for (const s of remoteOnly) console.log(`  ${s.name.padEnd(18)} ${s.description}${s.installed ? '（已安装）' : ''}  [线上]`);
+        if (remote.stale) console.log('  （线上索引来自本地缓存，已过期）');
       }
       return;
     }
@@ -673,7 +681,8 @@ async function main() {
       if (r.names) {
         console.log(`✓ 已从 git 仓库安装 ${r.names.length} 个技能：${r.names.join(', ')}`);
       } else {
-        console.log(`✓ 已安装技能 ${r.name} → ~/.mingdao/skills/${r.name}/（可编辑/删除，下次会话生效）`);
+        const srcLabel = r.host ? '（线上 registry）' : '';
+        console.log(`✓ 已安装技能 ${r.name}${srcLabel} → ~/.mingdao/skills/${r.name}/（可编辑/删除，下次会话生效）`);
       }
       return;
     }

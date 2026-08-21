@@ -301,6 +301,45 @@ let base = await startWeb(work1);
   ok('会话管理：重命名 / 删除 / 路径防护');
 }
 
+// ---------- 10. 模型与 API Key 管理 ----------
+{
+  const mc = await (await fetch(base + '/api/models-config')).json();
+  assert.equal(mc.ok, true);
+  assert.ok(Array.isArray(mc.providers) && mc.providers.some((p) => p.name === 'deepseek'), '应列出内置服务商');
+  assert.ok(mc.providers.find((p) => p.name === 'custom').keyState === 'stored', 'custom 的 Key 应来自凭证库');
+  assert.ok(mc.providers.find((p) => p.name === 'custom').keyMasked.includes('…'), 'Key 应脱敏显示');
+  const add = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'addCustom', name: 'web-custom', label: '网页自定义', baseUrl: `http://127.0.0.1:${mockPort}/v1`, key: 'sk-web-custom' }) })).json();
+  assert.equal(add.ok, true, add.error);
+  const badAdd = await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'addCustom', name: 'Bad Name!', label: 'x', baseUrl: 'https://x/v1' }) });
+  assert.equal(badAdd.status, 400, '非法模型名应 400');
+  const badUrl = await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'addCustom', name: 'ok-name', label: 'x', baseUrl: 'ftp://x' }) });
+  assert.equal(badUrl.status, 400, '非法 baseUrl 应 400');
+  const dup = await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'addCustom', name: 'web-custom', label: 'x', baseUrl: 'https://x/v1' }) });
+  assert.equal(dup.status, 400, '重复添加应 400');
+  const st = await (await fetch(base + '/api/state')).json();
+  assert.ok(st.models.some((m) => m.name === 'web-custom' && m.custom), '模型下拉应包含自定义模型');
+  const sw = await (await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'web-custom' }) })).json();
+  assert.equal(sw.ok, true, sw.error);
+  const up = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'updateCustom', name: 'web-custom', label: '改标签', baseUrl: `http://127.0.0.1:${mockPort}/v1` }) })).json();
+  assert.equal(up.ok, true, up.error);
+  const sk = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setCustomKey', name: 'web-custom', key: 'sk-new-key-1234567890' }) })).json();
+  assert.ok(sk.ok && sk.keyMasked.includes('…'), '应支持自定义模型设 Key');
+  const pk = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setProviderKey', provider: 'deepseek', key: 'sk-ds-test-1234567890' }) })).json();
+  assert.ok(pk.ok && pk.keyMasked.includes('…'), '应支持服务商设 Key');
+  const rk = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'removeProviderKey', provider: 'deepseek' }) })).json();
+  assert.equal(rk.ok, true);
+  const rm = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'removeCustom', name: 'web-custom' }) })).json();
+  assert.equal(rm.ok, true, rm.error);
+  assert.equal(rm.model, 'deepseek-v4-flash', '删除当前自定义模型应回退默认');
+  const back = await (await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'test-model' }) })).json();
+  assert.equal(back.ok, true, back.error);
+  const b1 = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setBaseUrl', baseUrl: `http://127.0.0.1:${mockPort}/v1` }) })).json();
+  assert.equal(b1.ok, true);
+  const html = await (await fetch(base + '/')).text();
+  assert.ok(html.includes('pkList') && html.includes('cmAdd'), '前端应包含模型与 Key 管理面板');
+  ok('模型与 API Key：添加/修改/删除自定义模型 + 服务商 Key 管理');
+}
+
 // ---------- 10. 技能库 API：列表 / 安装 / 卸载 ----------
 {
   const lib = await (await fetch(base + '/api/skill-library')).json();

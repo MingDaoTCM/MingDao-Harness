@@ -1,0 +1,227 @@
+{
+  "version": 1,
+  "updatedAt": "2026-08-21T06:58:03.233Z",
+  "total": 22,
+  "skills": [
+    {
+      "name": "bash",
+      "description": "Bash/Shell 脚本编写（健壮性与可移植性）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 903
+        }
+      ]
+    },
+    {
+      "name": "changelog",
+      "description": "变更日志与发布说明写作",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 849
+        }
+      ]
+    },
+    {
+      "name": "ci-cd",
+      "description": "CI/CD 流水线设计与故障排查（GitHub Actions/GitLab CI/自建）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 924
+        }
+      ]
+    },
+    {
+      "name": "data-analysis",
+      "description": "数据分析（CSV/统计汇总/图表建议）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 976
+        }
+      ]
+    },
+    {
+      "name": "database-design",
+      "description": "数据库表结构设计（建模/范式/索引）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 981
+        }
+      ]
+    },
+    {
+      "name": "docs",
+      "description": "技术文档写作（结构/语气/受众）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 918
+        }
+      ]
+    },
+    {
+      "name": "email",
+      "description": "邮件写作（主题/结构/语气，中英文）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 990
+        }
+      ]
+    },
+    {
+      "name": "file-organize",
+      "description": "文件整理与归档（分类/重命名/去重/目录规范）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 1227
+        }
+      ]
+    },
+    {
+      "name": "git-workflow",
+      "description": "Git 团队协作工作流（分支/PR/合并/冲突解决/回滚）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 1037
+        }
+      ]
+    },
+    {
+      "name": "i18n",
+      "description": "国际化与本地化改造（多语言文案/格式/提取流程）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 943
+        }
+      ]
+    },
+    {
+      "name": "markdown",
+      "description": "Markdown 排版规范（标题/列表/表格/代码块/中英文间距）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 1014
+        }
+      ]
+    },
+    {
+      "name": "meeting-notes",
+      "description": "会议纪要整理（结构化/决议/待办）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 836
+        }
+      ]
+    },
+    {
+      "name": "nodejs",
+      "description": "Node.js/JavaScript 编码规范与最佳实践",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 965
+        }
+      ]
+    },
+    {
+      "name": "performance",
+      "description": "性能分析与调优（定位瓶颈/基准/优化验证）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 932
+        }
+      ]
+    },
+    {
+      "name": "python",
+      "description": "Python 编码规范与最佳实践",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 906
+        }
+      ]
+    },
+    {
+      "name": "readme",
+      "description": "README 写作（项目门面：安装/用法/特色）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 796
+        }
+      ]
+    },
+    {
+      "name": "regex",
+      "description": "正则表达式编写、验证与性能注意",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 854
+        }
+      ]
+    },
+    {
+      "name": "report",
+      "description": "周报/月报/汇报总结写作（结构/亮点/数据）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 981
+        }
+      ]
+    },
+    {
+      "name": "resume",
+      "description": "简历优化（结构/量化/岗位匹配）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 939
+        }
+      ]
+    },
+    {
+      "name": "security-audit",
+      "description": "代码与配置安全审计",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 1040
+        }
+      ]
+    },
+    {
+      "name": "sql",
+      "description": "SQL 编写、审查与性能优化",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 916
+        }
+      ]
+    },
+    {
+      "name": "translation",
+      "description": "中英互译（术语一致/语气适配/本地化质量）",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "size": 975
+        }
+      ]
+    }
+  ]
+}

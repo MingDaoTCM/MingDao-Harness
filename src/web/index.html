@@ -147,6 +147,21 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 <div id="cfgModal" class="modal-mask" style="display:none">
   <div class="modal">
     <h3>⚙ 设置</h3>
+    <hr style="border:none;border-top:1px solid var(--border);margin:0 0 10px">
+    <h4 style="margin:4px 0;color:var(--accent2)">模型与 API Key</h4>
+    <div id="pkList" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div class="cfg-hint">自定义模型（OpenAI 兼容端点）：</div>
+    <div id="cmList" style="max-height:120px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap">
+      <input id="cmName" placeholder="模型名（如 my-gpt4）" style="flex:1;min-width:110px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+      <input id="cmLabel" placeholder="标签（可选）" style="flex:1;min-width:90px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+    </div>
+    <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap">
+      <input id="cmUrl" placeholder="API 地址 https://…/v1" style="flex:1.4;min-width:170px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+      <input id="cmKey" type="password" placeholder="API Key（可选）" style="flex:1;min-width:120px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+    </div>
+    <div class="row" style="justify-content:flex-start"><button id="cmAdd">＋ 添加自定义模型</button></div>
+    <div class="cfg-row" style="display:flex;gap:6px"><input id="baseUrlOverride" placeholder="API 地址覆盖（可选，覆盖当前服务商地址）" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"><button id="baseUrlSave">保存</button></div>
     <div class="cfg-row"><label>沙箱模式（bash 执行隔离）</label>
       <select id="sbxSel">
         <option value="off">off — 直接执行</option>
@@ -202,7 +217,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     </div>
     <div class="row" style="justify-content:flex-start"><button id="mcpAdd">＋ 接入 MCP 服务</button></div>
     <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
-    <h4 style="margin:4px 0;color:var(--accent2)">技能库（搜索 / 一键安装，装到用户级可改可删）</h4>
+    <h4 style="margin:4px 0;color:var(--accent2)">技能库（搜索 / 一键安装，装到用户级可改可删）<button id="skillRegRefresh" style="float:right;padding:1px 8px;font-size:11px">刷新线上</button></h4>
     <div class="cfg-row"><input id="skillSearch" placeholder="搜索技能…（留空显示全部）" style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"></div>
     <div id="skillLibList" style="max-height:170px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
     <div class="row"><button id="cfgCancel">取消</button><button class="primary" id="cfgSave">保存</button></div>
@@ -398,7 +413,7 @@ async function init(){
 }
 $('#cfgBtn').onclick=()=>{ $('#cfgModal').style.display='flex'; };
 $('#cfgCancel').onclick=()=>{ $('#cfgModal').style.display='none'; };
-$('#cfgBtn').addEventListener('click', ()=>{ refreshSchList(); refreshWorkspaces(); loadMemoryUI(); refreshCache(); refreshMcpPresets(); refreshSkillLib(''); });
+$('#cfgBtn').addEventListener('click', ()=>{ refreshModelsCfg(); refreshSchList(); refreshWorkspaces(); loadMemoryUI(); refreshCache(); refreshMcpPresets(); refreshSkillLib(''); });
 $('#schWhen').onchange=e=>{ const v=e.target.value; $('#schAtRow').style.display=v==='at'?'':'none'; $('#schEveryRow').style.display=v==='every'?'':'none'; $('#schAfterRow').style.display=v==='after'?'':'none'; $('#schChainRow').style.display=v==='chain'?'':'none'; };
 async function refreshSchList(){
   const r=await fetch('/api/schedule',{cache:'no-store'}).catch(()=>null); if(!r) return;
@@ -508,14 +523,24 @@ $('#mcpAdd').onclick=async ()=>{
 // —— 技能库 ——
 let skillSearchTimer=null;
 $('#skillSearch').addEventListener('input',e=>{ clearTimeout(skillSearchTimer); skillSearchTimer=setTimeout(()=>refreshSkillLib(e.target.value.trim()),300); });
-async function refreshSkillLib(q){
-  const u=q?'/api/skill-library?q='+encodeURIComponent(q):'/api/skill-library';
+async function refreshSkillLib(q, force){
+  let u=q?'/api/skill-library?q='+encodeURIComponent(q):'/api/skill-library';
+  if(force) u+=(q?'&':'?')+'refresh=1';
   const r=await fetch(u,{cache:'no-store'}).catch(()=>null); if(!r) return;
   const j=await r.json(); const list=$('#skillLibList'); list.innerHTML='';
+  if(j.registry&&j.registry.error){
+    const err=document.createElement('div'); err.style.cssText='color:var(--warn);font-size:11.5px;padding:4px 2px';
+    err.textContent='✗ 线上 registry 不可达（仅显示内置库）：'+j.registry.error; list.appendChild(err);
+  }else if(j.registry){
+    const meta=document.createElement('div'); meta.style.cssText='color:var(--faint);font-size:11.5px;padding:4px 2px';
+    meta.textContent='线上索引 '+new Date(j.registry.updatedAt).toLocaleString()+(j.registry.stale?'（缓存，已过期）':'');
+    list.appendChild(meta);
+  }
   if(!j.library||!j.library.length){ list.innerHTML='<div style="color:var(--faint);font-size:12px;padding:6px 2px">没有匹配的技能</div>'; return; }
   for(const s of j.library){
     const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px';
-    div.innerHTML='<span style="flex:1;min-width:0"><b>'+esc(s.name)+'</b> <span style="color:var(--faint)">'+esc(s.description||'')+'</span></span>';
+    const badge=s.source==='registry'?'<span style="color:var(--accent2);font-size:10px">线上</span>':'<span style="color:var(--faint);font-size:10px">内置库</span>';
+    div.innerHTML='<span style="flex:1;min-width:0"><b>'+esc(s.name)+'</b> '+badge+' <span style="color:var(--faint)">'+esc(s.description||'')+'</span></span>';
     const b=document.createElement('button');
     if(s.installed){ b.textContent='卸载'; b.className='danger'; } else { b.textContent='安装'; }
     b.style.cssText='padding:1px 8px;font-size:11px';
@@ -528,6 +553,63 @@ async function refreshSkillLib(q){
     div.appendChild(b); list.appendChild(div);
   }
 }
+$('#skillRegRefresh').onclick=()=>{ refreshSkillLib($('#skillSearch').value.trim(), true); };
+// —— 模型与 API Key ——
+async function reloadModels(){
+  try{
+    const r=await fetch('/api/state',{cache:'no-store'}); const j=await r.json();
+    const ms=$('#modelSel'); ms.innerHTML='';
+    const groups={}; const order=[];
+    for(const m of (j.models||[])){ const g=m.providerLabel||'其他'; if(!groups[g]){groups[g]=[];order.push(g);} groups[g].push(m); }
+    for(const g of order){
+      const og=document.createElement('optgroup'); og.label=g;
+      for(const m of groups[g]){ const o=document.createElement('option'); o.value=m.name; o.textContent=m.label; if(m.name===j.model) o.selected=true; og.appendChild(o); }
+      ms.appendChild(og);
+    }
+    if(!(j.models||[]).length){ const o=document.createElement('option'); o.value=j.model; o.textContent=j.model; ms.appendChild(o); }
+    const env=(j.workspace?'工作空间 '+j.workspace+' · ':'')+(j.routing?'路由开 · ':'')+(j.sandbox&&j.sandbox!=='off'?(j.sandboxSupported?'沙箱'+j.sandbox:'沙箱降级'):'');
+    $('#envBadge').textContent=env; $('#envBadge').style.display=env?'':'none';
+  }catch(e){}
+}
+async function refreshModelsCfg(){
+  const r=await fetch('/api/models-config',{cache:'no-store'}).catch(()=>null); if(!r) return;
+  const j=await r.json(); if(!j.ok) return;
+  const pk=$('#pkList'); pk.innerHTML='';
+  for(const p of j.providers){
+    const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px';
+    const state=p.keyState==='stored'?'<span style="color:var(--accent)">已存 '+esc(p.keyMasked||'')+'</span>':p.keyState==='env'?'<span style="color:var(--dim)">环境变量 '+esc(p.envKey||'')+'</span>':'<span style="color:var(--err)">未设置</span>';
+    div.innerHTML='<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><b>'+esc(p.name)+'</b> '+esc(p.label)+'</span><span style="white-space:nowrap">'+state+'</span>';
+    const set=document.createElement('button'); set.textContent='设Key'; set.style.cssText='padding:1px 8px;font-size:11px';
+    set.onclick=()=>{ const k=prompt('API Key（'+p.name+'）：'); if(k===null) return; fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setProviderKey',provider:p.name,key:k})}).then(rr=>rr.json()).then(jj=>{ if(jj.ok) refreshModelsCfg(); else alert(jj.error||'设置失败'); }); };
+    if(p.keyState==='stored'){ const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!confirm('删除 '+p.name+' 的 Key？')) return; await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'removeProviderKey',provider:p.name})}); refreshModelsCfg(); }; div.appendChild(rm); }
+    div.appendChild(set); pk.appendChild(div);
+  }
+  const cl=$('#cmList'); cl.innerHTML='';
+  if(!(j.customModels||[]).length) cl.innerHTML='<div style="color:var(--faint);font-size:12px;padding:6px 2px">暂无自定义模型</div>';
+  for(const c of j.customModels){
+    const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px';
+    const kstate=c.keyState==='stored'?'<span style="color:var(--accent)">'+esc(c.keyMasked||'')+'</span>':'<span style="color:var(--err)">无Key</span>';
+    div.innerHTML='<span style="flex:1;min-width:0"><b>'+esc(c.name)+'</b> <span style="color:var(--faint)">'+esc(c.label)+' · '+esc(c.baseUrl)+'</span></span><span style="white-space:nowrap">'+kstate+'</span>';
+    const sk=document.createElement('button'); sk.textContent='设Key'; sk.style.cssText='padding:1px 8px;font-size:11px'; sk.onclick=()=>{ const k=prompt('API Key（'+c.name+'）：'); if(k===null) return; fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setCustomKey',name:c.name,key:k})}).then(rr=>rr.json()).then(jj=>{ if(jj.ok) refreshModelsCfg(); else alert(jj.error||'设置失败'); }); };
+    const ed=document.createElement('button'); ed.textContent='修改'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=()=>{ const u=prompt('API 地址：', c.baseUrl); if(u===null) return; const l=prompt('标签：', c.label); if(l===null) return; fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'updateCustom',name:c.name,baseUrl:u,label:l})}).then(rr=>rr.json()).then(jj=>{ if(jj.ok){ refreshModelsCfg(); reloadModels(); } else alert(jj.error||'修改失败'); }); };
+    const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!confirm('删除自定义模型 '+c.name+'？')) return; const rr=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'removeCustom',name:c.name})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshModelsCfg(); reloadModels(); } else alert(jj.error||'删除失败'); };
+    div.appendChild(sk); div.appendChild(ed); div.appendChild(rm); cl.appendChild(div);
+  }
+  $('#baseUrlOverride').value=j.baseUrlOverride||'';
+}
+$('#cmAdd').onclick=async ()=>{
+  const name=$('#cmName').value.trim();
+  const url=$('#cmUrl').value.trim();
+  if(!name||!url){ alert('模型名与 API 地址必填'); return; }
+  const r=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'addCustom',name,label:$('#cmLabel').value.trim(),baseUrl:url,key:$('#cmKey').value})});
+  const j=await r.json().catch(()=>({error:'请求失败'}));
+  if(j.ok){ $('#cmName').value=''; $('#cmLabel').value=''; $('#cmUrl').value=''; $('#cmKey').value=''; refreshModelsCfg(); reloadModels(); } else alert(j.error||'添加失败');
+};
+$('#baseUrlSave').onclick=async ()=>{
+  const r=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setBaseUrl',baseUrl:$('#baseUrlOverride').value.trim()})});
+  const j=await r.json().catch(()=>({error:'请求失败'}));
+  if(j.ok) alert('✓ API 地址已保存（立即生效）'); else alert(j.error||'保存失败');
+};
 $('#cfgSave').onclick=()=>{ applyConfig({sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}); $('#cfgModal').style.display='none'; };
 async function applyConfig(payload, revertTarget){
   const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});

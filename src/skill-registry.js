@@ -1,0 +1,144 @@
+// 技能库线上 registry 客户端（零依赖，纯 fetch + 本地缓存）：
+//  - 默认 registry：MingDao-Harness 仓库 registry/index.json（github/gitee/gitcode 三镜像自动回退）
+//  - 自建 registry：设置环境变量 MINGDAO_REGISTRY_URL 指向自己的 index.json（企业内网可用）
+//  - 本地缓存 <home>/skill-registry-cache.json，TTL 1 小时（force 可强制刷新）
+//  - 安装：按索引逐文件下载 → dry-run 校验 frontmatter → 写入用户级技能目录
+//    （来源元数据 source=registry，mingdao skill update 可重装）
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { mingdaoHome, ensureHome } from './config.js';
+import { userSkillsDir, validateSkillDir, installedUserSkillNames } from './skill-lib.js';
+
+const DEFAULT_HOSTS = [
+  'https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main',
+  'https://gitee.com/MingDaoTCM/MingDao-harness/raw/main',
+  'https://gitcode.com/MingDaoTCM/MingDao-Harness/raw/main',
+];
+
+const TTL_MS = 60 * 60 * 1000;
+const MAX_FILE = 512 * 1024;
+
+function registryBase() {
+  const env = process.env.MINGDAO_REGISTRY_URL;
+  if (env) {
+    const u = String(env).replace(/\/index\.json$/, '').replace(/\/+$/, '');
+    return { hosts: [u], isCustom: true };
+  }
+  return { hosts: DEFAULT_HOSTS, isCustom: false };
+}
+
+function cacheFile() {
+  return path.join(mingdaoHome(), 'skill-registry-cache.json');
+}
+
+function loadCache() {
+  try {
+    return JSON.parse(fs.readFileSync(cacheFile(), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function saveCache(data, host) {
+  try {
+    ensureHome();
+    fs.writeFileSync(cacheFile(), JSON.stringify({ fetchedAt: Date.now(), host, data }, null, 2) + '\n', { mode: 0o600 });
+  } catch {}
+}
+
+async function fetchText(url, timeoutMs = 20000) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow' });
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const text = await res.text();
+    if (text.length > 2 * 1024 * 1024) throw new Error('索引超过 2MB 上限');
+    return text;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// 取远端索引（缓存优先；force 强制刷新）
+export async function fetchRegistryIndex({ force = false } = {}) {
+  const cached = force ? null : loadCache();
+  if (cached && Date.now() - cached.fetchedAt < TTL_MS && cached.data?.skills) {
+    return { data: cached.data, host: cached.host, fromCache: true };
+  }
+  const { hosts } = registryBase();
+  let lastErr = null;
+  for (const host of hosts) {
+    try {
+      const text = await fetchText(`${host}/registry/index.json`);
+      const data = JSON.parse(text);
+      if (!Array.isArray(data.skills)) throw new Error('索引缺少 skills 数组');
+      saveCache(data, host);
+      return { data, host, fromCache: false };
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  // 网络失败时回退旧缓存（过期也可用）
+  if (cached?.data?.skills) return { data: cached.data, host: cached.host, fromCache: true, stale: true };
+  return { error: `无法获取线上技能库：${lastErr?.message || '网络不可达'}（可用 MINGDAO_REGISTRY_URL 指向自建 registry）` };
+}
+
+// 远端搜索（合并展示：name/description/source/installed）
+export async function searchRegistry(kw, { force = false } = {}) {
+  const r = await fetchRegistryIndex({ force });
+  if (r.error) return { error: r.error };
+  const k = String(kw || '').trim().toLowerCase();
+  const installed = installedUserSkillNames();
+  const skills = r.data.skills
+    .filter((s) => !k || s.name.toLowerCase().includes(k) || (s.description || '').toLowerCase().includes(k))
+    .map((s) => ({ name: s.name, description: s.description, source: 'registry', installed: installed.has(s.name) }));
+  return { skills, host: r.host, updatedAt: r.data.updatedAt, fromCache: r.fromCache, stale: r.stale || false };
+}
+
+// 按索引安装（逐文件下载 + dry-run 校验）
+export async function installFromRegistry(name) {
+  const r = await fetchRegistryIndex();
+  if (r.error) return { error: r.error };
+  const entry = r.data.skills.find((s) => s.name === name);
+  if (!entry) return { error: `线上技能库中没有 ${name}（mingdao skill search 查看）` };
+  if (!Array.isArray(entry.files) || !entry.files.length) return { error: `技能 ${name} 的索引缺少文件清单` };
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-reg-'));
+  try {
+    for (const f of entry.files) {
+      const rel = String(f.path || '').replace(/\\/g, '/');
+      if (!rel || rel.includes('..') || rel.startsWith('/')) {
+        return { error: `技能 ${name} 的文件路径非法：${f.path}` };
+      }
+      const dest = path.join(tmp, rel);
+      fs.mkdirSync(path.dirname(dest), { recursive: true });
+      let text;
+      try {
+        text = await fetchText(`${r.host}/skills-lib/${encodeURI(name)}/${rel.split('/').map(encodeURIComponent).join('/')}`, 30000);
+      } catch (e) {
+        return { error: `下载 ${name}/${rel} 失败：${e.message}` };
+      }
+      if (text.length > MAX_FILE) return { error: `${name}/${rel} 超过 512KB 上限` };
+      fs.writeFileSync(dest, text);
+    }
+    const check = validateSkillDir(tmp, name);
+    if (check.error) return { error: check.error };
+    const target = path.join(userSkillsDir(), name);
+    if (path.resolve(tmp) !== path.resolve(target)) {
+      ensureHome();
+      fs.rmSync(target, { recursive: true, force: true });
+      fs.mkdirSync(target, { recursive: true });
+      fs.cpSync(tmp, target, { recursive: true });
+    }
+    fs.writeFileSync(
+      path.join(target, '.mingdao-source.json'),
+      JSON.stringify({ source: 'registry', installedAt: Date.now(), host: r.host, name }, null, 2) + '\n'
+    );
+    return { name, dir: target, host: r.host };
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+}

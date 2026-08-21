@@ -6,7 +6,7 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 
 ## 版本策略
 
-遵循语义化版本（SemVer）且保持克制：**修复 → 末位 +1**（0.2.7 → 0.2.8），**新子系统/大功能 → 中位 +1**（0.2 → 0.3），**首个 npm 稳定发布（API 冻结）→ 1.0.0**。当前 0.10.0 代表「功能活跃、接口可能调整」的诚实状态——不会出现一天一个大版本。
+遵循语义化版本（SemVer）且保持克制：**修复 → 末位 +1**，**新子系统/大功能 → 中位 +1**，**首个 npm 稳定发布（API 冻结）→ 1.0.0**。正式上线前版本稳定在 **0.1.x**（补丁号递增，当前 0.1.19）——诚实反映「未正式发布、接口可能调整」的状态。
 
 ## 特性
 
@@ -19,7 +19,8 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 - 🔌 **MCP 客户端**：零依赖实现 Model Context Protocol（stdio + JSON-RPC），`mcpServers` 配置即接入任意 MCP 服务器（实测官方 `server-everything` 13 个工具），工具并入 Agent 循环、只读标注自动放行、`/mcp` 查看状态
 - 🧩 **MCP 生态预设**：`mingdao mcp preset list/add <名称>` 与 WebUI 设置面板一键接入 9 个常用 MCP 服务器（filesystem / fetch / git / memory / sequential-thinking / playwright / sqlite / time / everything），npx 运行零预装
 - 📏 **精确 tokenizer**：内置 DeepSeek 官方词表（128k vocab）字节级 BPE 计数，与真实 API 口径偏差 <8%；非 DeepSeek 模型回退启发式估算
-- 🖥 **WebUI**：`mingdao web` 一键启动网页界面（零依赖 HTTP+SSE），流式输出、代码高亮、diff 预览、工具卡片、权限确认弹窗、会话切换，复用同一 Agent 核心
+- 🖥 **WebUI**：`mingdao web` 一键启动网页界面（零依赖 HTTP+SSE），流式输出、代码高亮、diff 预览、工具卡片、权限确认弹窗、会话切换，复用同一 Agent 核心；设置面板含模型/权限/沙箱/路由/调度/记忆/缓存/技能库/工作空间全项管理
+- 🔧 **模型与 API Key 自助管理**：WebUI 直接添加/修改/删除自定义模型（名称/标签/API 地址/Key，即 OpenAI 兼容端点），内置服务商 Key 一键设置/删除（脱敏展示、环境变量感知），API 地址覆盖——全程无需命令行，Key 依旧只进独立凭证库
 - 🥷 **沙箱执行**：bash 工具三档隔离（`off`/`readonly` 全盘只读/`safe` 只读+断网），基于 Linux bubblewrap，不可用环境优雅降级并明示
 - 🧭 **自动模型路由**：规划类任务自动切 `deepseek-v4-pro`、执行类走 `deepseek-v4-flash`（启发式+分类器两级判定，子代理固定执行模型），`/route` 一键开关
 - 🔎 **会话检索**：`mingdao sessions search <词>` / `/sessions <关键词>` / WebUI 搜索框，全文检索历史会话并返回匹配片段
@@ -289,7 +290,11 @@ mingdao skill uninstall sql      # 卸载用户级技能
 mingdao skill update sql         # 按来源元数据重装（更新）
 ```
 
-安装来源四选一、自动识别：**库名** / **本地目录**（含 SKILL.md 即整体复制）/ **远程 URL**（下载单个 SKILL.md，http(s)）/ **git 仓库**（clone 后自动扫描含 SKILL.md 的目录，可一次装多个）。统一安装到用户级 `~/.mingdao/skills/<名称>/`：可自由编辑、删除，同名覆盖内置；每个技能写入 `.mingdao-source.json` 来源元数据供更新与卸载识别。
+安装来源五选一、自动识别：**库名（内置库 → 线上 registry 自动回退）** / **本地目录**（含 SKILL.md 即整体复制）/ **远程 URL**（下载单个 SKILL.md，http(s)）/ **git 仓库**（clone 后自动扫描含 SKILL.md 的目录，可一次装多个）。统一安装到用户级 `~/.mingdao/skills/<名称>/`：可自由编辑、删除，同名覆盖内置；每个技能写入 `.mingdao-source.json` 来源元数据供更新与卸载识别。
+
+**安装前 dry-run 校验**：所有来源的 SKILL.md 都要通过 frontmatter 检查（name 合法 1–64 位、description 非空 ≤200 字），格式非法一律拒绝安装并给出具体错误，绝不装入半成品。
+
+**线上 registry**：`registry/index.json` 随仓库发布（github / gitee / gitcode 三镜像自动回退），`mingdao skill search` 合并展示「内置库 + 线上」，远端索引本地缓存 1 小时（WebUI「刷新线上」按钮强制更新）；企业内网可设 `MINGDAO_REGISTRY_URL` 指向自建 index.json（`node scripts/build-registry-index.js` 生成）。
 
 技能库清单（开发 13 + 办公 9）：
 
@@ -329,8 +334,10 @@ src/
   providers/         OpenAI 兼容客户端 + Provider 工厂（重试/超时/自定义模块）
   tools/             read/write/edit/ls/glob/grep/bash + skill/task/todo/undo
   skills.js          Skills 技能系统（渐进式披露）
-  skill-lib.js       技能库（搜索/四种来源安装/卸载/元数据）
+  skill-lib.js       技能库（搜索/五种来源安装/卸载/元数据/dry-run 校验）
+  skill-registry.js  线上技能 registry 客户端（多镜像回退/缓存/安装）
   skills-lib/        22 个可安装技能预设（SKILL.md）
+  registry/          线上 registry 索引（index.json，scripts/build-registry-index.js 生成）
   hooks.js           PreToolUse/PostToolUse 生命周期钩子
   mcp.js             MCP 客户端（stdio + JSON-RPC）
   routing.js         自动模型路由（启发式 + 分类器）

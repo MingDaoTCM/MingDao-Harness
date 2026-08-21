@@ -117,7 +117,7 @@ function runCli(args, opts = {}) {
   return new Promise((resolve) => {
     const child = spawn(process.execPath, [path.join(root, 'src', 'cli.js'), ...args], {
       cwd: opts.cwd || work,
-      env: { ...process.env, MINGDAO_HOME: home },
+      env: { ...process.env, MINGDAO_HOME: home, ...(opts.env || {}) },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     let out = '';
@@ -337,9 +337,15 @@ function ok(name) {
   assert.ok(s3.out.includes('email'), '列表应包含已安装技能');
   assert.ok(s3.out.includes('（用户级）'), '应标注用户级来源');
   assert.ok(s3.out.includes('技能库共'), '应提示技能库数量');
-  const s4 = await runCli(['skill', 'install', 'no-such-skill']);
+  const s4 = await runCli(['skill', 'install', 'no-such-skill'], { env: { MINGDAO_REGISTRY_URL: 'http://127.0.0.1:1' } });
   assert.equal(s4.code, 1);
-  assert.ok(s4.out.includes('技能库中没有'), '未知技能应有友好报错');
+  assert.ok(s4.out.includes('无法获取线上技能库'), '未知技能应回退线上 registry 并报告不可达');
+  const badDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-badskill-'));
+  fs.writeFileSync(path.join(badDir, 'SKILL.md'), '# 缺 frontmatter');
+  const s7 = await runCli(['skill', 'install', badDir], { env: { MINGDAO_REGISTRY_URL: 'http://127.0.0.1:1' } });
+  assert.equal(s7.code, 1);
+  assert.ok(s7.out.includes('frontmatter'), '坏格式技能应拒绝安装（dry-run 校验）');
+  fs.rmSync(badDir, { recursive: true, force: true });
   const s5 = await runCli(['skill', 'uninstall', 'email']);
   assert.equal(s5.code, 0, s5.err);
   assert.ok(s5.out.includes('✓ 已卸载 email'), '卸载应提示成功');

@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
+import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credentials.js';
 import { createProvider, resolveProviderConfig } from '../providers/index.js';
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { createAgent } from '../agent.js';
@@ -287,6 +288,15 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         provider: MODELS[name].provider || 'custom',
         providerLabel: PROVIDERS[MODELS[name].provider]?.label || '自定义',
       }));
+      for (const [cmName, cm] of Object.entries(cfg.customModels || {})) {
+        models.push({
+          name: cmName,
+          label: `${cmName} — ${cm.label || '自定义模型'}`,
+          provider: 'custom',
+          providerLabel: '自定义',
+          custom: true,
+        });
+      }
       if (!models.some((m) => m.name === modelName)) {
         models.unshift({ name: modelName, label: `${modelName}（当前配置）`, provider: 'custom', providerLabel: '自定义' });
       }
@@ -318,7 +328,10 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         if (!target) return json(res, 400, { error: '模型名不能为空' });
         const tpc = resolveProviderConfig(cfg, target);
         if (!tpc.apiKey) {
-          return json(res, 400, { error: `模型 ${target} 没有可用 API Key（服务商 ${tpc.name}），请先运行 mingdao key set ${tpc.name}` });
+          const hint = tpc.name.startsWith('custom:')
+            ? '请在 设置 → 模型与 API Key 中填写该模型的 Key'
+            : `请先运行 mingdao key set ${tpc.name}`;
+          return json(res, 400, { error: `模型 ${target} 没有可用 API Key（服务商 ${tpc.name}），${hint}` });
         }
         await getProviderFor(target); // 预热（失败会抛错）
         next.model = target;
@@ -371,6 +384,122 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       saveConfig(cfg);
       json(res, 200, { ok: true, model: modelName, permission: cfg.permission, sandbox: cfg.sandbox, routing: cfg.routing?.enabled, contextBudget: cfg.contextBudget, autostart: autostartChanged ? autostartStatus() : undefined, notify: cfg.notify !== false });
       return;
+    }
+    if (req.method === 'GET' && p === '/api/models-config') {
+      const providers = Object.keys(PROVIDERS).map((name) => {
+        const pp = PROVIDERS[name];
+        const stored = getStoredKey(name);
+        const env = pp.envKey && process.env[pp.envKey] ? true : false;
+        return {
+          name,
+          label: pp.label,
+          baseUrl: pp.baseUrl,
+          envKey: pp.envKey || null,
+          keyState: stored ? 'stored' : env ? 'env' : 'none',
+          keyMasked: stored ? maskKey(stored) : null,
+        };
+      });
+      const customModels = Object.entries(cfg.customModels || {}).map(([name, cm]) => {
+        const stored = getStoredKey(`custom:${name}`);
+        return {
+          name,
+          label: cm.label || '',
+          baseUrl: cm.baseUrl || '',
+          envKey: cm.envKey || null,
+          keyState: stored ? 'stored' : 'none',
+          keyMasked: stored ? maskKey(stored) : null,
+        };
+      });
+      json(res, 200, {
+        ok: true,
+        providers,
+        customModels,
+        model: modelName,
+        provider: resolveProviderConfig(cfg, modelName).name,
+        baseUrlOverride: cfg.baseUrl || '',
+      });
+      return;
+    }
+    if (req.method === 'POST' && p === '/api/models-config') {
+      const body = await readBody(req);
+      const action = body.action;
+      // —— 服务商 Key 管理 ——
+      if (action === 'setProviderKey') {
+        const provider = String(body.provider || '').trim();
+        if (!PROVIDERS[provider]) return json(res, 400, { error: `未知服务商 ${provider}` });
+        const key = String(body.key || '').trim();
+        if (!key) return json(res, 400, { error: 'Key 不能为空（删除请用 removeProviderKey）' });
+        setStoredKey(provider, key);
+        return json(res, 200, { ok: true, provider, keyMasked: maskKey(key) });
+      }
+      if (action === 'removeProviderKey') {
+        const provider = String(body.provider || '').trim();
+        if (!PROVIDERS[provider]) return json(res, 400, { error: `未知服务商 ${provider}` });
+        removeStoredKey(provider);
+        return json(res, 200, { ok: true, provider });
+      }
+      // —— 自定义模型增删改 ——
+      if (action === 'addCustom' || action === 'updateCustom') {
+        const name = String(body.name || '').trim();
+        if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$/.test(name)) {
+          return json(res, 400, { error: '模型名非法：字母/数字开头，可含 . _ -，1–64 位' });
+        }
+        if (MODELS[name]) return json(res, 400, { error: `${name} 与内置模型同名，请换一个名字` });
+        const label = String(body.label || '').trim();
+        const baseUrl = String(body.baseUrl || '').trim();
+        if (!baseUrl) return json(res, 400, { error: 'API 地址（baseUrl）不能为空' });
+        try {
+          const u = new URL(baseUrl);
+          if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error();
+        } catch {
+          return json(res, 400, { error: 'API 地址必须是合法的 http(s) URL' });
+        }
+        if (action === 'addCustom' && (cfg.customModels || {})[name]) {
+          return json(res, 400, { error: `自定义模型 ${name} 已存在（可修改）` });
+        }
+        cfg.customModels = cfg.customModels || {};
+        cfg.customModels[name] = { label, baseUrl, envKey: String(body.envKey || '').trim() || undefined };
+        if (String(body.key || '').trim()) setStoredKey(`custom:${name}`, String(body.key).trim());
+        saveConfig(cfg);
+        return json(res, 200, { ok: true, name });
+      }
+      if (action === 'removeCustom') {
+        const name = String(body.name || '').trim();
+        if (!(cfg.customModels || {})[name]) return json(res, 400, { error: `自定义模型 ${name} 不存在` });
+        delete cfg.customModels[name];
+        removeStoredKey(`custom:${name}`);
+        if (modelName === name) {
+          modelName = 'deepseek-v4-flash';
+          cfg.model = modelName;
+        }
+        saveConfig(cfg);
+        return json(res, 200, { ok: true, name, model: modelName });
+      }
+      if (action === 'setCustomKey') {
+        const name = String(body.name || '').trim();
+        if (!(cfg.customModels || {})[name]) return json(res, 400, { error: `自定义模型 ${name} 不存在` });
+        const key = String(body.key || '').trim();
+        if (!key) return json(res, 400, { error: 'Key 不能为空' });
+        setStoredKey(`custom:${name}`, key);
+        return json(res, 200, { ok: true, name, keyMasked: maskKey(key) });
+      }
+      // —— 当前服务商 API 地址覆盖 ——
+      if (action === 'setBaseUrl') {
+        const baseUrl = String(body.baseUrl || '').trim();
+        if (baseUrl) {
+          try {
+            const u = new URL(baseUrl);
+            if (u.protocol !== 'http:' && u.protocol !== 'https:') throw new Error();
+          } catch {
+            return json(res, 400, { error: 'API 地址必须是合法的 http(s) URL' });
+          }
+        }
+        cfg.baseUrl = baseUrl || undefined;
+        if (cfg.baseUrl === undefined) delete cfg.baseUrl;
+        saveConfig(cfg);
+        return json(res, 200, { ok: true, baseUrl: cfg.baseUrl || '' });
+      }
+      return json(res, 400, { error: '未知操作：setProviderKey|removeProviderKey|addCustom|updateCustom|removeCustom|setCustomKey|setBaseUrl' });
     }
     if (req.method === 'GET' && p === '/api/sessions') {
       const q = url.searchParams.get('q');
@@ -618,11 +747,26 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       return;
     }
     if (req.method === 'GET' && p === '/api/skill-library') {
-      const q = new URL(req.url, 'http://x').searchParams.get('q') || '';
-      const lib = q
+      const u = new URL(req.url, 'http://x');
+      const q = u.searchParams.get('q') || '';
+      const force = u.searchParams.get('refresh') === '1';
+      const local = q
         ? libraryList().filter((s) => s.name.includes(q) || (s.description || '').includes(q))
         : libraryList();
-      json(res, 200, { ok: true, library: lib, installed: [...installedUserSkillNames()] });
+      const { searchRegistry } = await import('../skill-registry.js');
+      const remote = await searchRegistry(q || '', { force });
+      const localNames = new Set(local.map((s) => s.name));
+      const registryEntries = remote.skills
+        ? remote.skills.filter((s) => !localNames.has(s.name)).map((s) => ({ ...s, dir: null }))
+        : [];
+      json(res, 200, {
+        ok: true,
+        library: local.map((s) => ({ name: s.name, description: s.description, source: 'builtin-lib', installed: s.installed })).concat(
+          registryEntries.map((s) => ({ name: s.name, description: s.description, source: 'registry', installed: s.installed }))
+        ),
+        installed: [...installedUserSkillNames()],
+        registry: remote.error ? { error: remote.error } : { host: remote.host, updatedAt: remote.updatedAt, stale: remote.stale || false },
+      });
       return;
     }
     if (req.method === 'POST' && p === '/api/skills') {
