@@ -53,10 +53,26 @@ export function createPermission(rawMode, io) {
   return {
     mode,
     async check(name, args = {}, label = '') {
-      if (deny.some((r) => ruleMatches(r, name, args))) return false;
+      const askOverride = async (question) => {
+        try {
+          const answer = await io.ask(style(question, C.yellow));
+          return /^y(es)?$/i.test(answer);
+        } catch {
+          return false; // 交互通道不可用（管道 EOF/静默 worker）：按拒绝处理
+        }
+      };
+      // 需要特殊授权时弹出对话框与用户交互，而不是静默拒绝：
+      // 1) 被 deny 规则拦截 → 询问是否本次强制放行
+      if (deny.some((r) => ruleMatches(r, name, args))) {
+        return askOverride(`规则拦截了 ${name}${summarize(name, args)}，是否本次强制放行？[y/N] `);
+      }
       if (allow.some((r) => ruleMatches(r, name, args))) return true;
       if (mode === 'auto') return true;
-      if (mode === 'readonly') return READONLY_TOOLS.has(name);
+      if (mode === 'readonly') {
+        // 2) 只读模式下的写操作 → 询问是否本次放行
+        if (READONLY_TOOLS.has(name)) return true;
+        return askOverride(`只读模式将拦截 ${name}${summarize(name, args)}，是否本次放行？[y/N] `);
+      }
       if (READONLY_TOOLS.has(name)) return true;
       const answer = await io.ask(
         style(`是否允许执行 ${label}${C.bold}${name}${C.reset}${summarize(name, args)} ？[y/N] `, C.yellow)

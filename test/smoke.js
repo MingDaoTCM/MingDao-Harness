@@ -279,18 +279,24 @@ const ctx = { cwd: tmp };
 
 // ---------- 6. 权限引擎 ----------
 {
-  const io = createIO({ quiet: true });
+  // 用 stub io：特殊授权（规则拦截/只读拦截）现在会弹出询问，测试注入应答避免读真实 stdin
+  const ioNo = { ask: async () => 'n' };
+  const ioYes = { ask: async () => 'y' };
   const { createPermission } = await import(path.join(srcDir, 'permissions.js'));
-  const auto = createPermission('auto', io);
+  const auto = createPermission('auto', ioNo);
   assert.equal(await auto.check('bash', { command: 'rm -rf /' }), true);
-  const readonly = createPermission('readonly', io);
+  const readonly = createPermission('readonly', ioNo);
   assert.equal(await readonly.check('read', {}), true);
-  assert.equal(await readonly.check('write', {}), false);
-  const obj = createPermission({ mode: 'ask', allow: ['bash'], deny: ['write'] }, io);
+  assert.equal(await readonly.check('write', {}), false, '只读拦截询问被拒应返回 false');
+  const readonlyYes = createPermission('readonly', ioYes);
+  assert.equal(await readonlyYes.check('write', {}), true, '只读拦截询问同意应放行');
+  const obj = createPermission({ mode: 'ask', allow: ['bash'], deny: ['write'] }, ioNo);
   assert.equal(await obj.check('bash', {}), true);
-  assert.equal(await obj.check('write', {}), false);
+  assert.equal(await obj.check('write', {}), false, 'deny 拦截询问被拒应返回 false');
+  const objYes = createPermission({ mode: 'ask', allow: ['bash'], deny: ['write'] }, ioYes);
+  assert.equal(await objYes.check('write', {}), true, 'deny 拦截询问同意应强制放行');
   assert.equal(await obj.check('grep', {}), true);
-  ok('permissions：auto / readonly / 规则对象');
+  ok('permissions：auto / readonly / 规则对象 / 特殊授权交互');
 }
 
 // ---------- 7. 配置与独立凭证库（隔离的 MINGDAO_HOME） ----------
@@ -420,7 +426,7 @@ const ctx = { cwd: tmp };
 // ---------- 12. 权限规则模式匹配 ----------
 {
   const { createPermission } = await import(path.join(srcDir, 'permissions.js'));
-  const io12 = createIO({ quiet: true });
+  const io12 = { ask: async () => 'n' };
   const p = createPermission({ mode: 'ask', allow: ['bash:git *'], deny: ['bash:rm *', 'write'] }, io12);
   assert.equal(await p.check('bash', { command: 'git status --short' }), true, 'allow 前缀匹配');
   assert.equal(await p.check('bash', { command: 'rm -rf /tmp/x' }), false, 'deny 前缀匹配');
