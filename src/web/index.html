@@ -124,6 +124,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
   <span id="cfgMsg" class="badge" style="display:none"></span>
   <span class="badge" id="envBadge"></span>
   <button id="cfgBtn" title="设置">⚙</button>
+  <select id="wsSel" title="工作空间（切换 / 新建，目录自动创建）"></select>
   <div class="spacer"></div>
   <input id="sessionSearch" placeholder="搜索会话…" title="关键词检索历史会话">
   <select id="sessions" title="历史会话"><option value="">历史会话</option></select>
@@ -517,6 +518,7 @@ async function init(){
     const ms=$('#modelSel'); if(!ms.options.length){ const o=document.createElement('option'); o.textContent='加载失败，刷新重试'; ms.appendChild(o); }
   }
   refreshSessions();
+  refreshWsSel();
   try{
     const dr=await fetch('/api/draft',{cache:'no-store'}); const dj=await dr.json();
     if(dj.text){ input.value=dj.text; input.style.height=Math.min(input.scrollHeight,200)+'px'; input.focus(); }
@@ -524,6 +526,46 @@ async function init(){
 }
 $('#cfgBtn').onclick=()=>{ $('#cfgModal').style.display='flex'; };
 $('#cfgCancel').onclick=()=>{ $('#cfgModal').style.display='none'; };
+// —— 工作空间头部下拉（⚙ 右侧：切换 / 新建 / 管理） ——
+async function refreshWsSel(){
+  const r=await fetch('/api/workspaces',{cache:'no-store'}).catch(()=>null); if(!r) return;
+  const j=await r.json();
+  const sel=$('#wsSel'); sel.innerHTML='';
+  const cur=document.createElement('option'); cur.value=''; cur.textContent='工作空间'+(j.current?'：'+j.current:'');
+  sel.appendChild(cur);
+  for(const w of j.workspaces||[]){
+    const o=document.createElement('option'); o.value=w.name; o.textContent=(w.name===j.current?'● ':'')+w.name;
+    if(w.name===j.current) o.selected=true;
+    sel.appendChild(o);
+  }
+  const add=document.createElement('option'); add.value='__add__'; add.textContent='＋ 新建工作空间…';
+  sel.appendChild(add);
+  const mgr=document.createElement('option'); mgr.value='__manage__'; mgr.textContent='管理（重命名/删除/改目录）…';
+  sel.appendChild(mgr);
+}
+$('#wsSel').addEventListener('change', async e=>{
+  const v=e.target.value;
+  if(v==='__add__'){
+    const name=prompt('新工作空间名称：'); if(!name){ refreshWsSel(); return; }
+    const dir=prompt('目录路径（留空 = 当前目录，目录不存在会自动创建）：');
+    const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',name,dir:dir||undefined})});
+    const j=await r.json().catch(()=>({error:'请求失败'}));
+    if(j.ok) renderBanner({text:'✓ 已登记工作空间 '+j.name+' → '+j.dir+'（目录已自动创建）'}); else alert(j.error||'创建失败');
+    refreshWsSel(); reloadModels();
+    return;
+  }
+  if(v==='__manage__'){
+    $('#cfgModal').style.display='flex'; refreshWorkspaces();
+    refreshWsSel();
+    return;
+  }
+  if(v){
+    const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'set',name:v})});
+    const j=await r.json().catch(()=>({error:'请求失败'}));
+    if(j.ok) renderBanner({text:'✓ 已切换到工作空间 '+j.name+'（'+j.dir+'），后续工具在此目录执行'}); else { alert(j.error||'切换失败'); }
+    refreshWsSel(); reloadModels();
+  }
+});
 $('#cfgBtn').addEventListener('click', ()=>{ refreshModelsCfg(); refreshSyncUI(); refreshSyncShares(); refreshSyncConflicts(); refreshSchList(); refreshWorkspaces(); loadMemoryUI(); refreshCache(); refreshMcpPresets(); refreshSkillLib(''); });
 $('#schWhen').onchange=e=>{ const v=e.target.value; $('#schAtRow').style.display=v==='at'?'':'none'; $('#schEveryRow').style.display=v==='every'?'':'none'; $('#schAfterRow').style.display=v==='after'?'':'none'; $('#schChainRow').style.display=v==='chain'?'':'none'; };
 async function refreshSchList(){
@@ -562,9 +604,9 @@ async function refreshWorkspaces(){
   for(const w of j.workspaces){
     const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px';
     div.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(w.name)+(w.name===j.current?' <span style="color:var(--accent)">●当前</span>':'')+'</span><span style="flex:1.4;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left">'+esc(w.dir||'')+'</span>';
-    const ed=document.createElement('button'); ed.textContent='改目录'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=async()=>{ const d=prompt('新目录：', w.dir); if(!d) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'set',name:w.name,dir:d})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok) refreshWorkspaces(); else alert(jj.error||'修改失败'); };
-    const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=prompt('新名称：', w.name); if(!t) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',name:w.name,newName:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok) refreshWorkspaces(); else alert(jj.error||'重命名失败'); };
-    const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!confirm('删除工作空间 '+w.name+'？')) return; await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',name:w.name})}); refreshWorkspaces(); };
+    const ed=document.createElement('button'); ed.textContent='改目录'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=async()=>{ const d=prompt('新目录：', w.dir); if(!d) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'set',name:w.name,dir:d})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshWorkspaces(); refreshWsSel(); reloadModels(); } else alert(jj.error||'修改失败'); };
+    const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=prompt('新名称：', w.name); if(!t) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',name:w.name,newName:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshWorkspaces(); refreshWsSel(); } else alert(jj.error||'重命名失败'); };
+    const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!confirm('删除工作空间 '+w.name+'？')) return; await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',name:w.name})}); refreshWorkspaces(); refreshWsSel(); reloadModels(); };
     div.appendChild(ed); div.appendChild(rn); div.appendChild(rm); list.appendChild(div);
   }
 }
@@ -573,7 +615,7 @@ $('#wsAdd').onclick=async ()=>{
   const dir=$('#wsDir').value.trim();
   const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',name,dir})});
   const j=await r.json().catch(()=>({error:'请求失败'}));
-  if(j.ok){ $('#wsName').value=''; $('#wsDir').value=''; refreshWorkspaces(); } else alert(j.error||'添加失败');
+  if(j.ok){ $('#wsName').value=''; $('#wsDir').value=''; refreshWorkspaces(); refreshWsSel(); reloadModels(); } else alert(j.error||'添加失败');
 };
 // —— 长期记忆 ——
 function memFlash(msg, good){ const m=$('#memMsg'); m.textContent=msg; m.style.color=good?'var(--accent)':'var(--err)'; setTimeout(()=>{m.textContent='';},4000); }

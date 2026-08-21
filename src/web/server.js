@@ -49,7 +49,7 @@ import {
   reconcileSchedules,
 } from '../schedule.js';
 import { enableAutostart, disableAutostart, autostartStatus } from '../autostart.js';
-import { currentWorkspace, listWorkspaces, addWorkspace, removeWorkspace, renameWorkspace, setWorkspaceDir } from '../workspace.js';
+import { currentWorkspace, listWorkspaces, addWorkspace, removeWorkspace, renameWorkspace, setWorkspaceDir, workspacePath, touchWorkspace } from '../workspace.js';
 import { loadMemory, writeMemory, dedupeMemory } from '../memory.js';
 import { recordUsage, listCacheStats, summarizeCacheStats } from '../cachestats.js';
 import { presetList, buildPreset } from '../mcp-presets.js';
@@ -92,7 +92,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     return;
   }
 
-  const workingDir = process.cwd();
+  let workingDir = process.cwd(); // 工作空间切换时随之更新（后续会话/工具都跟随新目录）
   // Provider 按模型懒加载缓存：界面切换模型后即时生效
   const providerCache = new Map();
   async function getProviderFor(m) {
@@ -709,9 +709,18 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       const name = String(body.name || '').trim();
       if (body.action === 'add') {
         if (!name) return json(res, 400, { error: '名称不能为空' });
-        const r = addWorkspace(name, body.dir || workingDir);
+        // 目录为空/不存在时自动新建（默认开，create:false 关闭）
+        const target = path.resolve(body.dir || workingDir);
+        if (body.create !== false) {
+          try {
+            fs.mkdirSync(target, { recursive: true });
+          } catch (e) {
+            return json(res, 400, { error: `无法创建目录：${target}（${e.message}）` });
+          }
+        }
+        const r = addWorkspace(name, target);
         if (r.error) return json(res, 400, { error: r.error });
-        return json(res, 200, { ok: true, name: r.name, dir: r.dir });
+        return json(res, 200, { ok: true, name: r.name, dir: r.dir, created: body.create !== false });
       }
       if (body.action === 'rename') {
         const r = renameWorkspace(name, body.newName);
@@ -719,9 +728,24 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         return json(res, 200, { ok: true, name: r.name });
       }
       if (body.action === 'set') {
-        const r = setWorkspaceDir(name, body.dir || workingDir);
-        if (r.error) return json(res, 400, { error: r.error });
-        return json(res, 200, { ok: true, name: r.name, dir: r.dir });
+        // 切换当前工作空间（可带 dir 修改目录）；目录缺失自动重建，服务端工作目录随之切换
+        if (body.dir) {
+          const r = setWorkspaceDir(name, body.dir);
+          if (r.error) return json(res, 400, { error: r.error });
+        }
+        const dir = workspacePath(name);
+        if (!dir) return json(res, 400, { error: `工作空间 ${name} 不存在` });
+        try {
+          fs.mkdirSync(dir, { recursive: true });
+        } catch (e) {
+          return json(res, 400, { error: `无法创建目录：${dir}（${e.message}）` });
+        }
+        touchWorkspace(name);
+        workingDir = dir;
+        try {
+          process.chdir(dir);
+        } catch {}
+        return json(res, 200, { ok: true, name, dir, current: name });
       }
       if (body.action === 'remove') {
         if (!name) return json(res, 400, { error: '缺少名称' });

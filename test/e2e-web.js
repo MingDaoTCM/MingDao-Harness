@@ -458,6 +458,30 @@ let base = await startWeb(work1);
   ok('附件：文本内联 / 视觉门控 / 视觉模型图文数组');
 }
 
+// ---------- 13. 工作空间头部下拉：新建（目录自动创建）/ 切换（服务端 cwd 跟随） ----------
+{
+  const newDir = path.join(os.tmpdir(), 'mingdao-ws-' + Date.now());
+  const add0 = await (await fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', name: '原空间', dir: work1 }) })).json();
+  assert.equal(add0.ok, true, add0.error);
+  const add = await (await fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', name: '自动创建测试', dir: newDir }) })).json();
+  assert.equal(add.ok, true, add.error);
+  assert.ok(fs.existsSync(newDir), '不存在的目录应自动创建');
+  const set = await (await fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'set', name: '自动创建测试' }) })).json();
+  assert.equal(set.ok, true, set.error);
+  assert.equal(set.dir, newDir);
+  const st = await (await fetch(base + '/api/state')).json();
+  assert.equal(st.workspace, '自动创建测试', 'state 应显示当前工作空间');
+  assert.equal(st.workingDir, newDir, '服务端 workingDir 应跟随切换');
+  const back = await (await fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'set', name: '原空间' }) })).json();
+  assert.equal(back.ok, true, back.error);
+  const st2 = await (await fetch(base + '/api/state')).json();
+  assert.equal(st2.workingDir, work1, '应能切回原目录');
+  const html = await (await fetch(base + '/')).text();
+  assert.ok(html.includes('wsSel'), '前端应包含工作空间下拉');
+  fs.rmSync(newDir, { recursive: true, force: true });
+  ok('工作空间：头部下拉 / 目录自动创建 / 服务端切换');
+}
+
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();

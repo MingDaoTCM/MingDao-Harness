@@ -60,7 +60,7 @@ Windows 说明：`bash` 工具自动使用 `cmd.exe`；配置目录 `C:\Users\<�
 | 会话 | `mingdao --continue` / `--resume` / `sessions search <词>` / `--model <模型>` |
 | 后台任务 | `mingdao run "<任务>"` · `mingdao tasks` / `tasks watch` / `tasks kill <id>` |
 | 调度 | `mingdao schedule add "<任务>" --at "2026-08-21 09:00"` / `--every 2h` / `--after <任务ID>` · `schedule chain "构建" "测试" "部署"` · `schedule list/remove/pause/resume` |
-| 工作空间 | `mingdao workspace add/list/use/path/remove <名称>` |
+| 工作空间 | WebUI 顶部（⚙ 右侧）下拉切换/新建（目录自动创建）；CLI：`mingdao workspace add/list/use/path/remove <名称>` |
 | 密钥 | `mingdao key`（脱敏状态）/ `key set <服务商>` / `key remove` / `key import` |
 | MCP | 配置 `mcpServers` 后会话内 `/mcp` 查看状态 · `mingdao mcp preset list/add <名称>` 一键接入常用服务器 |
 | 技能 | `mingdao skill search/install/list/uninstall/update` |
@@ -149,7 +149,7 @@ node test/e2e-schedule.js# 端到端：定时/周期/链式调度
 
 ## 版本
 
-语义化版本：修复 → 末位 +1，新子系统 → 中位 +1，首个 npm 稳定发布（API 冻结）→ 1.0.0。当前 **0.1.x**（最新 `v0.1.26`）。
+语义化版本：修复 → 末位 +1，新子系统 → 中位 +1，首个 npm 稳定发布（API 冻结）→ 1.0.0。当前 **0.1.x**（最新 `v0.1.27`）。
 
 ## License
 
