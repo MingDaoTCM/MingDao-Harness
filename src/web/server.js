@@ -268,6 +268,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         durationMs: r.durationMs,
         truncated: r.truncated,
         aborted: r.aborted,
+        note: r.note || (r.text ? '' : '（模型本轮没有输出正文）'),
         session: path.basename(session.file),
       });
     } catch (err) {

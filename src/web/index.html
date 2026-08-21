@@ -484,7 +484,7 @@ async function send(){
       else if(ev.type==='ask'){ update(); askModal(ev).then(a=>fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:ev.id,answer:a,taskId})}).catch(()=>{})); }
       else if(ev.type==='usage'){ onActivity(); const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; msg.appendChild(u); scroll(); }
       else if(ev.type==='error'){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); scroll(); }
-      else if(ev.type==='done'){ onActivity(); currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
+      else if(ev.type==='done'){ onActivity(); if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); } currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
     });
   }catch(e){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=e.message||'网络错误'; msg.appendChild(d); scroll(); }
   finally{ pending=false; content.innerHTML=renderMarkdown(raw); scroll(); updateTasksPanel(); }

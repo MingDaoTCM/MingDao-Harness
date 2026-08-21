@@ -234,6 +234,49 @@ const ctx = { cwd: tmp };
   ok('agent：工具调用循环 + 结果回填 + usage 汇总');
 }
 
+// ---------- 5b. 空/截断输出自动续写（推理吃满上限返回空正文时不能静默结束） ----------
+{
+  const io2 = createIO({ quiet: true });
+  let t2 = 0;
+  const fake2 = {
+    async chat() {
+      t2 += 1;
+      if (t2 === 1) {
+        return { text: '', toolCalls: null, usage: { prompt_tokens: 5, completion_tokens: 8000 }, finish: 'length' };
+      }
+      return { text: '续写完成！', toolCalls: null, usage: { prompt_tokens: 6, completion_tokens: 4 }, finish: 'stop' };
+    },
+  };
+  const agent2 = createAgent({
+    provider: fake2,
+    permission: { async check() { return true; } },
+    io: io2,
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmp,
+    cfg: { permission: 'auto' },
+  });
+  const m2 = [{ role: 'system', content: '系统' }, { role: 'user', content: '生成游戏' }];
+  const r2 = await agent2.runTurn(m2);
+  assert.equal(r2.text, '续写完成！', '截断后应自动续写而非静默结束');
+  assert.equal(r2.truncated, false);
+  assert.ok(m2.some((m) => m.role === 'user' && m.content.includes('长度上限被截断')), '应回填续写提示');
+  // 连续空输出 2 次 → 结束并带 note
+  let t3 = 0;
+  const fake3 = { async chat() { t3 += 1; return { text: '', toolCalls: null, usage: {}, finish: 'stop' }; } };
+  const agent3 = createAgent({
+    provider: fake3,
+    permission: { async check() { return true; } },
+    io: io2,
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmp,
+    cfg: { permission: 'auto' },
+  });
+  const r3 = await agent3.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: 'x' }]);
+  assert.equal(r3.text, null);
+  assert.ok(r3.note && r3.note.includes('没有输出正文'), '连续空输出应有提示而非无限循环');
+  ok('agent：空/截断输出续写与兜底');
+}
+
 // ---------- 6. 权限引擎 ----------
 {
   const io = createIO({ quiet: true });

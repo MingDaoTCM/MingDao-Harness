@@ -86,6 +86,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const usage = { prompt_tokens: 0, completion_tokens: 0 };
     const startedAt = Date.now();
     let aborted = false;
+    let emptyRounds = 0; // 连续空/截断输出计数（防止无限续写）
     let currentAc = null;
     // 整个回合注册一次 SIGINT：思考、工具执行、权限询问期间都能中断
     const offSigint = io.onSigint ? io.onSigint(() => { aborted = true; currentAc?.abort(); }) : () => {};
@@ -214,6 +215,52 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 空文本不回填，避免个别 API 对 assistant 空 content 报错
         if (res.text) {
           messages.push({ role: 'assistant', content: res.text });
+        }
+        // 输出被长度上限截断（DeepSeek 推理吃满 maxOutput 时正文为空）：让模型从断点续写，绝不静默结束
+        if (res.finish === 'length') {
+          emptyRounds += 1;
+          if (emptyRounds >= 3) {
+            stripOrphanCalls();
+            return {
+              text: res.text || null,
+              reasoning: res.reasoning || '',
+              usage,
+              steps,
+              finish,
+              truncated: true,
+              aborted: false,
+              note: '模型连续输出被截断，请换用更长输出的模型或拆分任务。',
+              durationMs: Date.now() - startedAt,
+            };
+          }
+          io.print('（输出达到长度上限，已让模型从断点继续…）');
+          messages.push({
+            role: 'user',
+            content: '（系统提示）你的上一条输出因达到长度上限被截断。请直接继续未完成的部分：不要重复已写内容，从断点接着完成。',
+          });
+          continue;
+        }
+        if (!res.text) {
+          // 静默空输出（无工具无正文）：同样回填续写提示，避免界面"没动静"
+          emptyRounds += 1;
+          if (emptyRounds >= 2) {
+            return {
+              text: null,
+              reasoning: res.reasoning || '',
+              usage,
+              steps,
+              finish,
+              truncated: false,
+              aborted: false,
+              note: '模型本轮没有输出正文。',
+              durationMs: Date.now() - startedAt,
+            };
+          }
+          messages.push({
+            role: 'user',
+            content: '（系统提示）你刚才没有输出任何正文就结束了。请继续完成用户的任务，给出实际内容。',
+          });
+          continue;
         }
         return {
           text: res.text || '',
