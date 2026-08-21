@@ -628,6 +628,13 @@ const ctx = { cwd: tmp };
   assert.ok(withCache < noCache * 0.6, '缓存计价应显著低于全未命中 ' + withCache + ' vs ' + noCache);
   const label = estimateCostLabel('deepseek-v4-flash', 1000, 100, { prompt_cache_hit_tokens: 600, prompt_cache_miss_tokens: 400 });
   assert.ok(label.includes('缓存命中 60%'), label);
+  // 多模态视觉模型预设（deepseek-v4-flash-vision-exp，与 flash 同价）
+  const { modelPreset } = await import(path.join(srcDir, 'models.js'));
+  const vision = modelPreset('deepseek-v4-flash-vision-exp');
+  assert.ok(vision && vision.supportsVision === true, '视觉模型预设应存在且标注 supportsVision');
+  assert.deepEqual(vision.pricing, modelPreset('deepseek-v4-flash').pricing, '视觉模型价格应与 V4-Flash 一致');
+  const visionCost = estimateCost('deepseek-v4-flash-vision-exp', 1000, 100, null, new Date('2026-08-21T03:00:00'));
+  assert.ok(visionCost > 0, '视觉模型应可计价');
   ok('pricing：缓存拆分 / 命中价 / 命中率标签');
 }
 

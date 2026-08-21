@@ -8,7 +8,7 @@ export const PROVIDERS = {
     kind: 'openai-compatible',
     baseUrl: 'https://api.deepseek.com/v1',
     envKey: 'DEEPSEEK_API_KEY',
-    models: ['deepseek-v4-flash', 'deepseek-v4-pro'],
+    models: ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
     note: 'DeepSeek-V4 正式版（2026-08-17 起商用）：384K 上下文，峰谷定价（高峰 9:00–14:00 为闲时 2 倍），支持工具调用 / Responses API / Anthropic 兼容接口。',
   },
   openai: {
@@ -72,6 +72,22 @@ export const MODELS = {
     maxOutputTokens: 8192,
     temperature: 0.6,
     supportsReasoning: false,
+    pricing: {
+      offpeak: { input: 1.5, output: 4.5, cacheHit: 0.05 },
+      peak: { input: 3, output: 9, cacheHit: 0.1 },
+    },
+  },
+  // 多模态视觉模型（2026-08-21 上线，实验版）：文本 + 图片输入（JPEG/PNG/GIF/WebP），
+  // 图片转 token 计费（≤384 tokens/张），价格与 V4-Flash 完全一致。
+  'deepseek-v4-flash-vision-exp': {
+    label: '多模态视觉 · 图片描述/截图识别/图表分析（实验版）',
+    provider: 'deepseek',
+    contextWindow: 384000,
+    budgetTokens: 128000,
+    maxOutputTokens: 8192,
+    temperature: 0.6,
+    supportsReasoning: false,
+    supportsVision: true,
     pricing: {
       offpeak: { input: 1.5, output: 4.5, cacheHit: 0.05 },
       peak: { input: 3, output: 9, cacheHit: 0.1 },
