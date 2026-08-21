@@ -495,13 +495,15 @@ async function send(){
   finally{ pending=false; content.innerHTML=renderMarkdown(raw); scroll(); updateTasksPanel(); }
 }
 
-function abort(){ fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{}); }
+function abort(){ fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(()=>updateTasksPanel()).catch(()=>{}); }
 
 // —— 任务面板（多会话并行） ——
 async function updateTasksPanel(){
   const r=await fetch('/api/tasks').catch(()=>null); if(!r) return;
   const j=await r.json(); const list=$('#tpList'); list.innerHTML='';
   $('#tpCount').textContent='（'+j.running+' 运行中 / 上限 '+j.maxConcurrent+'）';
+  // 有任务在生成时显示「■ 中断」停止键（点击中止全部运行中任务）
+  stopBtn.style.display = j.running > 0 ? '' : 'none';
   for(const t of j.tasks){
     const div=document.createElement('div'); div.className='tp-item';
     const dot = t.status==='running'?'tp-run':(t.status==='done'?'tp-done':'tp-bad');
