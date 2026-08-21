@@ -20,6 +20,7 @@ import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credent
 import { availableModels, fetchProviderModels, providerHasKey } from '../model-discovery.js';
 import { createProvider, resolveProviderConfig } from '../providers/index.js';
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
+import { routeTask, routingConfig } from '../routing.js';
 import { buildUserContent } from './attachments.js';
 import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
@@ -183,7 +184,21 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     if (!session) session = createSession(home);
     entry.session = session;
 
-    const systemPrompt = buildSystemPrompt({ modelName, workingDir });
+    // 自动路由（与 CLI 一致）：规划/生成类任务 → planner（大输出），执行类 → executor
+    let runModel = modelName;
+    let routeReason = null;
+    if (routingConfig(cfg)) {
+      try {
+        const route = await routeTask({ cfg, provider, currentModel: modelName, text: built.persistText || userMessage });
+        if (route.model !== modelName) {
+          runModel = route.model;
+          routeReason = route.reason;
+        }
+      } catch {}
+    }
+    if (routeReason) send({ type: 'banner', text: `⤷ 自动路由 → ${runModel}（${routeReason}）` });
+
+    const systemPrompt = buildSystemPrompt({ modelName: runModel, workingDir });
     let messages =
       session.messages?.length && session.messages[0]?.role === 'system'
         ? session.messages
@@ -217,12 +232,12 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       },
     });
     const permission = createPermission(cfg.permission ?? 'ask', io);
-    const providerNow = await getProviderFor(modelName);
+    const providerNow = await getProviderFor(runModel);
     const agent = createAgent({
       provider: providerNow,
       permission,
       io,
-      modelName,
+      modelName: runModel,
       workingDir,
       cfg,
       undoStore,
@@ -248,13 +263,13 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     try {
       const r = await agent.runTurn(messages);
       appendMessages(session.file, messages.slice(persistedBefore));
-      io.printUsageLine({ modelName, usage: r.usage, durationMs: r.durationMs });
-      recordUsage(modelName, r.usage);
+      io.printUsageLine({ modelName: runModel, usage: r.usage, durationMs: r.durationMs });
+      recordUsage(runModel, r.usage);
       maybeAutoSync().catch(() => {});
       // 新会话自动标题（可配置关闭）
       if (isNew && cfg.autoTitle !== false && r.text) {
         try {
-          const title = await generateTitle(providerNow, titleModel(cfg, modelName), built.persistText);
+          const title = await generateTitle(providerNow, titleModel(cfg, runModel), built.persistText);
           if (title) renameSessionFile(fs, path, home, session, title);
         } catch {}
       }

@@ -575,6 +575,10 @@ const ctx = { cwd: tmp };
   assert.ok(rc && rc.planner === 'deepseek-v4-pro' && rc.executor === 'deepseek-v4-flash');
   assert.equal(heuristicRoute('帮我写个函数', rc), 'deepseek-v4-flash');
   assert.equal(heuristicRoute('请设计这个系统的整体架构，梳理模块划分与数据流，并给出分阶段重构方案与风险评估与测试计划', rc), 'deepseek-v4-pro');
+  // 生成类任务（需要大输出）即使短句也路由 planner
+  assert.equal(heuristicRoute('给我生成一个愤怒的小鸟网页版游戏', rc), 'deepseek-v4-pro', '游戏生成应路由 planner');
+  assert.equal(heuristicRoute('帮我写一份详细的周报', rc), 'deepseek-v4-pro', '文档生成应路由 planner');
+  assert.equal(heuristicRoute('今天天气怎么样', rc), 'deepseek-v4-flash');
   // 分类器路径（fake provider 返回 plan / execute）
   const fake = { async chat() { return { text: 'plan' }; } };
   const r1 = await routeTask({ cfg: { routing: { enabled: true } }, provider: fake, currentModel: 'deepseek-v4-flash', text: '这是一条用于触发分类器判定流程的测试消息，其内容需要足够长以超过六十个字符的启发式阈值，才能进入分类器环节进行判定，请务必用分类器来判定本条消息的类别' });

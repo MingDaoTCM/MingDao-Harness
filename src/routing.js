@@ -18,8 +18,13 @@ export function routingConfig(cfg) {
 const PLAN_HINTS =
   /设计|架构|重构|审查|规划|分析|方案|评估|优化|排查|疑难|设计模式|选型|技术债|roadmap|review|design|refactor|plan|architecture|方案设计|评审/;
 
+// 生成类任务（游戏/网页/文档等）需要大输出（planner 32K vs executor 8K），即使短句也路由 planner
+const GENERATION_HINTS =
+  /(生成|制作|编写|创建|写|开发|实现|做).{0,30}(游戏|网页|页面|网站|应用|程序|文档|报告|简历|PPT|演示|完整|详细|小工具)|网页版|游戏/;
+
 export function heuristicRoute(text, rc) {
   const s = String(text ?? '');
+  if (GENERATION_HINTS.test(s)) return rc.planner; // 生成类：大输出优先
   if (s.length >= 40 && PLAN_HINTS.test(s)) return rc.planner;
   if (s.length <= 60) return rc.executor;
   return null; // 需要分类器
@@ -48,7 +53,7 @@ export async function routeTask({ cfg, provider, currentModel, text }) {
         {
           role: 'system',
           content:
-            '你是任务分类器。判断用户请求属于哪类，只输出一个词：plan（需要设计、规划、分析、审查、多步推理）或 execute（直接执行、简单问答、小改动）。',
+            '你是任务分类器。判断用户请求属于哪类，只输出一个词：plan（需要设计、规划、分析、审查、多步推理，或需要生成大段代码/文档/页面等长输出）或 execute（直接执行、简单问答、小改动）。',
         },
         { role: 'user', content: String(text).slice(0, 4000) },
       ],
