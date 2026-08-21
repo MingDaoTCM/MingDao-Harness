@@ -33,7 +33,11 @@ export function loadConfig() {
 
 export function saveConfig(cfg) {
   ensureHome();
-  fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+  const p = configPath();
+  fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+  try {
+    fs.chmodSync(p, 0o600);
+  } catch {}
 }
 
 export function effectiveApiKey(cfg, providerName) {

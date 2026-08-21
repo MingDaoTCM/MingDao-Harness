@@ -7,7 +7,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { startTask, readTask, listTasks } from './tasks.js';
+import { startTask, readTask, killTask } from './tasks.js';
+
+function isRunningTask(home, taskId) {
+  const t = readTask(home, taskId);
+  return Boolean(t && t.status === 'running');
+}
 
 const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url));
 
@@ -61,7 +66,12 @@ export function listSchedules(home) {
   return out.sort((a, b) => (a.nextRunAt || 0) - (b.nextRunAt || 0));
 }
 
+function isValidScheduleId(id) {
+  return typeof id === 'string' && /^[a-z0-9]+$/.test(id) && id.length >= 2 && id.length <= 40;
+}
+
 export function readSchedule(home, id) {
+  if (!isValidScheduleId(id)) return null; // 防 id 路径穿越
   try {
     return JSON.parse(fs.readFileSync(path.join(scheduleDir(home), id + '.json'), 'utf8'));
   } catch {
@@ -70,8 +80,13 @@ export function readSchedule(home, id) {
 }
 
 export function writeSchedule(home, job) {
+  if (!isValidScheduleId(job?.id)) return null;
   fs.mkdirSync(scheduleDir(home), { recursive: true });
-  fs.writeFileSync(path.join(scheduleDir(home), job.id + '.json'), JSON.stringify(job, null, 2) + '\n');
+  const target = path.join(scheduleDir(home), job.id + '.json');
+  const tmp = target + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(job, null, 2) + '\n');
+  fs.renameSync(tmp, target);
+  return job;
 }
 
 // 新建调度任务；after: 依赖的任务 ID（全部成功后才启动，任一失败则跳过）
@@ -130,6 +145,8 @@ export function removeSchedule(home, id) {
       process.kill(job.pid, 'SIGTERM');
     } catch {}
   }
+  // 正在跑的 worker 同步停止，避免成孤儿继续执行
+  if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
   try {
     fs.unlinkSync(path.join(scheduleDir(home), id + '.json'));
   } catch {}
@@ -144,7 +161,8 @@ export function pauseSchedule(home, id) {
       process.kill(job.pid, 'SIGTERM');
     } catch {}
   }
-  writeSchedule(home, { ...job, status: 'paused', pid: null });
+  if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
+  writeSchedule(home, { ...job, status: 'paused', pid: null, lastTaskId: null });
   return true;
 }
 
@@ -152,14 +170,24 @@ export function resumeSchedule(home, id) {
   const job = readSchedule(home, id);
   if (!job || job.status !== 'paused') return false;
   let next = job.nextRunAt;
-  if (job.kind === 'every') next = Date.now() + job.interval;
-  else if (job.kind === 'once') {
+  if (job.kind === 'every') {
+    next = job.anchor ? nextAnchorAfter(job.anchor, job.interval) || Date.now() + job.interval : Date.now() + job.interval;
+  } else if (job.kind === 'once') {
     if (next && next <= Date.now()) next = Date.now() + 30000; // 已过期的一次性任务恢复后 30s 执行
   } else next = Date.now();
   const nextJob = { ...job, status: 'pending', nextRunAt: next };
   writeSchedule(home, nextJob);
   spawnSleeper(home, nextJob);
   return true;
+}
+
+// 每日锚点：锚点时刻（HH:MM）对齐到 now 之后的最近一次
+function nextAnchorAfter(anchor, interval) {
+  const a = parseAt(anchor);
+  if (a == null) return null;
+  let n = a;
+  while (n <= Date.now()) n += interval;
+  return n;
 }
 
 // 链式编排：A→B→C，后者依赖前者成功
@@ -197,17 +225,30 @@ function spawnSleeper(home, job) {
   return child.pid;
 }
 
-// 重启自愈：为到期且 sleeper 已死的任务重新挂起 sleeper
+// 重启自愈：为到期且 sleeper 已死的任务重新挂起 sleeper（带锁防并发双挂）
 export function reconcileSchedules(home) {
   for (const job of listSchedules(home)) {
     if (job.status !== 'pending' && job.status !== 'running') continue;
     if (sleeperAlive(job.pid)) continue;
-    if (job.kind === 'after') {
-      spawnSleeper(home, job); // 依赖型任务始终需要 sleeper 轮询
-    } else if (job.nextRunAt && job.nextRunAt <= Date.now() + 5000) {
-      const next = job.nextRunAt <= Date.now() ? Date.now() + 1000 : job.nextRunAt;
-      writeSchedule(home, { ...job, nextRunAt: next });
-      spawnSleeper(home, job);
+    // 上次拉起的 worker 还在跑：不重挂 sleeper，避免同任务双跑
+    if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) continue;
+    const lock = path.join(scheduleDir(home), `${job.id}.sleeper.lock`);
+    let fd;
+    try {
+      fd = fs.openSync(lock, 'wx');
+    } catch {
+      continue; // 另一进程正在挂载
+    }
+    try {
+      if (job.kind === 'after') {
+        spawnSleeper(home, job); // 依赖型任务始终需要 sleeper 轮询
+      } else if (job.nextRunAt && job.nextRunAt <= Date.now() + 5000) {
+        const next = job.nextRunAt <= Date.now() ? Date.now() + 1000 : job.nextRunAt;
+        writeSchedule(home, { ...job, nextRunAt: next });
+        spawnSleeper(home, job);
+      }
+    } finally {
+      fs.closeSync(fd);
     }
   }
 }
@@ -229,7 +270,8 @@ export async function runSleeper(home, id) {
         return false; // pending / running
       }
       const t = readTask(home, dep);
-      if (!t || t.status === 'running') return false;
+      if (!t) return 'failed'; // 依赖任务不存在（拼错/已删）：判失败并报错，避免永续轮询
+      if (t.status === 'running') return false;
       if (t.status !== 'done') return 'failed';
     }
     return true;
@@ -254,6 +296,7 @@ export async function runSleeper(home, id) {
       t = readTask(home, task.id);
     }
     const cur0 = readSchedule(home, id);
+    if (!cur0) return 'failed'; // 任务已被删除：停止后续写入
     const history = [...(cur0?.history || [])];
     history.push({
       taskId: task.id,
@@ -286,8 +329,8 @@ export async function runSleeper(home, id) {
       await runOnce();
       const cur2 = readSchedule(home, id);
       if (!cur2) return;
-      // 下次 = 完成时间 + 周期（不追赶错过的档期）
-      const next = Date.now() + cur2.interval;
+      // 下次 = 完成时间 + 周期（不追赶错过的档期）；有每日锚点时对齐锚点，避免逐日漂移
+      const next = cur2.anchor ? nextAnchorAfter(cur2.anchor, cur2.interval) || Date.now() + cur2.interval : Date.now() + cur2.interval;
       writeSchedule(home, { ...cur2, status: 'pending', nextRunAt: next });
     } else if (cur.kind === 'once') {
       if (cur.nextRunAt && cur.nextRunAt > now) {

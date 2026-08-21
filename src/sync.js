@@ -41,7 +41,8 @@ export function syncStatus() {
 async function apiCall(baseUrl, method, payload, token, timeoutMs = TIMEOUT_MS) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  // 自建服务器用自签证书的阶段：config.sync.insecure=true 跳过证书校验（正式证书就绪后应关闭）
+  // 自建服务器用自签证书的阶段：config.sync.insecure=true 跳过证书校验（仅本请求生效，用后恢复）
+  const prevTls = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
   if (syncSettings()?.insecure) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   try {
     const res = await fetch(baseUrl.replace(/\/+$/, '') + method, {
@@ -66,6 +67,8 @@ async function apiCall(baseUrl, method, payload, token, timeoutMs = TIMEOUT_MS) 
     throw e;
   } finally {
     clearTimeout(timer);
+    if (prevTls === undefined) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
+    else process.env.NODE_TLS_REJECT_UNAUTHORIZED = prevTls;
   }
 }
 
@@ -145,6 +148,15 @@ export async function syncRemoteList() {
   }
 }
 
+// 会话名白名单（与 sync-server 同款）：远端返回的名字不满足即拒绝落盘，防恶意服务器任意文件写
+function isValidRemoteName(n) {
+  return typeof n === 'string' && /^[\w\u4e00-\u9fa5.-]{1,140}\.jsonl$/.test(n) && !n.includes('..');
+}
+// 冲突副本名：时间戳 + 随机后缀，防同一毫秒冲突静默覆盖
+function conflictCopyName(base, side) {
+  return base.replace(/\.jsonl$/, `.${side}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.jsonl`);
+}
+
 // 同步状态（记录每个会话最近见过的远端 mtime，用于判断冲突：只有远端被其他设备改过才算冲突）
 function stateFile() {
   return path.join(mingdaoHome(), 'sync-state.json');
@@ -158,7 +170,10 @@ function readState() {
 }
 function writeState(state) {
   ensureHome();
-  fs.writeFileSync(stateFile(), JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+  const target = stateFile();
+  const tmp = target + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, target);
 }
 
 // 推送单个/全部会话。仅当远端被其他设备改过（mtime 与本地记录不一致且内容不同）才视为冲突并备份远端。
@@ -190,7 +205,7 @@ export async function syncPush(name) {
     if (remote?.ok) {
       const lastMtime = state[s.name]?.remoteMtime;
       if (remote.content !== content && remote.mtime !== lastMtime) {
-        const backup = path.join(home, 'sessions', s.name.replace(/\.jsonl$/, `.server-${Date.now()}.jsonl`));
+        const backup = path.join(home, 'sessions', conflictCopyName(s.name, 'server'));
         fs.writeFileSync(backup, remote.content, { mode: 0o600 });
         conflicts.push(s.name);
       }
@@ -226,6 +241,7 @@ export async function syncPull(name) {
   const pulled = [];
   const conflicts = [];
   for (const s of sessions) {
+    if (!isValidRemoteName(s.name)) continue; // 恶意服务器返回的非法名：跳过，绝不落盘
     const target = path.join(home, 'sessions', s.name);
     let local = null;
     try {
@@ -234,7 +250,7 @@ export async function syncPull(name) {
     const r = await apiCall(g.url, '/api/sessions/pull', { name: s.name }, g.token);
     if (!r.ok) continue;
     if (local !== null && local !== r.content) {
-      const copy = path.join(home, 'sessions', s.name.replace(/\.jsonl$/, `.remote-${Date.now()}.jsonl`));
+      const copy = path.join(home, 'sessions', conflictCopyName(s.name, 'remote'));
       fs.writeFileSync(copy, r.content, { mode: 0o600 });
       conflicts.push(s.name);
       state[s.name] = { remoteMtime: r.mtime };
@@ -297,6 +313,7 @@ export async function syncShareAccept(shareId) {
     const r = await apiCall(g.url, '/api/share/accept', { shareId }, g.token);
     if (!r.ok) return { error: r.error };
     // 服务端已决定落盘位置与冲突语义：直接写入本地会话目录并记录远端 mtime
+    if (!isValidRemoteName(r.savedAs)) return { error: '服务器返回的会话名非法，已拒绝落盘' };
     const home = mingdaoHome();
     fs.mkdirSync(path.join(home, 'sessions'), { recursive: true });
     fs.writeFileSync(path.join(home, 'sessions', r.savedAs), r.content, { mode: 0o600 });

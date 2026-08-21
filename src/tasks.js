@@ -33,6 +33,7 @@ export function listTasks(home) {
 }
 
 export function readTask(home, id) {
+  if (!isValidTaskId(id)) return null; // 防 id 路径穿越（id 直接拼进文件路径）
   try {
     return JSON.parse(fs.readFileSync(path.join(tasksDir(home), id + '.json'), 'utf8'));
   } catch {
@@ -42,11 +43,19 @@ export function readTask(home, id) {
 
 export function writeTask(home, task) {
   fs.mkdirSync(tasksDir(home), { recursive: true });
-  fs.writeFileSync(path.join(tasksDir(home), task.id + '.json'), JSON.stringify(task, null, 2) + '\n');
+  // 原子写：先临时文件再改名，避免崩溃留下半截 JSON
+  const target = path.join(tasksDir(home), task.id + '.json');
+  const tmp = target + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(task, null, 2) + '\n');
+  fs.renameSync(tmp, target);
+}
+
+export function isValidTaskId(id) {
+  return typeof id === 'string' && /^[a-z0-9]+$/.test(id) && id.length >= 4 && id.length <= 40;
 }
 
 export function startTask(home, question, { permission, model, cwd } = {}) {
-  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6) + process.pid.toString(36);
   const task = {
     id,
     status: 'running',
@@ -83,12 +92,18 @@ export function patchTask(home, id, patch) {
 }
 
 export function killTask(home, id) {
+  if (!isValidTaskId(id)) return false;
   const t = readTask(home, id);
   if (!t) return false;
   if (t.status === 'running' && t.pid) {
     try {
-      process.kill(t.pid, 'SIGTERM');
-    } catch {}
+      // worker 是 detached 进程（自成进程组）：优先杀整组，避免工具子进程成孤儿
+      process.kill(-t.pid, 'SIGTERM');
+    } catch {
+      try {
+        process.kill(t.pid, 'SIGTERM');
+      } catch {}
+    }
   }
   patchTask(home, id, { status: 'killed', durationMs: t.durationMs ?? Date.now() - t.startedAt });
   return true;

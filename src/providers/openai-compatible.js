@@ -72,9 +72,59 @@ export async function parseStream(body, onDelta) {
   let buf = '';
   let content = '';
   let reasoning = '';
-  const calls = new Map(); // index -> {id, name, args}
+  const calls = new Map(); // key -> {id, name, args}（优先用 id，无 id 时按 index，再兜底自增）
+  const indexKeys = new Map(); // index -> key（id 只在首片出现，后续分片按 index 找回同一条目）
+  let autoKey = 0;
   let usage = null;
   let finish = null;
+
+  const handleLine = (lineRaw) => {
+    const line = lineRaw.trim();
+    if (!line.startsWith('data:')) return;
+    const data = line.slice(5).trim();
+    if (data === '[DONE]') {
+      finish = finish || 'stop';
+      return;
+    }
+    let json;
+    try {
+      json = JSON.parse(data);
+    } catch {
+      return;
+    }
+    // 注意：DeepSeek/OpenAI 流式最后一块常是 usage-only（choices 为空），必须先取 usage 再判 choices
+    if (json.usage) usage = json.usage;
+    const choice = json?.choices?.[0];
+    if (!choice) return;
+    const d = choice.delta ?? {};
+    if (d.content) {
+      content += d.content;
+      onDelta?.({ text: d.content });
+    }
+    if (d.reasoning_content) {
+      reasoning += d.reasoning_content;
+      onDelta?.({ reasoning: d.reasoning_content });
+    }
+    if (Array.isArray(d.tool_calls)) {
+      for (const tc of d.tool_calls) {
+        let key;
+        if (tc.id) key = `id:${tc.id}`;
+        else if (tc.index != null && indexKeys.has(tc.index)) key = indexKeys.get(tc.index);
+        else key = `idx-${tc.index != null ? tc.index : autoKey++}`;
+        if (tc.index != null) indexKeys.set(tc.index, key);
+        let cur = calls.get(key);
+        if (!cur) {
+          cur = { id: tc.id ?? '', name: '', args: '' };
+          calls.set(key, cur);
+        }
+        if (tc.id) cur.id = tc.id;
+        // 部分网关会重复下发完整 name：保留最长版本，避免重复拼接
+        if (tc.function?.name && tc.function.name.length > cur.name.length) cur.name = tc.function.name;
+        if (tc.function?.arguments) cur.args += tc.function.arguments;
+      }
+    }
+    if (choice.finish_reason) finish = choice.finish_reason;
+  };
 
   for (;;) {
     const { done, value } = await reader.read();
@@ -82,51 +132,17 @@ export async function parseStream(body, onDelta) {
     buf += decoder.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl).trim();
+      const line = buf.slice(0, nl);
       buf = buf.slice(nl + 1);
-      if (!line.startsWith('data:')) continue;
-      const data = line.slice(5).trim();
-      if (data === '[DONE]') {
-        finish = finish || 'stop';
-        continue;
-      }
-      let json;
-      try {
-        json = JSON.parse(data);
-      } catch {
-        continue;
-      }
-      const choice = json?.choices?.[0];
-      if (!choice) continue;
-      const d = choice.delta ?? {};
-      if (d.content) {
-        content += d.content;
-        onDelta?.({ text: d.content });
-      }
-      if (d.reasoning_content) {
-        reasoning += d.reasoning_content;
-        onDelta?.({ reasoning: d.reasoning_content });
-      }
-      if (Array.isArray(d.tool_calls)) {
-        for (const tc of d.tool_calls) {
-          const idx = tc.index ?? 0;
-          let cur = calls.get(idx);
-          if (!cur) {
-            cur = { id: tc.id ?? '', name: '', args: '' };
-            calls.set(idx, cur);
-          }
-          if (tc.id) cur.id = tc.id;
-          if (tc.function?.name) cur.name += tc.function.name;
-          if (tc.function?.arguments) cur.args += tc.function.arguments;
-        }
-      }
-      if (choice.finish_reason) finish = choice.finish_reason;
-      if (json.usage) usage = json.usage;
+      handleLine(line);
     }
   }
+  // 收尾：残行（网关最后一帧不带换行）与多字节字符冲刷
+  content += decoder.decode();
+  if (buf.trim()) handleLine(buf);
 
   const toolCalls = [...calls.entries()]
-    .sort((a, b) => a[0] - b[0])
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
     .map(([, c]) => ({
       id: c.id || `call_${c.name || 'x'}`,
       type: 'function',

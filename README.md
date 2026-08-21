@@ -1,96 +1,141 @@
 # MingDao-Harness（明道）
 
-> 开源智能体框架（Agent Harness）：零运行时依赖、开箱即用，针对 DeepSeek-V4 首发优化，开放主流模型接入。命令：`mingdao`（简写 `mdh`）。
+> 开源智能体框架（Agent Harness）：**零运行时依赖、开箱即用**，针对 DeepSeek-V4 首发深度优化，开放主流模型接入。一条命令安装，终端与浏览器双界面，命令：`mingdao`（简写 `mdh`）。
 
-一个轻量的「模型循环 + 工具 + 权限」内核：终端（TUI）与浏览器（WebUI）两种界面复用同一核心，核心能力以 ESM 库导出、接口开放。架构详见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+轻量的「模型循环 + 工具 + 权限」内核，能力以 ESM 库导出、接口全部开放。架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
-## 特性
+## 为什么选 MingDao
 
-- ⚡ **零运行时依赖**：纯 Node.js ≥ 18，无构建步骤，一条命令安装
-- ✨ **产品级体验**：流式 Markdown + 代码高亮、编辑 diff 预览、思考过程暗显、`/` 命令 Tab 补全、Ctrl+C 中断、token/耗时/费用状态行（峰谷计价 + 缓存命中率）
-- 🤖 **工具 Agent 循环**：`read` / `write` / `edit` / `ls` / `glob` / `grep` / `bash` + `skill` / `task`（子代理）/ `todo` / `undo`，流式输出与工具执行交替
-- 🖥 **双界面**：TUI 与 `mingdao web` 一键启动的 WebUI（零依赖 HTTP+SSE，支持 PWA 装到桌面、多任务并行、全项设置面板）
-- 🖼 **多模态输入**：WebUI 输入框 📎 上传图片（视觉模型）与文本文件，图片转 base64 内联、文本自动并入消息，会话落盘保持可读文本
-- 🧩 **IDE 集成**：VS Code 侧边栏内嵌 WebUI + 选中代码右键发送；JetBrains 全家桶工具窗（JCEF）
-- 🧠 **Skills 技能系统**：内置 14 个常驻技能 + 22 个可安装技能库（线上 registry，见下文）；SKILL.md 渐进式披露，不占上下文
-- 🔌 **MCP 客户端**：零依赖实现 Model Context Protocol，`mcpServers` 配置即接入任意 MCP 服务器，工具自动并入 Agent 循环
-- ☁️ **云同步与协作**：跨设备会话同步、多用户分享码协作、跨设备冲突图形化三选一（自建零依赖服务端）
-- 📅 **任务与调度**：后台任务面板、定时/周期/依赖/链式调度（重启自愈）
-- 🛡 **安全**：权限三档 `ask/auto/readonly` + 工具级规则；bash 沙箱三档 `off/readonly/safe`（bubblewrap）；API Key 与配置分离，绝不进仓库
-- 📏 **DeepSeek-V4 深度优化**：内置 384K 上下文预设、精确 tokenizer（官方词表 BPE）、缓存命中计价与仪表盘、自动模型路由（pro 规划 / flash 执行）、自动重试
-- 🔌 **开放模型接入**：DeepSeek / OpenAI（GPT-5 系列）/ Qwen（qwen3.7-max）/ GLM（GLM-5）/ Kimi（kimi-latest）+ 自定义 OpenAI 兼容端点（WebUI 自助添加模型与 Key）+ 自写 Provider 模块
+- ⚡ **真正的零依赖**：纯 Node.js ≥ 18，无任何 npm 运行时依赖、无构建步骤——装完即用，不拖 node_modules
+- 💰 **DeepSeek-V4 深度省钱**：384K 上下文预设、**缓存命中计价**（命中价仅为未命中的 1/30）+ 命中率仪表盘、峰谷计价、自动路由（pro 规划 / flash 执行）、精确 tokenizer（官方词表 BPE）
+- 🖥 **双界面 + IDE 全家桶**：产品级 TUI（流式 Markdown、代码高亮、编辑 diff、Ctrl+C 中断、Tab 补全）与 `mingdao web` 一键 WebUI（PWA 可装桌面、多任务并行、全项设置面板）；VS Code 侧边栏与 JetBrains 工具窗深度集成
+- 🧠 **36 个技能开箱即用**：14 个内置常驻 + 22 个可安装技能库（线上 registry，`mingdao skill install sql` 一键装，可自建企业内 registry）
+- 🔌 **生态即插即用**：MCP 客户端（零依赖实现，`mcpServers` 配置即接入任意 MCP 服务器）+ Hooks 钩子 + 9 个 MCP 生态预设
+- ☁️ **云同步与多用户协作**：跨设备会话同步、分享码协作、跨设备冲突图形化三选一；服务端零依赖单文件，一台 Linux 服务器即可自建
+- 🛡 **安全默认**：权限三档（ask/auto/readonly）+ 工具级规则、bash 沙箱三档（bubblewrap）、API Key 与配置分离（绝不进仓库）、附件/正则/路径全部有界
+- 🖼 **多模态**：DeepSeek-V4-Flash-Vision-Exp 视觉模型内置，WebUI 直接上传图片；模型列表以官方 `/models` 线上名单为准，新模型发布自动出现
 
-## 快速开始
+## 快速开始（3 步）
 
 ```bash
-mingdao init                          # 交互式向导：服务商/模型 → API Key → 权限与沙箱
-mingdao                               # 开始对话
-mingdao "用 Python 写一个快速排序"     # 单次提问（适合脚本/管道）
-mingdao --format json "问题"          # JSON 结构化输出（脚本集成）
-mingdao --continue                    # 继续最近会话 · --resume 从列表选择恢复
-mingdao web                           # 浏览器界面 http://127.0.0.1:3820
+mingdao init                          # ① 向导：选服务商/模型 → 填 API Key → 选权限与沙箱
+mingdao                               # ② 开始对话
+mingdao web                           # ③ 或浏览器界面 http://127.0.0.1:3820
 ```
 
-API Key 从 [DeepSeek 开放平台](https://platform.deepseek.com) 获取（其他内置服务商开箱即选）。密钥只存本机凭证库（权限 600），不写入仓库与配置文件。会话内输入 `/help` 查看全部命令（`/model` `/mode` `/compact` `/plan` `/memory` `/skills` `/sessions` `/status` `/cost` `/cache` `/mcp` `/route` `/verbose` `/exit`）。
+常用一行式：
 
-## 一键安装
+```bash
+mingdao "用 Python 写一个快速排序"      # 单次提问（脚本/管道友好）
+mingdao --format json "问题"           # JSON 结构化输出（机器集成）
+mingdao --continue                    # 继续最近会话 · --resume 从列表恢复
+mingdao --model deepseek-v4-pro       # 指定模型
+```
+
+API Key 从 [DeepSeek 开放平台](https://platform.deepseek.com) 获取。密钥只存本机凭证库（权限 600），不写入仓库与配置文件。
+
+## 安装指南
 
 ### Linux / macOS
 
+一行安装（自动装 Node 并安装 `mingdao` 命令）：
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main/install.sh | bash
-# 或
-git clone https://github.com/MingDaoTCM/MingDao-Harness.git && cd MingDao-Harness && bash install.sh
 ```
 
-安装脚本自动：检查 Node.js ≥ 18（缺失则经 nvm 安装）→ 安装 `mingdao` 命令（无管理员权限时装到 `~/.local/bin`）→ 提示初始化。
+或手动：
+
+```bash
+git clone https://github.com/MingDaoTCM/MingDao-Harness.git
+cd MingDao-Harness && bash install.sh
+```
+
+- 无管理员权限时自动安装到 `~/.local/bin`；装完 `mingdao init` 开始使用
+- 卸载：删除 `mingdao` / `mdh` 命令即可，数据目录 `~/.mingdao/` 按需保留
 
 ### Windows 10 / 11
 
 1. 克隆或下载本项目并解压；
 2. 双击 `install.bat`（自动经 winget 安装 Node.js，无需管理员权限）；
-3. 完成后运行 `mingdao init` → `mingdao`。
+3. 运行 `mingdao init` → `mingdao`。
 
-Windows 说明：`bash` 工具自动使用 `cmd.exe`；配置目录 `C:\Users\<用户名>\.mingdao\`；推荐 Windows Terminal / PowerShell 7 获得最佳彩色显示。
+说明：`bash` 工具自动使用 `cmd.exe`；配置目录 `C:\Users\<用户名>\.mingdao\`；推荐 Windows Terminal / PowerShell 7 获得最佳彩色显示。
 
-## 常用命令速查
+### 从源码运行（开发）
 
-| 分类 | 命令 |
-| --- | --- |
-| 会话 | `mingdao --continue` / `--resume` / `sessions search <词>` / `--model <模型>` |
-| 后台任务 | `mingdao run "<任务>"` · `mingdao tasks` / `tasks watch` / `tasks kill <id>` |
-| 调度 | `mingdao schedule add "<任务>" --at "2026-08-21 09:00"` / `--every 2h` / `--after <任务ID>` · `schedule chain "构建" "测试" "部署"` · `schedule list/remove/pause/resume` |
-| 工作空间 | WebUI 顶部（⚙ 右侧）下拉切换/新建（目录自动创建）；CLI：`mingdao workspace add/list/use/path/remove <名称>` |
-| 密钥 | `mingdao key`（脱敏状态）/ `key set <服务商>` / `key remove` / `key import` |
-| MCP | 配置 `mcpServers` 后会话内 `/mcp` 查看状态 · `mingdao mcp preset list/add <名称>` 一键接入常用服务器 |
-| 技能 | `mingdao skill search/install/list/uninstall/update` |
-| 云同步 | `mingdao sync login/push/pull/status/passwd/share/accept/conflicts` · 自建服务端 `mingdao sync-server [端口]` |
-| 其他 | `mingdao autostart on/off`（开机自启）· `mingdao web [端口]` · `mingdao init` |
+```bash
+git clone https://github.com/MingDaoTCM/MingDao-Harness.git && cd MingDao-Harness
+node src/cli.js        # 直接运行，无需安装
+```
 
-## 技能系统
+### 验证安装
 
-内置 **14 个常驻技能**（`git-commit` `code-review` `refactoring` `debugging` `testing` `pdf` `docx` `xlsx` `pptx` `frontend-design` `webapp-testing` `release-checklist` `docker` `api-design`）开箱即用，模型在相关任务时自动加载。
+```bash
+mingdao --version      # 显示版本号即成功
+node -v                # 需 ≥ 18.17
+```
 
-另有 **22 个可安装技能库**（开发 13 + 办公 9：SQL、性能、安全审计、CI/CD、邮件、会议纪要、简历、周报、文件整理等）：
+## 使用指南
+
+### 终端会话
+
+会话内命令（输入 `/help` 查看全部）：`/model <名>` 切模型 · `/mode pro|flash` 快捷切换 · `/compact` 压缩上下文 · `/plan` 先计划后执行 · `/memory add <内容>` 长期记忆 · `/skills` 技能列表 · `/sessions` 历史检索 · `/status` `/cost` `/cache` 状态与费用 · `/mcp` MCP 状态 · `/route` 自动路由开关 · `/exit` 退出。支持 Tab 补全、↑↓ 历史、Ctrl+C 中断、行尾 `\` 多行输入。
+
+### 后台任务与调度
+
+```bash
+mingdao run "重构 src 下的工具层" --permission auto   # 后台任务（独立进程）
+mingdao tasks / tasks watch / tasks kill <id>        # 任务面板
+mingdao schedule add "生成周报" --at "2026-08-21 09:00"   # 定时一次
+mingdao schedule add "同步数据" --every 2h                # 周期（可 --anchor 09:00 每日锚点）
+mingdao schedule chain "构建" "测试" "部署"               # 链式依赖
+mingdao schedule list/remove/pause/resume               # 管理；重启自愈
+```
+
+### WebUI（`mingdao web`）
+
+- 流式对话：Markdown 渲染、代码高亮、编辑 diff、工具卡片、思考实况、实时滚动
+- **上传入口**：输入框 📎 上传图片（视觉模型，如 `deepseek-v4-flash-vision-exp`）与文本文件
+- 多任务并行（上限 8）、权限确认弹窗、会话管理、PWA 安装到桌面
+- ⚙ 设置面板全项管理：模型与 API Key（动态模型列表）、权限/沙箱、调度、工作空间、记忆、缓存仪表盘、技能库、云同步
+- 远程/手机访问：配置 `"web": {"host": "0.0.0.0"}`（注意：无认证层，仅建议可信网络内使用）
+
+### IDE 集成
+
+- **VS Code**：`ide/vscode/` 复制到扩展目录 → 侧边栏内嵌完整 WebUI、选中代码右键「发送选中代码」、服务器随面板自动启停
+- **JetBrains**：`ide/jetbrains/` 工具窗（JCEF）集成，`./gradlew buildPlugin` 构建后安装
+- **桌面快捷方式**：`bash scripts/desktop/install-desktop.sh`
+
+### 工作空间
+
+WebUI 顶部（⚙ 右侧）下拉切换/新建（目录缺失自动创建，服务端工作目录随切换）；CLI：
+
+```bash
+mingdao workspace add 项目A ~/projects/a   # 登记（list/use/path/remove 管理）
+cd "$(mingdao workspace path 项目A)"        # 一键进入
+```
+
+### 技能系统（36 个开箱即用）
+
+内置 14 个常驻技能（`git-commit` `code-review` `debugging` `testing` `pdf` `docx` `xlsx` `pptx` `docker` 等）+ 22 个可安装技能库：
 
 ```bash
 mingdao skill search 文件      # 搜索（内置库 + 线上 registry）
-mingdao skill install sql      # 一键安装到 ~/.mingdao/skills/（可改可删，同名覆盖内置）
-mingdao skill update sql       # 按来源重装（更新）
+mingdao skill install sql      # 一键安装到 ~/.mingdao/skills/（可改可删）
+mingdao skill list/uninstall/update
 ```
 
-- 安装来源自动识别：**库名** / **本地目录** / **SKILL.md 的 http(s) URL** / **git 仓库**；安装前 dry-run 校验格式，非法即拒绝
-- 三级优先级：用户级（`~/.mingdao/skills/`）> 项目级（`.mingdao/skills/`）> 内置；SKILL.md 渐进式披露，按需加载全文
-- 线上 registry 随本仓库发布（GitHub / Gitee / GitCode 三镜像自动回退、本地缓存）；企业内网可设 `MINGDAO_REGISTRY_URL` 指向自建 index.json（`node scripts/build-registry-index.js` 生成）
+安装来源自动识别：库名 / 本地目录 / SKILL.md 的 URL / git 仓库；安装前 dry-run 校验格式。三级优先级：用户级 > 项目级（`.mingdao/skills/`）> 内置。企业内网可设 `MINGDAO_REGISTRY_URL` 指向自建 registry。
 
-## 云同步与多用户协作
+### 云同步与多用户协作
 
-**服务端**（一台 Linux 服务器即可，零依赖）：
+**服务端**（一台 Linux 服务器，零依赖单文件）：
 
 ```bash
 sudo mkdir -p /var/lib/mingdao-sync
 sudo mingdao sync-server 443
-# 公网请用 HTTPS：SYNC_CERT=/证书/fullchain.pem SYNC_KEY=/证书/privkey.pem
+# 公网务必 HTTPS：SYNC_CERT=/证书/fullchain.pem SYNC_KEY=/证书/privkey.pem
 ```
 
 **客户端**：
@@ -98,39 +143,47 @@ sudo mingdao sync-server 443
 ```bash
 mingdao sync login <用户名> <密码> https://你的服务器   # 首次自动注册 + 设备配对
 mingdao sync push / pull / status                      # 推送 / 拉取 / 状态
-mingdao sync passwd <新密码>                           # 修改密码
-mingdao sync share <会话名>                            # 分享会话 → 输出 10 位分享码
-mingdao sync accept <分享码>                           # 接受对方分享（进入自己的会话列表）
-mingdao sync shares / unshare <分享码>                 # 我的分享列表 / 撤销
-mingdao sync conflicts                                 # 查看跨设备冲突（三选一解决）
+mingdao sync passwd <新密码>                           # 改密码（吊销全部设备，需重新登录）
+mingdao sync share <会话名>                            # 分享会话 → 16 位分享码
+mingdao sync accept <分享码>                           # 接受分享（再次接受即刷新）
+mingdao sync conflicts                                 # 跨设备冲突三选一（保留本地/采用远端/都保留）
 ```
 
-- **多设备**：同账号多设备登录，会话结束自动推送（可关）；**多用户**：分享码协作，分享者更新后对方再次接受即就地刷新，双方改动都不会被覆盖
-- **冲突绝不丢数据**：冲突时自动备份为 `.server-*` / `.remote-*`，WebUI 冲突面板或 `sync conflict-resolve <会话> local|remote|both` 图形化选择
-- **安全**：密码加盐哈希、设备 token 随机（服务端只存哈希）、会话名白名单、单文件 20MB 上限；WebUI 设置面板含完整同步区块
+多设备自动同步（会话结束静默推送）；冲突绝不丢数据（自动 `.server-*` / `.remote-*` 备份 + 图形化选择）；WebUI 设置面板含完整同步/分享/冲突区块。
 
-## 模型接入
+### 模型与 Key
 
-- **内置预设**：DeepSeek（v4-pro / v4-flash / **v4-flash-vision-exp 多模态视觉**）、OpenAI（GPT-5 系列）、Qwen（qwen3.7-max）、GLM（GLM-5）、Kimi（kimi-latest）
-- **自定义 OpenAI 兼容端点**：`mingdao init` 选 `custom`，或 WebUI 设置面板直接添加/修改/删除自定义模型（名称/标签/API 地址/Key），顶部下拉框即选即用；模型下拉框只列已设置 Key 的服务商，名单以官方 /models 接口线上拉取为准（缓存 1 小时，可手动刷新）
-- **其他协议**：在 `~/.mingdao/providers/<name>.mjs` 导出 `createProvider(cfg)`，详见 [docs/PROVIDERS.md](docs/PROVIDERS.md)
+- 内置：DeepSeek（v4-pro / v4-flash / v4-flash-vision-exp）、OpenAI（GPT-5 系列）、Qwen（qwen3.7-max）、GLM（GLM-5）、Kimi（kimi-latest）
+- **动态模型列表**：下拉框只显示已设置 Key 的服务商，名单以官方 `/models` 接口线上拉取为准（缓存 1 小时，设置面板可手动「刷新模型」），新模型发布自动出现
+- 自定义 OpenAI 兼容端点：WebUI 设置面板直接添加/修改/删除（名称/标签/API 地址/Key，可标 `vision` 支持图片）
+- 其他协议：`~/.mingdao/providers/<name>.mjs` 写 `createProvider(cfg)`，见 [docs/PROVIDERS.md](docs/PROVIDERS.md)
 
-## 配置与安全
+### 安全
 
-- 配置文件 `~/.mingdao/config.json`：模型/权限/沙箱/上下文预算/路由/调度/MCP/同步等（**不含任何密钥**，可分享可提交）。完整字段、权限规则与 Hooks 见 [docs/CONFIG.md](docs/CONFIG.md)
-- API Key 存独立凭证库 `~/.mingdao/credentials.json`（权限 600）：`mingdao key` 查看脱敏状态、`key set <服务商>` 交互式保存、`key import` 从环境变量导入；解析优先级：环境变量 > 凭证库 > 配置字段
-- **沙箱**（bash 执行隔离，Linux + bubblewrap）：`off` 直接执行 / `readonly` 全盘只读 / `safe` 只读+断网；非 Linux 或未装 bubblewrap 自动降级并明示
-- **权限**：`ask`（默认，写文件/命令逐次确认）/ `auto` / `readonly`，另支持 `{"mode":"ask","allow":["bash:git *"],"deny":["write"]}` 工具级规则
+- **权限三档**：`ask`（默认，写文件/命令逐次确认）/ `auto` / `readonly`；工具级规则 `{"mode":"ask","allow":["bash:git *"],"deny":["write"]}`
+- **沙箱三档**（Linux + bubblewrap）：`off` / `readonly` 全盘只读 / `safe` 只读+断网；非 Linux 自动降级并明示
+- **密钥分离**：Key 存 `~/.mingdao/credentials.json`（600 权限，`mingdao key` 管理），`config.json` 无密钥可分享可提交
 
-## 文档与目录
+## 配置与扩展
 
-- 文档：[架构设计](docs/ARCHITECTURE.md) · [Provider 扩展](docs/PROVIDERS.md) · [配置详解](docs/CONFIG.md) · [桌面形态评估](docs/DESKTOP-EVALUATION.md) · [QA 报告](docs/QA-REPORT.md)
-- IDE 扩展：`ide/vscode/`（侧边栏 WebUI + 右键发送）· `ide/jetbrains/`（工具窗集成）
-- 桌面快捷方式：`bash scripts/desktop/install-desktop.sh`
+配置字段、权限规则、Hooks、MCP、云同步、自定义 Provider 的完整说明见 [docs/CONFIG.md](docs/CONFIG.md)；架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；Provider 扩展见 [docs/PROVIDERS.md](docs/PROVIDERS.md)。
+
+## 常见问题
+
+| 问题 | 解决 |
+| --- | --- |
+| 提示「没有可用 API Key」 | `mingdao key set <服务商>`（或 WebUI 设置面板设 Key）；Key 从对应平台获取 |
+| 模型下拉框是空的 | 说明没有任何服务商设置了 Key——设 Key 后自动拉取线上模型列表（可点「刷新模型」） |
+| 沙箱提示降级 | 需要 Linux 且安装 bubblewrap（`apt install bubblewrap` / `dnf install bubblewrap`） |
+| Windows 颜色异常 | 使用 Windows Terminal 或 PowerShell 7 |
+| 同步服务器自签证书报错 | 登录时加 `--insecure` 过渡；正式环境请配置 Let's Encrypt 证书 |
+| 上传图片报「模型不支持」 | 切换到 `deepseek-v4-flash-vision-exp` 或给自定义模型加 `vision` 标记 |
+
+## 目录结构
 
 ```
-src/               CLI / Agent / 工具 / 权限 / 会话 / 技能库 / MCP / 云同步 / WebUI（全部零依赖）
-skills/            14 个内置常驻技能（SKILL.md）
+src/               CLI / Agent 循环 / 工具 / 权限 / 技能库 / MCP / 云同步 / WebUI（全部零依赖）
+skills/            14 个内置常驻技能
 skills-lib/        22 个可安装技能库预设
 registry/          线上技能 registry 索引
 test/              smoke（离线）+ e2e（真实进程/HTTP）测试
@@ -141,15 +194,11 @@ install.sh / install.bat / install.ps1   一键安装
 ## 测试
 
 ```bash
-node test/smoke.js       # 离线冒烟：工具 / SSE 解析 / Agent 循环 / 权限 / 技能 / 同步
-node test/e2e-local.js   # 端到端：mock 服务器 + 完整 CLI 进程
-node test/e2e-web.js     # 端到端：WebUI HTTP/SSE/权限/调度/同步
-node test/e2e-schedule.js# 端到端：定时/周期/链式调度
+node test/smoke.js         # 离线冒烟：工具 / SSE / Agent 循环 / 权限 / 技能 / 同步
+node test/e2e-local.js     # 端到端：mock 服务器 + 完整 CLI 进程
+node test/e2e-web.js       # 端到端：WebUI HTTP/SSE/权限/调度/同步
+node test/e2e-schedule.js  # 端到端：定时/周期/链式调度
 ```
-
-## 版本
-
-语义化版本：修复 → 末位 +1，新子系统 → 中位 +1，首个 npm 稳定发布（API 冻结）→ 1.0.0。当前 **0.1.x**（最新 `v0.1.27`）。
 
 ## License
 

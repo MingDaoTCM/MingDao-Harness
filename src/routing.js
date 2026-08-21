@@ -19,8 +19,9 @@ const PLAN_HINTS =
   /设计|架构|重构|审查|规划|分析|方案|评估|优化|排查|疑难|设计模式|选型|技术债|roadmap|review|design|refactor|plan|architecture|方案设计|评审/;
 
 export function heuristicRoute(text, rc) {
-  if (text.length >= 40 && PLAN_HINTS.test(text)) return rc.planner;
-  if (text.length <= 60) return rc.executor;
+  const s = String(text ?? '');
+  if (s.length >= 40 && PLAN_HINTS.test(s)) return rc.planner;
+  if (s.length <= 60) return rc.executor;
   return null; // 需要分类器
 }
 

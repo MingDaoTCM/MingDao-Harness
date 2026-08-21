@@ -248,8 +248,9 @@ async function runWorkerTask(id, question, { permission, model }) {
   const home = ensureHome();
   const finish = (patch) => patchTask(home, id, patch);
   let mcpFacade = null;
+  let cfg = null; // 提到 try 外：catch 分支也要读 cfg.notify
   try {
-    const cfg = loadConfig();
+    cfg = loadConfig();
     if (!cfg) throw new Error('未初始化配置，请先运行 mingdao init');
     const modelName = model || cfg.model || 'deepseek-v4-flash';
     const pc = resolveProviderConfig(cfg, modelName);
@@ -383,7 +384,14 @@ async function main() {
       const a = opts.prompt[i];
       if (a === '--permission') permission = opts.prompt[++i];
       else if (a === '--model') model = opts.prompt[++i];
-      else if (a === '--question') question = opts.prompt.slice(i + 1).join(' ');
+      else if (a === '--question') {
+        // 收集到下一个已知 flag 为止（参数顺序：--question <任务> --permission … --model …）
+        const parts = [];
+        while (i + 1 < opts.prompt.length && !['--permission', '--model'].includes(opts.prompt[i + 1])) {
+          parts.push(opts.prompt[++i]);
+        }
+        question = parts.join(' ');
+      }
     }
     await runWorkerTask(id, question, { permission, model });
     return;

@@ -393,7 +393,7 @@ let base = await startWeb(work1);
   const shareName = localSessions[0];
   const sh = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'share', name: shareName }) })).json();
   assert.equal(sh.ok, true, sh.error);
-  assert.ok(/^[0-9a-f]{10}$/.test(sh.shareId), '分享码格式');
+  assert.ok(/^[0-9a-f]{16}$/.test(sh.shareId), '分享码格式');
   const shares = await (await fetch(base + '/api/sync', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'shares' }) })).json();
   assert.ok(shares.mine.some((s) => s.shareId === sh.shareId), '我的分享列表');
   // 改密码（旧密码错 → 400；正确 → ok）

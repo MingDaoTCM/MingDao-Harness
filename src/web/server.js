@@ -63,16 +63,30 @@ function json(res, code, obj) {
 }
 
 function readBody(req) {
-  return new Promise((resolve) => {
-    let body = '';
-    req.on('data', (d) => (body += d));
+  const MAX_BODY = 40 * 1024 * 1024; // 附件 base64 上限（4×5MB 图片 + 文本）留余量
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (d) => {
+      size += d.length;
+      if (size > MAX_BODY) {
+        const err = new Error('请求体过大（>40MB）');
+        err.status = 413;
+        req.destroy();
+        reject(err);
+        return;
+      }
+      chunks.push(d);
+    });
     req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
       try {
-        resolve(body ? JSON.parse(body) : {});
+        resolve(raw ? JSON.parse(raw) : {});
       } catch {
         resolve({});
       }
     });
+    req.on('error', reject);
   });
 }
 
@@ -138,7 +152,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
   }
 
   async function handleChat(res, body) {
-    const taskId = body.taskId || `t${++taskSeq}`;
+    const taskId = `t${++taskSeq}`; // 服务端生成：客户端自选 taskId 可能覆盖他人任务
     const entry = { res, send: null, abortHandler: null, pendingAsk: null, session: null, startedAt: Date.now(), status: 'running', message: '', durationMs: 0 };
     tasks.set(taskId, entry);
     const send = (obj) => {
@@ -216,12 +230,15 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     });
 
     res.on('close', () => {
-      // 浏览器断开：挂起的权限确认按拒绝处理
+      // 浏览器断开：中止正在跑的生成（否则白白烧 token），挂起的权限确认按拒绝处理
       if (entry.pendingAsk) {
         entry.pendingAsk.resolve('');
         entry.pendingAsk = null;
       }
       if (entry.status === 'running') {
+        try {
+          entry.abortHandler?.();
+        } catch {}
         entry.status = 'failed';
         entry.durationMs = Date.now() - entry.startedAt;
         pruneTasks();
@@ -266,9 +283,29 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     }
   }
 
-  const server = http.createServer(async (req, res) => {
+  const dispatch = async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname;
+
+    // CSRF 防护：跨源请求一律拒绝；POST 仅接受 JSON（拦截表单/纯文本跨站盲提交）
+    if (req.method !== 'GET' && req.method !== 'OPTIONS') {
+      const origin = req.headers.origin;
+      if (origin) {
+        try {
+          if (new URL(origin).host !== req.headers.host) return json(res, 403, { error: '跨源请求被拒绝' });
+        } catch {
+          return json(res, 403, { error: '非法 Origin' });
+        }
+      }
+      const ct = String(req.headers['content-type'] || '');
+      if (!ct.includes('application/json') && !ct.includes('text/plain')) {
+        return json(res, 415, { error: '仅接受 JSON 请求体' });
+      }
+      if (ct.includes('text/plain')) {
+        // text/plain 是经典 CSRF 向量（无需预检）：直接拒绝，要求 application/json
+        return json(res, 415, { error: '请使用 application/json' });
+      }
+    }
 
     if (req.method === 'GET' && (p === '/' || p === '/index.html')) {
       try {
@@ -591,7 +628,14 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         Connection: 'keep-alive',
         'X-Accel-Buffering': 'no',
       });
-      const body = await readBody(req);
+      let body;
+      try {
+        body = await readBody(req);
+      } catch (e) {
+        res.write(`data: ${JSON.stringify({ type: 'error', message: e.message })}\n\n`);
+        res.end();
+        return;
+      }
       await handleChat(res, body);
       return;
     }
@@ -923,6 +967,19 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       return;
     }
     json(res, 404, { error: 'Not found' });
+  };
+
+  // 全局异常兜底：readBody 超限（413）等错误不再让连接挂起
+  const server = http.createServer((req, res) => {
+    dispatch(req, res).catch((e) => {
+      if (!res.headersSent) {
+        json(res, e?.status || 500, { error: e?.message || '服务器内部错误' });
+      } else {
+        try {
+          res.end();
+        } catch {}
+      }
+    });
   });
 
   server.on('error', (err) => {
@@ -935,6 +992,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
   });
 
   server.listen(port, host, () => {
+    if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
+      console.warn('  ⚠ 警告：当前监听 ' + host + '（非本机回环）。此服务器无认证层，局域网/公网可达意味着任何人可读写你的会话与配置。建议保持 127.0.0.1，或置于可信网络/VPN 后。');
+    }
     const actual = server.address().port;
     console.log('');
     console.log(`  MingDao WebUI 已启动`);

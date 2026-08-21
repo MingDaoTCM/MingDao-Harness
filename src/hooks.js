@@ -39,6 +39,11 @@ export function createHooks(hooksCfg = {}, workingDir) {
       });
       let out = '';
       let err = '';
+      const MAX_HOOK_OUT = 64 * 1024;
+      const cap = (acc, d) => {
+        const t = acc + d;
+        return t.length > MAX_HOOK_OUT ? t.slice(-MAX_HOOK_OUT) : t;
+      };
       let settled = false;
       const finish = (result) => {
         if (settled) return;
@@ -49,8 +54,8 @@ export function createHooks(hooksCfg = {}, workingDir) {
         child.kill('SIGKILL');
         finish({ ok: false, error: 'hook 执行超时（10s）' });
       }, 10000);
-      child.stdout.on('data', (d) => (out += d));
-      child.stderr.on('data', (d) => (err += d));
+      child.stdout.on('data', (d) => (out = cap(out, d)));
+      child.stderr.on('data', (d) => (err = cap(err, d)));
       child.on('error', (e) => {
         clearTimeout(timer);
         finish({ ok: false, error: `hook 启动失败：${e.message}` });
@@ -78,14 +83,21 @@ export function createHooks(hooksCfg = {}, workingDir) {
           reason = r.error;
           break;
         }
+        const out = String(r.output || '').trim();
+        if (!out) continue; // 空输出 = 放行
         try {
-          const j = JSON.parse(r.output.trim());
+          const j = JSON.parse(out);
           if (j && j.decision === 'block') {
             decision = 'block';
             reason = j.reason || '被 PreToolUse 钩子阻止';
             break;
           }
-        } catch {}
+        } catch {
+          // fail-closed：输出不是合法 JSON（日志/报错混入）时按阻止处理，避免策略被静默绕过
+          decision = 'block';
+          reason = `PreToolUse 钩子输出无法解析（前 80 字）：${out.slice(0, 80)}`;
+          break;
+        }
       }
       return { decision, reason };
     },

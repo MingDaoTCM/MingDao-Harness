@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 function linuxFile() {
   return path.join(os.homedir(), '.config', 'autostart', 'mingdao-web.desktop');

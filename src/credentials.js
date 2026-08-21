@@ -25,7 +25,12 @@ export function loadCredentials() {
 
 export function saveCredentials(creds) {
   ensureHome();
-  fs.writeFileSync(credentialsPath(), JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
+  const p = credentialsPath();
+  fs.writeFileSync(p, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
+  // mode 只在创建时生效：对已存在但权限过宽的文件强制收权
+  try {
+    fs.chmodSync(p, 0o600);
+  } catch {}
 }
 
 export function getStoredKey(providerName) {

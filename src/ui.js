@@ -279,6 +279,7 @@ export function createIO({ quiet = false } = {}) {
   let renderer = null;
   let askQueue = []; // 非 TTY：挂起的输入请求
   let lineQueue = []; // 非 TTY：已缓冲但未被消费的行
+  let sigintHandler = null; // TTY 下 rl 'SIGINT' 事件转发目标
   let ttyPending = null;
   let closed = false;
 
@@ -305,12 +306,26 @@ export function createIO({ quiet = false } = {}) {
           historySize: 200,
           completer: (line) => completeLine(line),
         });
+        if (terminal) {
+          // 关键：TTY 下 Ctrl+C 由 readline 捕获（raw 模式），需要在这里转发给中断处理器；
+          // 注册该监听会抑制 readline 默认的 close 行为，无处理器时显式 close
+          rl.on('SIGINT', () => {
+            if (sigintHandler) {
+              try {
+                sigintHandler();
+              } catch {}
+            } else {
+              rl.close();
+            }
+          });
+        }
         if (!terminal) {
           // 非 TTY（管道输入）：持久 line 监听 + 队列，避免 rl.question 丢弃首行之后的输入
           rl.on('line', (line) => {
+            const trimmed = line.trim();
             const pending = askQueue.shift();
-            if (pending) pending.resolve(line.trim());
-            else lineQueue.push(line);
+            if (pending) pending.resolve(trimmed);
+            else lineQueue.push(trimmed);
           });
         }
         rl.on('close', () => {
@@ -525,14 +540,20 @@ export function createIO({ quiet = false } = {}) {
     },
 
     // —— SIGINT（Ctrl+C 中断生成，不退出程序） ——
+    // TTY 下 readline raw 模式会把 Ctrl+C 转成 rl 的 'SIGINT' 事件（ensureRl 转发到 sigintHandler），
+    // 非 TTY/其他来源走 process 级 SIGINT；两层都注册，保证任何路径都能中断
     onSigint(fn) {
       const h = () => {
         try {
           fn();
         } catch {}
       };
+      sigintHandler = h;
       process.on('SIGINT', h);
-      return () => process.removeListener('SIGINT', h);
+      return () => {
+        sigintHandler = null;
+        process.removeListener('SIGINT', h);
+      };
     },
 
     ask(question, opts = {}) {

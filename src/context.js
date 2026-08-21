@@ -34,16 +34,20 @@ function cleanToolPairing(kept) {
   }
   const clean = kept.filter((m) => m.role !== 'tool' || callIds.has(m.tool_call_id));
   const toolIds = new Set(clean.filter((m) => m.role === 'tool').map((m) => m.tool_call_id));
-  for (const m of clean) {
+  // 注意：裁剪是每次请求的投影，绝不能改写调用方 messages 里的原对象
+  // （否则会话历史被永久污染：assistant 消息丢失 tool_calls，下一轮 API 报 400）
+  return clean.map((m) => {
     if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
       const keptCalls = m.tool_calls.filter((tc) => toolIds.has(tc.id));
       if (keptCalls.length !== m.tool_calls.length) {
-        if (keptCalls.length) m.tool_calls = keptCalls;
-        else delete m.tool_calls; // 无任何对应 tool 响应，退化为纯文本消息
+        if (keptCalls.length) return { ...m, tool_calls: keptCalls };
+        const copy = { ...m };
+        delete copy.tool_calls; // 无任何对应 tool 响应，退化为纯文本消息
+        return copy;
       }
     }
-  }
-  return clean;
+    return m;
+  });
 }
 
 export function trimMessages(messages, budget, count = approxTokens) {

@@ -262,7 +262,7 @@ const $ = (s) => document.querySelector(s);
 const chatEl = $('#chat'), input = $('#input'), sendBtn = $('#sendBtn'), stopBtn = $('#stopBtn');
 let currentSession = null, thinking = null;
 
-function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 
 function highlight(code, lang){
   const kws = new Set('const let var function return if else for while import from export class new await async try catch throw null undefined true false def elif raise with as lambda None True False self echo exit if then else fi done local function'.split(' '));
@@ -287,8 +287,8 @@ function renderMarkdown(text){
     if(code!==null){ code.push(line); continue; }
     let l = esc(line);
     l = l.replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/\*([^*\s][^*]*)\*/g,'<i>$1</i>');
-    l = l.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g,'<a href="$2" target="_blank">$1</a>');
-    if(/^#{1,6}\s/.test(line.trim())){ const m=line.trim().match(/^(#+)\s+(.*)/); l='<h'+(m[1].length>3?3:m[1].length)+'>'+m[2]+'</h'+'>'; }
+    l = l.replace(/\[([^\]]+)\]\((https?:\/\/[^\s'"<>)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
+    if(/^#{1,6}\s/.test(line.trim())){ const m=line.trim().match(/^(#+)\s+(.*)/); const h=Math.min(m[1].length,3); l='<h'+h+'>'+esc(m[2])+'</h'+h+'>'; }
     else if(/^\s*[-*+]\s/.test(line)) l='• '+l.replace(/^\s*[-*+]\s/,'');
     else if(/^\s*\d+[.)]\s/.test(line)) l=l.replace(/^\s*(\d+)[.)]\s/,'<b>$1.</b> ');
     else if(/^>\s?/.test(line)) l='<blockquote>'+l.replace(/^>\s?/,'')+'</blockquote>';

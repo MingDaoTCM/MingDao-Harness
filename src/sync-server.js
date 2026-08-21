@@ -67,14 +67,39 @@ function acceptedFile() {
 }
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+// 密码存储用 scrypt（带盐 KDF）；旧数据兼容：verify 时 sha256 回退
 function hashPassword(password, salt) {
-  return sha(`${salt}:${password}`);
+  return crypto.scryptSync(String(password), String(salt), 32).toString('hex');
+}
+function verifyPassword(password, salt, hash) {
+  if (!hash) return false;
+  try {
+    if (crypto.scryptSync(String(password), String(salt), 32).toString('hex') === hash) return true;
+  } catch {}
+  // 兼容早期 sha256 存储
+  return sha(`${salt}:${password}`) === hash;
 }
 function isValidUsername(u) {
   return typeof u === 'string' && /^[A-Za-z0-9_.-]{2,32}$/.test(u) && u !== '.' && u !== '..';
 }
 function isValidSessionName(n) {
   return typeof n === 'string' && /^[\w\u4e00-\u9fa5.-]{1,140}\.jsonl$/.test(n) && !n.includes('..');
+}
+
+// ---------- 限速（防爆破/枚举；内存表，进程级） ----------
+const rateBuckets = new Map();
+function rateLimited(req, limit = 20) {
+  const key = (req.socket?.remoteAddress || 'x') + '|' + req.url;
+  const now = Date.now();
+  const b = rateBuckets.get(key);
+  if (b && now - b.t0 < 60000) {
+    b.n += 1;
+    if (b.n > limit) return true;
+  } else {
+    rateBuckets.set(key, { t0: now, n: 1 });
+    if (rateBuckets.size > 5000) rateBuckets.clear();
+  }
+  return false;
 }
 
 // ---------- HTTP 工具 ----------
@@ -148,7 +173,7 @@ function doPair(body) {
   const users = readJson(usersFile(), {});
   const u = users[username];
   if (!u) return { notFound: '用户不存在（请先注册）' };
-  if (hashPassword(password, u.salt) !== u.hash) return { unauthorized: '密码错误' };
+  if (!verifyPassword(password, u.salt, u.hash)) return { unauthorized: '密码错误' };
   const deviceId = crypto.randomBytes(8).toString('hex');
   const token = crypto.randomBytes(24).toString('hex');
   const devices = readJson(devicesFile(), {});
@@ -229,12 +254,16 @@ function doChangePassword(username, body) {
   const users = readJson(usersFile(), {});
   const u = users[username];
   if (!u) return { unauthorized: '用户不存在' };
-  if (hashPassword(oldPassword, u.salt) !== u.hash) return { unauthorized: '旧密码错误' };
+  if (!verifyPassword(oldPassword, u.salt, u.hash)) return { unauthorized: '旧密码错误' };
   const salt = crypto.randomBytes(12).toString('hex');
   users[username] = { ...u, salt, hash: hashPassword(newPassword, salt), updatedAt: Date.now() };
   writeJson(usersFile(), users);
-  log('password-changed', username);
-  return { ok: true };
+  // 改密吊销既有设备 token：密码可能已泄露，旧 token 一律失效（当前设备也需重新登录）
+  const devices = readJson(devicesFile(), {});
+  delete devices[username];
+  writeJson(devicesFile(), devices);
+  log('password-changed', username, '（全部设备已吊销）');
+  return { ok: true, note: '密码已修改，所有设备需重新登录' };
 }
 
 // ---------- 会话分享 ----------
@@ -242,7 +271,7 @@ function doShareCreate(username, name) {
   if (!isValidSessionName(name)) return { error: `会话名非法：${name}` };
   if (!fs.existsSync(path.join(sessionsDir(username), name))) return { notFound: '你还没有这个会话' };
   const shares = readJson(sharesFile(), {});
-  const shareId = crypto.randomBytes(5).toString('hex'); // 10 位分享码
+  const shareId = crypto.randomBytes(8).toString('hex'); // 16 位分享码（80bit，抗在线爆破）
   shares[shareId] = { owner: username, name, createdAt: Date.now(), pulls: 0 };
   writeJson(sharesFile(), shares);
   log('share-create', username, name, shareId);
@@ -341,6 +370,7 @@ async function handle(req, res) {
       return json(res, 200, { ok: true, service: 'mingdao-sync', version: 1, uptimeSec: Math.floor((Date.now() - startedAt) / 1000) });
     }
     if (req.method === 'POST' && p === '/api/register') {
+      if (rateLimited(req, 10)) return json(res, 429, { error: '尝试过于频繁，请稍后再试' });
       const body = await parseBody(req);
       if (body.__error) return json(res, 400, { error: 'JSON 解析失败' });
       const r = doRegister(body);
@@ -349,6 +379,7 @@ async function handle(req, res) {
       return json(res, 200, r);
     }
     if (req.method === 'POST' && p === '/api/pair') {
+      if (rateLimited(req, 10)) return json(res, 429, { error: '尝试过于频繁，请稍后再试' });
       const body = await parseBody(req);
       if (body.__error) return json(res, 400, { error: 'JSON 解析失败' });
       const r = doPair(body);
@@ -359,10 +390,16 @@ async function handle(req, res) {
     // —— 以下均需设备 token ——
     const dev = findDeviceByToken(tokenOf(req));
     if (!dev) return json(res, 401, { error: '未认证：请先 mingdao sync login' });
-    dev.device.lastSeen = Date.now();
-    const devices = readJson(devicesFile(), {});
-    devices[dev.username][dev.deviceId] = dev.device;
-    writeJson(devicesFile(), devices);
+    // lastSeen 节流写盘：60s 一次，避免高频整表读改写与并发丢失（/api/pair 新增设备被覆盖）
+    const nowSeen = Date.now();
+    if (nowSeen - (dev.device.lastSeen || 0) > 60000) {
+      dev.device.lastSeen = nowSeen;
+      const devices = readJson(devicesFile(), {});
+      if (devices[dev.username]?.[dev.deviceId]) {
+        devices[dev.username][dev.deviceId] = dev.device;
+        writeJson(devicesFile(), devices);
+      }
+    }
 
     if (req.method === 'POST' && p === '/api/devices') {
       const list = Object.entries(readJson(devicesFile(), {})[dev.username] || {}).map(([id, d]) => ({
@@ -397,6 +434,7 @@ async function handle(req, res) {
       return json(res, 200, r);
     }
     if (req.method === 'POST' && p === '/api/password') {
+      if (rateLimited(req, 10)) return json(res, 429, { error: '尝试过于频繁，请稍后再试' });
       const body = await parseBody(req);
       const r = doChangePassword(dev.username, body);
       if (r.error) return json(res, 400, r);
@@ -421,6 +459,7 @@ async function handle(req, res) {
       return json(res, 200, r);
     }
     if (req.method === 'POST' && p === '/api/share/accept') {
+      if (rateLimited(req, 10)) return json(res, 429, { error: '尝试过于频繁，请稍后再试' });
       const body = await parseBody(req);
       const r = doShareAccept(dev.username, String(body.shareId || '').trim());
       if (r.error) return json(res, 400, r);

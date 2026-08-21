@@ -94,14 +94,14 @@ export function removeMemoryLines(keyword) {
 export function appendJournal(home, entry) {
   try {
     fs.mkdirSync(path.join(home, path.dirname(journalFile())), { recursive: true });
-    const lines = [];
+    // 纯追加：并发会话收尾互不覆盖；崩溃最多丢最后一行
+    fs.appendFileSync(journalFile(), JSON.stringify(entry) + '\n');
+    // 低频截断：超过 600 行时重写保留最近 500 行
     try {
       const raw = fs.readFileSync(journalFile(), 'utf8');
-      lines.push(...raw.split('\n').filter(Boolean));
+      const lines = raw.split('\n').filter(Boolean);
+      if (lines.length > 600) fs.writeFileSync(journalFile(), lines.slice(-500).join('\n') + '\n');
     } catch {}
-    lines.push(JSON.stringify(entry));
-    if (lines.length > 500) lines.splice(0, lines.length - 500);
-    fs.writeFileSync(journalFile(), lines.join('\n') + '\n');
   } catch {}
 }
 
@@ -131,7 +131,7 @@ export function recentJournalBlock(home) {
   return (
     '\n\n<recent_sessions>\n' +
     entries
-      .map((e) => `- ${new Date(e.at).toISOString().slice(0, 10)} ${e.workspace || ''}：${e.firstUser?.slice(0, 40) ?? ''} → ${e.outcome?.slice(0, 40) ?? ''}`)
+      .map((e) => `- ${new Date(e.at).toISOString().slice(0, 10)} ${(e.workspace || '').replace(/[<>]/g, '')}：${(e.firstUser?.slice(0, 40) ?? '').replace(/[<>]/g, '')} → ${(e.outcome?.slice(0, 40) ?? '').replace(/[<>]/g, '')}`)
       .join('\n') +
     '\n</recent_sessions>'
   );

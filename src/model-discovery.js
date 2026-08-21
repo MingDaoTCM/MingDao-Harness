@@ -62,6 +62,8 @@ function isChatModel(id) {
 
 // 拉取某服务商的真实模型名单（缓存优先；force 强制刷新）
 // 返回 { models: [名称], fromCache, fetchedAt }；失败返回 { error }
+const inflight = new Map(); // 同服务商并发去重：合并为同一请求
+
 export async function fetchProviderModels(cfg, providerName, { force = false } = {}) {
   const base = providerBaseUrl(cfg, providerName).replace(/\/+$/, '');
   const key = providerApiKey(providerName);
@@ -71,28 +73,38 @@ export async function fetchProviderModels(cfg, providerName, { force = false } =
   if (!force && entry && Date.now() - entry.fetchedAt < TTL_MS && Array.isArray(entry.models)) {
     return { models: entry.models, fromCache: true, fetchedAt: entry.fetchedAt };
   }
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), 8000);
+  if (!force && inflight.has(providerName)) return inflight.get(providerName);
+  const p = (async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 8000);
+    try {
+      const res = await fetch(`${base}/models`, {
+        headers: { Authorization: `Bearer ${key}` },
+        signal: ctrl.signal,
+        redirect: 'follow',
+      });
+      if (!res.ok) return { error: `HTTP ${res.status}` };
+      const j = await res.json().catch(() => null);
+      const list = (j?.data || [])
+        .map((m) => String(m?.id || '').trim())
+        .filter((id) => id && isChatModel(id))
+        .slice(0, 200);
+      if (!list.length) return { error: '接口未返回可用模型' };
+      const cache2 = loadCache(); // 重新读取：避免与并发写入互相覆盖
+      cache2[providerName] = { models: list, fetchedAt: Date.now() };
+      saveCache(cache2);
+      return { models: list, fromCache: false, fetchedAt: Date.now() };
+    } catch (e) {
+      return { error: e.name === 'AbortError' ? '请求超时（8s）' : e.message };
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
+  inflight.set(providerName, p);
   try {
-    const res = await fetch(`${base}/models`, {
-      headers: { Authorization: `Bearer ${key}` },
-      signal: ctrl.signal,
-      redirect: 'follow',
-    });
-    if (!res.ok) return { error: `HTTP ${res.status}` };
-    const j = await res.json().catch(() => null);
-    const list = (j?.data || [])
-      .map((m) => String(m?.id || '').trim())
-      .filter((id) => id && isChatModel(id))
-      .slice(0, 200);
-    if (!list.length) return { error: '接口未返回可用模型' };
-    cache[providerName] = { models: list, fetchedAt: Date.now() };
-    saveCache(cache);
-    return { models: list, fromCache: false, fetchedAt: Date.now() };
-  } catch (e) {
-    return { error: e.name === 'AbortError' ? '请求超时（8s）' : e.message };
+    return await p;
   } finally {
-    clearTimeout(timer);
+    if (inflight.get(providerName) === p) inflight.delete(providerName);
   }
 }
 

@@ -22,7 +22,11 @@ export function loadWorkspaces() {
 
 export function saveWorkspaces(ws) {
   ensureHome();
-  fs.writeFileSync(workspacesFile(), JSON.stringify(ws, null, 2) + '\n');
+  // 原子写：临时文件 + rename，避免崩溃后注册表被冲空
+  const target = workspacesFile();
+  const tmp = target + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(ws, null, 2) + '\n');
+  fs.renameSync(tmp, target);
 }
 
 export function addWorkspace(name, dir) {
@@ -49,9 +53,10 @@ export function renameWorkspace(name, newName) {
   const key = String(newName).trim();
   if (!key) return { error: '新名称不能为空' };
   if (/[\\/]/.test(key)) return { error: '名称不能包含路径分隔符' };
+  if (key === name) return { name: key }; // 原样改名：无操作，避免自删条目
   const ws = loadWorkspaces();
   if (!ws[name]) return { error: `工作空间 ${name} 不存在` };
-  if (ws[key] && key !== name) return { error: `名称 ${key} 已存在` };
+  if (ws[key]) return { error: `名称 ${key} 已存在` };
   ws[key] = { ...ws[name] };
   delete ws[name];
   saveWorkspaces(ws);

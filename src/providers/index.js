@@ -95,7 +95,10 @@ export async function createProvider(cfg, modelName, { timeoutMs = 300000, retri
             includeUsage: cfg?.includeUsage !== false,
           });
         } catch (err) {
-          const transient = isTransient(err);
+          // 内部超时经 abort 抛出（reason 不会成为 fetch 错误 message），需单独识别；
+          // 用户 Ctrl+C 的中断不算超时、不重试
+          const timedOut = err?.name === 'AbortError' && !opts.signal?.aborted;
+          const transient = timedOut || isTransient(err);
           if (!transient || attempt >= retries) throw err;
           attempt += 1;
           await sleep(1000 * attempt); // 指数退避：1s / 2s

@@ -29,6 +29,8 @@ function ruleMatches(rule, name, args) {
     if (ruleName !== name) return false;
     const want = rule.slice(idx + 1).trim();
     const have = summarize(name, args).trim();
+    // bash 前缀规则防链式命令绕过：含 && / ; / | / ` / $( 的复合命令不匹配前缀规则，回落权限确认
+    if (name === 'bash' && /&&|\|\||[;|`]|\$\(|\n/.test(have)) return false;
     if (want.endsWith('*')) return have.startsWith(want.slice(0, -1));
     return have === want;
   }

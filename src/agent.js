@@ -86,17 +86,23 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const usage = { prompt_tokens: 0, completion_tokens: 0 };
     const startedAt = Date.now();
     let aborted = false;
+    let currentAc = null;
+    // 整个回合注册一次 SIGINT：思考、工具执行、权限询问期间都能中断
+    const offSigint = io.onSigint ? io.onSigint(() => { aborted = true; currentAc?.abort(); }) : () => {};
     const ctx = makeCtx();
-
+    const stripOrphanCalls = () => {
+      const last = messages[messages.length - 1];
+      if (last?.role === 'assistant' && Array.isArray(last.tool_calls) && last.tool_calls.length) {
+        messages[messages.length - 1] = { ...last, tool_calls: undefined };
+      }
+    };
+    try {
     while (steps < stepLimit) {
       steps += 1;
       const trimmed = trimMessages(messages, budget, count);
 
       const ac = new AbortController();
-      const offSigint = io.onSigint(() => {
-        aborted = true;
-        ac.abort();
-      });
+      currentAc = ac;
       io.beginTurn();
       io.startSpinner('正在思考…');
 
@@ -119,11 +125,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         io.stopSpinner();
         io.endTurn();
         if (aborted) {
+          stripOrphanCalls();
           return { text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: true, durationMs: Date.now() - startedAt };
         }
         throw err;
-      } finally {
-        offSigint();
       }
 
       finish = res.finish ?? finish;
@@ -145,12 +150,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         messages.push(assistantMsg);
         for (const tc of res.toolCalls) {
           const name = tc.function?.name || '';
-          let args = {};
+          let args = null;
           try {
-            args = JSON.parse(tc.function?.arguments || '{}') || {};
+            args = JSON.parse(tc.function?.arguments || '{}');
           } catch {
-            args = {};
+            // 参数 JSON 解析失败：回填错误给模型，不拿空参数去执行工具
+            io.renderToolDenied(name, {});
+            messages.push({ role: 'tool', tool_call_id: tc.id, content: '工具参数 JSON 解析失败，请重新输出合法参数。' });
+            continue;
           }
+          if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
 
           // PreToolUse 钩子
           const hook = await hooks.pre(name, args);
@@ -161,11 +170,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           }
 
           const isMcp = name.startsWith('mcp__');
-          let allowed;
+          let allowed = false;
           if (isMcp && mcp?.isReadonly(name)) {
             allowed = true; // MCP 工具的只读标注自动放行
           } else {
-            allowed = await permission.check(name, args);
+            try {
+              allowed = await permission.check(name, args);
+            } catch {
+              allowed = false; // 交互通道异常（如 stdin EOF）时按拒绝处理，不中断整个回合
+            }
           }
           if (!allowed) {
             io.renderToolDenied(name, args);
@@ -213,7 +226,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       }
     }
     io.endTurn();
+    // 步数上限：清掉未执行的 tool_calls，避免下一轮/恢复后 API 400
+    stripOrphanCalls();
     return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, durationMs: Date.now() - startedAt };
+    } finally {
+      currentAc = null;
+      offSigint();
+    }
   }
 
   return {

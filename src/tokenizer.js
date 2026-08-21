@@ -53,25 +53,93 @@ export function heuristicTokens(text) {
   return Math.ceil(ascii / 4) + cjk;
 }
 
-// 单个预分词片段的 BPE 计数（tiktoken 语义：优先合并 rank 最小的对）
+// 单个预分词片段的 BPE 计数（tiktoken 语义：优先合并 rank 最小的对，同 rank 取最左）。
+// 惰性最小堆实现（O(n log n)）：大文本（中文长文/工具输出）不再 O(n²) 全表扫描。
 function countPiece(piece, d) {
   const bytes = Buffer.from(piece, 'utf8');
   const syms = [];
   for (const b of bytes) syms.push(String.fromCharCode(b));
-  for (;;) {
-    let bestIdx = -1;
-    let bestRank = Infinity;
-    for (let i = 0; i < syms.length - 1; i++) {
-      const r = d.mergeRank.get(syms[i] + '\u0001' + syms[i + 1]);
-      if (r !== undefined && r < bestRank) {
-        bestRank = r;
-        bestIdx = i;
+  if (syms.length <= 1) return syms.length;
+
+  const alive = new Uint8Array(syms.length).fill(1);
+  const leftOf = (i) => {
+    for (let j = i - 1; j >= 0; j--) if (alive[j]) return j;
+    return -1;
+  };
+  const rightOf = (i) => {
+    for (let j = i + 1; j < syms.length; j++) if (alive[j]) return j;
+    return -1;
+  };
+
+  // 最小堆（rank, leftIndex）；过期条目惰性丢弃/重推
+  const heap = [];
+  const push = (rank, idx) => {
+    heap.push([rank, idx]);
+    let c = heap.length - 1;
+    while (c > 0) {
+      const p = (c - 1) >> 1;
+      if (heap[p][0] < heap[c][0] || (heap[p][0] === heap[c][0] && heap[p][1] <= heap[c][1])) break;
+      [heap[p], heap[c]] = [heap[c], heap[p]];
+      c = p;
+    }
+  };
+  const pop = () => {
+    const top = heap[0];
+    const last = heap.pop();
+    if (heap.length) {
+      heap[0] = last;
+      let c = 0;
+      for (;;) {
+        const l = c * 2 + 1;
+        const r = l + 1;
+        let m = c;
+        const better = (x) => heap[x][0] < heap[m][0] || (heap[x][0] === heap[m][0] && heap[x][1] < heap[m][1]);
+        if (l < heap.length && better(l)) m = l;
+        if (r < heap.length && better(r)) m = r;
+        if (m === c) break;
+        [heap[m], heap[c]] = [heap[c], heap[m]];
+        c = m;
       }
     }
-    if (bestIdx === -1) break;
-    syms.splice(bestIdx, 2, syms[bestIdx] + syms[bestIdx + 1]);
+    return top;
+  };
+
+  for (let i = 0; i < syms.length - 1; i++) {
+    const r = d.mergeRank.get(syms[i] + '\u0001' + syms[i + 1]);
+    if (r !== undefined) push(r, i);
   }
-  return syms.length;
+
+  for (;;) {
+    let pair = null;
+    while (heap.length) {
+      const [rank, idx] = pop();
+      if (!alive[idx]) continue;
+      const right = rightOf(idx);
+      if (right === -1) continue;
+      const r = d.mergeRank.get(syms[idx] + '\u0001' + syms[right]);
+      if (r === undefined) continue;
+      if (r === rank) {
+        pair = [idx, right];
+        break;
+      }
+      push(r, idx); // rank 过期（邻居变化）：重推
+    }
+    if (!pair) break;
+    const [li, ri] = pair;
+    syms[li] = syms[li] + syms[ri];
+    alive[ri] = 0;
+    const left = leftOf(li);
+    if (left !== -1) {
+      const r = d.mergeRank.get(syms[left] + '\u0001' + syms[li]);
+      if (r !== undefined) push(r, left);
+    }
+    const right = rightOf(li);
+    if (right !== -1) {
+      const r = d.mergeRank.get(syms[li] + '\u0001' + syms[right]);
+      if (r !== undefined) push(r, li);
+    }
+  }
+  return alive.reduce((s, v) => s + v, 0);
 }
 
 export function countTokens(text, modelName) {

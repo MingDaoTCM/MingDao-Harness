@@ -48,14 +48,17 @@ function saveCache(data, host) {
   } catch {}
 }
 
-async function fetchText(url, timeoutMs = 20000) {
+async function fetchText(url, timeoutMs = 20000, maxBytes = 2 * 1024 * 1024) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow' });
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    // Content-Length 预检：超限直接拒绝，不再全量下载进内存
+    const len = Number(res.headers.get('content-length'));
+    if (Number.isFinite(len) && len > maxBytes) throw new Error('响应超过大小上限');
     const text = await res.text();
-    if (text.length > 2 * 1024 * 1024) throw new Error('索引超过 2MB 上限');
+    if (text.length > maxBytes) throw new Error('响应超过大小上限');
     return text;
   } finally {
     clearTimeout(timer);
@@ -121,7 +124,7 @@ export async function installFromRegistry(name) {
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       let text;
       try {
-        text = await fetchText(`${r.host}/skills-lib/${encodeURI(name)}/${rel.split('/').map(encodeURIComponent).join('/')}`, 30000);
+        text = await fetchText(`${r.host}/skills-lib/${encodeURI(name)}/${rel.split('/').map(encodeURIComponent).join('/')}`, 30000, MAX_FILE);
       } catch (e) {
         return { error: `下载 ${name}/${rel} 失败：${e.message}` };
       }

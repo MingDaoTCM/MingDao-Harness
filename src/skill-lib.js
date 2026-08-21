@@ -194,12 +194,16 @@ export async function installFromUrl(url) {
 }
 
 export function installFromGit(gitUrl) {
+  if (typeof gitUrl !== 'string' || gitUrl.trim().startsWith('-')) {
+    return { error: 'git 地址不能以 - 开头（防选项注入）' };
+  }
   const check = spawnSync('git', ['--version'], { stdio: 'ignore' });
   if (check.error || check.status !== 0) {
     return { error: '未找到 git（git 仓库安装需要系统 git，可用 URL 安装单文件技能）' };
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-git-'));
-  const r = spawnSync('git', ['clone', '--depth', '1', gitUrl, tmp], { stdio: 'ignore', timeout: 120000 });
+  // -- 分隔符：gitUrl 即使形似选项也只按路径处理
+  const r = spawnSync('git', ['clone', '--depth', '1', '--', gitUrl, tmp], { stdio: 'ignore', timeout: 120000 });
   if (r.error || r.status !== 0) {
     fs.rmSync(tmp, { recursive: true, force: true });
     return { error: `git clone 失败：${r.error?.message || `退出码 ${r.status}`}` };
@@ -243,8 +247,11 @@ export function installFromGit(gitUrl) {
 }
 
 export function uninstallSkill(name) {
-  const target = path.join(userSkillsDir(), String(name).trim());
-  if (!/^[A-Za-z0-9_.-]+$/.test(String(name)) || !fs.existsSync(path.join(target, 'SKILL.md'))) {
+  const key = String(name).trim();
+  // '.'/'..' 会拼出上级目录，必须硬拒绝（正则 [A-Za-z0-9_.-]+ 会放行纯点号名）
+  if (key === '.' || key === '..') return { error: `技能名非法：${key}` };
+  const target = path.join(userSkillsDir(), key);
+  if (!/^[A-Za-z0-9_.-]+$/.test(key) || !fs.existsSync(path.join(target, 'SKILL.md'))) {
     return { error: `用户级未安装技能 ${name}（内置技能不可卸载，可同名覆盖）` };
   }
   fs.rmSync(target, { recursive: true, force: true });

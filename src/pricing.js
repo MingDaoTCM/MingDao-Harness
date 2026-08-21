@@ -25,7 +25,9 @@ export function estimateCost(modelName, promptTokens, completionTokens, cache = 
   const price = isPeakHour(date) ? preset.pricing.peak : preset.pricing.offpeak;
   if (cache && Number.isFinite(cache.hit) && Number.isFinite(cache.miss)) {
     const hitPrice = price.cacheHit ?? 0;
-    return (cache.hit * hitPrice + cache.miss * price.input + completionTokens * price.output) / 1e6;
+    // 网关 hit+miss 与 prompt_tokens 口径不一致时，余量按未命中计价，避免漏计
+    const miss = cache.miss + Math.max(0, promptTokens - cache.hit - cache.miss);
+    return (cache.hit * hitPrice + miss * price.input + completionTokens * price.output) / 1e6;
   }
   return (promptTokens * price.input + completionTokens * price.output) / 1e6;
 }

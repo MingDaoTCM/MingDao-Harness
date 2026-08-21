@@ -102,12 +102,23 @@ export function read(args, ctx) {
   }
 }
 
+const MAX_WRITE_BYTES = 2 * 1024 * 1024; // write 单次内容上限（防模型输出超大文件打爆磁盘）
+
 export function write(args, ctx) {
   try {
     const p = resolvePath(ctx.cwd, args.path ?? '');
     if (!p) return { ok: false, error: '缺少 path 参数。' };
     const content = String(args.content ?? '');
-    if (fs.existsSync(p)) backup(ctx, p);
+    if (Buffer.byteLength(content) > MAX_WRITE_BYTES) {
+      return { ok: false, error: `内容超过 ${MAX_WRITE_BYTES / 1024 / 1024}MB 上限，请分多次写入。` };
+    }
+    if (fs.existsSync(p)) {
+      const st = fs.statSync(p);
+      if (st.size > MAX_FILE_BYTES) {
+        return { ok: false, error: `目标文件 ${p} 超过 5MB，请改用 edit 精确修改。` };
+      }
+      backup(ctx, p);
+    }
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, content);
     return { ok: true, output: `已写入 ${p}（${Buffer.byteLength(content)} 字节）。` };
@@ -132,6 +143,11 @@ export function edit(args, ctx) {
     const replaceAll = Boolean(args.replace_all);
     if (!p) return { ok: false, error: '缺少 path 参数。' };
     if (!oldString) return { ok: false, error: '缺少 old_string 参数。' };
+    try {
+      if (fs.statSync(p).size > MAX_FILE_BYTES) {
+        return { ok: false, error: `文件 ${p} 超过 5MB，请先 read 定位后用更小的改动。` };
+      }
+    } catch {}
     const text = fs.readFileSync(p, 'utf8');
     const count = text.split(oldString).length - 1;
     if (count === 0) {
@@ -264,12 +280,20 @@ export function grep(args, ctx) {
   try {
     const pattern = String(args.pattern ?? '');
     if (!pattern) return { ok: false, error: '缺少 pattern 参数。' };
+    if (pattern.length > 500) return { ok: false, error: 'pattern 过长（>500 字符）。' };
+    // 拒绝嵌套量词类灾难回溯模式（如 (a+)+b），避免同步 ReDoS 卡死事件循环
+    if (/\([^)]*[+*][^)]*\)[+*{]/.test(pattern)) {
+      return { ok: false, error: 'pattern 疑似灾难性回溯（嵌套量词），请改写为等价安全形式。' };
+    }
     let re;
     try {
       re = new RegExp(pattern);
     } catch (e) {
       return { ok: false, error: `无效的正则表达式：${e.message}` };
     }
+    // 单行截断：超长行（如压缩的 JS/日志）截到 20KB 再匹配，防止正则开销失控
+    const MAX_LINE = 20 * 1024;
+    const testLine = (line) => (line.length > MAX_LINE ? re.test(line.slice(0, MAX_LINE)) : re.test(line));
     const root = resolvePath(ctx.cwd, args.path || '.');
     const include = args.include ? globToRegExp(String(args.include)) : null;
     const matches = [];
@@ -298,7 +322,7 @@ export function grep(args, ctx) {
       const rel = path.relative(root, full).split(path.sep).join('/');
       const lines = text.split('\n');
       for (let i = 0; i < lines.length; i++) {
-        if (re.test(lines[i])) {
+        if (testLine(lines[i])) {
           matches.push(`${rel}:${i + 1}: ${lines[i].trimEnd()}`);
           if (matches.length >= MAX_GREP_MATCHES) {
             truncated = true;

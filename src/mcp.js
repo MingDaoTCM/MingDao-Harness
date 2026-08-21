@@ -35,6 +35,7 @@ export class McpClient {
       cwd: this.workingDir,
       env: { ...process.env, ...this.env },
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: true, // 自成进程组：stop 时整组清理（npx 孙进程不成孤儿）
     });
     this.child.stdout.on('data', (d) => this._onData(d));
     this.child.stderr.on('data', (d) => {
@@ -62,6 +63,13 @@ export class McpClient {
 
   _onData(d) {
     this.buf += d.toString('utf8');
+    if (this.buf.length > 20 * 1024 * 1024) {
+      // 恶意/异常服务器灌入超量数据：放弃解析，避免内存膨胀
+      this.error = this.error || 'MCP 服务器输出超限';
+      this.buf = '';
+      this.stop();
+      return;
+    }
     let nl;
     while ((nl = this.buf.indexOf('\n')) >= 0) {
       const line = this.buf.slice(0, nl).trim();
@@ -173,15 +181,22 @@ export class McpClient {
       const text = (res.content || []).map((c) => c.text || '').join('\n');
       return { ok: false, error: text || 'MCP 工具返回错误' };
     }
-    const parts = (res?.content || []).map((c) => (c.type === 'text' ? c.text : `[${c.type}] ${JSON.stringify(c)}`));
-    return { ok: true, output: parts.join('\n') || '(无输出)' };
+    let parts = (res?.content || []).map((c) => (c.type === 'text' ? c.text : `[${c.type}] ${JSON.stringify(c)}`));
+    let text = parts.join('\n') || '(无输出)';
+    if (text.length > 100 * 1024) text = text.slice(0, 100 * 1024) + `\n…[MCP 输出过长已截断，原文共 ${text.length} 字符]`;
+    return { ok: true, output: text };
   }
 
   stop() {
     this.stopped = true;
     try {
-      this.child?.kill('SIGKILL');
-    } catch {}
+      // 整组清理：npx 等命令拉起的孙进程不成孤儿
+      if (this.child?.pid) process.kill(-this.child.pid, 'SIGKILL');
+    } catch {
+      try {
+        this.child?.kill('SIGKILL');
+      } catch {}
+    }
     this._failAll('MCP 服务器已停止');
   }
 }
@@ -202,6 +217,14 @@ export async function startMcpServers(mcpCfg, workingDir) {
       }
     })
   );
+  // 精确工具名映射：名字含 __ 的服务器/工具也不会被贪婪正则切错
+  const managerExact = new Map();
+  for (const [serverName, c] of clients) {
+    if (c.error) continue;
+    for (const t of c.tools || []) {
+      if (t?.name) managerExact.set(`mcp__${serverName}__${t.name}`, { server: serverName, tool: t.name });
+    }
+  }
   const manager = {
     clients,
     toolSchemas() {
@@ -212,12 +235,13 @@ export async function startMcpServers(mcpCfg, workingDir) {
       return out;
     },
     lookup(prefixedName) {
-      const m = /^mcp__(.+)__(.+)$/.exec(prefixedName);
-      if (!m) return null;
-      const [_, server, tool] = m;
-      const c = clients.get(server);
-      if (!c || c.error) return null;
-      return { client: c, toolName: tool };
+      const exact = managerExact.get(prefixedName);
+      if (exact) {
+        const c = clients.get(exact.server);
+        if (!c || c.error) return null;
+        return { client: c, toolName: exact.tool };
+      }
+      return null;
     },
     async call(prefixedName, args) {
       const found = this.lookup(prefixedName);

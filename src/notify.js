@@ -14,7 +14,7 @@ export function notify(title, message) {
       child.on('error', () => {});
       child.unref();
     } else if (process.platform === 'darwin') {
-      const safe = text.replace(/"/g, '\\"');
+      const safe = text.replace(/[\\"]/g, '\\$&');
       const child = spawn('osascript', ['-e', `display notification "${safe}" with title "${String(title)}"`], { detached: true, stdio: 'ignore' });
       child.on('error', () => {});
       child.unref();

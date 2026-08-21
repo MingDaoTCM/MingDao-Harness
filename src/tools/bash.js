@@ -34,7 +34,8 @@ export function runBash(args, ctx) {
   const command = String(args.command ?? '');
   if (!command.trim()) return { ok: false, error: 'command 参数为空。' };
   const timeoutSec = Math.min(Number(args.timeout) || 120, MAX_TIMEOUT_SECONDS);
-  const mode = String(args.sandbox || ctx?.cfg?.sandbox || 'off');
+  // 配置优先：模型不能通过传 sandbox:'off' 自行降级（配置里选了 safe/readonly 就必须沙箱）
+  const mode = String(ctx?.cfg?.sandbox ?? args.sandbox ?? 'off');
   const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/bash';
   const shellArgs = process.platform === 'win32' ? ['/d', '/s', '/c', command] : ['-lc', command];
 
@@ -73,32 +74,56 @@ export function runBash(args, ctx) {
       cwd: ctx.cwd,
       env: process.env,
       stdio: ['ignore', 'pipe', 'pipe'],
+      detached: true, // 自成进程组：超时/结束可整组清理，孙进程不成孤儿
     });
     let out = '';
     let err = '';
     let done = false;
     let timedOut = false;
+    // 输出增量截断：超长输出只保留尾部，避免内存无限累积
+    const cap = (s, d) => {
+      const t = s + d;
+      return t.length > MAX_OUTPUT * 2 ? t.slice(-MAX_OUTPUT * 2) : t;
+    };
+    const killGroup = (sig) => {
+      try {
+        process.kill(-child.pid, sig);
+      } catch {
+        try {
+          child.kill(sig);
+        } catch {}
+      }
+    };
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill('SIGKILL');
+      killGroup('SIGKILL');
     }, timeoutSec * 1000);
+    // 兜底：某些平台 close 可能因孙进程持有管道而延迟，exit 后强制收尾
+    const forceTimer = setTimeout(() => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      resolve({ ok: true, exitCode: 124, timedOut: true, sandbox, note: '进程已强杀（超时或管道未释放）', stdout: tail(out, MAX_OUTPUT), stderr: tail(err, MAX_OUTPUT) });
+    }, timeoutSec * 1000 + 3000);
 
     child.stdout.on('data', (d) => {
-      out += d;
+      out = cap(out, d);
     });
     child.stderr.on('data', (d) => {
-      err += d;
+      err = cap(err, d);
     });
     child.on('error', (e) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      clearTimeout(forceTimer);
       resolve({ ok: false, error: `无法启动进程：${e.message}`, sandbox });
     });
     child.on('close', (code) => {
       if (done) return;
       done = true;
       clearTimeout(timer);
+      clearTimeout(forceTimer);
       resolve({
         ok: true,
         exitCode: code,

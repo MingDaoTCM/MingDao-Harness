@@ -163,6 +163,22 @@ const ctx = { cwd: tmp };
   assert.equal(r.toolCalls[0].function.arguments, '{"path":"a.txt"}', '分片参数拼接');
   assert.equal(r.finish, 'tool_calls');
   assert.equal(r.usage.prompt_tokens, 12);
+  // usage-only 终包（choices 为空）+ 末帧无换行残行：usage 必须被捕获、残行必须被处理
+  const chunks2 = [
+    'data: {"choices":[{"delta":{"content":"尾"}}]}\n\n',
+    'data: [DONE]\n\n',
+    // 末帧无换行结尾：usage-only 终包留在残行里，必须被尾部冲刷处理
+    'data: {"choices":[],"usage":{"prompt_tokens":7,"completion_tokens":3}}',
+  ];
+  const stream2 = new ReadableStream({
+    start(c) {
+      for (const ch of chunks2) c.enqueue(new TextEncoder().encode(ch));
+      c.close();
+    },
+  });
+  const r2 = await parseStream(stream2, null);
+  assert.equal(r2.text, '尾', '无换行残行内容应被处理');
+  assert.equal(r2.usage.prompt_tokens, 7, 'usage-only 终包应被捕获');
   ok('provider：SSE 流解析（断行/分片/usage）');
 }
 
@@ -367,6 +383,11 @@ const ctx = { cwd: tmp };
   assert.equal(await p.check('bash', { command: 'rm -rf /tmp/x' }), false, 'deny 前缀匹配');
   assert.equal(await p.check('write', {}), false, 'deny 精确匹配');
   assert.equal(await p.check('grep', {}), true, '只读默认放行');
+  // 链式命令不得借前缀规则绕过（&& / ; / | 回落 ask → 测试 IO 拒绝）
+  const pChain = createPermission({ mode: 'ask', allow: ['bash:git *'] }, { ask: async () => 'n' });
+  assert.equal(await pChain.check('bash', { command: 'git push && rm -rf ~' }), false, '链式命令不应被前缀规则放行');
+  assert.equal(await pChain.check('bash', { command: 'git status; whoami' }), false, '分号链式同样拦截');
+  assert.equal(await pChain.check('bash', { command: 'git | grep x' }), false, '管道链式同样拦截');
   ok('permissions：工具名:参数前缀 规则匹配');
 }
 
@@ -884,7 +905,7 @@ const ctx = { cwd: tmp };
   await syncPush();
   const sh = await syncShareCreate('alice-notes.jsonl');
   assert.equal(sh.ok, true, sh.error);
-  assert.ok(/^[0-9a-f]{10}$/.test(sh.shareId), '分享码应为 10 位十六进制');
+  assert.ok(/^[0-9a-f]{16}$/.test(sh.shareId), '分享码应为 16 位十六进制');
   process.env.MINGDAO_HOME = homeB;
   await syncLogin({ url, username: 'bob', password: 'password123', deviceName: 'B' });
   const acc = await syncShareAccept(sh.shareId);

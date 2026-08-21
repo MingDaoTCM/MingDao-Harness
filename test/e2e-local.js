@@ -257,17 +257,18 @@ function ok(name) {
   ok('--format json 结构化输出');
 }
 
-// ---------- 10. JSON 模式 + ask 权限 + stdin EOF：stdout 恒为单行 JSON ----------
+// ---------- 10. JSON 模式 + ask 权限 + stdin EOF：交互通道中断按「拒绝」降级，契约不崩 ----------
 {
   writeConfig('ask');
   resetMock('write');
-  const r = await runCli(['--format', 'json', '创建 result.txt'], { stdin: '' });
-  assert.equal(r.code, 2, 'stderr: ' + r.err);
+  const r = await runCli(['--format', 'json', '创建 eof-denied.txt'], { stdin: '' });
+  // stdin EOF 时权限确认按拒绝处理：回合优雅完成（工具未执行），而非进程崩溃
+  assert.equal(r.code, 0, 'stderr: ' + r.err);
   const j = JSON.parse(r.out.trim());
-  assert.equal(j.ok, false);
-  assert.ok(String(j.error).includes('输入流'), '错误应说明输入流结束');
+  assert.equal(j.ok, true);
+  assert.ok(!fs.existsSync(path.join(work, 'eof-denied.txt')), '被拒的工具不应执行');
   writeConfig('auto');
-  ok('JSON 模式 + ask + stdin EOF：stdout 单行 JSON 契约');
+  ok('JSON 模式 + ask + stdin EOF：单行 JSON 契约 + 拒绝降级不崩溃');
 }
 
 // ---------- 11. 后台任务：启动 → 完成 → 状态文件 → 任务面板列表 ----------
@@ -376,10 +377,13 @@ function ok(name) {
   const p2 = await runCli(['sync', 'pull']);
   assert.equal(p2.code, 0, p2.err + p2.out);
   assert.ok(p2.out.includes('已拉取'), '拉取应成功');
-  // 改密码（stdin 输旧密码）
+  // 改密码（stdin 输旧密码）→ 服务端吊销全部设备 token，需用新密码重新登录
   const pw = await runCli(['sync', 'passwd', 'newpassword456'], { stdin: 'password123\n' });
   assert.equal(pw.code, 0, pw.err + pw.out);
   assert.ok(pw.out.includes('已修改'), '密码修改应成功');
+  const relogin = await runCli(['sync', 'login', 'cli-user', 'newpassword456', syncUrl]);
+  assert.equal(relogin.code, 0, relogin.err + relogin.out);
+  assert.ok(relogin.out.includes('已登录'), '改密后应能用新密码重新登录');
   // 分享与撤销（用本地真实会话名）
   const sessFiles = fs.readdirSync(path.join(home, 'sessions')).filter((f) => f.endsWith('.jsonl') && !f.includes('.server-') && !f.includes('.remote-'));
   const sh = await runCli(['sync', 'share', sessFiles[0]]);
