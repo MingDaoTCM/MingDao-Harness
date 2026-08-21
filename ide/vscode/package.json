@@ -2,7 +2,7 @@
   "name": "mingdao-vscode",
   "displayName": "MingDao（明道）",
   "description": "MingDao-Harness 的 VS Code 深度集成：侧边栏内嵌 WebUI、选中代码右键发送、服务器自动管理",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "publisher": "mingdao",
   "license": "MIT",
   "engines": {

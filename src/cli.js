@@ -695,11 +695,15 @@ async function main() {
           });
         });
       }
-      const r = await syncLogin({ url, username, password, deviceName: opts.prompt[5] });
+      const insecureFlag = opts.prompt[5] === '--insecure' || opts.prompt[6] === '--insecure';
+      const r = await syncLogin({ url, username, password, deviceName: opts.prompt[5] === '--insecure' ? undefined : opts.prompt[5], insecure: insecureFlag });
       if (r.error) {
         console.log('[错误] ' + r.error);
         process.exitCode = 1;
         return;
+      }
+      if (insecureFlag) {
+        console.log('  已启用 insecure（跳过证书校验，正式证书就绪后请在 config.sync 删除 insecure 字段）');
       }
       console.log(`✓ 已登录 ${r.username}（设备 ${r.deviceName}）→ ${r.url}`);
       console.log('  推送：mingdao sync push · 拉取：mingdao sync pull · 会话结束自动同步（config.sync.auto）');
@@ -717,7 +721,7 @@ async function main() {
         process.exitCode = 1;
         return;
       }
-      console.log(`✓ 已推送 ${r.pushed.length} 个会话${r.conflicts.length ? `，远端 ${r.conflicts.length} 个不同版本已备份为 .server-*（本地覆盖远端）` : ''}`);
+      console.log(`✓ 已推送 ${r.pushed.length} 个会话${r.skipped?.length ? `（跳过 ${r.skipped.length} 个空会话）` : ''}${r.conflicts.length ? `，远端 ${r.conflicts.length} 个不同版本已备份为 .server-*（本地覆盖远端）` : ''}`);
       return;
     }
     if (sub === 'pull') {

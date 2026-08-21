@@ -41,6 +41,8 @@ export function syncStatus() {
 async function apiCall(baseUrl, method, payload, token, timeoutMs = TIMEOUT_MS) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+  // 自建服务器用自签证书的阶段：config.sync.insecure=true 跳过证书校验（正式证书就绪后应关闭）
+  if (syncSettings()?.insecure) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   try {
     const res = await fetch(baseUrl.replace(/\/+$/, '') + method, {
       method: 'POST',
@@ -68,13 +70,15 @@ async function apiCall(baseUrl, method, payload, token, timeoutMs = TIMEOUT_MS) 
 }
 
 // 登录/注册 + 设备配对：注册失败（用户不存在）先注册再配对
-export async function syncLogin({ url, username, password, deviceName }) {
+export async function syncLogin({ url, username, password, deviceName, insecure = false }) {
   const base = String(url || '').trim().replace(/\/+$/, '');
   if (!/^https?:\/\//i.test(base)) return { error: '服务器地址需以 http(s):// 开头' };
   const name = String(username || '').trim();
   if (!/^[A-Za-z0-9_.-]{2,32}$/.test(name)) return { error: '用户名需 2–32 位字母/数字/._-' };
   if (!password || password.length < 8) return { error: '密码至少 8 位' };
   const dev = String(deviceName || '').trim().slice(0, 60) || os.hostname().slice(0, 60) || '未命名设备';
+  const useInsecure = insecure || syncSettings()?.insecure === true;
+  if (useInsecure) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
   try {
     let pair;
     try {
@@ -92,7 +96,7 @@ export async function syncLogin({ url, username, password, deviceName }) {
     if (!pair.ok || !pair.token) return { error: pair.error || '配对失败' };
     // 保存：config 只存非秘密，token 进凭证库
     const cfg = loadConfig() || {};
-    cfg.sync = { url: base, username: name, deviceName: dev, auto: cfg.sync?.auto !== false };
+    cfg.sync = { url: base, username: name, deviceName: dev, auto: cfg.sync?.auto !== false, insecure: useInsecure };
     saveConfig(cfg);
     const creds = loadCredentials();
     creds.sync = { token: pair.token, deviceId: pair.deviceId };
@@ -167,8 +171,13 @@ export async function syncPush(name) {
   const state = readState();
   const pushed = [];
   const conflicts = [];
+  const skipped = [];
   for (const s of locals) {
     const content = fs.readFileSync(s.file, 'utf8');
+    if (!content.trim()) {
+      skipped.push(s.name); // 空会话文件（刚创建未写消息）不推送
+      continue;
+    }
     if (Buffer.byteLength(content) > 19 * 1024 * 1024) {
       return { error: `${s.name} 超过 20MB 上限，跳过同步` };
     }
@@ -197,7 +206,7 @@ export async function syncPush(name) {
     }
   }
   writeState(state);
-  return { ok: true, pushed, conflicts };
+  return { ok: true, pushed, conflicts, skipped };
 }
 
 // 拉取单个/全部会话。本地有不同内容时保留本地，远端写入 .remote- 副本。
