@@ -884,7 +884,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     }
     if (req.method === 'GET' && p === '/sw.js') {
       res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
-      res.end(`self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(clients.claim()));self.addEventListener('fetch',e=>{if(e.request.method==='GET'&&new URL(e.request.url).origin===location.origin&&!e.request.url.includes('/api/')){e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open('mingdao-v2').then(cache=>cache.put(e.request,c));return r;}).catch(()=>caches.match(e.request).then(m=>m||caches.match('/'))));}});`);
+      res.end(`self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(clients.claim()));self.addEventListener('fetch',e=>{if(e.request.method==='GET'&&new URL(e.request.url).origin===location.origin&&!e.request.url.includes('/api/')){e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open('mingdao-v3').then(cache=>cache.put(e.request,c));return r;}).catch(()=>caches.match(e.request).then(m=>m||caches.match('/'))));}});`);
       return;
     }
     json(res, 404, { error: 'Not found' });

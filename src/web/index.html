@@ -64,6 +64,9 @@ main{flex:1;overflow-y:auto;padding:18px 0 12px;min-width:0}
 .reasoning summary{cursor:pointer;color:var(--faint);font-size:12.5px;padding:6px 12px;list-style:none}
 .reasoning summary:after{content:"（点击展开）";margin-left:6px}
 .reasoning[open] summary:after{content:""}
+.reasoning summary.live{color:var(--accent2)}
+.reasoning summary.live:after{content:"（思考中…）";color:var(--accent2);animation:blink 1.2s infinite}
+.think{color:var(--dim);font-size:13px;padding:6px 2px;animation:blink 1.2s infinite}
 .reasoning .body{padding:8px 12px;color:var(--dim);font-size:13px;white-space:pre-wrap;max-height:260px;overflow-y:auto;border-top:1px solid var(--border)}
 .tool{border:1px solid var(--border);border-radius:10px;background:var(--bg2);overflow:hidden;margin:8px 0}
 .tool .head{padding:8px 14px;display:flex;gap:10px;align-items:center;font-size:13.5px}
@@ -294,32 +297,66 @@ function addReasoning(msg){ const d=document.createElement('details'); d.classNa
 
 function addUser(text){ const el=document.createElement('div'); el.className='msg-user'; el.innerHTML='<div class="bubble">'+esc(text)+'</div>'; chatEl.appendChild(el); scrollBottom(); }
 
+function expandableBody(previewHtml, fullHtml){
+  const b=document.createElement('div'); b.className='body';
+  const prev=document.createElement('div'); const full=document.createElement('div');
+  prev.innerHTML=previewHtml; full.innerHTML=fullHtml; full.style.display='none';
+  const btn=document.createElement('button'); btn.textContent='展开全文'; btn.style.cssText='padding:1px 8px;font-size:11px;margin-top:4px';
+  btn.onclick=()=>{ const open=full.style.display!=='none'; full.style.display=open?'none':'block'; btn.textContent=open?'展开全文':'收起'; scrollBottom(); };
+  b.appendChild(prev); b.appendChild(full); b.appendChild(btn);
+  return b;
+}
 function renderToolEvent(ev){
   const msg = newAiMsg();
   const card=document.createElement('div'); card.className='tool';
   const ico = {'read':'📄','write':'✏️','edit':'✎','bash':'⚙','grep':'🔎','glob':'🔎','ls':'📁','task':'👥','skill':'🧩','todo':'☑','undo':'↩'}[ev.name]||'🔌';
-  const args = ev.name==='bash'? (ev.args&&ev.args.command):(ev.args&&(ev.args.path||ev.args.pattern||''))||'';
-  card.innerHTML='<div class="head"><span class="ico">'+ico+'</span><span class="name">'+esc(ev.name)+'</span><span class="args">'+esc(args)+'</span><span class="st '+(ev.result&&ev.result.ok!==false?'ok':'bad')+'">'+(ev.result&&ev.result.ok!==false?'✓':'✖')+(ev.durationMs!=null?' '+ev.durationMs+'ms':'')+'</span></div>';
-  if(ev.result){
-    const body=document.createElement('div'); body.className='body';
-    const r=ev.result;
-    if(ev.name==='edit'&&r.diff){
-      body.classList.add('diff');
-      const a=(r.diff.before||'').split('\n'), b=(r.diff.after||'').split('\n');
-      const n=Math.max(a.length,b.length);
-      for(let i=0;i<n;i++){
-        if(a[i]===b[i]) body.insertAdjacentHTML('beforeend','<span class="l ctx"> '+esc(a[i]??'')+'</span>');
-        else{ if(a[i]!==undefined) body.insertAdjacentHTML('beforeend','<span class="l del">- '+esc(a[i])+'</span>'); if(b[i]!==undefined) body.insertAdjacentHTML('beforeend','<span class="l add">+ '+esc(b[i])+'</span>'); }
-      }
-    }else if(ev.name==='write'&&r.ok){
-      const lines=String(ev.args&&ev.args.content||'').split('\n');
-      body.innerHTML='<pre>'+esc(lines.slice(0,8).join('\n'))+(lines.length>8?'\n…（共 '+lines.length+' 行）':'')+'</pre>';
-    }else if(ev.name==='bash'&&r.ok){
-      body.innerHTML='<b style="color:'+(r.exitCode===0?'var(--accent)':'var(--err)')+'">'+(r.timedOut?'⏱ 超时':'exit '+r.exitCode)+'</b>'+(r.stdout?'<pre>'+esc(r.stdout.slice(-4000))+'</pre>':'')+(r.stderr?'<pre style="color:#ff9d97">'+esc(r.stderr.slice(-1500))+'</pre>':'');
-    }else if(r.output){
-      body.innerHTML='<pre>'+esc(String(r.output).slice(0,4000))+'</pre>';
-    }else if(r.error){ body.innerHTML='<span style="color:var(--err)">'+esc(r.error)+'</span>'; }
-    card.appendChild(body);
+  const args = ev.name==='bash'? (ev.args&&ev.args.command):(ev.args&&(ev.args.path||ev.args.pattern||ev.args.name||''))||'';
+  const r = ev.result||{};
+  const ok = ev.result===undefined || r.ok!==false;
+  card.innerHTML='<div class="head"><span class="ico">'+ico+'</span><span class="name">'+esc(ev.name)+'</span><span class="args">'+esc(args)+'</span><span class="st '+(ok?'ok':'bad')+'">'+(ev.result===undefined?'…':(ok?'✓':'✖'))+(ev.durationMs!=null?' '+ev.durationMs+'ms':'')+'</span></div>';
+  const bodyWrap=(el)=>{ if(el) card.appendChild(el); };
+  if(ev.name==='skill'){
+    // 技能内容只供模型使用，不整篇倒给用户：一行摘要
+    const out=String(r.output||''); const desc=(out.match(/^description:\s*(.+)$/m)||[])[1]||'';
+    const b=document.createElement('div'); b.className='body';
+    b.innerHTML='<span style="color:var(--dim)">已加载技能 <b>'+esc(ev.args&&ev.args.name||'')+'</b>'+(desc?'：'+esc(desc.slice(0,80)):'')+'（全文 '+out.length+' 字，供模型参考）</span>';
+    bodyWrap(b);
+  }else if(ev.name==='edit'&&r.diff){
+    const b=document.createElement('div'); b.className='body diff';
+    const a=(r.diff.before||'').split('\n'), bb=(r.diff.after||'').split('\n');
+    const n=Math.max(a.length,bb.length); const cap=40;
+    const line=(x)=>'<span class="l ctx"> '+esc(x??'')+'</span>';
+    const line2=(x)=>'<span class="l del">- '+esc(x)+'</span>';
+    const line3=(x)=>'<span class="l add">+ '+esc(x)+'</span>';
+    let prev='', full='';
+    for(let i=0;i<n;i++){
+      const html=(a[i]===bb[i])?line(a[i]??''):((a[i]!==undefined?line2(a[i]):'')+(bb[i]!==undefined?line3(bb[i]):''));
+      if(i<cap) prev+=html; full+=html;
+    }
+    if(n>cap){ b.appendChild(expandableBody(prev+'<div style="color:var(--faint)">…（共 '+n+' 行差异）</div>', full)); }
+    else b.innerHTML=prev;
+    bodyWrap(b);
+  }else if(ev.name==='write'&&r.ok){
+    const lines=String(ev.args&&ev.args.content||'').split('\n');
+    const b=document.createElement('div'); b.className='body';
+    b.innerHTML='<pre>'+esc(lines.slice(0,8).join('\n'))+(lines.length>8?'\n…（共 '+lines.length+' 行）':'')+'</pre>';
+    bodyWrap(b);
+  }else if(ev.name==='bash'&&r.ok){
+    const badge='<b style="color:'+(r.exitCode===0?'var(--accent)':'var(--err)')+'">'+(r.timedOut?'⏱ 超时':'exit '+r.exitCode)+'</b>';
+    const out=(r.stdout?'<pre>'+esc(String(r.stdout).slice(-1200))+'</pre>':'')+(r.stderr?'<pre style="color:#ff9d97">'+esc(String(r.stderr).slice(-600))+'</pre>':'');
+    const full=badge+out;
+    if((String(r.stdout||'').length+String(r.stderr||'').length)>1800) bodyWrap(expandableBody(badge+'<div style="color:var(--faint)">…（输出较长）</div>', full));
+    else { const b=document.createElement('div'); b.className='body'; b.innerHTML=full; bodyWrap(b); }
+  }else if(r.output){
+    const out=String(r.output);
+    const max=400;
+    if(out.length>max){
+      bodyWrap(expandableBody('<pre>'+esc(out.slice(0,max))+'…</pre>', '<pre>'+esc(out)+'</pre>'));
+    }else{
+      const b=document.createElement('div'); b.className='body'; b.innerHTML='<pre>'+esc(out)+'</pre>'; bodyWrap(b);
+    }
+  }else if(r.error){
+    const b=document.createElement('div'); b.className='body'; b.innerHTML='<span style="color:var(--err)">'+esc(r.error)+'</span>'; bodyWrap(b);
   }
   msg.appendChild(card);
   if(ev.name==='todo'&&ev.result&&ev.result.todos) renderTodos(ev.result.todos, msg);
@@ -358,27 +395,32 @@ async function send(){
   addUser(text);
   const msg=newAiMsg(); const content=aiContent(msg); let raw='';
   let reason=null; let taskId=null;
-  const update=()=>{ content.innerHTML=renderMarkdown(raw); scrollBottom(); };
-  const timer=setInterval(()=>{ if(raw) update(); },200);
+  // 等待首个输出时的可见状态：脉动「正在思考…」
+  const think=document.createElement('div'); think.className='think'; think.textContent='💭 正在思考…'; msg.appendChild(think);
+  const nearBottom=()=> chatEl.scrollHeight - chatEl.scrollTop - chatEl.clientHeight < 90;
+  const scroll=()=>{ if(nearBottom()) chatEl.scrollTop = chatEl.scrollHeight; };
+  let pending=false;
+  const update=()=>{ if(pending) return; pending=true; requestAnimationFrame(()=>{ pending=false; content.innerHTML=renderMarkdown(raw); scroll(); }); };
+  const onActivity=()=>{ if(think.parentNode) think.remove(); if(reason&&reason.parentElement){ reason.parentElement.open=false; reason.parentElement.querySelector('summary').classList.remove('live'); } };
   updateTasksPanel();
   try{
     const resp=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text,file:currentSession})});
-    if(!resp.ok){ const j=await resp.json().catch(()=>({})); msg.innerHTML='<div class="errline">'+esc(j.error||('HTTP '+resp.status))+'</div>'; updateTasksPanel(); return; }
+    if(!resp.ok){ const j=await resp.json().catch(()=>({})); onActivity(); msg.innerHTML='<div class="errline">'+esc(j.error||('HTTP '+resp.status))+'</div>'; updateTasksPanel(); return; }
     await handleEvents(resp.body, ev=>{
       if(ev.taskId) taskId=ev.taskId;
-      if(ev.type==='text'){ raw+=ev.delta; }
-      else if(ev.type==='reasoning'){ if(!reason) reason=addReasoning(msg); reason.textContent+=ev.delta; }
-      else if(ev.type==='code'){ const pre=document.createElement('pre'); pre.innerHTML='<code>'+highlight(ev.code,ev.lang)+'</code>'; content.appendChild(pre); }
-      else if(ev.type==='tool'){ update(); renderToolEvent(ev); }
-      else if(ev.type==='toolDenied'){ const d=document.createElement('div'); d.className='errline'; d.textContent='✖ 未授权：'+ev.name; msg.appendChild(d); }
+      if(ev.type==='text'){ onActivity(); raw+=ev.delta; update(); }
+      else if(ev.type==='reasoning'){ if(!reason){ reason=addReasoning(msg); reason.parentElement.open=true; reason.parentElement.querySelector('summary').classList.add('live'); } reason.textContent+=ev.delta; scroll(); }
+      else if(ev.type==='code'){ onActivity(); const pre=document.createElement('pre'); pre.innerHTML='<code>'+highlight(ev.code,ev.lang)+'</code>'; content.appendChild(pre); scroll(); }
+      else if(ev.type==='tool'){ onActivity(); update(); renderToolEvent(ev); }
+      else if(ev.type==='toolDenied'){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent='✖ 未授权：'+ev.name; msg.appendChild(d); scroll(); }
       else if(ev.type==='banner'){ renderBanner(ev); }
       else if(ev.type==='ask'){ update(); askModal(ev).then(a=>fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:ev.id,answer:a,taskId})}).catch(()=>{})); }
-      else if(ev.type==='usage'){ const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; content.appendChild(u); }
-      else if(ev.type==='error'){ const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); }
-      else if(ev.type==='done'){ currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
+      else if(ev.type==='usage'){ onActivity(); const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; msg.appendChild(u); scroll(); }
+      else if(ev.type==='error'){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); scroll(); }
+      else if(ev.type==='done'){ onActivity(); currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
     });
-  }catch(e){ msg.innerHTML='<div class="errline">'+esc(e.message||'网络错误')+'</div>'; }
-  finally{ clearInterval(timer); update(); updateTasksPanel(); }
+  }catch(e){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=e.message||'网络错误'; msg.appendChild(d); scroll(); }
+  finally{ pending=false; content.innerHTML=renderMarkdown(raw); scroll(); updateTasksPanel(); }
 }
 
 function abort(){ fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{}); }

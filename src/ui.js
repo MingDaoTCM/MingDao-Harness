@@ -484,6 +484,14 @@ export function createIO({ quiet = false } = {}) {
         return;
       }
 
+      if (name === 'skill') {
+        // 技能全文只供模型使用，终端只给一行摘要
+        const out = String(r.output ?? '');
+        const desc = (out.match(/^description:\s*(.+)$/m) || [])[1] || '';
+        io.print(style(`  🧩 已加载技能 ${args.name}${desc ? '：' + desc.slice(0, 60) : ''}（${out.length} 字）${ms}`, C.bold));
+        return;
+      }
+
       // 只读工具：read / ls / glob / grep
       io.print(style(`  🔍 ${name}${summarizeArgs(name, args)}`, C.bold));
       const out = String(r.output ?? '');
