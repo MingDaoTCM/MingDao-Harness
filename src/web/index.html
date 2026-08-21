@@ -898,7 +898,7 @@ async function applyConfig(payload, revertTarget){
 }
 $('#modelSel').addEventListener('change', e=>{ applyConfig({model:e.target.value}, e.target); });
 $('#permSel').addEventListener('change', e=>{ applyConfig({permission:e.target.value}, e.target); });
-async function loadSession(file){ currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } scrollBottom(); }
+async function loadSession(file){ currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } scrollBottom(); }
 
 sendBtn.onclick=send; stopBtn.onclick=abort;
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });

@@ -219,7 +219,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 输出被长度上限截断（DeepSeek 推理吃满 maxOutput 时正文为空）：让模型从断点续写，绝不静默结束
         if (res.finish === 'length') {
           emptyRounds += 1;
-          if (emptyRounds >= 3) {
+          if (emptyRounds >= 12) {
             stripOrphanCalls();
             return {
               text: res.text || null,
@@ -233,7 +233,6 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               durationMs: Date.now() - startedAt,
             };
           }
-          io.print('（输出达到长度上限，已让模型从断点继续…）');
           messages.push({
             role: 'user',
             content: '（系统提示）你的上一条输出因达到长度上限被截断。请直接继续未完成的部分：不要重复已写内容，从断点接着完成。',
