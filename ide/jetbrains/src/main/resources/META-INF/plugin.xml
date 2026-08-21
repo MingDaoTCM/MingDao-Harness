@@ -3,18 +3,23 @@
   <name>MingDao（明道）</name>
   <vendor>MingDao-Harness Contributors</vendor>
   <description><![CDATA[
-    MingDao-Harness 的 JetBrains 集成：Tools 菜单一键启动 WebUI 服务器并打开浏览器。
+    MingDao-Harness 的 JetBrains 深度集成：右侧工具窗内嵌 WebUI、选中代码右键发送、Tools 菜单启动。
     前提：已安装 mingdao-harness（mingdao / mdh 命令可用，npm install -g 或 bash install.sh）。
   ]]></description>
   <depends>com.intellij.modules.platform</depends>
   <extensions defaultExtensionNs="com.intellij">
     <service serviceImplementation="mingdao.MingDaoSettings"/>
+    <toolWindow id="mingdao.toolWindow" anchor="right" factoryClass="mingdao.MingDaoToolWindowFactory"/>
   </extensions>
   <actions>
     <group id="MingDao.ToolsMenu" text="MingDao" popup="true">
       <add-to-group group-id="ToolsMenu" anchor="last"/>
       <action id="mingdao.openWebUI" class="mingdao.OpenWebUIAction" text="MingDao: 打开 WebUI" description="启动（如未运行）并打开 MingDao WebUI"/>
       <action id="mingdao.startServer" class="mingdao.StartServerAction" text="MingDao: 启动服务器" description="仅启动服务器（后台）"/>
+    </group>
+    <group id="MingDao.EditorPopup" text="MingDao">
+      <add-to-group group-id="EditorPopupMenu" anchor="last"/>
+      <action id="mingdao.sendSelection" class="mingdao.SendSelectionAction" text="MingDao: 发送选中代码" description="将选中代码发送到 MingDao 工具窗输入框"/>
     </group>
   </actions>
 </idea-plugin>

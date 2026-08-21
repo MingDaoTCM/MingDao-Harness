@@ -27,4 +27,4 @@ cd ide/jetbrains
 
 ## 状态说明
 
-本插件为骨架版本（与 VS Code 插件 v1 同级），已通过 Kotlin 语法审阅但未在真实 IDE 中构建验证（本仓库环境无 IntelliJ SDK）；构建或运行报错请反馈，深度集成（工具窗内嵌 WebUI、选中代码发送）在路线图中。
+本插件已含工具窗深度集成（JCEF 内嵌 WebUI + 选中代码发送），Kotlin 代码经审阅但未在真实 IDE 中构建验证（本仓库环境无 IntelliJ SDK）（本仓库环境无 IntelliJ SDK）；构建或运行报错请反馈，深度集成（工具窗内嵌 WebUI、选中代码发送）在路线图中。

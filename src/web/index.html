@@ -120,7 +120,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
   <div class="spacer"></div>
   <input id="sessionSearch" placeholder="搜索会话…" title="关键词检索历史会话">
   <select id="sessions" title="历史会话"><option value="">＋ 新会话</option></select>
-  <button id="tasksBtn" title="任务面板">任务</button>
+  <button id="tasksBtn" title="任务面板">任务</button><button id="sessMgrBtn" title="管理会话（重命名/删除）">✎</button>
   <button id="newChat">新对话</button>
   <button id="stopBtn" class="danger" style="display:none">■ 中断</button>
 </header>
@@ -137,6 +137,13 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
   <div id="hint">工具执行与权限确认会实时展示；生成中可点「中断」停止。</div>
 </footer>
 <div id="modalRoot"></div>
+<div id="sessModal" class="modal-mask" style="display:none">
+  <div class="modal">
+    <h3>会话管理（重命名 / 删除）</h3>
+    <div id="sessList" style="max-height:300px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:4px 8px"></div>
+    <div class="row" style="margin-top:12px"><button id="sessClose">关闭</button></div>
+  </div>
+</div>
 <div id="cfgModal" class="modal-mask" style="display:none">
   <div class="modal">
     <h3>⚙ 设置</h3>
@@ -156,7 +163,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap">
       <input id="schQuestion" placeholder="定时任务内容…" style="flex:1;min-width:130px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
       <select id="schWhen" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px">
-        <option value="at">定时一次</option><option value="every">周期</option><option value="after">依赖任务ID</option>
+        <option value="at">定时一次</option><option value="every">周期</option><option value="after">依赖任务ID</option><option value="chain">链式（每行一个任务）</option>
       </select>
     </div>
     <div class="cfg-row" id="schAtRow"><input type="datetime-local" id="schAt" style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"></div>
@@ -166,6 +173,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
       </select>
     </div>
     <div class="cfg-row" id="schAfterRow" style="display:none"><input id="schAfter" placeholder="任务 ID（mingdao run 返回）或调度 ID" style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"></div>
+    <div class="cfg-row" id="schChainRow" style="display:none"><textarea id="schChain" rows="4" placeholder="每行一个任务，按顺序执行（后者依赖前者成功）&#10;构建&#10;测试&#10;部署" style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px;resize:vertical"></textarea></div>
     <div class="row"><button id="schAdd">＋ 添加调度</button></div>
     <div class="row"><button id="cfgCancel">取消</button><button class="primary" id="cfgSave">保存</button></div>
   </div>
@@ -359,7 +367,7 @@ async function init(){
 $('#cfgBtn').onclick=()=>{ $('#cfgModal').style.display='flex'; };
 $('#cfgCancel').onclick=()=>{ $('#cfgModal').style.display='none'; };
 $('#cfgBtn').addEventListener('click', refreshSchList);
-$('#schWhen').onchange=e=>{ $('#schAtRow').style.display=e.target.value==='at'?'':'none'; $('#schEveryRow').style.display=e.target.value==='every'?'':'none'; $('#schAfterRow').style.display=e.target.value==='after'?'':'none'; };
+$('#schWhen').onchange=e=>{ const v=e.target.value; $('#schAtRow').style.display=v==='at'?'':'none'; $('#schEveryRow').style.display=v==='every'?'':'none'; $('#schAfterRow').style.display=v==='after'?'':'none'; $('#schChainRow').style.display=v==='chain'?'':'none'; };
 async function refreshSchList(){
   const r=await fetch('/api/schedule',{cache:'no-store'}).catch(()=>null); if(!r) return;
   const j=await r.json(); const list=$('#schList'); list.innerHTML='';
@@ -369,6 +377,7 @@ async function refreshSchList(){
     const mark=s.status==='running'?'▶':s.status==='paused'?'⏸':s.status==='done'?'✓':s.status==='skipped'?'⊘':'⏳';
     const when=s.kind==='every'?('每 '+(s.interval>=86400000?(s.interval/86400000)+'d':s.interval>=3600000?(s.interval/3600000)+'h':s.interval>=60000?(s.interval/60000)+'m':(s.interval/1000)+'s')):s.kind==='once'?(s.nextRunAt?new Date(s.nextRunAt).toLocaleString():''):('依赖 '+ (s.after||[]).join(','));
     div.innerHTML='<span>'+mark+'</span><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.question)+'</span><span style="color:var(--faint);white-space:nowrap">'+esc(when)+' · '+s.runs+'次</span>';
+    if((s.history||[]).length){ const hb=document.createElement('button'); hb.textContent='历史('+s.history.length+')'; hb.style.cssText='padding:1px 8px;font-size:11px'; const hist=document.createElement('div'); hist.style.cssText='display:none;padding:4px 0 4px 18px;font-size:11.5px;color:var(--dim)'; for(const h of s.history.slice(-8).reverse()){ hist.innerHTML+='<div>· '+new Date(h.at).toLocaleTimeString()+' '+(h.status==='done'?'✓':'✖')+' '+(h.durationMs!=null?(h.durationMs/1000).toFixed(1)+'s':'')+' '+esc((h.text||'').slice(0,60))+'</div>'; } hb.onclick=()=>{ hist.style.display=hist.style.display==='none'?'block':'none'; }; div.parentElement.insertBefore(hist, div.nextSibling); div.appendChild(hb); }
     if(s.status!=='done'&&s.status!=='skipped'){ const pa=document.createElement('button'); pa.textContent=s.status==='paused'?'恢复':'暂停'; pa.style.cssText='padding:1px 8px;font-size:11px'; pa.onclick=()=>schAction(s.status==='paused'?'resume':'pause', s.id); div.appendChild(pa); }
     const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=()=>schAction('remove', s.id); div.appendChild(rm);
     list.appendChild(div);
@@ -381,6 +390,7 @@ $('#schAdd').onclick=async ()=>{
   const payload={action:'add',question:q};
   if(kind==='at'){ const v=$('#schAt').value; if(!v) return; payload.at=v.replace('T',' '); }
   else if(kind==='every'){ payload.every=$('#schEvery').value; }
+  else if(kind==='chain'){ const v=$('#schChain').value.trim(); if(!v) return; const qs=v.split('\n').map(x=>x.trim()).filter(Boolean); if(qs.length<2){ alert('链式需要至少两行任务'); return; } payload.action='chain'; payload.questions=qs; }
   else { const v=$('#schAfter').value.trim(); if(!v) return; payload.after=[v]; }
   const r=await fetch('/api/schedule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const j=await r.json().catch(()=>({error:'请求失败'}));
@@ -414,6 +424,21 @@ sendBtn.onclick=send; stopBtn.onclick=abort;
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
 input.addEventListener('input',()=>{ input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; });
 $('#newChat').onclick=()=>{ currentSession=null; chatEl.innerHTML=''; refreshSessions(); };
+$('#sessMgrBtn').onclick=openSessModal;
+$('#sessClose').onclick=()=>{ $('#sessModal').style.display='none'; };
+async function openSessModal(){
+  $('#sessModal').style.display='flex';
+  const r=await fetch('/api/sessions',{cache:'no-store'}); const j=await r.json();
+  const list=$('#sessList'); list.innerHTML='';
+  if(!j.sessions.length){ list.innerHTML='<div style="color:var(--faint);font-size:12px;padding:6px">暂无会话</div>'; return; }
+  for(const s of j.sessions){
+    const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12.5px';
+    div.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.label)+'</span>';
+    const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=prompt('新标题：', s.file.replace(/\.jsonl$/,'')); if(!t) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',file:s.file,title:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshSessions(); openSessModal(); } else alert(jj.error||'重命名失败'); };
+    const dl=document.createElement('button'); dl.textContent='删除'; dl.className='danger'; dl.style.cssText='padding:1px 8px;font-size:11px'; dl.onclick=async()=>{ if(!confirm('删除会话 '+s.file+'？此操作不可恢复。')) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',file:s.file})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ if(currentSession===s.file) currentSession=null; refreshSessions(); openSessModal(); } else alert(jj.error||'删除失败'); };
+    div.appendChild(rn); div.appendChild(dl); list.appendChild(div);
+  }
+}
 $('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { currentSession=null; chatEl.innerHTML=''; } };
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
 init();

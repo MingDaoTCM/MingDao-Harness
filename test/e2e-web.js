@@ -282,6 +282,25 @@ let base = await startWeb(work1);
   ok('调度 API：列表 / 添加 / 暂停 / 删除');
 }
 
+// ---------- 9. 会话管理：重命名 / 删除 ----------
+{
+  requestCount = 0;
+  await chatOnce(base, '会话管理测试消息');
+  const st = await (await fetch(base + '/api/sessions')).json();
+  const target = st.sessions.find((s) => s.label.includes('会话管理测试消息'));
+  assert.ok(target, '应存在测试会话');
+  const rename = await (await fetch(base + '/api/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'rename', file: target.file, title: '改名后的会话' }) })).json();
+  assert.equal(rename.ok, true);
+  assert.ok(rename.file.includes('改名后的会话'));
+  const del = await (await fetch(base + '/api/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', file: rename.file }) })).json();
+  assert.equal(del.ok, true);
+  const gone = await fetch(base + '/api/session?file=' + encodeURIComponent(rename.file));
+  assert.equal(gone.status, 404, '删除后应不可载入');
+  const badDel = await fetch(base + '/api/session', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'delete', file: '../credentials.json' }) });
+  assert.equal(badDel.status, 404, '路径穿越应被 basename 防护拒绝');
+  ok('会话管理：重命名 / 删除 / 路径防护');
+}
+
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();

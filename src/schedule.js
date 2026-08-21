@@ -253,11 +253,22 @@ export async function runSleeper(home, id) {
       await wait(3000);
       t = readTask(home, task.id);
     }
+    const cur0 = readSchedule(home, id);
+    const history = [...(cur0?.history || [])];
+    history.push({
+      taskId: task.id,
+      status: t?.status || 'unknown',
+      at: Date.now(),
+      durationMs: t?.durationMs ?? null,
+      text: (t?.text || t?.error || '').slice(0, 200),
+    });
+    if (history.length > 50) history.shift();
     writeSchedule(home, {
-      ...readSchedule(home, id),
+      ...cur0,
       lastRunAt: Date.now(),
       lastTaskId: task.id,
-      runs: (readSchedule(home, id)?.runs || 0) + 1,
+      runs: (cur0?.runs || 0) + 1,
+      history,
     });
     return t?.status === 'done' ? 'done' : 'failed';
   };

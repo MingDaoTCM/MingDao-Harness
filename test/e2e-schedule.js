@@ -130,6 +130,9 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   assert.ok(job, '一次性任务应在 25s 内完成');
   assert.equal(job.runs, 1);
   assert.ok(job.lastTaskId, '应关联任务');
+  assert.ok(Array.isArray(job.history) && job.history.length === 1, '应记录执行历史');
+  assert.equal(job.history[0].taskId, job.lastTaskId);
+  assert.equal(job.history[0].status, 'done');
   assert.equal(fs.readFileSync(path.join(work, 'sched.txt'), 'utf8'), '调度成功\n');
   const t = readJson(path.join(home, 'tasks', job.lastTaskId + '.json'));
   assert.equal(t.status, 'done');

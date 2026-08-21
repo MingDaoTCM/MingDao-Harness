@@ -34,7 +34,7 @@ import {
 } from '../session.js';
 import { listSkills } from '../skills.js';
 import { detectSandbox } from '../tools/bash.js';
-import { generateTitle, renameSessionFile, titleModel } from '../titles.js';
+import { generateTitle, renameSessionFile, titleModel, sanitizeTitle } from '../titles.js';
 import {
   addSchedule,
   listSchedules,
@@ -374,6 +374,27 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       }
       return;
     }
+    if (req.method === 'POST' && p === '/api/session') {
+      const body = await readBody(req);
+      const file = path.basename(String(body.file || ''));
+      const full = path.join(home, 'sessions', file);
+      if (!file || !fs.existsSync(full)) return json(res, 404, { error: '会话不存在' });
+      if (body.action === 'rename') {
+        const title = sanitizeTitle(String(body.title || '会话'));
+        const renamed = renameSessionFile(fs, path, home, { file: full }, title);
+        if (!renamed) return json(res, 500, { error: '重命名失败（可能存在同名会话）' });
+        return json(res, 200, { ok: true, file: path.basename(renamed) });
+      }
+      if (body.action === 'delete') {
+        try {
+          fs.unlinkSync(full);
+          return json(res, 200, { ok: true });
+        } catch (err) {
+          return json(res, 500, { error: String(err?.message || err) });
+        }
+      }
+      return json(res, 400, { error: '未知操作：rename|delete' });
+    }
     if (req.method === 'GET' && p === '/api/skills') {
       json(res, 200, { ok: true, skills: listSkills(workingDir) });
       return;
@@ -470,6 +491,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         interval: j.interval,
         anchor: j.anchor,
         after: j.after,
+        history: j.history || [],
         note: j.note,
       }));
       json(res, 200, { ok: true, jobs });
