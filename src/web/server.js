@@ -45,7 +45,10 @@ import {
   reconcileSchedules,
 } from '../schedule.js';
 import { enableAutostart, disableAutostart, autostartStatus } from '../autostart.js';
-import { currentWorkspace } from '../workspace.js';
+import { currentWorkspace, listWorkspaces, addWorkspace, removeWorkspace, renameWorkspace, setWorkspaceDir } from '../workspace.js';
+import { loadMemory, writeMemory, dedupeMemory } from '../memory.js';
+import { recordUsage, listCacheStats, summarizeCacheStats } from '../cachestats.js';
+import { presetList, buildPreset } from '../mcp-presets.js';
 
 const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html');
 
@@ -221,6 +224,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       const r = await agent.runTurn(messages);
       appendMessages(session.file, messages.slice(persistedBefore));
       io.printUsageLine({ modelName, usage: r.usage, durationMs: r.durationMs });
+      recordUsage(modelName, r.usage);
       // 新会话自动标题（可配置关闭）
       if (isNew && cfg.autoTitle !== false && r.text) {
         try {
@@ -546,6 +550,71 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
       } catch (err) {
         return json(res, 500, { error: String(err?.message || err) });
       }
+    }
+    if (req.method === 'GET' && p === '/api/workspaces') {
+      json(res, 200, { ok: true, workspaces: listWorkspaces(), current: currentWorkspace(workingDir)?.name || null });
+      return;
+    }
+    if (req.method === 'POST' && p === '/api/workspaces') {
+      const body = await readBody(req);
+      const name = String(body.name || '').trim();
+      if (body.action === 'add') {
+        if (!name) return json(res, 400, { error: '名称不能为空' });
+        const r = addWorkspace(name, body.dir || workingDir);
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true, name: r.name, dir: r.dir });
+      }
+      if (body.action === 'rename') {
+        const r = renameWorkspace(name, body.newName);
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true, name: r.name });
+      }
+      if (body.action === 'set') {
+        const r = setWorkspaceDir(name, body.dir || workingDir);
+        if (r.error) return json(res, 400, { error: r.error });
+        return json(res, 200, { ok: true, name: r.name, dir: r.dir });
+      }
+      if (body.action === 'remove') {
+        if (!name) return json(res, 400, { error: '缺少名称' });
+        return json(res, 200, { ok: removeWorkspace(name) });
+      }
+      return json(res, 400, { error: '未知操作：add|rename|set|remove' });
+    }
+    if (req.method === 'GET' && p === '/api/memory') {
+      json(res, 200, { ok: true, content: loadMemory() });
+      return;
+    }
+    if (req.method === 'POST' && p === '/api/memory') {
+      const body = await readBody(req);
+      if (body.action === 'dedupe') {
+        const removed = dedupeMemory();
+        return json(res, 200, { ok: true, removed });
+      }
+      if (body.content !== undefined) {
+        writeMemory(body.content);
+        return json(res, 200, { ok: true });
+      }
+      return json(res, 400, { error: '缺少 content 或 action=dedupe' });
+    }
+    if (req.method === 'GET' && p === '/api/cache-stats') {
+      const entries = listCacheStats();
+      json(res, 200, { ok: true, summary: summarizeCacheStats(entries), recent: entries.slice(-10).reverse() });
+      return;
+    }
+    if (req.method === 'GET' && p === '/api/mcp-presets') {
+      json(res, 200, { ok: true, presets: presetList() });
+      return;
+    }
+    if (req.method === 'POST' && p === '/api/mcp-presets') {
+      const body = await readBody(req);
+      const name = String(body.name || '').trim();
+      const r = buildPreset(name, body.arg, workingDir);
+      if (r.error) return json(res, 400, { error: r.error });
+      cfg.mcpServers = cfg.mcpServers || {};
+      cfg.mcpServers[name] = r.config;
+      saveConfig(cfg);
+      json(res, 200, { ok: true, name, note: '重启 mingdao web 后生效（/mcp 查看状态）' });
+      return;
     }
     // PWA 资源
     if (req.method === 'GET' && p === '/manifest.webmanifest') {

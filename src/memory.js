@@ -32,6 +32,65 @@ export function appendMemory(lines) {
   return add.length;
 }
 
+function backupMemory() {
+  try {
+    if (fs.existsSync(memoryFile())) fs.copyFileSync(memoryFile(), memoryFile() + '.bak');
+  } catch {}
+}
+
+// 整体覆写（编辑面板保存用，自动备份）
+export function writeMemory(content) {
+  backupMemory();
+  ensureHome();
+  fs.writeFileSync(memoryFile(), String(content ?? ''));
+}
+
+// 去重：忽略日期前缀后内容相同的条目只保留第一条
+export function dedupeMemory() {
+  const raw = loadMemory();
+  if (!raw.trim()) return 0;
+  const seen = new Set();
+  const kept = [];
+  let removed = 0;
+  for (const line of raw.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    const norm = t.replace(/^-\s*\[\d{4}-\d{2}-\d{2}\]\s*/, '').trim().toLowerCase();
+    if (seen.has(norm)) {
+      removed += 1;
+      continue;
+    }
+    seen.add(norm);
+    kept.push(t);
+  }
+  if (removed > 0) {
+    backupMemory();
+    fs.writeFileSync(memoryFile(), kept.join('\n') + '\n');
+  }
+  return removed;
+}
+
+// 删除包含关键词的条目
+export function removeMemoryLines(keyword) {
+  const raw = loadMemory();
+  const kw = String(keyword).trim().toLowerCase();
+  if (!raw.trim() || !kw) return 0;
+  const kept = [];
+  let removed = 0;
+  for (const line of raw.split('\n')) {
+    if (line.trim() && line.toLowerCase().includes(kw)) {
+      removed += 1;
+      continue;
+    }
+    kept.push(line);
+  }
+  if (removed > 0) {
+    backupMemory();
+    fs.writeFileSync(memoryFile(), kept.join('\n'));
+  }
+  return removed;
+}
+
 export function appendJournal(home, entry) {
   try {
     fs.mkdirSync(path.join(home, path.dirname(journalFile())), { recursive: true });

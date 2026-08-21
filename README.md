@@ -6,7 +6,7 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 
 ## 版本策略
 
-遵循语义化版本（SemVer）且保持克制：**修复 → 末位 +1**（0.2.7 → 0.2.8），**新子系统/大功能 → 中位 +1**（0.2 → 0.3），**首个 npm 稳定发布（API 冻结）→ 1.0.0**。当前 0.2.x 代表「功能活跃、接口可能调整」的诚实状态——不会出现一天一个大版本。
+遵循语义化版本（SemVer）且保持克制：**修复 → 末位 +1**（0.2.7 → 0.2.8），**新子系统/大功能 → 中位 +1**（0.2 → 0.3），**首个 npm 稳定发布（API 冻结）→ 1.0.0**。当前 0.9.0 代表「功能活跃、接口可能调整」的诚实状态——不会出现一天一个大版本。
 
 ## 特性
 
@@ -17,6 +17,7 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 - 👥 **子代理**：`task` 工具把独立子任务委托给全新上下文子代理并回收汇报
 - 🪝 **Hooks 钩子**：PreToolUse（可阻止执行）/ PostToolUse，shell 命令 + JSON stdin/stdout 协议
 - 🔌 **MCP 客户端**：零依赖实现 Model Context Protocol（stdio + JSON-RPC），`mcpServers` 配置即接入任意 MCP 服务器（实测官方 `server-everything` 13 个工具），工具并入 Agent 循环、只读标注自动放行、`/mcp` 查看状态
+- 🧩 **MCP 生态预设**：`mingdao mcp preset list/add <名称>` 与 WebUI 设置面板一键接入 9 个常用 MCP 服务器（filesystem / fetch / git / memory / sequential-thinking / playwright / sqlite / time / everything），npx 运行零预装
 - 📏 **精确 tokenizer**：内置 DeepSeek 官方词表（128k vocab）字节级 BPE 计数，与真实 API 口径偏差 <8%；非 DeepSeek 模型回退启发式估算
 - 🖥 **WebUI**：`mingdao web` 一键启动网页界面（零依赖 HTTP+SSE），流式输出、代码高亮、diff 预览、工具卡片、权限确认弹窗、会话切换，复用同一 Agent 核心
 - 🥷 **沙箱执行**：bash 工具三档隔离（`off`/`readonly` 全盘只读/`safe` 只读+断网），基于 Linux bubblewrap，不可用环境优雅降级并明示
@@ -27,6 +28,9 @@ MingDao 在学习了 Claude Code、OpenAI Codex、DeepSeek-Harness、CodeWhale �
 - 📲 **PWA**：WebUI 支持「安装到桌面」——浏览器地址栏安装后即可像本地应用一样双击打开
 - 🧩 **VS Code 深度集成**：侧边栏内嵌 WebUI（复用全部前端资产）、选中代码右键发送、服务器随面板自动启停
 - 🗂 **多会话后台任务面板**：`mingdao run` 后台启动任务、`tasks`/`tasks watch`/`tasks kill` 面板管理（独立进程、状态落盘、会话与标题自动生成）
+- 📊 **缓存命中率仪表盘**：`/cache` 命令与 WebUI 设置面板展示最近 10 次请求的命中率柱状图、累计费用与相比全未命中的节省额（每次对话自动记录）
+- 🧠 **长期记忆可视化**：WebUI 设置面板直接编辑 / 保存 / 一键去重记忆库（自动提炼的偏好约定），改完下次对话即生效
+- 🗃 **工作空间面板**：WebUI 设置面板登记 / 重命名 / 改目录 / 删除项目工作空间，与 `mingdao workspace` CLI 共享同一注册表
 - 📋 **会话与任务管理**：`--resume` 会话选择器、`/compact` 上下文压缩、`/plan` 计划模式（先计划后执行）、`/init` 生成 AGENTS.md、`/memory` 用户记忆、todo 清单可视化、`undo` 撤销
 - 🎯 **DeepSeek-V4 优化**：内置 `deepseek-v4-pro` / `deepseek-v4-flash` 正式版预设（384K 上下文、温度、输出上限、推理内容流式展示），自动重试与超时
 - 🔌 **开放模型接入**：内置 DeepSeek / OpenAI（GPT-5 系列）/ Qwen（qwen3.7-max）/ GLM（GLM-5）/ Kimi（kimi-latest）等当前型号 + 自定义 OpenAI 兼容端点，支持自写 Provider 模块（[docs/PROVIDERS.md](docs/PROVIDERS.md)）
@@ -286,7 +290,8 @@ mingdao key import               # 从环境变量（DEEPSEEK_API_KEY 等）批�
 | 384K 上下文 | 预设 `contextWindow: 384000`（正式版规格，2026-08-17 起商用），`contextBudget` 按需调高 |
 | 精确 tokenizer | 内置 DeepSeek 词表字节级 BPE 计数（与真实 API 偏差 <8%），预算裁剪更精准 |
 | 缓存命中优化 | 系统提示前缀稳定化（日期粒度+静默裁剪）+ 命中/未命中分别计价，状态行实时显示缓存命中率（实测可达 80%，命中价仅为未命中的 1/30） |
-| 长记忆自进化 | 会话结束自动提炼用户偏好进记忆库（去重）、会话日志注入系统提示（跨会话记得上次做到哪）、/memory extract 手动触发 |
+| 缓存命中仪表盘 | 每次对话自动记录命中/未命中与费用，`/cache` 与 WebUI 仪表盘展示最近 10 次命中率柱状图与累计节省 |
+| 长记忆自进化 | 会话结束自动提炼用户偏好进记忆库（去重）、会话日志注入系统提示（跨会话记得上次做到哪）、`/memory extract` 手动触发、WebUI 直接编辑 |
 | 推理流展示 | `reasoning_content` 增量渲染（dim 样式），不打断正文流 |
 | 模型分工 | flash（预算 128k/温度 0.6）日常问答，pro（预算 200k/温度 0.4）复杂规划，一键 `/model` 切换 |
 | 峰谷定价 | 用量统计展示 prompt/completion tokens，方便按峰谷时段（高峰 9:00–14:00 为闲时 2 倍）安排任务 |

@@ -91,7 +91,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 #input:focus{outline:none;border-color:var(--accent2)}
 #hint{font-size:11.5px;color:var(--faint);margin-top:6px;max-width:860px;margin-left:auto;margin-right:auto}
 .modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:50}
-.modal{background:var(--bg2);border:1px solid var(--border);border-radius:14px;width:min(520px,92vw);padding:18px}
+.modal{background:var(--bg2);border:1px solid var(--border);border-radius:14px;width:min(520px,92vw);padding:18px;max-height:88vh;overflow-y:auto}
 .modal h3{margin:0 0 8px;font-size:15px;color:var(--warn)}
 .modal .q{color:var(--text);font-size:14px;white-space:pre-wrap;word-break:break-all;max-height:220px;overflow-y:auto;margin-bottom:14px}
 .modal .opts{display:flex;flex-direction:column;gap:6px;margin-bottom:14px}
@@ -177,6 +177,30 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <div class="cfg-row" id="schAfterRow" style="display:none"><input id="schAfter" placeholder="任务 ID（mingdao run 返回）或调度 ID" style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"></div>
     <div class="cfg-row" id="schChainRow" style="display:none"><textarea id="schChain" rows="4" placeholder="每行一个任务，按顺序执行（后者依赖前者成功）&#10;构建&#10;测试&#10;部署" style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px;resize:vertical"></textarea></div>
     <div class="row"><button id="schAdd">＋ 添加调度</button></div>
+    <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
+    <h4 style="margin:4px 0;color:var(--accent2)">工作空间（项目目录注册表，与 CLI 共享）</h4>
+    <div id="wsList" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap">
+      <input id="wsName" placeholder="空间名称…" style="flex:1;min-width:90px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+      <input id="wsDir" placeholder="目录（留空 = 服务器工作目录）" style="flex:1.4;min-width:140px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+    </div>
+    <div class="row" style="justify-content:flex-start"><button id="wsAdd">＋ 登记工作空间</button></div>
+    <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
+    <h4 style="margin:4px 0;color:var(--accent2)">长期记忆（注入每次会话的偏好/约定）</h4>
+    <textarea id="memArea" rows="5" placeholder="例如：所有文档用中文；提交信息用约定式提交…" style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;resize:vertical"></textarea>
+    <div class="row" style="justify-content:flex-start"><button id="memSave">保存记忆</button><button id="memDedupe">去重合并</button><span id="memMsg" style="font-size:12px;color:var(--faint)"></span></div>
+    <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
+    <h4 style="margin:4px 0;color:var(--accent2)">缓存命中率仪表盘（最近 10 次）</h4>
+    <div id="cacheSummary" style="font-size:12.5px;color:var(--dim);padding:2px"></div>
+    <div id="cacheRecent" style="max-height:130px;overflow-y:auto"></div>
+    <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
+    <h4 style="margin:4px 0;color:var(--accent2)">MCP 生态预设（一键接入，重启生效）</h4>
+    <div id="mcpList" style="font-size:12px;color:var(--dim);padding:2px"></div>
+    <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap">
+      <select id="mcpPresetSel" style="flex:1.3;min-width:150px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px"></select>
+      <input id="mcpArg" placeholder="参数（按提示，留空用默认）" style="flex:1;min-width:140px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+    </div>
+    <div class="row" style="justify-content:flex-start"><button id="mcpAdd">＋ 接入 MCP 服务</button></div>
     <div class="row"><button id="cfgCancel">取消</button><button class="primary" id="cfgSave">保存</button></div>
   </div>
 </div>
@@ -370,7 +394,7 @@ async function init(){
 }
 $('#cfgBtn').onclick=()=>{ $('#cfgModal').style.display='flex'; };
 $('#cfgCancel').onclick=()=>{ $('#cfgModal').style.display='none'; };
-$('#cfgBtn').addEventListener('click', refreshSchList);
+$('#cfgBtn').addEventListener('click', ()=>{ refreshSchList(); refreshWorkspaces(); loadMemoryUI(); refreshCache(); refreshMcpPresets(); });
 $('#schWhen').onchange=e=>{ const v=e.target.value; $('#schAtRow').style.display=v==='at'?'':'none'; $('#schEveryRow').style.display=v==='every'?'':'none'; $('#schAfterRow').style.display=v==='after'?'':'none'; $('#schChainRow').style.display=v==='chain'?'':'none'; };
 async function refreshSchList(){
   const r=await fetch('/api/schedule',{cache:'no-store'}).catch(()=>null); if(!r) return;
@@ -399,6 +423,83 @@ $('#schAdd').onclick=async ()=>{
   const r=await fetch('/api/schedule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const j=await r.json().catch(()=>({error:'请求失败'}));
   if(j.ok){ $('#schQuestion').value=''; refreshSchList(); } else { alert(j.error||'添加失败'); }
+};
+// —— 工作空间 ——
+async function refreshWorkspaces(){
+  const r=await fetch('/api/workspaces',{cache:'no-store'}).catch(()=>null); if(!r) return;
+  const j=await r.json(); const list=$('#wsList'); list.innerHTML='';
+  if(!j.workspaces||!j.workspaces.length){ list.innerHTML='<div style="color:var(--faint);font-size:12px;padding:6px 2px">暂无登记的工作空间</div>'; return; }
+  for(const w of j.workspaces){
+    const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px';
+    div.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(w.name)+(w.name===j.current?' <span style="color:var(--accent)">●当前</span>':'')+'</span><span style="flex:1.4;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left">'+esc(w.dir||'')+'</span>';
+    const ed=document.createElement('button'); ed.textContent='改目录'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=async()=>{ const d=prompt('新目录：', w.dir); if(!d) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'set',name:w.name,dir:d})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok) refreshWorkspaces(); else alert(jj.error||'修改失败'); };
+    const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=prompt('新名称：', w.name); if(!t) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',name:w.name,newName:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok) refreshWorkspaces(); else alert(jj.error||'重命名失败'); };
+    const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!confirm('删除工作空间 '+w.name+'？')) return; await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',name:w.name})}); refreshWorkspaces(); };
+    div.appendChild(ed); div.appendChild(rn); div.appendChild(rm); list.appendChild(div);
+  }
+}
+$('#wsAdd').onclick=async ()=>{
+  const name=$('#wsName').value.trim(); if(!name) return;
+  const dir=$('#wsDir').value.trim();
+  const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',name,dir})});
+  const j=await r.json().catch(()=>({error:'请求失败'}));
+  if(j.ok){ $('#wsName').value=''; $('#wsDir').value=''; refreshWorkspaces(); } else alert(j.error||'添加失败');
+};
+// —— 长期记忆 ——
+function memFlash(msg, good){ const m=$('#memMsg'); m.textContent=msg; m.style.color=good?'var(--accent)':'var(--err)'; setTimeout(()=>{m.textContent='';},4000); }
+async function loadMemoryUI(){
+  const r=await fetch('/api/memory',{cache:'no-store'}).catch(()=>null); if(!r) return;
+  const j=await r.json(); if(j.ok) $('#memArea').value=j.content||'';
+}
+$('#memSave').onclick=async ()=>{
+  const r=await fetch('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({content:$('#memArea').value})});
+  const j=await r.json().catch(()=>({error:'请求失败'}));
+  memFlash(j.ok?'✓ 已保存':('✖ '+(j.error||'保存失败')), Boolean(j.ok));
+};
+$('#memDedupe').onclick=async ()=>{
+  const r=await fetch('/api/memory',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'dedupe'})});
+  const j=await r.json().catch(()=>({error:'请求失败'}));
+  if(j.ok){ memFlash('✓ 去重完成，移除 '+j.removed+' 行', true); loadMemoryUI(); } else memFlash('✖ '+(j.error||'去重失败'), false);
+};
+// —— 缓存命中率仪表盘 ——
+function fmtT(n){ n=Number(n||0); return n>=1000?(n/1000).toFixed(1)+'k':String(n); }
+async function refreshCache(){
+  const r=await fetch('/api/cache-stats',{cache:'no-store'}).catch(()=>null); if(!r) return;
+  const j=await r.json(); if(!j.ok) return;
+  const s=j.summary||{};
+  const rate=s.rate!=null?(s.rate*100).toFixed(0)+'%':'暂无缓存数据';
+  $('#cacheSummary').innerHTML='轮次 '+s.turns+' · ↑'+fmtT(s.prompt)+' ↓'+fmtT(s.completion)+' tokens · 命中率 <b style="color:var(--accent)">'+rate+'</b> · 累计 ≈¥'+Number(s.cost||0).toFixed(5)+'（比全未命中省 ≈¥'+Number(s.saved||0).toFixed(5)+'）';
+  const list=$('#cacheRecent'); list.innerHTML='';
+  if(!(j.recent||[]).length){ list.innerHTML='<div style="color:var(--faint);font-size:12px;padding:6px 2px">暂无记录（每次对话后自动统计）</div>'; return; }
+  for(const e of j.recent){
+    const hit=e.hit!=null&&e.miss!=null&&(e.hit+e.miss)>0?e.hit/(e.hit+e.miss):null;
+    const pct=hit==null?'—':(hit*100).toFixed(0)+'%';
+    const bar=document.createElement('div'); bar.style.cssText='height:4px;border-radius:2px;background:var(--bg3);margin:2px 0;overflow:hidden';
+    bar.innerHTML='<div style="height:100%;width:'+(hit==null?0:Math.round(hit*100))+'%;background:var(--accent)"></div>';
+    const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);font-size:11.5px;color:var(--dim)';
+    const left=document.createElement('div'); left.style.cssText='flex:1';
+    left.innerHTML='<div style="display:flex;justify-content:space-between"><span>'+esc(e.model||'')+'</span><span>'+pct+' · ¥'+Number(e.cost||0).toFixed(5)+'</span></div>';
+    left.appendChild(bar);
+    const when=document.createElement('span'); when.style.cssText='white-space:nowrap;color:var(--faint)'; when.textContent=new Date(e.at).toLocaleTimeString();
+    div.appendChild(left); div.appendChild(when); list.appendChild(div);
+  }
+}
+// —— MCP 生态预设 ——
+let mcpPresetData=[];
+async function refreshMcpPresets(){
+  const r=await fetch('/api/mcp-presets',{cache:'no-store'}).catch(()=>null); if(!r) return;
+  const j=await r.json(); if(!j.ok) return;
+  mcpPresetData=j.presets||[]; const sel=$('#mcpPresetSel'); sel.innerHTML='';
+  for(const p of mcpPresetData){ const o=document.createElement('option'); o.value=p.name; o.textContent=p.name+' — '+p.label; o.title=p.command+' '+p.args.join(' '); sel.appendChild(o); }
+  sel.onchange=()=>{ const p=mcpPresetData.find(x=>x.name===sel.value); $('#mcpArg').placeholder=p&&p.argLabel?('参数：'+p.argLabel):'本预设无需参数'; };
+  sel.onchange();
+}
+$('#mcpAdd').onclick=async ()=>{
+  const name=$('#mcpPresetSel').value; if(!name) return;
+  const arg=$('#mcpArg').value.trim();
+  const r=await fetch('/api/mcp-presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,arg})});
+  const j=await r.json().catch(()=>({error:'请求失败'}));
+  if(j.ok) alert('✓ 已接入 '+name+'（重启 mingdao web 后生效，/mcp 查看状态）'); else alert(j.error||'接入失败');
 };
 $('#cfgSave').onclick=()=>{ applyConfig({sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}); $('#cfgModal').style.display='none'; };
 async function applyConfig(payload, revertTarget){

@@ -21,7 +21,9 @@ import { startTask, listTasks, patchTask, killTask, formatTaskRow } from './task
 import { enableAutostart, disableAutostart, autostartStatus, autostartPath } from './autostart.js';
 import { notifyTaskDone } from './notify.js';
 import { addWorkspace, removeWorkspace, workspacePath, touchWorkspace, listWorkspaces, currentWorkspace } from './workspace.js';
-import { finalizeSession, extractMemory, loadMemory, appendMemory, recentJournal } from './memory.js';
+import { finalizeSession, extractMemory, loadMemory, appendMemory, recentJournal, dedupeMemory, removeMemoryLines } from './memory.js';
+import { recordUsage, listCacheStats, summarizeCacheStats, formatCacheSummary } from './cachestats.js';
+import { presetList, buildPreset } from './mcp-presets.js';
 import {
   addSchedule,
   listSchedules,
@@ -291,6 +293,7 @@ async function runWorkerTask(id, question, { permission, model }) {
       } catch {}
     }
     const finalStatus = res.truncated ? 'failed' : res.aborted ? 'killed' : 'done';
+    recordUsage(modelName, res.usage);
     finish({
       status: finalStatus,
       text: (res.text || '').slice(0, 2000),
@@ -610,6 +613,41 @@ async function main() {
     return;
   }
 
+  // MCP 预设：mingdao mcp preset list|add <名称> [参数]
+  if (opts.prompt[0] === 'mcp' && opts.prompt[1] === 'preset') {
+    const home0 = ensureHome();
+    if (opts.prompt[2] === 'add') {
+      const name = opts.prompt[3];
+      if (!name) {
+        console.log('用法：mingdao mcp preset add <名称> [参数]（列表见 mingdao mcp preset list）');
+        process.exitCode = 1;
+        return;
+      }
+      const r = buildPreset(name, opts.prompt[4], process.cwd());
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      const cfg0 = loadConfig();
+      if (!cfg0) {
+        console.log('未初始化配置，请先运行 mingdao init');
+        process.exitCode = 1;
+        return;
+      }
+      cfg0.mcpServers = cfg0.mcpServers || {};
+      cfg0.mcpServers[name] = r.config;
+      saveConfig(cfg0);
+      console.log(`✓ 已添加 MCP 服务器 ${name}（重启 mingdao web 后生效；会话内 /mcp 查看状态）`);
+      return;
+    }
+    console.log('MCP 生态预设（mingdao mcp preset add <名称> 一键接入）：');
+    for (const p of presetList()) {
+      console.log(`  ${p.name.padEnd(20)} ${p.label}${p.argLabel ? `（参数：${p.argLabel}）` : ''}`);
+    }
+    return;
+  }
+
   // WebUI：mingdao web [端口]
   if (opts.prompt[0] === 'web') {
     const cfg0 = loadConfig();
@@ -745,10 +783,12 @@ async function main() {
             session: session.name,
           })
         );
+        recordUsage(modelName, res.usage);
         process.exitCode = res.truncated || res.aborted ? 1 : 0;
       } else {
         io.printUsageLine({ modelName, usage: res.usage, durationMs: res.durationMs });
         if (res.aborted) io.print(style('（已中断）', C.dim));
+        recordUsage(modelName, res.usage);
         process.exitCode = res.truncated ? 1 : 0;
       }
     } catch (err) {
@@ -961,6 +1001,36 @@ async function main() {
             io.stopSpinner();
             io.print(style('[错误] ' + (err?.message || err), C.red));
           }
+        } else if (arg === 'show') {
+          const raw = loadMemory();
+          if (!raw.trim()) {
+            io.print('记忆库为空。');
+          } else {
+            io.print(style('记忆库（' + memPath + '）：', C.bold));
+            raw.split('\n').forEach((l, i) => {
+              if (l.trim()) io.print(style(`  ${String(i + 1).padStart(3)}  ${l}`, C.dim));
+            });
+          }
+        } else if (arg.startsWith('remove ')) {
+          const kw = arg.slice(7).trim();
+          if (!kw) {
+            io.print('用法：/memory remove <关键词>（删除包含该词的条目）');
+            continue;
+          }
+          const removed = removeMemoryLines(kw);
+          io.print(removed > 0 ? style(`✓ 已删除 ${removed} 条（原文件备份于 ${memPath}.bak）`, C.green) : style('没有匹配的条目。', C.dim));
+        } else if (arg === 'dedupe') {
+          const removed = dedupeMemory();
+          io.print(removed > 0 ? style(`✓ 去重完成：合并 ${removed} 条重复记忆`, C.green) : style('没有重复条目。', C.dim));
+        } else if (arg === 'edit') {
+          const editor = process.env.EDITOR || process.env.VISUAL;
+          if (!editor) {
+            io.print(style('未设置 EDITOR 环境变量。可 export EDITOR=nano（或 vim/code）后用 /memory edit 打开记忆文件。', C.yellow));
+            continue;
+          }
+          const { spawnSync } = await import('node:child_process');
+          spawnSync(editor, [memPath], { stdio: 'inherit' });
+          io.print(style('✓ 记忆文件已编辑（后续会话自动生效）。', C.green));
         } else {
           io.print(style(`用户记忆文件：${memPath}${fs.existsSync(memPath) ? '' : '（尚不存在）'}`, C.dim));
           if (fs.existsSync(memPath)) io.print(style(fs.readFileSync(memPath, 'utf8').slice(0, 2000), C.dim));
@@ -969,7 +1039,7 @@ async function main() {
             io.print(style('最近会话：', C.bold));
             for (const e of journal.reverse()) io.print(style(`  ${new Date(e.at).toISOString().slice(0, 10)} ${e.firstUser?.slice(0, 40)}`, C.dim));
           }
-          io.print('用法：/memory add <内容> 追加 · /memory extract 从当前对话自动提炼');
+          io.print('用法：/memory add <内容> 追加 · extract 自动提炼 · show 查看 · remove <词> 删除 · dedupe 去重 · edit 编辑器修改');
         }
       } else if (cmd === '/skills') {
         const skills = listSkills(workingDir);
@@ -1067,6 +1137,22 @@ async function main() {
             C.dim
           )
         );
+      } else if (cmd === '/cache') {
+        const entries = listCacheStats();
+        if (!entries.length) {
+          io.print(style('暂无缓存统计（对话若干轮后自动累积）。', C.dim));
+          continue;
+        }
+        const sum = summarizeCacheStats(entries);
+        io.box('缓存命中率仪表盘', formatCacheSummary(sum));
+        io.print(style('近 10 次命中率趋势：', C.dim));
+        const recent = entries.slice(-10);
+        const maxBar = 24;
+        for (const e of recent) {
+          const rate = e.hit != null && e.hit + e.miss > 0 ? e.hit / (e.hit + e.miss) : null;
+          const bar = rate == null ? '—'.repeat(maxBar) : '█'.repeat(Math.round(rate * maxBar));
+          io.print(style(`  ${bar.padEnd(maxBar)} ${rate == null ? 'n/a' : (rate * 100).toFixed(0) + '%'}  ${e.model}`, C.dim));
+        }
       } else {
         io.print(style('未知命令，输入 /help 查看可用命令。', C.yellow));
       }
@@ -1116,6 +1202,7 @@ async function main() {
       lastUsage = res.usage;
       lastText = res.text || lastText;
       stats.turns += 1;
+      recordUsage(modelName, res.usage);
       stats.promptTokens += res.usage.prompt_tokens || 0;
       stats.completionTokens += res.usage.completion_tokens || 0;
       const fresh = messages.slice(persisted);

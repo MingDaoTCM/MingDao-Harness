@@ -45,6 +45,24 @@ export function removeWorkspace(name) {
   return true;
 }
 
+export function renameWorkspace(name, newName) {
+  const key = String(newName).trim();
+  if (!key) return { error: '新名称不能为空' };
+  if (/[\\/]/.test(key)) return { error: '名称不能包含路径分隔符' };
+  const ws = loadWorkspaces();
+  if (!ws[name]) return { error: `工作空间 ${name} 不存在` };
+  if (ws[key] && key !== name) return { error: `名称 ${key} 已存在` };
+  ws[key] = { ...ws[name] };
+  delete ws[name];
+  saveWorkspaces(ws);
+  return { name: key };
+}
+
+// 修改目录：登记同名即可覆盖目录
+export function setWorkspaceDir(name, dir) {
+  return addWorkspace(name, dir);
+}
+
 export function workspacePath(name) {
   return loadWorkspaces()[name]?.dir || null;
 }
