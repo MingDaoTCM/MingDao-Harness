@@ -92,3 +92,64 @@ export function currentWorkspace(cwd) {
   const hit = listWorkspaces().find((w) => path.resolve(w.dir) === target);
   return hit || null;
 }
+
+// 按目录反查工作空间名（会话记录的是目录，展示时需要名字）
+export function workspaceForDir(dir) {
+  if (!dir) return null;
+  const target = path.resolve(dir);
+  return listWorkspaces().find((w) => path.resolve(w.dir) === target) || null;
+}
+
+// —— 会话级工作空间（P3-4）：WebUI 并行任务互不串目录 ——
+// 每个会话记住自己的工作目录；运行中的任务使用会话记录目录，全局切换只影响新会话，
+// 不再有 process.chdir 影响所有运行中任务的全局副作用。
+export function sessionWorkspacesFile() {
+  return path.join(mingdaoHome(), 'session-workspaces.json');
+}
+
+export function loadSessionWorkspaces() {
+  try {
+    const j = JSON.parse(fs.readFileSync(sessionWorkspacesFile(), 'utf8'));
+    return j && typeof j === 'object' ? j : {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveSessionWorkspaces(map) {
+  try {
+    ensureHome();
+    const target = sessionWorkspacesFile();
+    const tmp = target + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(map, null, 2) + '\n', { mode: 0o600 });
+    fs.renameSync(tmp, target);
+  } catch {}
+}
+
+export function getSessionWorkspace(sessionName) {
+  return loadSessionWorkspaces()[sessionName]?.dir || null;
+}
+
+export function setSessionWorkspace(sessionName, dir, wsName = null) {
+  const map = loadSessionWorkspaces();
+  map[sessionName] = { dir: path.resolve(dir), name: wsName || workspaceForDir(dir)?.name || null, at: Date.now() };
+  saveSessionWorkspaces(map);
+}
+
+export function removeSessionWorkspace(sessionName) {
+  const map = loadSessionWorkspaces();
+  if (!map[sessionName]) return false;
+  delete map[sessionName];
+  saveSessionWorkspaces(map);
+  return true;
+}
+
+// 会话改名时迁移映射（记录保留）
+export function moveSessionWorkspace(oldName, newName) {
+  const map = loadSessionWorkspaces();
+  if (!map[oldName]) return false;
+  map[newName] = map[oldName];
+  delete map[oldName];
+  saveSessionWorkspaces(map);
+  return true;
+}

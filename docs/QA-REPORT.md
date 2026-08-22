@@ -208,7 +208,10 @@ smoke/e2e 全绿，并给出 P0–P3 问题清单。本批次全部落实（P0-1
 1. **P3-1 上下文自动压缩（auto-compaction）**：✅ **v0.1.45 已落地**——超预算且被裁段落 ≥2000 tokens 时，executor 模型压成摘要注入（替代静默丢中段），会话文件同步重写、摘要用量计入费用、失败自动回退裁剪；smoke #32/#33 + e2e-web #16 覆盖。
 2. **P3-5 工具调用审计日志**：✅ **v0.1.46 已落地**——全部工具调用（含拒绝/钩子阻止）落 `~/.mingdao/audit.jsonl`（600、脱敏、轮转），会话归因，`mingdao audit` / `/audit` 查看，`audit:false` 可关；smoke #35 覆盖。
 3. **P3-3 技能注册表 sha256 完整性校验**：✅ **v0.1.46 已落地**——registry 安装逐文件校验索引 sha256（不符拒绝），安装后记录目录指纹、加载时校验（篡改拒绝加载 + 警示），`mingdao skill trust` 显式接受修改；`registry/index.json` 全量 22 技能已带哈希（`scripts/build-registry-hashes.js` 再生成）；smoke #34 覆盖。
-4. **P3-2 会话索引/检索**、**P3-4 按会话隔离 workspace 默认目录**：延后。
+4. **P3-2 会话索引/检索**：✅ **v0.1.47 已落地**——增量词表倒排索引（中文 bigram+单字 / 英文词 / 多词 AND），mtime/size 增量重算、删除自动清理，`mingdao sessions search` 与 WebUI 检索共用；smoke #36 + e2e 覆盖。
+5. **P3-4 按会话隔离 workspace 默认目录**：✅ **v0.1.47 已落地**——每个会话记住自己的工作目录，任务固定写回会话目录、全局切换只影响新会话（移除 process.chdir 全局副作用），载入聚焦/显式切换跟随/改名删除自动维护；smoke #37 + e2e-web #17 覆盖。
+
+**第三轮复审建议项已全部落地**。
 
 ---
 

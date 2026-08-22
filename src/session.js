@@ -88,41 +88,43 @@ export function relativeTime(mtime) {
   return `${Math.floor(diff / 86400000)} 天前`;
 }
 
-// 全文检索历史会话：大小写不敏感子串匹配（按消息内容解析），返回命中会话与干净片段
+// 全文检索历史会话（P3-2 索引化）：增量词表倒排 + AND 匹配（中文 bigram），
+// 只对命中的少数文件读原文生成片段；未命中/无关键词时回退列表。
+import { syncSessionIndex, tokenize, extractSessionText } from './session-index.js';
+
 export function searchSessions(home, keyword, { limit = 20 } = {}) {
   const kw = String(keyword ?? '').trim();
   if (!kw) return listSessions(home).slice(0, limit);
+  const sessions = listSessions(home);
+  const idx = syncSessionIndex(home, sessions);
+  const qTerms = [...tokenize(kw).keys()];
+  if (!qTerms.length) return [];
   const lower = kw.toLowerCase();
   const out = [];
-  for (const s of listSessions(home)) {
+  for (const s of sessions) {
     if (out.length >= limit) break;
-    let lines;
-    try {
-      const st = fs.statSync(s.file);
-      if (st.size > 8 * 1024 * 1024) continue; // 超大文件跳过
-      lines = fs.readFileSync(s.file, 'utf8').split('\n');
-    } catch {
-      continue;
-    }
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      let m;
-      try {
-        m = JSON.parse(line);
-      } catch {
-        continue;
+    const e = idx.files[s.name];
+    if (!e?.terms) continue;
+    let hit = true;
+    for (const t of qTerms) {
+      if (!e.terms[t]) {
+        hit = false;
+        break;
       }
-      if (typeof m.content !== 'string') continue;
-      const idx = m.content.toLowerCase().indexOf(lower);
-      if (idx === -1) continue;
-      const start = Math.max(0, idx - 30);
-      const snippet = m.content
-        .slice(start, idx + lower.length + 50)
-        .replace(/\s+/g, ' ')
-        .trim();
-      out.push({ ...s, snippet: `…${snippet}…` });
-      break; // 每个会话只取第一条命中
     }
+    if (!hit) continue;
+    // 命中（数量受 limit 约束）：读原文生成干净片段
+    let snippet = '';
+    try {
+      const text = extractSessionText(s.file);
+      const at = text.toLowerCase().indexOf(lower);
+      if (at !== -1) {
+        snippet = `…${text.slice(Math.max(0, at - 30), at + kw.length + 50).replace(/\s+/g, ' ').trim()}…`;
+      } else {
+        snippet = `…${text.slice(0, 80).replace(/\s+/g, ' ').trim()}…`;
+      }
+    } catch {}
+    out.push({ ...s, snippet });
   }
   return out;
 }

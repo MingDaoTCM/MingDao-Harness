@@ -621,7 +621,10 @@ $('#wsSel').addEventListener('change', async e=>{
     return;
   }
   if(v){
-    const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'set',name:v})});
+    // 携带当前会话：显式切换时该会话的工作空间一并切过去（P3-4 会话级工作空间）
+    const payload={action:'set',name:v};
+    if(currentSession) payload.file=currentSession;
+    const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const j=await r.json().catch(()=>({error:'请求失败'}));
     if(j.ok) renderBanner({text:'✓ 已切换到工作空间 '+j.name+'（'+j.dir+'），后续工具在此目录执行'}); else { alert(j.error||'切换失败'); }
     refreshWsSel(); reloadModels();
@@ -932,7 +935,7 @@ async function applyConfig(payload, revertTarget){
 }
 $('#modelSel').addEventListener('change', e=>{ applyConfig({model:e.target.value}, e.target); });
 $('#permSel').addEventListener('change', e=>{ applyConfig({permission:e.target.value}, e.target); });
-async function loadSession(file){ currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } scrollBottom(); }
+async function loadSession(file){ currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } scrollBottom(); }
 
 sendBtn.onclick=send;
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });

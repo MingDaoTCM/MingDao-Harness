@@ -15,6 +15,7 @@
 - 🛡 **安全默认**：权限三档（ask/auto/readonly）+ 工具级规则、bash 沙箱三档（bubblewrap）、API Key 与配置分离（绝不进仓库）、附件/正则/路径全部有界、**工具调用审计日志**（`mingdao audit` 追溯每次执行与拒绝）
 - 🖼 **多模态**：DeepSeek-V4-Flash-Vision-Exp 视觉模型内置，WebUI 直接上传图片；模型列表以官方 `/models` 线上名单为准，新模型发布自动出现
 - ♻ **长会话不丢上下文**：超预算自动压缩——早期段落由 executor 模型压成摘要注入（`/compact` 可手动），绝不静默失忆
+- 🔎 **历史会话秒搜**：增量索引全文检索（中文 bigram 分词，`mingdao sessions search` / WebUI 搜索框共用）；WebUI **会话级工作空间**——每个会话记住自己的项目目录，多任务并行互不串目录
 
 ## 快速开始（3 步）
 

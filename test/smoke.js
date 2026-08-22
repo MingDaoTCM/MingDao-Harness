@@ -1512,6 +1512,69 @@ const ctx = { cwd: tmp };
   ok('audit：执行/拒绝记录 / 会话归因 / 参数与原因 / sk- 脱敏 / audit:false 关闭');
 }
 
+// ---------- 36. 会话检索索引（P3-2） ----------
+{
+  const homeI = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sidx-'));
+  process.env.MINGDAO_HOME = homeI;
+  const { tokenize } = await import(path.join(srcDir, 'session-index.js'));
+  const { searchSessions, appendMessages, createSession } = await import(path.join(srcDir, 'session.js'));
+  const s1 = createSession(homeI);
+  appendMessages(s1.file, [{ role: 'user', content: '帮我做一个贪吃蛇网页游戏，用 Canvas' }]);
+  const s2 = createSession(homeI);
+  appendMessages(s2.file, [{ role: 'user', content: '优化 tokenizer 的中文计数性能' }]);
+  const s3 = createSession(homeI);
+  appendMessages(s3.file, [{ role: 'user', content: '修复 WebUI 权限确认的 bug' }]);
+  // 中文 bigram 检索
+  const r1 = searchSessions(homeI, '贪吃蛇');
+  assert.equal(r1.length, 1, '中文检索应命中唯一会话');
+  assert.ok(r1[0].snippet.includes('贪吃蛇'), '应返回命中会话与片段');
+  // 英文词检索（大小写不敏感）
+  const r2 = searchSessions(homeI, 'TOKENIZER');
+  assert.equal(r2.length, 1, '英文检索应命中');
+  // AND 语义
+  assert.equal(searchSessions(homeI, '贪吃蛇 游戏').length, 1, '多词 AND 命中');
+  assert.equal(searchSessions(homeI, '贪吃蛇 tokenizer').length, 0, '跨会话多词不应命中');
+  // 增量：修改 s2 增加新词 → 重新索引后能命中
+  appendMessages(s2.file, [{ role: 'assistant', content: '顺带聊到贪吃蛇的实现' }]);
+  assert.equal(searchSessions(homeI, '贪吃蛇').length, 2, '修改后的会话应被增量重新索引');
+  // 删除会话 → 索引清理 + 不再命中
+  fs.unlinkSync(s3.file);
+  assert.equal(searchSessions(homeI, 'WebUI').length, 0, '删除的会话不应再命中');
+  const idx = JSON.parse(fs.readFileSync(path.join(homeI, 'sessions-index.json'), 'utf8'));
+  assert.ok(!idx.files[s3.name], '索引应清理已删除条目');
+  // 空关键词 → 列表回退
+  assert.equal(searchSessions(homeI, '').length, 2, '空关键词应返回会话列表');
+  // 分词单元：中文 bigram + 单字 + 英文词
+  const tk = tokenize('你好世界 hello');
+  assert.ok(tk.has('你好') && tk.has('好世') && tk.has('世界') && tk.has('hello') && tk.has('你'), 'bigram/单字/单词分词');
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeI, { recursive: true, force: true });
+  ok('session-index：中文 bigram / 英文词 / AND / 增量重索引 / 删除清理');
+}
+
+// ---------- 37. 会话级工作空间映射（P3-4 单元） ----------
+{
+  const homeW = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sws-'));
+  process.env.MINGDAO_HOME = homeW;
+  const { getSessionWorkspace, setSessionWorkspace, removeSessionWorkspace, moveSessionWorkspace, workspaceForDir } = await import(path.join(srcDir, 'workspace.js'));
+  const d1 = path.join(homeW, 'proj-a');
+  const d2 = path.join(homeW, 'proj-b');
+  fs.mkdirSync(d1);
+  fs.mkdirSync(d2);
+  assert.equal(getSessionWorkspace('sess1.jsonl'), null, '未记录时应为 null');
+  setSessionWorkspace('sess1.jsonl', d1, null);
+  assert.equal(getSessionWorkspace('sess1.jsonl'), path.resolve(d1), '记录后可读取');
+  moveSessionWorkspace('sess1.jsonl', 'sess1-renamed.jsonl');
+  assert.equal(getSessionWorkspace('sess1-renamed.jsonl'), path.resolve(d1), '改名后映射跟随');
+  assert.equal(getSessionWorkspace('sess1.jsonl'), null, '旧名映射应移除');
+  removeSessionWorkspace('sess1-renamed.jsonl');
+  assert.equal(getSessionWorkspace('sess1-renamed.jsonl'), null, '删除后清空');
+  assert.equal(workspaceForDir(d2), null, '未登记目录反查为 null');
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeW, { recursive: true, force: true });
+  ok('workspace：会话级工作空间映射 set/get/move/remove');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 fs.rmSync(smokeHome, { recursive: true, force: true });

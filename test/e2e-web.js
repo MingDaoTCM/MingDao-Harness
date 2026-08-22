@@ -585,6 +585,42 @@ let base = await startWeb(work1);
   ok('自动压缩端到端：超预算触发 / 摘要注入 / 会话文件重写');
 }
 
+// ---------- 17. 会话级工作空间（P3-4）：并行任务互不串目录 ----------
+{
+  const wsA = path.join(os.tmpdir(), 'mingdao-wsa-' + Date.now());
+  const wsB = path.join(os.tmpdir(), 'mingdao-wsb-' + Date.now());
+  fs.mkdirSync(wsA, { recursive: true });
+  fs.mkdirSync(wsB, { recursive: true });
+  const addA = await (await fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', name: '空间A', dir: wsA }) })).json();
+  const addB = await (await fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'add', name: '空间B', dir: wsB }) })).json();
+  assert.equal(addA.ok && addB.ok, true, '两个工作空间应登记成功');
+  await fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'set', name: '空间A' }) });
+  // 新会话在 A 中执行（mock 首请求 write web.txt → 写入会话工作空间）
+  requestCount = 0;
+  const evs1 = await chatOnce(base, '在 A 工作空间干活');
+  const sess = evs1.find((e) => e.type === 'done').session;
+  assert.ok(fs.existsSync(path.join(wsA, 'web.txt')), '新会话应写入创建时的工作空间 A');
+  // 全局切到 B（不带 file）→ 继续同一会话：任务仍应写 A，而不是 B
+  await fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'set', name: '空间B' }) });
+  fs.rmSync(path.join(wsA, 'web.txt'), { force: true });
+  requestCount = 0;
+  const evs2 = await chatOnce(base, { message: '继续上次的会话', file: sess });
+  assert.equal(evs2.find((e) => e.type === 'done').session, sess, '应继续同一会话');
+  assert.ok(fs.existsSync(path.join(wsA, 'web.txt')), '继续会话仍写入其记录的工作空间 A');
+  assert.ok(!fs.existsSync(path.join(wsB, 'web.txt')), '全局切换 B 不应影响已有会话');
+  // 载入接口返回会话工作空间名
+  const sj = await (await fetch(base + '/api/session?file=' + encodeURIComponent(sess))).json();
+  assert.equal(sj.workspace, '空间A', '载入接口应返回会话工作空间名');
+  // 显式切换（带 file）→ 会话工作空间跟随
+  const setWithFile = await (await fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'set', name: '空间B', file: sess }) })).json();
+  assert.equal(setWithFile.ok, true, setWithFile.error);
+  const sj2 = await (await fetch(base + '/api/session?file=' + encodeURIComponent(sess))).json();
+  assert.equal(sj2.workspace, '空间B', '显式切换后会话工作空间应跟随');
+  fs.rmSync(wsA, { recursive: true, force: true });
+  fs.rmSync(wsB, { recursive: true, force: true });
+  ok('会话级工作空间：新会话记录 / 继续不串目录 / 载入返回 / 显式切换跟随');
+}
+
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();

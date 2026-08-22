@@ -52,7 +52,7 @@ import {
   reconcileSchedules,
 } from '../schedule.js';
 import { enableAutostart, disableAutostart, autostartStatus } from '../autostart.js';
-import { currentWorkspace, listWorkspaces, addWorkspace, removeWorkspace, renameWorkspace, setWorkspaceDir, workspacePath, touchWorkspace } from '../workspace.js';
+import { currentWorkspace, workspaceForDir, listWorkspaces, addWorkspace, removeWorkspace, renameWorkspace, setWorkspaceDir, workspacePath, touchWorkspace, getSessionWorkspace, setSessionWorkspace, removeSessionWorkspace, moveSessionWorkspace } from '../workspace.js';
 import { loadMemory, writeMemory, dedupeMemory } from '../memory.js';
 import { recordUsage, listCacheStats, summarizeCacheStats } from '../cachestats.js';
 import { PRICE_DATA_AS_OF } from '../pricing.js';
@@ -241,7 +241,15 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     }
     if (routeReason) send({ type: 'banner', text: `⤷ 自动路由 → ${runModel}（${routeReason}）` });
 
-    const systemPrompt = buildSystemPrompt({ modelName: runModel, workingDir, withJournal: body.withJournal === true });
+    // 会话级工作空间（P3-4）：已记录工作空间的会话固定用自己目录——运行中的任务不受全局切换影响；
+    // 新会话/首次继续的旧会话记录当前全局工作空间。全局 workingDir 只决定新会话的默认目录。
+    const sessionName = path.basename(session.file);
+    const sessionWsDir = getSessionWorkspace(sessionName);
+    const taskDir = sessionWsDir || workingDir;
+    if (!sessionWsDir) {
+      setSessionWorkspace(sessionName, taskDir, currentWorkspace(workingDir)?.name || null);
+    }
+    const systemPrompt = buildSystemPrompt({ modelName: runModel, workingDir: taskDir, withJournal: body.withJournal === true });
     let messages =
       session.messages?.length && session.messages[0]?.role === 'system'
         ? session.messages
@@ -281,7 +289,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       permission,
       io,
       modelName: runModel,
-      workingDir,
+      workingDir: taskDir,
       cfg,
       undoStore,
       mcp: mcpFacade,
@@ -320,7 +328,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       if (isNew && cfg.autoTitle !== false && r.text) {
         try {
           const title = await generateTitle(providerNow, titleModel(cfg, runModel), built.persistText);
-          if (title) renameSessionFile(fs, path, home, session, title);
+          if (title) {
+            const oldName = path.basename(session.file);
+            const renamed = renameSessionFile(fs, path, home, session, title);
+            if (renamed) moveSessionWorkspace(oldName, path.basename(renamed)); // 会话改名 → 工作空间映射跟随
+          }
         } catch {}
       }
       entry.status = r.aborted ? 'aborted' : 'done';
@@ -649,9 +661,17 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       if (!file) return json(res, 400, { error: '缺少 file 参数' });
       try {
         const loaded = loadSession(path.join(home, 'sessions', path.basename(file)));
+        // 载入会话时聚焦其工作空间（P3-4）：全局默认切到该会话的目录，前端下拉同步显示
+        const wsDir = getSessionWorkspace(path.basename(file));
+        const ws = workspaceForDir(wsDir);
+        if (wsDir) {
+          workingDir = wsDir;
+          if (ws) touchWorkspace(ws.name);
+        }
         json(res, 200, {
           ok: true,
           messages: loaded.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ role: m.role, content: m.content ?? '' })),
+          workspace: ws?.name || null,
         });
       } catch {
         json(res, 404, { error: '会话不存在' });
@@ -667,11 +687,13 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         const title = sanitizeTitle(String(body.title || '会话'));
         const renamed = renameSessionFile(fs, path, home, { file: full }, title);
         if (!renamed) return json(res, 500, { error: '重命名失败（可能存在同名会话）' });
+        moveSessionWorkspace(file, path.basename(renamed));
         return json(res, 200, { ok: true, file: path.basename(renamed) });
       }
       if (body.action === 'delete') {
         try {
           fs.unlinkSync(full);
+          removeSessionWorkspace(file);
           return json(res, 200, { ok: true });
         } catch (err) {
           return json(res, 500, { error: String(err?.message || err) });
@@ -851,7 +873,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         return json(res, 200, { ok: true, name: r.name });
       }
       if (body.action === 'set') {
-        // 切换当前工作空间（可带 dir 修改目录）；目录缺失自动重建，服务端工作目录随之切换
+        // 切换全局工作空间（新会话默认目录；可带 dir 修改目录）；目录缺失自动重建。
+        // 携带 file 时同时把当前会话的工作空间切过去（P3-4：会话跟随显式切换）。
         if (body.dir) {
           const r = setWorkspaceDir(name, body.dir);
           if (r.error) return json(res, 400, { error: r.error });
@@ -865,9 +888,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         }
         touchWorkspace(name);
         workingDir = dir;
-        try {
-          process.chdir(dir);
-        } catch {}
+        // 不再 process.chdir：运行中任务的 cwd 在创建时已固定，全局切换只影响新会话
+        if (body.file) setSessionWorkspace(String(body.file), dir, name);
         return json(res, 200, { ok: true, name, dir, current: name });
       }
       if (body.action === 'remove') {
