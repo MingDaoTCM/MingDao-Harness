@@ -149,7 +149,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         io.endTurn();
         const assistantMsg = { role: 'assistant', content: res.text || null, tool_calls: res.toolCalls };
         messages.push(assistantMsg);
-        for (const tc of res.toolCalls) {
+
+        // 只读工具并行（P2-8）：同一 response 里的连续 read/ls/glob/grep 无相互依赖，
+        // 在 auto 权限模式下（无交互询问、无副作用的纯读）Promise.all 并发执行；
+        // 其余模式/工具保持串行，避免多个权限对话框交错。事件顺序（start/render/post/回填）不变。
+        const READONLY_BATCH = new Set(['read', 'ls', 'glob', 'grep']);
+        const canBatch = permission.mode === 'auto';
+
+        // 预检：解析参数 → PreToolUse 钩子 → 权限检查；拒绝/失败只回填不执行（返回 null）
+        async function prepTool(tc) {
           const name = tc.function?.name || '';
           let args = null;
           try {
@@ -158,7 +166,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             // 参数 JSON 解析失败：回填错误给模型，不拿空参数去执行工具
             io.renderToolDenied(name, {}, '参数解析失败（输出超限被截断？建议分块）');
             messages.push({ role: 'tool', tool_call_id: tc.id, content: '工具参数 JSON 解析失败，请重新输出合法参数。' });
-            continue;
+            return null;
           }
           if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
 
@@ -167,7 +175,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (hook.decision === 'block') {
             io.renderToolDenied(name, args, '被钩子阻止');
             messages.push({ role: 'tool', tool_call_id: tc.id, content: `工具被 PreToolUse 钩子阻止：${hook.reason}` });
-            continue;
+            return null;
           }
 
           const isMcp = name.startsWith('mcp__');
@@ -184,30 +192,61 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (!allowed) {
             io.renderToolDenied(name, args, '未授权');
             messages.push({ role: 'tool', tool_call_id: tc.id, content: '用户拒绝了该工具的执行权限。' });
-            continue;
+            return null;
           }
+          return { tc, name, args, isMcp };
+        }
 
-          const t0 = Date.now();
-          // 工具开始执行：终端/WebUI 先显示「执行中」状态（Web 端卡片带旋转动画）
-          io.renderToolStart?.(name, args);
-          let result;
+        // 执行单个工具（渲染「执行中」→ dispatch → 捕获异常转错误结果）
+        async function runTool(prep) {
+          io.renderToolStart?.(prep.name, prep.args);
           try {
-            if (isMcp) {
+            if (prep.isMcp) {
               if (!mcp) throw new Error('MCP 工具未启用');
-              result = await mcp.call(name, args);
-            } else {
-              result = await dispatch(name, args, ctx);
+              return await mcp.call(prep.name, prep.args);
             }
+            return await dispatch(prep.name, prep.args, ctx);
           } catch (err) {
-            result = JSON.stringify({ ok: false, error: String(err?.message || err) });
+            return JSON.stringify({ ok: false, error: String(err?.message || err) });
           }
-          const ms = Date.now() - t0;
-          io.renderTool(name, args, result, ms);
-          if (name === 'todo' && result?.todos) io.renderTodo(result.todos);
-          hooks.post(name, args, typeof result === 'string' ? { output: result } : result).catch(() => {});
+        }
 
+        // 收尾：渲染结果 → todo 更新 → PostToolUse 钩子 → 回填消息（顺序与串行一致）
+        function finishTool(prep, result, t0) {
+          const ms = Date.now() - t0;
+          io.renderTool(prep.name, prep.args, result, ms);
+          if (prep.name === 'todo' && result?.todos) io.renderTodo(result.todos);
+          hooks.post(prep.name, prep.args, typeof result === 'string' ? { output: result } : result).catch(() => {});
           const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
-          messages.push({ role: 'tool', tool_call_id: tc.id, content: clampText(text) });
+          messages.push({ role: 'tool', tool_call_id: prep.tc.id, content: clampText(text) });
+        }
+
+        let i = 0;
+        while (i < res.toolCalls.length) {
+          // 收集批次：连续且可并行的只读工具成批；首个非并行项（写入类/被拒/MCP）结束批次
+          const batch = []; // {prep, batchable}
+          while (i < res.toolCalls.length) {
+            const tc = res.toolCalls[i];
+            const prep = await prepTool(tc);
+            const name = tc.function?.name || '';
+            const batchable = canBatch && Boolean(prep) && !prep.isMcp && READONLY_BATCH.has(name);
+            batch.push({ prep, batchable });
+            i += 1;
+            if (!batchable) break;
+          }
+          const allBatchable = batch.length > 1 && batch.every((b) => b.batchable);
+          if (allBatchable) {
+            // 纯只读批次：并行执行（顺序收集结果，UI 事件顺序不变）
+            const t0 = Date.now();
+            const results = await Promise.all(batch.map((b) => runTool(b.prep)));
+            batch.forEach((b, idx) => finishTool(b.prep, results[idx], t0));
+          } else {
+            for (const b of batch) {
+              if (!b.prep) continue; // 拒绝/失败成员已在 prepTool 回填
+              const t0 = Date.now();
+              finishTool(b.prep, await runTool(b.prep), t0);
+            }
+          }
         }
       } else {
         io.endTurn();

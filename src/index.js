@@ -25,7 +25,7 @@ export {
   maskKey,
   resolveApiKey,
 } from './credentials.js';
-export { estimateCost, estimateCostLabel, isPeakHour } from './pricing.js';
+export { estimateCost, estimateCostLabel, isPeakHour, PRICE_DATA_AS_OF } from './pricing.js';
 export { countTokens, heuristicTokens, makeTokenCounter, isTokenizable } from './tokenizer.js';
 export { McpClient, startMcpServers } from './mcp.js';
 export {

@@ -1,7 +1,8 @@
 // 精确 tokenizer（零运行时依赖）：
 //  - 内置 DeepSeek 官方词表（assets/tokenizer-data.json.gz，源自 DeepSeek-V3 tokenizer.json）
-//  - 字节级 BPE 计数：added_tokens 最长优先匹配 + GPT-4 风格预分词 + 按 rank 合并（tiktoken 语义）
-//  - 非 DeepSeek 模型回退启发式估算（英文≈4字符/token，CJK≈1字符/token）
+//  - 字节级 BPE 计数：added_tokens 合并正则一次扫描（O(n)，替代逐 token indexOf）+ 官方 Split 预分词 + 按 rank 合并
+//  - 非 DeepSeek 模型回退启发式估算（英文≈4字符/token，CJK≈0.75 token/字，其余非 ASCII≈1）
+//  - 内容级计数缓存：同一文本（如多轮不变的会话消息）只做一次 BPE，重复调用 O(1) 命中
 // 仅用于上下文预算计数，不输出 token id。
 
 import fs from 'node:fs';
@@ -58,6 +59,10 @@ const BYTE_TO_UNICODE = (() => {
   return m;
 })();
 
+function escapeRe(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 let data = null;
 let loadError = null;
 
@@ -72,10 +77,11 @@ function loadData() {
       const [a, b] = parsed.merges[i];
       mergeRank.set(a + '\u0001' + b, i);
     }
-    data = {
-      mergeRank,
-      added: (parsed.added || []).sort((a, b) => b.length - a.length),
-    };
+    const added = (parsed.added || []).filter(Boolean).sort((a, b) => b.length - a.length);
+    // 全部 added token 合并成单个正则（按长度降序排列 → 左起最长优先，与逐 token startsWith 语义一致），
+    // 一次 matchAll 定位所有特殊 token，把 O(文本长 × 818 个 indexOf) 降到 O(n)
+    const addedRe = added.length ? new RegExp(added.map(escapeRe).join('|'), 'gu') : null;
+    data = { mergeRank, added, addedRe };
   } catch (err) {
     loadError = err;
   }
@@ -86,17 +92,28 @@ export function isTokenizable(modelName) {
   return typeof modelName === 'string' && modelName.startsWith('deepseek');
 }
 
-// 启发式估算（无词表模型的回退路径）
+// 启发式估算（无词表模型的回退路径）。
+// CJK 校准：主流模型流畅中文实测 ≈0.5–0.75 token/字（词表含多字词），
+// 旧版「1 字 = 1 token」会高估约 2 倍、过早触发预算裁剪；取 0.75 保守上界。
+// 其余非 ASCII（emoji/符号）保持 1（多数词表下单个 emoji 常为 2–3 token，不低估）。
+const CJK_RANGES = [
+  [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xf900, 0xfaff], // CJK 扩展/基本区/兼容
+  [0x3040, 0x30ff], [0xac00, 0xd7af], // 假名 / 谚文
+];
+const isCjk = (code) => CJK_RANGES.some(([lo, hi]) => code >= lo && code <= hi);
+
 export function heuristicTokens(text) {
   if (!text) return 0;
   let ascii = 0;
   let cjk = 0;
+  let other = 0;
   for (const ch of String(text)) {
     const code = ch.codePointAt(0);
     if (code < 128) ascii += 1;
-    else cjk += 1;
+    else if (isCjk(code)) cjk += 1;
+    else other += 1;
   }
-  return Math.ceil(ascii / 4) + cjk;
+  return Math.ceil(ascii / 4 + cjk * 0.75 + other);
 }
 
 // 单个预分词片段的 BPE 计数（tiktoken 语义：优先合并 rank 最小的对，同 rank 取最左）。
@@ -188,41 +205,51 @@ function countPiece(piece, d) {
   return alive.reduce((s, v) => s + v, 0);
 }
 
+// 内容级计数缓存（modelName → 文本 → token 数）：多轮会话中历史消息内容不变，
+// 每步 trimMessages 重复计数同一文本时直接命中。上限保护：超长文本不进缓存、
+// 每模型 512 条封顶（溢出整体清空，简单 LRU 退化策略）。
+const TOKEN_CACHE_MAX_ENTRIES = 512;
+const TOKEN_CACHE_MAX_LEN = 50000;
+const tokenCache = new Map();
+
+function countDeepseek(s) {
+  const d = loadData();
+  if (!d) return heuristicTokens(s); // 词表缺失时优雅回退
+  let total = 0;
+  let pos = 0;
+  if (d.addedRe) {
+    for (const m of s.matchAll(d.addedRe)) {
+      if (m.index > pos) total += countGap(s.slice(pos, m.index), d);
+      total += 1; // added token 自身计 1
+      pos = m.index + m[0].length;
+    }
+  }
+  if (pos < s.length) total += countGap(s.slice(pos), d);
+  return total;
+}
+
+function countGap(piece, d) {
+  let total = 0;
+  for (const m of pretokenize(piece)) total += countPiece(m, d);
+  return total;
+}
+
 export function countTokens(text, modelName) {
   if (!text) return 0;
   const s = String(text);
   if (!isTokenizable(modelName)) return heuristicTokens(s);
-  const d = loadData();
-  if (!d) return heuristicTokens(s); // 词表缺失时优雅回退
-
-  let total = 0;
-  let pos = 0;
-  while (pos < s.length) {
-    // added_tokens 最长优先匹配
-    let matched = null;
-    for (const a of d.added) {
-      if (a && s.startsWith(a, pos)) {
-        matched = a;
-        break;
-      }
-    }
-    if (matched) {
-      total += 1;
-      pos += matched.length;
-      continue;
-    }
-    // 原始片段：截到下一个 added token 出现处（或结尾）
-    let next = s.length;
-    for (const a of d.added) {
-      if (!a) continue;
-      const i = s.indexOf(a, pos + 1);
-      if (i !== -1 && i < next) next = i;
-    }
-    const piece = s.slice(pos, next);
-    for (const m of pretokenize(piece)) total += countPiece(m, d);
-    pos = next;
+  if (s.length > TOKEN_CACHE_MAX_LEN) return countDeepseek(s);
+  let byModel = tokenCache.get(modelName);
+  if (!byModel) {
+    byModel = new Map();
+    tokenCache.set(modelName, byModel);
   }
-  return total;
+  const hit = byModel.get(s);
+  if (hit !== undefined) return hit;
+  const n = countDeepseek(s);
+  if (byModel.size >= TOKEN_CACHE_MAX_ENTRIES) byModel.clear();
+  byModel.set(s, n);
+  return n;
 }
 
 // 供上下文预算使用的计数器工厂

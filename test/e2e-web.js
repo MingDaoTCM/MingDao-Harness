@@ -491,6 +491,61 @@ let base = await startWeb(work1);
   ok('工作空间：头部下拉 / 目录自动创建 / 服务端切换');
 }
 
+// ---------- 14. WebUI 访问令牌与 Host 校验（P1-3/P1-4） ----------
+{
+  const authPort = 40000 + Math.floor(Math.random() * 20000);
+  const child = spawn(
+    process.execPath,
+    [path.join(root, 'src', 'cli.js'), 'web', String(authPort), '--auth-token', 'tok-test-123'],
+    { cwd: work1, env: { ...process.env, MINGDAO_HOME: home }, stdio: ['ignore', 'pipe', 'pipe'] }
+  );
+  let log = '';
+  child.stdout.on('data', (d) => (log += d));
+  child.stderr.on('data', (d) => (log += d));
+  let tbase = null;
+  for (let i = 0; i < 60 && !tbase; i++) {
+    const m = log.match(/地址: http:\/\/127\.0\.0\.1:(\d+)/);
+    if (m) tbase = `http://127.0.0.1:${m[1]}`;
+    else await new Promise((r) => setTimeout(r, 200));
+  }
+  assert.ok(tbase, '带令牌的 web 服务器应在 12s 内就绪：' + log.slice(-300));
+  // 壳页面公开（不含数据，SPA 需先加载才能读取 ?token=）
+  const shell = await fetch(tbase + '/');
+  assert.equal(shell.status, 200, '壳页面应无需令牌即可加载');
+  // 数据接口：无令牌 401；query / header 两种携带方式均放行；错误令牌 401
+  const noTok = await fetch(tbase + '/api/state');
+  assert.equal(noTok.status, 401, '无令牌访问数据接口应 401');
+  const byQuery = await fetch(tbase + '/api/state?token=tok-test-123');
+  assert.equal(byQuery.status, 200, '?token= 应放行');
+  const byHeader = await fetch(tbase + '/api/state', { headers: { 'X-MingDao-Token': 'tok-test-123' } });
+  assert.equal(byHeader.status, 200, 'X-MingDao-Token 头应放行');
+  const badTok = await fetch(tbase + '/api/state?token=wrong');
+  assert.equal(badTok.status, 401, '错误令牌应 401');
+  // 权限应答接口同样受令牌保护（taskId 不可枚举）
+  const permNoTok = await fetch(tbase + '/api/permission', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id: 'x', answer: 'y', taskId: 't1' }),
+  });
+  assert.equal(permNoTok.status, 401, '/api/permission 无令牌应 401');
+  // Host 白名单（DNS rebinding）：伪造 Host 即使带对令牌也应 403（用原生 http 精确控制 Host 头）
+  const badHostStatus = await new Promise((resolve) => {
+    const req = http.request(
+      { host: '127.0.0.1', port: authPort, path: '/api/state', headers: { Host: `evil.example:${authPort}`, 'X-MingDao-Token': 'tok-test-123' } },
+      (res) => {
+        res.resume();
+        resolve(res.statusCode);
+      }
+    );
+    req.on('error', () => resolve(0));
+    req.end();
+  });
+  assert.equal(badHostStatus, 403, '伪造 Host 应 403');
+  child.kill('SIGTERM');
+  await new Promise((r) => child.once('close', r));
+  ok('访问控制：token 认证（query/header/401）+ Host 白名单（DNS rebinding 403）');
+}
+
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();

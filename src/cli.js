@@ -964,13 +964,25 @@ async function main() {
     return;
   }
 
-  // WebUI：mingdao web [端口]
+  // WebUI：mingdao web [端口] [--auth-token <令牌>]
   if (opts.prompt[0] === 'web') {
     const cfg0 = loadConfig();
     const portArg = opts.prompt[1] !== undefined ? Number(opts.prompt[1]) : NaN;
     const port = Number.isFinite(portArg) && portArg > 0 ? portArg : cfg0?.web?.port || 3820;
     const host = cfg0?.web?.host || '127.0.0.1';
-    await runWebServer({ host, port });
+    // 访问令牌优先级：--auth-token 参数 > 环境变量 MINGDAO_WEB_TOKEN > config.json 的 web.token
+    let authToken = process.env.MINGDAO_WEB_TOKEN || cfg0?.web?.token || undefined;
+    const atIdx = opts.prompt.findIndex((a) => typeof a === 'string' && a.startsWith('--auth-token'));
+    if (atIdx !== -1) {
+      const raw = opts.prompt[atIdx];
+      authToken = raw.includes('=') ? raw.slice(raw.indexOf('=') + 1) : opts.prompt[atIdx + 1];
+      if (!authToken) {
+        console.log('用法：mingdao web [端口] [--auth-token <令牌>]');
+        process.exitCode = 1;
+        return;
+      }
+    }
+    await runWebServer({ host, port, authToken });
     return;
   }
 

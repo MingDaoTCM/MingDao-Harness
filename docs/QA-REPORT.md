@@ -177,4 +177,26 @@ WebUI（io 接口已解耦，加 HTTP/SSE 适配器即可）→ MCP 客户端 �
 
 ---
 
+## 七、v0.1.42：外部技术评估报告整改批次（2026-08-22）
+
+外部评估（《MingDao-Harness 技术评估报告》，基于 v0.1.41/a0023ed 全量走读 + 实跑）确认
+smoke/e2e 全绿，并给出 P0–P3 问题清单。本批次全部落实（P0-1 以外部补丁 `git am` 合入，其余本仓修复）：
+
+| 编号 | 问题 | 处置 |
+| --- | --- | --- |
+| P0-1 | tokenizer 字节映射缺陷（73% merge 永不命中，中文计数虚高约 2 倍） | ✅ 补 GPT-2 `BYTE_TO_UNICODE` 映射 + 官方 Split 预分词序列；12 组黄金值 + 长文本 5550 精确断言。**独立复核**：用 HF tokenizers 0.23.1 + DeepSeek-V3 官方 tokenizer.json 逐值比对 12/12 + 5550 一致 |
+| P0-2 | 启发式回退低估/高估 CJK | ✅ 校准为 0.75 token/字（CJK 区间识别，emoji/符号保持 1），smoke 精确断言 |
+| P1-3 | WebUI 无认证、可远程切 auto 权限 | ✅ 访问令牌：非回环绑定强制（自动生成随机令牌并打印 `?token=` 链接），`--auth-token`/`MINGDAO_WEB_TOKEN`/`web.token` 三途径配置；全部 `/api/*` 校验（含 `/api/permission` 应答），前端 query→sessionStorage→`X-MingDao-Token` 头透传并清除地址栏令牌 |
+| P1-4 | CSRF 可被 DNS rebinding 绕过 | ✅ Host 白名单（回环名 + 绑定地址），伪造 Host 一律 403（带对令牌也不行），e2e 断言覆盖 |
+| P1-5 | bash 全量透传 process.env | ✅ 沙箱模式（readonly/safe）剥离 `*_API_KEY`/`*_TOKEN`/`*_SECRET`/`*_PASSWORD`/`*_CREDENTIAL` 等（segment 级匹配，不误伤 `TOKENIZERS_PARALLELISM`），`bashEnvKeep` 按名放行，smoke 三态断言 |
+| P1-6 | sync `--insecure` 是进程级 TLS 开关 | ✅ 请求级 `https.Agent({rejectUnauthorized:false})`（node:https 原生实现，零依赖），不再改写 `NODE_TLS_REJECT_UNAUTHORIZED` |
+| P2-7 | token 计数每步全量重算 + added-token O(n×818) | ✅ 818 个 added token 合并为单个正则一次扫描（O(n)）；内容级计数缓存（512 条/模型，超长不进缓存）+ trimMessages 消息级 WeakMap 缓存；实测 63K 中文 114ms 冷计 / 0.01ms 缓存命中 |
+| P2-8 | 工具串行执行 | ✅ auto 模式连续只读工具（read/ls/glob/grep）Promise.all 并行；事件顺序/结果回填顺序不变，写入类不并入并行（批次边界保护），smoke 事件序列断言 |
+| P3-9 | 版本回退/无 CI | ✅ 加 `.github/workflows/ci.yml`（Node 18/20/22 四套件矩阵）。版本号维持 0.1.x 系（项目决策：npm 发布前保持 0.1.x 预发布线） |
+| P3-10 | 安全小项 | ✅ sync-server 密码/设备 token 哈希比较改 `crypto.timingSafeEqual`；注册开关 `MINGDAO_SYNC_REGISTRATION=open|invite|closed` + 邀请码（smoke 子进程实测）；hooks 文档明示 `shell:true` 配置即代码执行；定价支持 `pricing.overrides.<模型>` 覆盖 + `pricingAsOf` 数据日期 |
+
+回归验证（2026-08-22）：smoke **33 组**、e2e-local **14 项**、e2e-schedule **4 项**、e2e-web **16 项**（新增「访问控制：token 认证 + Host 白名单」），全部通过。
+
+---
+
 *报告生成：Hermes Agent · 基于全量源码走读、17 项针对性验证、smoke + e2e 回归测试（含三轮复评）*

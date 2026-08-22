@@ -5,6 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const srcDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
@@ -26,7 +27,9 @@ function ok(name) {
 {
   const en = approxTokens('hello world hello world');
   const zh = approxTokens('你好世界');
-  assert.ok(zh >= 4 && en < zh + 4, 'CJK 估算应显著高于等长英文');
+  // CJK 校准（P0-2）：流畅中文 ≈0.75 token/字（旧版 1 字=1 token 高估约 2 倍）
+  assert.equal(zh, 3, '4 字中文应按 0.75/字计为 3 tokens');
+  assert.equal(en, 6, '英文按 4 字符/token 估算');
   const msgs = [
     { role: 'system', content: '系统提示' },
     { role: 'user', content: '很早的问题'.repeat(500) },
@@ -136,7 +139,22 @@ const ctx = { cwd: tmp };
   assert.ok(r.stdout.includes('mingdao-2'));
   const fail = await dispatch('bash', { command: isWin ? 'exit /b 3' : 'exit 3' }, ctx);
   assert.equal(fail.exitCode, 3);
-  ok('tools：bash 输出与退出码（跨平台）');
+  // 沙箱敏感环境变量过滤（P1-5）：沙箱开启时 API Key/Token/Secret 一律不可见，off 时保持原样
+  if (!isWin) {
+    process.env.MINGDAO_TEST_API_KEY = 'sk-secret-probe';
+    process.env.MINGDAO_TEST_TOKEN = 'tk-probe';
+    const sandboxCtx = { ...ctx, cfg: { ...ctx.cfg, sandbox: 'readonly' } };
+    const on = await dispatch('bash', { command: 'echo "k=$MINGDAO_TEST_API_KEY t=$MINGDAO_TEST_TOKEN"' }, ctx);
+    assert.ok(on.stdout.includes('k=sk-secret-probe'), 'sandbox off 应保留环境变量');
+    const off = await dispatch('bash', { command: 'echo "k=$MINGDAO_TEST_API_KEY t=$MINGDAO_TEST_TOKEN"' }, sandboxCtx);
+    assert.ok(!off.stdout.includes('sk-secret-probe') && !off.stdout.includes('tk-probe'), '沙箱模式应剥离敏感变量');
+    const keptCtx = { ...ctx, cfg: { ...ctx.cfg, sandbox: 'readonly', bashEnvKeep: ['MINGDAO_TEST_TOKEN'] } };
+    const kept = await dispatch('bash', { command: 'echo "k=$MINGDAO_TEST_API_KEY t=$MINGDAO_TEST_TOKEN"' }, keptCtx);
+    assert.ok(!kept.stdout.includes('sk-secret-probe') && kept.stdout.includes('tk-probe'), 'bashEnvKeep 应按名放行');
+    delete process.env.MINGDAO_TEST_API_KEY;
+    delete process.env.MINGDAO_TEST_TOKEN;
+  }
+  ok('tools：bash 输出与退出码 / 沙箱环境变量过滤（跨平台）');
 }
 
 // ---------- 4. SSE 流解析（跨 chunk 断行 + 分片 tool_calls） ----------
@@ -275,6 +293,65 @@ const ctx = { cwd: tmp };
   assert.equal(r3.text, null);
   assert.ok(r3.note && r3.note.includes('没有输出正文'), '连续空输出应有提示而非无限循环');
   ok('agent：空/截断输出续写与兜底');
+}
+
+// ---------- 5c. 只读工具并行（P2-8）：auto 模式连续只读 Promise.all，事件/结果顺序不变 ----------
+{
+  const ioP = createIO({ quiet: true });
+  const seq = [];
+  ioP.renderToolStart = (name) => seq.push('start:' + name);
+  ioP.renderTool = (name) => seq.push('end:' + name);
+  fs.writeFileSync(path.join(tmp, 'pa.txt'), 'A');
+  fs.writeFileSync(path.join(tmp, 'pb.txt'), 'B');
+  let tp = 0;
+  const fakeP = {
+    async chat() {
+      tp += 1;
+      if (tp === 1) {
+        return {
+          text: '',
+          toolCalls: ['pa.txt', 'pb.txt', 'pa.txt'].map((f, k) => ({
+            id: 'c' + k,
+            type: 'function',
+            function: { name: 'read', arguments: JSON.stringify({ path: f }) },
+          })),
+          usage: {},
+          finish: 'tool_calls',
+        };
+      }
+      if (tp === 2) {
+        return {
+          text: '',
+          toolCalls: [
+            { id: 'c3', type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: 'pa.txt' }) } },
+            { id: 'c4', type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: 'pc.txt', content: 'C' }) } },
+          ],
+          usage: {},
+          finish: 'tool_calls',
+        };
+      }
+      return { text: '并行完成', toolCalls: null, usage: {}, finish: 'stop' };
+    },
+  };
+  const agentP = createAgent({
+    provider: fakeP,
+    permission: { mode: 'auto', async check() { return true; } },
+    io: ioP,
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmp,
+    cfg: { permission: 'auto' },
+  });
+  const mP = [{ role: 'system', content: '系统' }, { role: 'user', content: '读三个文件' }];
+  const rP = await agentP.runTurn(mP);
+  assert.equal(rP.text, '并行完成');
+  // 纯只读批次：三个 start 连续出现后才出现 end（证明并行），end 顺序与调用顺序一致
+  assert.deepEqual(seq.slice(0, 6), ['start:read', 'start:read', 'start:read', 'end:read', 'end:read', 'end:read'], '纯只读批次应并行且事件有序');
+  // 混合批次：read 完成后才执行 write（写入不并入并行）
+  assert.deepEqual(seq.slice(6), ['start:read', 'end:read', 'start:write', 'end:write'], '混合批次应保持串行顺序');
+  assert.equal(fs.readFileSync(path.join(tmp, 'pc.txt'), 'utf8'), 'C', '批次中的写入应正常执行');
+  const toolIds = mP.filter((m) => m.role === 'tool').map((m) => m.tool_call_id);
+  assert.deepEqual(toolIds, ['c0', 'c1', 'c2', 'c3', 'c4'], '工具结果应按调用顺序回填');
+  ok('agent：连续只读工具并行执行（事件顺序/混合批次串行/结果顺序）');
 }
 
 // ---------- 6. 权限引擎 ----------
@@ -517,9 +594,18 @@ const ctx = { cwd: tmp };
   assert.equal(countTokens(long, 'deepseek-v4-pro'), 5550, '长文本计数应与官方 tokenizer 一致');
   // 非 deepseek 模型回退启发式
   assert.equal(countTokens('hello', 'gpt-4o'), heuristicTokens('hello'));
+  // 启发式 CJK 校准（P0-2）：流畅中文 ≈0.75 token/字（旧版 1 字=1 token 高估约 2 倍）
+  assert.equal(heuristicTokens('你好世界'), 3, 'CJK 启发式应按 0.75/字校准');
+  assert.equal(heuristicTokens('ab'), 1, 'ASCII 启发式不变');
+  assert.equal(heuristicTokens('🎉'), 1, 'emoji 保持 1（不低估）');
+  // 计数缓存（P2-7）：同一文本重复计数结果一致（且第二次走缓存路径）
+  const cachedText = '人工智能与 tokenizer 精确计量，缓存命中后速度提升。';
+  const c1 = countTokens(cachedText, 'deepseek-v4-flash');
+  const c2 = countTokens(cachedText, 'deepseek-v4-flash');
+  assert.equal(c1, c2, '缓存路径计数应与首次一致');
   // 特殊 token 记 1
   assert.equal(countTokens('<｜begin▁of▁sentence｜>', 'deepseek-v4-flash'), 1);
-  ok('tokenizer：官方黄金值 12 组 / 长文本 / 回退启发式 / 特殊 token');
+  ok('tokenizer：官方黄金值 12 组 / 长文本 / 回退启发式 / 特殊 token / CJK 校准 / 缓存');
 }
 
 // ---------- 15. MCP 客户端 ----------
@@ -941,6 +1027,48 @@ const ctx = { cwd: tmp };
   fs.rmSync(homeB, { recursive: true, force: true });
   fs.rmSync(dataDir, { recursive: true, force: true });
   ok('sync：注册登录 / 推送拉取 / 双端冲突备份 / 退出 / 错误路径');
+}
+
+// ---------- 26b. 同步服务端注册开关（invite 邀请码 / closed，P3-10） ----------
+{
+  const regDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sync-reg-'));
+  async function startRegServer(envExtra) {
+    const child = spawn(
+      process.execPath,
+      ['--input-type=module', '-e', `import { runSyncServer } from ${JSON.stringify(path.join(srcDir, 'sync-server.js'))}; const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: ${JSON.stringify(regDir)} }); srv.on('listening', () => console.log('PORT ' + srv.address().port));`],
+      { env: { ...process.env, ...envExtra }, stdio: ['ignore', 'pipe', 'pipe'] }
+    );
+    let out = '';
+    child.stdout.on('data', (d) => (out += d));
+    let port = null;
+    for (let i = 0; i < 50 && !port; i++) {
+      const m = out.match(/PORT (\d+)/);
+      if (m) port = Number(m[1]);
+      else await new Promise((r) => setTimeout(r, 200));
+    }
+    assert.ok(port, '注册开关测试服务应在 10s 内就绪');
+    return { child, base: `http://127.0.0.1:${port}` };
+  }
+  const register = (base, extra) =>
+    fetch(base + '/api/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'inviteuser', password: 'password123', ...extra }),
+    });
+  // invite 模式：无码/错码 403，正确码 200
+  const inv = await startRegServer({ MINGDAO_SYNC_REGISTRATION: 'invite', MINGDAO_SYNC_INVITE_CODES: 'code-a, code-b' });
+  assert.equal((await register(inv.base)).status, 403, 'invite 模式无邀请码应 403');
+  assert.equal((await register(inv.base, { inviteCode: 'nope' })).status, 403, '错误邀请码应 403');
+  assert.equal((await register(inv.base, { inviteCode: 'code-a' })).status, 200, '正确邀请码应放行');
+  inv.child.kill('SIGTERM');
+  await new Promise((r) => inv.child.once('close', r));
+  // closed 模式：一律 403（即使带正确码）
+  const closed = await startRegServer({ MINGDAO_SYNC_REGISTRATION: 'closed', MINGDAO_SYNC_INVITE_CODES: 'code-a' });
+  assert.equal((await register(closed.base, { inviteCode: 'code-a' })).status, 403, 'closed 模式应一律拒绝');
+  closed.child.kill('SIGTERM');
+  await new Promise((r) => closed.child.once('close', r));
+  fs.rmSync(regDir, { recursive: true, force: true });
+  ok('sync-server：注册开关 invite（邀请码）/ closed');
 }
 
 // ---------- 27. 云协作 M2：密码修改 / 会话分享 / 冲突解决 ----------

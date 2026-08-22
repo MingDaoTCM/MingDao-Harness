@@ -4,6 +4,8 @@
 //   SYNC_DATA_DIR  数据目录（默认 /var/lib/mingdao-sync）
 //   SYNC_HOST      监听地址（默认 0.0.0.0）
 //   SYNC_CERT / SYNC_KEY  提供后走 HTTPS（Let's Encrypt 证书路径）
+//   MINGDAO_SYNC_REGISTRATION  注册开关：open（默认）| invite（需邀请码）| closed
+//   MINGDAO_SYNC_INVITE_CODES  邀请码列表（逗号分隔，仅 invite 模式生效）
 // 数据布局：
 //   <DATA_DIR>/users.json                 {用户名: {salt, hash, createdAt}}
 //   <DATA_DIR>/devices.json               {用户名: {设备ID: {name, tokenHash, createdAt, lastSeen}}}
@@ -27,6 +29,14 @@ const KEY = process.env.SYNC_KEY;
 const MAX_BODY = 20 * 1024 * 1024;
 const MAX_FILE = 20 * 1024 * 1024;
 const startedAt = Date.now();
+// 注册开关（P3-10）：公网自建时用 invite/closed 限制自助注册
+const REGISTRATION = String(process.env.MINGDAO_SYNC_REGISTRATION || 'open').toLowerCase();
+const INVITE_CODES = new Set(
+  String(process.env.MINGDAO_SYNC_INVITE_CODES || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+);
 
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
@@ -67,6 +77,16 @@ function acceptedFile() {
 }
 
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+// 常量时间比较（P3-10）：token/密码哈希等值判断防时序侧信道
+function safeEqualHex(a, b) {
+  try {
+    const ba = Buffer.from(String(a), 'hex');
+    const bb = Buffer.from(String(b), 'hex');
+    return ba.length === bb.length && crypto.timingSafeEqual(ba, bb);
+  } catch {
+    return false;
+  }
+}
 // 密码存储用 scrypt（带盐 KDF）；旧数据兼容：verify 时 sha256 回退
 function hashPassword(password, salt) {
   return crypto.scryptSync(String(password), String(salt), 32).toString('hex');
@@ -74,10 +94,10 @@ function hashPassword(password, salt) {
 function verifyPassword(password, salt, hash) {
   if (!hash) return false;
   try {
-    if (crypto.scryptSync(String(password), String(salt), 32).toString('hex') === hash) return true;
+    if (safeEqualHex(hash, crypto.scryptSync(String(password), String(salt), 32).toString('hex'))) return true;
   } catch {}
   // 兼容早期 sha256 存储
-  return sha(`${salt}:${password}`) === hash;
+  return safeEqualHex(hash, sha(`${salt}:${password}`));
 }
 function isValidUsername(u) {
   return typeof u === 'string' && /^[A-Za-z0-9_.-]{2,32}$/.test(u) && u !== '.' && u !== '..';
@@ -145,7 +165,7 @@ function findDeviceByToken(token) {
   const devices = readJson(devicesFile(), {});
   for (const [username, devs] of Object.entries(devices)) {
     for (const [deviceId, d] of Object.entries(devs)) {
-      if (d.tokenHash === tokenHash) return { username, deviceId, device: d };
+      if (safeEqualHex(d.tokenHash, tokenHash)) return { username, deviceId, device: d };
     }
   }
   return null;
@@ -373,6 +393,11 @@ async function handle(req, res) {
       if (rateLimited(req, 10)) return json(res, 429, { error: '尝试过于频繁，请稍后再试' });
       const body = await parseBody(req);
       if (body.__error) return json(res, 400, { error: 'JSON 解析失败' });
+      if (REGISTRATION === 'closed') return json(res, 403, { error: '注册已关闭（管理员已禁用自助注册）' });
+      if (REGISTRATION === 'invite') {
+        const code = String(body.inviteCode || '').trim();
+        if (!code || !INVITE_CODES.has(code)) return json(res, 403, { error: '需要有效邀请码才能注册' });
+      }
       const r = doRegister(body);
       if (r.error) return json(res, 400, r);
       if (r.conflict) return json(res, 409, r);

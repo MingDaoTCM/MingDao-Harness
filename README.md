@@ -178,6 +178,7 @@ mingdao sync conflicts                                 # 跨设备冲突三选�
 | Windows 颜色异常 | 使用 Windows Terminal 或 PowerShell 7 |
 | 同步服务器自签证书报错 | 登录时加 `--insecure` 过渡；正式环境请配置 Let's Encrypt 证书 |
 | 上传图片报「模型不支持」 | 切换到 `deepseek-v4-flash-vision-exp` 或给自定义模型加 `vision` 标记 |
+| 局域网/公网访问 WebUI | `mingdao web --auth-token <令牌>`（或 `MINGDAO_WEB_TOKEN` / `web.token`）；未配置且非回环绑定时自动生成随机令牌并打印 `?token=` 链接，所有数据接口强制校验令牌与 Host 头 |
 
 ## 目录结构
 

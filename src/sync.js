@@ -10,11 +10,91 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import http from 'node:http';
+import https from 'node:https';
 import { loadConfig, saveConfig, mingdaoHome, ensureHome } from './config.js';
 import { loadCredentials, saveCredentials } from './credentials.js';
 import { listSessions } from './session.js';
 
 const TIMEOUT_MS = 20000;
+// 自签证书（--insecure）只影响同步请求本身，不再改写进程级 NODE_TLS_REJECT_UNAUTHORIZED
+const insecureOn = () => syncSettings()?.insecure === true;
+
+// 请求级不安全 TLS 传输（P1-6）：为本次请求单独建立 rejectUnauthorized:false 的 https.Agent，
+// 与并发的 provider 请求（各自的 TLS 校验）互不干扰；安全路径仍走 fetch（连接复用）。
+function rawRequest(target, { headers, body, timeoutMs, insecure }) {
+  return new Promise((resolve, reject) => {
+    const mod = target.protocol === 'http:' ? http : https;
+    const opts = { method: 'POST', headers };
+    if (insecure && target.protocol === 'https:') opts.agent = new https.Agent({ rejectUnauthorized: false });
+    const req = mod.request(target, opts, (res) => {
+      const chunks = [];
+      let size = 0;
+      res.on('data', (d) => {
+        size += d.length;
+        if (size > 25 * 1024 * 1024) {
+          req.destroy();
+          resolve({ status: 413, json: {} });
+          return;
+        }
+        chunks.push(d);
+      });
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        let j = {};
+        try {
+          j = text ? JSON.parse(text) : {};
+        } catch {}
+        resolve({ status: res.statusCode, json: j });
+      });
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error('请求超时')));
+    req.on('error', reject);
+    if (body) req.write(body);
+    req.end();
+  });
+}
+
+async function apiCall(baseUrl, method, payload, token, timeoutMs = TIMEOUT_MS, insecure = false) {
+  const target = new URL(baseUrl.replace(/\/+$/, '') + method);
+  const body = JSON.stringify(payload || {});
+  const headers = { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+  try {
+    if (insecure) {
+      const { status, json: j } = await rawRequest(target, { headers, body, timeoutMs, insecure: true });
+      if (status !== 200) {
+        const err = new Error(j.error || `HTTP ${status}`);
+        err.status = status;
+        err.body = j;
+        throw err;
+      }
+      return j;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(target, {
+        method: 'POST',
+        headers,
+        body,
+        signal: ctrl.signal,
+      });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const err = new Error(j.error || `HTTP ${res.status}`);
+        err.status = res.status;
+        err.body = j;
+        throw err;
+      }
+      return j;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch (e) {
+    if (e.name === 'AbortError' || e.message === '请求超时') throw new Error('请求超时（20s）');
+    throw e;
+  }
+}
 
 export function syncSettings() {
   const cfg = loadConfig();
@@ -38,40 +118,6 @@ export function syncStatus() {
   };
 }
 
-async function apiCall(baseUrl, method, payload, token, timeoutMs = TIMEOUT_MS) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  // 自建服务器用自签证书的阶段：config.sync.insecure=true 跳过证书校验（仅本请求生效，用后恢复）
-  const prevTls = process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-  if (syncSettings()?.insecure) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
-  try {
-    const res = await fetch(baseUrl.replace(/\/+$/, '') + method, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      },
-      body: JSON.stringify(payload || {}),
-      signal: ctrl.signal,
-    });
-    const j = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      const err = new Error(j.error || `HTTP ${res.status}`);
-      err.status = res.status;
-      err.body = j;
-      throw err;
-    }
-    return j;
-  } catch (e) {
-    if (e.name === 'AbortError') throw new Error('请求超时（20s）');
-    throw e;
-  } finally {
-    clearTimeout(timer);
-    if (prevTls === undefined) delete process.env.NODE_TLS_REJECT_UNAUTHORIZED;
-    else process.env.NODE_TLS_REJECT_UNAUTHORIZED = prevTls;
-  }
-}
-
 // 登录/注册 + 设备配对：注册失败（用户不存在）先注册再配对
 export async function syncLogin({ url, username, password, deviceName, insecure = false }) {
   const base = String(url || '').trim().replace(/\/+$/, '');
@@ -80,26 +126,25 @@ export async function syncLogin({ url, username, password, deviceName, insecure 
   if (!/^[A-Za-z0-9_.-]{2,32}$/.test(name)) return { error: '用户名需 2–32 位字母/数字/._-' };
   if (!password || password.length < 8) return { error: '密码至少 8 位' };
   const dev = String(deviceName || '').trim().slice(0, 60) || os.hostname().slice(0, 60) || '未命名设备';
-  const useInsecure = insecure || syncSettings()?.insecure === true;
-  if (useInsecure) process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+  const loginInsecure = insecure || insecureOn();
   try {
     let pair;
     try {
-      pair = await apiCall(base, '/api/pair', { username: name, password, deviceName: dev });
+      pair = await apiCall(base, '/api/pair', { username: name, password, deviceName: dev }, undefined, TIMEOUT_MS, loginInsecure);
     } catch (e) {
       if (e.status === 401) return { error: '用户名或密码错误' };
       if (e.status !== 404) return { error: `连接失败：${e.message}` };
       pair = { notFound: true }; // 用户不存在 → 先注册
     }
     if (pair.notFound) {
-      const reg = await apiCall(base, '/api/register', { username: name, password });
+      const reg = await apiCall(base, '/api/register', { username: name, password }, undefined, TIMEOUT_MS, loginInsecure);
       if (reg.error) return { error: reg.error };
-      pair = await apiCall(base, '/api/pair', { username: name, password, deviceName: dev });
+      pair = await apiCall(base, '/api/pair', { username: name, password, deviceName: dev }, undefined, TIMEOUT_MS, loginInsecure);
     }
     if (!pair.ok || !pair.token) return { error: pair.error || '配对失败' };
     // 保存：config 只存非秘密，token 进凭证库
     const cfg = loadConfig() || {};
-    cfg.sync = { url: base, username: name, deviceName: dev, auto: cfg.sync?.auto !== false, insecure: useInsecure };
+    cfg.sync = { url: base, username: name, deviceName: dev, auto: cfg.sync?.auto !== false, insecure: loginInsecure };
     saveConfig(cfg);
     const creds = loadCredentials();
     creds.sync = { token: pair.token, deviceId: pair.deviceId };
@@ -141,7 +186,7 @@ export async function syncRemoteList() {
   const g = tokenGuard();
   if (g.error) return { error: g.error };
   try {
-    const r = await apiCall(g.url, '/api/sessions/list', {}, g.token);
+    const r = await apiCall(g.url, '/api/sessions/list', {}, g.token, TIMEOUT_MS, insecureOn());
     return { ok: true, sessions: r.sessions || [] };
   } catch (e) {
     return { error: e.message };
@@ -198,7 +243,7 @@ export async function syncPush(name) {
     }
     let remote = null;
     try {
-      remote = await apiCall(g.url, '/api/sessions/pull', { name: s.name }, g.token);
+      remote = await apiCall(g.url, '/api/sessions/pull', { name: s.name }, g.token, TIMEOUT_MS, insecureOn());
     } catch (e) {
       if (e.status !== 404) return { error: `读取远端 ${s.name} 失败：${e.message}` };
     }
@@ -211,7 +256,7 @@ export async function syncPush(name) {
       }
     }
     try {
-      const r = await apiCall(g.url, '/api/sessions/push', { name: s.name, content }, g.token);
+      const r = await apiCall(g.url, '/api/sessions/push', { name: s.name, content }, g.token, TIMEOUT_MS, insecureOn());
       if (r.ok) {
         pushed.push(s.name);
         state[s.name] = { remoteMtime: r.mtime };
@@ -231,7 +276,7 @@ export async function syncPull(name) {
   const home = mingdaoHome();
   let sessions;
   try {
-    const r = await apiCall(g.url, '/api/sessions/list', {}, g.token);
+    const r = await apiCall(g.url, '/api/sessions/list', {}, g.token, TIMEOUT_MS, insecureOn());
     sessions = (r.sessions || []).filter((s) => !name || s.name === name);
   } catch (e) {
     return { error: `获取远端清单失败：${e.message}` };
@@ -247,7 +292,7 @@ export async function syncPull(name) {
     try {
       local = fs.readFileSync(target, 'utf8');
     } catch {}
-    const r = await apiCall(g.url, '/api/sessions/pull', { name: s.name }, g.token);
+    const r = await apiCall(g.url, '/api/sessions/pull', { name: s.name }, g.token, TIMEOUT_MS, insecureOn());
     if (!r.ok) continue;
     if (local !== null && local !== r.content) {
       const copy = path.join(home, 'sessions', conflictCopyName(s.name, 'remote'));
@@ -275,7 +320,7 @@ export async function syncChangePassword({ oldPassword, newPassword }) {
   if (g.error) return { error: g.error };
   if (!newPassword || newPassword.length < 8) return { error: '新密码至少 8 位' };
   try {
-    const r = await apiCall(g.url, '/api/password', { oldPassword: oldPassword || '', newPassword }, g.token);
+    const r = await apiCall(g.url, '/api/password', { oldPassword: oldPassword || '', newPassword }, g.token, TIMEOUT_MS, insecureOn());
     return r.ok ? { ok: true } : { error: r.error || '修改失败' };
   } catch (e) {
     if (e.status === 401) return { error: '旧密码错误' };
@@ -288,7 +333,7 @@ export async function syncShareCreate(name) {
   const g = tokenGuard();
   if (g.error) return { error: g.error };
   try {
-    const r = await apiCall(g.url, '/api/share/create', { name }, g.token);
+    const r = await apiCall(g.url, '/api/share/create', { name }, g.token, TIMEOUT_MS, insecureOn());
     return r.ok ? { ok: true, shareId: r.shareId, name: r.name } : { error: r.error };
   } catch (e) {
     return { error: `分享失败：${e.status === 404 ? '你还没有这个会话' : e.message}` };
@@ -299,7 +344,7 @@ export async function syncShareList() {
   const g = tokenGuard();
   if (g.error) return { error: g.error };
   try {
-    const r = await apiCall(g.url, '/api/share/list', {}, g.token);
+    const r = await apiCall(g.url, '/api/share/list', {}, g.token, TIMEOUT_MS, insecureOn());
     return { ok: true, mine: r.mine || [], accepted: r.accepted || [] };
   } catch (e) {
     return { error: `获取分享列表失败：${e.message}` };
@@ -310,7 +355,7 @@ export async function syncShareAccept(shareId) {
   const g = tokenGuard();
   if (g.error) return { error: g.error };
   try {
-    const r = await apiCall(g.url, '/api/share/accept', { shareId }, g.token);
+    const r = await apiCall(g.url, '/api/share/accept', { shareId }, g.token, TIMEOUT_MS, insecureOn());
     if (!r.ok) return { error: r.error };
     // 服务端已决定落盘位置与冲突语义：直接写入本地会话目录并记录远端 mtime
     if (!isValidRemoteName(r.savedAs)) return { error: '服务器返回的会话名非法，已拒绝落盘' };
@@ -330,7 +375,7 @@ export async function syncShareRevoke(shareId) {
   const g = tokenGuard();
   if (g.error) return { error: g.error };
   try {
-    const r = await apiCall(g.url, '/api/share/revoke', { shareId }, g.token);
+    const r = await apiCall(g.url, '/api/share/revoke', { shareId }, g.token, TIMEOUT_MS, insecureOn());
     return r.ok ? { ok: true } : { error: r.error };
   } catch (e) {
     return { error: `撤销失败：${e.status === 404 ? '分享不存在' : e.status === 403 ? '只能撤销自己的分享' : e.message}` };

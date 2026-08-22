@@ -57,7 +57,8 @@
 
 - `PreToolUse`：工具执行前调用，命令输出非空即阻止执行（返回的文本交给模型）；
 - `PostToolUse`：执行后调用（审计/日志）；
-- 协议：stdin 收 JSON（工具名/参数），stdout 回 JSON；`matcher` 支持 `|` 分隔与 `*` 通配。
+- 协议：stdin 收 JSON（工具名/参数），stdout 回 JSON；`matcher` 支持 `|` 分隔与 `*` 通配；
+- ⚠ **hooks 命令以 `shell: true` 执行——配置即代码执行**：命令会在每次工具调用时运行，请只填自己完全信任的命令（例如不直接填 `curl <不可信地址>`）。
 
 ## MCP 服务器
 
@@ -77,11 +78,45 @@
 
 ```json
 {
-  "web": { "host": "127.0.0.1", "port": 3820 }
+  "web": { "host": "127.0.0.1", "port": 3820, "token": "可选访问令牌" }
 }
 ```
 
-仅本机使用保持默认 `127.0.0.1`；远程/多设备使用改为 `0.0.0.0` 时请注意端口安全。
+- 仅本机使用保持默认 `127.0.0.1`（无需令牌）；
+- 绑定 `0.0.0.0`/局域网地址时**强制令牌认证**：未配置则每次启动随机生成并打印
+  `http://<地址>:<端口>/?token=…` 访问链接；固定令牌三种方式（优先级从高到低）：
+  `mingdao web --auth-token <令牌>`、环境变量 `MINGDAO_WEB_TOKEN`、`web.token`；
+- 令牌同时接受 URL `?token=`、请求头 `X-MingDao-Token` 或 `Authorization: Bearer`；
+- 服务端校验 `Host` 头必须等于回环名或绑定地址（防 DNS rebinding），代理场景会 403 属预期。
+
+## 沙箱环境变量过滤
+
+沙箱模式（`readonly`/`safe`）下，bash 工具默认从子进程环境中剥离敏感变量
+（`*_API_KEY`、`*_TOKEN`、`*_SECRET`、`*_PASSWORD`、`*_CREDENTIAL` 等），
+防止模型驱动的命令一条 `env` 读走密钥；按名放行：
+
+```json
+{ "bashEnvKeep": ["NPM_TOKEN"] }
+```
+
+`sandbox: "off"` 时保持完整环境（直接执行由你担责）。
+
+## 定价覆盖
+
+内置价格表数据时点为 2026-08（`/api/state` 的 `pricingAsOf` 字段），官方调价后无需等
+发版即可覆盖（单位：元/百万 tokens）：
+
+```json
+{
+  "pricing": {
+    "overrides": {
+      "deepseek-v4-flash": { "input": 1.5, "output": 4.5, "cacheHit": 0.05, "peak": { "input": 3 } }
+    }
+  }
+}
+```
+
+`peak` 缺省的字段沿用闲时价；未覆盖的模型继续用内置价格表。
 
 ## 云同步
 
@@ -98,6 +133,10 @@
 
 设备 token 存凭证库（`credentials.json` 的 `sync` 字段），配置里只留非秘密项。自建自签证书
 过渡阶段可加 `"insecure": true`（正式证书就绪后删除）。详见 README「云同步与多用户协作」。
+
+同步**服务端**（`mingdao sync-server`）支持注册开关环境变量：
+`MINGDAO_SYNC_REGISTRATION=open|invite|closed`（默认 open）+ `MINGDAO_SYNC_INVITE_CODES=码1,码2`
+（invite 模式生效），公网自建建议至少 `invite`。
 
 ## 自定义模型（WebUI 添加后落盘的结构）
 

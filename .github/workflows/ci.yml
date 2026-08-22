@@ -1,0 +1,28 @@
+# MingDao-Harness 最小 CI：Node 18/20/22 矩阵跑全部四套测试（全部离线，无需任何密钥）
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: 冒烟测试（31+ 组断言）
+        run: node test/smoke.js
+      - name: 端到端：本地 Agent / 同步 / 分享
+        run: node test/e2e-local.js
+      - name: 端到端：WebUI HTTP/SSE/权限/访问控制
+        run: node test/e2e-web.js
+      - name: 端到端：调度
+        run: node test/e2e-schedule.js

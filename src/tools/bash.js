@@ -10,6 +10,23 @@ import { spawn, spawnSync } from 'node:child_process';
 const MAX_OUTPUT = 20000;
 const MAX_TIMEOUT_SECONDS = 600;
 
+// 敏感环境变量过滤（P1-5）：沙箱开启（readonly/safe）时默认生效——模型驱动的命令
+// 不应直接读到 API Key / 凭证（一条 env 即可泄露）。config.bashEnvKeep 可按名放行
+// （如构建需要 NPM_TOKEN）。沙箱 off 时保持完整环境（用户明确选择直接执行）。
+const SENSITIVE_ENV_PAIR = /(api[_-]?key|access[_-]?key|client[_-]?secret|private[_-]?key)/i;
+const SENSITIVE_ENV_SEGMENT = /(^|_)(token|secret|password|passwd|credential|authorization|auth)(_|$)/i;
+const isSensitiveEnv = (k) => SENSITIVE_ENV_PAIR.test(k) || SENSITIVE_ENV_SEGMENT.test(k);
+
+function buildChildEnv(ctx, filterSensitive) {
+  if (!filterSensitive) return process.env;
+  const keep = new Set((ctx?.cfg?.bashEnvKeep || []).map(String));
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!isSensitiveEnv(k) || keep.has(k)) env[k] = v;
+  }
+  return env;
+}
+
 let sandboxSupport = null;
 
 export function detectSandbox() {
@@ -72,7 +89,7 @@ export function runBash(args, ctx) {
   return new Promise((resolve) => {
     const child = spawn(spawnCmd, spawnArgs, {
       cwd: ctx.cwd,
-      env: process.env,
+      env: buildChildEnv(ctx, mode !== 'off'),
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: true, // 自成进程组：超时/结束可整组清理，孙进程不成孤儿
     });

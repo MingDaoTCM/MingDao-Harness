@@ -14,6 +14,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
 import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credentials.js';
@@ -53,6 +54,7 @@ import { enableAutostart, disableAutostart, autostartStatus } from '../autostart
 import { currentWorkspace, listWorkspaces, addWorkspace, removeWorkspace, renameWorkspace, setWorkspaceDir, workspacePath, touchWorkspace } from '../workspace.js';
 import { loadMemory, writeMemory, dedupeMemory } from '../memory.js';
 import { recordUsage, listCacheStats, summarizeCacheStats } from '../cachestats.js';
+import { PRICE_DATA_AS_OF } from '../pricing.js';
 import { presetList, buildPreset } from '../mcp-presets.js';
 import { syncStatus, syncLogin, syncLogout, syncPush, syncPull, syncRemoteList, maybeAutoSync, syncChangePassword, syncShareCreate, syncShareList, syncShareAccept, syncShareRevoke, listSyncConflicts, resolveSyncConflict } from '../sync.js';
 
@@ -91,7 +93,7 @@ function readBody(req) {
   });
 }
 
-export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
+export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken } = {}) {
   const home = ensureHome();
   const cfg = loadConfig();
   if (!cfg) {
@@ -99,6 +101,46 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     process.exitCode = 1;
     return;
   }
+  // 访问令牌（P1-3）：非回环绑定时强制——配置的 token / 启动参数 / 环境变量优先，
+  // 都没有则本次随机生成并打印带 token 的访问地址。回环绑定且未配置时保持无认证（本机信任）。
+  const isLoopbackHost = (h) => h === '127.0.0.1' || h === 'localhost' || h === '::1';
+  let webToken = String(authToken || cfg?.web?.token || '').trim() || null;
+  let tokenGenerated = false;
+  if (!isLoopbackHost(host) && !webToken) {
+    webToken = crypto.randomBytes(16).toString('hex');
+    tokenGenerated = true;
+  }
+  const authEnabled = Boolean(webToken);
+  const tokenMatches = (got) => {
+    if (!webToken) return true;
+    if (!got) return false;
+    const a = Buffer.from(String(got));
+    const b = Buffer.from(webToken);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  };
+  const requestToken = (req, url) => {
+    const q = url.searchParams.get('token');
+    if (q) return q;
+    const h = String(req.headers['x-mingdao-token'] || '');
+    if (h) return h;
+    const m = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
+    return m ? m[1] : null;
+  };
+  // Host 白名单（P1-4，防 DNS rebinding）：只接受回环名 + 绑定地址；
+  // 绑定 0.0.0.0 且启用 token 时放行任意 Host（此时 token 才是访问边界，攻击者页面拿不到）。
+  let boundPort = port;
+  const trustedHost = (reqHost) => {
+    const h = String(reqHost || '').toLowerCase();
+    const names = new Set(['127.0.0.1', 'localhost', '::1']);
+    if (host !== '0.0.0.0') names.add(host.toLowerCase());
+    const candidates = new Set();
+    for (const n of names) {
+      candidates.add(`${n.includes(':') && !n.startsWith('[') ? `[${n}]` : n}:${boundPort}`);
+      if (boundPort === 80) candidates.add(n);
+    }
+    if (candidates.has(h)) return true;
+    return host === '0.0.0.0' && authEnabled;
+  };
   let modelName = cfg.model || 'deepseek-v4-flash';
   const pc = resolveProviderConfig(cfg, modelName);
   if (!pc.apiKey) {
@@ -304,6 +346,17 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname;
 
+    // 访问控制（P1-3/P1-4）：token 校验覆盖数据与操作接口；壳页面与 PWA 静态资源公开
+    // （壳不含任何数据，SPA 需要先加载才能读取 ?token=）；Host 白名单覆盖一切请求
+    const isStaticAsset =
+      p === '/' || p === '/index.html' || p === '/favicon.ico' || p === '/icon.svg' || p === '/manifest.webmanifest' || p === '/sw.js';
+    if (authEnabled && !isStaticAsset && !tokenMatches(requestToken(req, url))) {
+      return json(res, 401, { error: '未授权：缺少或无效的访问令牌（地址需带 ?token=…，或请求头携带 X-MingDao-Token）' });
+    }
+    if (!trustedHost(req.headers.host)) {
+      return json(res, 403, { error: 'Host 校验失败：请通过绑定地址访问（DNS rebinding 防护）' });
+    }
+
     // CSRF 防护：跨源请求一律拒绝；POST 仅接受 JSON（拦截表单/纯文本跨站盲提交）
     if (req.method !== 'GET' && req.method !== 'OPTIONS') {
       const origin = req.headers.origin;
@@ -355,6 +408,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
         sandboxSupported: detectSandbox() !== 'none',
         routing: cfg.routing?.enabled ? cfg.routing : null,
         contextBudget: cfg.contextBudget || 128000,
+        pricingAsOf: PRICE_DATA_AS_OF,
         autostart: autostartStatus(),
         notify: cfg.notify !== false,
         workspace: currentWorkspace(workingDir)?.name || null,
@@ -980,7 +1034,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
     }
     if (req.method === 'GET' && p === '/sw.js') {
       res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
-      res.end(`self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(clients.claim()));self.addEventListener('fetch',e=>{if(e.request.method==='GET'&&new URL(e.request.url).origin===location.origin&&!e.request.url.includes('/api/')){e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open('mingdao-v3').then(cache=>cache.put(e.request,c));return r;}).catch(()=>caches.match(e.request).then(m=>m||caches.match('/'))));}});`);
+      // 缓存键去掉 query（?token= 不落缓存）；mingdao-v4：随 token 认证版本升版本号，强制替换旧 SW 缓存
+      res.end(`self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!=='mingdao-v4').map(k=>caches.delete(k)))).then(()=>clients.claim())));self.addEventListener('fetch',e=>{if(e.request.method==='GET'&&new URL(e.request.url).origin===location.origin&&!e.request.url.includes('/api/')){const u=new URL(e.request.url);u.search='';e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open('mingdao-v4').then(cache=>cache.put(u.toString(),c));return r;}).catch(()=>caches.match(u.toString()).then(m=>m||caches.match('/'))));}});`);
       return;
     }
     json(res, 404, { error: 'Not found' });
@@ -1009,13 +1064,23 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820 } = {}) {
   });
 
   server.listen(port, host, () => {
-    if (host !== '127.0.0.1' && host !== 'localhost' && host !== '::1') {
-      console.warn('  ⚠ 警告：当前监听 ' + host + '（非本机回环）。此服务器无认证层，局域网/公网可达意味着任何人可读写你的会话与配置。建议保持 127.0.0.1，或置于可信网络/VPN 后。');
-    }
     const actual = server.address().port;
+    boundPort = actual;
+    const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host;
     console.log('');
     console.log(`  MingDao WebUI 已启动`);
-    console.log(`  地址: http://${host}:${actual}`);
+    console.log(`  地址: http://${displayHost}:${actual}`);
+    if (authEnabled) {
+      console.log(`  访问令牌: http://${displayHost}:${actual}/?token=${webToken}`);
+      if (tokenGenerated) {
+        console.log('  ⚠ 非回环绑定且未配置令牌：本次已随机生成（重启后更换）。');
+        console.log('    固定令牌：mingdao web --auth-token <令牌>，或 config.json 的 web.token / 环境变量 MINGDAO_WEB_TOKEN。');
+      } else if (isLoopbackHost(host)) {
+        console.log('  ℹ 已启用访问令牌：地址需带 ?token=… 才能访问。');
+      }
+    } else if (!isLoopbackHost(host)) {
+      console.warn('  ⚠ 警告：当前监听 ' + host + '（非本机回环）且未启用令牌，任何能到达端口的人都可访问。建议：mingdao web --auth-token <令牌>。');
+    }
     console.log(`  模型: ${modelName} · 权限: ${cfg.permission ?? 'ask'} · 工作目录: ${workingDir}`);
     if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) console.log('  MCP:  后台连接中，/api/state 可查看状态');
     console.log(`  退出: Ctrl+C`);

@@ -18,8 +18,18 @@ function partTokens(msg, count) {
   return total;
 }
 
+// 消息对象级 token 缓存（WeakMap：消息被会话持有期间有效，随消息一起回收）。
+// 会话历史消息内容基本不可变（裁剪是投影，不改原对象），同一回合的 24 步里
+// trimMessages 每步全量重算时直接命中，跳过重复 BPE 计数；key 附上 count 函数，
+// 模型切换（新计数器）后自动失效重算。
+const messageTokenCache = new WeakMap();
+
 export function messageTokens(msg, count = approxTokens) {
-  return partTokens(msg, count) + 4; // 每条消息的协议开销
+  const hit = messageTokenCache.get(msg);
+  if (hit && hit.fn === count) return hit.value;
+  const total = partTokens(msg, count) + 4; // 每条消息的协议开销
+  messageTokenCache.set(msg, { fn: count, value: total });
+  return total;
 }
 
 // 从尾部向前保留消息，直到预算用尽；始终保留首条 system 消息。

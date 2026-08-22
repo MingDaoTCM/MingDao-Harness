@@ -266,6 +266,26 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
   </div>
 </div>
 <script>
+// 访问令牌（P1-3）：地址带 ?token= 时记入 sessionStorage 并从地址栏移除（防截图/历史外泄），
+// 之后所有同源请求统一附加 X-MingDao-Token 头；无令牌时行为与旧版一致。
+const AUTH_TOKEN = (() => {
+  try {
+    const q = new URLSearchParams(location.search).get('token');
+    if (q) {
+      sessionStorage.setItem('mingdao-token', q);
+      history.replaceState(null, '', location.pathname);
+      return q;
+    }
+    return sessionStorage.getItem('mingdao-token') || null;
+  } catch { return null; }
+})();
+if (AUTH_TOKEN) {
+  const rawFetch = window.fetch.bind(window);
+  window.fetch = (input, init = {}) => {
+    init.headers = Object.assign({}, init.headers, { 'X-MingDao-Token': AUTH_TOKEN });
+    return rawFetch(input, init);
+  };
+}
 const $ = (s) => document.querySelector(s);
 const chatEl = $('#chat'), input = $('#input'), sendBtn = $('#sendBtn');
 let generating = false; // 生成中：发送按钮复用为停止按钮
