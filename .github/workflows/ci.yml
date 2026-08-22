@@ -1,4 +1,5 @@
-# MingDao-Harness 最小 CI：Node 18/20/22 矩阵跑全部四套测试（全部离线，无需任何密钥）
+# MingDao-Harness CI：Ubuntu(18/20/22) + Windows + macOS 三平台矩阵跑全部四套测试（全部离线，无需任何密钥）。
+# Windows 平台缺陷（评估 D1–D5）此前因 CI 只有 Linux 而结构性无法发现，现永久守住。
 name: CI
 
 on:
@@ -8,17 +9,27 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node: [18, 20, 22]
+        include:
+          - os: ubuntu-latest
+            node: 18
+          - os: ubuntu-latest
+            node: 20
+          - os: ubuntu-latest
+            node: 22
+          - os: windows-latest
+            node: 20
+          - os: macos-latest
+            node: 20
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node }}
-      - name: 冒烟测试（31+ 组断言）
+      - name: 冒烟测试（40+ 组断言）
         run: node test/smoke.js
       - name: 端到端：本地 Agent / 同步 / 分享
         run: node test/e2e-local.js

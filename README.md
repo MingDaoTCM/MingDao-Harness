@@ -16,6 +16,7 @@
 - 🖼 **多模态**：DeepSeek-V4-Flash-Vision-Exp 视觉模型内置，WebUI 直接上传图片；模型列表以官方 `/models` 线上名单为准，新模型发布自动出现
 - ♻ **长会话不丢上下文**：超预算自动压缩——早期段落由 executor 模型压成摘要注入（`/compact` 可手动），绝不静默失忆
 - 🔎 **历史会话秒搜**：增量索引全文检索（中文 bigram 分词，`mingdao sessions search` / WebUI 搜索框共用）；WebUI **会话级工作空间**——每个会话记住自己的项目目录，多任务并行互不串目录
+- 🌍 **真·跨平台**：Linux / macOS / Windows 全程实测，三平台 CI 矩阵（Ubuntu 18/20/22 + Windows + macOS）常驻守护，Windows 下 journal/测试全绿
 
 ## 快速开始（3 步）
 

@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
+import { mingdaoHome } from './config.js';
 
 // DeepSeek 官方预分词（tokenizer.json 的 Split 序列，与 HF tokenizers 语义一致）：
 //   1. \p{N}{1,3}               数字按 1–3 位切成独立段
@@ -89,7 +90,30 @@ function loadData() {
 }
 
 export function isTokenizable(modelName) {
-  return typeof modelName === 'string' && modelName.startsWith('deepseek');
+  if (typeof modelName !== 'string') return false;
+  if (modelName.startsWith('deepseek')) return true;
+  // B8（评估建议）：自定义端点跑 DeepSeek 系模型时，config.customModels.<name>.tokenizer = "deepseek"
+  // 即可按官方词表精确计数（否则回退启发式，预算误差可达 ±2 倍）
+  return customTokenizerNames().has(modelName);
+}
+
+// 配置按 mtime 缓存：避免每次计数都读盘解析 config.json
+let customTokCache = { mtime: 0, names: new Set() };
+function customTokenizerNames() {
+  try {
+    const file = path.join(mingdaoHome(), 'config.json');
+    const st = fs.statSync(file);
+    if (st.mtimeMs === customTokCache.mtime) return customTokCache.names;
+    const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+    const names = new Set();
+    for (const [n, c] of Object.entries(cfg?.customModels || {})) {
+      if (c && c.tokenizer === 'deepseek') names.add(n);
+    }
+    customTokCache = { mtime: st.mtimeMs, names };
+  } catch {
+    // 无配置/解析失败 → 保持空集合（下次重试）
+  }
+  return customTokCache.names;
 }
 
 // 启发式估算（无词表模型的回退路径）。

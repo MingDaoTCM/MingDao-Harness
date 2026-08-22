@@ -6,16 +6,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const srcDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
 
-const { createAgent } = await import(path.join(srcDir, 'agent.js'));
-const { parseStream } = await import(path.join(srcDir, 'providers/openai-compatible.js'));
-const { approxTokens, trimMessages, clampText } = await import(path.join(srcDir, 'context.js'));
-const { dispatch } = await import(path.join(srcDir, 'tools/index.js'));
-const { saveConfig, loadConfig } = await import(path.join(srcDir, 'config.js'));
-const { createIO } = await import(path.join(srcDir, 'ui.js'));
+const { createAgent } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
+const { parseStream } = await import(pathToFileURL(path.join(srcDir, 'providers/openai-compatible.js')).href);
+const { approxTokens, trimMessages, clampText } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
+const { dispatch } = await import(pathToFileURL(path.join(srcDir, 'tools/index.js')).href);
+const { saveConfig, loadConfig } = await import(pathToFileURL(path.join(srcDir, 'config.js')).href);
+const { createIO } = await import(pathToFileURL(path.join(srcDir, 'ui.js')).href);
 
 // 全局隔离：整个测试期间审计/记忆/技能等写入临时 home，绝不污染真实 ~/.mingdao
 const smokeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-smoke-home-'));
@@ -363,7 +363,7 @@ const ctx = { cwd: tmp };
   // 用 stub io：特殊授权（规则拦截/只读拦截）现在会弹出询问，测试注入应答避免读真实 stdin
   const ioNo = { ask: async () => 'n' };
   const ioYes = { ask: async () => 'y' };
-  const { createPermission } = await import(path.join(srcDir, 'permissions.js'));
+  const { createPermission } = await import(pathToFileURL(path.join(srcDir, 'permissions.js')).href);
   const auto = createPermission('auto', ioNo);
   assert.equal(await auto.check('bash', { command: 'rm -rf /' }), true);
   const readonly = createPermission('readonly', ioNo);
@@ -392,7 +392,7 @@ const ctx = { cwd: tmp };
     credentialsPath,
     resolveApiKey,
     loadCredentials,
-  } = await import(path.join(srcDir, 'credentials.js'));
+  } = await import(pathToFileURL(path.join(srcDir, 'credentials.js')).href);
 
   // config.json 不含任何密钥（可安全分享/提交）
   saveConfig({ provider: 'deepseek', model: 'deepseek-v4-pro', permission: 'ask', contextBudget: 123456 });
@@ -431,7 +431,7 @@ const ctx = { cwd: tmp };
 // ---------- 8. 会话持久化 ----------
 {
   const home3 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sess-'));
-  const { createSession, appendMessages, loadSession, latestSession } = await import(path.join(srcDir, 'session.js'));
+  const { createSession, appendMessages, loadSession, latestSession } = await import(pathToFileURL(path.join(srcDir, 'session.js')).href);
   const s = createSession(home3);
   appendMessages(s.file, [
     { role: 'user', content: '你好' },
@@ -452,7 +452,7 @@ const ctx = { cwd: tmp };
   const proj = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-proj-'));
   fs.mkdirSync(path.join(proj, '.mingdao', 'skills', 'pdf'), { recursive: true });
   fs.writeFileSync(path.join(proj, '.mingdao', 'skills', 'pdf', 'SKILL.md'), '# PDF 处理\n\n处理 PDF 的方法。');
-  const { listSkills, loadSkill } = await import(path.join(srcDir, 'skills.js'));
+  const { listSkills, loadSkill } = await import(pathToFileURL(path.join(srcDir, 'skills.js')).href);
   const skills = listSkills(proj);
   const pdf = skills.find((s) => s.name === 'pdf');
   assert.ok(pdf && pdf.source === 'project', '项目级技能应被发现');
@@ -506,7 +506,7 @@ const ctx = { cwd: tmp };
 
 // ---------- 12. 权限规则模式匹配 ----------
 {
-  const { createPermission } = await import(path.join(srcDir, 'permissions.js'));
+  const { createPermission } = await import(pathToFileURL(path.join(srcDir, 'permissions.js')).href);
   const io12 = { ask: async () => 'n' };
   const p = createPermission({ mode: 'ask', allow: ['bash:git *'], deny: ['bash:rm *', 'write'] }, io12);
   assert.equal(await p.check('bash', { command: 'git status --short' }), true, 'allow 前缀匹配');
@@ -523,7 +523,7 @@ const ctx = { cwd: tmp };
 
 // ---------- 13. Hooks ----------
 {
-  const { createHooks } = await import(path.join(srcDir, 'hooks.js'));
+  const { createHooks } = await import(pathToFileURL(path.join(srcDir, 'hooks.js')).href);
   const blockCmd = `node -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>console.log(JSON.stringify({decision:'block',reason:'测试阻止'})))"`;
   const hooks = createHooks({ PreToolUse: [{ matcher: 'write', cmd: blockCmd }] }, tmp);
   const pre = await hooks.pre('write', { path: 'a.txt' });
@@ -541,7 +541,7 @@ const ctx = { cwd: tmp };
 // ---------- 14. Provider 中断信号转发（Ctrl+C 必须能中断请求） ----------
 {
   const http = await import('node:http');
-  const { createProvider } = await import(path.join(srcDir, 'providers/index.js'));
+  const { createProvider } = await import(pathToFileURL(path.join(srcDir, 'providers/index.js')).href);
   // 故意不响应的服务器：请求会挂起直到被 abort
   const server = http.createServer((req, res) => {
     req.on('data', () => {});
@@ -572,7 +572,7 @@ const ctx = { cwd: tmp };
 
 // ---------- 14. 精确 tokenizer ----------
 {
-  const { countTokens, heuristicTokens } = await import(path.join(srcDir, 'tokenizer.js'));
+  const { countTokens, heuristicTokens } = await import(pathToFileURL(path.join(srcDir, 'tokenizer.js')).href);
   // 黄金值断言：全部数值取自 DeepSeek-V3 官方 tokenizer.json 用 HF tokenizers 库的真实输出，
   // 覆盖字节映射（汉字必须合并成词表单 token，防 0x7F-0xA0 字节永不合并的回归）、
   // 预分词（数字 1-3 位切段/标点引导词/空白与换行）、代码与中英混合长文本。
@@ -609,12 +609,20 @@ const ctx = { cwd: tmp };
   assert.equal(c1, c2, '缓存路径计数应与首次一致');
   // 特殊 token 记 1
   assert.equal(countTokens('<｜begin▁of▁sentence｜>', 'deepseek-v4-flash'), 1);
-  ok('tokenizer：官方黄金值 12 组 / 长文本 / 回退启发式 / 特殊 token / CJK 校准 / 缓存');
+  // B8：自定义端点声明 tokenizer: "deepseek" → 按官方词表精确计数
+  const cfgFile = path.join(process.env.MINGDAO_HOME, 'config.json');
+  const prevCfg = fs.existsSync(cfgFile) ? fs.readFileSync(cfgFile, 'utf8') : null;
+  fs.writeFileSync(cfgFile, JSON.stringify({ customModels: { 'my-ds': { label: 'x', baseUrl: 'http://x', tokenizer: 'deepseek' } } }));
+  assert.equal(countTokens('的', 'my-ds'), 1, '自定义端点声明 deepseek tokenizer 后应精确计数');
+  assert.ok(countTokens('的', 'my-ds2') > 0, '未声明时回退启发式仍可用');
+  if (prevCfg === null) fs.rmSync(cfgFile, { force: true });
+  else fs.writeFileSync(cfgFile, prevCfg);
+  ok('tokenizer：官方黄金值 12 组 / 长文本 / 回退启发式 / 特殊 token / CJK 校准 / 缓存 / 自定义端点映射');
 }
 
 // ---------- 15. MCP 客户端 ----------
 {
-  const { startMcpServers } = await import(path.join(srcDir, 'mcp.js'));
+  const { startMcpServers } = await import(pathToFileURL(path.join(srcDir, 'mcp.js')).href);
   const serverPath = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures', 'mock-mcp-server.mjs');
   const mcp = await startMcpServers(
     { mock: { command: process.execPath, args: [serverPath] } },
@@ -647,7 +655,7 @@ const ctx = { cwd: tmp };
 
 // ---------- 16. 沙箱执行（随环境能力自适应） ----------
 {
-  const { detectSandbox } = await import(path.join(srcDir, 'tools/bash.js'));
+  const { detectSandbox } = await import(pathToFileURL(path.join(srcDir, 'tools/bash.js')).href);
   if (detectSandbox() === 'bwrap') {
     const d16 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sbx-'));
     const ctx16 = { cwd: d16, cfg: { sandbox: 'safe' } };
@@ -675,7 +683,7 @@ const ctx = { cwd: tmp };
 
 // ---------- 17. 自动路由 ----------
 {
-  const { routeTask, heuristicRoute, routingConfig, subagentModel } = await import(path.join(srcDir, 'routing.js'));
+  const { routeTask, heuristicRoute, routingConfig, subagentModel } = await import(pathToFileURL(path.join(srcDir, 'routing.js')).href);
   const rc = routingConfig({ routing: { enabled: true } });
   assert.ok(rc && rc.planner === 'deepseek-v4-pro' && rc.executor === 'deepseek-v4-flash');
   assert.equal(heuristicRoute('帮我写个函数', rc), 'deepseek-v4-flash');
@@ -700,7 +708,7 @@ const ctx = { cwd: tmp };
 
 // ---------- 18. 会话检索 ----------
 {
-  const { searchSessions, createSession: cs18, appendMessages: ap18 } = await import(path.join(srcDir, 'session.js'));
+  const { searchSessions, createSession: cs18, appendMessages: ap18 } = await import(pathToFileURL(path.join(srcDir, 'session.js')).href);
   const home18 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-srch-'));
   const s1 = cs18(home18);
   ap18(s1.file, [{ role: 'user', content: '帮我写一个快速排序，并且分析其时间复杂度' }]);
@@ -723,7 +731,7 @@ const ctx = { cwd: tmp };
   const homeW = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ws-'));
   const projA = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-wsa-'));
   process.env.MINGDAO_HOME = homeW;
-  const { addWorkspace, removeWorkspace, workspacePath, touchWorkspace, listWorkspaces, currentWorkspace } = await import(path.join(srcDir, 'workspace.js'));
+  const { addWorkspace, removeWorkspace, workspacePath, touchWorkspace, listWorkspaces, currentWorkspace } = await import(pathToFileURL(path.join(srcDir, 'workspace.js')).href);
   const r1 = addWorkspace('项目A', projA);
   assert.ok(r1.name === '项目A' && r1.dir === projA);
   const bad = addWorkspace('', projA);
@@ -747,21 +755,25 @@ const ctx = { cwd: tmp };
   const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-home-'));
   const oldHome = process.env.HOME;
   process.env.HOME = fakeHome;
-  const { enableAutostart, disableAutostart, autostartStatus, autostartPath } = await import(path.join(srcDir, 'autostart.js'));
+  // Windows 的自启文件在 APPDATA（启动文件夹），必须一并隔离，否则污染真实系统（评估 D4）
+  const oldAppData = process.env.APPDATA;
+  if (process.platform === 'win32') process.env.APPDATA = path.join(fakeHome, 'AppData', 'Roaming');
+  const { enableAutostart, disableAutostart, autostartStatus, autostartPath } = await import(pathToFileURL(path.join(srcDir, 'autostart.js')).href);
   assert.equal(autostartStatus(), false, '初始应为关');
   assert.equal(enableAutostart(), true);
   assert.equal(autostartStatus(), true, '开启后应为开');
   assert.ok(fs.existsSync(autostartPath()), '应存在自启文件');
   assert.equal(disableAutostart(), true);
   assert.equal(autostartStatus(), false, '关闭后应为关');
+  if (process.platform === 'win32') process.env.APPDATA = oldAppData;
   process.env.HOME = oldHome;
   fs.rmSync(fakeHome, { recursive: true, force: true });
-  ok('autostart：开 / 关 / 状态（隔离 HOME）');
+  ok('autostart：开 / 关 / 状态（隔离 HOME + APPDATA）');
 }
 
 // ---------- 21. 桌面通知（静默不抛） ----------
 {
-  const { notify, notifyTaskDone } = await import(path.join(srcDir, 'notify.js'));
+  const { notify, notifyTaskDone } = await import(pathToFileURL(path.join(srcDir, 'notify.js')).href);
   notify('MingDao', '测试通知'); // 无桌面环境时静默忽略，绝不应抛错
   notifyTaskDone('测试任务', 'done');
   notifyTaskDone('失败任务', 'failed');
@@ -772,7 +784,7 @@ const ctx = { cwd: tmp };
 {
   const homeM = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-mem-'));
   process.env.MINGDAO_HOME = homeM;
-  const { loadMemory, appendMemory, appendJournal, recentJournal, recentJournalBlock, extractMemory } = await import(path.join(srcDir, 'memory.js'));
+  const { loadMemory, appendMemory, appendJournal, recentJournal, recentJournalBlock, extractMemory } = await import(pathToFileURL(path.join(srcDir, 'memory.js')).href);
   appendMemory(['用户偏好简洁的中文回复']);
   const existing = loadMemory();
   assert.ok(existing.includes('简洁的中文回复'));
@@ -799,7 +811,7 @@ const ctx = { cwd: tmp };
 
 // ---------- 23. 缓存感知计价 ----------
 {
-  const { estimateCost, estimateCostLabel, cacheSplit } = await import(path.join(srcDir, 'pricing.js'));
+  const { estimateCost, estimateCostLabel, cacheSplit } = await import(pathToFileURL(path.join(srcDir, 'pricing.js')).href);
   const split = cacheSplit({ prompt_cache_hit_tokens: 600, prompt_cache_miss_tokens: 400 });
   assert.deepEqual(split, { hit: 600, miss: 400, rate: 0.6 });
   const withCache = estimateCost('deepseek-v4-flash', 1000, 100, { hit: 600, miss: 400 }, new Date('2026-08-21T03:00:00'));
@@ -808,7 +820,7 @@ const ctx = { cwd: tmp };
   const label = estimateCostLabel('deepseek-v4-flash', 1000, 100, { prompt_cache_hit_tokens: 600, prompt_cache_miss_tokens: 400 });
   assert.ok(label.includes('缓存命中 60%'), label);
   // 多模态视觉模型预设（deepseek-v4-flash-vision-exp，与 flash 同价）
-  const { modelPreset } = await import(path.join(srcDir, 'models.js'));
+  const { modelPreset } = await import(pathToFileURL(path.join(srcDir, 'models.js')).href);
   const vision = modelPreset('deepseek-v4-flash-vision-exp');
   assert.ok(vision && vision.supportsVision === true, '视觉模型预设应存在且标注 supportsVision');
   assert.deepEqual(vision.pricing, modelPreset('deepseek-v4-flash').pricing, '视觉模型价格应与 V4-Flash 一致');
@@ -822,8 +834,8 @@ const ctx = { cwd: tmp };
   const homeSk = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skilllib-'));
   process.env.MINGDAO_HOME = homeSk;
   const { libraryList, searchLibrary, installFromLibrary, installFromDir, installFromUrl, installFromGit, installSkill, uninstallSkill, reinstallSkill, installedUserSkillNames, userSkillsDir } =
-    await import(path.join(srcDir, 'skill-lib.js'));
-  const { listSkills } = await import(path.join(srcDir, 'skills.js'));
+    await import(pathToFileURL(path.join(srcDir, 'skill-lib.js')).href);
+  const { listSkills } = await import(pathToFileURL(path.join(srcDir, 'skills.js')).href);
 
   // 内置技能库目录
   const lib = libraryList();
@@ -896,9 +908,12 @@ const ctx = { cwd: tmp };
   assert.ok(!fs.existsSync(path.join(userSkillsDir(), 'good-name')), '校验失败不应写入技能目录');
   fs.rmSync(badDir, { recursive: true, force: true });
 
-  // git 安装：无 git 环境优雅报错，不抛异常
-  const gitR = installFromGit('https://example.com/x.git');
+  // git 安装：本地裸仓库演练（完全离线、确定性——example.com 在受限网络会挂起 120s 超时）
+  const bareGit = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-bare-'));
+  spawnSync('git', ['init', '--bare', '--quiet', bareGit], { encoding: 'utf8' });
+  const gitR = installFromGit(bareGit);
   assert.ok(gitR.names || gitR.error, 'git 安装应返回结果或错误而非抛出');
+  fs.rmSync(bareGit, { recursive: true, force: true });
 
   // 卸载：只卸载用户级；未安装报错；路径穿越拒绝
   const rm1 = uninstallSkill('sql');
@@ -952,7 +967,7 @@ const ctx = { cwd: tmp };
   });
   await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
   process.env.MINGDAO_REGISTRY_URL = `http://127.0.0.1:${srv.address().port}`;
-  const { searchRegistry, installFromRegistry, fetchRegistryIndex } = await import(path.join(srcDir, 'skill-registry.js'));
+  const { searchRegistry, installFromRegistry, fetchRegistryIndex } = await import(pathToFileURL(path.join(srcDir, 'skill-registry.js')).href);
   const sr = await searchRegistry('online');
   assert.ok(sr.skills.length === 1 && sr.skills[0].source === 'registry', '远端搜索应命中线上技能');
   const ri = await installFromRegistry('online-skill');
@@ -978,11 +993,11 @@ const ctx = { cwd: tmp };
   const homeA = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sync-a-'));
   const homeB = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sync-b-'));
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sync-data-'));
-  const { runSyncServer } = await import(path.join(srcDir, 'sync-server.js'));
+  const { runSyncServer } = await import(pathToFileURL(path.join(srcDir, 'sync-server.js')).href);
   const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir });
   await new Promise((r) => srv.once('listening', r));
   const syncPort = srv.address().port;
-  const { syncLogin, syncPush, syncPull, syncRemoteList, syncStatus, syncLogout } = await import(path.join(srcDir, 'sync.js'));
+  const { syncLogin, syncPush, syncPull, syncRemoteList, syncStatus, syncLogout } = await import(pathToFileURL(path.join(srcDir, 'sync.js')).href);
 
   // 设备 A 注册登录 + 推送
   process.env.MINGDAO_HOME = homeA;
@@ -1039,7 +1054,7 @@ const ctx = { cwd: tmp };
   async function startRegServer(envExtra) {
     const child = spawn(
       process.execPath,
-      ['--input-type=module', '-e', `import { runSyncServer } from ${JSON.stringify(path.join(srcDir, 'sync-server.js'))}; const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: ${JSON.stringify(regDir)} }); srv.on('listening', () => console.log('PORT ' + srv.address().port));`],
+      ['--input-type=module', '-e', `import { pathToFileURL } from 'node:url'; const { runSyncServer } = await import(pathToFileURL(${JSON.stringify(path.join(srcDir, 'sync-server.js'))}).href); const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: ${JSON.stringify(regDir)} }); srv.on('listening', () => console.log('PORT ' + srv.address().port));`],
       { env: { ...process.env, ...envExtra }, stdio: ['ignore', 'pipe', 'pipe'] }
     );
     let out = '';
@@ -1080,12 +1095,12 @@ const ctx = { cwd: tmp };
   const homeA = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-col-a-'));
   const homeB = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-col-b-'));
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-col-data-'));
-  const { runSyncServer } = await import(path.join(srcDir, 'sync-server.js'));
+  const { runSyncServer } = await import(pathToFileURL(path.join(srcDir, 'sync-server.js')).href);
   const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir });
   await new Promise((r) => srv.once('listening', r));
   const url = `http://127.0.0.1:${srv.address().port}`;
   const { syncLogin, syncPush, syncPull, syncChangePassword, syncShareCreate, syncShareList, syncShareAccept, syncShareRevoke, listSyncConflicts, resolveSyncConflict } =
-    await import(path.join(srcDir, 'sync.js'));
+    await import(pathToFileURL(path.join(srcDir, 'sync.js')).href);
 
   // —— 密码修改 ——
   process.env.MINGDAO_HOME = homeA;
@@ -1187,8 +1202,8 @@ const ctx = { cwd: tmp };
   });
   await new Promise((r) => srv.listen(0, '127.0.0.1', r));
   const port = srv.address().port;
-  const { setStoredKey } = await import(path.join(srcDir, 'credentials.js'));
-  const { fetchProviderModels, availableModels, providerHasKey } = await import(path.join(srcDir, 'model-discovery.js'));
+  const { setStoredKey } = await import(pathToFileURL(path.join(srcDir, 'credentials.js')).href);
+  const { fetchProviderModels, availableModels, providerHasKey } = await import(pathToFileURL(path.join(srcDir, 'model-discovery.js')).href);
   const cfg = { provider: 'deepseek', baseUrl: `http://127.0.0.1:${port}/v1`, model: 'deepseek-v4-flash' };
   const before = await availableModels(cfg, 'deepseek-v4-flash');
   assert.ok(before.every((m) => m.name !== 'deepseek-v4-flash' || m.providerLabel === '当前'), '无 Key 时不应列服务商模型（仅当前模型兜底）');
@@ -1220,7 +1235,7 @@ const ctx = { cwd: tmp };
 
 // ---------- 29. 聊天附件构造（图片 / 文本文件） ----------
 {
-  const { buildUserContent } = await import(path.join(srcDir, 'web', 'attachments.js'));
+  const { buildUserContent } = await import(pathToFileURL(path.join(srcDir, 'web', 'attachments.js')).href);
   const t1 = buildUserContent('你好', [{ type: 'text', name: 'a.txt', content: '文件内容' }], false);
   assert.ok(typeof t1.content === 'string' && t1.content.includes('[文件 a.txt]') && t1.content.includes('文件内容'), '文本附件应内联进消息');
   assert.ok(t1.persistText.includes('[文件：a.txt]'), '落盘文本应带文件名标注');
@@ -1248,7 +1263,7 @@ const ctx = { cwd: tmp };
     JSON.stringify({ at: Date.now(), workspace: null, firstUser: '制作愤怒的小鸟', outcome: '完成网页游戏', turns: 5 }) + '\n'
   );
   process.env.MINGDAO_HOME = jhome;
-  const { buildSystemPrompt } = await import(path.join(srcDir, 'prompts.js'));
+  const { buildSystemPrompt } = await import(pathToFileURL(path.join(srcDir, 'prompts.js')).href);
   const fresh = buildSystemPrompt({ modelName: 'deepseek-v4-flash', workingDir: tmp });
   assert.ok(!fresh.includes('recent_sessions') && !fresh.includes('愤怒的小鸟'), '新会话默认不应注入最近会话日志');
   const withJ = buildSystemPrompt({ modelName: 'deepseek-v4-flash', workingDir: tmp, withJournal: true });
@@ -1260,7 +1275,7 @@ const ctx = { cwd: tmp };
 
 // ---------- 31. 自更新模块（临时 git 仓库演练，P3-9 落实） ----------
 {
-  const { updateCheck, mingdaoUpdate, mingdaoRollback } = await import(path.join(srcDir, 'update.js'));
+  const { updateCheck, mingdaoUpdate, mingdaoRollback } = await import(pathToFileURL(path.join(srcDir, 'update.js')).href);
   const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-upd-'));
   const remoteDir = path.join(base, 'origin');
   const localDir = path.join(base, 'local');
@@ -1306,8 +1321,8 @@ const ctx = { cwd: tmp };
 
 // ---------- 32. 上下文自动压缩模块（P3-1） ----------
 {
-  const { compactConversation } = await import(path.join(srcDir, 'compact.js'));
-  const { approxTokens } = await import(path.join(srcDir, 'context.js'));
+  const { compactConversation } = await import(pathToFileURL(path.join(srcDir, 'compact.js')).href);
+  const { approxTokens } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
   let summaryCalls = 0;
   const summaryProvider = {
     async chat() {
@@ -1347,7 +1362,14 @@ const ctx = { cwd: tmp };
   const badProvider = { async chat() { throw new Error('摘要失败'); } };
   const r3 = await compactConversation({ messages: msgs, budget, count: approxTokens, provider: badProvider, executorModel: 'x' });
   assert.equal(r3, null, '摘要失败应回退普通裁剪');
-  ok('compact：触发条件 / 摘要注入 / 配对清洗 / 用量带回 / 失败回退');
+  // B1/B2：达到预算 90% 即提前压缩（滞回缓冲），低于 80% 不压缩
+  const { messageTokens } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
+  const total32 = msgs.reduce((s, m) => s + messageTokens(m, approxTokens), 0);
+  const r4 = await compactConversation({ messages: msgs, budget: Math.floor(total32 * 0.9), count: approxTokens, provider: summaryProvider, executorModel: 'x' });
+  assert.ok(r4, '达预算 90% 应提前触发压缩（B1/B2 滞回缓冲）');
+  const r5 = await compactConversation({ messages: msgs, budget: Math.floor(total32 / 0.7), count: approxTokens, provider: summaryProvider, executorModel: 'x' });
+  assert.equal(r5, null, '低于 80% 预算不应压缩');
+  ok('compact：触发条件 / 摘要注入 / 配对清洗 / 用量带回 / 失败回退 / 滞回触发线');
 }
 
 // ---------- 33. Agent 循环集成：自动压缩触发 / 历史替换 / onCompact 回调 ----------
@@ -1417,9 +1439,9 @@ const ctx = { cwd: tmp };
   await new Promise((r) => regServer.listen(0, '127.0.0.1', r));
   process.env.MINGDAO_REGISTRY_URL = `http://127.0.0.1:${regServer.address().port}/index.json`;
   process.env.MINGDAO_HOME = homeS;
-  const { installFromRegistry } = await import(path.join(srcDir, 'skill-registry.js'));
-  const { listSkills, tamperedSkillNames } = await import(path.join(srcDir, 'skills.js'));
-  const { trustSkill, skillDirHash } = await import(path.join(srcDir, 'skill-lib.js'));
+  const { installFromRegistry } = await import(pathToFileURL(path.join(srcDir, 'skill-registry.js')).href);
+  const { listSkills, tamperedSkillNames } = await import(pathToFileURL(path.join(srcDir, 'skills.js')).href);
+  const { trustSkill, skillDirHash } = await import(pathToFileURL(path.join(srcDir, 'skill-lib.js')).href);
   // 1) 索引哈希正确 → 安装成功且 verified
   const ok1 = await installFromRegistry('demo-int');
   assert.ok(!ok1.error && ok1.verified === true, '正确 sha256 应安装成功且 verified');
@@ -1450,7 +1472,7 @@ const ctx = { cwd: tmp };
 {
   const homeA = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-audit-'));
   process.env.MINGDAO_HOME = homeA;
-  const { listAudit, auditFile, redactSecrets } = await import(path.join(srcDir, 'audit.js'));
+  const { listAudit, auditFile, redactSecrets } = await import(pathToFileURL(path.join(srcDir, 'audit.js')).href);
   let turn = 0;
   const providerA = {
     async chat() {
@@ -1516,8 +1538,8 @@ const ctx = { cwd: tmp };
 {
   const homeI = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sidx-'));
   process.env.MINGDAO_HOME = homeI;
-  const { tokenize } = await import(path.join(srcDir, 'session-index.js'));
-  const { searchSessions, appendMessages, createSession } = await import(path.join(srcDir, 'session.js'));
+  const { tokenize } = await import(pathToFileURL(path.join(srcDir, 'session-index.js')).href);
+  const { searchSessions, appendMessages, createSession } = await import(pathToFileURL(path.join(srcDir, 'session.js')).href);
   const s1 = createSession(homeI);
   appendMessages(s1.file, [{ role: 'user', content: '帮我做一个贪吃蛇网页游戏，用 Canvas' }]);
   const s2 = createSession(homeI);
@@ -1556,7 +1578,7 @@ const ctx = { cwd: tmp };
 {
   const homeW = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sws-'));
   process.env.MINGDAO_HOME = homeW;
-  const { getSessionWorkspace, setSessionWorkspace, removeSessionWorkspace, moveSessionWorkspace, workspaceForDir } = await import(path.join(srcDir, 'workspace.js'));
+  const { getSessionWorkspace, setSessionWorkspace, removeSessionWorkspace, moveSessionWorkspace, workspaceForDir } = await import(pathToFileURL(path.join(srcDir, 'workspace.js')).href);
   const d1 = path.join(homeW, 'proj-a');
   const d2 = path.join(homeW, 'proj-b');
   fs.mkdirSync(d1);

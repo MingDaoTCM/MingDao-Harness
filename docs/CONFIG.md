@@ -50,6 +50,10 @@ MingDao 先用 executor 模型（路由关闭时为当前模型）把被裁段�
 消息注入，替代「失忆」；压缩后会话文件同步重写为压缩形态，不会每轮重复压缩。摘要失败自动
 回退普通裁剪，绝不阻塞会话。设置 `"autoCompact": false` 可关闭（回到纯静默裁剪）。
 
+触发线（滞回缓冲）：默认达到预算 **80%** 即提前压缩、压到约 60%——避免在预算线附近反复
+裁剪/压缩导致缓存前缀频繁失效（每次失效 = 该轮 prompt 全额按未命中计费）。可用
+`"compactTrigger": 0.9` 调整触发线（0–1 之间的小数）。
+
 ## 会话检索索引（P3-2）
 
 `mingdao sessions search <关键词>` 与 WebUI 历史会话搜索走增量词表索引
@@ -188,12 +192,16 @@ WebUI 中每个会话记住自己的工作目录：新会话记录创建时的�
 ```json
 {
   "customModels": {
-    "my-gpt4": { "label": "我的 GPT-4 网关", "baseUrl": "https://gateway.example.com/v1" }
+    "my-gpt4": { "label": "我的 GPT-4 网关", "baseUrl": "https://gateway.example.com/v1" },
+    "my-ds": { "label": "自建 DeepSeek 网关", "baseUrl": "https://gw.example.com/v1", "tokenizer": "deepseek" }
   }
 }
 ```
 
 自定义模型的 Key 存凭证库 `custom:<模型名>` 键下；增删改建议直接用 WebUI 设置面板完成。
+
+自定义端点若跑的是 DeepSeek 系模型（模型名不以 `deepseek` 开头时默认走启发式估算、预算误差
+可达 ±2 倍），加 `"tokenizer": "deepseek"` 即按官方词表精确计数：
 
 ## 自定义 Provider 模块（非 OpenAI 兼容协议）
 

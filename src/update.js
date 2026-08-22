@@ -75,25 +75,32 @@ function writeState(s) {
   fs.writeFileSync(stateFile(), JSON.stringify(s, null, 2) + '\n', { mode: 0o600 });
 }
 
-function fetchAll(repo) {
-  return git(['fetch', '--all', '--tags', '--prune', '--quiet'], repo).ok;
+// 直接向远端指定分支要版本（评估 D6）：fetch 到 FETCH_HEAD 再读 package.json，
+// 不依赖本地 refs 落盘——部分 Windows git 环境存在「fetch 成功但 refs 不更新」的异常，
+// 按本地 refs 判断会误报「已是最新」。ls-remote 思路的等价实现。
+function remoteVersion(repo, remote, branch) {
+  const r = git(['fetch', '--quiet', remote, branch], repo);
+  if (!r.ok) return null;
+  return versionAt(repo, 'FETCH_HEAD');
 }
 
-function remoteHeads(repo) {
-  const r = git(['for-each-ref', '--format=%(refname:short)', 'refs/remotes'], repo);
+function listRemotes(repo) {
+  const r = git(['remote'], repo);
   if (!r.ok) return [];
-  return r.out.split('\n').filter((b) => b && !b.endsWith('/HEAD'));
+  return r.out.split('\n').filter(Boolean);
 }
 
-// 各远端中版本号最大的 ref（多镜像部署：github/gitee/gitcode 谁新跟谁）
+// 各远端（main/master 任一存在）中版本号最大的（多镜像部署：github/gitee/gitcode 谁新跟谁）
 function newestRemote(repo) {
   let latest = '';
   let ref = '';
-  for (const head of remoteHeads(repo)) {
-    const v = versionAt(repo, head);
-    if (v && compareVersions(v, latest) > 0) {
-      latest = v;
-      ref = head;
+  for (const remote of listRemotes(repo)) {
+    for (const branch of ['main', 'master']) {
+      const v = remoteVersion(repo, remote, branch);
+      if (v && compareVersions(v, latest) > 0) {
+        latest = v;
+        ref = `${remote}/${branch}`;
+      }
     }
   }
   return { version: latest, ref };
@@ -109,11 +116,11 @@ export async function updateCheck({ repo } = {}) {
   const root = resolveRepo(repo);
   if (!root) return { ok: false, lines: [NPM_HINT] };
   const local = versionAt(root) || '未知';
-  if (!fetchAll(root)) {
-    return { ok: false, lines: [`当前版本 v${local}`, '✖ 无法连接远端（git fetch 失败），请检查网络。'] };
-  }
   const newest = newestRemote(root);
-  if (!newest.version || compareVersions(newest.version, local) <= 0) {
+  if (!newest.version) {
+    return { ok: false, lines: [`当前版本 v${local}`, '✖ 无法连接远端（git fetch 全部失败），请检查网络。'] };
+  }
+  if (compareVersions(newest.version, local) <= 0) {
     return { ok: true, behind: false, lines: [`当前已是最新版本 v${local} ✓`, '（如需升级：mingdao update）'] };
   }
   return {
@@ -139,10 +146,10 @@ export async function mingdaoUpdate({ repo } = {}) {
   }
   const prev = git(['rev-parse', 'HEAD'], root);
   if (!prev.ok) return { ok: false, lines: ['✖ 无法读取当前提交（git rev-parse HEAD）'] };
-  if (!fetchAll(root)) return { ok: false, lines: ['✖ git fetch 失败：无法连接远端'] };
   const newest = newestRemote(root);
-  if (!newest.version || compareVersions(newest.version, local) <= 0) {
-    return { ok: true, lines: [`当前已是最新版本 v${local} ✓（远端最新 v${newest.version || local}）`] };
+  if (!newest.version) return { ok: false, lines: ['✖ git fetch 失败：无法连接远端'] };
+  if (compareVersions(newest.version, local) <= 0) {
+    return { ok: true, lines: [`当前已是最新版本 v${local} ✓（远端最新 v${newest.version}）`] };
   }
   // 从版本号最新的远端快进拉取（远程名/分支：优先当前分支名，回落 main）
   const remoteName = newest.ref.split('/')[0];

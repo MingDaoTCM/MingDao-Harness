@@ -8,9 +8,28 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// Windows：detached 后台任务/杀毒等短暂占用目录会让 rmSync 抛 EBUSY——清理容错重试（评估 D5）
+const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
+const sleepMs = (ms) => Atomics.wait(sleepBuf, 0, 0, ms);
+function safeRm(target) {
+  if (!target) return;
+  for (let i = 0; i < 3; i++) {
+    try {
+      safeRm(target, { recursive: true, force: true });
+      return;
+    } catch {
+      sleepMs(150);
+    }
+  }
+  try {
+    safeRm(target, { recursive: true, force: true });
+  } catch {}
+}
+
 let passed = 0;
 function ok(name) {
   passed += 1;
@@ -382,7 +401,7 @@ let base = await startWeb(work1);
 
 // ---------- 11. 云同步 API：登录 / 状态 / 推送 / 退出 ----------
 {
-  const { runSyncServer } = await import(path.join(root, 'src', 'sync-server.js'));
+  const { runSyncServer } = await import(pathToFileURL(path.join(root, 'src', 'sync-server.js')).href);
   const syncDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-websync-'));
   const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: syncDir });
   await new Promise((r) => srv.once('listening', r));
@@ -435,7 +454,7 @@ let base = await startWeb(work1);
   const html = await (await fetch(base + '/')).text();
   assert.ok(html.includes('syncLogin') && html.includes('syncAutoChk'), '前端应包含云同步面板');
   srv.close();
-  fs.rmSync(syncDir, { recursive: true, force: true });
+  safeRm(syncDir, { recursive: true, force: true });
   ok('云同步 API：登录 / 状态 / 推送 / 退出');
 }
 
@@ -487,7 +506,7 @@ let base = await startWeb(work1);
   assert.equal(st2.workingDir, work1, '应能切回原目录');
   const html = await (await fetch(base + '/')).text();
   assert.ok(html.includes('wsSel'), '前端应包含工作空间下拉');
-  fs.rmSync(newDir, { recursive: true, force: true });
+  safeRm(newDir, { recursive: true, force: true });
   ok('工作空间：头部下拉 / 目录自动创建 / 服务端切换');
 }
 
@@ -602,7 +621,7 @@ let base = await startWeb(work1);
   assert.ok(fs.existsSync(path.join(wsA, 'web.txt')), '新会话应写入创建时的工作空间 A');
   // 全局切到 B（不带 file）→ 继续同一会话：任务仍应写 A，而不是 B
   await fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'set', name: '空间B' }) });
-  fs.rmSync(path.join(wsA, 'web.txt'), { force: true });
+  safeRm(path.join(wsA, 'web.txt'), { force: true });
   requestCount = 0;
   const evs2 = await chatOnce(base, { message: '继续上次的会话', file: sess });
   assert.equal(evs2.find((e) => e.type === 'done').session, sess, '应继续同一会话');
@@ -616,14 +635,14 @@ let base = await startWeb(work1);
   assert.equal(setWithFile.ok, true, setWithFile.error);
   const sj2 = await (await fetch(base + '/api/session?file=' + encodeURIComponent(sess))).json();
   assert.equal(sj2.workspace, '空间B', '显式切换后会话工作空间应跟随');
-  fs.rmSync(wsA, { recursive: true, force: true });
-  fs.rmSync(wsB, { recursive: true, force: true });
+  safeRm(wsA, { recursive: true, force: true });
+  safeRm(wsB, { recursive: true, force: true });
   ok('会话级工作空间：新会话记录 / 继续不串目录 / 载入返回 / 显式切换跟随');
 }
 
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();
-for (const d of [work1]) fs.rmSync(d, { recursive: true, force: true });
-fs.rmSync(home, { recursive: true, force: true });
+for (const d of [work1]) safeRm(d, { recursive: true, force: true });
+safeRm(home, { recursive: true, force: true });
 console.log(`\nWebUI 端到端测试全部通过：${passed} 项 ✓`);

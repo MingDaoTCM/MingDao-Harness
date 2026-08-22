@@ -94,7 +94,10 @@ export function removeMemoryLines(keyword) {
 
 export function appendJournal(home, entry) {
   try {
-    fs.mkdirSync(path.join(home, path.dirname(journalFile())), { recursive: true });
+    // journalFile() 已含 mingdaoHome()（home 参数仅为兼容旧签名保留）。
+    // 不能 path.join(home, dirname(journalFile()))：journalFile() 是绝对路径，join 会拼出
+    // 「D:\a\D:\b」式非法路径——Windows 上 mkdir 抛错被静默吞掉，journal 整体失效（评估 D1）。
+    fs.mkdirSync(path.dirname(journalFile()), { recursive: true });
     // 纯追加：并发会话收尾互不覆盖；崩溃最多丢最后一行
     fs.appendFileSync(journalFile(), JSON.stringify(entry) + '\n');
     // 低频截断：超过 600 行时重写保留最近 500 行
@@ -103,7 +106,10 @@ export function appendJournal(home, entry) {
       const lines = raw.split('\n').filter(Boolean);
       if (lines.length > 600) fs.writeFileSync(journalFile(), lines.slice(-500).join('\n') + '\n');
     } catch {}
-  } catch {}
+  } catch (err) {
+    // 静默吞错面收窄（评估建议 3）：调试开关可见原因，正常使用仍零打扰
+    if (process.env.MINGDAO_DEBUG) console.warn('[MingDao] journal 写入失败：' + (err?.message || err));
+  }
 }
 
 export function recentJournal(home, n = 3) {

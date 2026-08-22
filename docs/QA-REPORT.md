@@ -215,4 +215,31 @@ smoke/e2e 全绿，并给出 P0–P3 问题清单。本批次全部落实（P0-1
 
 ---
 
+## 九、Windows 平台评估整改（2026-08-22，v0.1.48）
+
+外部 Windows 11 实测评估（基于 v0.1.44）发现「Windows 支持」宣称与实测不符：journal 在
+Windows 上静默丢失（P1 产品缺陷）+ 四套测试在 Windows 全部无法运行（4 个测试级缺陷）。
+本批次全部落实：
+
+| 编号 | 问题 | 处置 |
+| --- | --- | --- |
+| D1 | `appendJournal` 绝对路径二次 join 产生 `D:\a\D:\b` 非法路径 → journal 静默丢失 | ✅ `mkdirSync(path.dirname(journalFile()))` + catch 加 `MINGDAO_DEBUG` 告警（静默吞错面收窄） |
+| D2 | 动态 `import(path.join(...))` Windows ESM 不支持 | ✅ 全部测试统一 `pathToFileURL(...).href`（smoke 45 处 + e2e + 子进程脚本） |
+| D3 | smoke git 测试依赖 example.com（受限网络挂 120s） | ✅ 改本地裸仓库演练，完全离线确定性 |
+| D4 | autostart 测试未隔离 APPDATA → Windows 污染真实启动文件夹 | ✅ win32 下同步隔离 APPDATA |
+| D5 | e2e 清理 rmSync 无容错 → Windows EBUSY 使整套失败 | ✅ `safeRm()` 重试版（注：评估件自带 safeRm 为无限递归空操作，已按正确语义实现） |
+| D6 | updateCheck 依赖本地 refs 落盘（部分 Windows git 有异常） | ✅ 改 `git fetch <remote> <branch>` → `FETCH_HEAD` 直读版本，不依赖 refs |
+| B1/B2 | 裁剪边界反复破坏缓存前缀 / 无自动压缩 | ✅ 压缩触发提前到预算 **80%**、压到 60%（滞回缓冲带，`compactTrigger` 可调） |
+| B3 | 工具回填 pretty JSON 白费 10-20% token | ✅ 改紧凑 `JSON.stringify(result)` |
+| B8 | 自定义端点 DeepSeek 模型回退启发式（±2 倍误差） | ✅ `customModels.<name>.tokenizer: "deepseek"` 按官方词表精确计数（mtime 缓存） |
+| CI | 仅 Linux，Windows 全盲 | ✅ 三平台矩阵（Ubuntu 18/20/22 + Windows + macOS） |
+
+回归验证（2026-08-22，Linux 实测）：smoke **41 组**、e2e-local **14 项**、e2e-schedule **4 项**、
+e2e-web **19 项**，全部通过（78 项）；Windows 侧由新增 CI 矩阵常驻守护。
+
+**评估的后续路线图（未纳入本批，按建议排期）**：B4 token 预算化智能截断、B5 费用护栏 +
+`--offpeak` 避峰调度、B6 Batch API 半价通道（战略省钱）、B7 路由惯性 + 分类缓存、子代理并行（只读场景）。
+
+---
+
 *报告生成：Hermes Agent · 基于全量源码走读、17 项针对性验证、smoke + e2e 回归测试（含三轮复评）*

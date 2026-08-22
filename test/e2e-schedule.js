@@ -11,6 +11,25 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// Windows：detached 后台任务/杀毒等短暂占用目录会让 rmSync 抛 EBUSY——清理容错重试（评估 D5）
+const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
+const sleepMs = (ms) => Atomics.wait(sleepBuf, 0, 0, ms);
+function safeRm(target) {
+  if (!target) return;
+  for (let i = 0; i < 3; i++) {
+    try {
+      safeRm(target, { recursive: true, force: true });
+      return;
+    } catch {
+      sleepMs(150);
+    }
+  }
+  try {
+    safeRm(target, { recursive: true, force: true });
+  } catch {}
+}
+
 let passed = 0;
 function ok(name) {
   passed += 1;
@@ -200,6 +219,6 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
 
 // 清理
 mock.close();
-fs.rmSync(home, { recursive: true, force: true });
-fs.rmSync(work, { recursive: true, force: true });
+safeRm(home, { recursive: true, force: true });
+safeRm(work, { recursive: true, force: true });
 console.log(`\n调度 e2e 全部通过：${passed} 项 ✓`);

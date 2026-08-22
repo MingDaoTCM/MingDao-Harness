@@ -113,6 +113,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             count,
             provider,
             executorModel: subagentModel(cfg, modelName),
+            triggerRatio: cfg.compactTrigger, // 可配置触发线（默认 80%）
           });
           if (compacted) {
             messages.splice(0, messages.length, ...compacted.messages);
@@ -288,7 +289,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               outputBytes: Buffer.byteLength(typeof result === 'string' ? result : JSON.stringify(result ?? {}), 'utf8'),
             });
           }
-          const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
+          const text = typeof result === 'string' ? result : JSON.stringify(result); // 紧凑 JSON（评估 B3）：嵌套结果省 10-20% 回填 token，且下轮按 prompt 重复计费
           messages.push({ role: 'tool', tool_call_id: prep.tc.id, content: clampText(text) });
         }
 

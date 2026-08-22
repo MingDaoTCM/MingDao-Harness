@@ -9,9 +9,28 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// Windows：detached 后台任务/杀毒等短暂占用目录会让 rmSync 抛 EBUSY——清理容错重试（评估 D5）
+const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
+const sleepMs = (ms) => Atomics.wait(sleepBuf, 0, 0, ms);
+function safeRm(target) {
+  if (!target) return;
+  for (let i = 0; i < 3; i++) {
+    try {
+      safeRm(target, { recursive: true, force: true });
+      return;
+    } catch {
+      sleepMs(150);
+    }
+  }
+  try {
+    safeRm(target, { recursive: true, force: true });
+  } catch {}
+}
+
 
 // ---------- 可编程 mock 服务器 ----------
 // mockMode: 'write' 首请求返回 write 工具调用 | 'task' 首请求返回 task 工具调用 | 'plain' 无工具调用
@@ -202,8 +221,8 @@ function ok(name) {
   assert.equal(allow.code, 0, 'stderr: ' + allow.err);
   assert.equal(fs.readFileSync(path.join(w5b, 'result.txt'), 'utf8'), 'e2e 成功\n', '放行后文件应创建');
   writeConfig('auto');
-  fs.rmSync(w5, { recursive: true, force: true });
-  fs.rmSync(w5b, { recursive: true, force: true });
+  safeRm(w5, { recursive: true, force: true });
+  safeRm(w5b, { recursive: true, force: true });
   ok('ask 权限模式：拒绝 / 放行闭环');
 }
 
@@ -216,7 +235,7 @@ function ok(name) {
   assert.ok(r.out.includes('── 执行计划 ──'), '应显示计划');
   assert.ok(r.out.includes('第一步：列出文件'), '计划内容应来自模型');
   assert.equal(fs.readFileSync(path.join(w6, 'result.txt'), 'utf8'), 'e2e 成功\n', '确认后应执行计划');
-  fs.rmSync(w6, { recursive: true, force: true });
+  safeRm(w6, { recursive: true, force: true });
   ok('/plan 计划模式：计划 → 确认 → 执行');
 }
 
@@ -227,7 +246,7 @@ function ok(name) {
   const r = await runCli([], { cwd: w7, stdin: '问题一\n问题二\n问题三\n/compact\n/exit\n' });
   assert.equal(r.code, 0, 'stderr: ' + r.err);
   assert.ok(r.out.includes('已压缩上下文'), '应输出压缩成功标记');
-  fs.rmSync(w7, { recursive: true, force: true });
+  safeRm(w7, { recursive: true, force: true });
   ok('/compact 上下文压缩');
 }
 
@@ -239,7 +258,7 @@ function ok(name) {
   assert.equal(r.code, 0, 'stderr: ' + r.err);
   assert.ok(r.out.includes('子任务'), '应显示子代理进度标记');
   assert.ok(sawToolCall, '主代理应发起 task 调用');
-  fs.rmSync(w8, { recursive: true, force: true });
+  safeRm(w8, { recursive: true, force: true });
   ok('task 子代理真实往返');
 }
 
@@ -297,7 +316,7 @@ function ok(name) {
   const list = await runCli(['tasks']);
   assert.equal(list.code, 0);
   assert.ok(list.out.includes('✓') && list.out.includes(id), '任务面板应列出已完成任务');
-  fs.rmSync(w9, { recursive: true, force: true });
+  safeRm(w9, { recursive: true, force: true });
   ok('后台任务：启动/完成/状态文件/面板列表');
 }
 
@@ -321,7 +340,7 @@ function ok(name) {
   assert.ok(String(task.note).includes('只读'), 'ask 降级应注明');
   assert.ok(!fs.existsSync(path.join(w10, 'result.txt')), '只读降级下不应写入文件');
   writeConfig('auto');
-  fs.rmSync(w10, { recursive: true, force: true });
+  safeRm(w10, { recursive: true, force: true });
   ok('后台任务：ask 权限降级只读');
 }
 
@@ -342,13 +361,13 @@ function ok(name) {
   const s4 = await runCli(['skill', 'install', 'no-such-skill'], { env: { MINGDAO_REGISTRY_URL: 'http://127.0.0.1:1', MINGDAO_HOME: offlineHome } });
   assert.equal(s4.code, 1);
   assert.ok(s4.out.includes('无法获取线上技能库'), '未知技能应回退线上 registry 并报告不可达');
-  fs.rmSync(offlineHome, { recursive: true, force: true });
+  safeRm(offlineHome, { recursive: true, force: true });
   const badDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-badskill-'));
   fs.writeFileSync(path.join(badDir, 'SKILL.md'), '# 缺 frontmatter');
   const s7 = await runCli(['skill', 'install', badDir], { env: { MINGDAO_REGISTRY_URL: 'http://127.0.0.1:1' } });
   assert.equal(s7.code, 1);
   assert.ok(s7.out.includes('frontmatter'), '坏格式技能应拒绝安装（dry-run 校验）');
-  fs.rmSync(badDir, { recursive: true, force: true });
+  safeRm(badDir, { recursive: true, force: true });
   const s5 = await runCli(['skill', 'uninstall', 'email']);
   assert.equal(s5.code, 0, s5.err);
   assert.ok(s5.out.includes('✓ 已卸载 email'), '卸载应提示成功');
@@ -360,7 +379,7 @@ function ok(name) {
 
 // ---------- 14. 云同步 CLI：登录 / 推送 / 拉取 / 状态 / 退出 ----------
 {
-  const { runSyncServer } = await import(path.join(root, 'src', 'sync-server.js'));
+  const { runSyncServer } = await import(pathToFileURL(path.join(root, 'src', 'sync-server.js')).href);
   const syncDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-clisync-'));
   const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: syncDir });
   await new Promise((r) => srv.once('listening', r));
@@ -410,13 +429,13 @@ function ok(name) {
   const ln = await runCli(['sync', 'login', 'cli-user', 'newpassword456', syncUrl], { env: { MINGDAO_HOME: tempHome } });
   assert.equal(ln.code, 0, ln.err + ln.out);
   assert.ok(ln.out.includes('已登录'), '新密码登录应成功');
-  fs.rmSync(tempHome, { recursive: true, force: true });
+  safeRm(tempHome, { recursive: true, force: true });
   srv.close();
-  fs.rmSync(syncDir, { recursive: true, force: true });
+  safeRm(syncDir, { recursive: true, force: true });
   ok('sync CLI：登录 / 推送 / 拉取 / 状态 / 退出 / 改密 / 分享 / 冲突');
 }
 
 server.close();
-fs.rmSync(home, { recursive: true, force: true });
-fs.rmSync(work, { recursive: true, force: true });
+safeRm(home, { recursive: true, force: true });
+safeRm(work, { recursive: true, force: true });
 console.log(`\n端到端测试全部通过：${passed} 项 ✓`);

@@ -10,6 +10,10 @@ import { messageTokens, cleanToolPairing, clampText } from './context.js';
 
 const MIN_DROP_MESSAGES = 3; // 至少裁掉 3 条才值得压缩
 const MIN_DROP_TOKENS = 2000; // 被裁段落 token 数低于此值不值得一次模型调用
+// B1/B2（评估建议）：达到预算 80% 即提前压缩、压到 60%——滞回缓冲带避免在预算线附近
+// 反复触发裁剪/压缩，让摘要成为稳定前缀、后续轮次全程缓存命中；压缩触发频率也大幅下降。
+const DEFAULT_TRIGGER_RATIO = 0.8;
+const TARGET_RATIO = 0.6;
 const SUMMARY_MAX_CHARS = 1600; // 摘要上限（约几百 token，远小于被裁段落）
 const INPUT_MAX_CHARS = 30000; // 摘要输入上限（防超长工具输出撑爆摘要请求）
 const TOOL_OUTPUT_CAP = 300; // 摘要输入中每条工具结果截断长度
@@ -35,9 +39,9 @@ export async function summarizeConversation(provider, model, convoText) {
   return { text: text.slice(0, SUMMARY_MAX_CHARS), usage: res?.usage || null };
 }
 
-export async function compactConversation({ messages, budget, count, provider, executorModel }) {
+export async function compactConversation({ messages, budget, count, provider, executorModel, triggerRatio }) {
   if (!messages.length) return null;
-  // 各消息 token 与总量；未超预算无需压缩
+  // 各消息 token 与总量；低于触发线（默认预算 80%）无需压缩
   const sizes = [];
   let total = 0;
   for (const m of messages) {
@@ -45,26 +49,27 @@ export async function compactConversation({ messages, budget, count, provider, e
     sizes.push(t);
     total += t;
   }
-  if (total <= budget) return null;
-  // 保留边界（与 trimMessages 同语义：system 恒保留，从尾部向前装到预算）
+  const trigger = Number.isFinite(Number(triggerRatio)) ? Number(triggerRatio) : DEFAULT_TRIGGER_RATIO;
+  if (total <= budget * trigger) return null;
+  // 保留边界：保留段（boundary..end）≤ budget×TARGET_RATIO（system 恒保留）
   let keepTokens = sizes[0] ?? 0;
-  let dropEnd = messages.length;
+  let boundary = messages.length;
   for (let i = messages.length - 1; i >= 1; i--) {
-    if (keepTokens + sizes[i] > budget) {
-      dropEnd = i + 1;
+    if (keepTokens + sizes[i] > budget * TARGET_RATIO) {
+      boundary = i + 1;
       break;
     }
     keepTokens += sizes[i];
   }
-  const droppedCount = dropEnd - 1; // 不含 system
+  const droppedCount = boundary - 1; // 不含 system
   if (droppedCount < MIN_DROP_MESSAGES) return null;
   let droppedTokens = 0;
-  for (let i = 1; i < dropEnd; i++) droppedTokens += sizes[i];
+  for (let i = 1; i < boundary; i++) droppedTokens += sizes[i];
   if (droppedTokens < MIN_DROP_TOKENS) return null;
 
   // 被裁段落 → 文本（工具结果截断；tool_calls 带名称标注）
   const convoText = messages
-    .slice(1, dropEnd)
+    .slice(1, boundary)
     .map((m) => {
       if (m.role === 'tool') {
         return `工具结果(${m.tool_call_id ?? ''}): ${clampText(String(m.content ?? ''), TOOL_OUTPUT_CAP)}`;
@@ -91,7 +96,7 @@ export async function compactConversation({ messages, budget, count, provider, e
   if (!summary) return null;
 
   // 组装：system + 摘要(user) + 保留段（清洗保留段头部因裁剪而孤立的 tool 消息）
-  const kept = cleanToolPairing(messages.slice(dropEnd));
+  const kept = cleanToolPairing(messages.slice(boundary));
   const next = [
     messages[0],
     {
