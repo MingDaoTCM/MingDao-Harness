@@ -93,13 +93,23 @@ mingdao schedule chain "构建" "测试" "部署"               # 链式依赖
 mingdao schedule list/remove/pause/resume               # 管理；重启自愈
 ```
 
+### 自更新（`mingdao update`）
+
+```bash
+mingdao update          # 一键升级：拉取最新 main → 自动跑冒烟测试 → 失败自动回滚
+mingdao update --check  # 只对比版本，不改动工作区
+mingdao rollback        # 回滚到上次 update 之前的提交（升级验证失败也可一键退回）
+```
+
+git 安装形态（仓库 + 全局链接）开箱即用；npm 形态按提示用 `npm update -g` 升级。
+
 ### WebUI（`mingdao web`）
 
 - 流式对话：Markdown 渲染、代码高亮、编辑 diff、工具卡片、思考实况、实时滚动
 - **上传入口**：输入框 📎 上传图片（视觉模型，如 `deepseek-v4-flash-vision-exp`）与文本文件
 - 多任务并行（上限 8）、权限确认弹窗、会话管理、PWA 安装到桌面
 - ⚙ 设置面板全项管理：模型与 API Key（动态模型列表）、权限/沙箱、调度、工作空间、记忆、缓存仪表盘、技能库、云同步
-- 远程/手机访问：配置 `"web": {"host": "0.0.0.0"}`（注意：无认证层，仅建议可信网络内使用）
+- 远程/手机访问：配置 `"web": {"host": "0.0.0.0"}` 后自动启用访问令牌（打印 `?token=` 链接；`mingdao web --auth-token <令牌>` 可固定）；默认 `127.0.0.1` 本机免令牌
 
 ### IDE 集成
 

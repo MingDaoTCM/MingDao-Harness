@@ -29,7 +29,7 @@ function loadFile(p, cap) {
   }
 }
 
-export function buildSystemPrompt({ modelName, workingDir }) {
+export function buildSystemPrompt({ modelName, workingDir, withJournal = false }) {
   let prompt = `${BASE}
 
 当前工作目录：${workingDir}
@@ -40,8 +40,10 @@ export function buildSystemPrompt({ modelName, workingDir }) {
   const memory = loadFile(path.join(mingdaoHome(), 'AGENTS.md'), 8000);
   if (memory) prompt += `\n\n<user_memory>\n${memory}\n</user_memory>`;
 
-  // 最近会话日志（跨会话连续性：记得上次做到哪；每条会话结束写入）
-  prompt += recentJournalBlock(mingdaoHome());
+  // 最近会话日志（跨会话连续性）：默认不注入——新会话应当全新开始，避免串到
+  // 上一次会话的上下文（曾出现「新会话却接着给上个会话的游戏升级」的混淆）。
+  // 仅当用户显式开启时注入（WebUI 勾选「带上文」/ CLI --journal）。
+  if (withJournal) prompt += recentJournalBlock(mingdaoHome());
 
   // 技能清单（渐进披露：仅名称+描述，按需加载全文）
   prompt += skillsRegistryBlock(workingDir);

@@ -77,9 +77,12 @@ const HELP_LINES = [
   ['  mingdao autostart on|off    开机自启（登录后自动启动服务器）', null],
   ['  mingdao workspace add/list/use/path/remove 工作空间（项目目录登记与快速切换）', null],
   ['  mingdao --continue         继续最近一次会话', null],
+  ['  mingdao --journal          新会话带上最近会话日志（默认不注入，新会话全新开始）', null],
   ['  mingdao --resume           从会话列表选择恢复', null],
   ['  mingdao --model <模型名>   指定模型，例如 deepseek-v4-pro', null],
   ['  mingdao init               初始化配置向导', null],
+  ['  mingdao update [--check]   一键自更新（git 安装形态；--check 只对比版本）', null],
+  ['  mingdao rollback           回滚到上次 update 之前的提交', null],
   ['  mingdao --help / --version 帮助 / 版本', null],
   ['', null],
   ['凭证管理（API Key 独立存储，绝不写入 config.json / 仓库）', C.bold + C.yellow],
@@ -119,6 +122,7 @@ function parseArgs(argv) {
     if (a === '-h' || a === '--help') opts.help = true;
     else if (a === '-v' || a === '--version') opts.version = true;
     else if (a === '-c' || a === '--continue') opts.continueSession = true;
+    else if (a === '--journal') opts.journal = true;
     else if (a === '-r' || a === '--resume') opts.resume = true;
     else if (a === '--init' || a === 'init') opts.init = true;
     else if (a === '-m' || a === '--model') opts.model = argv[++i];
@@ -365,6 +369,25 @@ async function main() {
   }
   if (opts.version) {
     console.log('mingdao ' + pkg.version);
+    return;
+  }
+  // 最近会话日志默认不注入（新会话全新开始）；--journal 显式带上
+  const withJournal = Boolean(opts.journal);
+
+  // 自更新与回滚（git 安装形态）
+  if (opts.prompt[0] === 'update') {
+    const { updateCheck, mingdaoUpdate } = await import('./update.js');
+    const checkOnly = opts.prompt.includes('--check');
+    const r = await (checkOnly ? updateCheck() : mingdaoUpdate());
+    console.log(r.lines?.join('\n') || '');
+    process.exitCode = r.ok ? 0 : 1;
+    return;
+  }
+  if (opts.prompt[0] === 'rollback') {
+    const { mingdaoRollback } = await import('./update.js');
+    const r = mingdaoRollback();
+    console.log(r.lines?.join('\n') || '');
+    process.exitCode = r.ok ? 0 : 1;
     return;
   }
 
@@ -1079,7 +1102,7 @@ async function main() {
     const turnAgent = createAgent({ provider, permission, io: turnIo, modelName, workingDir, cfg, undoStore: sessionUndoStore, mcp: mcpFacade });
     const session = createSession(home);
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ modelName, workingDir }) },
+      { role: 'system', content: buildSystemPrompt({ modelName, workingDir, withJournal }) },
       { role: 'user', content: question },
     ];
     appendMessages(session.file, messages);
@@ -1184,7 +1207,7 @@ async function main() {
   if (!session) session = createSession(home);
   io.print(style(`会话  ${path.basename(session.file)}`, C.dim));
 
-  const systemPrompt = buildSystemPrompt({ modelName, workingDir });
+  const systemPrompt = buildSystemPrompt({ modelName, workingDir, withJournal });
   // 恢复会话时刷新 system prompt（用户记忆 / AGENTS.md / 技能清单 / 时间戳以当前为准），
   // 旧 system 消息保留在会话文件中，不影响追加历史。
   const loadedMsgs = session.messages || [];
@@ -1214,7 +1237,7 @@ async function main() {
       cfg.model = target;
       saveConfig(cfg);
       agent = createAgent({ provider, permission, io, modelName, workingDir, cfg, undoStore: sessionUndoStore, mcp: mcpFacade });
-      messages[0] = { role: 'system', content: buildSystemPrompt({ modelName, workingDir }) };
+      messages[0] = { role: 'system', content: buildSystemPrompt({ modelName, workingDir, withJournal }) };
       if (!silent) {
         const p2 = modelPreset(modelName);
         io.print(style(`✓ 已切换到 ${C.bold}${modelName}${C.reset}${p2 ? `（${p2.label}）` : ''}`, C.green));

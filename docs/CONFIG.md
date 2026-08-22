@@ -138,6 +138,17 @@
 `MINGDAO_SYNC_REGISTRATION=open|invite|closed`（默认 open）+ `MINGDAO_SYNC_INVITE_CODES=码1,码2`
 （invite 模式生效），公网自建建议至少 `invite`。
 
+## 会话日志与「带上文」（跨会话连续性）
+
+每个会话结束时写入 `~/.mingdao/journal.jsonl`（首条用户消息 + 结果摘要）。**默认不注入**新会话的
+系统提示——新会话应当全新开始，避免「新会话却接着上一次会话的工作」的上下文混淆；需要延续上次
+工作时显式开启：
+
+- WebUI：输入框下方「📌 带上文」勾选（仅本次发送生效）；
+- CLI：`mingdao --journal`（新会话或 `--continue` 均可叠加）。
+
+长期偏好仍走用户记忆（`AGENTS.md`，见上），不受此开关影响。
+
 ## 自定义模型（WebUI 添加后落盘的结构）
 
 ```json

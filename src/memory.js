@@ -1,6 +1,7 @@
 // 长记忆与自主进化（借鉴 Hermes Agent）：
 //  - 用户记忆：~/.mingdao/AGENTS.md（/memory add 手动 + 会话结束自动提取用户偏好，去重追加）
-//  - 会话日志：~/.mingdao/journal.jsonl（跨会话连续性；最近 3 条注入系统提示，让 MingDao 记得上次做到哪）
+//  - 会话日志：~/.mingdao/journal.jsonl（跨会话连续性；默认不注入系统提示——新会话全新开始，
+//    避免串到历史会话上下文；WebUI「带上文」勾选 / CLI --journal 时注入最近 3 条）
 //  - 自动记忆提取用 executor 模型（约几十 token/会话），config.autoMemory 可关（默认开）
 
 import fs from 'node:fs';

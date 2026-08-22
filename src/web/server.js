@@ -240,7 +240,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     }
     if (routeReason) send({ type: 'banner', text: `⤷ 自动路由 → ${runModel}（${routeReason}）` });
 
-    const systemPrompt = buildSystemPrompt({ modelName: runModel, workingDir });
+    const systemPrompt = buildSystemPrompt({ modelName: runModel, workingDir, withJournal: body.withJournal === true });
     let messages =
       session.messages?.length && session.messages[0]?.role === 'system'
         ? session.messages

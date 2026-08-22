@@ -546,6 +546,26 @@ let base = await startWeb(work1);
   ok('访问控制：token 认证（query/header/401）+ Host 白名单（DNS rebinding 403）');
 }
 
+// ---------- 15. 带上文开关：最近会话日志默认不注入，withJournal 显式注入 ----------
+{
+  fs.writeFileSync(
+    path.join(home, 'journal.jsonl'),
+    JSON.stringify({ at: Date.now(), workspace: null, firstUser: '上次做了游戏', outcome: '完成网页游戏', turns: 3 }) + '\n'
+  );
+  // 注意：会话结束后的自动标题请求也会打到 mock（tools 为空），需在 payloadLog 切片里找聊天请求的 system 消息
+  requestCount = 0;
+  const mark1 = payloadLog.length;
+  await chatOnce(base, '检查系统提示');
+  const sys1 = payloadLog.slice(mark1).find((pl) => String(pl.messages?.[0]?.content).includes('工作准则'));
+  assert.ok(sys1 && !String(sys1.messages[0].content).includes('recent_sessions'), '默认系统提示不应注入最近会话日志');
+  requestCount = 0;
+  const mark2 = payloadLog.length;
+  await chatOnce(base, { message: '检查系统提示', withJournal: true });
+  const sys2 = payloadLog.slice(mark2).find((pl) => String(pl.messages?.[0]?.content).includes('工作准则'));
+  assert.ok(sys2 && String(sys2.messages[0].content).includes('recent_sessions') && String(sys2.messages[0].content).includes('上次做了游戏'), 'withJournal 应注入最近会话日志');
+  ok('带上文开关：默认全新上下文 / withJournal 显式注入');
+}
+
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();

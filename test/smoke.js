@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const srcDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
@@ -1234,6 +1234,70 @@ const ctx = { cwd: tmp };
   const five = buildUserContent('x', [1, 2, 3, 4, 5].map((i) => ({ type: 'text', name: i + '.txt', content: 'c' + i })), false);
   assert.ok(!five.content.includes('c5'), '第 5 个附件应被忽略');
   ok('attachments：文本内联 / 视觉门控 / 格式与大小校验 / 附件上限');
+}
+
+// ---------- 30. 系统提示：最近会话日志默认不注入（新会话防串上下文） ----------
+{
+  const jhome = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-journal-'));
+  fs.writeFileSync(
+    path.join(jhome, 'journal.jsonl'),
+    JSON.stringify({ at: Date.now(), workspace: null, firstUser: '制作愤怒的小鸟', outcome: '完成网页游戏', turns: 5 }) + '\n'
+  );
+  process.env.MINGDAO_HOME = jhome;
+  const { buildSystemPrompt } = await import(path.join(srcDir, 'prompts.js'));
+  const fresh = buildSystemPrompt({ modelName: 'deepseek-v4-flash', workingDir: tmp });
+  assert.ok(!fresh.includes('recent_sessions') && !fresh.includes('愤怒的小鸟'), '新会话默认不应注入最近会话日志');
+  const withJ = buildSystemPrompt({ modelName: 'deepseek-v4-flash', workingDir: tmp, withJournal: true });
+  assert.ok(withJ.includes('recent_sessions') && withJ.includes('愤怒的小鸟'), 'withJournal 开启时应注入最近会话日志');
+  delete process.env.MINGDAO_HOME;
+  fs.rmSync(jhome, { recursive: true, force: true });
+  ok('prompts：最近会话日志默认不注入（--journal / WebUI「带上文」显式开启）');
+}
+
+// ---------- 31. 自更新模块（临时 git 仓库演练，P3-9 落实） ----------
+{
+  const { updateCheck, mingdaoUpdate, mingdaoRollback } = await import(path.join(srcDir, 'update.js'));
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-upd-'));
+  const remoteDir = path.join(base, 'origin');
+  const localDir = path.join(base, 'local');
+  const g = (cwd, ...args) => spawnSync('git', args, { cwd, encoding: 'utf8' });
+  const rpkg = (v) => JSON.stringify({ name: 'mingdao-harness', version: v });
+  fs.mkdirSync(remoteDir, { recursive: true });
+  fs.mkdirSync(path.join(remoteDir, 'test'), { recursive: true });
+  fs.writeFileSync(path.join(remoteDir, 'package.json'), rpkg('0.1.40'));
+  fs.writeFileSync(path.join(remoteDir, 'test', 'smoke.js'), "console.log('全部通过：1 组断言 ✓');\n");
+  g(remoteDir, 'init', '-q', '-b', 'main');
+  g(remoteDir, '-c', 'user.email=t@mingdao.local', '-c', 'user.name=t', 'add', '.');
+  g(remoteDir, '-c', 'user.email=t@mingdao.local', '-c', 'user.name=t', 'commit', '-q', '-m', 'v0.1.40');
+  g(base, 'clone', '-q', remoteDir, 'local');
+  process.env.MINGDAO_HOME = path.join(base, 'home');
+  fs.mkdirSync(process.env.MINGDAO_HOME, { recursive: true });
+  // 无新版本 → 已最新
+  const c1 = await updateCheck({ repo: localDir });
+  assert.equal(c1.ok, true, c1.lines.join('\n'));
+  assert.equal(c1.behind, false, '无新版本时 behind 应为 false');
+  // 脏工作区 → 拒绝升级（保护未提交改动）
+  fs.appendFileSync(path.join(localDir, 'package.json'), '\n// dirty');
+  const dirty = await mingdaoUpdate({ repo: localDir });
+  assert.equal(dirty.ok, false);
+  assert.ok(dirty.lines.join('').includes('未提交改动'), '脏工作区应拒绝升级');
+  fs.writeFileSync(path.join(localDir, 'package.json'), rpkg('0.1.40'));
+  // 远端发 0.1.41 → check 发现 → update 成功（含冒烟）→ rollback 回到 0.1.40
+  fs.writeFileSync(path.join(remoteDir, 'package.json'), rpkg('0.1.41'));
+  g(remoteDir, '-c', 'user.email=t@mingdao.local', '-c', 'user.name=t', 'commit', '-qam', 'v0.1.41');
+  const c2 = await updateCheck({ repo: localDir });
+  assert.equal(c2.behind, true, '远端有新版本时 behind 应为 true');
+  const up = await mingdaoUpdate({ repo: localDir });
+  assert.equal(up.ok, true, up.lines.join('\n'));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(localDir, 'package.json'), 'utf8')).version, '0.1.41', '升级后版本应为 0.1.41');
+  const rb = mingdaoRollback({ repo: localDir });
+  assert.equal(rb.ok, true, rb.lines.join('\n'));
+  assert.equal(JSON.parse(fs.readFileSync(path.join(localDir, 'package.json'), 'utf8')).version, '0.1.40', '回滚后版本应为 0.1.40');
+  const rb2 = mingdaoRollback({ repo: localDir });
+  assert.equal(rb2.ok, false, '回滚记录已消耗，再回滚应失败');
+  delete process.env.MINGDAO_HOME;
+  fs.rmSync(base, { recursive: true, force: true });
+  ok('update：版本对比 / 脏工作区拒绝 / 升级+冒烟 / 回滚');
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

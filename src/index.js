@@ -27,6 +27,7 @@ export {
 } from './credentials.js';
 export { estimateCost, estimateCostLabel, isPeakHour, PRICE_DATA_AS_OF } from './pricing.js';
 export { countTokens, heuristicTokens, makeTokenCounter, isTokenizable } from './tokenizer.js';
+export { updateCheck, mingdaoUpdate, mingdaoRollback, findRepoRoot } from './update.js';
 export { McpClient, startMcpServers } from './mcp.js';
 export {
   createSession,

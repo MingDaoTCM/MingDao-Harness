@@ -153,7 +153,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送，Shift+Enter 换行）"></textarea>
     <button id="sendBtn" class="primary">发送</button>
   </div>
-  <div id="hint">工具执行与权限确认会实时展示；生成中可点「中断」停止。</div>
+  <div id="hint">工具执行与权限确认会实时展示；生成中可点「中断」停止。<label style="margin-left:12px;cursor:pointer;user-select:none"><input type="checkbox" id="journalChk" style="vertical-align:-2px;margin:0 4px 0 0">📌 带上文（最近会话日志，默认关＝新会话全新开始）</label></div>
 </footer>
 <div id="modalRoot"></div>
 <div id="sessModal" class="modal-mask" style="display:none">
@@ -483,6 +483,8 @@ async function send(){
   const text=input.value.trim(); if(!text && !attachments.length) return;
   input.value=''; input.style.height='44px';
   const payload={message:text,file:currentSession};
+  // 带上文开关：勾选后系统提示注入最近会话日志（默认不注入——新会话全新开始，避免串到历史会话上下文）
+  if($('#journalChk').checked) payload.withJournal=true;
   if(attachments.length) payload.attachments=attachments;
   const sentAttachments=attachments;
   attachments=[]; renderAttachments();
