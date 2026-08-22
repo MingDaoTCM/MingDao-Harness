@@ -44,12 +44,14 @@ API Key 从 [DeepSeek 开放平台](https://platform.deepseek.com) 获取。密�
 # Gitee（国内推荐）
 curl -fsSL https://gitee.com/MingDaoTCM/MingDao-harness/raw/main/install.sh | bash -s -- gitee
 
-# GitCode（国内推荐）
-curl -fsSL https://gitcode.com/MingDaoTCM/MingDao-Harness/raw/main/install.sh | bash -s -- gitcode
+# GitCode（国内推荐；其 raw 接口对 curl 有反爬拦截，改用克隆式）
+git clone https://gitcode.com/MingDaoTCM/MingDao-Harness.git MingDao-Harness && cd MingDao-Harness && bash install.sh
 
 # GitHub（海外）
 curl -fsSL https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main/install.sh | bash -s -- github
 ```
+
+> 若某平台的 raw 脚本下载被反爬拦截，把 `| bash` 换成克隆式安装即可（见下方「手动克隆」）。
 
 或手动克隆（建议在本平台克隆，速度最快；目录名统一为 `MingDao-Harness`）：
 
