@@ -8,8 +8,9 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { mingdaoHome, ensureHome } from './config.js';
-import { userSkillsDir, validateSkillDir, installedUserSkillNames } from './skill-lib.js';
+import { userSkillsDir, validateSkillDir, installedUserSkillNames, skillDirHash, writeSourceMeta } from './skill-lib.js';
 
 const DEFAULT_HOSTS = [
   'https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main',
@@ -115,6 +116,7 @@ export async function installFromRegistry(name) {
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-reg-'));
   try {
+    let verified = false; // 是否至少一个文件做了 sha256 校验（索引声明了哈希才校验）
     for (const f of entry.files) {
       const rel = String(f.path || '').replace(/\\/g, '/');
       if (!rel || rel.includes('..') || rel.startsWith('/')) {
@@ -129,6 +131,14 @@ export async function installFromRegistry(name) {
         return { error: `下载 ${name}/${rel} 失败：${e.message}` };
       }
       if (text.length > MAX_FILE) return { error: `${name}/${rel} 超过 512KB 上限` };
+      // 完整性校验（P3-3）：索引声明 sha256 时逐文件比对，不符即拒绝安装（供应链防护）
+      if (f.sha256 && typeof f.sha256 === 'string') {
+        const got = crypto.createHash('sha256').update(text).digest('hex');
+        if (got !== f.sha256.toLowerCase()) {
+          return { error: `完整性校验失败：${name}/${rel} 与 registry 声明的 sha256 不符（文件可能被篡改或索引过期），已拒绝安装` };
+        }
+        verified = true;
+      }
       fs.writeFileSync(dest, text);
     }
     const check = validateSkillDir(tmp, name);
@@ -140,11 +150,15 @@ export async function installFromRegistry(name) {
       fs.mkdirSync(target, { recursive: true });
       fs.cpSync(tmp, target, { recursive: true });
     }
-    fs.writeFileSync(
-      path.join(target, '.mingdao-source.json'),
-      JSON.stringify({ source: 'registry', installedAt: Date.now(), host: r.host, name }, null, 2) + '\n'
-    );
-    return { name, dir: target, host: r.host };
+    writeSourceMeta(target, {
+      source: 'registry',
+      installedAt: Date.now(),
+      host: r.host,
+      name,
+      sha256: skillDirHash(target), // 安装即记录指纹：加载时校验防本地篡改
+      verified: Boolean(verified),
+    });
+    return { name, dir: target, host: r.host, verified: Boolean(verified) };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

@@ -27,7 +27,21 @@
 
 可选字段：`temperature`、`maxOutputTokens`、`includeUsage`（流式请求 usage 统计，个别网关不支持
 `stream_options` 时设 `false`）、`autoTitle`（自动生成会话标题，默认开）、`notify`（任务桌面通知，默认开）、
-`autoCompact`（上下文自动压缩，默认开，见下）。
+`autoCompact`（上下文自动压缩，默认开，见下）、`audit`（工具调用审计，默认开，见下）。
+
+## 工具调用审计（P3-5）
+
+每个工具调用（含被拒/被钩子阻止/参数解析失败）自动落 `~/.mingdao/audit.jsonl`（600 权限）：
+时间、会话、模型、工具名、参数（`sk-` 系 Key 自动脱敏）、执行结果/退出码/超时/耗时/输出大小、
+拒绝原因。查看：`mingdao audit [数量]`（默认 20 条）或会话内 `/audit`；`"audit": false` 关闭。
+超过 20000 行自动保留最近 10000 行。
+
+## 技能完整性（P3-3）
+
+registry 技能安装时逐文件校验索引声明的 `sha256`（不符即拒绝安装）；安装后在
+`.mingdao-source.json` 记录目录指纹，加载时校验——被本地篡改的技能**拒绝加载**并在
+`mingdao skill` 列表 / WebUI 技能面板中警示。确认是自己改的：`mingdao skill trust <名称>`
+重新记录指纹；否则卸载重装。
 
 ## 上下文自动压缩（auto-compaction）
 

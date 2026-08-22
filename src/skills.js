@@ -11,6 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mingdaoHome } from './config.js';
+import { skillDirHash, readSourceMeta } from './skill-lib.js';
 
 const BUILTIN_DIR = fileURLToPath(new URL('../skills', import.meta.url));
 
@@ -37,6 +38,43 @@ function readDescription(skillMd) {
   }
 }
 
+// 完整性校验（P3-3）：带指纹（sha256）来源记录的技能，内容与安装时不一致 → 拒绝加载
+function isTampered(dir) {
+  const meta = readSourceMeta(dir);
+  if (!meta?.sha256) return false; // 旧版安装（无指纹）不拦截
+  try {
+    return skillDirHash(dir) !== meta.sha256;
+  } catch {
+    return true;
+  }
+}
+
+// 被篡改的用户级技能清单（CLI/WebUI 提示用；这些技能已被 listSkills 排除加载）
+export function tamperedSkillNames(workingDir) {
+  const dir = path.join(mingdaoHome(), 'skills');
+  const out = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const skillDir = path.join(dir, e.name);
+    try {
+      if (!fs.statSync(path.join(skillDir, 'SKILL.md')).isFile()) continue;
+    } catch {
+      continue;
+    }
+    if (isTampered(skillDir)) {
+      const meta = readSourceMeta(skillDir);
+      out.push({ name: e.name, source: meta?.source || 'user', sha256: meta?.sha256?.slice(0, 16) || null });
+    }
+  }
+  return out;
+}
+
 export function listSkills(workingDir) {
   const seen = new Set();
   const out = [];
@@ -56,6 +94,8 @@ export function listSkills(workingDir) {
         continue;
       }
       seen.add(e.name); // 优先级：user > project > builtin，先出现的生效
+      // P3-3：用户级技能指纹不符 → 拒绝加载（绝不静默执行被篡改的提示词）
+      if (source === 'user' && isTampered(path.join(dir, e.name))) continue;
       out.push({
         name: e.name,
         dir: path.join(dir, e.name),

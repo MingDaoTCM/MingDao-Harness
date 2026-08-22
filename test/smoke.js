@@ -17,6 +17,10 @@ const { dispatch } = await import(path.join(srcDir, 'tools/index.js'));
 const { saveConfig, loadConfig } = await import(path.join(srcDir, 'config.js'));
 const { createIO } = await import(path.join(srcDir, 'ui.js'));
 
+// 全局隔离：整个测试期间审计/记忆/技能等写入临时 home，绝不污染真实 ~/.mingdao
+const smokeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-smoke-home-'));
+process.env.MINGDAO_HOME = smokeHome;
+
 let passed = 0;
 function ok(name) {
   passed += 1;
@@ -420,7 +424,7 @@ const ctx = { cwd: tmp };
 
   removeStoredKey('deepseek');
   assert.equal(getStoredKey('deepseek'), null);
-  delete process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = smokeHome;
   ok('credentials：独立存储 / 600 权限 / 脱敏 / 三级解析优先级');
 }
 
@@ -467,7 +471,7 @@ const ctx = { cwd: tmp };
   const pdf2 = listSkills(proj).find((s) => s.name === 'pdf');
   assert.equal(pdf2.source, 'user', '用户级技能应覆盖项目级');
   assert.equal(pdf2.description, '用户级覆盖');
-  delete process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(proj, { recursive: true, force: true });
   ok('skills：项目/内置发现、frontmatter 描述、用户级覆盖优先级');
 }
@@ -732,7 +736,7 @@ const ctx = { cwd: tmp };
   assert.ok(currentWorkspace(projA)?.name === '项目A', '当前目录应识别工作空间');
   assert.equal(removeWorkspace('项目A'), true);
   assert.equal(workspacePath('项目A'), null);
-  delete process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(homeW, { recursive: true, force: true });
   fs.rmSync(projA, { recursive: true, force: true });
   ok('workspace：登记 / 校验 / 列表 / 识别当前 / 移除');
@@ -788,7 +792,7 @@ const ctx = { cwd: tmp };
   appendJournal(homeM, { at: Date.now(), workspace: 'test', firstUser: '测试会话二', outcome: '完成', turns: 3 });
   assert.equal(recentJournal(homeM, 3).length, 2);
   assert.ok(recentJournalBlock(homeM).includes('测试会话二'));
-  delete process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(homeM, { recursive: true, force: true });
   ok('memory：提取 / 追加 / 无新增 / 日志 / 最近块');
 }
@@ -908,7 +912,7 @@ const ctx = { cwd: tmp };
 
   // 清理
   for (const n of ['my-custom', 'remote-skill', 'regex']) uninstallSkill(n);
-  delete process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(homeSk, { recursive: true, force: true });
   ok('skill-lib：内置库 / 搜索 / 库名·目录·URL 安装 / 卸载 / 元数据更新');
 }
@@ -963,7 +967,7 @@ const ctx = { cwd: tmp };
   assert.ok(miss.error && miss.error.includes('没有'), '远端未知技能应报错');
   srv.close();
   delete process.env.MINGDAO_REGISTRY_URL;
-  delete process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(homeRg, { recursive: true, force: true });
   fs.rmSync(regRoot, { recursive: true, force: true });
   ok('skill-registry：远端搜索 / 安装 / 缓存与强制刷新 / 未知技能');
@@ -1022,7 +1026,7 @@ const ctx = { cwd: tmp };
   assert.ok(!syncStatus().loggedIn, '退出后应未登录');
 
   srv.close();
-  delete process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(homeA, { recursive: true, force: true });
   fs.rmSync(homeB, { recursive: true, force: true });
   fs.rmSync(dataDir, { recursive: true, force: true });
@@ -1150,7 +1154,7 @@ const ctx = { cwd: tmp };
   assert.ok(listSyncConflicts().length === 0, '解决后应无冲突');
 
   srv.close();
-  delete process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(homeA, { recursive: true, force: true });
   fs.rmSync(homeB, { recursive: true, force: true });
   fs.rmSync(dataDir, { recursive: true, force: true });
@@ -1209,7 +1213,7 @@ const ctx = { cwd: tmp };
   const list3 = await availableModels(cfg, 'deepseek-v4-flash');
   assert.ok(list3.some((m) => m.name === 'gpt-5'), '拉取失败应回退预设名单');
   srv.close();
-  delete process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(homeM, { recursive: true, force: true });
   ok('model-discovery：只列有 Key 服务商 / 线上名单优先 / 缓存与强制刷新 / 回退预设');
 }
@@ -1249,7 +1253,7 @@ const ctx = { cwd: tmp };
   assert.ok(!fresh.includes('recent_sessions') && !fresh.includes('愤怒的小鸟'), '新会话默认不应注入最近会话日志');
   const withJ = buildSystemPrompt({ modelName: 'deepseek-v4-flash', workingDir: tmp, withJournal: true });
   assert.ok(withJ.includes('recent_sessions') && withJ.includes('愤怒的小鸟'), 'withJournal 开启时应注入最近会话日志');
-  delete process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(jhome, { recursive: true, force: true });
   ok('prompts：最近会话日志默认不注入（--journal / WebUI「带上文」显式开启）');
 }
@@ -1295,7 +1299,7 @@ const ctx = { cwd: tmp };
   assert.equal(JSON.parse(fs.readFileSync(path.join(localDir, 'package.json'), 'utf8')).version, '0.1.40', '回滚后版本应为 0.1.40');
   const rb2 = mingdaoRollback({ repo: localDir });
   assert.equal(rb2.ok, false, '回滚记录已消耗，再回滚应失败');
-  delete process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(base, { recursive: true, force: true });
   ok('update：版本对比 / 脏工作区拒绝 / 升级+冒烟 / 回滚');
 }
@@ -1388,5 +1392,127 @@ const ctx = { cwd: tmp };
   ok('agent：自动压缩触发 / 历史替换 / onCompact 回调 / 提示输出');
 }
 
+// ---------- 34. 技能完整性（P3-3）：registry sha256 校验 / 本地篡改拒绝加载 / trust ----------
+{
+  const homeS = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-int-'));
+  const http = await import('node:http');
+  const cryptoMod = await import('node:crypto');
+  const skillMd = '---\nname: demo-int\ndescription: 完整性测试技能\n---\n\n# demo-int\n\n测试内容 A。\n';
+  const hashOf = (t) => cryptoMod.createHash('sha256').update(t).digest('hex');
+  let currentIndex = { version: 1, skills: [{ name: 'demo-int', description: '完整性测试技能', files: [{ path: 'SKILL.md', size: skillMd.length, sha256: hashOf(skillMd) }] }] };
+  let currentSkill = skillMd;
+  const regServer = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    if (u.pathname.endsWith('/index.json')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(currentIndex));
+    } else if (u.pathname.endsWith('/SKILL.md')) {
+      res.writeHead(200, { 'Content-Type': 'text/markdown' });
+      res.end(currentSkill);
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  await new Promise((r) => regServer.listen(0, '127.0.0.1', r));
+  process.env.MINGDAO_REGISTRY_URL = `http://127.0.0.1:${regServer.address().port}/index.json`;
+  process.env.MINGDAO_HOME = homeS;
+  const { installFromRegistry } = await import(path.join(srcDir, 'skill-registry.js'));
+  const { listSkills, tamperedSkillNames } = await import(path.join(srcDir, 'skills.js'));
+  const { trustSkill, skillDirHash } = await import(path.join(srcDir, 'skill-lib.js'));
+  // 1) 索引哈希正确 → 安装成功且 verified
+  const ok1 = await installFromRegistry('demo-int');
+  assert.ok(!ok1.error && ok1.verified === true, '正确 sha256 应安装成功且 verified');
+  assert.ok(listSkills(process.cwd()).some((s) => s.name === 'demo-int'), '安装后应可见');
+  // 2) 篡改本地文件 → 拒绝加载 + 篡改清单可见
+  fs.appendFileSync(path.join(homeS, 'skills', 'demo-int', 'SKILL.md'), '（被篡改）\n');
+  assert.ok(!listSkills(process.cwd()).some((s) => s.name === 'demo-int'), '被篡改的技能应被排除加载');
+  assert.ok(tamperedSkillNames(process.cwd()).some((t) => t.name === 'demo-int'), '篡改清单应包含该技能');
+  // 3) trust → 重新可见（显式接受当前内容）
+  const tr = trustSkill('demo-int');
+  assert.equal(tr.ok, true, tr.error);
+  assert.ok(listSkills(process.cwd()).some((s) => s.name === 'demo-int'), 'trust 后应重新可见');
+  // 4) 索引哈希错误 → 拒绝安装（供应链防护）；先清缓存确保拿到更新后的索引
+  currentIndex = { version: 1, skills: [{ name: 'demo-bad', description: 'x', files: [{ path: 'SKILL.md', size: skillMd.length, sha256: hashOf('完全不同') }] }] };
+  fs.rmSync(path.join(homeS, 'skill-registry-cache.json'), { force: true });
+  const bad = await installFromRegistry('demo-bad');
+  assert.ok(bad.error && bad.error.includes('完整性校验失败'), '哈希不符应拒绝安装');
+  // 5) 目录哈希稳定（排除元数据文件）
+  assert.equal(skillDirHash(path.join(homeS, 'skills', 'demo-int')), skillDirHash(path.join(homeS, 'skills', 'demo-int')), '哈希应稳定');
+  regServer.close();
+  delete process.env.MINGDAO_REGISTRY_URL;
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeS, { recursive: true, force: true });
+  ok('skill 完整性：registry sha256 校验 / 篡改拒绝加载 / trust / 哈希稳定');
+}
+
+// ---------- 35. 工具调用审计日志（P3-5） ----------
+{
+  const homeA = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-audit-'));
+  process.env.MINGDAO_HOME = homeA;
+  const { listAudit, auditFile, redactSecrets } = await import(path.join(srcDir, 'audit.js'));
+  let turn = 0;
+  const providerA = {
+    async chat() {
+      turn += 1;
+      if (turn === 1) {
+        return {
+          text: '',
+          toolCalls: [
+            { id: 'a1', type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: 'audit-test.txt', content: 'A' }) } },
+            { id: 'a2', type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: 'echo hello' }) } },
+          ],
+          usage: {},
+          finish: 'tool_calls',
+        };
+      }
+      return { text: '完成', toolCalls: null, usage: {}, finish: 'stop' };
+    },
+  };
+  const permissionA = {
+    mode: 'auto',
+    async check(name) {
+      return name !== 'bash'; // write 放行，bash 拒绝 → 审计应各记一条
+    },
+  };
+  const agentA = createAgent({
+    provider: providerA,
+    permission: permissionA,
+    io: createIO({ quiet: true }),
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmp,
+    cfg: { permission: 'auto' },
+    sessionRef: { name: 'audit-smoke.jsonl' },
+  });
+  await agentA.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: '写文件并执行命令' }]);
+  assert.ok(fs.existsSync(auditFile()), '审计文件应已创建');
+  const rows = listAudit(50);
+  const writeRow = rows.find((r) => r.tool === 'write' && !r.denied);
+  assert.ok(writeRow && writeRow.ok === true && writeRow.durationMs >= 0, 'write 执行应记录且 ok');
+  assert.equal(writeRow.session, 'audit-smoke.jsonl', '审计应归因到会话');
+  const bashRow = rows.find((r) => r.tool === 'bash' && r.denied);
+  assert.ok(bashRow && bashRow.reason === '未授权' && bashRow.args.includes('echo hello'), 'bash 拒绝应记录原因与参数');
+  // 脱敏：sk- 系 Key 掩码
+  assert.ok(!redactSecrets('curl -H "Authorization: Bearer sk-abcdef1234567890"').includes('sk-abcdef'), 'sk- 密钥应被掩码');
+  assert.ok(redactSecrets('sk-abcdef1234567890').includes('sk-***'), '掩码后应保留 sk-*** 标记');
+  // cfg.audit=false 关闭
+  const before = rows.length;
+  const agentOff = createAgent({
+    provider: { async chat() { return { text: '无工具', toolCalls: null, usage: {}, finish: 'stop' }; } },
+    permission: { mode: 'auto', async check() { return true; } },
+    io: createIO({ quiet: true }),
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmp,
+    cfg: { permission: 'auto', audit: false },
+  });
+  await agentOff.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: 'x' }]);
+  assert.equal(listAudit(50).length, before, 'audit:false 时不应新增记录');
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeA, { recursive: true, force: true });
+  ok('audit：执行/拒绝记录 / 会话归因 / 参数与原因 / sk- 脱敏 / audit:false 关闭');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
+delete process.env.MINGDAO_HOME;
+fs.rmSync(smokeHome, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);

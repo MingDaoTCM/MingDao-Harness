@@ -12,11 +12,63 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mingdaoHome, ensureHome } from './config.js';
 
 const LIB_DIR = fileURLToPath(new URL('../skills-lib', import.meta.url));
+
+// ---------- 完整性（P3-3）：技能目录联合哈希 ----------
+// 对目录内全部文件（排除 .mingdao-source.json 自身）按相对路径排序，
+// 逐文件 sha256 后拼成 "rel:hash\n" 再取一次 sha256，作为目录内容指纹。
+export function skillDirHash(dir) {
+  const out = [];
+  const walk = (d, base) => {
+    let entries;
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const full = path.join(d, e.name);
+      const rel = path.join(base, e.name).split(path.sep).join('/');
+      if (rel === '.mingdao-source.json') continue;
+      if (e.isDirectory()) walk(full, rel);
+      else if (e.isFile()) out.push([rel, crypto.createHash('sha256').update(fs.readFileSync(full)).digest('hex')]);
+    }
+  };
+  walk(dir, '');
+  out.sort((a, b) => a[0].localeCompare(b[0]));
+  return crypto
+    .createHash('sha256')
+    .update(out.map(([rel, h]) => `${rel}:${h}`).join('\n'))
+    .digest('hex');
+}
+
+export function readSourceMeta(dir) {
+  try {
+    return JSON.parse(fs.readFileSync(path.join(dir, '.mingdao-source.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+export function writeSourceMeta(dir, meta) {
+  fs.writeFileSync(path.join(dir, '.mingdao-source.json'), JSON.stringify(meta, null, 2) + '\n', { mode: 0o600 });
+}
+
+// 显式信任当前内容（用户改过 registry/library 安装的技能后重新记录指纹）
+export function trustSkill(name) {
+  const target = path.join(userSkillsDir(), name);
+  const meta = readSourceMeta(target);
+  if (!meta) return { error: `技能 ${name} 没有来源记录（无需 trust）` };
+  meta.sha256 = skillDirHash(target);
+  meta.trustedAt = Date.now();
+  writeSourceMeta(target, meta);
+  return { ok: true, name, sha256: meta.sha256.slice(0, 16) };
+}
 
 export function skillLibDir() {
   return LIB_DIR;
@@ -130,10 +182,9 @@ function copySkillIntoUser(dir, name, source, extra) {
   fs.rmSync(target, { recursive: true, force: true });
   fs.mkdirSync(target, { recursive: true });
   fs.cpSync(dir, target, { recursive: true });
-  fs.writeFileSync(
-    path.join(target, '.mingdao-source.json'),
-    JSON.stringify({ source, installedAt: Date.now(), ...(extra || {}) }, null, 2) + '\n'
-  );
+  // 安装即记录内容指纹（P3-3）：加载时校验，被篡改则拒绝加载
+  const meta = { source, installedAt: Date.now(), sha256: skillDirHash(target), ...(extra || {}) };
+  fs.writeFileSync(path.join(target, '.mingdao-source.json'), JSON.stringify(meta, null, 2) + '\n');
   return { name, dir: target };
 }
 

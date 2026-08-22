@@ -40,8 +40,8 @@ import {
 import { createAgent } from './agent.js';
 import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
-import { listSkills } from './skills.js';
-import { libraryList, searchLibrary, installSkill, uninstallSkill, reinstallSkill } from './skill-lib.js';
+import { listSkills, tamperedSkillNames } from './skills.js';
+import { libraryList, searchLibrary, installSkill, uninstallSkill, reinstallSkill, trustSkill } from './skill-lib.js';
 import { syncLogin, syncLogout, syncPush, syncPull, syncStatus, syncRemoteList, maybeAutoSync, syncChangePassword, syncShareCreate, syncShareList, syncShareAccept, syncShareRevoke, listSyncConflicts, resolveSyncConflict } from './sync.js';
 import { runWebServer } from './web/server.js';
 import { routeTask, routingConfig } from './routing.js';
@@ -84,6 +84,7 @@ const HELP_LINES = [
   ['  mingdao init               初始化配置向导', null],
   ['  mingdao update [--check]   一键自更新（git 安装形态；--check 只对比版本）', null],
   ['  mingdao rollback           回滚到上次 update 之前的提交', null],
+  ['  mingdao audit [数量]       查看工具调用审计日志（默认最近 20 条）', null],
   ['  mingdao --help / --version 帮助 / 版本', null],
   ['', null],
   ['凭证管理（API Key 独立存储，绝不写入 config.json / 仓库）', C.bold + C.yellow],
@@ -283,6 +284,7 @@ async function runWorkerTask(id, question, { permission, model }) {
       };
       startMcpServers(cfg.mcpServers, workingDir).then((m) => (mcpManager = m)).catch(() => {});
     }
+    const sessionRef = { name: null };
     const agent = createAgent({
       provider,
       permission: permissionObj,
@@ -291,12 +293,14 @@ async function runWorkerTask(id, question, { permission, model }) {
       workingDir,
       cfg,
       mcp: mcpFacade || undefined,
+      sessionRef,
       onCompact: (msgs) => {
         rewriteSession(session.file, msgs);
         persistedCount = msgs.length;
       },
     });
     const session = createSession(home);
+    sessionRef.name = path.basename(session.file);
     const messages = [
       { role: 'system', content: buildSystemPrompt({ modelName, workingDir }) },
       { role: 'user', content: question },
@@ -394,6 +398,26 @@ async function main() {
     const r = mingdaoRollback();
     console.log(r.lines?.join('\n') || '');
     process.exitCode = r.ok ? 0 : 1;
+    return;
+  }
+
+  // 审计日志查看（P3-5）：mingdao audit [数量]
+  if (opts.prompt[0] === 'audit') {
+    const { listAudit, auditFile } = await import('./audit.js');
+    const n = Number(opts.prompt[1]) || 20;
+    const rows = listAudit(n);
+    if (!rows.length) {
+      console.log(`暂无审计记录（工具调用将自动记录到 ${auditFile()}）。`);
+      return;
+    }
+    console.log(`审计日志（最近 ${rows.length} 条）：${auditFile()}`);
+    for (const r of rows) {
+      const when = new Date(r.at).toISOString().slice(0, 19).replace('T', ' ');
+      const status = r.denied ? `✖拒绝(${r.reason || ''})` : r.ok ? '✓' : '✖错误';
+      const extra = !r.denied && r.timedOut ? '（超时）' : !r.denied && r.exitCode !== null && r.exitCode !== undefined ? `（exit ${r.exitCode}）` : '';
+      const sess = r.session ? `  [会话 ${String(r.session).slice(0, 28)}]` : '';
+      console.log(`  ${when}  ${status} ${r.tool} ${(r.args || '').slice(0, 80)} ${extra}${sess}`);
+    }
     return;
   }
 
@@ -982,11 +1006,31 @@ async function main() {
       console.log(`✓ 已更新技能 ${r.name}`);
       return;
     }
+    if (sub === 'trust') {
+      if (!arg) {
+        console.log('用法：mingdao skill trust <名称>（编辑过 registry/库安装的技能后，重新记录内容指纹）');
+        process.exitCode = 1;
+        return;
+      }
+      const r = trustSkill(arg);
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return;
+      }
+      console.log(`✓ 已信任技能 ${r.name} 的当前内容（指纹 ${r.sha256}…）`);
+      return;
+    }
     const skills = listSkills(process.cwd());
     console.log(`已安装技能（${skills.length}）· 三级来源：用户级 > 项目级 > 内置`);
     for (const s of skills) {
       const label = s.source === 'user' ? '（用户级）' : s.source === 'project' ? '（项目级）' : '（内置）';
       console.log(`  ${s.name.padEnd(18)} ${s.description || ''}${label}`);
+    }
+    // P3-3：完整性校验被拦下的技能单独警示
+    const tampered = tamperedSkillNames(process.cwd());
+    for (const t of tampered) {
+      console.log(`  ⚠ ${t.name.padEnd(18)} 内容与安装时不一致，已拒绝加载——确认是你改的就执行 mingdao skill trust ${t.name}，否则 mingdao skill uninstall ${t.name} 后重装`);
     }
     const lib = libraryList();
     console.log(`\n技能库共 ${lib.length} 个可安装技能：mingdao skill search [关键词] 搜索，mingdao skill install <名称> 安装`);
@@ -1090,6 +1134,7 @@ async function main() {
       })
       .catch(() => {});
   }
+  const sessionRef = { name: null }; // 会话名在下方 REPL 初始化中回填（审计归因用）
   let agent = createAgent({
     provider,
     permission,
@@ -1099,6 +1144,7 @@ async function main() {
     cfg,
     undoStore: sessionUndoStore,
     mcp: mcpFacade,
+    sessionRef,
     // 自动压缩后重写会话文件 + 同步落盘游标（session/persisted 在下方 REPL 初始化中声明）
     onCompact: (msgs) => {
       rewriteSession(session.file, msgs);
@@ -1125,6 +1171,7 @@ async function main() {
       { role: 'user', content: question },
     ];
     let oneShotPersisted = messages.length;
+    const oneShotRef = { name: path.basename(session.file) };
     const turnAgent = createAgent({
       provider,
       permission,
@@ -1134,6 +1181,7 @@ async function main() {
       cfg,
       undoStore: sessionUndoStore,
       mcp: mcpFacade,
+      sessionRef: oneShotRef,
       onCompact: (msgs) => {
         rewriteSession(session.file, msgs);
         oneShotPersisted = msgs.length;
@@ -1239,6 +1287,7 @@ async function main() {
     if (!session) io.print('没有可继续的历史会话，已新建。');
   }
   if (!session) session = createSession(home);
+  sessionRef.name = path.basename(session.file);
   io.print(style(`会话  ${path.basename(session.file)}`, C.dim));
 
   const systemPrompt = buildSystemPrompt({ modelName, workingDir, withJournal });
@@ -1279,6 +1328,7 @@ async function main() {
         cfg,
         undoStore: sessionUndoStore,
         mcp: mcpFacade,
+        sessionRef,
         onCompact: (msgs) => {
           rewriteSession(session.file, msgs);
           persisted = msgs.length;
@@ -1477,6 +1527,20 @@ async function main() {
           io.print(style(`✓ 会话已命名为 ${path.basename(newFile)}`, C.green));
         } catch (err) {
           io.print(style('[错误] ' + (err?.message || err), C.red));
+        }
+      } else if (cmd === '/audit') {
+        const n = Number(arg) || 10;
+        const { listAudit } = await import('./audit.js');
+        const rows = listAudit(n);
+        if (!rows.length) {
+          io.print(style('暂无审计记录（工具调用会自动记录）。', C.dim));
+          continue;
+        }
+        io.print(style(`最近 ${rows.length} 条工具调用审计：`, C.bold));
+        for (const r of rows) {
+          const when = new Date(r.at).toISOString().slice(0, 19).replace('T', ' ');
+          const status = r.denied ? `✖拒绝(${r.reason || ''})` : r.ok ? '✓' : '✖错误';
+          io.print(`  ${when}  ${status}  ${r.tool}  ${String(r.args || '').slice(0, 60)}`);
         }
       } else if (cmd === '/mcp') {
         const status = mcpFacade.status();

@@ -38,7 +38,7 @@ import {
   relativeTime,
   searchSessions,
 } from '../session.js';
-import { listSkills } from '../skills.js';
+import { listSkills, tamperedSkillNames } from '../skills.js';
 import { libraryList, installSkill, uninstallSkill, installedUserSkillNames } from '../skill-lib.js';
 import { detectSandbox } from '../tools/bash.js';
 import { generateTitle, renameSessionFile, titleModel, sanitizeTitle } from '../titles.js';
@@ -290,6 +290,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         rewriteSession(session.file, msgs);
         persistedBefore = msgs.length;
       },
+      // 审计记录归入当前会话（P3-5）
+      sessionRef: { name: path.basename(session.file) },
     });
 
     res.on('close', () => {
@@ -678,7 +680,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       return json(res, 400, { error: '未知操作：rename|delete' });
     }
     if (req.method === 'GET' && p === '/api/skills') {
-      json(res, 200, { ok: true, skills: listSkills(workingDir) });
+      json(res, 200, { ok: true, skills: listSkills(workingDir), tampered: tamperedSkillNames(workingDir) });
       return;
     }
     if (req.method === 'GET' && p === '/api/tasks') {

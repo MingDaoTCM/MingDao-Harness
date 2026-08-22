@@ -9,11 +9,12 @@
 - ⚡ **真正的零依赖**：纯 Node.js ≥ 18，无任何 npm 运行时依赖、无构建步骤——装完即用，不拖 node_modules
 - 💰 **DeepSeek-V4 深度省钱**：384K 上下文预设、**缓存命中计价**（命中价仅为未命中的 1/30）+ 命中率仪表盘、峰谷计价、自动路由（pro 规划 / flash 执行）、精确 tokenizer（官方词表 BPE）
 - 🖥 **双界面 + IDE 全家桶**：产品级 TUI（流式 Markdown、代码高亮、编辑 diff、Ctrl+C 中断、Tab 补全）与 `mingdao web` 一键 WebUI（PWA 可装桌面、多任务并行、全项设置面板）；VS Code 侧边栏与 JetBrains 工具窗深度集成
-- 🧠 **36 个技能开箱即用**：14 个内置常驻 + 22 个可安装技能库（线上 registry，`mingdao skill install sql` 一键装，可自建企业内 registry）
+- 🧠 **36 个技能开箱即用**：14 个内置常驻 + 22 个可安装技能库（线上 registry 逐文件 sha256 校验防供应链篡改，`mingdao skill install sql` 一键装，可自建企业内 registry）
 - 🔌 **生态即插即用**：MCP 客户端（零依赖实现，`mcpServers` 配置即接入任意 MCP 服务器）+ Hooks 钩子 + 9 个 MCP 生态预设
 - ☁️ **云同步与多用户协作**：跨设备会话同步、分享码协作、跨设备冲突图形化三选一；服务端零依赖单文件，一台 Linux 服务器即可自建
-- 🛡 **安全默认**：权限三档（ask/auto/readonly）+ 工具级规则、bash 沙箱三档（bubblewrap）、API Key 与配置分离（绝不进仓库）、附件/正则/路径全部有界
+- 🛡 **安全默认**：权限三档（ask/auto/readonly）+ 工具级规则、bash 沙箱三档（bubblewrap）、API Key 与配置分离（绝不进仓库）、附件/正则/路径全部有界、**工具调用审计日志**（`mingdao audit` 追溯每次执行与拒绝）
 - 🖼 **多模态**：DeepSeek-V4-Flash-Vision-Exp 视觉模型内置，WebUI 直接上传图片；模型列表以官方 `/models` 线上名单为准，新模型发布自动出现
+- ♻ **长会话不丢上下文**：超预算自动压缩——早期段落由 executor 模型压成摘要注入（`/compact` 可手动），绝不静默失忆
 
 ## 快速开始（3 步）
 

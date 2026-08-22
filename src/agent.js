@@ -10,11 +10,12 @@ import { makeTokenCounter } from './tokenizer.js';
 import { createHooks } from './hooks.js';
 import { createIO, style, C } from './ui.js';
 import { subagentModel } from './routing.js';
+import { writeAudit, redactSecrets } from './audit.js';
 
 const MAX_STEPS = 24;
 const SUBAGENT_MAX_STEPS = 12;
 
-export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact }) {
+export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact, sessionRef }) {
   const preset = modelPreset(modelName) || {};
   const budget = cfg.contextBudget || preset.budgetTokens || 128000;
   const maxOutput = cfg.maxOutputTokens || preset.maxOutputTokens || 8192;
@@ -47,6 +48,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       undoStore: undo,
       maxSteps: SUBAGENT_MAX_STEPS,
       mcp,
+      sessionRef, // 子代理的审计记录归入主会话
     });
     const sys =
       `你是主智能体 MingDao 派出的子代理，独立完成一项子任务。` +
@@ -189,12 +191,25 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 预检：解析参数 → PreToolUse 钩子 → 权限检查；拒绝/失败只回填不执行（返回 null）
         async function prepTool(tc) {
           const name = tc.function?.name || '';
+          // 审计（P3-5）：参数与拒绝原因都记录（配置 audit:false 可关）
+          const auditOn = cfg.audit !== false;
+          const auditArgs = () => redactSecrets(JSON.stringify(args ?? {})).slice(0, 2000);
+          const auditEntry = (extra = {}) =>
+            writeAudit({
+              at: Date.now(),
+              session: sessionRef?.name ?? null,
+              model: modelName,
+              tool: name,
+              args: auditArgs(),
+              ...extra,
+            });
           let args = null;
           try {
             args = JSON.parse(tc.function?.arguments || '{}');
           } catch {
             // 参数 JSON 解析失败：回填错误给模型，不拿空参数去执行工具
             io.renderToolDenied(name, {}, '参数解析失败（输出超限被截断？建议分块）');
+            if (auditOn) auditEntry({ denied: true, reason: '参数解析失败' });
             messages.push({ role: 'tool', tool_call_id: tc.id, content: '工具参数 JSON 解析失败，请重新输出合法参数。' });
             return null;
           }
@@ -204,6 +219,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           const hook = await hooks.pre(name, args);
           if (hook.decision === 'block') {
             io.renderToolDenied(name, args, '被钩子阻止');
+            if (auditOn) auditEntry({ denied: true, reason: `PreToolUse 钩子阻止：${String(hook.reason || '').slice(0, 200)}` });
             messages.push({ role: 'tool', tool_call_id: tc.id, content: `工具被 PreToolUse 钩子阻止：${hook.reason}` });
             return null;
           }
@@ -221,6 +237,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           }
           if (!allowed) {
             io.renderToolDenied(name, args, '未授权');
+            if (auditOn) auditEntry({ denied: true, reason: '未授权' });
             messages.push({ role: 'tool', tool_call_id: tc.id, content: '用户拒绝了该工具的执行权限。' });
             return null;
           }
@@ -247,6 +264,30 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           io.renderTool(prep.name, prep.args, result, ms);
           if (prep.name === 'todo' && result?.todos) io.renderTodo(result.todos);
           hooks.post(prep.name, prep.args, typeof result === 'string' ? { output: result } : result).catch(() => {});
+          // 审计（P3-5）：执行结果摘要（含退出码/超时/输出大小）
+          if (cfg.audit !== false) {
+            let rObj = result;
+            if (typeof result === 'string') {
+              try {
+                rObj = JSON.parse(result);
+              } catch {
+                rObj = null;
+              }
+            }
+            writeAudit({
+              at: Date.now(),
+              session: sessionRef?.name ?? null,
+              model: modelName,
+              tool: prep.name,
+              args: redactSecrets(JSON.stringify(prep.args ?? {})).slice(0, 2000),
+              denied: false,
+              ok: rObj ? rObj.ok !== false : !String(result ?? '').includes('"ok": false'),
+              exitCode: rObj?.exitCode ?? null,
+              timedOut: Boolean(rObj?.timedOut),
+              durationMs: ms,
+              outputBytes: Buffer.byteLength(typeof result === 'string' ? result : JSON.stringify(result ?? {}), 'utf8'),
+            });
+          }
           const text = typeof result === 'string' ? result : JSON.stringify(result, null, 2);
           messages.push({ role: 'tool', tool_call_id: prep.tc.id, content: clampText(text) });
         }
