@@ -100,8 +100,9 @@ function newestRemote(repo) {
 }
 
 const NPM_HINT =
-  '✖ 未找到 git 仓库（npm 安装形态）：请用 `npm update -g mingdao-harness` 升级（npm 发布后可用），' +
-  '或从 https://gitee.com/MingDaoTCM/MingDao-harness 克隆后执行 `npm link` 重新安装。';
+  '✖ 未找到 git 仓库（npm 或源码包安装形态）：npm 安装用 `npm update -g`（npm 发布后可用）；' +
+  '源码包安装请重新运行安装脚本（install.sh）；或从任意平台仓库克隆后 `npm link`：' +
+  'https://gitee.com/MingDaoTCM/MingDao-harness · https://gitcode.com/MingDaoTCM/MingDao-Harness · https://github.com/MingDaoTCM/MingDao-Harness';
 
 export async function updateCheck({ repo } = {}) {
   const lines = [];

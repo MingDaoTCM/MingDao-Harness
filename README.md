@@ -38,16 +38,25 @@ API Key 从 [DeepSeek 开放平台](https://platform.deepseek.com) 获取。密�
 
 ### Linux / macOS
 
-一行安装（自动装 Node 并安装 `mingdao` 命令）：
+一行安装（自动装 Node 并安装 `mingdao` 命令）。**三平台内容完全一致——你在哪个平台浏览，就用哪一行**（Gitee / GitCode 国内速度快，GitHub 面向海外）：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main/install.sh | bash
+# Gitee（国内推荐）
+curl -fsSL https://gitee.com/MingDaoTCM/MingDao-harness/raw/main/install.sh | bash -s -- gitee
+
+# GitCode（国内推荐）
+curl -fsSL https://gitcode.com/MingDaoTCM/MingDao-Harness/raw/main/install.sh | bash -s -- gitcode
+
+# GitHub（海外）
+curl -fsSL https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main/install.sh | bash -s -- github
 ```
 
-或手动：
+或手动克隆（建议在本平台克隆，速度最快；目录名统一为 `MingDao-Harness`）：
 
 ```bash
-git clone https://github.com/MingDaoTCM/MingDao-Harness.git
+git clone https://gitee.com/MingDaoTCM/MingDao-harness.git MingDao-Harness     # Gitee
+git clone https://gitcode.com/MingDaoTCM/MingDao-Harness.git MingDao-Harness  # GitCode
+git clone https://github.com/MingDaoTCM/MingDao-Harness.git MingDao-Harness   # GitHub
 cd MingDao-Harness && bash install.sh
 ```
 
@@ -56,7 +65,7 @@ cd MingDao-Harness && bash install.sh
 
 ### Windows 10 / 11
 
-1. 克隆或下载本项目并解压；
+1. 在本平台克隆或下载本项目并解压（上方三条克隆地址任选其一，国内建议 Gitee / GitCode）；
 2. 双击 `install.bat`（自动经 winget 安装 Node.js，无需管理员权限）；
 3. 运行 `mingdao init` → `mingdao`。
 
@@ -65,7 +74,7 @@ cd MingDao-Harness && bash install.sh
 ### 从源码运行（开发）
 
 ```bash
-git clone https://github.com/MingDaoTCM/MingDao-Harness.git && cd MingDao-Harness
+git clone https://gitee.com/MingDaoTCM/MingDao-harness.git MingDao-Harness && cd MingDao-Harness   # 其余平台见上方「手动克隆」
 node src/cli.js        # 直接运行，无需安装
 ```
 
@@ -96,7 +105,7 @@ mingdao schedule list/remove/pause/resume               # 管理；重启自愈
 ### 自更新（`mingdao update`）
 
 ```bash
-mingdao update          # 一键升级：拉取最新 main → 自动跑冒烟测试 → 失败自动回滚
+mingdao update          # 一键升级：从 Gitee/GitCode/GitHub 三镜像取最新（哪个可达用哪个）→ 自动跑冒烟测试 → 失败自动回滚
 mingdao update --check  # 只对比版本，不改动工作区
 mingdao rollback        # 回滚到上次 update 之前的提交（升级验证失败也可一键退回）
 ```
