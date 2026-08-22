@@ -566,6 +566,25 @@ let base = await startWeb(work1);
   ok('带上文开关：默认全新上下文 / withJournal 显式注入');
 }
 
+// ---------- 16. 自动压缩端到端（P3-1）：超预算会话 → 摘要注入 + 会话文件重写 ----------
+{
+  requestCount = 0;
+  let sessFile = null;
+  const longMsg = '这是一段用于撑大上下文的中文长文本。'.repeat(600); // ≈ 1 万字 ≈ 7.5K tokens/条
+  for (let i = 0; i < 6; i++) {
+    requestCount = 0;
+    const payload = sessFile ? { message: `第${i}轮：${longMsg}`, file: sessFile } : { message: `第${i}轮：${longMsg}` };
+    const evs = await chatOnce(base, payload);
+    const done = evs.find((e) => e.type === 'done');
+    assert.ok(done, `第${i}轮应完成`);
+    sessFile = done.session;
+  }
+  const raw = fs.readFileSync(path.join(home, 'sessions', sessFile), 'utf8');
+  assert.ok(raw.includes('conversation_summary'), '压缩后会话文件应含摘要消息');
+  assert.ok(!raw.includes('第0轮：'), '最早消息应已被摘要替代（会话文件重写生效）');
+  ok('自动压缩端到端：超预算触发 / 摘要注入 / 会话文件重写');
+}
+
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();

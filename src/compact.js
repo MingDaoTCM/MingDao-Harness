@@ -1,0 +1,107 @@
+// 上下文自动压缩（P3-1，复审建议第一优先）：
+// 长会话超出预算、静默裁剪即将丢弃早期段落时，先用 executor 模型把被裁段落压成摘要，
+// 以单条 user 消息注入（替代「失忆」）；被裁段落不足最小阈值时仍走普通裁剪（省一次模型调用）。
+// 摘要失败绝不阻塞会话：任何异常回退普通裁剪。
+//
+// 触发条件：总 token 数 > 预算，且被裁段落（不含 system）≥ MIN_DROP_MESSAGES 条、≥ MIN_DROP_TOKENS tokens。
+// 注入格式：system → 摘要(user) → 保留段（保留段头部经 cleanToolPairing 清洗孤儿 tool 消息）。
+
+import { messageTokens, cleanToolPairing, clampText } from './context.js';
+
+const MIN_DROP_MESSAGES = 3; // 至少裁掉 3 条才值得压缩
+const MIN_DROP_TOKENS = 2000; // 被裁段落 token 数低于此值不值得一次模型调用
+const SUMMARY_MAX_CHARS = 1600; // 摘要上限（约几百 token，远小于被裁段落）
+const INPUT_MAX_CHARS = 30000; // 摘要输入上限（防超长工具输出撑爆摘要请求）
+const TOOL_OUTPUT_CAP = 300; // 摘要输入中每条工具结果截断长度
+
+const SUMMARY_SYSTEM =
+  '你是 MingDao 的会话压缩器。把对话记录压成紧凑中文摘要（≤500 字，要点列表）：' +
+  '保留用户目标与关键要求、已完成的步骤与结论、修改/创建的文件、未完成事项、重要约定与决策；' +
+  '省略已完成的中间过程与细节。只输出摘要本身，不要任何解释。';
+
+export async function summarizeConversation(provider, model, convoText) {
+  const res = await provider.chat({
+    model,
+    messages: [
+      { role: 'system', content: SUMMARY_SYSTEM },
+      { role: 'user', content: convoText },
+    ],
+    tools: [],
+    temperature: 0.2,
+    maxTokens: 1024,
+  });
+  const text = String(res?.text || '').trim();
+  if (!text) return { text: null, usage: res?.usage || null };
+  return { text: text.slice(0, SUMMARY_MAX_CHARS), usage: res?.usage || null };
+}
+
+export async function compactConversation({ messages, budget, count, provider, executorModel }) {
+  if (!messages.length) return null;
+  // 各消息 token 与总量；未超预算无需压缩
+  const sizes = [];
+  let total = 0;
+  for (const m of messages) {
+    const t = messageTokens(m, count);
+    sizes.push(t);
+    total += t;
+  }
+  if (total <= budget) return null;
+  // 保留边界（与 trimMessages 同语义：system 恒保留，从尾部向前装到预算）
+  let keepTokens = sizes[0] ?? 0;
+  let dropEnd = messages.length;
+  for (let i = messages.length - 1; i >= 1; i--) {
+    if (keepTokens + sizes[i] > budget) {
+      dropEnd = i + 1;
+      break;
+    }
+    keepTokens += sizes[i];
+  }
+  const droppedCount = dropEnd - 1; // 不含 system
+  if (droppedCount < MIN_DROP_MESSAGES) return null;
+  let droppedTokens = 0;
+  for (let i = 1; i < dropEnd; i++) droppedTokens += sizes[i];
+  if (droppedTokens < MIN_DROP_TOKENS) return null;
+
+  // 被裁段落 → 文本（工具结果截断；tool_calls 带名称标注）
+  const convoText = messages
+    .slice(1, dropEnd)
+    .map((m) => {
+      if (m.role === 'tool') {
+        return `工具结果(${m.tool_call_id ?? ''}): ${clampText(String(m.content ?? ''), TOOL_OUTPUT_CAP)}`;
+      }
+      const head = m.role === 'user' ? '用户' : m.role === 'assistant' ? 'MingDao' : String(m.role);
+      const calls =
+        Array.isArray(m.tool_calls) && m.tool_calls.length
+          ? ` [调用: ${m.tool_calls.map((tc) => `${tc.function?.name ?? ''}(${String(tc.function?.arguments ?? '').slice(0, 200)})`).join('; ')}]`
+          : '';
+      return `${head}: ${String(m.content ?? '')}${calls}`;
+    })
+    .join('\n')
+    .slice(0, INPUT_MAX_CHARS);
+
+  let summary = null;
+  let usage = null;
+  try {
+    const r = await summarizeConversation(provider, executorModel, convoText);
+    summary = r.text;
+    usage = r.usage;
+  } catch {
+    return null; // 摘要失败：退回普通裁剪
+  }
+  if (!summary) return null;
+
+  // 组装：system + 摘要(user) + 保留段（清洗保留段头部因裁剪而孤立的 tool 消息）
+  const kept = cleanToolPairing(messages.slice(dropEnd));
+  const next = [
+    messages[0],
+    {
+      role: 'user',
+      content:
+        '（以下是本会话早期内容的自动压缩摘要，细节已省略；如摘要与你的最新要求冲突，以最新指令为准）\n<conversation_summary>\n' +
+        summary +
+        '\n</conversation_summary>',
+    },
+    ...kept,
+  ];
+  return { messages: next, droppedCount, droppedTokens, summary, usage };
+}

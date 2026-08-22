@@ -91,7 +91,7 @@ node -v                # 需 ≥ 18.17
 
 ### 终端会话
 
-会话内命令（输入 `/help` 查看全部）：`/model <名>` 切模型 · `/mode pro|flash` 快捷切换 · `/compact` 压缩上下文 · `/plan` 先计划后执行 · `/memory add <内容>` 长期记忆 · `/skills` 技能列表 · `/sessions` 历史检索 · `/status` `/cost` `/cache` 状态与费用 · `/mcp` MCP 状态 · `/route` 自动路由开关 · `/exit` 退出。支持 Tab 补全、↑↓ 历史、Ctrl+C 中断、行尾 `\` 多行输入。
+会话内命令（输入 `/help` 查看全部）：`/model <名>` 切模型 · `/mode pro|flash` 快捷切换 · `/compact` 手动压缩上下文（超预算时另有**自动压缩**：早期段落被 executor 模型压成摘要注入，替代静默丢弃） · `/plan` 先计划后执行 · `/memory add <内容>` 长期记忆 · `/skills` 技能列表 · `/sessions` 历史检索 · `/status` `/cost` `/cache` 状态与费用 · `/mcp` MCP 状态 · `/route` 自动路由开关 · `/exit` 退出。支持 Tab 补全、↑↓ 历史、Ctrl+C 中断、行尾 `\` 多行输入。
 
 ### 后台任务与调度
 

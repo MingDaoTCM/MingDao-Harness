@@ -33,6 +33,7 @@ import {
   listSessions,
   loadSession,
   appendMessages,
+  rewriteSession,
   sessionPreview,
   relativeTime,
   searchSessions,
@@ -249,7 +250,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     messages.push({ role: 'user', content: built.content });
     // 落盘用文本版（图文数组只发给模型，会话文件保持字符串可渲染）
     appendMessages(session.file, [{ role: 'user', content: built.persistText }]);
-    const persistedBefore = messages.length;
+    let persistedBefore = messages.length;
 
     // 权限/选择类交互：发 ask 事件（带 taskId），等待 POST /api/permission 应答
     const askHandler = ({ question, hidden, options, label, confirm }) =>
@@ -284,6 +285,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       cfg,
       undoStore,
       mcp: mcpFacade,
+      // 自动压缩后重写会话文件（否则每次加载历史都会重新触发压缩），并同步落盘游标
+      onCompact: (msgs) => {
+        rewriteSession(session.file, msgs);
+        persistedBefore = msgs.length;
+      },
     });
 
     res.on('close', () => {

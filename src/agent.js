@@ -3,6 +3,7 @@
 // 附带：子代理（task 工具）、todo 清单状态、undo 备份仓、Ctrl+C 中断。
 
 import { trimMessages, clampText } from './context.js';
+import { compactConversation } from './compact.js';
 import { toolSchemas, dispatch } from './tools/index.js';
 import { modelPreset } from './models.js';
 import { makeTokenCounter } from './tokenizer.js';
@@ -13,7 +14,7 @@ import { subagentModel } from './routing.js';
 const MAX_STEPS = 24;
 const SUBAGENT_MAX_STEPS = 12;
 
-export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp }) {
+export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact }) {
   const preset = modelPreset(modelName) || {};
   const budget = cfg.contextBudget || preset.budgetTokens || 128000;
   const maxOutput = cfg.maxOutputTokens || preset.maxOutputTokens || 8192;
@@ -100,6 +101,35 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     try {
     while (steps < stepLimit) {
       steps += 1;
+      // 自动压缩（P3-1）：预算不足、静默裁剪即将丢弃早期段落时，先用 executor 模型
+      // 把被裁段落压成摘要注入，替代「失忆」；失败/不值得时回退普通裁剪。
+      if (cfg.autoCompact !== false) {
+        try {
+          const compacted = await compactConversation({
+            messages,
+            budget,
+            count,
+            provider,
+            executorModel: subagentModel(cfg, modelName),
+          });
+          if (compacted) {
+            messages.splice(0, messages.length, ...compacted.messages);
+            if (compacted.usage) {
+              usage.prompt_tokens += compacted.usage.prompt_tokens || 0;
+              usage.completion_tokens += compacted.usage.completion_tokens || 0;
+            }
+            io.print(
+              style(
+                `♻ 自动压缩上下文：${compacted.droppedCount} 条早期消息 → 摘要（回收约 ${compacted.droppedTokens} tokens）`,
+                C.dim
+              )
+            );
+            try {
+              onCompact?.(messages);
+            } catch {}
+          }
+        } catch {}
+      }
       const trimmed = trimMessages(messages, budget, count);
 
       const ac = new AbortController();

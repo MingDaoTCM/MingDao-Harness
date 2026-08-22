@@ -26,7 +26,15 @@
 | `contextBudget` | 上下文预算 tokens（模型预设默认值：flash 128k / pro 200k） |
 
 可选字段：`temperature`、`maxOutputTokens`、`includeUsage`（流式请求 usage 统计，个别网关不支持
-`stream_options` 时设 `false`）、`autoTitle`（自动生成会话标题，默认开）、`notify`（任务桌面通知，默认开）。
+`stream_options` 时设 `false`）、`autoTitle`（自动生成会话标题，默认开）、`notify`（任务桌面通知，默认开）、
+`autoCompact`（上下文自动压缩，默认开，见下）。
+
+## 上下文自动压缩（auto-compaction）
+
+长会话超出 `contextBudget`、静默裁剪即将丢弃早期段落时（被裁段落 ≥3 条且 ≥2000 tokens），
+MingDao 先用 executor 模型（路由关闭时为当前模型）把被裁段落压成 ≤500 字摘要，以单条 user
+消息注入，替代「失忆」；压缩后会话文件同步重写为压缩形态，不会每轮重复压缩。摘要失败自动
+回退普通裁剪，绝不阻塞会话。设置 `"autoCompact": false` 可关闭（回到纯静默裁剪）。
 
 ## 权限规则（工具级 allow/deny）
 

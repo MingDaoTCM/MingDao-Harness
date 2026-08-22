@@ -35,7 +35,7 @@ export function messageTokens(msg, count = approxTokens) {
 // 从尾部向前保留消息，直到预算用尽；始终保留首条 system 消息。
 // 裁剪可能切断 assistant(tool_calls) ↔ tool 的配对，清洗掉孤立消息，
 // 否则 OpenAI 兼容 API 会因 tool_call_id 找不到对应调用而报 400。
-function cleanToolPairing(kept) {
+export function cleanToolPairing(kept) {
   const callIds = new Set();
   for (const m of kept) {
     if (m.role === 'assistant' && Array.isArray(m.tool_calls)) {

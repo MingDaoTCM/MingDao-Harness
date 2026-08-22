@@ -4,6 +4,7 @@ export { createAgent } from './agent.js';
 export { createProvider, resolveProviderConfig } from './providers/index.js';
 export { toolSchemas, dispatch } from './tools/index.js';
 export { trimMessages, approxTokens, clampText, TOOL_RESULT_LIMIT } from './context.js';
+export { compactConversation, summarizeConversation } from './compact.js';
 export { createPermission } from './permissions.js';
 export { MODELS, PROVIDERS, modelPreset, providerPreset } from './models.js';
 export { createIO, style, C } from './ui.js';

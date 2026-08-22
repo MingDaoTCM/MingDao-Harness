@@ -39,6 +39,14 @@ export function appendMessages(file, messages) {
   fs.appendFileSync(file, lines);
 }
 
+// 整文件原子重写：自动压缩后把会话文件同步为压缩形态（否则每次加载历史都会重新触发压缩）
+export function rewriteSession(file, messages) {
+  const lines = messages.map((m) => JSON.stringify(m)).join('\n');
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, lines + (lines ? '\n' : ''), { mode: 0o600 });
+  fs.renameSync(tmp, file);
+}
+
 export function loadSession(file) {
   const raw = fs.readFileSync(file, 'utf8');
   const messages = [];

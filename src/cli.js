@@ -53,6 +53,7 @@ import {
   createSession,
   latestSession,
   appendMessages,
+  rewriteSession,
   loadSession,
   listSessions,
   sessionPreview,
@@ -290,6 +291,10 @@ async function runWorkerTask(id, question, { permission, model }) {
       workingDir,
       cfg,
       mcp: mcpFacade || undefined,
+      onCompact: (msgs) => {
+        rewriteSession(session.file, msgs);
+        persistedCount = msgs.length;
+      },
     });
     const session = createSession(home);
     const messages = [
@@ -297,9 +302,10 @@ async function runWorkerTask(id, question, { permission, model }) {
       { role: 'user', content: question },
     ];
     appendMessages(session.file, messages);
+    let persistedCount = messages.length;
     const t0 = Date.now();
     const res = await agent.runTurn(messages);
-    appendMessages(session.file, messages.slice(2));
+    appendMessages(session.file, messages.slice(persistedCount));
     if (cfg.autoTitle !== false && res.text) {
       try {
         const title = await generateTitle(provider, titleModel(cfg, modelName), question);
@@ -1084,7 +1090,21 @@ async function main() {
       })
       .catch(() => {});
   }
-  let agent = createAgent({ provider, permission, io, modelName, workingDir, cfg, undoStore: sessionUndoStore, mcp: mcpFacade });
+  let agent = createAgent({
+    provider,
+    permission,
+    io,
+    modelName,
+    workingDir,
+    cfg,
+    undoStore: sessionUndoStore,
+    mcp: mcpFacade,
+    // 自动压缩后重写会话文件 + 同步落盘游标（session/persisted 在下方 REPL 初始化中声明）
+    onCompact: (msgs) => {
+      rewriteSession(session.file, msgs);
+      persisted = msgs.length;
+    },
+  });
   const preset = modelPreset(modelName);
 
   // —— 单次提问模式 ——
@@ -1099,16 +1119,30 @@ async function main() {
     }
     // JSON 模式：关闭流式输出，结果以单行 JSON 输出（脚本/管道友好）
     const turnIo = jsonMode ? createIO({ quiet: true }) : io;
-    const turnAgent = createAgent({ provider, permission, io: turnIo, modelName, workingDir, cfg, undoStore: sessionUndoStore, mcp: mcpFacade });
     const session = createSession(home);
     const messages = [
       { role: 'system', content: buildSystemPrompt({ modelName, workingDir, withJournal }) },
       { role: 'user', content: question },
     ];
+    let oneShotPersisted = messages.length;
+    const turnAgent = createAgent({
+      provider,
+      permission,
+      io: turnIo,
+      modelName,
+      workingDir,
+      cfg,
+      undoStore: sessionUndoStore,
+      mcp: mcpFacade,
+      onCompact: (msgs) => {
+        rewriteSession(session.file, msgs);
+        oneShotPersisted = msgs.length;
+      },
+    });
     appendMessages(session.file, messages);
     try {
       const res = await turnAgent.runTurn(messages);
-      appendMessages(session.file, messages.slice(2));
+      appendMessages(session.file, messages.slice(oneShotPersisted));
       if (!jsonMode && cfg.autoTitle !== false && res.text) {
         const title = await generateTitle(provider, titleModel(cfg, modelName), question);
         if (title) {
@@ -1236,7 +1270,20 @@ async function main() {
       modelName = target;
       cfg.model = target;
       saveConfig(cfg);
-      agent = createAgent({ provider, permission, io, modelName, workingDir, cfg, undoStore: sessionUndoStore, mcp: mcpFacade });
+      agent = createAgent({
+        provider,
+        permission,
+        io,
+        modelName,
+        workingDir,
+        cfg,
+        undoStore: sessionUndoStore,
+        mcp: mcpFacade,
+        onCompact: (msgs) => {
+          rewriteSession(session.file, msgs);
+          persisted = msgs.length;
+        },
+      });
       messages[0] = { role: 'system', content: buildSystemPrompt({ modelName, workingDir, withJournal }) };
       if (!silent) {
         const p2 = modelPreset(modelName);

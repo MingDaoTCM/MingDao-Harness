@@ -1300,5 +1300,93 @@ const ctx = { cwd: tmp };
   ok('update：版本对比 / 脏工作区拒绝 / 升级+冒烟 / 回滚');
 }
 
+// ---------- 32. 上下文自动压缩模块（P3-1） ----------
+{
+  const { compactConversation } = await import(path.join(srcDir, 'compact.js'));
+  const { approxTokens } = await import(path.join(srcDir, 'context.js'));
+  let summaryCalls = 0;
+  const summaryProvider = {
+    async chat() {
+      summaryCalls += 1;
+      return {
+        text: '压缩摘要：用户要做一个计算器，已完成加法，未完成减法；创建了 calc.js。',
+        usage: { prompt_tokens: 100, completion_tokens: 20 },
+      };
+    },
+  };
+  const mk = (role, content, extra = {}) => ({ role, content, ...extra });
+  const longText = '这是一段用于撑大上下文的中文长文本，包含任务要求与讨论细节。'.repeat(40);
+  const msgs = [
+    mk('system', '系统提示'),
+    mk('user', longText + ' 第1轮'),
+    mk('assistant', longText + ' 第1轮回复', {
+      tool_calls: [{ id: 'c1', type: 'function', function: { name: 'write', arguments: '{"path":"calc.js"}' } }],
+    }),
+    mk('tool', '写入成功', { tool_call_id: 'c1' }),
+    ...Array.from({ length: 8 }, (_, i) => [mk('user', longText + ` 第${i + 2}轮`), mk('assistant', longText + ` 第${i + 2}轮回复`)]).flat(),
+  ];
+  const budget = 1500;
+  const r1 = await compactConversation({ messages: msgs, budget, count: approxTokens, provider: summaryProvider, executorModel: 'deepseek-v4-flash' });
+  assert.ok(r1, '超预算且被裁段落够大时应触发压缩');
+  assert.equal(summaryCalls, 1, '应恰好调用一次摘要');
+  assert.equal(r1.messages[0].role, 'system', 'system 消息应保留在首位');
+  assert.equal(r1.messages[1].role, 'user', '摘要以 user 消息注入');
+  assert.ok(r1.messages[1].content.includes('conversation_summary') && r1.messages[1].content.includes('calc.js'), '摘要内容应注入');
+  assert.ok(r1.droppedCount >= 3 && r1.droppedTokens >= 2000, '被裁段落应满足最小阈值');
+  assert.ok(!r1.messages.some((m) => m.role === 'tool'), '被裁段落的 tool 消息不应残留');
+  assert.ok(r1.messages.length < msgs.length, '压缩后消息应显著减少');
+  assert.ok(r1.usage && r1.usage.prompt_tokens === 100, '摘要用量应带回计入费用');
+  // 未超预算 → 不压缩
+  const r2 = await compactConversation({ messages: msgs.slice(0, 4), budget: 1e9, count: approxTokens, provider: summaryProvider, executorModel: 'x' });
+  assert.equal(r2, null, '未超预算不应压缩');
+  // 摘要失败 → null（回退普通裁剪，绝不阻塞会话）
+  const badProvider = { async chat() { throw new Error('摘要失败'); } };
+  const r3 = await compactConversation({ messages: msgs, budget, count: approxTokens, provider: badProvider, executorModel: 'x' });
+  assert.equal(r3, null, '摘要失败应回退普通裁剪');
+  ok('compact：触发条件 / 摘要注入 / 配对清洗 / 用量带回 / 失败回退');
+}
+
+// ---------- 33. Agent 循环集成：自动压缩触发 / 历史替换 / onCompact 回调 ----------
+{
+  const ioC = createIO({ quiet: true });
+  const notices = [];
+  ioC.print = (t) => notices.push(String(t));
+  const short = '长'.repeat(400); // ≈300 tokens
+  const fakeC = {
+    async chat(opts) {
+      // 摘要请求：tools 为空数组（主请求 tools ≥6）
+      if (!opts.tools || !opts.tools.length) {
+        return { text: '自动摘要内容。', usage: { prompt_tokens: 5, completion_tokens: 2 } };
+      }
+      return { text: '完成', toolCalls: null, usage: {}, finish: 'stop' };
+    },
+  };
+  const history = [
+    { role: 'system', content: '系统' },
+    ...Array.from({ length: 10 }, (_, i) => [
+      { role: 'user', content: short + '问题' + i },
+      { role: 'assistant', content: short + '回答' + i },
+    ]).flat(),
+    { role: 'user', content: '现在收尾' },
+  ];
+  let compactCb = 0;
+  const agentC = createAgent({
+    provider: fakeC,
+    permission: { mode: 'auto', async check() { return true; } },
+    io: ioC,
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmp,
+    cfg: { permission: 'auto', contextBudget: 1200 },
+    onCompact: () => { compactCb += 1; },
+  });
+  const rc = await agentC.runTurn(history);
+  assert.equal(rc.text, '完成');
+  assert.equal(compactCb, 1, 'onCompact 应被调用一次');
+  assert.equal(history[1].role, 'user');
+  assert.ok(history[1].content.includes('conversation_summary'), '历史数组应被替换为压缩形态');
+  assert.ok(notices.some((t) => t.includes('自动压缩')), '应输出压缩提示');
+  ok('agent：自动压缩触发 / 历史替换 / onCompact 回调 / 提示输出');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);
