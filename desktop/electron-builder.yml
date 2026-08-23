@@ -1,8 +1,8 @@
-# 明道 MingDao 桌面版打包配置
+# MingDao Harness 桌面版打包配置
 # 产物：Windows NSIS 安装包 / macOS dmg / Linux AppImage+deb
 # 本地验证：cd desktop && npm run dist:dir（生成未打包可运行目录）
 appId: com.mingdao.harness
-productName: MingDao
+productName: MingDao Harness
 copyright: © 2026 MingDaoTCM
 
 directories:
@@ -55,7 +55,7 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
-  shortcutName: 明道 MingDao
+  shortcutName: MingDao Harness
   artifactName: mingdao-setup-${version}-${arch}.${ext}
 
 mac:
@@ -65,6 +65,7 @@ mac:
   icon: build/icon.png
 
 linux:
+  executableName: mingdao
   target:
     - AppImage
     - deb

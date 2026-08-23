@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// MingDao（明道）CLI 入口：初始化向导、凭证管理、单次提问、交互式 TUI 会话。
+// MingDao Harness CLI 入口：初始化向导、凭证管理、单次提问、交互式 TUI 会话。
 // 会话能力：/plan 计划模式、/compact 上下文压缩、/init、/memory、/skills、
 // /mode 模型快捷切换、/verbose 思考开关、/status、/cost、会话选择恢复。
 
@@ -65,7 +65,7 @@ import {
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 
 const HELP_LINES = [
-  [`MingDao 明道 · AI 智能体框架 v${pkg.version}（命令：mingdao，简写 mdh）`, C.bold + C.cyan],
+  [`MingDao Harness · AI 智能体框架 v${pkg.version}（命令：mingdao，简写 mdh）`, C.bold + C.cyan],
   ['', null],
   ['用法', C.bold + C.yellow],
   ['  mingdao                    交互式对话（TUI）', null],
@@ -600,7 +600,7 @@ async function main() {
   const routing = routingConfig(cfg);
   const wsNow = currentWorkspace(workingDir);
   io.print('');
-  io.box(`MingDao 明道 v${pkg.version}`, [
+  io.box(`MingDao Harness v${pkg.version}`, [
     `模型  ${modelName}${preset?.label ? '（' + preset.label + '）' : ''}`,
     `权限  ${permission.mode} · 密钥  ${keySource}`,
     `沙箱  ${sandboxLabel}${routing ? ` · 路由  ${routing.planner}⇄${routing.executor}` : ''}`,
@@ -1090,7 +1090,7 @@ async function main() {
   try {
     await maybeAutoSync();
   } catch {}
-  io.print('再见，明道与你同行。');
+  io.print('再见，MingDao Harness 与你同行。');
   io.close();
 }
 

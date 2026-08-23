@@ -402,7 +402,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     // 访问控制（P1-3/P1-4）：token 校验覆盖数据与操作接口；壳页面与 PWA 静态资源公开
     // （壳不含任何数据，SPA 需要先加载才能读取 ?token=）；Host 白名单覆盖一切请求
     const isStaticAsset =
-      p === '/' || p === '/index.html' || p === '/favicon.ico' || p === '/icon.svg' || p === '/manifest.webmanifest' || p === '/sw.js';
+      p === '/' || p === '/index.html' || p === '/favicon.ico' || p === '/icon.svg' || p === '/icon-192.png' || p === '/icon-512.png' || p === '/manifest.webmanifest' || p === '/sw.js';
     if (authEnabled && !isStaticAsset && !tokenMatches(requestToken(req, url))) {
       return json(res, 401, { error: '未授权：缺少或无效的访问令牌（地址需带 ?token=…，或请求头携带 X-MingDao-Token）' });
     }
@@ -440,9 +440,16 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       }
       return;
     }
-    if (req.method === 'GET' && p === '/favicon.ico') {
-      res.writeHead(204);
-      res.end();
+    // 统一品牌图标：浏览器标签页 /favicon.ico 直接返回 192 PNG
+    if (req.method === 'GET' && (p === '/favicon.ico' || p === '/icon-192.png' || p === '/icon-512.png')) {
+      try {
+        const file = path.join(path.dirname(fileURLToPath(import.meta.url)), 'icons', p === '/icon-512.png' ? 'icon-512.png' : 'icon-192.png');
+        const buf = fs.readFileSync(file);
+        res.writeHead(200, { 'Content-Type': 'image/png', 'Cache-Control': 'public, max-age=86400' });
+        res.end(buf);
+      } catch {
+        json(res, 404, { error: 'icon missing' });
+      }
       return;
     }
     if (req.method === 'GET' && p === '/api/state') {
@@ -1087,14 +1094,17 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       res.writeHead(200, { 'Content-Type': 'application/manifest+json; charset=utf-8' });
       res.end(
         JSON.stringify({
-          name: 'MingDao 明道',
+          name: 'MingDao Harness',
           short_name: 'MingDao',
           description: 'MingDao-Harness 智能体框架 WebUI',
           start_url: '/',
           display: 'standalone',
           background_color: '#0f1115',
           theme_color: '#0f1115',
-          icons: [{ src: '/icon.svg', sizes: 'any', type: 'image/svg+xml', purpose: 'any' }],
+          icons: [
+            { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
+            { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any maskable' },
+          ],
         })
       );
       return;

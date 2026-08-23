@@ -1,10 +1,10 @@
 {
   "name": "mingdao-desktop",
-  "version": "0.1.57",
+  "version": "0.1.59",
   "private": true,
   "type": "module",
   "main": "main.js",
-  "description": "明道 MingDao 桌面版（Electron 薄壳，内置 WebUI）",
+  "description": "MingDao Harness 桌面版（Electron 薄壳，内置 WebUI）",
   "author": "MingDao-Harness Contributors",
   "license": "MIT",
   "scripts": {

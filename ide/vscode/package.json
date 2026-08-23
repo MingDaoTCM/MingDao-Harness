@@ -1,6 +1,6 @@
 {
   "name": "mingdao-vscode",
-  "displayName": "MingDao（明道）",
+  "displayName": "MingDao Harness",
   "description": "MingDao-Harness 的 VS Code 深度集成：侧边栏内嵌 WebUI、选中代码右键发送、服务器自动管理",
   "version": "0.1.41",
   "publisher": "mingdao",
@@ -24,7 +24,7 @@
       "activitybar": [
         {
           "id": "mingdao-sidebar",
-          "title": "MingDao 明道",
+          "title": "MingDao Harness",
           "icon": "media/icon.svg"
         }
       ]

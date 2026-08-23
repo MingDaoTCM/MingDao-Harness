@@ -31,7 +31,7 @@ export async function handleDesktop(args) {
     process.exitCode = 1;
     return true;
   }
-  console.log('正在启动 明道 MingDao 桌面版…（窗口弹出即成功；托盘常驻，关闭窗口 = 最小化到托盘）');
+  console.log('正在启动 MingDao Harness 桌面版…（窗口弹出即成功；托盘常驻，关闭窗口 = 最小化到托盘）');
   const child = spawn(localBin, [desktopDir], { cwd: desktopDir, stdio: 'ignore', detached: true });
   child.on('error', (err) => {
     console.log('[错误] 启动 Electron 失败：' + (err?.message || err));

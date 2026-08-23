@@ -181,7 +181,7 @@ function ok(name) {
 {
   const r = await runCli([], { stdin: '/help\n/exit\n' });
   assert.equal(r.code, 0, 'stderr: ' + r.err);
-  assert.ok(r.out.includes('MingDao 明道'), '应显示横幅');
+  assert.ok(r.out.includes('MingDao Harness'), '应显示横幅');
   assert.ok(r.out.includes('会话内命令'), '/help 应输出帮助');
   ok('REPL 启动 / /help / /exit');
 }

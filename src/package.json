@@ -1,0 +1,5 @@
+{
+  "type": "module",
+  "private": true,
+  "description": "显式声明 src/ 为 ESM：桌面版打包后 resources/src/ 上方无 package.json，Electron 31（Node 20.14，无语法探测）会把 .js 当 CJS 加载报「Cannot use import statement outside a module」。此文件随 extraResources 一并打包。"
+}

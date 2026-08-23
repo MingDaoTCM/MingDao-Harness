@@ -1,4 +1,4 @@
-// 明道 MingDao 桌面版（Electron 薄壳）：
+// MingDao Harness 桌面版（Electron 薄壳）：
 //  - 主进程内启动 MingDao WebUI（复用 src/web/server.js，零子进程零端口暴露）
 //  - 127.0.0.1 随机端口 + 一次性访问令牌，窗口只加载本机地址
 //  - 系统托盘（关闭最小化到托盘）、应用菜单、窗口大小/位置记忆、单实例锁
@@ -44,7 +44,7 @@ async function startServer() {
   try {
     mod = await import(pathToFileURL(path.join(srcRoot, 'web', 'server.js')).href);
   } catch (err) {
-    dialog.showErrorBox('明道 MingDao', `无法加载内置服务：${err?.message || err}`);
+    dialog.showErrorBox('MingDao Harness', `无法加载内置服务：${err?.message || err}`);
     app.quit();
     return null;
   }
@@ -52,7 +52,7 @@ async function startServer() {
   const cfg = loadConfig();
   if (!cfg) {
     dialog.showErrorBox(
-      '明道 MingDao',
+      'MingDao Harness',
       '尚未初始化配置。\n\n请先在终端运行：mingdao init\n（或 mingdao key set deepseek 设置 API Key）后重新打开桌面版。'
     );
     app.quit();
@@ -63,7 +63,7 @@ async function startServer() {
   try {
     await mod.runWebServer({ host: '127.0.0.1', port, authToken });
   } catch (err) {
-    dialog.showErrorBox('明道 MingDao', `WebUI 启动失败：${err?.message || err}`);
+    dialog.showErrorBox('MingDao Harness', `WebUI 启动失败：${err?.message || err}`);
     app.quit();
     return null;
   }
@@ -73,7 +73,7 @@ async function startServer() {
 function buildMenu() {
   const template = [
     ...(process.platform === 'darwin' ? [{ role: 'appMenu' }] : []),
-    { label: '文件', submenu: [{ role: 'quit', label: '退出明道' }] },
+    { label: '文件', submenu: [{ role: 'quit', label: '退出 MingDao Harness' }] },
     {
       label: '编辑',
       submenu: [
@@ -108,7 +108,7 @@ function buildMenu() {
       submenu: [
         { label: '官网', click: () => shell.openExternal('https://harness.mingdao.ai') },
         { label: '文档（Gitee）', click: () => shell.openExternal('https://gitee.com/MingDaoTCM/MingDao-harness') },
-        { label: '关于明道', click: () => dialog.showMessageBox({ title: '关于', message: '明道 MingDao 桌面版', detail: `版本 v${app.getVersion()}\n零依赖 DeepSeek-V4 智能体框架\nhttps://harness.mingdao.ai` }) },
+        { label: '关于 MingDao Harness', click: () => dialog.showMessageBox({ title: '关于', message: 'MingDao Harness 桌面版', detail: `版本 v${app.getVersion()}\n零依赖 DeepSeek-V4 智能体框架\nhttps://harness.mingdao.ai` }) },
       ],
     },
   ];
@@ -125,13 +125,13 @@ function buildTray() {
   const icon = trayIcon();
   if (!icon) return;
   tray = new Tray(icon);
-  tray.setToolTip('明道 MingDao');
+  tray.setToolTip('MingDao Harness');
   tray.setContextMenu(
     Menu.buildFromTemplate([
-      { label: '打开明道', click: () => showMainWindow() },
+      { label: '打开 MingDao Harness', click: () => showMainWindow() },
       { label: '隐藏窗口', click: () => mainWindow?.hide() },
       { type: 'separator' },
-      { label: '退出明道', click: () => { quitting = true; app.quit(); } },
+      { label: '退出 MingDao Harness', click: () => { quitting = true; app.quit(); } },
     ])
   );
   tray.on('double-click', () => showMainWindow());
@@ -156,7 +156,7 @@ async function createWindow() {
     minHeight: 600,
     autoHideMenuBar: false,
     backgroundColor: '#0b0e14',
-    title: '明道 MingDao',
+    title: 'MingDao Harness',
     icon: path.join(buildRoot, 'icon.png'),
     show: false,
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
@@ -203,7 +203,7 @@ function setupAutoUpdate() {
           .showMessageBox({
             type: 'info',
             title: '发现新版本',
-            message: `明道 v${info.version} 已下载完成`,
+            message: `MingDao Harness v${info.version} 已下载完成`,
             detail: '重启应用即可完成更新。',
             buttons: ['立即重启', '稍后'],
           })

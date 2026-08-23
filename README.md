@@ -1,4 +1,4 @@
-# MingDao-Harness（明道）
+# MingDao Harness
 
 > 开源智能体框架（Agent Harness）：**零运行时依赖、开箱即用**，针对 DeepSeek-V4 首发深度优化，开放主流模型接入。一条命令安装，终端与浏览器双界面，命令：`mingdao`（简写 `mdh`）。
 
