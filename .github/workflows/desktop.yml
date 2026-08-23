@@ -21,8 +21,9 @@ jobs:
           - os: windows-latest
             args: --win nsis
             name: win-x64
-          - os: macos-13
-            args: --mac dmg
+          # macos-13 公共池已基本退役（排队数小时），Intel 版改用 macos-14(arm64) + Rosetta 交叉构建 x64
+          - os: macos-14
+            args: --mac dmg --x64
             name: mac-x64
           - os: macos-14
             args: --mac dmg
