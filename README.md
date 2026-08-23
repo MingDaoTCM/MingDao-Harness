@@ -86,11 +86,12 @@ cd MingDao-Harness && bash install.sh
 
 ```bash
 npm run desktop          # 源码直跑（自动启动内置 WebUI 并打开窗口）
-npm run desktop:dist     # 打包为未压缩可运行目录（desktop/dist/linux-unpacked/）
 ```
 
-三平台安装包（Windows NSIS / macOS dmg / Linux AppImage+deb）由 GitHub Actions `desktop.yml`
-在打 tag 时自动构建；本地用 `cd desktop && npm run dist:win|dist:mac|dist:linux` 手动构建。
+- 内置服务零端口暴露（127.0.0.1 随机端口 + 一次性令牌）、系统托盘常驻、窗口状态记忆、
+  权限一律拒绝、外链走系统浏览器、打包版自动更新；
+- 安装包：Linux `AppImage`/`deb`（本地 `npm run desktop:dist` 已实测构建）、Windows NSIS、
+  macOS dmg；打 tag 后 CI 自动构建三平台安装包（详见 `desktop/README.md`）。
 
 ### 从源码运行（开发）
 

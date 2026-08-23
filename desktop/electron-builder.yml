@@ -13,6 +13,7 @@ directories:
 files:
   - main.js
   - package.json
+  - "!build/tray-16.png"
 extraResources:
   - from: ../src
     to: src
@@ -24,21 +25,30 @@ extraResources:
 asar: true
 npmRebuild: false
 
+# 自动更新发布渠道（GitHub Releases；本地/CI 无 token 时用 --publish never）
+publish:
+  provider: github
+  owner: MingDaoTCM
+  repo: MingDao-Harness
+
 electronDownload:
   mirror: https://npmmirror.com/mirrors/electron/
 
 win:
   target:
     - nsis
+  icon: build/icon.png
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
   shortcutName: 明道 MingDao
+  artifactName: mingdao-setup-${version}-${arch}.${ext}
 
 mac:
   target:
     - dmg
   category: public.app-category.developer-tools
+  icon: build/icon.png
 
 linux:
   target:
@@ -46,3 +56,8 @@ linux:
     - deb
   category: Development
   maintainer: MingDaoTCM
+  icon: build/icon.png
+  artifactName: mingdao-${version}-${arch}.${ext}
+
+dmg:
+  artifactName: mingdao-${version}-${arch}.${ext}
