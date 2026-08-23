@@ -27,6 +27,10 @@ export function recordCacheStats(entry) {
       cost: entry.cost ?? null,
       saved: entry.saved ?? null,
       batch: entry.batch === true ? true : undefined, // Batch API 半价任务标记（/cost 分账展示）
+      steps: entry.steps ?? undefined, // 本回合步数（状态栏 步数统计）
+      llmMs: entry.llmMs ?? undefined, // 模型调用总耗时（状态栏 LLM 时长/tok-s）
+      toolMs: entry.toolMs ?? undefined, // 工具执行总耗时（状态栏 工具调用时长）
+      firstTokenMs: entry.firstTokenMs ?? undefined, // 首 token 延迟（状态栏平均首 token）
     });
     fs.appendFileSync(cacheStatsFile(), line + '\n');
     cacheStatsCount += 1;
@@ -60,7 +64,7 @@ export function listCacheStats(limit = 2000) {
 }
 
 export function summarizeCacheStats(entries) {
-  const sum = { turns: entries.length, prompt: 0, completion: 0, hit: 0, miss: 0, cost: 0, saved: 0 };
+  const sum = { turns: entries.length, prompt: 0, completion: 0, hit: 0, miss: 0, cost: 0, saved: 0, steps: 0, llmMs: 0, toolMs: 0, firstTokenCount: 0, firstTokenSumMs: 0 };
   for (const e of entries) {
     sum.prompt += e.prompt || 0;
     sum.completion += e.completion || 0;
@@ -68,13 +72,23 @@ export function summarizeCacheStats(entries) {
     sum.miss += e.miss || 0;
     sum.cost += e.cost || 0;
     sum.saved += e.saved || 0;
+    sum.steps += e.steps || 0;
+    sum.llmMs += e.llmMs || 0;
+    sum.toolMs += e.toolMs || 0;
+    if (e.firstTokenMs != null) {
+      sum.firstTokenCount += 1;
+      sum.firstTokenSumMs += e.firstTokenMs;
+    }
   }
   sum.rate = sum.hit + sum.miss > 0 ? sum.hit / (sum.hit + sum.miss) : null;
+  sum.firstTokenAvgMs = sum.firstTokenCount > 0 ? sum.firstTokenSumMs / sum.firstTokenCount : null;
+  sum.tokensPerSec = sum.llmMs > 0 ? (sum.completion / (sum.llmMs / 1000)) : null;
   return sum;
 }
 
 // 记录一次用量（agent 侧调用）：自动计算命中拆分与节省额
-export function recordUsage(modelName, usage) {
+// 记录一次用量（agent 侧调用）：自动计算命中拆分与节省额；perf 为回合性能指标（状态栏）
+export function recordUsage(modelName, usage, perf = null) {
   const split = cacheSplit(usage);
   const prompt = usage?.prompt_tokens || 0;
   const completion = usage?.completion_tokens || 0;
@@ -84,7 +98,19 @@ export function recordUsage(modelName, usage) {
     cost = estimateCost(modelName, prompt, completion, split);
     saved = estimateCost(modelName, prompt, completion, null) - cost;
   }
-  recordCacheStats({ model: modelName, prompt, completion, hit: split?.hit ?? null, miss: split?.miss ?? null, cost, saved });
+  recordCacheStats({
+    model: modelName,
+    prompt,
+    completion,
+    hit: split?.hit ?? null,
+    miss: split?.miss ?? null,
+    cost,
+    saved,
+    steps: perf?.steps ?? undefined,
+    llmMs: perf?.llmMs ?? undefined,
+    toolMs: perf?.toolMs ?? undefined,
+    firstTokenMs: perf?.firstTokenMs ?? undefined,
+  });
 }
 
 export function formatCacheSummary(sum) {

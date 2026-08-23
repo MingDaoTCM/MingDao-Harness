@@ -93,6 +93,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     let finish = null;
     const usage = { prompt_tokens: 0, completion_tokens: 0 };
     const startedAt = Date.now();
+    // 回合性能指标（状态栏：LLM 时长 / 工具时长 / 首 token 延迟 / 步数）
+    let llmMsTotal = 0;
+    let toolMsTotal = 0;
+    let firstTokenAt = null;
+    const perf = () => ({ llmMs: llmMsTotal, toolMs: toolMsTotal, firstTokenMs: firstTokenAt == null ? null : firstTokenAt - startedAt, steps });
     let aborted = false;
     let emptyRounds = 0; // 连续空/截断输出计数（防止无限续写）
     let currentAc = null;
@@ -156,6 +161,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               aborted: false,
               note: guard.message,
               durationMs: Date.now() - startedAt,
+              perf: perf(),
             };
           }
           io.print(style(guard.message, C.yellow));
@@ -169,6 +175,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
 
       let res;
       try {
+        const llmT0 = Date.now();
         res = await provider.chat({
           model: modelName,
           messages: trimmed,
@@ -178,16 +185,19 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           signal: ac.signal,
           onDelta(d) {
             io.stopSpinner();
+            if (firstTokenAt == null) firstTokenAt = Date.now(); // 首个增量即首 token
             if (d.text) io.writeText(d.text);
             if (d.reasoning) io.writeReasoning(d.reasoning);
           },
         });
+        llmMsTotal += Date.now() - llmT0;
       } catch (err) {
+        llmMsTotal += Date.now() - llmT0;
         io.stopSpinner();
         io.endTurn();
         if (aborted) {
           stripOrphanCalls();
-          return { text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: true, durationMs: Date.now() - startedAt };
+          return { text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: true, durationMs: Date.now() - startedAt, perf: perf() };
         }
         throw err;
       }
@@ -290,6 +300,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 收尾：渲染结果 → todo 更新 → PostToolUse 钩子 → 回填消息（顺序与串行一致）
         function finishTool(prep, result, t0) {
           const ms = Date.now() - t0;
+          toolMsTotal += ms;
           io.renderTool(prep.name, prep.args, result, ms);
           if (prep.name === 'todo' && result?.todos) io.renderTodo(result.todos);
           hooks.post(prep.name, prep.args, typeof result === 'string' ? { output: result } : result).catch(() => {});
@@ -374,6 +385,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               aborted: false,
               note: `模型连续 ${maxEmptyRounds} 轮输出被截断，已停止续写——请换用更长输出的模型或拆分任务（maxEmptyRounds 可调）。`,
               durationMs: Date.now() - startedAt,
+              perf: perf(),
             };
           }
           messages.push({
@@ -396,6 +408,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               aborted: false,
               note: '模型本轮没有输出正文。',
               durationMs: Date.now() - startedAt,
+              perf: perf(),
             };
           }
           messages.push({
@@ -413,13 +426,14 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           truncated: false,
           aborted: false,
           durationMs: Date.now() - startedAt,
+          perf: perf(),
         };
       }
     }
     io.endTurn();
     // 步数上限：清掉未执行的 tool_calls，避免下一轮/恢复后 API 400
     stripOrphanCalls();
-    return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, durationMs: Date.now() - startedAt };
+    return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, durationMs: Date.now() - startedAt, perf: perf() };
     } finally {
       currentAc = null;
       offSigint();

@@ -256,7 +256,7 @@ async function runWorkerTask(id, question, { permission, model, offpeak }) {
       } catch {}
     }
     const finalStatus = res.truncated ? 'failed' : res.aborted ? 'killed' : 'done';
-    recordUsage(modelName, res.usage);
+    recordUsage(modelName, res.usage, res.perf);
     finish({
       status: finalStatus,
       text: (res.text || '').slice(0, 2000),
@@ -565,12 +565,12 @@ async function main() {
             session: session.name,
           })
         );
-        recordUsage(modelName, res.usage);
+        recordUsage(modelName, res.usage, res.perf);
         process.exitCode = res.truncated || res.aborted ? 1 : 0;
       } else {
         io.printUsageLine({ modelName, usage: res.usage, durationMs: res.durationMs });
         if (res.aborted) io.print(style('（已中断）', C.dim));
-        recordUsage(modelName, res.usage);
+        recordUsage(modelName, res.usage, res.perf);
         process.exitCode = res.truncated ? 1 : 0;
       }
     } catch (err) {
@@ -1035,7 +1035,7 @@ async function main() {
       lastUsage = res.usage;
       lastText = res.text || lastText;
       stats.turns += 1;
-      recordUsage(modelName, res.usage);
+      recordUsage(modelName, res.usage, res.perf);
       stats.promptTokens += res.usage.prompt_tokens || 0;
       stats.completionTokens += res.usage.completion_tokens || 0;
       const fresh = messages.slice(persisted);

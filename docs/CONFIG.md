@@ -187,7 +187,7 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
 ```json
 {
   "sync": {
-    "url": "https://你的同步服务器",
+    "url": "https://session.mingdao.ai",
     "username": "you",
     "deviceName": "我的笔记本",
     "auto": true

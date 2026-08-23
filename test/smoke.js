@@ -1864,6 +1864,33 @@ const ctx = { cwd: tmp };
   ok('子代理：只读 task 并行执行（并发≥2 / 顺序回填）');
 }
 
+
+// ---------- 45. 状态栏指标：perf 记录与汇总（llmMs/toolMs/首 token/步数） ----------
+{
+  const homeP = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-perf-'));
+  process.env.MINGDAO_HOME = homeP;
+  const { recordUsage, summarizeCacheStats, listCacheStats } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+  recordUsage('deepseek-v4-flash', { prompt_tokens: 1000, completion_tokens: 100, prompt_cache_hit_tokens: 800, prompt_cache_miss_tokens: 200 }, { steps: 3, llmMs: 5000, toolMs: 2000, firstTokenMs: 800 });
+  recordUsage('deepseek-v4-flash', { prompt_tokens: 500, completion_tokens: 50, prompt_cache_hit_tokens: 400, prompt_cache_miss_tokens: 100 }, { steps: 2, llmMs: 3000, toolMs: 1000, firstTokenMs: 1200 });
+  const sum = summarizeCacheStats(listCacheStats(100));
+  assert.equal(sum.turns, 2, '轮次应为 2');
+  assert.equal(sum.steps, 5, '步数应累计');
+  assert.equal(sum.llmMs, 8000, 'LLM 时长应累计');
+  assert.equal(sum.toolMs, 3000, '工具时长应累计');
+  assert.equal(sum.firstTokenCount, 2);
+  assert.equal(sum.firstTokenAvgMs, 1000, '首 token 平均应为 1000ms');
+  assert.ok(Math.abs(sum.tokensPerSec - 18.75) < 1e-6, `tok/s 应=150/8s=18.75（得到 ${sum.tokensPerSec}）`);
+  assert.ok(Math.abs(sum.rate - 0.8) < 1e-9, '缓存命中率应为 80%');
+  // 旧数据（无 perf 字段）兼容
+  recordUsage('deepseek-v4-flash', { prompt_tokens: 10, completion_tokens: 1 });
+  const sum2 = summarizeCacheStats(listCacheStats(100));
+  assert.equal(sum2.turns, 3, '旧格式条目应计入轮次且不影响 perf 累计');
+  assert.equal(sum2.llmMs, 8000, '旧条目 llmMs 缺省为 0');
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeP, { recursive: true, force: true });
+  ok('状态栏指标：perf 记录 / 汇总（时长/首 token/tok-s/步数）/ 旧数据兼容');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 fs.rmSync(smokeHome, { recursive: true, force: true });

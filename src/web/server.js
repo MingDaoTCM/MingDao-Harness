@@ -325,7 +325,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       const r = await agent.runTurn(messages);
       appendMessages(session.file, messages.slice(persistedBefore));
       io.printUsageLine({ modelName: runModel, usage: r.usage, durationMs: r.durationMs });
-      recordUsage(runModel, r.usage);
+      recordUsage(runModel, r.usage, r.perf);
       maybeAutoSync().catch(() => {});
       // 新会话自动标题（可配置关闭）
       if (isNew && cfg.autoTitle !== false && r.text) {

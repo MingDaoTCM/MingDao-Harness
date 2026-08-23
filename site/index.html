@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>明道 MingDao —— 零依赖的 DeepSeek-V4 智能体框架</title>
+<meta name="description" content="MingDao-Harness（明道）：纯 Node.js 零运行时依赖的开源智能体框架，DeepSeek-V4 深度省钱适配（缓存命中 1/30 计价、Batch 半价、避峰调度、自动路由），TUI/WebUI/IDE 三端，一键安装。">
+<meta name="keywords" content="MingDao,明道,智能体框架,Agent Harness,DeepSeek,零依赖,CLI,WebUI">
+<style>
+:root{
+  --bg:#0b0e14; --bg2:#10141d; --bg3:#161b27; --border:#242b3a;
+  --text:#e8ecf4; --dim:#98a2b8; --faint:#5c6679;
+  --green:#3ddc97; --cyan:#22b8cf; --yellow:#ffc94d; --red:#ff6b6b;
+  --code:#0d1017;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--text);font-family:'HarmonyOS Sans SC',Inter,'PingFang SC','Segoe UI','Microsoft YaHei',sans-serif;line-height:1.7;font-size:16px}
+a{color:var(--cyan);text-decoration:none}
+a:hover{text-decoration:underline}
+.wrap{max-width:1060px;margin:0 auto;padding:0 24px}
+header{position:sticky;top:0;z-index:10;background:rgba(11,14,20,.85);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
+header .wrap{display:flex;align-items:center;gap:18px;height:60px}
+.logo{font-weight:700;font-size:18px;color:var(--text);display:flex;align-items:center;gap:8px}
+.logo .mark{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,var(--green),var(--cyan));display:inline-flex;align-items:center;justify-content:center;font-size:14px;color:#06121a;font-weight:800}
+nav{margin-left:auto;display:flex;gap:18px;font-size:14px;color:var(--dim)}
+nav a{color:var(--dim)}
+nav a:hover{color:var(--text);text-decoration:none}
+.hero{padding:88px 0 56px;text-align:center;position:relative;overflow:hidden}
+.hero::before{content:'';position:absolute;inset:-40% -20%;background:radial-gradient(600px 300px at 50% 0%,rgba(61,220,151,.14),transparent 70%),radial-gradient(500px 280px at 75% 30%,rgba(34,184,207,.10),transparent 70%);pointer-events:none}
+.badge{display:inline-block;border:1px solid var(--border);background:var(--bg2);color:var(--green);border-radius:999px;padding:5px 14px;font-size:13px;margin-bottom:22px}
+h1{font-size:46px;line-height:1.25;letter-spacing:.5px}
+h1 .accent{background:linear-gradient(90deg,var(--green),var(--cyan));-webkit-background-clip:text;background-clip:text;color:transparent}
+.hero p.sub{color:var(--dim);font-size:17px;max-width:680px;margin:18px auto 0}
+.cta{margin-top:34px}
+.install{max-width:720px;margin:0 auto;text-align:left;background:var(--code);border:1px solid var(--border);border-radius:14px;overflow:hidden;box-shadow:0 20px 60px rgba(0,0,0,.45)}
+.install .tabs{display:flex;border-bottom:1px solid var(--border)}
+.install .tab{padding:10px 18px;font-size:13px;color:var(--dim);cursor:pointer;user-select:none;border-right:1px solid var(--border)}
+.install .tab.on{color:var(--green);background:var(--bg2)}
+.install pre{margin:0;padding:16px 18px;font-family:'SFMono-Regular',Menlo,Consolas,monospace;font-size:13px;color:#9fe8c4;overflow-x:auto}
+.install pre .c{color:var(--faint)}
+.stats{display:flex;flex-wrap:wrap;gap:14px;justify-content:center;margin-top:36px}
+.stat{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:14px 22px;min-width:150px}
+.stat b{display:block;font-size:24px;color:var(--green);font-variant-numeric:tabular-nums}
+.stat span{font-size:12.5px;color:var(--dim)}
+section{padding:64px 0}
+h2{font-size:30px;text-align:center;margin-bottom:10px}
+h2 .dot{color:var(--green)}
+.sec-sub{text-align:center;color:var(--dim);max-width:640px;margin:0 auto 40px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}
+.card{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:22px;transition:border-color .2s,transform .2s}
+.card:hover{border-color:var(--green);transform:translateY(-2px)}
+.card .ic{font-size:24px}
+.card h3{font-size:17px;margin:10px 0 6px}
+.card p{font-size:13.5px;color:var(--dim)}
+.steps{counter-reset:s;max-width:760px;margin:0 auto}
+.step{display:flex;gap:18px;padding:18px 0;border-bottom:1px dashed var(--border)}
+.step:last-child{border-bottom:none}
+.step .n{counter-increment:s;flex:0 0 44px;height:44px;border-radius:50%;background:var(--bg3);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-weight:700;color:var(--green)}
+.step .n::before{content:counter(s)}
+.step h3{font-size:17px}
+.step p{font-size:14px;color:var(--dim)}
+.step code{background:var(--bg3);border:1px solid var(--border);border-radius:6px;padding:1px 7px;font-size:13px;color:var(--cyan)}
+.money{background:linear-gradient(180deg,var(--bg2),var(--bg3));border:1px solid var(--border);border-radius:18px;padding:38px;margin-top:16px}
+.money h2{color:var(--green)}
+.money .grid{grid-template-columns:repeat(auto-fit,minmax(210px,1fr))}
+.money .card{background:var(--bg)}
+.money .card b{font-size:22px;color:var(--yellow);display:block;margin-top:8px;font-variant-numeric:tabular-nums}
+.flow{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px;counter-reset:f}
+.flow .card{position:relative}
+.flow .card::before{counter-increment:f;content:counter(f);position:absolute;top:14px;right:16px;color:var(--faint);font-size:26px;font-weight:800}
+.repos{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:16px}
+.repo{background:var(--bg2);border:1px solid var(--border);border-radius:14px;padding:22px;display:flex;gap:14px;align-items:center}
+.repo .ic{font-size:26px}
+.repo b{font-size:15px}
+.repo span{display:block;font-size:12.5px;color:var(--dim)}
+footer{border-top:1px solid var(--border);padding:36px 0 48px;color:var(--faint);font-size:13px;text-align:center}
+footer .links{display:flex;gap:20px;justify-content:center;margin-bottom:14px;flex-wrap:wrap}
+@media (max-width:760px){h1{font-size:32px}header nav{display:none}.hero{padding:60px 0 40px}}
+</style>
+</head>
+<body>
+<header><div class="wrap">
+  <a class="logo" href="#"><span class="mark">明</span>明道 MingDao</a>
+  <nav>
+    <a href="#quick">快速开始</a>
+    <a href="#features">为什么选明道</a>
+    <a href="#money">省钱工程</a>
+    <a href="#flow">工作原理</a>
+    <a href="#repos">仓库</a>
+  </nav>
+</div></header>
+
+<section class="hero">
+  <div class="wrap">
+    <span class="badge">零运行时依赖 · DeepSeek-V4 深度适配 · 开源</span>
+    <h1>明道 <span class="accent">MingDao</span><br>会替你省钱的 AI 智能体框架</h1>
+    <p class="sub">纯 Node.js（≥18.17）打造，无任何 npm 运行时依赖。缓存命中计价（命中价仅为未命中的 1/30）、Batch 半价批处理、避峰调度、自动路由 pro⇄flash——「省钱」是刻进内核的系统设计，不是营销话术。</p>
+    <div class="cta">
+      <div class="install">
+        <div class="tabs">
+          <div class="tab on" data-t="gitee">Gitee（国内推荐）</div>
+          <div class="tab" data-t="gitcode">GitCode</div>
+          <div class="tab" data-t="github">GitHub（海外）</div>
+        </div>
+        <pre id="cmdGitee"><span class="c"># 一行安装（自动装 Node）</span>
+curl -fsSL https://gitee.com/MingDaoTCM/MingDao-harness/raw/main/install.sh | bash -s -- gitee</pre>
+        <pre id="cmdGitcode" style="display:none"><span class="c"># GitCode（克隆式安装）</span>
+git clone https://gitcode.com/MingDaoTCM/MingDao-Harness.git MingDao-Harness && cd MingDao-Harness && bash install.sh</pre>
+        <pre id="cmdGithub" style="display:none"><span class="c"># 一行安装（自动装 Node）</span>
+curl -fsSL https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main/install.sh | bash -s -- github</pre>
+      </div>
+      <p style="margin-top:14px;color:var(--faint);font-size:13px">装完 <code style="color:var(--cyan)">mingdao init</code> 配置 DeepSeek Key，输入 <code style="color:var(--cyan)">mingdao</code> 开始对话；Windows 用户解压后双击 install.bat。</p>
+    </div>
+    <div class="stats">
+      <div class="stat"><b>86 项</b><span>测试全绿（三平台 CI）</span></div>
+      <div class="stat"><b>0</b><span>npm 运行时依赖</span></div>
+      <div class="stat"><b>1/30</b><span>缓存命中价 vs 未命中</span></div>
+      <div class="stat"><b>50% off</b><span>Batch 批量 / 避峰执行</span></div>
+    </div>
+  </div>
+</section>
+
+<section id="quick"><div class="wrap">
+  <h2><span class="dot">●</span> 快速上手</h2>
+  <p class="sec-sub">三步完成安装；Windows 解压后双击 install.bat（自动经 winget 装 Node）。</p>
+  <div class="steps">
+    <div class="step"><div class="n"></div><div><h3>安装</h3><p>上方三平台任选一行（Gitee/GitCode 国内速度快，三平台内容一致）；无管理员权限自动装到 <code>~/.local/bin</code>，仓库常驻、<code>mingdao update</code> 一键自更新（升级后冒烟失败自动回滚）。</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>配置</h3><p><code>mingdao init</code> 交互式配置 DeepSeek（API Key 独立存 600 权限凭证库，绝不进 config.json/仓库）；模型列表以官方 /models 线上名单为准，新模型发布自动出现。</p></div></div>
+    <div class="step"><div class="n"></div><div><h3>使用</h3><p><code>mingdao</code> 进 TUI 对话；<code>mingdao web</code> 一键 WebUI（PWA 可装桌面，多任务并行）；VS Code / JetBrains 插件开箱即用；<code>mingdao schedule add</code> 定时任务。</p></div></div>
+  </div>
+  <h2 style="margin-top:60px">推荐使用顺序</h2>
+  <p class="sec-sub">与 Hermes 社区一致的上手路径：先用起来，再进阶。</p>
+  <div class="grid">
+    <div class="card"><div class="ic">🖥</div><h3>先用 WebUI 上手</h3><p><code>mingdao web</code> 一键启动：流式思考实况、工具卡片、权限确认弹窗、会话管理、全部设置面板。</p></div>
+    <div class="card"><div class="ic">⌨️</div><h3>TUI 进阶</h3><p><code>mingdao</code> 终端对话：/plan 先计划后执行、/compact 压缩、/memory 长期记忆、/cost 分账、Tab 补全。</p></div>
+    <div class="card"><div class="ic">🧩</div><h3>IDE 集成</h3><p>VS Code 侧边栏与 JetBrains 工具窗深度集成，选中代码直接发问。</p></div>
+    <div class="card"><div class="ic">⏰</div><h3>定时与后台任务</h3><p><code>mingdao run</code> 后台任务、<code>schedule add</code> 定时/链式依赖，支持 <code>--offpeak</code> 避峰执行。</p></div>
+  </div>
+</div></section>
+
+<section id="features" style="background:var(--bg2);border-top:1px solid var(--border);border-bottom:1px solid var(--border)"><div class="wrap">
+  <h2><span class="dot">●</span> 为什么选明道</h2>
+  <p class="sec-sub">架构干净、安全默认、测试真实存在——三轮外部评估 8.4–8.9/10。</p>
+  <div class="grid">
+    <div class="card"><div class="ic">⚡</div><h3>真正的零依赖</h3><p>SSE 解析、BPE tokenizer、MCP 客户端、HTTP 服务器、云同步全部只用 node: 内置模块，装完即用。</p></div>
+    <div class="card"><div class="ic">💰</div><h3>DeepSeek 深度省钱</h3><p>缓存命中计价 + 仪表盘、峰谷计价（周末全天低价）、Batch 半价、避峰调度、费用护栏。</p></div>
+    <div class="card"><div class="ic">🧠</div><h3>36 个技能</h3><p>14 内置常驻 + 22 可安装技能库；线上 registry 逐文件 sha256 防篡改，渐进披露只注入名称。</p></div>
+    <div class="card"><div class="ic">🔌</div><h3>生态即插即用</h3><p>MCP 客户端（9 个生态预设一键接入）、Hooks 钩子、自定义 Provider 模块、自建企业内 registry。</p></div>
+    <div class="card"><div class="ic">☁️</div><h3>云同步与协作</h3><p>跨设备会话同步、分享码协作、冲突三选一绝不丢数据；服务端零依赖单文件即可自建。</p></div>
+    <div class="card"><div class="ic">🛡</div><h3>安全默认</h3><p>权限三档 + 工具级规则、bash 沙箱、WebUI 令牌 + Host 白名单、审计日志、凭证 600 隔离。</p></div>
+    <div class="card"><div class="ic">♻</div><h3>长会话不丢上下文</h3><p>超预算自动压缩（80% 触发、压到 60%），早期段落压成摘要注入，前缀字节稳定保缓存命中。</p></div>
+    <div class="card"><div class="ic">🔎</div><h3>历史会话秒搜</h3><p>增量索引全文检索（中文 bigram 分词）；WebUI 会话级工作空间，多任务并行互不串目录。</p></div>
+  </div>
+</div></section>
+
+<section id="money"><div class="wrap">
+  <h2><span class="dot">●</span> 省钱工程 <small style="color:var(--faint);font-size:14px">——把每一分钱算清楚</small></h2>
+  <p class="sec-sub">DeepSeek-V4 的缓存计价（命中 1/30 价）决定了 Harness 的核心竞争力 = 让每个请求的前缀字节稳定。明道围绕这一点做了系统设计。</p>
+  <div class="money"><div class="grid">
+    <div class="card"><div class="ic">🧊</div><h3>缓存命中计价</h3><p>hit/miss 拆分计费 + 命中率仪表盘，口径不一致时余量按未命中计（不漏计）。</p><b>0.15 元 vs 4.5 元 /M</b></div>
+    <div class="card"><div class="ic">🔀</div><h3>Batch 半价批处理</h3><p><code>mingdao batch 问题.txt</code> 单轮批量任务走批处理通道，结果落盘并计入分账。</p><b>×0.5</b></div>
+    <div class="card"><div class="ic">🌙</div><h3>避峰调度</h3><p><code>--offpeak</code> 高峰（工作日 9:00–14:00）自动顺延 14:00 后；周末全天闲时（官方确认）。</p><b>输入价省 50%</b></div>
+    <div class="card"><div class="ic">🎯</div><h3>自动路由</h3><p>pro 规划 / flash 执行，分类缓存 + 会话粘滞；系统提示跨模型字节恒定，路由翻转不破缓存前缀。</p><b>日常省 67%</b></div>
+    <div class="card"><div class="ic">🔢</div><h3>精确 tokenizer</h3><p>官方词表 BPE：GPT-2 字节映射 + Split 预分词 + 堆合并，与 HF tokenizers 逐值一致。</p><b>±2 倍误差 → 0</b></div>
+    <div class="card"><div class="ic">🛡</div><h3>费用护栏</h3><p><code>costGuard</code> 每日上限：warn 提醒 / block 暂停，按真实口径（含缓存折扣与半价）累计。</p><b>绝不超支</b></div>
+  </div></div>
+</div></section>
+
+<section id="flow" style="background:var(--bg2);border-top:1px solid var(--border);border-bottom:1px solid var(--border)"><div class="wrap">
+  <h2><span class="dot">●</span> 一条任务是怎样完成的</h2>
+  <p class="sec-sub">从任务到结果，全链路可观测、可追溯。</p>
+  <div class="flow">
+    <div class="card"><h3>自动路由</h3><p>启发式零成本 + 分类器兜底（LRU 缓存/会话粘滞），生成类任务自动切大输出模型防截断。</p></div>
+    <div class="card"><h3>思考与工具</h3><p>流式思考实况、工具卡片逐个闪烁、只读工具与只读子代理并行执行；权限引擎 + 沙箱 + 敏感环境变量过滤。</p></div>
+    <div class="card"><h3>审计与计费</h3><p>每次调用落审计日志（sk- 脱敏）；缓存命中率、费用、节省额实时入账，/cost 按模型分账。</p></div>
+    <div class="card"><h3>交付总结</h3><p>交付物卡片（路径 + 使用说明）、自动生成会话标题、结束静默同步云端。</p></div>
+  </div>
+</div></section>
+
+<section id="cap"><div class="wrap">
+  <h2><span class="dot">●</span> 能力清单</h2>
+  <div class="grid">
+    <div class="card"><div class="ic">🧠</div><h3>跨会话记忆</h3><p>用户记忆（AGENTS.md）+ 会话日志；新会话默认全新开始，「带上文」显式开启。</p></div>
+    <div class="card"><div class="ic">🏠</div><h3>本地或服务器运行</h3><p>本地零依赖直跑；服务器上 WebUI + 云同步服务端一条龙。</p></div>
+    <div class="card"><div class="ic">⏰</div><h3>定时执行任务</h3><p>一次性/周期/链式依赖，单守护进程调度器，重启自愈。</p></div>
+    <div class="card"><div class="ic">📚</div><h3>保存并复用 Skills</h3><p>SKILL.md 格式，三级来源（用户/项目/内置），线上 registry 一键安装。</p></div>
+    <div class="card"><div class="ic">🖼</div><h3>多模态</h3><p>DeepSeek-V4-Flash-Vision-Exp 内置，WebUI 上传图片/文本附件。</p></div>
+    <div class="card"><div class="ic">👥</div><h3>多用户协作</h3><p>分享码协作、跨设备冲突图形化三选一、注册开关/邀请码。</p></div>
+  </div>
+</div></section>
+
+<section id="repos"><div class="wrap">
+  <h2><span class="dot">●</span> 仓库与入口</h2>
+  <p class="sec-sub">三平台镜像内容一致，你在哪个平台浏览就用哪个（Gitee / GitCode 国内速度快）。</p>
+  <div class="repos">
+    <a class="repo" href="https://gitee.com/MingDaoTCM/MingDao-harness"><div class="ic">🟥</div><div><b>Gitee 仓库（国内推荐）</b><span>gitee.com/MingDaoTCM/MingDao-harness</span></div></a>
+    <a class="repo" href="https://gitcode.com/MingDaoTCM/MingDao-Harness"><div class="ic">🟦</div><div><b>GitCode 仓库</b><span>gitcode.com/MingDaoTCM/MingDao-Harness</span></div></a>
+    <a class="repo" href="https://github.com/MingDaoTCM/MingDao-Harness"><div class="ic">⬛</div><div><b>GitHub 仓库（海外）</b><span>github.com/MingDaoTCM/MingDao-Harness</span></div></a>
+  </div>
+  <p style="text-align:center;margin-top:26px;color:var(--dim);font-size:14px">
+    使用文档见仓库 <code style="color:var(--cyan)">README.md</code> 与 <code style="color:var(--cyan)">docs/</code>；WebUI 由 <code style="color:var(--cyan)">mingdao web</code> 一键启动。
+  </p>
+</div></section>
+
+<footer>
+  <div class="links">
+    <a href="#quick">快速开始</a><a href="#features">功能</a><a href="#money">省钱工程</a>
+    <a href="https://gitee.com/MingDaoTCM/MingDao-harness">Gitee</a>
+    <a href="https://gitcode.com/MingDaoTCM/MingDao-Harness">GitCode</a>
+    <a href="https://github.com/MingDaoTCM/MingDao-Harness">GitHub</a>
+  </div>
+  <div>明道 MingDao · 开源智能体框架 · © 2026 MingDaoTCM · 用 ❤️ 与 DeepSeek 打造</div>
+</footer>
+
+<script>
+document.querySelectorAll('.install .tab').forEach((t) => {
+  t.addEventListener('click', () => {
+    document.querySelectorAll('.install .tab').forEach((x) => x.classList.remove('on'));
+    document.querySelectorAll('.install pre').forEach((p) => (p.style.display = 'none'));
+    t.classList.add('on');
+    document.getElementById('cmd' + t.dataset.t.charAt(0).toUpperCase() + t.dataset.t.slice(1)).style.display = '';
+  });
+});
+</script>
+</body>
+</html>
