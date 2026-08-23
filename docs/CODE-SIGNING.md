@@ -81,6 +81,10 @@ macOS 作业的 `--mac dmg` 在检测到 `CSC_LINK` + Apple 凭证时自动完�
   entitlements。electron-builder 会在 CI 日志打印 notarytool 完整输出。
 - **验证是否签上**：Windows 右键 exe →「数字签名」；macOS `codesign -dv
   --verbose=4 MingDao.app` 与 `spctl -a -vv MingDao.app`。
+- **「代码签名 OV」与「域名 OV」是同一个证书吗？** 不是。两者只共享 OV（组织验证）
+  概念：域名 OV 是 SSL/TLS 证书（绑定域名、EKU=Server Authentication、给 HTTPS 用）；
+  代码签名 OV 绑定组织身份（EKU=Code Signing 1.3.6.1.5.5.7.3.3、给软件签名用），
+  常以 USB Key 交付，互不可替代。下单务必确认 EKU 为 Code Signing。
 - **不想签**：现状即可用（官网已附绕过说明），仅多一步手动确认。
 
 ---
