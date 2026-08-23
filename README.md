@@ -85,7 +85,8 @@ cd MingDao-Harness && bash install.sh
 ### 桌面版（Electron）
 
 ```bash
-npm run desktop          # 源码直跑（自动启动内置 WebUI 并打开窗口）
+mingdao desktop          # 任意目录启动桌面版（首次运行会提示安装 Electron，带镜像指引）
+npm run desktop          # 等价写法（需在仓库目录内）
 ```
 
 - 内置服务零端口暴露（127.0.0.1 随机端口 + 一次性令牌）、系统托盘常驻、窗口状态记忆、

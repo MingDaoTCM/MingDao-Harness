@@ -7,10 +7,12 @@
 ## 开发运行
 
 ```bash
-# 仓库根目录
-npm install -g .          # 先装好 mingdao（或已有凭证与配置即可）
+# 任意目录（推荐）
 mingdao init              # 首次需要初始化配置
-npm run desktop           # 启动桌面版（自动拉起内置 WebUI）
+mingdao desktop           # 启动桌面版（自动定位仓库并拉起内置 WebUI）
+
+# 等价：在仓库根目录
+npm run desktop
 ```
 
 ## 本地打包
