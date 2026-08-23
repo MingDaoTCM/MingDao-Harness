@@ -111,7 +111,7 @@ const NPM_HINT =
   '源码包安装请重新运行安装脚本（install.sh）；或从任意平台仓库克隆后 `npm link`：' +
   'https://gitee.com/MingDaoTCM/MingDao-harness · https://gitcode.com/MingDaoTCM/MingDao-Harness · https://github.com/MingDaoTCM/MingDao-Harness';
 
-export async function updateCheck({ repo } = {}) {
+export async function updateCheck({ repo } = /** @type {any} */ ({})) {
   const lines = [];
   const root = resolveRepo(repo);
   if (!root) return { ok: false, lines: [NPM_HINT] };
@@ -130,7 +130,7 @@ export async function updateCheck({ repo } = {}) {
   };
 }
 
-export async function mingdaoUpdate({ repo } = {}) {
+export async function mingdaoUpdate({ repo } = /** @type {any} */ ({})) {
   const lines = [];
   const root = resolveRepo(repo);
   if (!root) return { ok: false, lines: [NPM_HINT] };
@@ -195,7 +195,7 @@ export async function mingdaoUpdate({ repo } = {}) {
   };
 }
 
-export function mingdaoRollback({ repo } = {}) {
+export function mingdaoRollback({ repo } = /** @type {any} */ ({})) {
   const root = resolveRepo(repo);
   if (!root) return { ok: false, lines: [NPM_HINT] };
   const st = readState();

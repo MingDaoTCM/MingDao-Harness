@@ -44,6 +44,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: 同步桌面版版本号（与根 package.json 联动）
+        working-directory: desktop
+        run: node ../scripts/sync-versions.mjs
       - name: 安装 Electron 依赖（npmmirror 镜像）
         working-directory: desktop
         env:
@@ -67,6 +70,7 @@ jobs:
             desktop/dist/*.deb
             desktop/dist/*.exe
             desktop/dist/*.dmg
+            desktop/dist/*.zip
           if-no-files-found: warn
       - name: 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
@@ -76,5 +80,6 @@ jobs:
             desktop/dist/*.deb
             desktop/dist/*.exe
             desktop/dist/*.dmg
+            desktop/dist/*.zip
           draft: false
           generate_release_notes: true

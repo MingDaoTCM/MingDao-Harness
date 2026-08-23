@@ -18,7 +18,8 @@ import {
 
 async function askHidden(question) {
   return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    // _writeToOutput 为 readline 内部接口：静音回显（密码输入），类型护栏下显式 any
+    const rl = /** @type {any} */ (readline.createInterface({ input: process.stdin, output: process.stdout }));
     const orig = rl._writeToOutput;
     rl._writeToOutput = () => {};
     rl.question(question, (a) => {

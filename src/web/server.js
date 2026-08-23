@@ -74,7 +74,7 @@ function readBody(req) {
     let size = 0;
     // 审计 P2-6：慢速连接防护——60s 未传完请求体即断开，防占满 socket
     const slowTimer = setTimeout(() => {
-      const err = new Error('请求体上传超时（60s）');
+      const err = /** @type {Error & { status?: number }} */ (new Error('请求体上传超时（60s）'));
       err.status = 408;
       req.destroy();
       reject(err);
@@ -84,7 +84,7 @@ function readBody(req) {
     req.on('data', (d) => {
       size += d.length;
       if (size > MAX_BODY) {
-        const err = new Error('请求体过大（>40MB）');
+        const err = /** @type {Error & { status?: number }} */ (new Error('请求体过大（>40MB）'));
         err.status = 413;
         req.destroy();
         reject(err);
@@ -104,6 +104,7 @@ function readBody(req) {
   });
 }
 
+/** @param {{ host?: string, port?: number, authToken?: string|null, [key: string]: any }} [opts] */
 export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken } = {}) {
   const home = ensureHome();
   const cfg = loadConfig();
@@ -1138,7 +1139,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     });
   });
 
-  server.on('error', (err) => {
+  server.on('error', (/** @type {Error & { code?: string }} */ err) => {
     if (err.code === 'EADDRINUSE') {
       console.error(`[MingDao] 端口 ${port} 已被占用，请换一个端口：mingdao web <端口号>`);
     } else {
@@ -1148,7 +1149,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   });
 
   server.listen(port, host, () => {
-    const actual = server.address().port;
+    const actual = /** @type {import('node:net').AddressInfo} */ (server.address()).port;
     boundPort = actual;
     const displayHost = host === '0.0.0.0' ? '127.0.0.1' : host;
     console.log('');

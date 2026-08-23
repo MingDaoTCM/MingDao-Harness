@@ -16,6 +16,11 @@ import { checkCostGuard } from './cost-guard.js';
 const MAX_STEPS = 24;
 const SUBAGENT_MAX_STEPS = 12;
 
+/**
+ * 创建 Agent 循环（调用方只需传 provider/permission/io/modelName/workingDir，其余可选）
+ * @param {{ provider: any, permission: any, io: any, modelName: any, workingDir: any,
+ *   cfg?: any, undoStore?: any, maxSteps?: number, mcp?: any, onCompact?: any, sessionRef?: any }} params
+ */
 export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact, sessionRef }) {
   const preset = modelPreset(modelName) || {};
   const budget = cfg.contextBudget || preset.budgetTokens || 128000;
@@ -174,8 +179,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       io.startSpinner('正在思考…');
 
       let res;
+      // 审计（tsc 扩面发现）：llmT0 此前在 try 内声明、catch 内引用——chat 抛错时
+      // catch 自身 ReferenceError，掩盖原始错误且计时丢失；提到 try 外声明。
+      const llmT0 = Date.now();
       try {
-        const llmT0 = Date.now();
         res = await provider.chat({
           model: modelName,
           messages: trimmed,

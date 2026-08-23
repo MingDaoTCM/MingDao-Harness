@@ -1339,14 +1339,15 @@ const ctx = { cwd: tmp };
 
 // ---------- 32. 上下文自动压缩模块（P3-1） ----------
 {
-  const { compactConversation } = await import(pathToFileURL(path.join(srcDir, 'compact.js')).href);
+  const { compactConversation, summarizeConversation } = await import(pathToFileURL(path.join(srcDir, 'compact.js')).href);
   const { approxTokens } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
   let summaryCalls = 0;
   const summaryProvider = {
     async chat() {
       summaryCalls += 1;
       return {
-        text: '压缩摘要：用户要做一个计算器，已完成加法，未完成减法；创建了 calc.js。',
+        // 结构化输出（审计 MiniMax §3.3-D）：支持 json_object 的网关返回 {"summary": ...}
+        text: '{"summary": "压缩摘要：用户要做一个计算器，已完成加法，未完成减法；创建了 calc.js。"}',
         usage: { prompt_tokens: 100, completion_tokens: 20 },
       };
     },
@@ -1380,6 +1381,12 @@ const ctx = { cwd: tmp };
   const badProvider = { async chat() { throw new Error('摘要失败'); } };
   const r3 = await compactConversation({ messages: msgs, budget, count: approxTokens, provider: badProvider, executorModel: 'x' });
   assert.equal(r3, null, '摘要失败应回退普通裁剪');
+  // 网关不支持 json_object → 纯文本回退仍应产出摘要（审计 MiniMax §3.3-D）
+  let plainCalls = 0;
+  const plainProvider = { async chat() { plainCalls += 1; return { text: '纯文本摘要：直接给结论。', usage: null }; } };
+  const rp = await summarizeConversation(plainProvider, 'x', '一段对话');
+  assert.equal(plainCalls, 2, 'json 解析失败后应回退纯文本一次');
+  assert.ok(rp.text && rp.text.includes('纯文本摘要'), '回退纯文本应解析成功');
   // B1/B2：达到预算 90% 即提前压缩（滞回缓冲），低于 80% 不压缩
   const { messageTokens } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
   const total32 = msgs.reduce((s, m) => s + messageTokens(m, approxTokens), 0);

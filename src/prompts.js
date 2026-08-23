@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { skillsRegistryBlock } from './skills.js';
-import { mingdaoHome } from './config.js';
+import { mingdaoHome, loadConfig } from './config.js';
 import { recentJournalBlock } from './memory.js';
 
 const BASE = `你是 MingDao Harness，一个由 MingDao Harness 驱动的 AI 编程助手。你在用户的电脑上工作：通过工具读写文件、搜索代码、执行命令，帮助用户完成编程、调试与自动化任务。
@@ -29,6 +29,7 @@ function loadFile(p, cap) {
   }
 }
 
+/** @param {{ workingDir: any, withJournal?: boolean, [key: string]: any }} opts */
 export function buildSystemPrompt({ workingDir, withJournal = false }) {
   // 前缀字节稳定性（评估 P1-1/P1-2，四份评估一致的最高价值项）：
   // 系统提示不含「当前模型」「当前日期」等易变字段——DeepSeek 上下文缓存按前缀字节匹配，
@@ -50,9 +51,15 @@ export function buildSystemPrompt({ workingDir, withJournal = false }) {
   // 技能清单（渐进披露：仅名称+描述，按需加载全文）
   prompt += skillsRegistryBlock(workingDir);
 
-  // 项目约定（./AGENTS.md）
-  const agentsMd = loadFile(path.join(workingDir, 'AGENTS.md'), 20000);
-  if (agentsMd) prompt += `\n\n<agents_md>\n${agentsMd}\n</agents_md>`;
+  // 项目约定（./AGENTS.md）——体积可配置（审计 MiniMax §3.3-B，v0.1.48 P0-D）：
+  // 典型项目 6-12K 的 AGENTS.md 全量进 system 每轮按缓存价计费；默认截 4K，超长部分
+  // 模型可 read 工具按需读全文。config.maxAgentsMdChars 可调（0 表示不注入）。
+  const cfg = loadConfig();
+  const agentsMdCap = cfg && Number.isFinite(Number(cfg.maxAgentsMdChars)) ? Math.max(0, Number(cfg.maxAgentsMdChars)) : 4000;
+  if (agentsMdCap > 0) {
+    const agentsMd = loadFile(path.join(workingDir, 'AGENTS.md'), agentsMdCap);
+    if (agentsMd) prompt += `\n\n<agents_md>\n${agentsMd}\n</agents_md>`;
+  }
 
   return prompt;
 }

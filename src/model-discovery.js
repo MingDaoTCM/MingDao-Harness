@@ -84,7 +84,7 @@ export async function fetchProviderModels(cfg, providerName, { force = false } =
         redirect: 'follow',
       });
       if (!res.ok) return { error: `HTTP ${res.status}` };
-      const j = await res.json().catch(() => null);
+      const j = /** @type {any} */ (await res.json().catch(() => null));
       const list = (j?.data || [])
         .map((m) => String(m?.id || '').trim())
         .filter((id) => id && isChatModel(id))

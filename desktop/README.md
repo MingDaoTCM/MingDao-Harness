@@ -27,8 +27,13 @@ npm run dist:mac          # dmg（macOS 上运行）
 ```
 
 产物在 `desktop/dist/`。CI（`.github/workflows/desktop.yml`）在打 tag 时自动构建三平台安装包
-并上传为 Actions 工件；GitHub Releases 发布后，打包版应用会自动检测更新
-（`electron-updater`，可用 `MINGDAO_NO_AUTOUPDATE=1` 关闭）。
+并上传为 Actions 工件；安装包发布到官网后，打包版应用会自动检测更新。
+
+**自动更新**（`electron-updater`，可用 `MINGDAO_NO_AUTOUPDATE=1` 关闭）：
+- 更新源为官网自托管 feed：`https://harness.mingdao.ai/updates/`（latest.yml / latest-mac.yml / latest-linux.yml），
+  国内直连，不走 GitHub；
+- 每次发版需把新安装包与对应 latest*.yml 一并上传（发版清单见根 README）；
+- deb 安装不支持 electron-updater（仅 AppImage / NSIS / dmg+zip）。
 
 ## 结构
 

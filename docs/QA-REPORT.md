@@ -2,7 +2,7 @@
 
 > 质检日期：2026-08-18
 > 项目路径：`/home/YouLi/AI/DeepSeek-harness-Space/MingDao-Harness`
-> 版本：0.4.0（纯 ESM，零 npm 依赖，Node.js ≥ 18.17）
+> 版本：0.1.54（历史归档；现行 0.1.x 口径见根 README 与各版本 tag。纯 ESM，零 npm 依赖，Node.js ≥ 18.17）
 > 质检方式：全量源码走读 + 冒烟/端到端测试 + 针对性缺陷验证脚本
 
 ---

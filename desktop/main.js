@@ -159,7 +159,8 @@ async function createWindow() {
     title: 'MingDao Harness',
     icon: path.join(buildRoot, 'icon.png'),
     show: false,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true },
+    // 权限收紧（审计 MiniMax §2.1）：webview 显式禁用 + 页面 CSP（index.html meta）双重防线
+    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false },
   });
   mainWindow = win;
   if (st.maximized) win.maximize();

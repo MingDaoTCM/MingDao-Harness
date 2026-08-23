@@ -171,7 +171,7 @@ export async function extractMemory(provider, model, messages, existingMemory) {
       {
         role: 'system',
         content:
-          '你是 MingDao 的记忆提取器。从对话中提取值得长期记住的用户偏好与事实（工具链、代码风格、项目背景、个人约定、常用指令等）。每条一行，以 - 开头，≤30 字，只输出新条目（与「已有记忆」重复或对话中未提及的不要输出）；没有新增时 items 为空数组。\n已有记忆：\n' +
+          '你是 MingDao Harness 的记忆提取器。从对话中提取值得长期记住的用户偏好与事实（工具链、代码风格、项目背景、个人约定、常用指令等）。每条 ≤30 字，只输出新条目（与「已有记忆」重复或对话中未提及的不要输出）。只输出 JSON：{"items": ["条目1", "条目2"]}；没有新增时输出 {"items": []}。\n已有记忆：\n' +
           (existingMemory || '（空）'),
       },
       { role: 'user', content: convo.slice(0, 8000) },

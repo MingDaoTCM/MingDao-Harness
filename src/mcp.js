@@ -151,7 +151,7 @@ export class McpClient {
           this.notify('notifications/initialized');
           this.ready = true;
           clearTimeout(timer);
-          resolve();
+          resolve(undefined);
         })
         .catch((err) => {
           clearTimeout(timer);

@@ -93,8 +93,8 @@ export function writeSchedule(home, job) {
   return job;
 }
 
-// 新建调度任务；after: 依赖的任务 ID（全部成功后才启动，任一失败则跳过）
-export function addSchedule(home, question, { at, every, after, permission, model, cwd, anchor, offpeak }) {
+/** 新建调度任务；after: 依赖的任务 ID（全部成功后才启动，任一失败则跳过） */
+export function addSchedule(home, question, /** @type {any} */ { at, every, after, permission, model, cwd, anchor, offpeak }) {
   const id = 'sc' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   const interval = every != null ? parseInterval(every) : null;
   const afterList = Array.isArray(after) ? after.filter(Boolean).map(String) : after ? String(after).split(',').map((x) => x.trim()).filter(Boolean) : [];
@@ -276,7 +276,11 @@ export function spawnDaemon(home) {
     env: { ...process.env, MINGDAO_HOME: home },
   });
   try {
-    fs.writeFileSync(daemonPidFile(home), `${child.pid} ${nonce}`);
+    // 原子写（审计 workbuddy P3-4）：tmp+rename 与 writeSchedule 同款——崩溃不留半截 pid 文件
+    const target = daemonPidFile(home);
+    const tmp = target + '.tmp';
+    fs.writeFileSync(tmp, `${child.pid} ${nonce}`);
+    fs.renameSync(tmp, target);
   } catch {}
   child.unref();
   return true;

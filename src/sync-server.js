@@ -193,7 +193,7 @@ async function doRegister(body) {
   // 审计 P2-10：注册用进程内互斥，避免并发同名注册双双成功（后写覆盖）
   if (!registerLock) {
     registerLock = new Promise((resolve) => {
-      queueMicrotask(resolve);
+      queueMicrotask(() => resolve(undefined));
     });
   }
   const prev = registerLock;
@@ -530,6 +530,7 @@ async function handle(req, res) {
 }
 
 // ---------- 启动 ----------
+/** @param {{ port?: any, host?: any, dataDir?: any, cert?: any, key?: any }} [opts] */
 export function runSyncServer({ port, host, dataDir, cert, key } = {}) {
   const dir = dataDir || DEFAULT_DATA_DIR;
   ACTIVE_DIR = dir;

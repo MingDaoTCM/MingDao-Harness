@@ -49,17 +49,27 @@ export function recordCacheStats(entry) {
   }
 }
 
+// listCacheStats 读取缓存（审计：costGuard 每步 / WebUI 每 15s / /cost 命令都调用——
+// 四报告共识 P2-2/§3.3-A：全文件读+逐行 parse 会随 JSONL 增长线性放大 IO。
+// 按 mtimeMs+size 双键缓存；写入追加会改两者，轮转重写同样改，缓存自动失效）
+let _statsCache = null;
+
 export function listCacheStats(limit = 2000) {
   try {
-    const raw = fs.readFileSync(cacheStatsFile(), 'utf8');
-    const out = [];
-    for (const l of raw.split('\n')) {
-      if (!l.trim()) continue;
-      try {
-        out.push(JSON.parse(l));
-      } catch {}
+    const file = cacheStatsFile();
+    const st = fs.statSync(file);
+    if (!_statsCache || _statsCache.mtimeMs !== st.mtimeMs || _statsCache.size !== st.size || _statsCache.limit < limit) {
+      const raw = fs.readFileSync(file, 'utf8');
+      const out = [];
+      for (const l of raw.split('\n')) {
+        if (!l.trim()) continue;
+        try {
+          out.push(JSON.parse(l));
+        } catch {}
+      }
+      _statsCache = { mtimeMs: st.mtimeMs, size: st.size, limit, lines: out };
     }
-    return out.slice(-limit);
+    return _statsCache.lines.slice(-limit);
   } catch {
     return [];
   }

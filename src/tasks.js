@@ -54,7 +54,7 @@ export function isValidTaskId(id) {
   return typeof id === 'string' && /^[a-z0-9]+$/.test(id) && id.length >= 4 && id.length <= 40;
 }
 
-export function startTask(home, question, { permission, model, cwd, offpeak } = {}) {
+export function startTask(home, question, { permission, model, cwd, offpeak } = /** @type {any} */ ({})) {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6) + process.pid.toString(36);
   const task = {
     id,

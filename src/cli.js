@@ -23,7 +23,7 @@ import { enableAutostart, disableAutostart, autostartStatus, autostartPath } fro
 import { notifyTaskDone } from './notify.js';
 import { addWorkspace, removeWorkspace, workspacePath, touchWorkspace, listWorkspaces, currentWorkspace } from './workspace.js';
 import { finalizeSession, extractMemory, loadMemory, appendMemory, recentJournal, dedupeMemory, removeMemoryLines } from './memory.js';
-import { recordUsage, listCacheStats, summarizeCacheStats, formatCacheSummary } from './cachestats.js';
+import { recordUsage, listCacheStats, summarizeCacheStats, formatCacheSummary, costBreakdown } from './cachestats.js';
 import { presetList, buildPreset } from './mcp-presets.js';
 import {
   addSchedule,
@@ -508,10 +508,12 @@ async function main() {
     const route = await routeTask({ cfg, provider, currentModel: modelName, text: question });
     if (route.model !== modelName) {
       if (!jsonMode) io.print(style(`⤷ 自动路由 → ${route.model}（${route.reason}）`, C.dim));
+      // 审计 P1-2（第五轮复审实证）：先按新模型重建 provider、再改模型名——
+      // 此前顺序颠倒（先赋值再判断），条件恒假，跨服务商路由池会把 executor 模型名
+      // 发到 planner 的 baseUrl/key 上（401/404）。默认同服务商配置不受影响。
+      provider = await createProvider(cfg, route.model);
       modelName = route.model;
     }
-    // 审计 P1-2：自动路由改换模型后必须重建对应 provider（此前用旧模型的 baseUrl/key 发请求）
-    if (route.model !== modelName) provider = await createProvider(cfg, modelName);
     // JSON 模式：关闭流式输出，结果以单行 JSON 输出（脚本/管道友好）
     const turnIo = jsonMode ? createIO({ quiet: true }) : io;
     const session = createSession(home);
@@ -712,6 +714,9 @@ async function main() {
     if (input.startsWith('/')) {
       const [cmd, ...rest] = input.split(/\s+/);
       const arg = rest.join(' ');
+      // 审计（第五轮 P1-1 教训）：斜杠命令统一 try/catch——单条命令异常只提示不退出，
+      // 绝不再因一条命令的错误杀死整个 REPL 会话（历史 P1-1 曾导致会话上下文全丢）
+      try {
       if (cmd === '/exit' || cmd === '/quit') break;
       else if (cmd === '/help') printHelpLines(io.print);
       else if (cmd === '/clear') {
@@ -993,6 +998,10 @@ async function main() {
         io.print(style('未知命令，输入 /help 查看可用命令。', C.yellow));
       }
       continue;
+      } catch (err) {
+        io.print(style('[错误] 命令执行失败：' + (err?.message || err), C.red));
+        continue;
+      }
     }
 
     // 自动路由：规划类任务切 planner，执行类走 executor（会话粘滞 + 分类缓存见 routing.js）

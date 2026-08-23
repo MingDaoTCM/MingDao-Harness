@@ -435,6 +435,66 @@ function ok(name) {
   ok('sync CLI：登录 / 推送 / 拉取 / 状态 / 退出 / 改密 / 分享 / 冲突');
 }
 
+// ---------- 15. REPL 斜杠命令离线冒烟（审计 Kimi 第五轮 P1-1 回归护栏） ----------
+// 历史缺陷：/cost 调用未导入的 costBreakdown → ReferenceError 杀死整个会话。
+// 逐条管道投喂全部离线斜杠命令：断言无 is not defined、进程存活到 /exit、关键输出出现。
+{
+  resetMock('plain');
+  const w15 = newWorkDir();
+  const cmds = ['/help', '/status', '/usage', '/cost', '/cache', '/sessions', '/skills', '/memory', '/model', '/mode', '/compact', '/audit', '/mcp', '/exit'];
+  const r = await runCli([], { cwd: w15, stdin: cmds.join('\n') + '\n' });
+  assert.equal(r.code, 0, 'REPL 应以 /exit 正常退出，stderr: ' + r.err);
+  assert.ok(!r.out.includes('is not defined'), '斜杠命令不得出现 ReferenceError（历史 P1-1 回归）');
+  assert.ok(!r.out.includes('命令执行失败'), '斜杠命令 try/catch 兜底不应被触发（全部命令应正常执行）');
+  assert.ok(r.out.includes('费用分账'), '/cost 应正常输出分账');
+  assert.ok(r.out.includes('会话状态'), '/status 应正常输出状态');
+  assert.ok(r.out.includes('缓存命中率'), '/cache 应正常输出仪表盘');
+  safeRm(w15, { recursive: true, force: true });
+  ok('REPL：全部离线斜杠命令管道冒烟（无 ReferenceError / 进程存活到 /exit）');
+}
+
+// ---------- 16. 一次性提问跨服务商路由：provider 必须按新模型重建（审计 Kimi P1-2 / workbuddy P1-1） ----------
+// 历史缺陷：先赋值 modelName 再判断 → 重建分支永假 → executor 模型名被发到 planner 的 baseUrl。
+// 用两个独立端点 mock 两个服务商：短问题（启发式直判 executor）必须落在 executor 端点。
+{
+  let hitB = 0;
+  const serverB = http.createServer((req, res) => {
+    if ((req.url || '').includes('/chat/completions')) hitB += 1;
+    sse(res, {
+      choices: [{ delta: { content: 'B 端点应答：路由正确' }, finish_reason: 'stop' }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    });
+  });
+  await new Promise((r2) => serverB.listen(0, '127.0.0.1', r2));
+  const portB = serverB.address().port;
+  fs.writeFileSync(
+    path.join(home, 'config.json'),
+    JSON.stringify({
+      model: 'planner-m',
+      routing: { planner: 'planner-m', executor: 'executor-m' },
+      customModels: {
+        'planner-m': { baseUrl: `http://127.0.0.1:${port}/v1` },
+        'executor-m': { baseUrl: `http://127.0.0.1:${portB}/v1` },
+      },
+      permission: 'auto',
+      contextBudget: 32000,
+    })
+  );
+  // 记录主 mock 当前请求数作为 A 端点基线（reset 后为 0）
+  resetMock('plain');
+  const aBaseline = requestCount;
+  const w16 = newWorkDir();
+  const r = await runCli(['帮我看看这个错误'], { cwd: w16 });
+  assert.equal(r.code, 0, 'stderr: ' + r.err);
+  assert.ok(r.out.includes('B 端点应答'), '回答应来自 executor 端点（修复前会打到 planner 端点）');
+  assert.ok(hitB >= 1, 'executor 端点应收到 chat 请求');
+  assert.equal(requestCount, aBaseline, 'planner 端点不应收到任何请求（修复前 provider 未重建会打到这里）');
+  safeRm(w16, { recursive: true, force: true });
+  serverB.close();
+  writeConfig('auto'); // 恢复默认配置供后续（本文件结尾无后续用例，保险起见）
+  ok('单次提问：跨服务商路由命中 executor 端点（provider 重建生效）');
+}
+
 server.close();
 safeRm(home, { recursive: true, force: true });
 safeRm(work, { recursive: true, force: true });

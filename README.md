@@ -101,6 +101,14 @@ git clone https://gitee.com/MingDaoTCM/MingDao-harness.git MingDao-Harness && cd
 node src/cli.js        # 直接运行，无需安装
 ```
 
+开发者护栏（提交前建议执行；CI 会强制跑全套）：
+
+```bash
+npm install            # 仅装 devDependencies（typescript + @types/node），运行时依旧零依赖
+npm run typecheck      # tsc --checkJs 类型护栏（覆盖 agent/cli/commands/provider/cachestats 等核心模块）
+node test/smoke.js && node test/e2e-local.js && node test/e2e-web.js && node test/e2e-schedule.js
+```
+
 ### 验证安装
 
 ```bash

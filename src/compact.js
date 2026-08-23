@@ -19,12 +19,12 @@ const INPUT_MAX_CHARS = 30000; // 摘要输入上限（防超长工具输出撑�
 const TOOL_OUTPUT_CAP = 300; // 摘要输入中每条工具结果截断长度
 
 const SUMMARY_SYSTEM =
-  '你是 MingDao 的会话压缩器。把对话记录压成紧凑中文摘要（≤500 字，要点列表）：' +
+  '你是 MingDao Harness 的会话压缩器。把对话记录压成紧凑中文摘要（≤500 字，要点列表）：' +
   '保留用户目标与关键要求、已完成的步骤与结论、修改/创建的文件、未完成事项、重要约定与决策；' +
-  '省略已完成的中间过程与细节。只输出摘要本身，不要任何解释。';
+  '省略已完成的中间过程与细节。只输出 JSON：{"summary": "摘要内容"}。';
 
 export async function summarizeConversation(provider, model, convoText) {
-  const res = await provider.chat({
+  const base = {
     model,
     messages: [
       { role: 'system', content: SUMMARY_SYSTEM },
@@ -32,11 +32,26 @@ export async function summarizeConversation(provider, model, convoText) {
     ],
     tools: [],
     temperature: 0.2,
-    maxTokens: 2048, // 审计 Q2：与 SUMMARY_MAX_CHARS(1600 字) 匹配，避免模型侧先截断
-  });
-  const text = String(res?.text || '').trim();
-  if (!text) return { text: null, usage: res?.usage || null };
-  return { text: text.slice(0, SUMMARY_MAX_CHARS), usage: res?.usage || null };
+  };
+  // 结构化输出（审计 MiniMax §3.3-D）：压缩是 30K 输入 × pro 价的大开销，与标题/记忆/路由
+  // 一致改 json_object + maxTokens 2048→1024（1600 字摘要足够）；网关不支持时回退纯文本。
+  let text = '';
+  let usage = null;
+  try {
+    const res = await provider.chat({ ...base, maxTokens: 1024, responseFormat: { type: 'json_object' } });
+    const j = JSON.parse(String(res?.text || '').trim());
+    text = String(j?.summary || '').trim();
+    usage = res?.usage || null;
+  } catch {}
+  if (!text) {
+    try {
+      const res = await provider.chat({ ...base, maxTokens: 1024 });
+      text = String(res?.text || '').trim();
+      usage = res?.usage || null;
+    } catch {}
+  }
+  if (!text) return { text: null, usage };
+  return { text: text.slice(0, SUMMARY_MAX_CHARS), usage };
 }
 
 export async function compactConversation({ messages, budget, count, provider, executorModel, triggerRatio }) {

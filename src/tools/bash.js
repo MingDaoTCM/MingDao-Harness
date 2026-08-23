@@ -43,8 +43,35 @@ export function detectSandbox() {
   return sandboxSupport;
 }
 
+// 输出折叠（审计 MiniMax §3.3-E / v0.1.48 P1-G）：模型回填的 bash 输出先折叠再截断——
+// 1) 剥离 ANSI 转义序列（CSI/OSC）；2) 连续重复行（>3 行相同）折叠为「首行 + 重复标记」。
+// npm install 类输出通常 30-50KB → 折叠后 5-10KB，单次工具回填省 60-70% prompt token。
+function stripAnsi(s) {
+  return s
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
+}
+function foldRepeats(s) {
+  const lines = s.split('\n');
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    let j = i;
+    while (j + 1 < lines.length && lines[j + 1] === lines[i]) j += 1;
+    const run = j - i + 1;
+    if (run > 3) {
+      out.push(lines[i], `…（以上重复 ${run} 行，已折叠）`);
+      i = j + 1;
+    } else {
+      out.push(lines[i]);
+      i += 1;
+    }
+  }
+  return out.join('\n');
+}
 function tail(s, n) {
-  return s.length > n ? `…[输出过长，已截断头部]\n${s.slice(-n)}` : s;
+  const folded = foldRepeats(stripAnsi(s));
+  return folded.length > n ? `…[输出过长，已截断头部]\n${folded.slice(-n)}` : folded;
 }
 
 export function runBash(args, ctx) {

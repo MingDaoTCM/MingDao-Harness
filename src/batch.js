@@ -11,7 +11,6 @@ import path from 'node:path';
 import { resolveProviderConfig } from './providers/index.js';
 import { estimateBatchCost, BATCH_DISCOUNT } from './pricing.js';
 import { recordCacheStats } from './cachestats.js';
-import { buildSystemPrompt } from './prompts.js';
 
 const DEFAULT_WINDOW = '24h';
 const DEFAULT_ENDPOINT = '/v1/chat/completions';
@@ -26,15 +25,16 @@ function batchBase(cfg, model) {
   return pc.name === 'deepseek' ? base.replace(/\/v1\/?$/, '') : base;
 }
 
+/** @returns {Promise<any>} */
 async function api(base, apiKey, methodPath, payload, httpMethod = 'POST') {
   const res = await fetch(base + methodPath, {
     method: httpMethod,
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: payload === undefined ? undefined : JSON.stringify(payload),
   });
-  const j = await res.json().catch(() => ({}));
+  const j = /** @type {any} */ (await res.json().catch(() => ({})));
   if (!res.ok) {
-    const e = new Error(j?.error?.message || j?.message || `HTTP ${res.status}`);
+    const e = /** @type {Error & { status?: number }} */ (new Error(j?.error?.message || j?.message || `HTTP ${res.status}`));
     e.status = res.status;
     throw e;
   }
@@ -50,9 +50,9 @@ async function uploadFile(base, apiKey, jsonl) {
     headers: { Authorization: `Bearer ${apiKey}` },
     body: form,
   });
-  const j = await res.json().catch(() => ({}));
+  const j = /** @type {any} */ (await res.json().catch(() => ({})));
   if (!res.ok) {
-    const e = new Error(j?.error?.message || j?.message || `上传失败 HTTP ${res.status}`);
+    const e = /** @type {Error & { status?: number }} */ (new Error(j?.error?.message || j?.message || `上传失败 HTTP ${res.status}`));
     e.status = res.status;
     throw e;
   }
@@ -84,7 +84,8 @@ async function downloadResults(base, apiKey, batch) {
   throw new Error('批处理结果文件不可用（端点不支持或文件已过期）');
 }
 
-// 执行一次批处理。questions: string[]。返回 { ok, outputFile, results, usage, cost, batchId }
+/** 执行一次批处理。questions: string[]。返回 { ok, outputFile, results, usage, cost, batchId }
+ * @param {{ cfg: any, model: any, questions: any, workingDir?: string, maxTokens?: number, temperature?: any, signal?: any, onStatus?: any }} opts */
 export async function runBatch({ cfg, model, questions, workingDir = process.cwd(), maxTokens = 4096, temperature, signal, onStatus }) {
   const list = (questions || []).map((q) => String(q).trim()).filter(Boolean);
   if (!list.length) return { error: '没有可批处理的问题（每行一个问题）' };
@@ -92,7 +93,10 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
   if (!pc.apiKey) return { error: `模型 ${model} 没有可用 API Key（mingdao key set ${pc.name}）` };
   const base = batchBase(cfg, model);
   const apiKey = pc.apiKey;
-  const systemPrompt = buildSystemPrompt({ workingDir });
+  // 审计（workbuddy P2-1）：批量任务无缓存语义，每个问题的 system 都按 input 全价计费——
+  // 不再携带完整系统提示（技能清单/用户记忆/AGENTS.md 对无工具批任务毫无意义，1000 问
+  // 可白烧 50-80 万 token）；改用一行精简角色提示，剩余能力损失为零。
+  const systemPrompt = '你是 MingDao Harness 编程助手。直接针对每个问题给出准确、完整的答案，不要复述问题、不要解释过程。';
   const bodyTemplate = {
     model,
     messages: null, // 逐行填充
@@ -122,11 +126,14 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
       completion_window: cfg?.batchWindow || DEFAULT_WINDOW,
     });
     onStatus?.(`任务已创建：${batch.id}`);
-    // 轮询（间隔可用 MINGDAO_BATCH_POLL_MS 覆盖，测试用）；连续失败 10 次 → 报错，绝不无限重试
-    const interval = Math.max(500, Number(process.env.MINGDAO_BATCH_POLL_MS) || 5000);
+    // 轮询：指数退避（审计 workbuddy P3-3）——基础间隔 5s（MINGDAO_BATCH_POLL_MS 可覆盖，测试用），
+    // ×1.5 逐次翻倍、30s 封顶：24h 窗口内轮询请求量从 ~1.7 万次降到 ~3 千次；
+    // 连续失败 10 次 → 报错，绝不无限重试。每次轮询报告进度（含已处理 X/Y）。
+    const baseInterval = Math.max(500, Number(process.env.MINGDAO_BATCH_POLL_MS) || 5000);
     const t0 = Date.now();
     let st = batch.status;
     let failures = 0;
+    let polls = 0;
     for (;;) {
       if (signal?.aborted) return { error: '已取消轮询（任务仍在服务端运行）', batchId: batch.id };
       if (Date.now() - t0 > 24 * 3600 * 1000) return { error: '批处理超过 24h 窗口', batchId: batch.id };
@@ -137,7 +144,7 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
       } catch (err) {
         failures += 1;
         if (failures >= 10) return { error: `轮询失败：${err?.message || err}（任务仍在服务端，ID ${batch.id}）`, batchId: batch.id };
-        await new Promise((r) => setTimeout(r, interval));
+        await new Promise((r) => setTimeout(r, Math.min(baseInterval * 1.5 ** failures, 30000)));
         continue;
       }
       st = j.status;
@@ -149,11 +156,11 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
         const detail = j?.errors?.data?.[0]?.message || j?.errors?.message || '';
         return { error: `批处理失败：${st}${detail ? '（' + detail + '）' : ''}`, batchId: batch.id };
       }
-      if (st !== 'in_progress' && st !== 'validating' && st !== 'finalizing') {
-        // 未知状态：继续等待但报告
-        onStatus?.(`状态：${st}`);
-      }
-      await new Promise((r) => setTimeout(r, interval));
+      polls += 1;
+      const rc = j?.request_counts || {};
+      const done = rc.completed != null && rc.total != null ? `${rc.completed}/${rc.total}` : '';
+      onStatus?.(`状态：${st}${done ? `（已处理 ${done}）` : ''}`);
+      await new Promise((r) => setTimeout(r, Math.min(baseInterval * 1.5 ** polls, 30000)));
     }
     onStatus?.('下载结果…');
     const results = await downloadResults(base, apiKey, batch);

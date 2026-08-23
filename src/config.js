@@ -23,6 +23,8 @@ export function configPath() {
   return path.join(mingdaoHome(), 'config.json');
 }
 
+/** 读取配置对象（不存在/损坏返回 null）；返回值为用户可编辑的任意 JSON 配置，类型不定
+ * @returns {any} */
 export function loadConfig() {
   try {
     return JSON.parse(fs.readFileSync(configPath(), 'utf8'));

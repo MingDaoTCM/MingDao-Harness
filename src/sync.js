@@ -63,7 +63,7 @@ async function apiCall(baseUrl, method, payload, token, timeoutMs = TIMEOUT_MS, 
     if (insecure) {
       const { status, json: j } = await rawRequest(target, { headers, body, timeoutMs, insecure: true });
       if (status !== 200) {
-        const err = new Error(j.error || `HTTP ${status}`);
+        const err = /** @type {Error & { status?: number, body?: any }} */ (new Error(j.error || `HTTP ${status}`));
         err.status = status;
         err.body = j;
         throw err;
@@ -79,9 +79,9 @@ async function apiCall(baseUrl, method, payload, token, timeoutMs = TIMEOUT_MS, 
         body,
         signal: ctrl.signal,
       });
-      const j = await res.json().catch(() => ({}));
+      const j = /** @type {any} */ (await res.json().catch(() => ({})));
       if (!res.ok) {
-        const err = new Error(j.error || `HTTP ${res.status}`);
+        const err = /** @type {Error & { status?: number, body?: any }} */ (new Error(j.error || `HTTP ${res.status}`));
         err.status = res.status;
         err.body = j;
         throw err;

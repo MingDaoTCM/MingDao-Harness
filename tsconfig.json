@@ -18,6 +18,16 @@
     "src/context.js",
     "src/titles.js",
     "src/routing.js",
-    "src/cost-guard.js"
+    "src/cost-guard.js",
+    "src/agent.js",
+    "src/cli.js",
+    "src/commands/*.js",
+    "src/providers/index.js",
+    "src/cachestats.js",
+    "src/batch.js",
+    "src/compact.js",
+    "src/memory.js",
+    "src/schedule.js",
+    "src/tools/bash.js"
   ]
 }
