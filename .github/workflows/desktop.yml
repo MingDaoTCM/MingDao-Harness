@@ -51,7 +51,13 @@ jobs:
         run: npm install --no-audit --no-fund
       - name: 打包
         working-directory: desktop
-        run: npx electron-builder ${{ matrix.args }} --publish never
+        shell: bash
+        run: |
+          # 未配置的签名 Secrets 会被 Actions 替换为空字符串，electron-builder 将空串视为有效证书路径而快速报错——先清空再构建
+          for k in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET; do
+            if [ -z "${!k}" ]; then unset "$k"; fi
+          done
+          npx electron-builder ${{ matrix.args }} --publish never
       - name: 上传工件
         uses: actions/upload-artifact@v4
         with:

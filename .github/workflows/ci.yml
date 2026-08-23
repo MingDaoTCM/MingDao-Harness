@@ -38,4 +38,4 @@ jobs:
       - name: 端到端：调度
         run: node test/e2e-schedule.js
       - name: 类型护栏（tsc --checkJs 核心模块）
-        run: npx tsc -p tsconfig.json
+        run: npx -y typescript@7.0.2 tsc -p tsconfig.json
