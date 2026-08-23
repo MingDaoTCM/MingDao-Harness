@@ -18,6 +18,8 @@ html{scroll-behavior:smooth}
 body{background:var(--bg);color:var(--text);font-family:'HarmonyOS Sans SC',Inter,'PingFang SC','Segoe UI','Microsoft YaHei',sans-serif;line-height:1.7;font-size:16px}
 a{color:var(--cyan);text-decoration:none}
 a:hover{text-decoration:underline}
+.dbtn{display:inline-block;background:linear-gradient(135deg,var(--green),var(--cyan));color:#06121a;font-weight:700;border-radius:10px;padding:9px 18px;font-size:14px;text-decoration:none;transition:opacity .2s}
+.dbtn:hover{opacity:.88;text-decoration:none}
 .wrap{max-width:1060px;margin:0 auto;padding:0 24px}
 header{position:sticky;top:0;z-index:10;background:rgba(11,14,20,.85);backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
 header .wrap{display:flex;align-items:center;gap:18px;height:60px}
@@ -85,6 +87,7 @@ footer .links{display:flex;gap:20px;justify-content:center;margin-bottom:14px;fl
   <nav>
     <a href="#quick">快速开始</a>
     <a href="#features">为什么选明道</a>
+    <a href="#downloads">下载桌面版</a>
     <a href="#money">省钱工程</a>
     <a href="#flow">工作原理</a>
     <a href="#repos">仓库</a>
@@ -120,6 +123,34 @@ curl -fsSL https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main/ins
     </div>
   </div>
 </section>
+
+<section id="downloads" style="background:var(--bg2);border-top:1px solid var(--border);border-bottom:1px solid var(--border)"><div class="wrap">
+  <h2><span class="dot">●</span> 下载桌面版</h2>
+  <p class="sec-sub">内置 WebUI 的 Electron 桌面应用：托盘常驻、窗口记忆、权限收紧、自动更新。安装即用，<code style="color:var(--cyan)">mingdao init</code> 首次配置后即可对话。</p>
+  <div class="repos" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
+    <div class="repo" style="flex-direction:column;align-items:flex-start;gap:10px">
+      <div style="display:flex;gap:12px;align-items:center"><div class="ic">🪟</div><div><b>Windows 10/11</b><span>NSIS 安装包 · x64 · v0.1.57</span></div></div>
+      <a class="dbtn" href="https://github.com/MingDaoTCM/MingDao-Harness/releases/download/v0.1.57/mingdao-setup-0.1.57-x64.exe">⬇ 下载安装包（.exe）</a>
+      <p style="font-size:12.5px;color:var(--dim)">安装后从开始菜单启动；首次运行若出现 SmartScreen 提示，点「更多信息 → 仍要运行」（未签名构建）。</p>
+    </div>
+    <div class="repo" style="flex-direction:column;align-items:flex-start;gap:10px">
+      <div style="display:flex;gap:12px;align-items:center"><div class="ic">🍎</div><div><b>macOS</b><span>dmg · v0.1.57</span></div></div>
+      <a class="dbtn" href="https://github.com/MingDaoTCM/MingDao-Harness/releases/download/v0.1.57/mingdao-0.1.57-arm64.dmg">⬇ Apple Silicon（arm64）</a>
+      <a class="dbtn" href="https://github.com/MingDaoTCM/MingDao-Harness/releases/download/v0.1.57/mingdao-0.1.57-x64.dmg">⬇ Intel（x64）</a>
+      <p style="font-size:12.5px;color:var(--dim)">未公证：首次打开请在「系统设置 → 隐私与安全性」点「仍要打开」。</p>
+    </div>
+    <div class="repo" style="flex-direction:column;align-items:flex-start;gap:10px">
+      <div style="display:flex;gap:12px;align-items:center"><div class="ic">🐧</div><div><b>Linux</b><span>deb + AppImage · x64 · v0.1.57（官网直连，国内最快）</span></div></div>
+      <a class="dbtn" href="/downloads/mingdao-0.1.57-amd64.deb">⬇ deb（75.6MB · Debian/Ubuntu）</a>
+      <a class="dbtn" href="/downloads/mingdao-0.1.57-x86_64.AppImage">⬇ AppImage（108.6MB · 通用）</a>
+      <p style="font-size:12.5px;color:var(--dim)">deb：<code>sudo apt install ./mingdao-0.1.57-amd64.deb</code>；AppImage：<code>chmod +x</code> 后直接运行。</p>
+    </div>
+  </div>
+  <p style="text-align:center;margin-top:18px;color:var(--faint);font-size:13px">
+    🔒 校验：deb sha256 <code>a6a406baa6c78ea5…</code> · AppImage sha256 <code>42102197d23a053f…</code>（<code>sha256sum 文件名</code> 比对）；
+    全部产物由 CI 在打 tag 时自动构建并发布到 GitHub Releases（Windows/macOS 链接构建完成后即刻生效）。
+  </p>
+</div></section>
 
 <section id="quick"><div class="wrap">
   <h2><span class="dot">●</span> 快速上手</h2>

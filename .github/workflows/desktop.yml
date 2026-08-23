@@ -1,10 +1,13 @@
-# MingDao 桌面版打包：打 tag 或手动触发时构建三平台安装包并发布为 Release 资产
+# MingDao 桌面版打包：打 tag 自动构建三平台安装包 → 上传工件 + 自动创建 GitHub Release
 name: Desktop
 
 on:
   workflow_dispatch:
   push:
     tags: ['v*']
+
+permissions:
+  contents: write # 自动创建 Release 需要
 
 jobs:
   build:
@@ -14,10 +17,16 @@ jobs:
         include:
           - os: ubuntu-latest
             args: --linux AppImage deb
+            name: linux-x64
           - os: windows-latest
             args: --win nsis
-          - os: macos-latest
+            name: win-x64
+          - os: macos-13
             args: --mac dmg
+            name: mac-x64
+          - os: macos-14
+            args: --mac dmg
+            name: mac-arm64
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -32,9 +41,23 @@ jobs:
       - name: 打包
         working-directory: desktop
         run: npx electron-builder ${{ matrix.args }} --publish never
-      - name: 上传产物
+      - name: 上传工件
         uses: actions/upload-artifact@v4
         with:
-          name: mingdao-desktop-${{ matrix.os }}
-          path: desktop/dist/*.*
+          name: mingdao-desktop-${{ matrix.name }}
+          path: |
+            desktop/dist/*.AppImage
+            desktop/dist/*.deb
+            desktop/dist/*.exe
+            desktop/dist/*.dmg
           if-no-files-found: warn
+      - name: 发布到 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            desktop/dist/*.AppImage
+            desktop/dist/*.deb
+            desktop/dist/*.exe
+            desktop/dist/*.dmg
+          draft: false
+          generate_release_notes: true

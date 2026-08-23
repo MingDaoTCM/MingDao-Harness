@@ -1,6 +1,6 @@
 {
   "name": "mingdao-desktop",
-  "version": "0.1.55",
+  "version": "0.1.57",
   "private": true,
   "type": "module",
   "main": "main.js",
