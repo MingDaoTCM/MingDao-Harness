@@ -122,6 +122,7 @@ curl -fsSL https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main/ins
       <div class="stat"><b>0</b><span>npm 运行时依赖</span></div>
       <div class="stat"><b>1/30</b><span>缓存命中价 vs 未命中</span></div>
       <div class="stat"><b>50% off</b><span>Batch 批量 / 避峰执行</span></div>
+      <div class="stat"><b id="statVisit">—</b><span>官网累计访问 · 今日 —</span></div>
     </div>
   </div>
 </section>
@@ -133,24 +134,28 @@ curl -fsSL https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main/ins
     <div class="repo" style="flex-direction:column;align-items:flex-start;gap:10px">
       <div style="display:flex;gap:12px;align-items:center"><div class="ic">🪟</div><div><b>Windows 10/11</b><span>NSIS 安装包 · x64 · v0.1.60 · 官网直连</span></div></div>
       <a class="dbtn" href="/downloads/mingdao-setup-0.1.60-x64.exe">⬇ 下载安装包（.exe · 79.6MB）</a>
+      <p class="dlc" data-files="mingdao-setup-0.1.60-x64.exe" style="display:none;margin:0;font-size:12.5px;color:var(--cyan)"></p>
       <p style="font-size:12.5px;color:var(--dim)">安装后从开始菜单启动；首次运行若出现 SmartScreen 提示，点「更多信息 → 仍要运行」（未签名构建）。</p>
     </div>
     <div class="repo" style="flex-direction:column;align-items:flex-start;gap:10px">
       <div style="display:flex;gap:12px;align-items:center"><div class="ic">🍎</div><div><b>macOS</b><span>dmg · v0.1.60 · 官网直连</span></div></div>
       <a class="dbtn" href="/downloads/mingdao-0.1.60-arm64.dmg">⬇ Apple Silicon（arm64 · 96.6MB）</a>
       <a class="dbtn" href="/downloads/mingdao-0.1.60-x64.dmg">⬇ Intel（x64 · 102.6MB）</a>
+      <p class="dlc" data-files="mingdao-0.1.60-arm64.dmg,mingdao-0.1.60-x64.dmg" style="display:none;margin:0;font-size:12.5px;color:var(--cyan)"></p>
       <p style="font-size:12.5px;color:var(--dim)">未公证：首次打开请在「系统设置 → 隐私与安全性」点「仍要打开」。</p>
     </div>
     <div class="repo" style="flex-direction:column;align-items:flex-start;gap:10px">
       <div style="display:flex;gap:12px;align-items:center"><div class="ic">🐧</div><div><b>Linux</b><span>deb + AppImage · x64 · v0.1.60 · 官网直连</span></div></div>
       <a class="dbtn" href="/downloads/mingdao-0.1.60-amd64.deb">⬇ deb（75.6MB · Debian/Ubuntu）</a>
       <a class="dbtn" href="/downloads/mingdao-0.1.60-x86_64.AppImage">⬇ AppImage（108.6MB · 通用）</a>
+      <p class="dlc" data-files="mingdao-0.1.60-amd64.deb,mingdao-0.1.60-x86_64.AppImage" style="display:none;margin:0;font-size:12.5px;color:var(--cyan)"></p>
       <p style="font-size:12.5px;color:var(--dim)">deb：<code>sudo apt install ./mingdao-0.1.60-amd64.deb</code>；AppImage：<code>chmod +x</code> 后直接运行。</p>
     </div>
   </div>
   <p style="text-align:center;margin-top:18px;color:var(--faint);font-size:13px">
-    🔒 校验（<code>sha256sum 文件名</code> 比对）：exe <code>361e1f5b1823b6d6…</code> · dmg-arm64 <code>fff1c76f32b7a577…</code> · dmg-x64 <code>e6450c66b33d16ea…</code> · deb <code>c5c8343d537e5e55…</code> · AppImage <code>314e922c2e6e323e…</code>； 全部安装包由 CI 打 tag 时自动构建，官网同域直出、国内直连极速；桌面版自动更新走官网 feed（/updates/latest*.yml）。
-    全部安装包由 CI 打 tag 时自动构建，官网同域直出、国内直连极速。
+    🔒 校验（<code>sha256sum 文件名</code> 比对）：exe <code>361e1f5b1823b6d6…</code> · dmg-arm64 <code>fff1c76f32b7a577…</code> · dmg-x64 <code>e6450c66b33d16ea…</code> · deb <code>c5c8343d537e5e55…</code> · AppImage <code>314e922c2e6e323e…</code>；
+    全部安装包由 CI 打 tag 时自动构建，官网同域直出、国内直连极速；桌面版自动更新走官网 feed（/updates/latest*.yml）。
+    📈 累计下载 <b id="statDl" style="color:var(--green)">—</b> 份（计数每 5 分钟更新）。
   </p>
 </div></section>
 
@@ -255,6 +260,30 @@ document.querySelectorAll('.install .tab').forEach((t) => {
     document.getElementById('cmd' + t.dataset.t.charAt(0).toUpperCase() + t.dataset.t.slice(1)).style.display = '';
   });
 });
+</script>
+<script>
+// 官网访问/下载计数：stats.json 由服务端每 5 分钟从 harness 专属访问日志聚合，失败静默隐藏
+fetch('/stats.json?t=' + Date.now())
+  .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
+  .then((s) => {
+    const fmt = (n) => (n >= 10000 ? (n / 10000).toFixed(1) + ' 万' : String(n));
+    const box = document.querySelector('.stats .stat:last-child');
+    if (box) {
+      box.querySelector('b').textContent = fmt(s.pvTotal);
+      box.querySelector('span').textContent = '官网累计访问 · 今日 ' + fmt(s.pvToday) + ' · 访客 ' + s.uvToday;
+    }
+    let dlTotal = 0;
+    document.querySelectorAll('.dlc').forEach((el) => {
+      const names = (el.dataset.files || '').split(',').filter(Boolean);
+      const n = names.reduce((a, f) => a + ((s.downloads[f] || {}).total || 0), 0);
+      dlTotal += n;
+      el.textContent = '已下载 ' + fmt(n) + ' 次';
+      el.style.display = '';
+    });
+    const dl = document.getElementById('statDl');
+    if (dl) dl.textContent = fmt(dlTotal);
+  })
+  .catch(() => {});
 </script>
 </body>
 </html>
