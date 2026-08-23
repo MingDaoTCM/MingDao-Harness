@@ -6,7 +6,18 @@
 //   }
 // 工具命名：mcp__<服务器>__<工具>，与内置工具合并后交给模型；/mcp 查看状态。
 
+import fs from 'node:fs';
 import { spawn } from 'node:child_process';
+
+// 客户端版本读 package.json（评估 P3-9：此前硬编码 '0.6.0' 与真实版本脱节）
+const CLIENT_VERSION = (() => {
+  try {
+    const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
+    return pkg.version || '0.0.0';
+  } catch {
+    return '0.0.0';
+  }
+})();
 
 const REQUEST_TIMEOUT_MS = 60000;
 const HANDSHAKE_TIMEOUT_MS = 20000;
@@ -133,7 +144,7 @@ export class McpClient {
       this.request('initialize', {
         protocolVersion: '2025-03-26',
         capabilities: {},
-        clientInfo: { name: 'mingdao', version: '0.6.0' },
+        clientInfo: { name: 'mingdao', version: CLIENT_VERSION },
       })
         .then(() => {
           this.notify('notifications/initialized');

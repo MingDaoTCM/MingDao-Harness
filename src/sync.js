@@ -233,6 +233,19 @@ export async function syncPush(name) {
   const conflicts = [];
   const skipped = [];
   for (const s of locals) {
+    // 增量推送（评估 P2-3）：本地文件自上次推送后未变化（mtime 一致）→ 跳过全部网络往返。
+    // 远端若被其他设备改过，由对方设备推送、本地 pull 拉取——本地不覆盖也不需要知道。
+    let localStat = null;
+    try {
+      localStat = fs.statSync(s.file);
+    } catch {
+      continue;
+    }
+    const prevState = state[s.name];
+    if (prevState?.localMtime === localStat.mtimeMs && prevState?.remoteMtime) {
+      skipped.push(s.name);
+      continue;
+    }
     const content = fs.readFileSync(s.file, 'utf8');
     if (!content.trim()) {
       skipped.push(s.name); // 空会话文件（刚创建未写消息）不推送
@@ -259,7 +272,7 @@ export async function syncPush(name) {
       const r = await apiCall(g.url, '/api/sessions/push', { name: s.name, content }, g.token, TIMEOUT_MS, insecureOn());
       if (r.ok) {
         pushed.push(s.name);
-        state[s.name] = { remoteMtime: r.mtime };
+        state[s.name] = { remoteMtime: r.mtime, localMtime: localStat.mtimeMs };
       }
     } catch (e) {
       return { error: `推送 ${s.name} 失败：${e.message}` };
@@ -287,6 +300,8 @@ export async function syncPull(name) {
   const conflicts = [];
   for (const s of sessions) {
     if (!isValidRemoteName(s.name)) continue; // 恶意服务器返回的非法名：跳过，绝不落盘
+    // 增量拉取（评估 P2-3）：远端 mtime 与上次拉取一致 → 跳过下载
+    if (state[s.name]?.remoteMtime === s.mtime) continue;
     const target = path.join(home, 'sessions', s.name);
     let local = null;
     try {

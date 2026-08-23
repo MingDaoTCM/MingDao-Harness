@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
 import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credentials.js';
 import { availableModels, fetchProviderModels, providerHasKey } from '../model-discovery.js';
-import { createProvider, resolveProviderConfig } from '../providers/index.js';
+import { createProvider, resolveProviderConfig, helperProvider } from '../providers/index.js';
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { routeTask, routingConfig } from '../routing.js';
 import { buildUserContent } from './attachments.js';
@@ -227,12 +227,14 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     if (!session) session = createSession(home);
     entry.session = session;
 
-    // 自动路由（与 CLI 一致）：规划/生成类任务 → planner（大输出），执行类 → executor
+    // 自动路由（与 CLI 一致）：规划/生成类任务 → planner（大输出），执行类 → executor；
+    // 会话粘滞 + 分类缓存（评估 P2-1），路由结果挂在会话对象上（进程内，不落盘）
     let runModel = modelName;
     let routeReason = null;
     if (routingConfig(cfg)) {
       try {
-        const route = await routeTask({ cfg, provider, currentModel: modelName, text: built.persistText || userMessage });
+        const route = await routeTask({ cfg, provider, currentModel: modelName, text: built.persistText || userMessage, sticky: session.lastRoute || null });
+        session.lastRoute = route.model;
         if (route.model !== modelName) {
           runModel = route.model;
           routeReason = route.reason;
@@ -249,7 +251,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     if (!sessionWsDir) {
       setSessionWorkspace(sessionName, taskDir, currentWorkspace(workingDir)?.name || null);
     }
-    const systemPrompt = buildSystemPrompt({ modelName: runModel, workingDir: taskDir, withJournal: body.withJournal === true });
+    const systemPrompt = buildSystemPrompt({ workingDir: taskDir, withJournal: body.withJournal === true });
     let messages =
       session.messages?.length && session.messages[0]?.role === 'system'
         ? session.messages
@@ -327,7 +329,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       // 新会话自动标题（可配置关闭）
       if (isNew && cfg.autoTitle !== false && r.text) {
         try {
-          const title = await generateTitle(providerNow, titleModel(cfg, runModel), built.persistText);
+          const tModel = titleModel(cfg, runModel);
+          const title = await generateTitle(await helperProvider(cfg, tModel, providerNow), tModel, built.persistText);
           if (title) {
             const oldName = path.basename(session.file);
             const renamed = renameSessionFile(fs, path, home, session, title);

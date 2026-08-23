@@ -4,14 +4,37 @@
 // 价格覆盖（P3-10）：config.json 的 pricing.overrides.<模型名> 可覆盖内置价格表，
 //   结构 { input, output, cacheHit, peak?: { input, output, cacheHit } }（单位：元/百万 tokens）。
 
+import fs from 'node:fs';
+import path from 'node:path';
 import { modelPreset } from './models.js';
-import { loadConfig } from './config.js';
+import { loadConfig, mingdaoHome } from './config.js';
 
 // 内置价格表的数据时点（定价可能调整，配置覆盖可随时更新）
 export const PRICE_DATA_AS_OF = '2026-08';
 
+// 峰谷判断锚定北京时间（评估 P0-4：DeepSeek 按北京时间 9:00–14:00 高峰计价，
+// 用本机时区判断会让海外用户计费错位）。config.pricing.timezone 可覆盖，mtime 缓存避免每次读盘。
+let tzCache = { mtime: 0, timezone: 'Asia/Shanghai' };
+function peakTimezone() {
+  try {
+    const file = path.join(mingdaoHome(), 'config.json');
+    const st = fs.statSync(file);
+    if (st.mtimeMs !== tzCache.mtime) {
+      const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+      tzCache = { mtime: st.mtimeMs, timezone: String(cfg?.pricing?.timezone || 'Asia/Shanghai') };
+    }
+  } catch {}
+  return tzCache.timezone;
+}
+
 export function isPeakHour(date = new Date()) {
-  const hour = date.getHours();
+  let hour = -1;
+  try {
+    const parts = new Intl.DateTimeFormat('en-US', { timeZone: peakTimezone(), hour: 'numeric', hourCycle: 'h23' }).formatToParts(date);
+    hour = Number(parts.find((p) => p.type === 'hour')?.value);
+  } catch {
+    hour = date.getHours(); // 非法时区回退本机
+  }
   return hour >= 9 && hour < 14;
 }
 

@@ -110,3 +110,19 @@ export async function createProvider(cfg, modelName, { timeoutMs = 300000, retri
     },
   };
 }
+
+// 辅助调用（标题生成/记忆提取等）的 provider 解析（评估 P2-2）：辅助模型与当前模型
+// 分属不同服务商时单独创建 provider——避免拿 deepseek-v4-flash 模型名去自定义网关请求
+// 而 404 被静默吞掉（标题缺失、记忆永不沉淀且零感知）。
+export async function helperProvider(cfg, helperModel, currentProvider) {
+  try {
+    const curName = String(currentProvider?.name || '');
+    const helperName = String(resolveProviderConfig(cfg, helperModel)?.name || '');
+    if (curName && curName === helperName) return currentProvider;
+  } catch {}
+  try {
+    return await createProvider(cfg, helperModel);
+  } catch {
+    return currentProvider;
+  }
+}

@@ -10,6 +10,7 @@ import { mingdaoHome, ensureHome } from './config.js';
 
 const MAX_LINES = 20000;
 const KEEP_LINES = 10000;
+let auditCount = 0; // 内存计数（评估 P3-2）：避免每次写入都整文件读一遍只为查行数
 
 export function auditFile() {
   return path.join(mingdaoHome(), 'audit.jsonl');
@@ -28,17 +29,21 @@ export function writeAudit(entry) {
     try {
       fs.chmodSync(file, 0o600);
     } catch {}
+    auditCount += 1;
   } catch {
     return; // 审计失败绝不影响会话
   }
-  // 低频截断
-  try {
-    const raw = fs.readFileSync(auditFile(), 'utf8');
-    const lines = raw.split('\n').filter(Boolean);
-    if (lines.length > MAX_LINES) {
-      fs.writeFileSync(auditFile(), lines.slice(-KEEP_LINES).join('\n') + '\n', { mode: 0o600 });
-    }
-  } catch {}
+  // 低频截断：跨过上限后每 200 条才读盘检查一次
+  if (auditCount > MAX_LINES && auditCount % 200 === 0) {
+    try {
+      const raw = fs.readFileSync(auditFile(), 'utf8');
+      const lines = raw.split('\n').filter(Boolean);
+      if (lines.length > MAX_LINES) {
+        fs.writeFileSync(auditFile(), lines.slice(-KEEP_LINES).join('\n') + '\n', { mode: 0o600 });
+        auditCount = KEEP_LINES;
+      }
+    } catch {}
+  }
 }
 
 export function listAudit(limit = 20) {

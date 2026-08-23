@@ -327,10 +327,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         if (res.text) {
           messages.push({ role: 'assistant', content: res.text });
         }
-        // 输出被长度上限截断（DeepSeek 推理吃满 maxOutput 时正文为空）：让模型从断点续写，绝不静默结束
+        // 输出被长度上限截断（DeepSeek 推理吃满 maxOutput 时正文为空）：让模型从断点续写，绝不静默结束。
+        // 空轮护栏（评估 4.2-2）：每轮空输出都是全额 completion 计费（pro 32k 闲时 ≈ ¥0.43/轮），
+        // 上限从 12 收紧到 3（cfg.maxEmptyRounds 可调），超限直接终止并明确提示。
+        const maxEmptyRounds = Math.max(1, Number(cfg.maxEmptyRounds) || 3);
         if (res.finish === 'length') {
           emptyRounds += 1;
-          if (emptyRounds >= 12) {
+          if (emptyRounds >= maxEmptyRounds) {
             stripOrphanCalls();
             return {
               text: res.text || null,
@@ -340,7 +343,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               finish,
               truncated: true,
               aborted: false,
-              note: '模型连续输出被截断，请换用更长输出的模型或拆分任务。',
+              note: `模型连续 ${maxEmptyRounds} 轮输出被截断，已停止续写——请换用更长输出的模型或拆分任务（maxEmptyRounds 可调）。`,
               durationMs: Date.now() - startedAt,
             };
           }

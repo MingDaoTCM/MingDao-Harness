@@ -131,15 +131,13 @@ WebUI 中每个会话记住自己的工作目录：新会话记录创建时的�
 
 ## 沙箱环境变量过滤
 
-沙箱模式（`readonly`/`safe`）下，bash 工具默认从子进程环境中剥离敏感变量
-（`*_API_KEY`、`*_TOKEN`、`*_SECRET`、`*_PASSWORD`、`*_CREDENTIAL` 等），
-防止模型驱动的命令一条 `env` 读走密钥；按名放行：
+bash 工具**默认**从子进程环境中剥离敏感变量（`*_API_KEY`、`*_TOKEN`、`*_SECRET`、
+`*_PASSWORD`、`*_CREDENTIAL` 等），防止模型驱动的命令一条 `env` 读走密钥——与沙箱档位
+无关（`sandbox: "off"` 同样过滤）。按名放行 / 整体关闭：
 
 ```json
-{ "bashEnvKeep": ["NPM_TOKEN"] }
+{ "bashEnvKeep": ["NPM_TOKEN"], "bashEnvFilter": false }
 ```
-
-`sandbox: "off"` 时保持完整环境（直接执行由你担责）。
 
 ## 定价覆盖
 
@@ -156,7 +154,12 @@ WebUI 中每个会话记住自己的工作目录：新会话记录创建时的�
 }
 ```
 
-`peak` 缺省的字段沿用闲时价；未覆盖的模型继续用内置价格表。
+`peak` 缺省的字段沿用闲时价；未覆盖的模型继续用内置价格表。峰谷判断默认锚定**北京时间**
+（`Asia/Shanghai`，与 DeepSeek 计费口径一致，海外用户本机时区不再错位），可覆盖：
+`"pricing": { "timezone": "Asia/Shanghai" }`。
+
+其他护栏字段：`maxEmptyRounds`（连续空输出续写轮数上限，默认 3——每轮空输出都是全额
+completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger`（自动压缩触发线，默认 0.8）。
 
 ## 云同步
 

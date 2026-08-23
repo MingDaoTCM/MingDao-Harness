@@ -7,7 +7,7 @@ import { routingConfig } from './routing.js';
 export function titleModel(cfg, currentModel) {
   const rc = routingConfig(cfg);
   if (rc) return rc.executor;
-  if (modelPreset('deepseek-v4-flash')) return 'deepseek-v4-flash';
+  // 路由关闭：辅助调用用当前模型（评估 P2-2：硬编码 flash 会在自定义网关 404 静默失败）
   return currentModel;
 }
 

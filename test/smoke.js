@@ -143,18 +143,18 @@ const ctx = { cwd: tmp };
   assert.ok(r.stdout.includes('mingdao-2'));
   const fail = await dispatch('bash', { command: isWin ? 'exit /b 3' : 'exit 3' }, ctx);
   assert.equal(fail.exitCode, 3);
-  // 沙箱敏感环境变量过滤（P1-5）：沙箱开启时 API Key/Token/Secret 一律不可见，off 时保持原样
+  // 敏感环境变量过滤（P1-5 + 评估 P2-3）：默认常开（与沙箱档位解耦），bashEnvKeep 放行，bashEnvFilter:false 关闭
   if (!isWin) {
     process.env.MINGDAO_TEST_API_KEY = 'sk-secret-probe';
     process.env.MINGDAO_TEST_TOKEN = 'tk-probe';
-    const sandboxCtx = { ...ctx, cfg: { ...ctx.cfg, sandbox: 'readonly' } };
     const on = await dispatch('bash', { command: 'echo "k=$MINGDAO_TEST_API_KEY t=$MINGDAO_TEST_TOKEN"' }, ctx);
-    assert.ok(on.stdout.includes('k=sk-secret-probe'), 'sandbox off 应保留环境变量');
-    const off = await dispatch('bash', { command: 'echo "k=$MINGDAO_TEST_API_KEY t=$MINGDAO_TEST_TOKEN"' }, sandboxCtx);
-    assert.ok(!off.stdout.includes('sk-secret-probe') && !off.stdout.includes('tk-probe'), '沙箱模式应剥离敏感变量');
-    const keptCtx = { ...ctx, cfg: { ...ctx.cfg, sandbox: 'readonly', bashEnvKeep: ['MINGDAO_TEST_TOKEN'] } };
+    assert.ok(!on.stdout.includes('sk-secret-probe') && !on.stdout.includes('tk-probe'), '默认应剥离敏感变量（沙箱 off 也过滤）');
+    const keptCtx = { ...ctx, cfg: { ...ctx.cfg, bashEnvKeep: ['MINGDAO_TEST_TOKEN'] } };
     const kept = await dispatch('bash', { command: 'echo "k=$MINGDAO_TEST_API_KEY t=$MINGDAO_TEST_TOKEN"' }, keptCtx);
     assert.ok(!kept.stdout.includes('sk-secret-probe') && kept.stdout.includes('tk-probe'), 'bashEnvKeep 应按名放行');
+    const offCtx = { ...ctx, cfg: { ...ctx.cfg, bashEnvFilter: false } };
+    const off = await dispatch('bash', { command: 'echo "k=$MINGDAO_TEST_API_KEY t=$MINGDAO_TEST_TOKEN"' }, offCtx);
+    assert.ok(off.stdout.includes('sk-secret-probe'), 'bashEnvFilter:false 应完全透传');
     delete process.env.MINGDAO_TEST_API_KEY;
     delete process.env.MINGDAO_TEST_TOKEN;
   }
@@ -400,13 +400,18 @@ const ctx = { cwd: tmp };
   assert.equal(loaded.model, 'deepseek-v4-pro');
   assert.equal(loaded.contextBudget, 123456);
   assert.equal('apiKey' in loaded, false, 'config.json 不应包含 apiKey 字段');
-  assert.equal(fs.statSync(path.join(home2, 'config.json')).mode & 0o777, 0o600, '配置文件权限应为 600');
+  // Windows（NTFS）无 POSIX 权限语义：chmodSync(0o600) 后回读恒为 0666，权限断言仅限 POSIX（评估 P0-1，曾致 Windows 冒烟/自更新永久失败）
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(path.join(home2, 'config.json')).mode & 0o777, 0o600, '配置文件权限应为 600');
+  }
 
   // 凭证库：独立文件、600 权限、脱敏显示
   const key = 'sk-test-abcdef1234567890';
   setStoredKey('deepseek', key);
   assert.equal(getStoredKey('deepseek'), key);
-  assert.equal(fs.statSync(credentialsPath()).mode & 0o777, 0o600, '凭证文件权限应为 600');
+  if (process.platform !== 'win32') {
+    assert.equal(fs.statSync(credentialsPath()).mode & 0o777, 0o600, '凭证文件权限应为 600');
+  }
   assert.equal(maskKey(key), 'sk-tes…7890', '脱敏格式应为「前6位…后4位」');
   assert.deepEqual(Object.keys(loadCredentials()), ['deepseek']);
 
@@ -1029,7 +1034,16 @@ const ctx = { cwd: tmp };
   assert.ok(fs.readdirSync(path.join(homeA, 'sessions')).some((f) => f.includes('.server-')), '应生成 .server- 备份');
   fs.appendFileSync(path.join(homeA, 'sessions', 'sync-smoke.jsonl'), '{"role":"assistant","content":"A再改"}\n');
   const pullA2 = await syncPull();
-  assert.ok(pullA2.conflicts.includes('sync-smoke.jsonl'), '本地有未推送改动时 pull 应报冲突');
+  // 增量拉取（评估 P2-3）：远端未变化 → 跳过下载，本地单方改动保留、不产生虚假冲突副本
+  assert.ok(pullA2.conflicts.length === 0, '远端未变化时 pull 应增量跳过（本地改动保留）');
+  assert.ok(fs.readFileSync(path.join(homeA, 'sessions', 'sync-smoke.jsonl'), 'utf8').includes('A再改'), '本地改动应保留');
+  // 真实冲突场景仍覆盖：远端再被 B 改过 + 本地有改动 → pull 报冲突并生成 .remote- 副本
+  process.env.MINGDAO_HOME = homeB;
+  fs.appendFileSync(path.join(homeB, 'sessions', 'sync-smoke.jsonl'), '{"role":"assistant","content":"B再改"}\n');
+  await syncPush();
+  process.env.MINGDAO_HOME = homeA;
+  const pullA3 = await syncPull();
+  assert.ok(pullA3.conflicts.includes('sync-smoke.jsonl'), '远端变化且本地有改动时 pull 应报冲突');
   assert.ok(fs.readdirSync(path.join(homeA, 'sessions')).some((f) => f.includes('.remote-')), '应生成 .remote- 副本');
 
   // 错误路径与状态
@@ -1264,13 +1278,17 @@ const ctx = { cwd: tmp };
   );
   process.env.MINGDAO_HOME = jhome;
   const { buildSystemPrompt } = await import(pathToFileURL(path.join(srcDir, 'prompts.js')).href);
-  const fresh = buildSystemPrompt({ modelName: 'deepseek-v4-flash', workingDir: tmp });
+  const fresh = buildSystemPrompt({ workingDir: tmp });
   assert.ok(!fresh.includes('recent_sessions') && !fresh.includes('愤怒的小鸟'), '新会话默认不应注入最近会话日志');
-  const withJ = buildSystemPrompt({ modelName: 'deepseek-v4-flash', workingDir: tmp, withJournal: true });
+  const withJ = buildSystemPrompt({ workingDir: tmp, withJournal: true });
   assert.ok(withJ.includes('recent_sessions') && withJ.includes('愤怒的小鸟'), 'withJournal 开启时应注入最近会话日志');
+  // 前缀字节稳定性（评估 P1-1/P1-2）：路由池内任意模型/任意日期，系统提示必须逐字节一致，
+  // 否则每次路由切换/跨天都会让 DeepSeek 上下文缓存整段失效（命中价 30 倍）
+  assert.ok(!fresh.includes('当前模型') && !fresh.includes('当前日期'), '系统提示不应含易变字段');
+  assert.equal(fresh, buildSystemPrompt({ workingDir: tmp }), '同一工作空间下系统提示应恒定（前缀稳定）');
   process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(jhome, { recursive: true, force: true });
-  ok('prompts：最近会话日志默认不注入（--journal / WebUI「带上文」显式开启）');
+  ok('prompts：最近会话日志默认不注入 / 系统提示前缀字节稳定（易变字段已移除）');
 }
 
 // ---------- 31. 自更新模块（临时 git 仓库演练，P3-9 落实） ----------
@@ -1595,6 +1613,31 @@ const ctx = { cwd: tmp };
   process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(homeW, { recursive: true, force: true });
   ok('workspace：会话级工作空间映射 set/get/move/remove');
+}
+
+// ---------- 38. 路由：分类器缓存 / 会话粘滞（评估 P2-1/B7） ----------
+{
+  const { routeTask } = await import(pathToFileURL(path.join(srcDir, 'routing.js')).href);
+  const cfg = { routing: { enabled: true, planner: 'deepseek-v4-pro', executor: 'deepseek-v4-flash' } };
+  let classifyCalls = 0;
+  const provider = {
+    async chat() {
+      classifyCalls += 1;
+      return { text: 'execute' };
+    },
+  };
+  const longText = '这是一些很长的日常文本内容，没有任何特殊的敏感词汇，只是用来填充长度。'.repeat(3);
+  const r1 = await routeTask({ cfg, provider, currentModel: 'deepseek-v4-pro', text: longText });
+  assert.equal(r1.model, 'deepseek-v4-flash', '分类器判定 execute 应切 executor');
+  assert.equal(classifyCalls, 1);
+  const r2 = await routeTask({ cfg, provider, currentModel: 'deepseek-v4-pro', text: longText });
+  assert.equal(r2.model, 'deepseek-v4-flash');
+  assert.equal(classifyCalls, 1, '同一文本应命中分类缓存，不再重复分类');
+  const otherText = '这是另一段足够长的文本，内容与之前完全不同，用来验证会话粘滞路径。'.repeat(3);
+  const r3 = await routeTask({ cfg, provider, currentModel: 'deepseek-v4-pro', text: otherText, sticky: 'deepseek-v4-flash' });
+  assert.equal(r3.model, 'deepseek-v4-flash', '执行类会话粘滞应直接走 executor');
+  assert.equal(classifyCalls, 1, '粘滞下不应再调分类器');
+  ok('routing：分类器缓存 / 会话粘滞');
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

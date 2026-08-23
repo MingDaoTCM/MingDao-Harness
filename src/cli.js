@@ -16,7 +16,7 @@ import {
   credentialsPath,
   getStoredKey,
 } from './credentials.js';
-import { createProvider, resolveProviderConfig } from './providers/index.js';
+import { createProvider, resolveProviderConfig, helperProvider } from './providers/index.js';
 import { startMcpServers } from './mcp.js';
 import { startTask, listTasks, patchTask, killTask, formatTaskRow } from './tasks.js';
 import { enableAutostart, disableAutostart, autostartStatus, autostartPath } from './autostart.js';
@@ -312,7 +312,8 @@ async function runWorkerTask(id, question, { permission, model }) {
     appendMessages(session.file, messages.slice(persistedCount));
     if (cfg.autoTitle !== false && res.text) {
       try {
-        const title = await generateTitle(provider, titleModel(cfg, modelName), question);
+        const tModel = titleModel(cfg, modelName);
+        const title = await generateTitle(await helperProvider(cfg, tModel, provider), tModel, question);
         if (title) renameSessionFile(fs, path, home, session, title);
       } catch {}
     }
@@ -384,8 +385,9 @@ async function main() {
   // 最近会话日志默认不注入（新会话全新开始）；--journal 显式带上
   const withJournal = Boolean(opts.journal);
 
-  // 自更新与回滚（git 安装形态）
-  if (opts.prompt[0] === 'update') {
+  // 自更新与回滚（git 安装形态）。
+  // 评估 P3-1 子命令劫持防护：参数不合法时回退为普通提问（如 "mingdao update the docs" 是提问而非更新命令）
+  if (opts.prompt[0] === 'update' && opts.prompt.slice(1).every((a) => a === '--check')) {
     const { updateCheck, mingdaoUpdate } = await import('./update.js');
     const checkOnly = opts.prompt.includes('--check');
     const r = await (checkOnly ? updateCheck() : mingdaoUpdate());
@@ -393,7 +395,7 @@ async function main() {
     process.exitCode = r.ok ? 0 : 1;
     return;
   }
-  if (opts.prompt[0] === 'rollback') {
+  if (opts.prompt[0] === 'rollback' && opts.prompt.length === 1) {
     const { mingdaoRollback } = await import('./update.js');
     const r = mingdaoRollback();
     console.log(r.lines?.join('\n') || '');
@@ -401,8 +403,8 @@ async function main() {
     return;
   }
 
-  // 审计日志查看（P3-5）：mingdao audit [数量]
-  if (opts.prompt[0] === 'audit') {
+  // 审计日志查看（P3-5）：mingdao audit [数量]（仅裸命令或单个数字；其余按提问处理）
+  if (opts.prompt[0] === 'audit' && (opts.prompt.length === 1 || (opts.prompt.length === 2 && /^\d+$/.test(opts.prompt[1])))) {
     const { listAudit, auditFile } = await import('./audit.js');
     const n = Number(opts.prompt[1]) || 20;
     const rows = listAudit(n);
@@ -1037,26 +1039,56 @@ async function main() {
     return;
   }
 
-  // WebUI：mingdao web [端口] [--auth-token <令牌>]
+  // WebUI：mingdao web [端口] [--auth-token <令牌>]（评估 P3-1：参数结构不合法的按提问处理）
   if (opts.prompt[0] === 'web') {
-    const cfg0 = loadConfig();
-    const portArg = opts.prompt[1] !== undefined ? Number(opts.prompt[1]) : NaN;
-    const port = Number.isFinite(portArg) && portArg > 0 ? portArg : cfg0?.web?.port || 3820;
-    const host = cfg0?.web?.host || '127.0.0.1';
-    // 访问令牌优先级：--auth-token 参数 > 环境变量 MINGDAO_WEB_TOKEN > config.json 的 web.token
-    let authToken = process.env.MINGDAO_WEB_TOKEN || cfg0?.web?.token || undefined;
-    const atIdx = opts.prompt.findIndex((a) => typeof a === 'string' && a.startsWith('--auth-token'));
-    if (atIdx !== -1) {
-      const raw = opts.prompt[atIdx];
-      authToken = raw.includes('=') ? raw.slice(raw.indexOf('=') + 1) : opts.prompt[atIdx + 1];
-      if (!authToken) {
-        console.log('用法：mingdao web [端口] [--auth-token <令牌>]');
-        process.exitCode = 1;
-        return;
+    const webArgs = opts.prompt.slice(1);
+    const webValid = (() => {
+      let portSeen = false;
+      let tokenSeen = false;
+      for (let i = 0; i < webArgs.length; i++) {
+        const a = webArgs[i];
+        if (a === '--auth-token') {
+          if (tokenSeen || i + 1 >= webArgs.length) return false;
+          tokenSeen = true;
+          i += 1;
+          continue;
+        }
+        if (a.startsWith('--auth-token=')) {
+          if (tokenSeen) return false;
+          tokenSeen = true;
+          continue;
+        }
+        if (/^\d+$/.test(a) && !portSeen) {
+          portSeen = true;
+          continue;
+        }
+        return false;
       }
+      return true;
+    })();
+    if (!webValid) {
+      // 非 web 命令结构 → 回退为普通提问（不在 web 分支里 continue/return）
+      // 注意：此处不能 return，需落到下方提问流程——用哨兵跳过命令执行
+    } else {
+      const cfg0 = loadConfig();
+      const portArg = opts.prompt[1] !== undefined ? Number(opts.prompt[1]) : NaN;
+      const port = Number.isFinite(portArg) && portArg > 0 ? portArg : cfg0?.web?.port || 3820;
+      const host = cfg0?.web?.host || '127.0.0.1';
+      // 访问令牌优先级：--auth-token 参数 > 环境变量 MINGDAO_WEB_TOKEN > config.json 的 web.token
+      let authToken = process.env.MINGDAO_WEB_TOKEN || cfg0?.web?.token || undefined;
+      const atIdx = opts.prompt.findIndex((a) => typeof a === 'string' && a.startsWith('--auth-token'));
+      if (atIdx !== -1) {
+        const raw = opts.prompt[atIdx];
+        authToken = raw.includes('=') ? raw.slice(raw.indexOf('=') + 1) : opts.prompt[atIdx + 1];
+        if (!authToken) {
+          console.log('用法：mingdao web [端口] [--auth-token <令牌>]');
+          process.exitCode = 1;
+          return;
+        }
+      }
+      await runWebServer({ host, port, authToken });
+      return;
     }
-    await runWebServer({ host, port, authToken });
-    return;
   }
 
   // 会话检索：mingdao sessions search <关键词>
@@ -1192,7 +1224,8 @@ async function main() {
       const res = await turnAgent.runTurn(messages);
       appendMessages(session.file, messages.slice(oneShotPersisted));
       if (!jsonMode && cfg.autoTitle !== false && res.text) {
-        const title = await generateTitle(provider, titleModel(cfg, modelName), question);
+        const tModel = titleModel(cfg, modelName);
+        const title = await generateTitle(await helperProvider(cfg, tModel, provider), tModel, question);
         if (title) {
           const renamed = renameSessionFile(fs, path, home, session, title);
           if (renamed) io.print(style(`✓ 会话标题：${path.basename(renamed)}`, C.dim));
@@ -1303,11 +1336,12 @@ async function main() {
   let lastText = '';
   let planMode = false;
   let routingEnabled = Boolean(routing);
+  let lastRouteModel = null; // 会话级路由粘滞（评估 P2-1：执行类会话不再逐轮分类）
   let autoTitled = Boolean(session.messages?.length);
   const stats = { turns: 0, promptTokens: 0, completionTokens: 0 };
   io.setHistory(messages.filter((m) => m.role === 'user').map((m) => m.content));
 
-  async function switchToModel(target, { silent = false } = {}) {
+  async function switchToModel(target, { silent = false, persist = true } = {}) {
     try {
       const npc = resolveProviderConfig(cfg, target);
       if (!npc.apiKey) {
@@ -1317,8 +1351,11 @@ async function main() {
       const newProvider = await createProvider(cfg, target);
       provider = newProvider;
       modelName = target;
-      cfg.model = target;
-      saveConfig(cfg);
+      // 自动路由的切换只改会话内存态（评估 P3-6：不悄悄改写用户持久默认模型）；/model 显式切换才落盘
+      if (persist) {
+        cfg.model = target;
+        saveConfig(cfg);
+      }
       agent = createAgent({
         provider,
         permission,
@@ -1334,7 +1371,7 @@ async function main() {
           persisted = msgs.length;
         },
       });
-      messages[0] = { role: 'system', content: buildSystemPrompt({ modelName, workingDir, withJournal }) };
+      messages[0] = { role: 'system', content: buildSystemPrompt({ workingDir, withJournal }) };
       if (!silent) {
         const p2 = modelPreset(modelName);
         io.print(style(`✓ 已切换到 ${C.bold}${modelName}${C.reset}${p2 ? `（${p2.label}）` : ''}`, C.green));
@@ -1362,8 +1399,13 @@ async function main() {
       else if (cmd === '/help') printHelpLines(io.print);
       else if (cmd === '/clear') {
         messages = [{ role: 'system', content: systemPrompt }];
-        persisted = 0;
-        io.print('已清空上下文。');
+        // 评估 P2-1：会话文件同步原子重写为仅新 system——否则旧上下文残留会被 --continue 读回，
+        // 且后续 appendMessages 会把 system+新消息重复追加到旧历史之后。
+        try {
+          rewriteSession(session.file, messages);
+        } catch {}
+        persisted = messages.length;
+        io.print('已清空上下文（会话文件已同步重置）。');
       } else if (cmd === '/model') {
         if (!arg) {
           io.print(`当前模型：${modelName}`);
@@ -1625,11 +1667,12 @@ async function main() {
       continue;
     }
 
-    // 自动路由：规划类任务切 planner，执行类走 executor
+    // 自动路由：规划类任务切 planner，执行类走 executor（会话粘滞 + 分类缓存见 routing.js）
     if (routingEnabled) {
-      const route = await routeTask({ cfg, provider, currentModel: modelName, text: input });
+      const route = await routeTask({ cfg, provider, currentModel: modelName, text: input, sticky: lastRouteModel });
+      lastRouteModel = route.model;
       if (route.model !== modelName) {
-        const okSwitch = await switchToModel(route.model, { silent: true });
+        const okSwitch = await switchToModel(route.model, { silent: true, persist: false });
         if (okSwitch) io.print(style(`⤷ 自动路由 → ${route.model}（${route.reason}）`, C.dim));
       }
     }
@@ -1676,7 +1719,8 @@ async function main() {
       persisted = messages.length;
       if (!autoTitled && cfg.autoTitle !== false && res.text) {
         autoTitled = true;
-        const title = await generateTitle(provider, titleModel(cfg, modelName), input);
+        const tModel = titleModel(cfg, modelName);
+        const title = await generateTitle(await helperProvider(cfg, tModel, provider), tModel, input);
         if (title) {
           const renamed = renameSessionFile(fs, path, home, session, title);
           if (renamed) io.print(style(`✓ 会话标题：${path.basename(renamed)}`, C.dim));

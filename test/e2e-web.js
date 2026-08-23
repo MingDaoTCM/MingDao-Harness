@@ -94,31 +94,44 @@ function writeConfig(permission) {
 writeConfig('auto');
 fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ custom: 'sk-test-1234567890abcdef' }), { mode: 0o600 });
 
-// 启动 web 服务器（可反复调用；返回 {child, base}）
+// 启动 web 服务器（可反复调用；返回 {child, base}）。
+// Windows 随机端口可能命中 Hyper-V 保留段（如 50770–50869）抛 EACCES/EADDRINUSE——捕获后换端口重试（评估 P2-2）
 let webChild = null;
 async function startWeb(workDir) {
   if (webChild) {
     webChild.kill('SIGTERM');
     await new Promise((r) => webChild.once('close', r));
   }
-  const port = 40000 + Math.floor(Math.random() * 20000); // 随机端口，避免与常驻服务冲突
-  const child = spawn(process.execPath, [path.join(root, 'src', 'cli.js'), 'web', String(port)], {
-    cwd: workDir,
-    env: { ...process.env, MINGDAO_HOME: home },
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
-  webChild = child;
-  let log = '';
-  child.stdout.on('data', (d) => (log += d));
-  child.stderr.on('data', (d) => (log += d));
-  let base = null;
-  for (let i = 0; i < 60 && !base; i++) {
-    const m = log.match(/地址: http:\/\/127\.0\.0\.1:(\d+)/);
-    if (m) base = `http://127.0.0.1:${m[1]}`;
-    else await new Promise((r) => setTimeout(r, 200));
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const port = 40000 + Math.floor(Math.random() * 20000); // 随机端口，避免与常驻服务冲突
+    const child = spawn(process.execPath, [path.join(root, 'src', 'cli.js'), 'web', String(port)], {
+      cwd: workDir,
+      env: { ...process.env, MINGDAO_HOME: home },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    webChild = child;
+    let log = '';
+    child.stdout.on('data', (d) => (log += d));
+    child.stderr.on('data', (d) => (log += d));
+    let base = null;
+    let exitedEarly = false;
+    child.on('exit', (code) => {
+      if (code !== null && code !== 0) exitedEarly = true;
+    });
+    for (let i = 0; i < 60 && !base && !exitedEarly; i++) {
+      const m = log.match(/地址: http:\/\/127\.0\.0\.1:(\d+)/);
+      if (m) base = `http://127.0.0.1:${m[1]}`;
+      else await new Promise((r) => setTimeout(r, 200));
+    }
+    if (base) return base;
+    // 端口被保留/占用：杀掉换端口重试
+    try {
+      child.kill('SIGTERM');
+    } catch {}
+    await new Promise((r) => child.once('close', r));
   }
-  assert.ok(base, 'web 服务器应在 12s 内就绪：' + log.slice(-300));
-  return base;
+  assert.ok(false, 'web 服务器三次尝试均未在 12s 内就绪（端口可能命中系统保留段）');
+  return null;
 }
 
 // 读取一条聊天 SSE 流；遇到 ask 事件时调用 answerFn(id)（返回答案）

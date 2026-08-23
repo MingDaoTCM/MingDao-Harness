@@ -92,6 +92,8 @@ export function removeMemoryLines(keyword) {
   return removed;
 }
 
+let journalCount = 0; // 内存计数（评估 P3-2）：避免每次写入都整文件读一遍只为查行数
+
 export function appendJournal(home, entry) {
   try {
     // journalFile() 已含 mingdaoHome()（home 参数仅为兼容旧签名保留）。
@@ -100,15 +102,21 @@ export function appendJournal(home, entry) {
     fs.mkdirSync(path.dirname(journalFile()), { recursive: true });
     // 纯追加：并发会话收尾互不覆盖；崩溃最多丢最后一行
     fs.appendFileSync(journalFile(), JSON.stringify(entry) + '\n');
-    // 低频截断：超过 600 行时重写保留最近 500 行
-    try {
-      const raw = fs.readFileSync(journalFile(), 'utf8');
-      const lines = raw.split('\n').filter(Boolean);
-      if (lines.length > 600) fs.writeFileSync(journalFile(), lines.slice(-500).join('\n') + '\n');
-    } catch {}
+    journalCount += 1;
   } catch (err) {
     // 静默吞错面收窄（评估建议 3）：调试开关可见原因，正常使用仍零打扰
     if (process.env.MINGDAO_DEBUG) console.warn('[MingDao] journal 写入失败：' + (err?.message || err));
+  }
+  // 低频截断：超过 600 行时重写保留最近 500 行（跨过上限后每 200 条检查一次）
+  if (journalCount > 600 && journalCount % 200 === 0) {
+    try {
+      const raw = fs.readFileSync(journalFile(), 'utf8');
+      const lines = raw.split('\n').filter(Boolean);
+      if (lines.length > 600) {
+        fs.writeFileSync(journalFile(), lines.slice(-500).join('\n') + '\n');
+        journalCount = 500;
+      }
+    } catch {}
   }
 }
 
@@ -196,7 +204,10 @@ export async function finalizeSession({ cfg, provider, model, home, workingDir, 
   if (cfg?.autoMemory !== false && turns >= 3) {
     try {
       const existing = loadMemory();
-      const lines = await extractMemory(provider, model, messages, existing);
+      // 辅助模型与当前模型分属不同服务商时按模型解析 provider（评估 P2-2）
+      const { helperProvider } = await import('./providers/index.js');
+      const memProvider = await helperProvider(cfg, model, provider);
+      const lines = await extractMemory(memProvider, model, messages, existing);
       if (lines.length) appendMemory(lines);
     } catch {}
   }

@@ -10,6 +10,11 @@ export function cacheStatsFile() {
   return path.join(mingdaoHome(), 'cache-stats.jsonl');
 }
 
+// 内存计数 + 低频轮转（评估 P3-3：此前无限增长且每次全量解析）
+const MAX_LINES = 20000;
+const KEEP_LINES = 10000;
+let cacheStatsCount = 0;
+
 export function recordCacheStats(entry) {
   try {
     const line = JSON.stringify({
@@ -23,7 +28,18 @@ export function recordCacheStats(entry) {
       saved: entry.saved ?? null,
     });
     fs.appendFileSync(cacheStatsFile(), line + '\n');
+    cacheStatsCount += 1;
   } catch {}
+  if (cacheStatsCount > MAX_LINES && cacheStatsCount % 200 === 0) {
+    try {
+      const raw = fs.readFileSync(cacheStatsFile(), 'utf8');
+      const lines = raw.split('\n').filter(Boolean);
+      if (lines.length > MAX_LINES) {
+        fs.writeFileSync(cacheStatsFile(), lines.slice(-KEEP_LINES).join('\n') + '\n');
+        cacheStatsCount = KEEP_LINES;
+      }
+    } catch {}
+  }
 }
 
 export function listCacheStats(limit = 2000) {

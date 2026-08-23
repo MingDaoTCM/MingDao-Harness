@@ -242,4 +242,36 @@ e2e-web **19 项**，全部通过（78 项）；Windows 侧由新增 CI 矩阵�
 
 ---
 
+## 十、四报告综合整改（2026-08-23，v0.1.49）
+
+综合 Kimi / MiniMax / OfficeACE / WorkBuddy 四份评估（评分 8.4–8.9/10，均认可「零依赖 +
+DeepSeek 深度适配」护城河；共识最高价值项 = **缓存前缀字节稳定性**：前缀 1 字节变化 = 整段
+cache miss，命中 0.15 元 vs 未命中 4.5 元 **30 倍价差**）。本批落地「信任与缓存经济学」13 项：
+
+| # | 来源 | 处置 |
+| --- | --- | --- |
+| P0-1 | WB/Kimi | Windows 冒烟 600 权限断言（NTFS 恒 0666）→ win32 跳过；恢复 Windows `mingdao update` 自更新能力 |
+| P1-1/2 | WB/MiniMax | 系统提示移除「当前模型/当前日期」易变字段 → 同工作空间前缀字节恒定；smoke 恒定性断言 |
+| P2-1/B7 | WB/Kimi/OfficeACE | 路由分类器 sha256 LRU 缓存（100 条）+ 会话粘滞（执行类不再逐轮分类）；smoke #38 覆盖 |
+| P3-6 | WB/Kimi | 自动路由切换不再 `saveConfig`（`switchToModel persist:false`），不悄悄改写用户默认模型 |
+| P2-2 | WB | 辅助模型 provider 正确解析：`helperProvider()` + `titleModel` 路由关闭回退当前模型；标题/记忆/分类在自定义网关上不再 404 静默失败 |
+| P2-3 | Kimi | bash 敏感环境变量过滤默认常开（与沙箱档位解耦），`bashEnvFilter:false` 关闭 |
+| P2-1 | Kimi | `/clear` 会话文件原子重写（旧上下文不再被 `--continue` 读回、消息不再重复追加） |
+| P2-2 | Kimi | e2e-web 随机端口命中 Hyper-V 保留段 → EACCES 换端口重试（最多 3 次） |
+| P0-4 | Kimi/WB | `isPeakHour` 锚定 `Asia/Shanghai`（Intl 零依赖），`pricing.timezone` 可覆盖 |
+| P3-9 | Kimi | MCP 握手 clientInfo.version 读 package.json（不再硬编码 0.6.0） |
+| 4.2-2 | WB | 空轮续写上限 12→3（每轮空输出 = 全额 completion 计费），`maxEmptyRounds` 可调 |
+| P3-2/3 | Kimi | audit/journal/cache-stats 写入计数内存化 + 低频轮转（不再每次写都全量读盘） |
+| P3-1 | Kimi | 子命令劫持防护：update/rollback/audit/web 参数结构不合法 → 回退为普通提问 |
+| P2-3 | WB/Kimi/MiniMax | 云同步增量：本地 mtime 未变零网络跳过；pull 远端 mtime 未变跳过下载；真实冲突回归仍覆盖 |
+
+回归验证（2026-08-23，Linux 实测）：smoke **42 组**、e2e-local **14 项**、e2e-schedule **4 项**、
+e2e-web **19 项**，全部通过（79 项）；Windows 侧由三平台 CI 常驻守护。
+
+**下一批（v0.1.50 → v0.2.0 战略省钱，四报告共识路线图）**：Batch API 半价通道、费用护栏
+`costGuard`、避峰调度 `--offpeak`、token 预算可视化、/cost 分账与节省归因、辅助调用结构化输出、
+Retry-After 退避；远期：拆 cli.js、子代理并行、插件生命周期、hooks 沙箱、SQLite 索引、流式 JSON。
+
+---
+
 *报告生成：Hermes Agent · 基于全量源码走读、17 项针对性验证、smoke + e2e 回归测试（含三轮复评）*
