@@ -22,11 +22,12 @@ jobs:
             args: --win nsis
             name: win-x64
           # macos-13 公共池已基本退役（排队数小时），Intel 版改用 macos-14(arm64) + Rosetta 交叉构建 x64
+          # zip 供自动更新（MacUpdater 全量/差分下载），dmg 供手动安装
           - os: macos-14
-            args: --mac dmg --x64
+            args: --mac dmg zip --x64
             name: mac-x64
           - os: macos-14
-            args: --mac dmg
+            args: --mac dmg zip
             name: mac-arm64
     runs-on: ${{ matrix.os }}
     env:
