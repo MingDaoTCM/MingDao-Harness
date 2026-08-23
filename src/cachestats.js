@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome } from './config.js';
-import { estimateCost, cacheSplit, beijingDayStart } from './pricing.js';
+import { estimateCost, cacheSplit, beijingDayStart, beijingParts } from './pricing.js';
 
 export function cacheStatsFile() {
   return path.join(mingdaoHome(), 'cache-stats.jsonl');
@@ -134,4 +134,51 @@ export function costBreakdown() {
     rate: hit + miss > 0 ? hit / (hit + miss) : null,
     byModel: [...byModel.entries()].map(([model, m]) => ({ model, ...m })).sort((a, b) => b.cost - a.cost),
   };
+}
+
+// 月度费用报告（/cost 导出）：按北京时间月份聚合，month 形如 'YYYY-MM'，缺省返回全部月份
+export function costMonthlyReport(month) {
+  const entries = listCacheStats(100000);
+  const want = String(month || '').trim();
+  const months = new Map();
+  for (const e of entries) {
+    const p = beijingParts(new Date(e.at));
+    const key = `${p.year}-${String(p.month).padStart(2, '0')}`;
+    if (want && key !== want) continue;
+    let m = months.get(key);
+    if (!m) {
+      m = { month: key, cost: 0, saved: 0, prompt: 0, completion: 0, hit: 0, miss: 0, batchCost: 0, days: new Map(), models: new Map() };
+      months.set(key, m);
+    }
+    m.cost += e.cost || 0;
+    m.saved += e.saved || 0;
+    m.prompt += e.prompt || 0;
+    m.completion += e.completion || 0;
+    m.hit += e.hit || 0;
+    m.miss += e.miss || 0;
+    if (e.batch) m.batchCost += e.cost || 0;
+    const day = String(p.day).padStart(2, '0');
+    m.days.set(day, (m.days.get(day) || 0) + (e.cost || 0));
+    const mm = m.models.get(e.model) || { prompt: 0, completion: 0, cost: 0, turns: 0 };
+    mm.prompt += e.prompt || 0;
+    mm.completion += e.completion || 0;
+    mm.cost += e.cost || 0;
+    mm.turns += 1;
+    m.models.set(e.model, mm);
+  }
+  return [...months.values()]
+    .sort((a, b) => a.month.localeCompare(b.month))
+    .map((m) => ({
+      month: m.month,
+      cost: m.cost,
+      saved: m.saved,
+      prompt: m.prompt,
+      completion: m.completion,
+      hit: m.hit,
+      miss: m.miss,
+      rate: m.hit + m.miss > 0 ? m.hit / (m.hit + m.miss) : null,
+      batchCost: m.batchCost,
+      days: [...m.days.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([day, cost]) => ({ day, cost })),
+      models: [...m.models.entries()].map(([model, x]) => ({ model, ...x })).sort((a, b) => b.cost - a.cost),
+    }));
 }

@@ -83,19 +83,26 @@ export async function routeTask({ cfg, provider, currentModel, text, sticky = nu
         {
           role: 'system',
           content:
-            '你是任务分类器。判断用户请求属于哪类，只输出一个词：plan（需要设计、规划、分析、审查、多步推理，或需要生成大段代码/文档/页面等长输出）或 execute（直接执行、简单问答、小改动）。',
+            '你是任务分类器。判断用户请求属于哪类：plan（需要设计、规划、分析、审查、多步推理，或需要生成大段代码/文档/页面等长输出）或 execute（直接执行、简单问答、小改动）。只输出 JSON：{"verdict":"plan"} 或 {"verdict":"execute"}。',
         },
         { role: 'user', content: String(text).slice(0, 4000) },
       ],
       tools: [],
       temperature: 0,
-      maxTokens: 80, // 推理内容会占用 max_tokens，留足余量
+      maxTokens: 20, // 结构化输出（评估 4.2-4）：80→20
+      responseFormat: { type: 'json_object' },
     });
-    // 正文为空时用推理内容兜底（flash 可能先输出 reasoning 再输出正文）
-    const t = String(res.text || res.reasoning || '').trim().toLowerCase();
     let verdict = null;
-    if (t.includes('plan')) verdict = 'plan';
-    else if (t.includes('exec')) verdict = 'execute';
+    try {
+      const j = JSON.parse(String(res.text || '').trim());
+      if (j?.verdict === 'plan' || j?.verdict === 'execute') verdict = j.verdict;
+    } catch {}
+    if (!verdict) {
+      // 正文为空/非 JSON 时用推理内容兜底（flash 可能先输出 reasoning 再输出正文）
+      const t = String(res.text || res.reasoning || '').trim().toLowerCase();
+      if (t.includes('plan')) verdict = 'plan';
+      else if (t.includes('exec')) verdict = 'execute';
+    }
     if (verdict) {
       if (routeCache.size >= ROUTE_CACHE_MAX) {
         const first = routeCache.keys().next().value;

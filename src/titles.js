@@ -11,25 +11,41 @@ export function titleModel(cfg, currentModel) {
   return currentModel;
 }
 
+function cleanTitle(s) {
+  return String(s ?? '')
+    .trim()
+    .replace(/["「」『』"'`*#\n\r]/g, '')
+    .slice(0, 20);
+}
+
 export async function generateTitle(provider, model, firstUserText) {
+  const user = { role: 'user', content: String(firstUserText).slice(0, 300) };
+  // 结构化输出（评估 4.2-4）：json_object，maxTokens 120→50，解析零失败；网关不支持时回退纯文本
   try {
     const res = await provider.chat({
       model,
       messages: [
-        {
-          role: 'system',
-          content: '为下面的对话开头生成一个简短标题（≤12 字，中文，不要引号、句号、markdown 符号，直接输出标题本身）。',
-        },
-        { role: 'user', content: String(firstUserText).slice(0, 300) },
+        { role: 'system', content: '为下面的对话开头生成一个简短标题（≤12 字，中文，不要引号、句号、markdown 符号）。只输出 JSON：{"title":"标题"}。' },
+        user,
       ],
       tools: [],
       temperature: 0.3,
-      maxTokens: 120, // 推理内容会占用 max_tokens，留足余量保证正文产出
+      maxTokens: 50,
+      responseFormat: { type: 'json_object' },
     });
-    const t = String(res.text || '')
-      .trim()
-      .replace(/["「」『』"'`*#\n\r]/g, '')
-      .slice(0, 20);
+    const j = JSON.parse(String(res.text || '').trim());
+    const t = cleanTitle(j?.title);
+    if (t) return t;
+  } catch {}
+  try {
+    const res = await provider.chat({
+      model,
+      messages: [{ role: 'system', content: '为下面的对话开头生成一个简短标题（≤12 字，中文，不要引号、句号、markdown 符号，直接输出标题本身）。' }, user],
+      tools: [],
+      temperature: 0.3,
+      maxTokens: 120,
+    });
+    const t = cleanTitle(res.text);
     return t || null;
   } catch {
     return null;

@@ -180,76 +180,6 @@ async function compactContext(provider, modelName, messages) {
   return res.text || '';
 }
 
-// mingdao key [status|set <服务商> [key]|remove <服务商>|import]
-async function handleKeyCommand(args) {
-  const io = createIO();
-  try {
-    const sub = args[0] || 'status';
-    const target = args[1];
-    if (sub === 'status') {
-      ensureHome();
-      io.print(style(`本地凭证库：${credentialsPath()}`, C.bold));
-      const creds = loadCredentials();
-      const names = Object.keys(creds);
-      if (!names.length) io.print('  (空)');
-      for (const n of names) {
-        io.print(style(`  ${n}: ${maskKey(creds[n])}`, C.dim));
-      }
-      for (const [k, pp] of Object.entries(PROVIDERS)) {
-        if (pp.envKey && process.env[pp.envKey]) {
-          io.print(style(`  环境变量 ${pp.envKey}: 已设置（未读取内容）`, C.dim));
-        }
-      }
-      if (process.env.MINGDAO_API_KEY) {
-        io.print(style('  环境变量 MINGDAO_API_KEY: 已设置（未读取内容）', C.dim));
-      }
-      io.print('提示：密钥只存本机凭证库，config.json 可安全分享/提交仓库。');
-    } else if (sub === 'set') {
-      if (!target) {
-        io.print('用法：mingdao key set <服务商名> [key]');
-        return;
-      }
-      let key = args[2] || '';
-      if (!key) {
-        if (!io.isTTY) {
-          io.print('非交互环境请直接传参：mingdao key set <服务商名> <key>');
-          return;
-        }
-        key = await io.ask(`输入 ${target} 的 API Key（隐藏输入）：`, { hidden: true });
-      }
-      if (!key) {
-        io.print('未输入，已取消。');
-        return;
-      }
-      setStoredKey(target, key);
-      io.print(`已保存 ${target} → ${maskKey(key)}（${credentialsPath()}，权限 600）。`);
-      io.print('注意：密钥不会写入 config.json，也不会进入项目仓库。');
-    } else if (sub === 'remove') {
-      if (!target) {
-        io.print('用法：mingdao key remove <服务商名>');
-        return;
-      }
-      removeStoredKey(target);
-      io.print(`已移除 ${target} 的本地凭证。`);
-    } else if (sub === 'import') {
-      ensureHome();
-      let count = 0;
-      for (const [k, pp] of Object.entries(PROVIDERS)) {
-        if (pp.envKey && process.env[pp.envKey]) {
-          setStoredKey(k, process.env[pp.envKey]);
-          io.print(`已导入 ${k}（来自环境变量 ${pp.envKey}）。`);
-          count += 1;
-        }
-      }
-      if (!count) io.print('没有可导入的环境变量（如 DEEPSEEK_API_KEY）。');
-    } else {
-      io.print('用法：mingdao key [status|set <服务商> [key]|remove <服务商>|import]');
-    }
-  } finally {
-    io.close();
-  }
-}
-
 // —— 后台任务 worker：独立进程执行一轮任务并写状态文件 ——
 async function runWorkerTask(id, question, { permission, model, offpeak }) {
   const home = ensureHome();
@@ -349,37 +279,6 @@ async function runWorkerTask(id, question, { permission, model, offpeak }) {
   }
 }
 
-function printTasks(home) {
-  const tasks = listTasks(home);
-  if (!tasks.length) {
-    console.log('暂无任务。启动：mingdao run "<任务>"');
-    return;
-  }
-  console.log(`任务面板（共 ${tasks.length} 个，新→旧）`);
-  for (const t of tasks.slice(0, 20)) console.log('  ' + formatTaskRow(t));
-  const running = tasks.filter((t) => t.status === 'running').length;
-  console.log(running ? `\n${running} 个运行中 · mingdao tasks watch 实时刷新 · kill <id> 停止` : '\n无运行中任务');
-}
-
-async function watchTasks(home) {
-  if (!process.stdout.isTTY) {
-    printTasks(home);
-    return;
-  }
-  for (;;) {
-    const tasks = listTasks(home);
-    console.log('\n\x1b[2J\x1b[H' + `任务面板 ${new Date().toLocaleTimeString()}`);
-    if (!tasks.length) console.log('  暂无任务。启动：mingdao run "<任务>"');
-    for (const t of tasks.slice(0, 20)) console.log('  ' + formatTaskRow(t));
-    const running = tasks.filter((t) => t.status === 'running');
-    if (!running.length) {
-      console.log('\n全部任务已结束');
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 2000));
-  }
-}
-
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -393,111 +292,24 @@ async function main() {
   // 最近会话日志默认不注入（新会话全新开始）；--journal 显式带上
   const withJournal = Boolean(opts.journal);
 
-  // 自更新与回滚（git 安装形态）。
-  // 评估 P3-1 子命令劫持防护：参数不合法时回退为普通提问（如 "mingdao update the docs" 是提问而非更新命令）
-  if (opts.prompt[0] === 'update' && opts.prompt.slice(1).every((a) => a === '--check')) {
-    const { updateCheck, mingdaoUpdate } = await import('./update.js');
-    const checkOnly = opts.prompt.includes('--check');
-    const r = await (checkOnly ? updateCheck() : mingdaoUpdate());
-    console.log(r.lines?.join('\n') || '');
-    process.exitCode = r.ok ? 0 : 1;
-    return;
-  }
-  if (opts.prompt[0] === 'rollback' && opts.prompt.length === 1) {
-    const { mingdaoRollback } = await import('./update.js');
-    const r = mingdaoRollback();
-    console.log(r.lines?.join('\n') || '');
-    process.exitCode = r.ok ? 0 : 1;
-    return;
-  }
-
-  // Batch API 半价批处理（A1）：mingdao batch <问题文件|-> [--model 名] [--max-tokens n] [--out 文件]
-  if (opts.prompt[0] === 'batch') {
-    const { runBatch } = await import('./batch.js');
-    const cfgB = loadConfig();
-    if (!cfgB) {
-      console.log('[错误] 未初始化配置：请先运行 mingdao init');
-      process.exitCode = 1;
-      return;
+  // —— 命令分发（已拆至 src/commands/，评估 P0-1 拆 cli.js）——
+  // 各 handler 返回 true = 已处理；false = 按普通提问继续（保留词劫持防护）
+  {
+    const dispatchTable = [
+      ['update', 'update'], ['rollback', 'update'], ['batch', 'update'], ['cost', 'update'], ['audit', 'update'],
+      ['tasks', 'schedule'], ['schedule', 'schedule'],
+      ['workspace', 'workspace'], ['mcp', 'workspace'],
+      ['sync', 'sync'],
+      ['skill', 'skill'], ['web', 'skill'], ['sessions', 'skill'],
+      ['key', 'key'],
+    ];
+    const hit = dispatchTable.find(([name]) => name === opts.prompt[0]);
+    if (hit) {
+      const mod = await import(`./commands/${hit[1]}.js`);
+      const fn = mod[hit[1] === 'update' ? 'handleUpdateFamily' : hit[1] === 'schedule' ? (opts.prompt[0] === 'tasks' ? 'handleTasks' : 'handleSchedule') : hit[1] === 'workspace' ? (opts.prompt[0] === 'mcp' ? 'handleMcp' : 'handleWorkspace') : hit[1] === 'skill' ? (opts.prompt[0] === 'skill' ? 'handleSkill' : opts.prompt[0] === 'web' ? 'handleWeb' : 'handleSessions') : 'handle' + hit[1][0].toUpperCase() + hit[1].slice(1)];
+      const handled = await fn(opts.prompt[0], opts.prompt.slice(1));
+      if (handled) return;
     }
-    let model = cfgB.model || 'deepseek-v4-flash';
-    let maxTokens = 4096;
-    let srcFile = null;
-    const restB = opts.prompt.slice(1);
-    for (let i = 0; i < restB.length; i++) {
-      const a = restB[i];
-      if (a === '--model') model = restB[++i];
-      else if (a === '--max-tokens') maxTokens = Number(restB[++i]) || 4096;
-      else if (a === '--out') { i += 1; /* 输出默认落工作目录，--out 暂以默认处理 */ }
-      else if (!srcFile) srcFile = a;
-    }
-    if (!srcFile) {
-      console.log('用法：mingdao batch <问题文件|-> 每行一个问题（--model 名 --max-tokens n）');
-      process.exitCode = 1;
-      return;
-    }
-    let questions = [];
-    try {
-      const raw = srcFile === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(srcFile, 'utf8');
-      questions = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 1000);
-    } catch (err) {
-      console.log('[错误] 读取问题文件失败：' + (err?.message || err));
-      process.exitCode = 1;
-      return;
-    }
-    if (!questions.length) {
-      console.log('[错误] 问题文件为空');
-      process.exitCode = 1;
-      return;
-    }
-    console.log(`Batch 半价批处理：${questions.length} 个问题 · 模型 ${model}（价格 ×${0.5}，结果异步返回，最长 24h）`);
-    const ac = new AbortController();
-    process.on('SIGINT', () => ac.abort());
-    const r = await runBatch({
-      cfg: cfgB,
-      model,
-      questions,
-      workingDir: process.cwd(),
-      maxTokens,
-      signal: ac.signal,
-      onStatus: (st) => console.log('  ' + st),
-    });
-    process.removeAllListeners('SIGINT');
-    if (r.error) {
-      console.log('[错误] ' + r.error);
-      process.exitCode = 1;
-      return;
-    }
-    console.log(`✓ 完成 ${r.results.length} 条 · ↑${r.usage.prompt_tokens} ↓${r.usage.completion_tokens} tokens · 费用 ≈¥${r.cost.toFixed(5)}（已按半价）`);
-    console.log(`  结果文件：${r.outputFile}`);
-    console.log(`  任务 ID：${r.batchId}（结果已计入 /cost 分账）`);
-    return;
-  }
-
-  // 审计日志查看（P3-5）：mingdao audit [数量]（仅裸命令或单个数字；其余按提问处理）
-  if (opts.prompt[0] === 'audit' && (opts.prompt.length === 1 || (opts.prompt.length === 2 && /^\d+$/.test(opts.prompt[1])))) {
-    const { listAudit, auditFile } = await import('./audit.js');
-    const n = Number(opts.prompt[1]) || 20;
-    const rows = listAudit(n);
-    if (!rows.length) {
-      console.log(`暂无审计记录（工具调用将自动记录到 ${auditFile()}）。`);
-      return;
-    }
-    console.log(`审计日志（最近 ${rows.length} 条）：${auditFile()}`);
-    for (const r of rows) {
-      const when = new Date(r.at).toISOString().slice(0, 19).replace('T', ' ');
-      const status = r.denied ? `✖拒绝(${r.reason || ''})` : r.ok ? '✓' : '✖错误';
-      const extra = !r.denied && r.timedOut ? '（超时）' : !r.denied && r.exitCode !== null && r.exitCode !== undefined ? `（exit ${r.exitCode}）` : '';
-      const sess = r.session ? `  [会话 ${String(r.session).slice(0, 28)}]` : '';
-      console.log(`  ${when}  ${status} ${r.tool} ${(r.args || '').slice(0, 80)} ${extra}${sess}`);
-    }
-    return;
-  }
-
-  // 凭证管理子命令（无需配置即可使用）
-  if (opts.prompt[0] === 'key') {
-    await handleKeyCommand(opts.prompt.slice(1));
-    return;
   }
 
   // 后台任务 worker（内部入口，由 mingdao run 启动）
@@ -553,28 +365,6 @@ async function main() {
   }
 
   // 任务面板：mingdao tasks [watch|kill <id>]
-  if (opts.prompt[0] === 'tasks') {
-    const home0 = ensureHome();
-    reconcileSchedules(home0);
-    const sub = opts.prompt[1];
-    if (sub === 'kill') {
-      const id = opts.prompt[2];
-      if (!id) {
-        console.log('用法：mingdao tasks kill <id>');
-        process.exitCode = 1;
-        return;
-      }
-      console.log(killTask(home0, id) ? `已请求停止任务 ${id}` : '任务不存在');
-      return;
-    }
-    if (sub === 'watch') {
-      await watchTasks(home0);
-      return;
-    }
-    printTasks(home0);
-    return;
-  }
-
   // 调度器 worker（内部入口，由 schedule 系统启动的 sleeper 进程）
   if (opts.prompt[0] === 'schedule-worker') {
     const home0 = ensureHome();
@@ -582,106 +372,39 @@ async function main() {
     return;
   }
 
-  // 任务队列与调度：mingdao schedule add/list/remove/pause/resume/chain
-  if (opts.prompt[0] === 'schedule') {
+  // 单守护进程调度器（评估 P3-5）：一进程监督全部调度任务（协程复用 runSleeper），无任务自动退出
+  if (opts.prompt[0] === 'schedule-daemon') {
     const home0 = ensureHome();
-    reconcileSchedules(home0);
-    const sub = opts.prompt[1];
-    const rest = opts.prompt.slice(2);
-    if (sub === 'add') {
-      let question = '';
-      let at = null;
-      let every = null;
-      let anchor = null;
-      let after = [];
-      let permission = null;
-      let model = null;
-      let offpeak = false;
-      for (let i = 0; i < rest.length; i++) {
-        const a = rest[i];
-        if (a === '--at') at = rest[++i];
-        else if (a === '--every') every = rest[++i];
-        else if (a === '--anchor') anchor = rest[++i];
-        else if (a === '--after') after = String(rest[++i]).split(',').map((x) => x.trim()).filter(Boolean);
-        else if (a === '--permission') permission = rest[++i];
-        else if (a === '--model') model = rest[++i];
-        else if (a === '--offpeak') offpeak = true;
-        else if (question === '') question = a;
+    const { listSchedules, runSleeper, sleeperAlive, daemonPidFile } = await import('./schedule.js');
+    const { readTask } = await import('./tasks.js');
+    const handled = new Set();
+    try {
+      for (;;) {
+        const jobs = listSchedules(home0);
+        if (!jobs.some((j) => j.status === 'pending' || j.status === 'running')) break;
+        for (const j of jobs) {
+          if (j.status !== 'pending' || handled.has(j.id)) continue;
+          if (sleeperAlive(j.pid)) continue; // 旧式 sleeper 仍在：交回给它，避免双跑
+          if (j.lastTaskId) {
+            const t = readTask(home0, j.lastTaskId);
+            if (t && t.status === 'running') continue; // worker 仍在跑（异常窗口），不重拉
+          }
+          handled.add(j.id);
+          runSleeper(home0, j.id)
+            .catch(() => {})
+            .finally(() => handled.delete(j.id));
+        }
+        await new Promise((r) => setTimeout(r, 2000));
       }
-      if (!question) {
-        console.log('用法：mingdao schedule add "<任务>" [--at "YYYY-MM-DD HH:MM" | --every 2h [--anchor 09:00]] [--after 任务ID,...] [--permission auto] [--model 名] [--offpeak 高峰顺延至 14:00 后]');
-        process.exitCode = 1;
-        return;
-      }
-      const r = addSchedule(home0, question, { at, every, after, permission, model, cwd: process.cwd(), anchor, offpeak });
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`✓ 调度任务已创建 ${r.id}`);
-      console.log(`  查看：mingdao schedule list · 删除：mingdao schedule remove ${r.id}`);
-      return;
+    } finally {
+      try {
+        fs.rmSync(daemonPidFile(home0), { force: true });
+      } catch {}
     }
-    if (sub === 'list') {
-      const jobs = listSchedules(home0);
-      if (!jobs.length) {
-        console.log('暂无调度任务。创建：mingdao schedule add "<任务>" --at "2026-08-21 09:00" 或 --every 2h');
-        return;
-      }
-      console.log(`调度队列（共 ${jobs.length} 个，按下次运行排序）`);
-      for (const j of jobs.slice(0, 30)) console.log('  ' + formatScheduleRow(j));
-      return;
-    }
-    if (sub === 'remove') {
-      const id = rest[0];
-      if (!id) {
-        console.log('用法：mingdao schedule remove <id>');
-        process.exitCode = 1;
-        return;
-      }
-      console.log(removeSchedule(home0, id) ? `已删除调度任务 ${id}` : '任务不存在');
-      return;
-    }
-    if (sub === 'pause') {
-      const id = rest[0];
-      if (!id) {
-        console.log('用法：mingdao schedule pause <id>');
-        process.exitCode = 1;
-        return;
-      }
-      console.log(pauseSchedule(home0, id) ? `已暂停 ${id}（mingdao schedule resume ${id} 恢复）` : '任务不存在或不可暂停');
-      return;
-    }
-    if (sub === 'resume') {
-      const id = rest[0];
-      if (!id) {
-        console.log('用法：mingdao schedule resume <id>');
-        process.exitCode = 1;
-        return;
-      }
-      console.log(resumeSchedule(home0, id) ? `已恢复 ${id}` : '任务不存在或未暂停');
-      return;
-    }
-    if (sub === 'chain') {
-      if (rest.length < 2) {
-        console.log('用法：mingdao schedule chain "任务A" "任务B" "任务C"（按顺序执行，后者依赖前者成功）');
-        process.exitCode = 1;
-        return;
-      }
-      const r = chainSchedules(home0, rest);
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`✓ 链式队列已创建：${r.ids.join(' → ')}`);
-      return;
-    }
-    console.log('用法：mingdao schedule add|list|remove|pause|resume|chain');
     return;
   }
 
+  // 任务队列与调度：mingdao schedule add/list/remove/pause/resume/chain
   // 开机自启：mingdao autostart on|off|status
   if (opts.prompt[0] === 'autostart') {
     const sub = opts.prompt[1] || 'status';
@@ -696,499 +419,12 @@ async function main() {
   }
 
   // 工作空间：mingdao workspace add|list|use|path|remove
-  if (opts.prompt[0] === 'workspace') {
-    const sub = opts.prompt[1] || 'list';
-    const name = opts.prompt[2];
-    if (sub === 'add') {
-      if (!name) {
-        console.log('用法：mingdao workspace add <名称> [目录]');
-        process.exitCode = 1;
-        return;
-      }
-      const r = addWorkspace(name, opts.prompt[3]);
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`✓ 已登记工作空间 ${r.name} → ${r.dir}`);
-      return;
-    }
-    if (sub === 'remove') {
-      if (!name) {
-        console.log('用法：mingdao workspace remove <名称>');
-        process.exitCode = 1;
-        return;
-      }
-      console.log(removeWorkspace(name) ? `✓ 已移除 ${name}` : '未找到该工作空间');
-      return;
-    }
-    if (sub === 'path') {
-      if (!name) {
-        console.log('用法：mingdao workspace path <名称>');
-        process.exitCode = 1;
-        return;
-      }
-      const p = workspacePath(name);
-      if (p) console.log(p);
-      else {
-        console.error('未找到该工作空间（mingdao workspace list 查看）');
-        process.exitCode = 1;
-      }
-      return;
-    }
-    if (sub === 'use') {
-      if (!name) {
-        console.log('用法：mingdao workspace use <名称>');
-        process.exitCode = 1;
-        return;
-      }
-      const p = workspacePath(name);
-      if (!p) {
-        console.log('未找到该工作空间（mingdao workspace list 查看）');
-        process.exitCode = 1;
-        return;
-      }
-      touchWorkspace(name);
-      console.log(`✓ 工作空间 ${name}：${p}`);
-      console.log(`  快速进入：cd "$(mingdao workspace path ${name})"（建议做成 shell 函数/别名，如 mdw() { cd "$(mingdao workspace path "$1")"; }）`);
-      return;
-    }
-    const ws = listWorkspaces();
-    if (!ws.length) {
-      console.log('暂无工作空间。添加：mingdao workspace add <名称> [目录]');
-    } else {
-      console.log('工作空间（最近使用优先）');
-      for (const w of ws) console.log(`  ${w.name.padEnd(16)} ${w.dir}`);
-      console.log('\n  进入：cd "$(mingdao workspace path <名称>)"');
-    }
-    return;
-  }
-
-  // MCP 预设：mingdao mcp preset list|add <名称> [参数]
-  if (opts.prompt[0] === 'mcp' && opts.prompt[1] === 'preset') {
-    const home0 = ensureHome();
-    if (opts.prompt[2] === 'add') {
-      const name = opts.prompt[3];
-      if (!name) {
-        console.log('用法：mingdao mcp preset add <名称> [参数]（列表见 mingdao mcp preset list）');
-        process.exitCode = 1;
-        return;
-      }
-      const r = buildPreset(name, opts.prompt[4], process.cwd());
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      const cfg0 = loadConfig();
-      if (!cfg0) {
-        console.log('未初始化配置，请先运行 mingdao init');
-        process.exitCode = 1;
-        return;
-      }
-      cfg0.mcpServers = cfg0.mcpServers || {};
-      cfg0.mcpServers[name] = r.config;
-      saveConfig(cfg0);
-      console.log(`✓ 已添加 MCP 服务器 ${name}（重启 mingdao web 后生效；会话内 /mcp 查看状态）`);
-      return;
-    }
-    console.log('MCP 生态预设（mingdao mcp preset add <名称> 一键接入）：');
-    for (const p of presetList()) {
-      console.log(`  ${p.name.padEnd(20)} ${p.label}${p.argLabel ? `（参数：${p.argLabel}）` : ''}`);
-    }
-    return;
-  }
-
   // 云同步：mingdao sync login|logout|push|pull|status · 自建服务端 mingdao sync-server [端口]
   if (opts.prompt[0] === 'sync-server') {
     const { runSyncServer } = await import('./sync-server.js');
     await runSyncServer({ port: Number(opts.prompt[1]) || undefined });
     return;
   }
-  if (opts.prompt[0] === 'sync') {
-    const sub = opts.prompt[1] || 'status';
-    if (sub === 'login') {
-      const username = opts.prompt[2];
-      if (!username) {
-        console.log('用法：mingdao sync login <用户名> [密码] [服务器地址]（地址默认取已配置项）');
-        process.exitCode = 1;
-        return;
-      }
-      const s0 = syncStatus();
-      const url = opts.prompt[4] || s0.url;
-      if (!url) {
-        console.log('缺少服务器地址：mingdao sync login <用户名> [密码] <http(s)://地址>');
-        process.exitCode = 1;
-        return;
-      }
-      let password = opts.prompt[3];
-      if (!password) {
-        password = await new Promise((resolve) => {
-          const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-          const orig = rl._writeToOutput;
-          rl._writeToOutput = () => {};
-          rl.question('密码（至少 8 位）：', (a) => {
-            if (typeof orig === 'function') rl._writeToOutput = orig;
-            rl.close();
-            resolve(a.trim());
-          });
-        });
-      }
-      const insecureFlag = opts.prompt[5] === '--insecure' || opts.prompt[6] === '--insecure';
-      const r = await syncLogin({ url, username, password, deviceName: opts.prompt[5] === '--insecure' ? undefined : opts.prompt[5], insecure: insecureFlag });
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      if (insecureFlag) {
-        console.log('  已启用 insecure（跳过证书校验，正式证书就绪后请在 config.sync 删除 insecure 字段）');
-      }
-      console.log(`✓ 已登录 ${r.username}（设备 ${r.deviceName}）→ ${r.url}`);
-      console.log('  推送：mingdao sync push · 拉取：mingdao sync pull · 会话结束自动同步（config.sync.auto）');
-      return;
-    }
-    if (sub === 'logout') {
-      syncLogout();
-      console.log('✓ 已退出同步（配置保留，凭证已清除）');
-      return;
-    }
-    if (sub === 'passwd') {
-      const newPassword = opts.prompt[2];
-      if (!newPassword) {
-        console.log('用法：mingdao sync passwd <新密码>（将提示输入旧密码）');
-        process.exitCode = 1;
-        return;
-      }
-      const oldPassword = await new Promise((resolve) => {
-        const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-        const orig = rl._writeToOutput;
-        rl._writeToOutput = () => {};
-        rl.question('旧密码：', (a) => {
-          if (typeof orig === 'function') rl._writeToOutput = orig;
-          rl.close();
-          resolve(a.trim());
-        });
-      });
-      const r = await syncChangePassword({ oldPassword, newPassword });
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log('✓ 密码已修改（其他设备下次登录用新密码）');
-      return;
-    }
-    if (sub === 'share') {
-      const name = opts.prompt[2];
-      if (!name) {
-        console.log('用法：mingdao sync share <会话文件名>（列出：mingdao sync shares）');
-        process.exitCode = 1;
-        return;
-      }
-      const r = await syncShareCreate(name);
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`✓ 已创建分享（会话 ${r.name}）`);
-      console.log(`  分享码：${r.shareId}`);
-      console.log(`  对方接受：mingdao sync accept ${r.shareId}`);
-      return;
-    }
-    if (sub === 'shares') {
-      const r = await syncShareList();
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`我分享的（${r.mine.length}）：`);
-      for (const s of r.mine) console.log(`  ${s.shareId.padEnd(12)} ${s.name} · 被接受 ${s.pulls} 次`);
-      console.log(`我接受的（${r.accepted.length}）：`);
-      for (const s of r.accepted) console.log(`  ${s.shareId.padEnd(12)} ${s.owner} 的 ${s.name} → 本地 ${s.savedAs}`);
-      if (!r.mine.length && !r.accepted.length) console.log('  暂无分享');
-      return;
-    }
-    if (sub === 'accept') {
-      const shareId = opts.prompt[2];
-      if (!shareId) {
-        console.log('用法：mingdao sync accept <分享码>');
-        process.exitCode = 1;
-        return;
-      }
-      const r = await syncShareAccept(shareId);
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`✓ 已接受分享 → 本地会话 ${r.savedAs}${r.conflict ? '（与你已有的同名会话不同，已另存副本）' : ''}`);
-      return;
-    }
-    if (sub === 'unshare') {
-      const shareId = opts.prompt[2];
-      if (!shareId) {
-        console.log('用法：mingdao sync unshare <分享码>');
-        process.exitCode = 1;
-        return;
-      }
-      const r = await syncShareRevoke(shareId);
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`✓ 已撤销分享 ${shareId}（已接受者保留副本）`);
-      return;
-    }
-    if (sub === 'conflicts') {
-      const list = listSyncConflicts();
-      if (!list.length) {
-        console.log('暂无冲突备份');
-        return;
-      }
-      console.log(`冲突备份（${list.length} 个会话）· 解决：mingdao sync conflict-resolve <会话名> local|remote|both`);
-      for (const c of list) {
-        const localLabel = c.localExists ? '本地有' : '本地无';
-        const newest = c.entries[0];
-        console.log(`  ${c.base.padEnd(44)} ${localLabel} · 备份 ${c.entries.length} 个（最新 ${newest.side}-${newest.ts}）`);
-      }
-      return;
-    }
-    if (sub === 'conflict-resolve') {
-      const base = opts.prompt[2];
-      const choice = opts.prompt[3];
-      if (!base || !['local', 'remote', 'both'].includes(choice)) {
-        console.log('用法：mingdao sync conflict-resolve <会话文件名> local|remote|both');
-        console.log('  local  保留本地，删除备份 · remote  采用远端版本覆盖本地 · both  两者都保留（备份转正）');
-        process.exitCode = 1;
-        return;
-      }
-      const r = resolveSyncConflict(base, choice);
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`✓ 已解决：${r.base} → ${choice === 'local' ? '保留本地' : choice === 'remote' ? '采用 ' + r.applied : '保留两者（' + r.kept + '）'}`);
-      return;
-    }
-    if (sub === 'push') {
-      const r = await syncPush(opts.prompt[2]);
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`✓ 已推送 ${r.pushed.length} 个会话${r.skipped?.length ? `（跳过 ${r.skipped.length} 个空会话）` : ''}${r.conflicts.length ? `，远端 ${r.conflicts.length} 个不同版本已备份为 .server-*（本地覆盖远端）` : ''}`);
-      return;
-    }
-    if (sub === 'pull') {
-      const r = await syncPull(opts.prompt[2]);
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`✓ 已拉取 ${r.pulled.length} 个会话${r.conflicts.length ? `，${r.conflicts.length} 个与本地不同：远端内容已存为 .remote-*（本地保留）` : ''}`);
-      return;
-    }
-    const st = syncStatus();
-    if (!st.configured) {
-      console.log('未配置云同步。登录：mingdao sync login <用户名> [密码] <http(s)://服务器地址>');
-      return;
-    }
-    console.log(`同步服务器  ${st.url}`);
-    console.log(`账号        ${st.username || '（未登录）'} · 设备 ${st.deviceName || '（未登录）'}`);
-    console.log(`状态        ${st.loggedIn ? '✓ 已登录' : '✗ 未登录'} · 自动同步 ${st.auto ? '开' : '关'}`);
-    if (st.loggedIn) {
-      const remote = await syncRemoteList();
-      if (remote.error) {
-        console.log(`远端会话    ${remote.error}`);
-      } else {
-        console.log(`远端会话    ${remote.sessions.length} 个`);
-        for (const s of remote.sessions.slice(0, 10)) {
-          console.log(`  ${s.name.padEnd(42)} ${new Date(s.mtime).toLocaleString()} · ${(s.size / 1024).toFixed(1)}KB`);
-        }
-      }
-    }
-    return;
-  }
-
-  // 技能库：mingdao skill list|search|install|uninstall|update
-  if (opts.prompt[0] === 'skill') {
-    const sub = opts.prompt[1] || 'list';
-    const arg = opts.prompt[2];
-    if (sub === 'search') {
-      const local = searchLibrary(arg || '');
-      const { searchRegistry } = await import('./skill-registry.js');
-      const remote = await searchRegistry(arg || '');
-      const localNames = new Set(local.map((s) => s.name));
-      const remoteOnly = remote.skills ? remote.skills.filter((s) => !localNames.has(s.name)) : [];
-      console.log(
-        `技能库匹配：内置 ${local.length}${remote.error ? '' : ` + 线上 ${remoteOnly.length}`} · 安装：mingdao skill install <名称>`
-      );
-      for (const s of local) console.log(`  ${s.name.padEnd(18)} ${s.description}${s.installed ? '（已安装）' : ''}  [内置]`);
-      if (remote.error) {
-        console.log(`  ✗ 线上 registry 不可达：${remote.error}`);
-      } else {
-        for (const s of remoteOnly) console.log(`  ${s.name.padEnd(18)} ${s.description}${s.installed ? '（已安装）' : ''}  [线上]`);
-        if (remote.stale) console.log('  （线上索引来自本地缓存，已过期）');
-      }
-      return;
-    }
-    if (sub === 'install') {
-      const r = await installSkill(arg);
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      if (r.names) {
-        console.log(`✓ 已从 git 仓库安装 ${r.names.length} 个技能：${r.names.join(', ')}`);
-      } else {
-        const srcLabel = r.host ? '（线上 registry）' : '';
-        console.log(`✓ 已安装技能 ${r.name}${srcLabel} → ~/.mingdao/skills/${r.name}/（可编辑/删除，下次会话生效）`);
-      }
-      return;
-    }
-    if (sub === 'uninstall') {
-      if (!arg) {
-        console.log('用法：mingdao skill uninstall <名称>');
-        process.exitCode = 1;
-        return;
-      }
-      const r = uninstallSkill(arg);
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`✓ 已卸载 ${r.name}（内置同名技能如有会自动重新可见）`);
-      return;
-    }
-    if (sub === 'update') {
-      if (!arg) {
-        console.log('用法：mingdao skill update <名称>');
-        process.exitCode = 1;
-        return;
-      }
-      const r = await reinstallSkill(arg);
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`✓ 已更新技能 ${r.name}`);
-      return;
-    }
-    if (sub === 'trust') {
-      if (!arg) {
-        console.log('用法：mingdao skill trust <名称>（编辑过 registry/库安装的技能后，重新记录内容指纹）');
-        process.exitCode = 1;
-        return;
-      }
-      const r = trustSkill(arg);
-      if (r.error) {
-        console.log('[错误] ' + r.error);
-        process.exitCode = 1;
-        return;
-      }
-      console.log(`✓ 已信任技能 ${r.name} 的当前内容（指纹 ${r.sha256}…）`);
-      return;
-    }
-    const skills = listSkills(process.cwd());
-    console.log(`已安装技能（${skills.length}）· 三级来源：用户级 > 项目级 > 内置`);
-    for (const s of skills) {
-      const label = s.source === 'user' ? '（用户级）' : s.source === 'project' ? '（项目级）' : '（内置）';
-      console.log(`  ${s.name.padEnd(18)} ${s.description || ''}${label}`);
-    }
-    // P3-3：完整性校验被拦下的技能单独警示
-    const tampered = tamperedSkillNames(process.cwd());
-    for (const t of tampered) {
-      console.log(`  ⚠ ${t.name.padEnd(18)} 内容与安装时不一致，已拒绝加载——确认是你改的就执行 mingdao skill trust ${t.name}，否则 mingdao skill uninstall ${t.name} 后重装`);
-    }
-    const lib = libraryList();
-    console.log(`\n技能库共 ${lib.length} 个可安装技能：mingdao skill search [关键词] 搜索，mingdao skill install <名称> 安装`);
-    return;
-  }
-
-  // WebUI：mingdao web [端口] [--auth-token <令牌>]（评估 P3-1：参数结构不合法的按提问处理）
-  if (opts.prompt[0] === 'web') {
-    const webArgs = opts.prompt.slice(1);
-    const webValid = (() => {
-      let portSeen = false;
-      let tokenSeen = false;
-      for (let i = 0; i < webArgs.length; i++) {
-        const a = webArgs[i];
-        if (a === '--auth-token') {
-          if (tokenSeen || i + 1 >= webArgs.length) return false;
-          tokenSeen = true;
-          i += 1;
-          continue;
-        }
-        if (a.startsWith('--auth-token=')) {
-          if (tokenSeen) return false;
-          tokenSeen = true;
-          continue;
-        }
-        if (/^\d+$/.test(a) && !portSeen) {
-          portSeen = true;
-          continue;
-        }
-        return false;
-      }
-      return true;
-    })();
-    if (!webValid) {
-      // 非 web 命令结构 → 回退为普通提问（不在 web 分支里 continue/return）
-      // 注意：此处不能 return，需落到下方提问流程——用哨兵跳过命令执行
-    } else {
-      const cfg0 = loadConfig();
-      const portArg = opts.prompt[1] !== undefined ? Number(opts.prompt[1]) : NaN;
-      const port = Number.isFinite(portArg) && portArg > 0 ? portArg : cfg0?.web?.port || 3820;
-      const host = cfg0?.web?.host || '127.0.0.1';
-      // 访问令牌优先级：--auth-token 参数 > 环境变量 MINGDAO_WEB_TOKEN > config.json 的 web.token
-      let authToken = process.env.MINGDAO_WEB_TOKEN || cfg0?.web?.token || undefined;
-      const atIdx = opts.prompt.findIndex((a) => typeof a === 'string' && a.startsWith('--auth-token'));
-      if (atIdx !== -1) {
-        const raw = opts.prompt[atIdx];
-        authToken = raw.includes('=') ? raw.slice(raw.indexOf('=') + 1) : opts.prompt[atIdx + 1];
-        if (!authToken) {
-          console.log('用法：mingdao web [端口] [--auth-token <令牌>]');
-          process.exitCode = 1;
-          return;
-        }
-      }
-      await runWebServer({ host, port, authToken });
-      return;
-    }
-  }
-
-  // 会话检索：mingdao sessions search <关键词>
-  if (opts.prompt[0] === 'sessions' && opts.prompt[1] === 'search') {
-    const kw = opts.prompt.slice(2).join(' ').trim();
-    if (!kw) {
-      console.log('用法：mingdao sessions search <关键词>');
-      process.exitCode = 1;
-      return;
-    }
-    const home0 = ensureHome();
-    const hits = searchSessions(home0, kw);
-    if (!hits.length) console.log(`未找到包含「${kw}」的会话。`);
-    else {
-      console.log(`找到 ${hits.length} 个会话：`);
-      for (const h of hits) {
-        console.log(`  ${h.name}（${relativeTime(h.mtime)}）\n    ${h.snippet}`);
-      }
-      console.log(`\n恢复：mingdao --resume（选择器中可见全部会话）`);
-    }
-    return;
-  }
-
   const home = ensureHome();
   let cfg = loadConfig();
   if (!cfg || opts.init) {

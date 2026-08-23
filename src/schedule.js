@@ -1,6 +1,8 @@
 // 任务队列与调度：定时任务（一次性/周期）与依赖编排（after/链式）。
-// 架构：每个调度任务一个轻量 sleeper 进程（node cli.js schedule-worker <id>），
-// 到点或依赖满足后启动 worker（复用 mingdao run 的独立进程机制）；状态落盘 <home>/schedule/<id>.json。
+// 架构（评估 P3-5 单守护进程调度器）：一个 schedule-daemon 进程监督全部调度任务——
+// 守护进程内以协程运行每任务的 runSleeper 等待/执行逻辑，到期启动 worker（复用 mingdao run
+// 的独立进程机制）；状态落盘 <home>/schedule/<id>.json，daemon.pid 防重复。
+// 旧式逐任务 sleeper（schedule-worker）保留为 daemon 启动失败时的兜底。
 // 命令族：mingdao schedule add/list/remove/pause/resume/chain；tasks/run 触发时自动 reconcile 补挂到期任务（重启自愈）。
 
 import fs from 'node:fs';
@@ -136,7 +138,7 @@ export function addSchedule(home, question, { at, every, after, permission, mode
     offpeak: Boolean(offpeak),
   };
   writeSchedule(home, job);
-  spawnSleeper(home, job);
+  if (!daemonAlive(home)) spawnDaemon(home); // 单守护进程监督（评估 P3-5）
   return { id, job };
 }
 
@@ -207,7 +209,7 @@ export function chainSchedules(home, questions, opts = {}) {
   return { ids };
 }
 
-function sleeperAlive(pid) {
+export function sleeperAlive(pid) {
   if (!pid) return false;
   try {
     process.kill(pid, 0);
@@ -228,34 +230,67 @@ function spawnSleeper(home, job) {
   return child.pid;
 }
 
-// 重启自愈：为到期且 sleeper 已死的任务重新挂起 sleeper（带锁防并发双挂）
-export function reconcileSchedules(home) {
-  for (const job of listSchedules(home)) {
-    if (job.status !== 'pending' && job.status !== 'running') continue;
-    if (sleeperAlive(job.pid)) continue;
-    // 上次拉起的 worker 还在跑：不重挂 sleeper，避免同任务双跑
-    if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) continue;
-    const lock = path.join(scheduleDir(home), `${job.id}.sleeper.lock`);
-    let fd;
-    try {
-      fd = fs.openSync(lock, 'wx');
-    } catch {
-      continue; // 另一进程正在挂载
-    }
-    try {
-      if (job.kind === 'after') {
-        spawnSleeper(home, job); // 依赖型任务始终需要 sleeper 轮询
-      } else if (job.nextRunAt && job.nextRunAt <= Date.now() + 5000) {
-        const next = job.nextRunAt <= Date.now() ? Date.now() + 1000 : job.nextRunAt;
-        writeSchedule(home, { ...job, nextRunAt: next });
-        spawnSleeper(home, job);
-      }
-    } finally {
-      fs.closeSync(fd);
-    }
+// —— 单守护进程调度器（评估 P3-5）：一进程监督全部任务 ——
+export function daemonPidFile(home) {
+  return path.join(scheduleDir(home), 'daemon.pid');
+}
+export function daemonAlive(home) {
+  try {
+    const pid = Number(fs.readFileSync(daemonPidFile(home), 'utf8'));
+    if (!pid) return false;
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
   }
 }
+export function stopDaemon(home) {
+  try {
+    const pid = Number(fs.readFileSync(daemonPidFile(home), 'utf8'));
+    if (pid) {
+      try {
+        process.kill(pid, 'SIGTERM');
+      } catch {}
+    }
+  } catch {}
+  try {
+    fs.rmSync(daemonPidFile(home), { force: true });
+  } catch {}
+  return true;
+}
+export function spawnDaemon(home) {
+  if (daemonAlive(home)) return true;
+  const child = spawn(process.execPath, [CLI_PATH, 'schedule-daemon'], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, MINGDAO_HOME: home },
+  });
+  try {
+    fs.writeFileSync(daemonPidFile(home), String(child.pid));
+  } catch {}
+  child.unref();
+  return true;
+}
 
+// 重启自愈：有非终态任务且 daemon 不在 → 拉起单守护（失败才回退旧式逐任务 sleeper）
+export function reconcileSchedules(home) {
+  const jobs = listSchedules(home);
+  const hasPending = jobs.some((j) => j.status === 'pending' || j.status === 'running');
+  if (!hasPending) return;
+  if (daemonAlive(home) || process.env.MINGDAO_NO_DAEMON === '1') {
+    if (process.env.MINGDAO_NO_DAEMON === '1') {
+      // 兜底路径（旧式）
+      for (const job of jobs) {
+        if (job.status !== 'pending' && job.status !== 'running') continue;
+        if (sleeperAlive(job.pid)) continue;
+        if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) continue;
+        if (job.kind === 'after' || (job.nextRunAt && job.nextRunAt <= Date.now() + 5000)) spawnSleeper(home, job);
+      }
+    }
+    return;
+  }
+  spawnDaemon(home);
+}
 // —— sleeper 主循环（schedule-worker 进程内运行）——
 export async function runSleeper(home, id) {
   const job = readSchedule(home, id);

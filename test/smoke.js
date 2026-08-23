@@ -1756,6 +1756,114 @@ const ctx = { cwd: tmp };
   ok('batch：上传/轮询/取回/半价计费/结果落盘/分账标记/端点不可用报错');
 }
 
+
+// ---------- 42. 月度费用报告（/cost 导出） ----------
+{
+  const homeR = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-costr-'));
+  process.env.MINGDAO_HOME = homeR;
+  const { beijingToDate } = await import(pathToFileURL(path.join(srcDir, 'pricing.js')).href);
+  const { costMonthlyReport } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+  const statsFile = path.join(homeR, 'cache-stats.jsonl');
+  const line = (at, cost) => JSON.stringify({ at, model: 'deepseek-v4-flash', prompt: 100, completion: 10, hit: 50, miss: 50, cost, saved: 0.001 }) + '\n';
+  // 7 月与 8 月各两条（北京时区）
+  const j1 = beijingToDate({ year: 2026, month: 7, day: 31, hour: 23, minute: 0, second: 0 });
+  const a1 = beijingToDate({ year: 2026, month: 8, day: 1, hour: 0, minute: 1, second: 0 });
+  const a2 = beijingToDate({ year: 2026, month: 8, day: 15, hour: 10, minute: 0, second: 0 });
+  fs.writeFileSync(statsFile, line(j1.getTime(), 0.1) + line(j1.getTime(), 0.2) + line(a1.getTime(), 0.3) + line(a2.getTime(), 0.4));
+  const all = costMonthlyReport();
+  assert.equal(all.length, 2, '应按月份分组为 2 个月');
+  assert.equal(all[0].month, '2026-07');
+  assert.ok(Math.abs(all[0].cost - 0.3) < 1e-9, '7 月费用应为 0.3');
+  assert.ok(Math.abs(all[1].cost - 0.7) < 1e-9, '8 月费用应为 0.7');
+  assert.equal(all[1].days.length, 2, '8 月应按天分组（2 天）');
+  const aug = costMonthlyReport('2026-08');
+  assert.equal(aug.length, 1, '指定月份只返回该月');
+  assert.ok(Math.abs(aug[0].cost - 0.7) < 1e-9);
+  assert.ok(costMonthlyReport('2025-01').length === 0, '无记录月份返回空');
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeR, { recursive: true, force: true });
+  ok('cost 月度报告：按月/按天分组 / 指定月份过滤 / 空月份');
+}
+
+// ---------- 43. 辅助调用结构化输出（json_object + 纯文本回退） ----------
+{
+  const { generateTitle } = await import(pathToFileURL(path.join(srcDir, 'titles.js')).href);
+  const { extractMemory } = await import(pathToFileURL(path.join(srcDir, 'memory.js')).href);
+  // json 路径：返回 {"title":"..."} 直接解析（maxTokens 应为 50）
+  let seenMax = 0;
+  const jsonProvider = { async chat(opts) { seenMax = opts.maxTokens; return { text: '{"title":"贪吃蛇游戏"}' }; } };
+  const t1 = await generateTitle(jsonProvider, 'deepseek-v4-flash', '做一个贪吃蛇游戏');
+  assert.equal(t1, '贪吃蛇游戏', 'json_object 标题应直接解析');
+  assert.equal(seenMax, 50, '标题 maxTokens 应压到 50');
+  // 纯文本回退：json 解析失败 → 第二次纯文本调用
+  let calls = 0;
+  const plainProvider = { async chat() { calls += 1; return { text: '纯文本标题' }; } };
+  const t2 = await generateTitle(plainProvider, 'x', '做个计算器');
+  assert.equal(t2, '纯文本标题', '回退纯文本路径仍可用');
+  assert.equal(calls, 2, 'json 失败后应再走一次纯文本调用');
+  // 记忆提取 json 路径
+  const memProvider = { async chat() { return { text: '{"items":["- 用户喜欢用 pnpm","- 项目在 /data/app"]}' }; } };
+  const lines = await extractMemory(memProvider, 'deepseek-v4-flash', [{ role: 'user', content: '我用 pnpm，项目在 /data/app' }], '');
+  assert.deepEqual(lines, ['- 用户喜欢用 pnpm', '- 项目在 /data/app'], 'json 记忆提取应解析 items');
+  // 记忆提取纯文本回退
+  const memPlain = { async chat() { return { text: '- 旧格式条目' }; } };
+  const lines2 = await extractMemory(memPlain, 'deepseek-v4-flash', [{ role: 'user', content: 'x' }], '');
+  assert.deepEqual(lines2, ['- 旧格式条目'], '记忆提取纯文本回退');
+  ok('结构化输出：标题 json/回退（maxTokens 50）/ 记忆 json/回退');
+}
+
+
+// ---------- 44. 只读子代理并行（评估 A4） ----------
+{
+  let active = 0;
+  let maxActive = 0;
+  let mainTurns = 0;
+  const providerAll = {
+    async chat(opts) {
+      const lastUser = String(opts.messages?.at(-1)?.content || '');
+      if (lastUser.startsWith('调研 ')) {
+        // 子代理调用：延长窗口确保两个子代理的调用重叠
+        active += 1;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((r) => setTimeout(r, 80));
+        active -= 1;
+        return { text: lastUser + '完成', toolCalls: null, usage: {}, finish: 'stop' };
+      }
+      mainTurns += 1;
+      if (mainTurns === 1) {
+        return {
+          text: '',
+          toolCalls: [
+            { id: 't1', type: 'function', function: { name: 'task', arguments: JSON.stringify({ prompt: '调研 A', readOnly: true }) } },
+            { id: 't2', type: 'function', function: { name: 'task', arguments: JSON.stringify({ prompt: '调研 B', readOnly: true }) } },
+          ],
+          usage: {},
+          finish: 'tool_calls',
+        };
+      }
+      return { text: '汇总完成', toolCalls: null, usage: {}, finish: 'stop' };
+    },
+  };
+  const agentP = createAgent({
+    provider: providerAll,
+    permission: { mode: 'auto', async check() { return true; } },
+    io: createIO({ quiet: true }),
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmp,
+    cfg: { permission: 'auto' },
+  });
+  const mP = [{ role: 'system', content: '系统' }, { role: 'user', content: '并行调研' }];
+  const rP = await agentP.runTurn(mP);
+  assert.equal(rP.text, '汇总完成');
+  assert.ok(maxActive >= 2, `两个只读子代理应并行执行（最大并发 ${maxActive}）`);
+  const toolMsgs = mP.filter((m) => m.role === 'tool');
+  assert.equal(toolMsgs.length, 2);
+  assert.equal(toolMsgs[0].tool_call_id, 't1', '结果应按调用顺序回填');
+  assert.equal(toolMsgs[1].tool_call_id, 't2');
+  assert.ok(toolMsgs.every((m) => m.content.includes('完成')), '两个子任务都应完成并汇报');
+  ok('子代理：只读 task 并行执行（并发≥2 / 顺序回填）');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 fs.rmSync(smokeHome, { recursive: true, force: true });

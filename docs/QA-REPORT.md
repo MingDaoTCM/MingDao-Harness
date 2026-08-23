@@ -294,6 +294,24 @@ e2e-web **19 项**，全部通过（83 项）。
 **下一批候选**：辅助调用结构化输出（`response_format`，maxTokens 80–300 → 8–50）、/cost 月度报告导出、
 子代理并行（只读）、单守护进程调度器（P3-5）、拆 cli.js。
 
+## 十二、工程化与效率批次（2026-08-23，v0.1.52）
+
+按四报告路线图 v0.3.0 能力纵深项提前落地五项：
+
+| 项 | 实现 |
+| --- | --- |
+| 辅助调用结构化输出（4.2-4） | 标题/记忆提取/路由分类器走 `response_format: json_object`，maxTokens 120→50、300→200、80→20；解析失败自动回退纯文本（smoke #43 覆盖 json 与回退双路径） |
+| /cost 月度报告导出 | `mingdao cost report [YYYY-MM\|all]` 生成 Markdown（按模型分账/每日柱状图/命中率/Batch 子项）；`costMonthlyReport` 按北京时区月/日聚合（smoke #42） |
+| 子代理并行（A4） | `task` 工具 `readOnly:true` 并入并行批次——只读子代理（read/ls/glob/grep/skill 放行、写类拒绝、零交互）Promise.all 执行，结果按调用顺序回填（smoke #44：并发≥2 断言） |
+| 单守护进程调度器（P3-5） | `schedule-daemon` 一进程监督全部任务（协程复用 runSleeper），pid 文件防重复、无任务自动退出、旧式 sleeper 存活时避让防双跑；`mingdao schedule daemon status/stop`；reconcile 自动拉起（e2e-schedule 5 项全绿） |
+| 拆 cli.js（P0-1） | cli.js 1957→1098 行：`src/commands/` 九个命令族模块（update/rollback/batch/cost/audit、tasks/schedule、workspace/mcp、sync、skill/web/sessions、key），统一 `(cmd, args) → boolean` 分发协议，保留词劫持防护语义不变；全部命令实测通过 |
+
+**过程中修复的两个真 bug**：① 分发表首次接入漏传 `cmd`（`update --check`/`cost` 被当成提问
+交给模型）——已修复签名协议并清理误建会话；② `costMonthlyReport` 缺 `beijingParts` 导入。
+
+回归验证（2026-08-23，Linux 实测）：smoke **48 组**、e2e-local **14 项**、e2e-schedule **5 项**、
+e2e-web **19 项**，全部通过（86 项）。
+
 ---
 
 *报告生成：Hermes Agent · 基于全量源码走读、17 项针对性验证、smoke + e2e 回归测试（含三轮复评）*

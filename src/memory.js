@@ -160,6 +160,27 @@ export async function extractMemory(provider, model, messages, existingMemory) {
       .slice(-20)
       .map((m) => `${m.role === 'user' ? '用户' : 'MingDao'}：${String(m.content || '').slice(0, 500)}`)
       .join('\n');
+    const msgs = [
+      {
+        role: 'system',
+        content:
+          '你是 MingDao 的记忆提取器。从对话中提取值得长期记住的用户偏好与事实（工具链、代码风格、项目背景、个人约定、常用指令等）。每条一行，以 - 开头，≤30 字，只输出新条目（与「已有记忆」重复或对话中未提及的不要输出）；没有新增时 items 为空数组。\n已有记忆：\n' +
+          (existingMemory || '（空）'),
+      },
+      { role: 'user', content: convo.slice(0, 8000) },
+    ];
+    // 结构化输出（评估 4.2-4）：json_object，maxTokens 300→200，解析零失败；网关不支持时回退纯文本
+    try {
+      const res = await provider.chat({ model, messages: msgs, tools: [], temperature: 0.2, maxTokens: 200, responseFormat: { type: 'json_object' } });
+      const j = JSON.parse(String(res.text || '').trim());
+      const items = Array.isArray(j?.items) ? j.items : [];
+      const clean = items
+        .map((l) => String(l).trim())
+        .filter((l) => l.startsWith('-') || /^[·•]/.test(l))
+        .map((l) => l.replace(/^[·•]\s*/, '- '))
+        .slice(0, 10);
+      if (clean.length || items.length === 0) return clean; // 空数组 = 无新增；有内容即返回
+    } catch {}
     const res = await provider.chat({
       model,
       messages: [

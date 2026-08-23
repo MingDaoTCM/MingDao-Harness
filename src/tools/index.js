@@ -85,6 +85,7 @@ const TASK_SCHEMA = {
   properties: {
     description: { type: 'string', description: '子任务一句话描述（用于进度展示）。' },
     prompt: { type: 'string', description: '交给子代理的完整任务说明（它没有当前对话上下文）。' },
+    readOnly: { type: 'boolean', description: '只读调研任务（不写文件不执行命令）。多个 readOnly 子任务会并行执行。' },
   },
   required: ['prompt'],
 };
@@ -235,7 +236,7 @@ async function runTask(args, ctx) {
   if (!prompt) return { ok: false, error: '缺少 prompt 参数。' };
   if (typeof ctx.spawnTask !== 'function') return { ok: false, error: '当前环境不支持子代理。' };
   try {
-    const out = await ctx.spawnTask(prompt, { description });
+    const out = await ctx.spawnTask(prompt, { description, readOnly: args.readOnly === true });
     return { ok: true, output: out };
   } catch (err) {
     return { ok: false, error: `子任务失败：${err?.message || err}` };

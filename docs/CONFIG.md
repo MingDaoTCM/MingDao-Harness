@@ -239,3 +239,19 @@ export async function createProvider(cfg) {
 ```
 
 `provider` 填模块名即生效。完整协议见 [PROVIDERS.md](PROVIDERS.md)。
+
+## 辅助调用结构化输出与并行子代理
+
+- 标题生成/记忆提取/路由分类器三类辅助调用走 `response_format: json_object`（maxTokens
+  120→50、300→200、80→20），解析失败自动回退纯文本路径——不支持的网关静默兼容。
+- `task` 子代理工具支持 `readOnly: true`：只读调研任务（read/ls/glob/grep/skill）自动并行
+  执行（auto 权限模式下），写类任务仍串行。
+- 调度器为**单守护进程**：`mingdao schedule daemon [status|stop]` 查看/停止；有任务时任意
+  schedule 命令自动拉起，无任务自动退出（每任务一个 sleeper 进程的旧方案仅作兜底）。
+
+## 月度费用报告
+
+`mingdao cost` 控制台速览；`mingdao cost report [YYYY-MM|all]` 导出 Markdown 报告
+（按模型分账、每日费用柱状图、缓存命中率、Batch 子项），文件落当前目录
+`mingdao-cost-report-<月>.md`。数据源为 cache-stats.jsonl（含缓存折扣与 Batch 半价的真实口径）。
+

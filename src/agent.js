@@ -26,17 +26,20 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // 会话级共享：调用方传入则复用（/model 切换、子代理均共享，undo 不丢失）
   const undo = undoStore || { backups: new Map() };
   const stepLimit = maxSteps || MAX_STEPS;
+  // 只读工具集合（子代理只读模式 + 并行批次共用）
+  const READONLY_TOOLS_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill']);
   // 精确 token 计数：DeepSeek 词表，其他模型回退启发式
   const count = makeTokenCounter(modelName);
   // MCP 工具集（每次取，服务器晚就绪也能在后续轮次出现）
   const mcpSchemas = () => (mcp ? mcp.toolSchemas() : []);
 
   // 子代理：全新上下文 + 同一 Provider/权限（提示带「子任务」标记），独立完成子任务后汇报
-  async function spawnTask(prompt, { description = '' } = {}) {
+  async function spawnTask(prompt, { description = '', readOnly = false } = {}) {
     const subIo = createIO({ quiet: true });
-    const subPermission = {
-      check: (name, args) => permission.check(name, args, '（子任务）'),
-    };
+    // 只读子代理（评估 A4：可并行）：只读工具自动放行、写类直接拒绝，无交互询问
+    const subPermission = readOnly
+      ? { mode: 'readonly-noask', check: (name) => READONLY_TOOLS_SET.has(name) }
+      : { check: (name, args) => permission.check(name, args, '（子任务）') };
     // 自动路由：子代理固定走 executor 模型（便宜的执行单元）
     const subModel = subagentModel(cfg, modelName);
     const subAgent = createAgent({
@@ -54,6 +57,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const sys =
       `你是主智能体 MingDao 派出的子代理，独立完成一项子任务。` +
       `你与主线程共享同一台电脑与项目（工作目录：${workingDir}）。` +
+      (readOnly ? `本次为只读调研任务：只能使用 read/ls/glob/grep/skill 工具，不得写入或执行命令。` : '') +
       `完成后用简洁中文汇报结果、关键结论与涉及的文件路径；不要向用户提问。`;
     const messages = [
       { role: 'system', content: sys },
@@ -213,6 +217,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         const canBatch = permission.mode === 'auto';
 
         // 预检：解析参数 → PreToolUse 钩子 → 权限检查；拒绝/失败只回填不执行（返回 null）
+        // task 工具标记 readOnly 时也可并行（评估 A4：只读子代理 Promise.all）
         async function prepTool(tc) {
           const name = tc.function?.name || '';
           // 审计（P3-5）：参数与拒绝原因都记录（配置 audit:false 可关）
@@ -324,7 +329,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             const tc = res.toolCalls[i];
             const prep = await prepTool(tc);
             const name = tc.function?.name || '';
-            const batchable = canBatch && Boolean(prep) && !prep.isMcp && READONLY_BATCH.has(name);
+            let batchable = canBatch && Boolean(prep) && !prep.isMcp && READONLY_BATCH.has(name);
+            if (!batchable && canBatch && Boolean(prep) && name === 'task' && prep.args?.readOnly === true) batchable = true;
             batch.push({ prep, batchable });
             i += 1;
             if (!batchable) break;

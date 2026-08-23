@@ -1,7 +1,7 @@
 // OpenAI 兼容协议的 HTTP + SSE 流式客户端。
 // DeepSeek、OpenAI、Qwen、GLM、Moonshot 以及绝大多数模型网关都走这一层。
 
-export async function chat({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta, includeUsage = true }) {
+export async function chat({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta, includeUsage = true, responseFormat }) {
   const url = String(baseUrl).replace(/\/+$/, '') + '/chat/completions';
   const payload = { model, messages };
   if (temperature != null) payload.temperature = temperature;
@@ -10,6 +10,7 @@ export async function chat({ baseUrl, apiKey, model, messages, tools, temperatur
     payload.tool_choice = 'auto';
   }
   if (maxTokens) payload.max_tokens = maxTokens;
+  if (responseFormat) payload.response_format = responseFormat;
   payload.stream = true;
   // 流式响应默认不带 usage，显式请求以便展示 token/费用统计
   // （部分网关不支持该字段，可在 config.json 设 "includeUsage": false 关闭）
