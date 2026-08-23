@@ -159,31 +159,60 @@ function tokenOf(req) {
   const m = h.match(/^Bearer\s+(.+)$/i);
   return m ? m[1].trim() : '';
 }
+// 审计 P2-8：tokenHash → 设备的内存缓存（避免每请求全表扫描 + 频繁读盘）
+const deviceTokenCache = new Map();
+function invalidateDeviceCache() {
+  deviceTokenCache.clear();
+}
 function findDeviceByToken(token) {
   if (!token) return null;
   const tokenHash = sha(token);
+  const hit = deviceTokenCache.get(tokenHash);
+  if (hit) return hit;
   const devices = readJson(devicesFile(), {});
   for (const [username, devs] of Object.entries(devices)) {
     for (const [deviceId, d] of Object.entries(devs)) {
-      if (safeEqualHex(d.tokenHash, tokenHash)) return { username, deviceId, device: d };
+      if (safeEqualHex(d.tokenHash, tokenHash)) {
+        const out = { username, deviceId, device: d };
+        deviceTokenCache.set(tokenHash, out);
+        if (deviceTokenCache.size > 5000) deviceTokenCache.clear();
+        return out;
+      }
     }
   }
   return null;
 }
 
 // ---------- 业务 ----------
-function doRegister(body) {
+let registerLock = null;
+async function doRegister(body) {
   const username = String(body.username || '').trim();
   const password = String(body.password || '');
   if (!isValidUsername(username)) return { error: '用户名需 2–32 位字母/数字/._-' };
   if (password.length < 8) return { error: '密码至少 8 位' };
-  const users = readJson(usersFile(), {});
-  if (users[username]) return { conflict: '用户名已存在' };
-  const salt = crypto.randomBytes(12).toString('hex');
-  users[username] = { salt, hash: hashPassword(password, salt), createdAt: Date.now() };
-  writeJson(usersFile(), users);
-  log('register', username);
-  return { ok: true, username };
+  // 审计 P2-10：注册用进程内互斥，避免并发同名注册双双成功（后写覆盖）
+  if (!registerLock) {
+    registerLock = new Promise((resolve) => {
+      queueMicrotask(resolve);
+    });
+  }
+  const prev = registerLock;
+  let release;
+  registerLock = new Promise((resolve) => {
+    release = resolve;
+  });
+  await prev;
+  try {
+    const users = readJson(usersFile(), {});
+    if (users[username]) return { conflict: '用户名已存在' };
+    const salt = crypto.randomBytes(12).toString('hex');
+    users[username] = { salt, hash: hashPassword(password, salt), createdAt: Date.now() };
+    writeJson(usersFile(), users);
+    log('register', username);
+    return { ok: true, username };
+  } finally {
+    release();
+  }
 }
 
 function doPair(body) {
@@ -200,6 +229,7 @@ function doPair(body) {
   devices[username] = devices[username] || {};
   devices[username][deviceId] = { name: deviceName, tokenHash: sha(token), createdAt: Date.now(), lastSeen: Date.now() };
   writeJson(devicesFile(), devices);
+  invalidateDeviceCache();
   log('pair', username, deviceName, deviceId);
   return { ok: true, username, deviceId, deviceName, token };
 }
@@ -282,6 +312,7 @@ function doChangePassword(username, body) {
   const devices = readJson(devicesFile(), {});
   delete devices[username];
   writeJson(devicesFile(), devices);
+  invalidateDeviceCache();
   log('password-changed', username, '（全部设备已吊销）');
   return { ok: true, note: '密码已修改，所有设备需重新登录' };
 }
@@ -291,7 +322,7 @@ function doShareCreate(username, name) {
   if (!isValidSessionName(name)) return { error: `会话名非法：${name}` };
   if (!fs.existsSync(path.join(sessionsDir(username), name))) return { notFound: '你还没有这个会话' };
   const shares = readJson(sharesFile(), {});
-  const shareId = crypto.randomBytes(8).toString('hex'); // 16 位分享码（80bit，抗在线爆破）
+  const shareId = crypto.randomBytes(8).toString('hex'); // 16 位分享码（64bit，抗在线爆破；审计 P2-11 修正注释）
   shares[shareId] = { owner: username, name, createdAt: Date.now(), pulls: 0 };
   writeJson(sharesFile(), shares);
   log('share-create', username, name, shareId);
@@ -398,7 +429,7 @@ async function handle(req, res) {
         const code = String(body.inviteCode || '').trim();
         if (!code || !INVITE_CODES.has(code)) return json(res, 403, { error: '需要有效邀请码才能注册' });
       }
-      const r = doRegister(body);
+      const r = await doRegister(body);
       if (r.error) return json(res, 400, r);
       if (r.conflict) return json(res, 409, r);
       return json(res, 200, r);

@@ -41,7 +41,13 @@ export function tokenize(text) {
     if (t) terms.set(t, (terms.get(t) || 0) + 1);
   };
   const s = String(text ?? '');
-  for (const m of s.matchAll(/[A-Za-z0-9_./-]{2,}/g)) add(m[0].toLowerCase());
+  for (const m of s.matchAll(/[A-Za-z0-9_./-]{2,}/g)) {
+    add(m[0].toLowerCase());
+    // 审计 B6：'.'/'/' 分隔的子段也成词（"abc.def" 同时可被 "def" 命中）
+    for (const sub of m[0].split(/[./]/)) {
+      if (sub.length >= 2) add(sub.toLowerCase());
+    }
+  }
   const cjk = s.replace(/[^\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af]/g, ' ');
   for (const run of cjk.split(/\s+/)) {
     if (!run) continue;

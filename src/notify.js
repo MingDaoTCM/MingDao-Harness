@@ -9,18 +9,22 @@ import { spawn } from 'node:child_process';
 export function notify(title, message) {
   try {
     const text = String(message).replace(/\s+/g, ' ').slice(0, 120);
+    // 审计 P2-12：title 同样转义（mac 反斜杠/引号、win 单引号），防注入破坏命令
+    const t = String(title).replace(/\s+/g, ' ').slice(0, 40);
     if (process.platform === 'linux') {
-      const child = spawn('notify-send', [String(title), text], { detached: true, stdio: 'ignore' });
+      const child = spawn('notify-send', [t, text], { detached: true, stdio: 'ignore' });
       child.on('error', () => {});
       child.unref();
     } else if (process.platform === 'darwin') {
       const safe = text.replace(/[\\"]/g, '\\$&');
-      const child = spawn('osascript', ['-e', `display notification "${safe}" with title "${String(title)}"`], { detached: true, stdio: 'ignore' });
+      const safeT = t.replace(/[\\"]/g, '\\$&');
+      const child = spawn('osascript', ['-e', `display notification "${safe}" with title "${safeT}"`], { detached: true, stdio: 'ignore' });
       child.on('error', () => {});
       child.unref();
     } else if (process.platform === 'win32') {
       const safe = text.replace(/'/g, "''");
-      const child = spawn('powershell', ['-NoProfile', '-Command', `(New-Object -ComObject Wscript.Shell).Popup('${safe}', 10, '${String(title)}', 64)`], { detached: true, stdio: 'ignore' });
+      const safeT = t.replace(/'/g, "''");
+      const child = spawn('powershell', ['-NoProfile', '-Command', `(New-Object -ComObject Wscript.Shell).Popup('${safe}', 10, '${safeT}', 64)`], { detached: true, stdio: 'ignore' });
       child.on('error', () => {});
       child.unref();
     }

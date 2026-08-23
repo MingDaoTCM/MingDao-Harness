@@ -1,6 +1,6 @@
 {
   "name": "mingdao-harness",
-  "version": "0.1.53",
+  "version": "0.1.54",
   "description": "明道 MingDao —— 开源智能体框架（Agent Harness）。零依赖、开箱即用，针对 DeepSeek-V4 系列优化，开放主流模型接入。",
   "type": "module",
   "bin": {
@@ -30,7 +30,7 @@
   "bugs": {
     "url": "https://github.com/MingDaoTCM/MingDao-Harness/issues"
   },
-  "homepage": "https://github.com/MingDaoTCM/MingDao-Harness#readme",
+  "homepage": "https://harness.mingdao.ai",
   "engines": {
     "node": ">=18.17"
   },
@@ -48,6 +48,14 @@
   "license": "MIT",
   "scripts": {
     "start": "node src/cli.js",
-    "test": "node test/smoke.js"
+    "test": "node test/smoke.js",
+    "typecheck": "tsc -p tsconfig.json",
+    "prepublishOnly": "node test/smoke.js && node test/e2e-local.js && node test/e2e-schedule.js",
+    "desktop": "npm --prefix desktop start",
+    "desktop:dist": "npm --prefix desktop run dist:dir"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^7.0.2"
   }
 }

@@ -51,7 +51,12 @@ export function createHooks(hooksCfg = {}, workingDir) {
         resolve(result);
       };
       const timer = setTimeout(() => {
-        child.kill('SIGKILL');
+        // 审计质量项：超时杀整组（shell:true 的孙进程不成孤儿）
+        try {
+          process.kill(-child.pid, 'SIGKILL');
+        } catch {
+          child.kill('SIGKILL');
+        }
         finish({ ok: false, error: 'hook 执行超时（10s）' });
       }, 10000);
       child.stdout.on('data', (d) => (out = cap(out, d)));

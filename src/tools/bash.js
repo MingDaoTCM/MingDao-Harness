@@ -115,12 +115,22 @@ export function runBash(args, ctx) {
       timedOut = true;
       killGroup('SIGKILL');
     }, timeoutSec * 1000);
-    // 兜底：某些平台 close 可能因孙进程持有管道而延迟，exit 后强制收尾
+    // 兜底：close 可能因孙进程持有管道而延迟——先杀整组再收尾；
+    // 只有真正超时（timer 已触发）才标 timedOut，正常完成绝不误标（审计 P1-2）
     const forceTimer = setTimeout(() => {
       if (done) return;
       done = true;
       clearTimeout(timer);
-      resolve({ ok: true, exitCode: 124, timedOut: true, sandbox, note: '进程已强杀（超时或管道未释放）', stdout: tail(out, MAX_OUTPUT), stderr: tail(err, MAX_OUTPUT) });
+      killGroup('SIGKILL');
+      resolve({
+        ok: true,
+        exitCode: timedOut ? 124 : 0,
+        timedOut,
+        sandbox,
+        note: timedOut ? '命令超时，已强杀进程组' : '输出管道未释放，已清理子进程组',
+        stdout: tail(out, MAX_OUTPUT),
+        stderr: tail(err, MAX_OUTPUT),
+      });
     }, timeoutSec * 1000 + 3000);
 
     child.stdout.on('data', (d) => {

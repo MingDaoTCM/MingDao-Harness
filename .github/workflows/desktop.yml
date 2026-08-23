@@ -1,0 +1,40 @@
+# MingDao 桌面版打包：打 tag 或手动触发时构建三平台安装包并发布为 Release 资产
+name: Desktop
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            args: --linux AppImage deb
+          - os: windows-latest
+            args: --win nsis
+          - os: macos-latest
+            args: --mac dmg
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: 安装 Electron 依赖（npmmirror 镜像）
+        working-directory: desktop
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+        run: npm install --no-audit --no-fund
+      - name: 打包
+        working-directory: desktop
+        run: npx electron-builder ${{ matrix.args }} --publish never
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: mingdao-desktop-${{ matrix.os }}
+          path: desktop/dist/*.*
+          if-no-files-found: warn

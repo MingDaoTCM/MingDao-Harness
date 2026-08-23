@@ -8,3 +8,10 @@ node_modules/
 .env
 .env.*
 credentials.json
+
+# 桌面版构建产物
+node_modules/
+desktop/dist/
+desktop/node_modules/
+package-lock.json
+desktop/package-lock.json

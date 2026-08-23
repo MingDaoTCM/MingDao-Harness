@@ -262,7 +262,8 @@ export async function syncPush(name) {
     }
     if (remote?.ok) {
       const lastMtime = state[s.name]?.remoteMtime;
-      if (remote.content !== content && remote.mtime !== lastMtime) {
+      // 审计 B7：仅当本地曾记录过远端版本且内容不同才判冲突；首次推送不产生虚假 .server- 备份
+      if (lastMtime !== undefined && remote.content !== content && remote.mtime !== lastMtime) {
         const backup = path.join(home, 'sessions', conflictCopyName(s.name, 'server'));
         fs.writeFileSync(backup, remote.content, { mode: 0o600 });
         conflicts.push(s.name);

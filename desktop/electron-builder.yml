@@ -1,0 +1,48 @@
+# 明道 MingDao 桌面版打包配置
+# 产物：Windows NSIS 安装包 / macOS dmg / Linux AppImage+deb
+# 本地验证：cd desktop && npm run dist:dir（生成未打包可运行目录）
+appId: com.mingdao.harness
+productName: MingDao
+copyright: © 2026 MingDaoTCM
+
+directories:
+  output: dist
+  buildResources: build
+
+# 应用内只带主进程壳；src/assets/skills 经 extraResources 随包分发（零 npm 运行时依赖不变）
+files:
+  - main.js
+  - package.json
+extraResources:
+  - from: ../src
+    to: src
+  - from: ../assets
+    to: assets
+  - from: ../skills
+    to: skills
+
+asar: true
+npmRebuild: false
+
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
+
+win:
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  shortcutName: 明道 MingDao
+
+mac:
+  target:
+    - dmg
+  category: public.app-category.developer-tools
+
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Development
+  maintainer: MingDaoTCM

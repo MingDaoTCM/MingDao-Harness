@@ -39,6 +39,12 @@ API Key 从 [DeepSeek 开放平台](https://platform.deepseek.com) 获取。密�
 
 ## 安装指南
 
+### 任意平台（npm 发布后）
+
+```bash
+npm install -g mingdao-harness   # 之后 mingdao / mdh 即可用（升级：npm update -g）
+```
+
 ### Linux / macOS
 
 一行安装（自动装 Node 并安装 `mingdao` 命令）。**三平台内容完全一致——你在哪个平台浏览，就用哪一行**（Gitee / GitCode 国内速度快，GitHub 面向海外）：
@@ -75,6 +81,16 @@ cd MingDao-Harness && bash install.sh
 3. 运行 `mingdao init` → `mingdao`。
 
 说明：`bash` 工具自动使用 `cmd.exe`；配置目录 `C:\Users\<用户名>\.mingdao\`；推荐 Windows Terminal / PowerShell 7 获得最佳彩色显示。
+
+### 桌面版（Electron）
+
+```bash
+npm run desktop          # 源码直跑（自动启动内置 WebUI 并打开窗口）
+npm run desktop:dist     # 打包为未压缩可运行目录（desktop/dist/linux-unpacked/）
+```
+
+三平台安装包（Windows NSIS / macOS dmg / Linux AppImage+deb）由 GitHub Actions `desktop.yml`
+在打 tag 时自动构建；本地用 `cd desktop && npm run dist:win|dist:mac|dist:linux` 手动构建。
 
 ### 从源码运行（开发）
 

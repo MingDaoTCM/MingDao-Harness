@@ -81,7 +81,11 @@ export async function createProvider(cfg, modelName, { timeoutMs = 300000, retri
       let attempt = 0;
       for (;;) {
         const ac = new AbortController();
-        const timer = setTimeout(() => ac.abort(new Error('请求超时')), timeoutMs);
+        let timedOut = false; // 审计 P2-6：用标志而非 name/字符串匹配识别内部超时
+        const timer = setTimeout(() => {
+          timedOut = true;
+          ac.abort(new Error('请求超时'));
+        }, timeoutMs);
         // 转发外部信号（用户 Ctrl+C 中断），避免被内部超时信号覆盖
         const onUserAbort = () => ac.abort(opts.signal?.reason);
         if (opts.signal?.aborted) onUserAbort();
@@ -95,10 +99,8 @@ export async function createProvider(cfg, modelName, { timeoutMs = 300000, retri
             includeUsage: cfg?.includeUsage !== false,
           });
         } catch (err) {
-          // 内部超时经 abort 抛出（reason 不会成为 fetch 错误 message），需单独识别；
-          // 用户 Ctrl+C 的中断不算超时、不重试
-          const timedOut = err?.name === 'AbortError' && !opts.signal?.aborted;
-          const transient = timedOut || isTransient(err);
+          // 内部超时经 abort 抛出，用标志识别（审计 P2-6）；用户 Ctrl+C 的中断不算超时、不重试
+          const transient = (timedOut && !opts.signal?.aborted) || isTransient(err);
           if (!transient || attempt >= retries) throw err;
           attempt += 1;
           // 指数退避 + 尊重 Retry-After（评估 P3-1）：基础 1s/2s，服务端指定时取其值（封顶 30s）

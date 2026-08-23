@@ -21,12 +21,14 @@ export function loadWorkspaces() {
 }
 
 export function saveWorkspaces(ws) {
-  ensureHome();
-  // 原子写：临时文件 + rename，避免崩溃后注册表被冲空
-  const target = workspacesFile();
-  const tmp = target + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(ws, null, 2) + '\n');
-  fs.renameSync(tmp, target);
+  try {
+    ensureHome();
+    // 原子写：临时文件 + rename，避免崩溃后注册表被冲空
+    const target = workspacesFile();
+    const tmp = target + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(ws, null, 2) + '\n');
+    fs.renameSync(tmp, target);
+  } catch {}
 }
 
 export function addWorkspace(name, dir) {
@@ -38,7 +40,7 @@ export function addWorkspace(name, dir) {
   const ws = loadWorkspaces();
   ws[key] = { dir: target, createdAt: ws[key]?.createdAt || Date.now(), lastUsed: Date.now() };
   saveWorkspaces(ws);
-  return { name: key, dir: target };
+  return { ok: true, name: key, dir: target };
 }
 
 export function removeWorkspace(name) {
@@ -60,7 +62,7 @@ export function renameWorkspace(name, newName) {
   ws[key] = { ...ws[name] };
   delete ws[name];
   saveWorkspaces(ws);
-  return { name: key };
+  return { ok: true, name: key };
 }
 
 // 修改目录：登记同名即可覆盖目录

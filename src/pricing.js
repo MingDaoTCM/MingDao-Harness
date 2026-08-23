@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { modelPreset } from './models.js';
-import { loadConfig, mingdaoHome } from './config.js';
+import { mingdaoHome } from './config.js';
 
 // 内置价格表的数据时点（定价可能调整，配置覆盖可随时更新）
 export const PRICE_DATA_AS_OF = '2026-08';
@@ -47,8 +47,15 @@ export function isPeakHour(date = new Date()) {
 
 // —— 北京时间墙钟工具（避峰调度/费用护栏按天统计用，零依赖 Intl） ——
 export function beijingParts(date = new Date()) {
+  let tz = 'Asia/Shanghai';
+  try {
+    tz = peakTimezone();
+    new Intl.DateTimeFormat('en-US', { timeZone: tz }).format(); // 非法时区在此抛错
+  } catch {
+    tz = 'Asia/Shanghai'; // 审计 B1：坏时区配置回退北京时间，绝不让计费/护栏崩溃
+  }
   const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: peakTimezone(),
+    timeZone: tz,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -98,10 +105,22 @@ export function cacheSplit(usage) {
 }
 
 // 合并内置价与用户覆盖：offpeak 字段覆盖 offpeak，over.peak 覆盖 peak（缺省沿用 offpeak）
+let overridesCache = { mtime: 0, overrides: {} };
+function pricingOverrides() {
+  try {
+    const file = path.join(mingdaoHome(), 'config.json');
+    const st = fs.statSync(file);
+    if (st.mtimeMs !== overridesCache.mtime) {
+      const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
+      overridesCache = { mtime: st.mtimeMs, overrides: cfg?.pricing?.overrides || {} };
+    }
+  } catch {}
+  return overridesCache.overrides;
+}
 function effectivePricing(modelName) {
   const preset = modelPreset(modelName);
   if (!preset?.pricing) return null;
-  const over = loadConfig()?.pricing?.overrides?.[modelName] || {};
+  const over = pricingOverrides()[modelName] || {}; // 审计 Q3：mtime 缓存替代每轮读盘
   const merge = (base, o = {}) => ({
     input: Number(o.input ?? base?.input ?? 0),
     output: Number(o.output ?? base?.output ?? 0),

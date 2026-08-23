@@ -606,7 +606,7 @@ const ctx = { cwd: tmp };
   // 启发式 CJK 校准（P0-2）：流畅中文 ≈0.75 token/字（旧版 1 字=1 token 高估约 2 倍）
   assert.equal(heuristicTokens('你好世界'), 3, 'CJK 启发式应按 0.75/字校准');
   assert.equal(heuristicTokens('ab'), 1, 'ASCII 启发式不变');
-  assert.equal(heuristicTokens('🎉'), 1, 'emoji 保持 1（不低估）');
+  assert.equal(heuristicTokens('🎉'), 2, '增补平面 emoji 按 2 保守计（审计 B5，不再低估）');
   // 计数缓存（P2-7）：同一文本重复计数结果一致（且第二次走缓存路径）
   const cachedText = '人工智能与 tokenizer 精确计量，缓存命中后速度提升。';
   const c1 = countTokens(cachedText, 'deepseek-v4-flash');
@@ -1889,6 +1889,33 @@ const ctx = { cwd: tmp };
   process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(homeP, { recursive: true, force: true });
   ok('状态栏指标：perf 记录 / 汇总（时长/首 token/tok-s/步数）/ 旧数据兼容');
+}
+
+
+// ---------- 46. 质检回归：坏时区兜底 / 索引子词 / 首推不误判冲突 ----------
+{
+  const homeQ = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-qa-'));
+  process.env.MINGDAO_HOME = homeQ;
+  // 1) 坏时区配置：计费/护栏/月度报告全部回退北京时间，不崩溃（审计 B1）
+  fs.writeFileSync(path.join(homeQ, 'config.json'), JSON.stringify({ pricing: { timezone: 'Mars/Olympus' } }));
+  const { isPeakHour, beijingParts, beijingDayStart } = await import(pathToFileURL(path.join(srcDir, 'pricing.js')).href);
+  assert.doesNotThrow(() => beijingParts(new Date()), '坏时区 beijingParts 应回退不抛错');
+  assert.doesNotThrow(() => beijingDayStart(new Date()), '坏时区 beijingDayStart 应回退不抛错');
+  assert.doesNotThrow(() => isPeakHour(new Date()), '坏时区 isPeakHour 应回退不抛错');
+  const { costGuardStatus } = await import(pathToFileURL(path.join(srcDir, 'cost-guard.js')).href);
+  assert.doesNotThrow(() => costGuardStatus(), '坏时区 costGuardStatus 不抛错');
+  // 2) 索引子词：abc.def 可被 def 命中（审计 B6）
+  const { tokenize } = await import(pathToFileURL(path.join(srcDir, 'session-index.js')).href);
+  const tk = tokenize('abc.def xyz');
+  assert.ok(tk.has('def'), '点分隔的子段应成词（def 可命中 abc.def）');
+  assert.ok(tk.has('abc.def'), '完整词保留');
+  // 3) 首推不误判冲突：远端内容不同但本地无记录 → 无 .server- 备份（审计 B7）
+  process.env.MINGDAO_HOME = homeQ;
+  const { listSyncConflicts } = await import(pathToFileURL(path.join(srcDir, 'sync.js')).href);
+  assert.equal(listSyncConflicts().length, 0, '无状态记录时不应产生虚假冲突');
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeQ, { recursive: true, force: true });
+  ok('质检回归：坏时区兜底 / 索引子词 / 首推冲突语义');
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

@@ -32,7 +32,7 @@ export async function summarizeConversation(provider, model, convoText) {
     ],
     tools: [],
     temperature: 0.2,
-    maxTokens: 1024,
+    maxTokens: 2048, // 审计 Q2：与 SUMMARY_MAX_CHARS(1600 字) 匹配，避免模型侧先截断
   });
   const text = String(res?.text || '').trim();
   if (!text) return { text: null, usage: res?.usage || null };

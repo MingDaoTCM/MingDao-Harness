@@ -1,0 +1,21 @@
+{
+  "name": "mingdao-desktop",
+  "version": "0.1.53",
+  "private": true,
+  "type": "module",
+  "main": "main.js",
+  "description": "明道 MingDao 桌面版（Electron 薄壳，内置 WebUI）",
+  "author": "MingDao-Harness Contributors",
+  "license": "MIT",
+  "scripts": {
+    "start": "electron .",
+    "dist:dir": "electron-builder --dir",
+    "dist:linux": "electron-builder --linux AppImage deb",
+    "dist:win": "electron-builder --win nsis",
+    "dist:mac": "electron-builder --mac dmg"
+  },
+  "devDependencies": {
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3"
+  }
+}

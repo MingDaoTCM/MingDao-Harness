@@ -135,8 +135,10 @@ export function heuristicTokens(text) {
     const code = ch.codePointAt(0);
     if (code < 128) ascii += 1;
     else if (isCjk(code)) cjk += 1;
-    else other += 1;
+    else other += code > 0xffff ? 2 : 1; // 审计 B5：增补平面 emoji 按 2 token 保守计
   }
+  // 审计 B5：非 CJK 非 ASCII（emoji 等）按码点计但每个 2 个 UTF-16 单元的 emoji 计 2，
+  // 避免对预算的过度乐观（ZWJ 序列仍可能低估，但方向已保守）
   return Math.ceil(ascii / 4 + cjk * 0.75 + other);
 }
 

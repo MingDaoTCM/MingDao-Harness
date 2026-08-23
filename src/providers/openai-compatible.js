@@ -1,6 +1,11 @@
 // OpenAI 兼容协议的 HTTP + SSE 流式客户端。
 // DeepSeek、OpenAI、Qwen、GLM、Moonshot 以及绝大多数模型网关都走这一层。
 
+/**
+ * API 错误：Error 附带 HTTP 状态码与响应头（重试退避读 Retry-After 用）。
+ * @typedef {Error & { status?: number, headers?: Headers }} ApiError
+ */
+
 export async function chat({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta, includeUsage = true, responseFormat }) {
   const url = String(baseUrl).replace(/\/+$/, '') + '/chat/completions';
   const payload = { model, messages };
@@ -25,6 +30,7 @@ export async function chat({ baseUrl, apiKey, model, messages, tools, temperatur
       signal,
     });
   } catch (err) {
+    /** @type {ApiError} */
     const e = new Error(`网络请求失败：${err?.message || err}`);
     e.status = 0;
     throw e;
@@ -37,6 +43,7 @@ export async function chat({ baseUrl, apiKey, model, messages, tools, temperatur
       const j = JSON.parse(raw);
       if (j?.error?.message) detail = j.error.message;
     } catch {}
+    /** @type {ApiError} */
     const e = new Error(`[${model}] API 错误 ${res.status}: ${detail}`);
     e.status = res.status;
     e.headers = res.headers; // 重试退避读取 Retry-After 用
@@ -80,13 +87,15 @@ export async function parseStream(body, onDelta) {
   let usage = null;
   let finish = null;
 
+  let doneFlag = false;
   const handleLine = (lineRaw) => {
     const line = lineRaw.trim();
     if (!line.startsWith('data:')) return;
     const data = line.slice(5).trim();
     if (data === '[DONE]') {
       finish = finish || 'stop';
-      return;
+      doneFlag = true;
+      return true; // 通知外层终止读取（审计 P2-4：[DONE] 后不再消费残帧、不挂到超时）
     }
     let json;
     try {
@@ -99,11 +108,11 @@ export async function parseStream(body, onDelta) {
     const choice = json?.choices?.[0];
     if (!choice) return;
     const d = choice.delta ?? {};
-    if (d.content) {
+    if (d.content && !doneFlag) {
       content += d.content;
       onDelta?.({ text: d.content });
     }
-    if (d.reasoning_content) {
+    if (d.reasoning_content && !doneFlag) {
       reasoning += d.reasoning_content;
       onDelta?.({ reasoning: d.reasoning_content });
     }
@@ -136,15 +145,21 @@ export async function parseStream(body, onDelta) {
     while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl);
       buf = buf.slice(nl + 1);
-      handleLine(line);
+      if (handleLine(line)) break;
     }
   }
   // 收尾：残行（网关最后一帧不带换行）与多字节字符冲刷
   content += decoder.decode();
-  if (buf.trim()) handleLine(buf);
+  if (buf.trim()) handleLine(buf); // [DONE] 后残留 usage 尾帧仍吸收（正文/推理已被 doneFlag 拦截）
 
   const toolCalls = [...calls.entries()]
-    .sort((a, b) => String(a[0]).localeCompare(String(b[0])))
+    .sort((a, b) => {
+      const na = Number(String(a[0]).replace(/^idx-/, ''));
+      const nb = Number(String(b[0]).replace(/^idx-/, ''));
+      // 无 id 的 idx-N 按数字排序（审计 P2-5：idx-10 应在 idx-2 之后而非之前）
+      if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
+      return String(a[0]).localeCompare(String(b[0]));
+    })
     .map(([, c]) => ({
       id: c.id || `call_${c.name || 'x'}`,
       type: 'function',

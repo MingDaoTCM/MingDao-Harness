@@ -508,6 +508,8 @@ async function main() {
       if (!jsonMode) io.print(style(`⤷ 自动路由 → ${route.model}（${route.reason}）`, C.dim));
       modelName = route.model;
     }
+    // 审计 P1-2：自动路由改换模型后必须重建对应 provider（此前用旧模型的 baseUrl/key 发请求）
+    if (route.model !== modelName) provider = await createProvider(cfg, modelName);
     // JSON 模式：关闭流式输出，结果以单行 JSON 输出（脚本/管道友好）
     const turnIo = jsonMode ? createIO({ quiet: true }) : io;
     const session = createSession(home);

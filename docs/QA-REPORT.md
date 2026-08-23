@@ -312,6 +312,22 @@ e2e-web **19 项**，全部通过（83 项）。
 回归验证（2026-08-23，Linux 实测）：smoke **48 组**、e2e-local **14 项**、e2e-schedule **5 项**、
 e2e-web **19 项**，全部通过（86 项）。
 
+## 十三、全面质检与发布准备（2026-08-23，v0.1.54）
+
+三路并行人工审计（内核 / 工具与 providers / Web 与 CLI）逐行通读全仓，共修复 **20 项**真实问题：
+
+**P1 级**：① 调度 resume 在守护进程存活时双跑任务（改由 daemon 独占接管）② bash forceTimer 不杀进程组且误标超时（补 SIGKILL + 仅真超时标 timedOut）③ MCP 启动失败泄漏 detached 子进程树（catch 中 stop()）④ WebUI 僵尸任务耗尽并发（provider 失败时任务清理）⑤ 单次提问自动路由后用旧 provider 发请求（重建 provider）⑥ renderMarkdown codeLang 信息串 XSS（esc 转义）⑦ 坏时区配置使费用护栏/月度报告崩溃（beijingParts 回退北京时间）。
+
+**P2 级（择要）**：SSE `[DONE]` 后吞残帧/挂超时（break + usage 尾帧仍吸收）、tool_calls `idx-10`/`idx-2` 字典序错排（数字排序）、工具卡片 seq 并行错配（name+args 配对）、内部超时识别死代码（标志化）、sync-server 每请求全表扫 token（内存缓存 + 失效钩子）、注册并发覆盖（进程内互斥）、首次推送误判冲突备份（状态缺失特判）、daemon PID 复用误判（nonce 校验）、runOnce 超时孤儿 worker（killTask）、update 把 spawn 失败当测试失败（区分 error）、Batch `/v1` 前缀不一致（按服务商约定）、web 端口解析与校验不一致、notify title 注入、hooks 超时孙进程泄漏、fs-tools off-by-one 与 offset 越界空输出、sessionPreview null 行中断、tokenizer emoji 低估、索引点号子词漏检、memory 日期口径/条目回退、cachestats 无 ensureHome/非 DeepSeek 计 0 元、compact maxTokens 与摘要上限矛盾、workspace 返回约定与写盘异常。
+
+**TS 决策**：不整体转 TypeScript（零构建步骤是项目身份、1.3 万行快速迭代中、发布前大改风险高）；改为 **JSDoc + `tsc --checkJs` 类型护栏**——`npm run typecheck` 覆盖 pricing/tokenizer/context/titles/routing/cost-guard 核心模块，CI 常驻，首跑即抓出 Error 自定义属性问题并修复。
+
+**发布准备**：package.json 元数据补齐（homepage 指向官网、prepublishOnly 测试门禁）、`npm pack --dry-run` 通过（78 文件 / 970KB）；npm 未登录（ENEEDAUTH），发布需用户侧 `npm login` 后执行 `npm publish`。
+
+**Electron 桌面版**：`desktop/` 薄壳（主进程内嵌 WebUI、随机端口+一次性令牌、单实例锁、外链走系统浏览器、无 nodeIntegration）；electron-builder 配置三平台安装包（npmmirror 镜像）；本地 `dist:dir` 打包验证通过（mingdao-desktop + app.asar + src/assets/skills 资源齐全）；`desktop.yml` 在打 tag 时自动构建三平台安装包。
+
+回归验证（2026-08-23，Linux 实测）：smoke **50 组**、e2e-local **14 项**、e2e-schedule **5 项**、e2e-web **19 项**、`tsc --checkJs` 全部通过（88 项 + 类型护栏）。
+
 ---
 
 *报告生成：Hermes Agent · 基于全量源码走读、17 项针对性验证、smoke + e2e 回归测试（含三轮复评）*

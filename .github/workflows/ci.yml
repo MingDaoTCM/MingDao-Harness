@@ -37,3 +37,5 @@ jobs:
         run: node test/e2e-web.js
       - name: 端到端：调度
         run: node test/e2e-schedule.js
+      - name: 类型护栏（tsc --checkJs 核心模块）
+        run: npx tsc -p tsconfig.json

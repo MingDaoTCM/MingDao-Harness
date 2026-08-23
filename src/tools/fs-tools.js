@@ -87,6 +87,10 @@ export function read(args, ctx) {
     const lines = buf.toString('utf8').split('\n');
     const offset = Math.max(1, Number(args.offset) || 1);
     const limit = Math.max(1, Number(args.limit) || 400);
+    // 审计质量项：offset 超出文件行数时明确提示，而非返回空内容让模型误以为文件为空
+    if (offset > lines.length) {
+      return { ok: true, output: `（offset=${offset} 超出文件总行数 ${lines.length}，文件已读完）`, totalLines: lines.length };
+    }
     const end = Math.min(lines.length, offset - 1 + limit);
     const out = [];
     for (let i = offset - 1; i < end; i++) out.push(`${i + 1}\t${lines[i]}`);

@@ -69,6 +69,7 @@ export function sessionPreview(file) {
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
       const m = JSON.parse(line);
+      if (!m || typeof m !== 'object') continue; // 审计 B4：null/非对象行跳过而非中断预览
       if (m.role === 'user') {
         const s = String(m.content).split('\n')[0].trim().slice(0, 60);
         return s || '(空消息)';

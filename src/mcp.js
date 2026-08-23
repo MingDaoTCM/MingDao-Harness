@@ -67,6 +67,7 @@ export class McpClient {
       await this._listTools();
     } catch (err) {
       this.error = String(err?.message || err);
+      this.stop(); // 审计 P1-3：握手/列工具失败时清理 detached 子进程树，防孤儿
       throw err;
     }
     return this;

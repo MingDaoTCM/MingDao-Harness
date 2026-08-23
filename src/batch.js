@@ -21,7 +21,9 @@ function batchBase(cfg, model) {
   const explicit = String(cfg?.batchBaseUrl || '').trim().replace(/\/+$/, '');
   if (explicit) return explicit;
   const pc = resolveProviderConfig(cfg, model);
-  return String(pc.baseUrl || '').replace(/\/+$/, '').replace(/\/v1\/?$/, '');
+  // 审计 P2-10：DeepSeek 的批处理端点在根路径（/files /batches），其余 OpenAI 兼容网关在 /v1 下
+  const base = String(pc.baseUrl || '').replace(/\/+$/, '');
+  return pc.name === 'deepseek' ? base.replace(/\/v1\/?$/, '') : base;
 }
 
 async function api(base, apiKey, methodPath, payload, httpMethod = 'POST') {

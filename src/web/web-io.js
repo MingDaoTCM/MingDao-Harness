@@ -10,6 +10,7 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
     _pending: null,
     _toolCount: 0,
     _deliverables: [],
+    _activeTools: [], // {seq, key}：并行批次下 toolStart↔tool 按 name+args 配对（审计 P2-7）
     // 交付物与步数统计：写/编辑成功的文件路径（去重）
     stats() {
       return { toolCount: io._toolCount, deliverables: [...new Set(io._deliverables)] };
@@ -54,11 +55,16 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
       if ((name === 'write' || name === 'edit') && args?.path && result && result.ok !== false) {
         io._deliverables.push(String(args.path));
       }
-      send({ type: 'tool', name, args, result, durationMs, seq: io._toolSeq });
+      // 审计 P2-7：按 name+args 找回 toolStart 的 seq（并行批次下各卡片配对正确）
+      const key = name + ':' + JSON.stringify(args || {});
+      const idx = io._activeTools.findIndex((a) => a.key === key);
+      const seq = idx !== -1 ? io._activeTools.splice(idx, 1)[0].seq : (io._toolSeq || 0) + 1;
+      send({ type: 'tool', name, args, result, durationMs, seq });
     },
     // 工具开始执行：前端先渲染带旋转状态的卡片，完成后原地更新（seq 配对）
     renderToolStart(name, args) {
       io._toolSeq = (io._toolSeq || 0) + 1;
+      io._activeTools.push({ seq: io._toolSeq, key: name + ':' + JSON.stringify(args || {}) });
       send({ type: 'toolStart', name, args, seq: io._toolSeq });
     },
     renderToolDenied(name, args, reason) {

@@ -165,6 +165,13 @@ export async function mingdaoUpdate({ repo } = {}) {
   const newVer = versionAt(root) || '未知';
   // 升级后冒烟验证：失败自动回滚到升级前提交，绝不让坏版本常驻
   const smoke = spawnSync(process.execPath, [path.join(root, 'test', 'smoke.js')], { cwd: root, encoding: 'utf8', timeout: 300000 });
+  // 审计 P2-9：spawn 失败（脚本缺失/进程崩溃）与测试非零区分——只有测试真实跑完且失败才回滚
+  if (smoke.error) {
+    return {
+      ok: false,
+      lines: [`✖ 升级已完成，但冒烟测试无法运行：${smoke.error?.message || smoke.error}`, `  已保持在 v${newVer}（未回滚，因为不是测试失败）。`],
+    };
+  }
   if (smoke.status !== 0) {
     git(['reset', '--hard', prev.out], root);
     const tail = String(smoke.stdout || smoke.stderr || '')

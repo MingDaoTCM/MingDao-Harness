@@ -182,7 +182,8 @@ export function resumeSchedule(home, id) {
   } else next = Date.now();
   const nextJob = { ...job, status: 'pending', nextRunAt: next };
   writeSchedule(home, nextJob);
-  spawnSleeper(home, nextJob);
+  // 审计修复：守护进程在时只更新状态交给 daemon 接管；否则旧式 sleeper 兜底（避免双跑）
+  if (process.env.MINGDAO_NO_DAEMON === '1' || !daemonAlive(home)) spawnSleeper(home, nextJob);
   return true;
 }
 
@@ -234,11 +235,19 @@ function spawnSleeper(home, job) {
 export function daemonPidFile(home) {
   return path.join(scheduleDir(home), 'daemon.pid');
 }
+// pid 文件内容 "pid nonce"：校验进程存在 + 命令行含同一 nonce，防止陈旧 PID 被无关进程复用而误判（审计 P2-7）
 export function daemonAlive(home) {
   try {
-    const pid = Number(fs.readFileSync(daemonPidFile(home), 'utf8'));
-    if (!pid) return false;
+    const [pidStr, nonce] = fs.readFileSync(daemonPidFile(home), 'utf8').trim().split(/\s+/);
+    const pid = Number(pidStr);
+    if (!pid || !nonce) return false;
     process.kill(pid, 0);
+    try {
+      const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+      if (!cmdline.includes(nonce)) return false;
+    } catch {
+      // 非 Linux 读不到 /proc：仅校验进程存活（尽力而为）
+    }
     return true;
   } catch {
     return false;
@@ -260,13 +269,14 @@ export function stopDaemon(home) {
 }
 export function spawnDaemon(home) {
   if (daemonAlive(home)) return true;
-  const child = spawn(process.execPath, [CLI_PATH, 'schedule-daemon'], {
+  const nonce = Math.random().toString(36).slice(2, 10);
+  const child = spawn(process.execPath, [CLI_PATH, 'schedule-daemon', nonce], {
     detached: true,
     stdio: 'ignore',
     env: { ...process.env, MINGDAO_HOME: home },
   });
   try {
-    fs.writeFileSync(daemonPidFile(home), String(child.pid));
+    fs.writeFileSync(daemonPidFile(home), `${child.pid} ${nonce}`);
   } catch {}
   child.unref();
   return true;
@@ -333,12 +343,16 @@ export async function runSleeper(home, id) {
       model: job.model || undefined,
       cwd: job.cwd || process.cwd(),
     });
-    // 轮询 worker 状态直至结束（最长 2 小时）
+    // 轮询 worker 状态直至结束（最长 2 小时）；超时清理 worker 防孤儿（审计 P2-8）
     let t = readTask(home, task.id);
     const deadline = Date.now() + 2 * 3600000;
     while (t && t.status === 'running' && Date.now() < deadline) {
       await wait(3000);
       t = readTask(home, task.id);
+    }
+    if (t && t.status === 'running') {
+      killTask(home, task.id);
+      t = { ...t, status: 'timedout' };
     }
     const cur0 = readSchedule(home, id);
     if (!cur0) return 'failed'; // 任务已被删除：停止后续写入
@@ -358,7 +372,7 @@ export async function runSleeper(home, id) {
       runs: (cur0?.runs || 0) + 1,
       history,
     });
-    return t?.status === 'done' ? 'done' : 'failed';
+    return t?.status === 'done' ? 'done' : t?.status === 'timedout' ? 'timedout' : 'failed';
   };
 
   for (;;) {

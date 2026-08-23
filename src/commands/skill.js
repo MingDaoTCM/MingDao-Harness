@@ -104,7 +104,7 @@ export async function handleSkill(cmd, args) {
 
 // WebUI：mingdao web [端口] [--auth-token <令牌>]（评估 P3-1：参数结构不合法的按提问处理）
 export async function handleWeb(cmd, args) {
-  let portSeen = false;
+  let portIndex = -1;
   let tokenSeen = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -119,14 +119,14 @@ export async function handleWeb(cmd, args) {
       tokenSeen = true;
       continue;
     }
-    if (/^\d+$/.test(a) && !portSeen) {
-      portSeen = true;
+    if (/^\d+$/.test(a) && portIndex === -1) {
+      portIndex = i; // 审计 P2-11：记录端口实际位置，而非默认读首参
       continue;
     }
     return false;
   }
   const cfg0 = loadConfig();
-  const portArg = args[0] !== undefined ? Number(args[0]) : NaN;
+  const portArg = portIndex !== -1 ? Number(args[portIndex]) : NaN;
   const port = Number.isFinite(portArg) && portArg > 0 ? portArg : cfg0?.web?.port || 3820;
   const host = cfg0?.web?.host || '127.0.0.1';
   // 访问令牌优先级：--auth-token 参数 > 环境变量 MINGDAO_WEB_TOKEN > config.json 的 web.token

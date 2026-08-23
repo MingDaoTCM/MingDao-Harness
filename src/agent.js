@@ -346,12 +346,32 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             i += 1;
             if (!batchable) break;
           }
-          const allBatchable = batch.length > 1 && batch.every((b) => b.batchable);
-          if (allBatchable) {
-            // 纯只读批次：并行执行（顺序收集结果，UI 事件顺序不变）
-            const t0 = Date.now();
-            const results = await Promise.all(batch.map((b) => runTool(b.prep)));
-            batch.forEach((b, idx) => finishTool(b.prep, results[idx], t0));
+          const firstNon = batch.findIndex((b) => !b.batchable);
+          const prefix = firstNon === -1 ? batch : batch.slice(0, firstNon); // 审计 B11：非并行项前的前导只读子批仍可并行
+          const allBatchable = prefix.length > 1 && prefix.every((b) => b.batchable);
+          if (allBatchable && prefix.length === batch.length) {
+            // 纯只读批次：并行执行（顺序收集结果，UI 事件顺序不变）；per-tool 计时（审计 B3）
+            const results = await Promise.all(
+              batch.map((b) => {
+                const t0 = Date.now();
+                return runTool(b.prep).then((r) => ({ r, t0 }));
+              })
+            );
+            batch.forEach((b, idx) => finishTool(b.prep, results[idx].r, results[idx].t0));
+          } else if (allBatchable && prefix.length > 1) {
+            // 前导只读子批并行 + 其余串行
+            const results = await Promise.all(
+              prefix.map((b) => {
+                const t0 = Date.now();
+                return runTool(b.prep).then((r) => ({ r, t0 }));
+              })
+            );
+            prefix.forEach((b, idx) => finishTool(b.prep, results[idx].r, results[idx].t0));
+            for (const b of batch.slice(prefix.length)) {
+              if (!b.prep) continue;
+              const t0 = Date.now();
+              finishTool(b.prep, await runTool(b.prep), t0);
+            }
           } else {
             for (const b of batch) {
               if (!b.prep) continue; // 拒绝/失败成员已在 prepTool 回填
@@ -395,9 +415,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           continue;
         }
         if (!res.text) {
-          // 静默空输出（无工具无正文）：同样回填续写提示，避免界面"没动静"
+          // 静默空输出（无工具无正文）：同样回填续写提示，避免界面"没动静"（审计 Q1：与截断续写统一护栏）
           emptyRounds += 1;
-          if (emptyRounds >= 2) {
+          if (emptyRounds >= maxEmptyRounds) {
             return {
               text: null,
               reasoning: res.reasoning || '',

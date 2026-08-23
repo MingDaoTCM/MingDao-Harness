@@ -3,8 +3,9 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { mingdaoHome } from './config.js';
+import { mingdaoHome, ensureHome } from './config.js';
 import { estimateCost, cacheSplit, beijingDayStart, beijingParts } from './pricing.js';
+import { modelPreset } from './models.js';
 
 export function cacheStatsFile() {
   return path.join(mingdaoHome(), 'cache-stats.jsonl');
@@ -17,6 +18,7 @@ let cacheStatsCount = 0;
 
 export function recordCacheStats(entry) {
   try {
+    ensureHome(); // 审计 B10：与 audit/journal 一致，目录缺失不静默丢统计
     const line = JSON.stringify({
       at: Date.now(),
       model: entry.model || '',
@@ -97,6 +99,9 @@ export function recordUsage(modelName, usage, perf = null) {
   if (split) {
     cost = estimateCost(modelName, prompt, completion, split);
     saved = estimateCost(modelName, prompt, completion, null) - cost;
+  } else if (modelPreset(modelName)?.pricing) {
+    // 审计 B10：无缓存字段时按全未命中估算（不再计 0 元，费用护栏口径更真实）
+    cost = estimateCost(modelName, prompt, completion, null);
   }
   recordCacheStats({
     model: modelName,

@@ -28,7 +28,14 @@ export function appendMemory(lines) {
   const add = lines.map((l) => l.trim()).filter(Boolean);
   if (!add.length) return 0;
   ensureHome();
-  const date = new Date().toISOString().slice(0, 10);
+  // 审计 B9：与费用统计同口径，用北京时间自然日做记忆日期戳
+  let date = new Date().toISOString().slice(0, 10);
+  try {
+    const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' })
+      .formatToParts(new Date());
+    const g = (t) => p.find((x) => x.type === t)?.value;
+    date = `${g('year')}-${g('month')}-${g('day')}`;
+  } catch {}
   fs.appendFileSync(memoryFile(), add.map((l) => (l.startsWith('-') ? `- [${date}] ${l.slice(1).trim()}` : `- [${date}] ${l}`)).join('\n') + '\n');
   return add.length;
 }
@@ -176,8 +183,8 @@ export async function extractMemory(provider, model, messages, existingMemory) {
       const items = Array.isArray(j?.items) ? j.items : [];
       const clean = items
         .map((l) => String(l).trim())
-        .filter((l) => l.startsWith('-') || /^[·•]/.test(l))
-        .map((l) => l.replace(/^[·•]\s*/, '- '))
+        .filter(Boolean)
+        .map((l) => (/^[·•]/.test(l) ? '- ' + l.replace(/^[·•]\s*/, '') : l.startsWith('-') ? l : '- ' + l)) // 审计 Q4：非前缀条目规整为 "- "，不再二次回退调用
         .slice(0, 10);
       if (clean.length || items.length === 0) return clean; // 空数组 = 无新增；有内容即返回
     } catch {}

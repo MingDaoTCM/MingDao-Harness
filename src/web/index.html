@@ -309,7 +309,8 @@ function highlight(code, lang){
 }
 function renderMarkdown(text){
   const lines = String(text).split('\n'); let out='', code=null, codeLang='';
-  const flush=()=>{ if(code!==null){ out+='<pre><code class="lang-'+codeLang+'">'+highlight(code.join('\n'),codeLang)+'</code></pre>'; code=null; } };
+  // 审计 P1-3：codeLang 经 esc() 转义防 XSS（信息串闭合 class 注入）
+  const flush=()=>{ if(code!==null){ out+='<pre><code class="lang-'+esc(codeLang)+'">'+highlight(code.join('\n'),codeLang)+'</code></pre>'; code=null; } };
   for(const line of lines){
     if(line.trim().startsWith('```')){
       if(code===null){ code=[]; codeLang=(line.trim().slice(3).trim().split(/\s+/)[0]||''); }

@@ -72,6 +72,15 @@ function readBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
     let size = 0;
+    // 审计 P2-6：慢速连接防护——60s 未传完请求体即断开，防占满 socket
+    const slowTimer = setTimeout(() => {
+      const err = new Error('请求体上传超时（60s）');
+      err.status = 408;
+      req.destroy();
+      reject(err);
+    }, 60000);
+    req.on('end', () => clearTimeout(slowTimer));
+    req.on('close', () => clearTimeout(slowTimer));
     req.on('data', (d) => {
       size += d.length;
       if (size > MAX_BODY) {
@@ -286,7 +295,17 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       },
     });
     const permission = createPermission(cfg.permission ?? 'ask', io);
-    const providerNow = await getProviderFor(runModel);
+    let providerNow;
+    try {
+      providerNow = await getProviderFor(runModel); // 审计 P1-1：失败时清理任务占位，避免僵尸 running 耗尽并发
+    } catch (err) {
+      entry.status = 'failed';
+      entry.durationMs = Date.now() - entry.startedAt;
+      send({ type: 'error', message: `模型 ${runModel} 不可用：${String(err?.message || err)}` });
+      res.end();
+      pruneTasks();
+      return;
+    }
     const agent = createAgent({
       provider: providerNow,
       permission,
@@ -678,8 +697,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         // 载入会话时聚焦其工作空间（P3-4）：全局默认切到该会话的目录，前端下拉同步显示
         const wsDir = getSessionWorkspace(path.basename(file));
         const ws = workspaceForDir(wsDir);
-        if (wsDir) {
-          workingDir = wsDir;
+        if (wsDir && path.resolve(wsDir) !== path.resolve(workingDir)) {
+          workingDir = wsDir; // 审计 P2-5：仅在目录不同时才切换，减少全局状态抖动
           if (ws) touchWorkspace(ws.name);
         }
         json(res, 200, {
@@ -733,8 +752,12 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       return;
     }
     if (req.method === 'POST' && p === '/api/chat') {
+      // 审计 P2-4：先占位再计数（单线程下 set 后统计即真实并发），消除检查-注册间隙
+      const tmpId = 'resv' + (++taskSeq) + Math.random().toString(36).slice(2, 5);
+      tasks.set(tmpId, { status: 'running' });
       const running = [...tasks.values()].filter((t) => t.status === 'running').length;
-      if (running >= MAX_CONCURRENT) {
+      tasks.delete(tmpId);
+      if (running > MAX_CONCURRENT) {
         return json(res, 429, { error: `并发任务已达上限（${MAX_CONCURRENT}），请等待任务完成或中断` });
       }
       res.writeHead(200, {
