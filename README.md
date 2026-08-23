@@ -39,10 +39,10 @@ API Key 从 [DeepSeek 开放平台](https://platform.deepseek.com) 获取。密�
 
 ## 安装指南
 
-### 任意平台（npm 发布后）
+### 任意平台（npm）
 
 ```bash
-npm install -g mingdao-harness   # 之后 mingdao / mdh 即可用（升级：npm update -g）
+npm install -g mingdao-harness   # 之后 mingdao / mdh 即可用（升级：npm update -g mingdao-harness）
 ```
 
 ### Linux / macOS
