@@ -180,7 +180,7 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
   批处理的网关、`batchEndpoint`/`batchWindow` 覆盖协议字段。
 - **避峰执行（高峰输入价 2 倍）**：`mingdao run --offpeak` / `mingdao schedule add --offpeak`
   ——高峰时段（北京时间工作日 9:00–14:00）自动顺延到 14:00 后执行；**周末全天按闲时计价**
-  （DeepSeek 2026-08 计费调整），不触发避峰等待。WebUI 调度面板勾选「🌙 避峰执行」。
+  （DeepSeek 官方邮件确认），不触发避峰等待。WebUI 调度面板勾选「🌙 避峰执行」。
 
 ## 云同步
 

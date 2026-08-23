@@ -1647,8 +1647,10 @@ const ctx = { cwd: tmp };
   // 2026-08-21 是周五：北京 10:00（UTC 02:00）→ 高峰；14:00（UTC 06:00）→ 闲时
   assert.equal(isPeakHour(new Date('2026-08-21T02:00:00Z')), true, '工作日 10:00 应为高峰');
   assert.equal(isPeakHour(new Date('2026-08-21T06:00:00Z')), false, '工作日 14:00 起应为闲时');
-  // 2026-08-22 是周六：全天闲时（DeepSeek 周末全天低价）
-  assert.equal(isPeakHour(new Date('2026-08-22T02:00:00Z')), false, '周末全天应按闲时计价');
+  // 2026-08-22 周六 / 2026-08-23 周日：官方邮件确认周末全天闲时低价
+  assert.equal(isPeakHour(new Date('2026-08-22T02:00:00Z')), false, '周六全天应按闲时计价');
+  assert.equal(isPeakHour(new Date('2026-08-23T02:00:00Z')), false, '周日全天应按闲时计价');
+  assert.equal(isPeakHour(new Date('2026-08-22T23:00:00Z')), false, '周六深夜同样按闲时计价');
   // 避峰顺延：高峰时刻 → 当天北京 14:00
   const defer = deferToOffpeak(new Date('2026-08-21T02:00:00Z'));
   assert.equal(defer.getTime(), new Date('2026-08-21T06:00:00Z').getTime(), '高峰应顺延到当天 14:00');

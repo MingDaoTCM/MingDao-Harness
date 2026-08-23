@@ -36,7 +36,7 @@ export function isPeakHour(date = new Date()) {
       hourCycle: 'h23',
     }).formatToParts(date);
     const weekday = parts.find((p) => p.type === 'weekday')?.value;
-    // 周末全天按闲时计价（DeepSeek 2026-08 计费调整：周末全天低价，批量任务更划算）
+    // 周末全天按闲时计价（DeepSeek 官方邮件确认：周六/周日全天闲时低价，批量任务周末更划算）
     if (weekday === 'Sat' || weekday === 'Sun') return false;
     const hour = Number(parts.find((p) => p.type === 'hour')?.value);
     return hour >= 9 && hour < 14;
