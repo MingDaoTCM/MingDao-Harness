@@ -161,6 +161,27 @@ bash 工具**默认**从子进程环境中剥离敏感变量（`*_API_KEY`、`*_
 其他护栏字段：`maxEmptyRounds`（连续空输出续写轮数上限，默认 3——每轮空输出都是全额
 completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger`（自动压缩触发线，默认 0.8）。
 
+## 费用护栏（costGuard）
+
+按北京时间自然日累计实际费用（含缓存折扣与 Batch 半价后的真实口径），Agent 每轮开始前检查：
+
+```json
+{ "costGuard": { "dailyLimitYuan": 10, "warnAtYuan": 8, "action": "block" } }
+```
+
+- `action: "warn"`（默认）超限仅提醒；`"block"` 到达上限暂停执行（明天自动恢复）；
+- `/cost` 与 WebUI 头部费用徽标实时显示「今日费用 / 上限百分比」。
+
+## 战略省钱：Batch 半价 + 避峰调度
+
+- **Batch API（50% off）**：`mingdao batch <问题文件|->` 每行一个问题，单轮批量任务走
+  批处理通道（无工具无流式），结果落 `mingdao-batch-result-<时间戳>.jsonl` 并计入 `/cost`
+  分账（`batch` 标记）。端点不支持的网关会明确报错；可用 `config.batchBaseUrl` 指定支持
+  批处理的网关、`batchEndpoint`/`batchWindow` 覆盖协议字段。
+- **避峰执行（高峰输入价 2 倍）**：`mingdao run --offpeak` / `mingdao schedule add --offpeak`
+  ——高峰时段（北京时间工作日 9:00–14:00）自动顺延到 14:00 后执行；**周末全天按闲时计价**
+  （DeepSeek 2026-08 计费调整），不触发避峰等待。WebUI 调度面板勾选「🌙 避峰执行」。
+
 ## 云同步
 
 ```json

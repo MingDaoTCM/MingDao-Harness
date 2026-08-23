@@ -101,7 +101,12 @@ export async function createProvider(cfg, modelName, { timeoutMs = 300000, retri
           const transient = timedOut || isTransient(err);
           if (!transient || attempt >= retries) throw err;
           attempt += 1;
-          await sleep(1000 * attempt); // 指数退避：1s / 2s
+          // 指数退避 + 尊重 Retry-After（评估 P3-1）：基础 1s/2s，服务端指定时取其值（封顶 30s）
+          let backoff = 1000 * attempt;
+          const ra = Number(err?.headers?.get?.('retry-after'));
+          if (Number.isFinite(ra) && ra > 0) backoff = Math.max(backoff, ra * 1000);
+          backoff = Math.min(backoff, 30000);
+          await sleep(backoff);
         } finally {
           clearTimeout(timer);
           opts.signal?.removeEventListener('abort', onUserAbort);

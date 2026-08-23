@@ -133,7 +133,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
   <span id="cfgMsg" class="badge" style="display:none"></span>
   <button id="cfgBtn" title="设置">⚙</button>
   <select id="wsSel" title="工作空间（切换 / 新建，目录自动创建）"></select>
-  <span class="badge" id="envBadge"></span>
+  <span class="badge" id="envBadge"></span><span class="badge" id="costBadge" title="今日费用 / 缓存命中率（每 15s 刷新）"></span>
   <div class="spacer"></div>
   <input id="sessionSearch" placeholder="搜索会话…" title="关键词检索历史会话">
   <select id="sessions" title="历史会话"><option value="">历史会话</option></select>
@@ -226,6 +226,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
       </select>
     </div>
     <div class="cfg-row" id="schAtRow"><input type="datetime-local" id="schAt" style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"></div>
+    <div class="cfg-row" style="align-items:center;gap:8px"><label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px"><input type="checkbox" id="schOffpeak">🌙 避峰执行（高峰时段自动顺延到 14:00 后，输入价省 50%）</label></div>
     <div class="cfg-row" id="schEveryRow" style="display:none">
       <select id="schEvery" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
         <option value="30s">每 30 秒</option><option value="5m">每 5 分钟</option><option value="1h">每 1 小时</option><option value="1d">每 1 天</option>
@@ -521,7 +522,7 @@ async function send(){
       else if(ev.type==='ask'){ update(); askModal(ev).then(a=>fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:ev.id,answer:a,taskId})}).catch(()=>{})); }
       else if(ev.type==='usage'){ onActivity(); const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; msg.appendChild(u); scroll(); }
       else if(ev.type==='error'){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); scroll(); }
-      else if(ev.type==='done'){ onActivity(); if(ev.stats&&ev.stats.deliverables&&ev.stats.deliverables.length){ const card=document.createElement('div'); card.className='deliver'; card.innerHTML='<div class="t">📦 交付物（'+ev.stats.deliverables.length+' 个文件）</div>'+ev.stats.deliverables.map(f=>'<div class="i">'+esc(f)+(f.toLowerCase().endsWith('.html')?' <span style="color:var(--accent2)">— 浏览器打开即可运行</span>':'')+'</div>').join(''); msg.appendChild(card); } if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); } currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
+      else if(ev.type==='done'){ onActivity(); if(ev.budget){ const b=ev.budget; hintEl.textContent='预算 '+Math.round(b.used/1000)+'K/'+Math.round(b.total/1000)+'K（'+Math.round(b.used/b.total*100)+'%）· 本轮完成 · 提示栏右侧为今日费用与命中率'; } if(ev.stats&&ev.stats.deliverables&&ev.stats.deliverables.length){ const card=document.createElement('div'); card.className='deliver'; card.innerHTML='<div class="t">📦 交付物（'+ev.stats.deliverables.length+' 个文件）</div>'+ev.stats.deliverables.map(f=>'<div class="i">'+esc(f)+(f.toLowerCase().endsWith('.html')?' <span style="color:var(--accent2)">— 浏览器打开即可运行</span>':'')+'</div>').join(''); msg.appendChild(card); } if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); } currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
     });
   }catch(e){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=e.message||'网络错误'; msg.appendChild(d); scroll(); }
   finally{ clearInterval(hintTimer); hintEl.classList.remove('working'); hintEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); scroll(); updateTasksPanel(); }
@@ -548,6 +549,17 @@ async function updateTasksPanel(){
   }
 }
 setInterval(updateTasksPanel, 2000);
+// 费用徽标：今日费用 / 缓存命中率 / 护栏（15s 刷新）
+async function refreshCostBadge(){
+  const r=await fetch('/api/cache-stats',{cache:'no-store'}).catch(()=>null); if(!r) return;
+  const j=await r.json().catch(()=>null); if(!j) return;
+  const bd=j.breakdown||{}; const gd=j.guard||null;
+  let t='今日 ≈¥'+(bd.today||0).toFixed(4);
+  if(bd.rate!=null) t+=' · 命中 '+(bd.rate*100).toFixed(0)+'%';
+  if(gd&&gd.limit>0) t+=' · 护栏 '+(gd.cost/gd.limit*100).toFixed(0)+'%';
+  $('#costBadge').textContent=t;
+}
+refreshCostBadge(); setInterval(refreshCostBadge, 15000);
 $('#tasksBtn').onclick=()=>{ const p=$('#tasksPanel'); p.style.display = p.style.display==='none'?'flex':'none'; if(p.style.display==='flex') updateTasksPanel(); };
 $('#tpClose').onclick=()=>{ $('#tasksPanel').style.display='none'; };
 
@@ -652,6 +664,7 @@ $('#schAdd').onclick=async ()=>{
   const q=$('#schQuestion').value.trim(); if(!q) return;
   const kind=$('#schWhen').value;
   const payload={action:'add',question:q};
+  if($('#schOffpeak').checked) payload.offpeak=true;
   if(kind==='at'){ const v=$('#schAt').value; if(!v) return; payload.at=v.replace('T',' '); }
   else if(kind==='every'){ payload.every=$('#schEvery').value; }
   else if(kind==='chain'){ const v=$('#schChain').value.trim(); if(!v) return; const qs=v.split('\n').map(x=>x.trim()).filter(Boolean); if(qs.length<2){ alert('链式需要至少两行任务'); return; } payload.action='chain'; payload.questions=qs; }

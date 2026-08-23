@@ -274,4 +274,26 @@ Retry-After 退避；远期：拆 cli.js、子代理并行、插件生命周期�
 
 ---
 
+## 十一、战略省钱批次（2026-08-23，v0.1.50）
+
+按四报告共识路线图落地「主动省钱」五件套，把峰谷/批量定价从「展示」升级为「主动干预」：
+
+| 项 | 实现 |
+| --- | --- |
+| **Batch API 半价通道（A1）** | `src/batch.js` + `mingdao batch <文件|->`：单轮批量任务走 OpenAI 兼容批处理协议（上传→建批→轮询→取回），结果落盘 JSONL 并计入 `/cost` 分账（`batch:true`，×0.5 计价）；轮询连续失败 10 次报错、端点不支持明确报错；`batchBaseUrl/batchEndpoint/batchWindow` 可配。smoke #41 全协议 mock 演练 |
+| **费用护栏（A2）** | `src/cost-guard.js`：按北京时间自然日累计真实费用（含缓存折扣与 batch 半价），`costGuard{dailyLimitYuan,warnAtYuan,action:warn\|block}`；Agent 每轮开始前检查，block 时暂停并明确告知；`/cost`、WebUI 头部费用徽标实时显示。smoke #40 覆盖 |
+| **避峰调度** | `run --offpeak` / `schedule add --offpeak` / WebUI「🌙 避峰执行」：高峰（北京工作日 9:00–14:00）自动顺延到 14:00 后执行；**周末全天识别为闲时**（DeepSeek 2026-08 计费调整）。e2e-schedule #5 覆盖 |
+| **/cost 分账升级** | 按模型分账、今日费用、Batch 子项、节省归因（相比全未命中省 ¥X）、护栏状态；Web `/api/cache-stats` 同步输出 |
+| **token 预算可视化（A5）** | WebUI done 事件携带会话 token 占用/预算，提示栏显示 `预算 45K/128K（35%）`；头部费用徽标 15s 刷新「今日 ¥x · 命中 y% · 护栏 z%」 |
+| **Retry-After 退避（P3-1）** | provider 重试尊重 `Retry-After` 头（封顶 30s），错误对象透传响应头 |
+| **附带修复** | e2e `safeRm` 内部误替换为递归调用（清理静默失效）→ 恢复 `fs.rmSync` 语义 |
+
+回归验证（2026-08-23，Linux 实测）：smoke **45 组**、e2e-local **14 项**、e2e-schedule **5 项**、
+e2e-web **19 项**，全部通过（83 项）。
+
+**下一批候选**：辅助调用结构化输出（`response_format`，maxTokens 80–300 → 8–50）、/cost 月度报告导出、
+子代理并行（只读）、单守护进程调度器（P3-5）、拆 cli.js。
+
+---
+
 *报告生成：Hermes Agent · 基于全量源码走读、17 项针对性验证、smoke + e2e 回归测试（含三轮复评）*

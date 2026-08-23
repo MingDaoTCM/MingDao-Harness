@@ -11,6 +11,7 @@ import { createHooks } from './hooks.js';
 import { createIO, style, C } from './ui.js';
 import { subagentModel } from './routing.js';
 import { writeAudit, redactSecrets } from './audit.js';
+import { checkCostGuard } from './cost-guard.js';
 
 const MAX_STEPS = 24;
 const SUBAGENT_MAX_STEPS = 12;
@@ -134,6 +135,28 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         } catch {}
       }
       const trimmed = trimMessages(messages, budget, count);
+
+      // 费用护栏（A2）：每轮开始前按今日实际费用检查；block 时暂停本轮并明确告知
+      if (cfg.costGuard) {
+        const guard = checkCostGuard();
+        if (guard) {
+          if (guard.blocked) {
+            stripOrphanCalls();
+            return {
+              text: null,
+              reasoning: '',
+              usage,
+              steps,
+              finish,
+              truncated: false,
+              aborted: false,
+              note: guard.message,
+              durationMs: Date.now() - startedAt,
+            };
+          }
+          io.print(style(guard.message, C.yellow));
+        }
+      }
 
       const ac = new AbortController();
       currentAc = ac;

@@ -7,7 +7,7 @@
 ## 为什么选 MingDao
 
 - ⚡ **真正的零依赖**：纯 Node.js ≥ 18，无任何 npm 运行时依赖、无构建步骤——装完即用，不拖 node_modules
-- 💰 **DeepSeek-V4 深度省钱**：384K 上下文预设、**缓存命中计价**（命中价仅为未命中的 1/30）+ 命中率仪表盘、峰谷计价、自动路由（pro 规划 / flash 执行）、精确 tokenizer（官方词表 BPE）
+- 💰 **DeepSeek-V4 深度省钱**：384K 上下文预设、**缓存命中计价**（命中价仅为未命中的 1/30）+ 命中率仪表盘、峰谷计价（周末全天低价自动识别）、自动路由（pro 规划 / flash 执行 + 分类缓存 + 会话粘滞）、精确 tokenizer（官方词表 BPE）、滞回自动压缩、**Batch API 半价批处理**（`mingdao batch`）、**避峰调度**（`--offpeak` 高峰顺延 14:00 后）、**费用护栏**（每日上限防超支）
 - 🖥 **双界面 + IDE 全家桶**：产品级 TUI（流式 Markdown、代码高亮、编辑 diff、Ctrl+C 中断、Tab 补全）与 `mingdao web` 一键 WebUI（PWA 可装桌面、多任务并行、全项设置面板）；VS Code 侧边栏与 JetBrains 工具窗深度集成
 - 🧠 **36 个技能开箱即用**：14 个内置常驻 + 22 个可安装技能库（线上 registry 逐文件 sha256 校验防供应链篡改，`mingdao skill install sql` 一键装，可自建企业内 registry）
 - 🔌 **生态即插即用**：MCP 客户端（零依赖实现，`mcpServers` 配置即接入任意 MCP 服务器）+ Hooks 钩子 + 9 个 MCP 生态预设

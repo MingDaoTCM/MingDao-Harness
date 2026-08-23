@@ -54,7 +54,7 @@ export function isValidTaskId(id) {
   return typeof id === 'string' && /^[a-z0-9]+$/.test(id) && id.length >= 4 && id.length <= 40;
 }
 
-export function startTask(home, question, { permission, model, cwd } = {}) {
+export function startTask(home, question, { permission, model, cwd, offpeak } = {}) {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6) + process.pid.toString(36);
   const task = {
     id,
@@ -67,12 +67,13 @@ export function startTask(home, question, { permission, model, cwd } = {}) {
     usage: null,
     durationMs: null,
     error: '',
-    note: '',
+    note: offpeak ? '避峰：高峰时段顺延到 14:00 后执行（省 50%）' : '',
   };
   writeTask(home, task);
   const args = [CLI_PATH, 'run-worker', id, '--question', String(question)];
   if (permission) args.push('--permission', permission);
   if (model) args.push('--model', model);
+  if (offpeak) args.push('--offpeak');
   const child = spawn(process.execPath, args, {
     cwd: cwd || process.cwd(),
     detached: true,

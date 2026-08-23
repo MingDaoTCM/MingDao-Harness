@@ -19,14 +19,14 @@ function safeRm(target) {
   if (!target) return;
   for (let i = 0; i < 3; i++) {
     try {
-      safeRm(target, { recursive: true, force: true });
+      fs.rmSync(target, { recursive: true, force: true });
       return;
     } catch {
       sleepMs(150);
     }
   }
   try {
-    safeRm(target, { recursive: true, force: true });
+    fs.rmSync(target, { recursive: true, force: true });
   } catch {}
 }
 
@@ -215,6 +215,19 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   assert.equal(list.code, 0);
   assert.ok(list.out.includes('一次性') || list.out.includes('调度队列'), '列表应正常输出');
   ok('调度面板列表');
+}
+
+// ---------- 5. 避峰调度（--offpeak）：任务携带避峰标记与说明 ----------
+{
+  const r = await runCli(['schedule', 'add', '避峰任务', '--every', '2s', '--offpeak']);
+  assert.equal(r.code, 0, r.out);
+  const m = r.out.match(/sc[0-9a-z]+/);
+  assert.ok(m, '应返回调度 id');
+  const job = readJson(jobFile(m[0]));
+  assert.equal(job.offpeak, true, '任务应携带 offpeak 标记');
+  assert.ok(String(job.note || '').includes('避峰'), '任务备注应说明避峰');
+  await runCli(['schedule', 'remove', m[0]]);
+  ok('避峰调度：--offpeak 标记 / 备注说明');
 }
 
 // 清理

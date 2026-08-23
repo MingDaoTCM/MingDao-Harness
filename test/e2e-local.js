@@ -20,14 +20,14 @@ function safeRm(target) {
   if (!target) return;
   for (let i = 0; i < 3; i++) {
     try {
-      safeRm(target, { recursive: true, force: true });
+      fs.rmSync(target, { recursive: true, force: true });
       return;
     } catch {
       sleepMs(150);
     }
   }
   try {
-    safeRm(target, { recursive: true, force: true });
+    fs.rmSync(target, { recursive: true, force: true });
   } catch {}
 }
 

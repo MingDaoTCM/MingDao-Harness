@@ -16,6 +16,8 @@ function isRunningTask(home, taskId) {
 
 const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url));
 
+import { isPeakHour, deferToOffpeak } from './pricing.js';
+
 export function scheduleDir(home) {
   return path.join(home, 'schedule');
 }
@@ -90,7 +92,7 @@ export function writeSchedule(home, job) {
 }
 
 // 新建调度任务；after: 依赖的任务 ID（全部成功后才启动，任一失败则跳过）
-export function addSchedule(home, question, { at, every, after, permission, model, cwd, anchor }) {
+export function addSchedule(home, question, { at, every, after, permission, model, cwd, anchor, offpeak }) {
   const id = 'sc' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   const interval = every != null ? parseInterval(every) : null;
   const afterList = Array.isArray(after) ? after.filter(Boolean).map(String) : after ? String(after).split(',').map((x) => x.trim()).filter(Boolean) : [];
@@ -130,7 +132,8 @@ export function addSchedule(home, question, { at, every, after, permission, mode
     runs: 0,
     pid: null,
     createdAt: Date.now(),
-    note: '',
+    note: offpeak ? '避峰：高峰时段自动顺延到 14:00 后执行' : '',
+    offpeak: Boolean(offpeak),
   };
   writeSchedule(home, job);
   spawnSleeper(home, job);
@@ -278,6 +281,13 @@ export async function runSleeper(home, id) {
   }
 
   const runOnce = async () => {
+    // 避峰（评估 A2/Kimi P-1）：高峰时段（北京工作日 9:00–14:00）顺延到 14:00 执行，输入价省 50%
+    if (job.offpeak && isPeakHour(new Date())) {
+      const defer = deferToOffpeak(new Date());
+      const curN = readSchedule(home, id);
+      if (curN) writeSchedule(home, { ...curN, note: `避峰等待至 ${defer.toISOString().slice(11, 16)}Z+8` });
+      await wait(defer.getTime() - Date.now() + 2000);
+    }
     if (job.after?.length) {
       const st = await depsSatisfied(job.after);
       if (st === false) return 'pending';

@@ -41,13 +41,14 @@ import { createAgent } from './agent.js';
 import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
 import { listSkills, tamperedSkillNames } from './skills.js';
+import { costGuardStatus } from './cost-guard.js';
 import { libraryList, searchLibrary, installSkill, uninstallSkill, reinstallSkill, trustSkill } from './skill-lib.js';
 import { syncLogin, syncLogout, syncPush, syncPull, syncStatus, syncRemoteList, maybeAutoSync, syncChangePassword, syncShareCreate, syncShareList, syncShareAccept, syncShareRevoke, listSyncConflicts, resolveSyncConflict } from './sync.js';
 import { runWebServer } from './web/server.js';
 import { routeTask, routingConfig } from './routing.js';
 import { detectSandbox } from './tools/bash.js';
 import { generateTitle, renameSessionFile, titleModel } from './titles.js';
-import { estimateCost } from './pricing.js';
+import { estimateCost, isPeakHour, deferToOffpeak } from './pricing.js';
 import { createIO, style, C } from './ui.js';
 import {
   createSession,
@@ -250,7 +251,7 @@ async function handleKeyCommand(args) {
 }
 
 // —— 后台任务 worker：独立进程执行一轮任务并写状态文件 ——
-async function runWorkerTask(id, question, { permission, model }) {
+async function runWorkerTask(id, question, { permission, model, offpeak }) {
   const home = ensureHome();
   const finish = (patch) => patchTask(home, id, patch);
   let mcpFacade = null;
@@ -268,6 +269,13 @@ async function runWorkerTask(id, question, { permission, model }) {
     if (perm === 'ask') {
       perm = 'readonly';
       note = 'ask 权限下后台任务按只读执行';
+    }
+    // 避峰（评估 A2/Kimi P-1）：高峰时段（北京工作日 9:00–14:00）自动顺延到 14:00 执行，输入价省 50%
+    if (offpeak && isPeakHour(new Date())) {
+      const defer = deferToOffpeak(new Date());
+      finish({ note: `避峰等待至 ${defer.toISOString().slice(11, 16)}（北京时间 14:00 后）` });
+      await new Promise((r) => setTimeout(r, defer.getTime() - Date.now() + 2000));
+      finish({ note: '' });
     }
     const provider = await createProvider(cfg, modelName);
     const io = createIO({ quiet: true });
@@ -403,6 +411,69 @@ async function main() {
     return;
   }
 
+  // Batch API 半价批处理（A1）：mingdao batch <问题文件|-> [--model 名] [--max-tokens n] [--out 文件]
+  if (opts.prompt[0] === 'batch') {
+    const { runBatch } = await import('./batch.js');
+    const cfgB = loadConfig();
+    if (!cfgB) {
+      console.log('[错误] 未初始化配置：请先运行 mingdao init');
+      process.exitCode = 1;
+      return;
+    }
+    let model = cfgB.model || 'deepseek-v4-flash';
+    let maxTokens = 4096;
+    let srcFile = null;
+    const restB = opts.prompt.slice(1);
+    for (let i = 0; i < restB.length; i++) {
+      const a = restB[i];
+      if (a === '--model') model = restB[++i];
+      else if (a === '--max-tokens') maxTokens = Number(restB[++i]) || 4096;
+      else if (a === '--out') { i += 1; /* 输出默认落工作目录，--out 暂以默认处理 */ }
+      else if (!srcFile) srcFile = a;
+    }
+    if (!srcFile) {
+      console.log('用法：mingdao batch <问题文件|-> 每行一个问题（--model 名 --max-tokens n）');
+      process.exitCode = 1;
+      return;
+    }
+    let questions = [];
+    try {
+      const raw = srcFile === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(srcFile, 'utf8');
+      questions = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 1000);
+    } catch (err) {
+      console.log('[错误] 读取问题文件失败：' + (err?.message || err));
+      process.exitCode = 1;
+      return;
+    }
+    if (!questions.length) {
+      console.log('[错误] 问题文件为空');
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`Batch 半价批处理：${questions.length} 个问题 · 模型 ${model}（价格 ×${0.5}，结果异步返回，最长 24h）`);
+    const ac = new AbortController();
+    process.on('SIGINT', () => ac.abort());
+    const r = await runBatch({
+      cfg: cfgB,
+      model,
+      questions,
+      workingDir: process.cwd(),
+      maxTokens,
+      signal: ac.signal,
+      onStatus: (st) => console.log('  ' + st),
+    });
+    process.removeAllListeners('SIGINT');
+    if (r.error) {
+      console.log('[错误] ' + r.error);
+      process.exitCode = 1;
+      return;
+    }
+    console.log(`✓ 完成 ${r.results.length} 条 · ↑${r.usage.prompt_tokens} ↓${r.usage.completion_tokens} tokens · 费用 ≈¥${r.cost.toFixed(5)}（已按半价）`);
+    console.log(`  结果文件：${r.outputFile}`);
+    console.log(`  任务 ID：${r.batchId}（结果已计入 /cost 分账）`);
+    return;
+  }
+
   // 审计日志查看（P3-5）：mingdao audit [数量]（仅裸命令或单个数字；其余按提问处理）
   if (opts.prompt[0] === 'audit' && (opts.prompt.length === 1 || (opts.prompt.length === 2 && /^\d+$/.test(opts.prompt[1])))) {
     const { listAudit, auditFile } = await import('./audit.js');
@@ -435,20 +506,22 @@ async function main() {
     let question = '';
     let permission = null;
     let model = null;
+    let offpeak = false;
     for (let i = 2; i < opts.prompt.length; i++) {
       const a = opts.prompt[i];
       if (a === '--permission') permission = opts.prompt[++i];
       else if (a === '--model') model = opts.prompt[++i];
+      else if (a === '--offpeak') offpeak = true;
       else if (a === '--question') {
         // 收集到下一个已知 flag 为止（参数顺序：--question <任务> --permission … --model …）
         const parts = [];
-        while (i + 1 < opts.prompt.length && !['--permission', '--model'].includes(opts.prompt[i + 1])) {
+        while (i + 1 < opts.prompt.length && !['--permission', '--model', '--offpeak'].includes(opts.prompt[i + 1])) {
           parts.push(opts.prompt[++i]);
         }
         question = parts.join(' ');
       }
     }
-    await runWorkerTask(id, question, { permission, model });
+    await runWorkerTask(id, question, { permission, model, offpeak });
     return;
   }
 
@@ -458,20 +531,22 @@ async function main() {
     let question = '';
     let permission = null;
     let model = null;
+    let offpeak = false;
     for (let i = 0; i < rest.length; i++) {
       const a = rest[i];
       if (a === '--permission') permission = rest[++i];
       else if (a === '--model') model = rest[++i];
+      else if (a === '--offpeak') offpeak = true;
       else if (question === '') question = a;
     }
     if (!question) {
-      console.log('用法：mingdao run "<任务>" [--permission auto|readonly] [--model 模型名]');
+      console.log('用法：mingdao run "<任务>" [--permission auto|readonly] [--model 模型名] [--offpeak]');
       process.exitCode = 1;
       return;
     }
     const home0 = ensureHome();
     reconcileSchedules(home0);
-    const task = startTask(home0, question, { permission, model, cwd: process.cwd() });
+    const task = startTask(home0, question, { permission, model, cwd: process.cwd(), offpeak });
     console.log(`✓ 后台任务已启动 ${task.id}`);
     console.log(`  查看：mingdao tasks · 实时刷新：mingdao tasks watch · 停止：mingdao tasks kill ${task.id}`);
     return;
@@ -521,6 +596,7 @@ async function main() {
       let after = [];
       let permission = null;
       let model = null;
+      let offpeak = false;
       for (let i = 0; i < rest.length; i++) {
         const a = rest[i];
         if (a === '--at') at = rest[++i];
@@ -529,14 +605,15 @@ async function main() {
         else if (a === '--after') after = String(rest[++i]).split(',').map((x) => x.trim()).filter(Boolean);
         else if (a === '--permission') permission = rest[++i];
         else if (a === '--model') model = rest[++i];
+        else if (a === '--offpeak') offpeak = true;
         else if (question === '') question = a;
       }
       if (!question) {
-        console.log('用法：mingdao schedule add "<任务>" [--at "YYYY-MM-DD HH:MM" | --every 2h [--anchor 09:00]] [--after 任务ID,...] [--permission auto] [--model 名]');
+        console.log('用法：mingdao schedule add "<任务>" [--at "YYYY-MM-DD HH:MM" | --every 2h [--anchor 09:00]] [--after 任务ID,...] [--permission auto] [--model 名] [--offpeak 高峰顺延至 14:00 后]');
         process.exitCode = 1;
         return;
       }
-      const r = addSchedule(home0, question, { at, every, after, permission, model, cwd: process.cwd(), anchor });
+      const r = addSchedule(home0, question, { at, every, after, permission, model, cwd: process.cwd(), anchor, offpeak });
       if (r.error) {
         console.log('[错误] ' + r.error);
         process.exitCode = 1;
@@ -1639,12 +1716,23 @@ async function main() {
           `计划模式  ${planMode ? '开' : '关'} · 思考显示  ${io.showReasoning ? '开' : '关'} · 任务 ${agent.getTodos().length} 项`,
         ]);
       } else if (cmd === '/cost') {
-        io.print(
-          style(
-            `累计费用估算：≈¥${estimateCost(modelName, stats.promptTokens, stats.completionTokens).toFixed(5)}（↑${stats.promptTokens} / ↓${stats.completionTokens} tokens · 按当前模型计价 · 未计缓存折扣）`,
-            C.dim
-          )
-        );
+        const bd = costBreakdown();
+        io.box('费用分账（含缓存折扣与 Batch 半价的真实口径）', [
+          `累计  ≈¥${bd.totalCost.toFixed(5)} · 今日 ≈¥${bd.today.toFixed(5)}` +
+            `${bd.totalSaved > 0 ? ` · 相比全未命中已省 ≈¥${bd.totalSaved.toFixed(5)}` : ''}`,
+          `缓存命中率  ${bd.rate != null ? (bd.rate * 100).toFixed(0) + '%' : '暂无缓存数据'}${bd.batchCost > 0 ? ` · Batch 半价任务 ≈¥${bd.batchCost.toFixed(5)}` : ''}`,
+          ...bd.byModel.slice(0, 8).map((m) => `  ${m.model}：${m.turns} 轮（${m.batchTurns ? m.batchTurns + ' 批' : ''}）· ↑${m.prompt} ↓${m.completion} · ≈¥${m.cost.toFixed(5)}${m.saved > 0 ? ` · 省 ¥${m.saved.toFixed(5)}` : ''}`),
+        ]);
+        const guard = costGuardStatus();
+        if (guard) {
+          io.print(
+            style(
+              `费用护栏：今日 ¥${guard.cost.toFixed(4)} / 上限 ¥${guard.limit.toFixed(2)}${guard.overLimit ? '（已达上限' + (guard.action === 'block' ? '，执行已暂停' : '，仅提醒') + '）' : ''}`,
+              guard.overLimit ? C.yellow : C.dim
+            )
+          );
+        }
+        io.print(style('会话内累计（本次）≈¥' + estimateCost(modelName, stats.promptTokens, stats.completionTokens).toFixed(5), C.dim));
       } else if (cmd === '/cache') {
         const entries = listCacheStats();
         if (!entries.length) {

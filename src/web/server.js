@@ -54,8 +54,9 @@ import {
 import { enableAutostart, disableAutostart, autostartStatus } from '../autostart.js';
 import { currentWorkspace, workspaceForDir, listWorkspaces, addWorkspace, removeWorkspace, renameWorkspace, setWorkspaceDir, workspacePath, touchWorkspace, getSessionWorkspace, setSessionWorkspace, removeSessionWorkspace, moveSessionWorkspace } from '../workspace.js';
 import { loadMemory, writeMemory, dedupeMemory } from '../memory.js';
-import { recordUsage, listCacheStats, summarizeCacheStats } from '../cachestats.js';
+import { recordUsage, listCacheStats, summarizeCacheStats, costBreakdown } from '../cachestats.js';
 import { PRICE_DATA_AS_OF } from '../pricing.js';
+import { costGuardStatus } from '../cost-guard.js';
 import { presetList, buildPreset } from '../mcp-presets.js';
 import { syncStatus, syncLogin, syncLogout, syncPush, syncPull, syncRemoteList, maybeAutoSync, syncChangePassword, syncShareCreate, syncShareList, syncShareAccept, syncShareRevoke, listSyncConflicts, resolveSyncConflict } from '../sync.js';
 
@@ -340,8 +341,18 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       }
       entry.status = r.aborted ? 'aborted' : 'done';
       entry.durationMs = Date.now() - entry.startedAt;
+      // 预算可视化（评估 A5）：会话当前 token 占用 / 预算
+      let budgetInfo = null;
+      try {
+        const { makeTokenCounter } = await import('../tokenizer.js');
+        const { messageTokens } = await import('../context.js');
+        const counter = makeTokenCounter(runModel);
+        const used = messages.reduce((sum, m) => sum + messageTokens(m, counter), 0);
+        budgetInfo = { used, total: cfg.contextBudget || modelPreset(runModel)?.budgetTokens || 128000 };
+      } catch {}
       send({
         type: 'done',
+        budget: budgetInfo,
         ok: true,
         text: r.text,
         usage: r.usage,
@@ -827,6 +838,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
             permission: body.permission || null,
             model: body.model || null,
             cwd: workingDir,
+            offpeak: body.offpeak === true,
           });
           if (r.error) return json(res, 400, { error: r.error });
           return json(res, 200, { ok: true, id: r.id });
@@ -919,7 +931,13 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     }
     if (req.method === 'GET' && p === '/api/cache-stats') {
       const entries = listCacheStats();
-      json(res, 200, { ok: true, summary: summarizeCacheStats(entries), recent: entries.slice(-10).reverse() });
+      json(res, 200, {
+        ok: true,
+        summary: summarizeCacheStats(entries),
+        breakdown: costBreakdown(),
+        guard: costGuardStatus(),
+        recent: entries.slice(-10).reverse(),
+      });
       return;
     }
     if (req.method === 'GET' && p === '/api/mcp-presets') {

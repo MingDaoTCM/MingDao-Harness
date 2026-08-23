@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome } from './config.js';
-import { estimateCost, cacheSplit } from './pricing.js';
+import { estimateCost, cacheSplit, beijingDayStart } from './pricing.js';
 
 export function cacheStatsFile() {
   return path.join(mingdaoHome(), 'cache-stats.jsonl');
@@ -26,6 +26,7 @@ export function recordCacheStats(entry) {
       miss: entry.miss ?? null,
       cost: entry.cost ?? null,
       saved: entry.saved ?? null,
+      batch: entry.batch === true ? true : undefined, // Batch API 半价任务标记（/cost 分账展示）
     });
     fs.appendFileSync(cacheStatsFile(), line + '\n');
     cacheStatsCount += 1;
@@ -94,4 +95,43 @@ export function formatCacheSummary(sum) {
     `实际费用  ≈¥${sum.cost.toFixed(5)} · 相比全未命中节省 ≈¥${sum.saved.toFixed(5)}`,
   ];
   return lines;
+}
+
+// 分账统计（评估 /cost 升级）：按模型分账、今日费用、batch 半价任务、节省归因
+export function costBreakdown() {
+  const entries = listCacheStats(100000);
+  const byModel = new Map();
+  const start = beijingDayStart().getTime();
+  let totalCost = 0;
+  let totalSaved = 0;
+  let today = 0;
+  let batchCost = 0;
+  let hit = 0;
+  let miss = 0;
+  for (const e of entries) {
+    totalCost += e.cost || 0;
+    totalSaved += e.saved || 0;
+    hit += e.hit || 0;
+    miss += e.miss || 0;
+    if (e.batch) batchCost += e.cost || 0;
+    if (e.at >= start) today += e.cost || 0;
+    const m = byModel.get(e.model) || { prompt: 0, completion: 0, cost: 0, saved: 0, turns: 0, batchTurns: 0 };
+    m.prompt += e.prompt || 0;
+    m.completion += e.completion || 0;
+    m.cost += e.cost || 0;
+    m.saved += e.saved || 0;
+    m.turns += 1;
+    if (e.batch) m.batchTurns += 1;
+    byModel.set(e.model, m);
+  }
+  return {
+    totalCost,
+    totalSaved,
+    today,
+    batchCost,
+    hit,
+    miss,
+    rate: hit + miss > 0 ? hit / (hit + miss) : null,
+    byModel: [...byModel.entries()].map(([model, m]) => ({ model, ...m })).sort((a, b) => b.cost - a.cost),
+  };
 }

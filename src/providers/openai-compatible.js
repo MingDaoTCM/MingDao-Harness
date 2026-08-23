@@ -38,6 +38,7 @@ export async function chat({ baseUrl, apiKey, model, messages, tools, temperatur
     } catch {}
     const e = new Error(`[${model}] API 错误 ${res.status}: ${detail}`);
     e.status = res.status;
+    e.headers = res.headers; // 重试退避读取 Retry-After 用
     throw e;
   }
 

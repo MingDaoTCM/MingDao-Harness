@@ -1640,6 +1640,120 @@ const ctx = { cwd: tmp };
   ok('routing：分类器缓存 / 会话粘滞');
 }
 
+
+// ---------- 39. 峰谷时区/周末低价/避峰顺延/Batch 半价计价（A2/Kimi P0-4） ----------
+{
+  const { isPeakHour, deferToOffpeak, estimateBatchCost, BATCH_DISCOUNT } = await import(pathToFileURL(path.join(srcDir, 'pricing.js')).href);
+  // 2026-08-21 是周五：北京 10:00（UTC 02:00）→ 高峰；14:00（UTC 06:00）→ 闲时
+  assert.equal(isPeakHour(new Date('2026-08-21T02:00:00Z')), true, '工作日 10:00 应为高峰');
+  assert.equal(isPeakHour(new Date('2026-08-21T06:00:00Z')), false, '工作日 14:00 起应为闲时');
+  // 2026-08-22 是周六：全天闲时（DeepSeek 周末全天低价）
+  assert.equal(isPeakHour(new Date('2026-08-22T02:00:00Z')), false, '周末全天应按闲时计价');
+  // 避峰顺延：高峰时刻 → 当天北京 14:00
+  const defer = deferToOffpeak(new Date('2026-08-21T02:00:00Z'));
+  assert.equal(defer.getTime(), new Date('2026-08-21T06:00:00Z').getTime(), '高峰应顺延到当天 14:00');
+  assert.equal(deferToOffpeak(new Date('2026-08-21T06:00:00Z')).getTime(), new Date('2026-08-21T06:00:00Z').getTime(), '闲时应原时刻返回');
+  // Batch 半价：flash 闲时 1.5/4.5 → (1.5+4.5)×0.5 = 3.0 元/M
+  assert.equal(BATCH_DISCOUNT, 0.5);
+  const bc = estimateBatchCost('deepseek-v4-flash', 1000000, 1000000);
+  assert.ok(Math.abs(bc - 3.0) < 1e-9, `batch 应为半价（得到 ${bc}）`);
+  ok('pricing：时区锚定 / 周末低价 / 避峰顺延 / Batch 半价计价');
+}
+
+// ---------- 40. 费用护栏（A2）：累计 / 预警 / 阻断 ----------
+{
+  const homeC = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-guard-'));
+  process.env.MINGDAO_HOME = homeC;
+  const { costGuardStatus, checkCostGuard } = await import(pathToFileURL(path.join(srcDir, 'cost-guard.js')).href);
+  const statsFile = path.join(homeC, 'cache-stats.jsonl');
+  const line = (cost, at = Date.now()) => JSON.stringify({ at, model: 'deepseek-v4-flash', prompt: 100, completion: 10, hit: null, miss: null, cost, saved: null }) + '\n';
+  fs.writeFileSync(statsFile, line(0.2) + line(0.2));
+  const cfgFile = path.join(homeC, 'config.json');
+  fs.writeFileSync(cfgFile, JSON.stringify({ costGuard: { dailyLimitYuan: 1, warnAtYuan: 0.5, action: 'block' } }));
+  let st = costGuardStatus();
+  assert.ok(st && Math.abs(st.cost - 0.4) < 1e-9, '今日费用应为累计 0.4');
+  assert.equal(st.overWarn, false, '未达预警线');
+  assert.equal(st.overLimit, false, '未达上限');
+  fs.appendFileSync(statsFile, line(0.3));
+  st = costGuardStatus();
+  assert.equal(st.overWarn, true, '超过 warnAt 应预警');
+  assert.equal(st.overLimit, false);
+  fs.appendFileSync(statsFile, line(0.5));
+  st = costGuardStatus();
+  assert.equal(st.overLimit, true, '超过上限');
+  const chk = checkCostGuard();
+  assert.ok(chk && chk.blocked === true && chk.message.includes('暂停'), 'block 模式应阻断并提示');
+  // warn 模式：超限仅提醒不阻断
+  fs.writeFileSync(cfgFile, JSON.stringify({ costGuard: { dailyLimitYuan: 1, action: 'warn' } }));
+  const chk2 = checkCostGuard();
+  assert.ok(chk2 && chk2.blocked === false && chk2.message.includes('护栏'), 'warn 模式应仅提醒');
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeC, { recursive: true, force: true });
+  ok('costGuard：按自然日累计 / 预警线 / block 阻断 / warn 提醒');
+}
+
+// ---------- 41. Batch API 半价通道（A1）：上传/轮询/取回/费用入账 ----------
+{
+  const http = await import('node:http');
+  const homeB = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-batch-'));
+  process.env.MINGDAO_HOME = homeB;
+  process.env.MINGDAO_BATCH_POLL_MS = '100';
+  let pollCount = 0;
+  const mockBatch = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    if (req.method === 'POST' && u.pathname === '/files') {
+      req.on('data', () => {});
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: 'file-1' }));
+      });
+    } else if (req.method === 'POST' && u.pathname === '/batches') {
+      req.on('data', () => {});
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: 'batch-1', status: 'validating' }));
+      });
+    } else if (req.method === 'GET' && u.pathname === '/batches/batch-1') {
+      pollCount += 1;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(pollCount < 2 ? { id: 'batch-1', status: 'in_progress' } : { id: 'batch-1', status: 'completed', output_file_id: 'out-1' }));
+    } else if (req.method === 'GET' && u.pathname === '/batches/batch-1/files/result') {
+      res.writeHead(200, { 'Content-Type': 'application/x-jsonlines' });
+      res.end(
+        JSON.stringify({ custom_id: 'md-0', response: { status_code: 200, body: { usage: { prompt_tokens: 100, completion_tokens: 10 }, choices: [{ message: { content: '答案一' } }] } } }) + '\n' +
+        JSON.stringify({ custom_id: 'md-1', response: { status_code: 200, body: { usage: { prompt_tokens: 120, completion_tokens: 8 }, choices: [{ message: { content: '答案二' } }] } } }) + '\n'
+      );
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'not found' } }));
+    }
+  });
+  await new Promise((r) => mockBatch.listen(0, '127.0.0.1', r));
+  const batchPort = mockBatch.address().port;
+  fs.writeFileSync(path.join(homeB, 'config.json'), JSON.stringify({ provider: 'custom', model: 'deepseek-v4-flash', baseUrl: `http://127.0.0.1:${batchPort}/v1` }));
+  fs.writeFileSync(path.join(homeB, 'credentials.json'), JSON.stringify({ deepseek: 'sk-batch-test-1234567890' }));
+  const { runBatch } = await import(pathToFileURL(path.join(srcDir, 'batch.js')).href);
+  const cfgB = { provider: 'custom', model: 'deepseek-v4-flash', baseUrl: `http://127.0.0.1:${batchPort}/v1` };
+  const r = await runBatch({ cfg: cfgB, model: 'deepseek-v4-flash', questions: ['问题一', '问题二'], workingDir: homeB, onStatus: () => {} });
+  assert.ok(r.ok === true, r.error || 'batch 应成功');
+  assert.equal(r.results.length, 2, '应取回 2 条结果');
+  assert.ok(r.results[0].content.includes('答案一'), '结果内容应正确');
+  assert.equal(r.usage.prompt_tokens, 220);
+  assert.ok(r.cost > 0, '应按半价计费');
+  assert.ok(fs.existsSync(r.outputFile), '应写入结果文件');
+  const stats = fs.readFileSync(path.join(homeB, 'cache-stats.jsonl'), 'utf8');
+  assert.ok(stats.includes('"batch":true'), '批量任务应计入分账并标记 batch');
+  // 端点不支持 → 明确报错不静默
+  const badCfg = { provider: 'custom', model: 'deepseek-v4-flash', baseUrl: 'http://127.0.0.1:1/v1' };
+  const bad = await runBatch({ cfg: badCfg, model: 'deepseek-v4-flash', questions: ['x'], onStatus: () => {} });
+  assert.ok(bad.error && bad.error.includes('批处理不可用'), '端点不可用应明确报错');
+  mockBatch.close();
+  delete process.env.MINGDAO_BATCH_POLL_MS;
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeB, { recursive: true, force: true });
+  ok('batch：上传/轮询/取回/半价计费/结果落盘/分账标记/端点不可用报错');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 fs.rmSync(smokeHome, { recursive: true, force: true });

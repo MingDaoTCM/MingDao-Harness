@@ -28,14 +28,63 @@ function peakTimezone() {
 }
 
 export function isPeakHour(date = new Date()) {
-  let hour = -1;
   try {
-    const parts = new Intl.DateTimeFormat('en-US', { timeZone: peakTimezone(), hour: 'numeric', hourCycle: 'h23' }).formatToParts(date);
-    hour = Number(parts.find((p) => p.type === 'hour')?.value);
+    const parts = new Intl.DateTimeFormat('en-US', {
+      timeZone: peakTimezone(),
+      weekday: 'short',
+      hour: 'numeric',
+      hourCycle: 'h23',
+    }).formatToParts(date);
+    const weekday = parts.find((p) => p.type === 'weekday')?.value;
+    // 周末全天按闲时计价（DeepSeek 2026-08 计费调整：周末全天低价，批量任务更划算）
+    if (weekday === 'Sat' || weekday === 'Sun') return false;
+    const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+    return hour >= 9 && hour < 14;
   } catch {
-    hour = date.getHours(); // 非法时区回退本机
+    return date.getHours() >= 9 && date.getHours() < 14; // 非法时区回退本机
   }
-  return hour >= 9 && hour < 14;
+}
+
+// —— 北京时间墙钟工具（避峰调度/费用护栏按天统计用，零依赖 Intl） ——
+export function beijingParts(date = new Date()) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: peakTimezone(),
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const g = (t) => Number(parts.find((p) => p.type === t)?.value);
+  return { year: g('year'), month: g('month'), day: g('day'), hour: g('hour'), minute: g('minute'), second: g('second') };
+}
+
+// 北京时间墙钟 → Date（UTC+8）
+export function beijingToDate(parts) {
+  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - 8 * 3600 * 1000);
+}
+
+// 避峰：当前处于高峰（9:00–14:00）→ 顺延到当天 14:00；否则原时刻
+export function deferToOffpeak(date = new Date()) {
+  if (!isPeakHour(date)) return date;
+  const p = beijingParts(date);
+  return beijingToDate({ ...p, hour: 14, minute: 0, second: 0 });
+}
+
+// 北京时间当日 0 点（费用护栏按自然日累计）
+export function beijingDayStart(date = new Date()) {
+  const p = beijingParts(date);
+  return beijingToDate({ ...p, hour: 0, minute: 0, second: 0 });
+}
+
+// —— Batch API 半价计价：批量任务无缓存语义，按闲时全未命中 × 0.5 ——
+export const BATCH_DISCOUNT = 0.5;
+export function estimateBatchCost(modelName, promptTokens, completionTokens) {
+  const pricing = effectivePricing(modelName);
+  if (!pricing) return 0;
+  return ((promptTokens * pricing.offpeak.input + completionTokens * pricing.offpeak.output) / 1e6) * BATCH_DISCOUNT;
 }
 
 // usage 中的缓存拆分（DeepSeek 返回字段）
