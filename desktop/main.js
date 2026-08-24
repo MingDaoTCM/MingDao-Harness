@@ -115,10 +115,18 @@ function buildMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// 图标读取：打包后 build/ 位于 app.asar 内——nativeImage.createFromPath 对 asar 路径
+// 支持不稳定，统一改为读字节 + createFromBuffer（审计：打包版托盘/窗口图标缺失修复）
+function loadIcon(file) {
+  try {
+    return nativeImage.createFromBuffer(fs.readFileSync(path.join(buildRoot, file)));
+  } catch {
+    return null;
+  }
+}
+
 function trayIcon() {
-  const file = path.join(buildRoot, 'tray.png');
-  if (!fs.existsSync(file)) return null;
-  return nativeImage.createFromPath(file);
+  return loadIcon('tray.png');
 }
 
 function buildTray() {
@@ -157,7 +165,7 @@ async function createWindow() {
     autoHideMenuBar: false,
     backgroundColor: '#0b0e14',
     title: 'MingDao Harness',
-    icon: path.join(buildRoot, 'icon.png'),
+    icon: loadIcon('icon.png') || undefined,
     show: false,
     // 权限收紧（审计 MiniMax §2.1）：webview 显式禁用 + 页面 CSP（index.html meta）双重防线
     webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false },

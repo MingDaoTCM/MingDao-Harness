@@ -10,10 +10,13 @@ directories:
   buildResources: build
 
 # 应用内只带主进程壳；src/assets/skills 经 extraResources 随包分发（零 npm 运行时依赖不变）
+# build/icon.png + tray.png 必须打包进 asar：窗口/托盘图标运行时按路径读取，
+# 此前 files 白名单漏掉 build/ → 打包版窗口图标与托盘图标缺失（审计：图标统一修复）
 files:
   - main.js
   - package.json
-  - "!build/tray-16.png"
+  - build/icon.png
+  - build/tray.png
 extraResources:
   - from: ../src
     to: src
@@ -58,6 +61,8 @@ nsis:
   allowToChangeInstallationDirectory: true
   shortcutName: MingDao Harness
   artifactName: mingdao-setup-${version}-${arch}.${ext}
+  installerIcon: build/icon.png # 安装器/卸载器图标与 App Icon 统一（审计：三平台图标统一）
+  uninstallerIcon: build/icon.png
 
 mac:
   target:
