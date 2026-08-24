@@ -61,8 +61,8 @@ nsis:
   allowToChangeInstallationDirectory: true
   shortcutName: MingDao Harness
   artifactName: mingdao-setup-${version}-${arch}.${ext}
-  installerIcon: build/icon.png # 安装器/卸载器图标与 App Icon 统一（审计：三平台图标统一）
-  uninstallerIcon: build/icon.png
+  # 安装器/卸载器图标默认即应用图标（build/icon.png 由 electron-builder 转 ico）——
+  # 曾显式指定 installerIcon: png 导致 NSIS 打包失败（该字段要求 .ico），已移除
 
 mac:
   target:
