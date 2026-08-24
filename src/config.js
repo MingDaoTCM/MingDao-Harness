@@ -33,6 +33,26 @@ export function loadConfig() {
   }
 }
 
+/** 桌面版首次运行：无配置时自动创建最小可用配置（引导在 WebUI 内完成，
+ * 不再要求先去终端跑 mingdao init）。CLI 的 mingdao init 向导不受影响。 */
+export function ensureMinimalConfig() {
+  const existing = loadConfig();
+  if (existing) return existing;
+  ensureHome();
+  const pp = PROVIDERS['deepseek'] || Object.values(PROVIDERS)[0];
+  const model = modelPreset('deepseek-v4-flash') ? 'deepseek-v4-flash' : pp.models[0];
+  const cfg = {
+    provider: 'deepseek',
+    model,
+    baseUrl: pp.baseUrl,
+    permission: 'ask',
+    sandbox: 'off',
+    contextBudget: 128000,
+  };
+  saveConfig(cfg);
+  return cfg;
+}
+
 export function saveConfig(cfg) {
   ensureHome();
   const p = configPath();

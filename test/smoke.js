@@ -394,6 +394,17 @@ const ctx = { cwd: tmp };
     loadCredentials,
   } = await import(pathToFileURL(path.join(srcDir, 'credentials.js')).href);
 
+  // 桌面版首次运行自动初始化（审计）：无配置时建最小可用配置，二次调用幂等不改写
+  {
+    const { ensureMinimalConfig } = await import(pathToFileURL(path.join(srcDir, 'config.js')).href);
+    const c1 = ensureMinimalConfig();
+    assert.ok(c1 && c1.provider === 'deepseek' && c1.model && c1.permission === 'ask', '首次运行应自动创建最小配置');
+    assert.equal('apiKey' in c1, false, '自动初始化不应写入任何密钥');
+    const c2 = ensureMinimalConfig();
+    assert.deepEqual(c2, c1, '已有配置时 ensureMinimalConfig 应原样返回（幂等，不改写用户配置）');
+    fs.rmSync(path.join(home2, 'config.json'), { force: true });
+  }
+
   // config.json 不含任何密钥（可安全分享/提交）
   saveConfig({ provider: 'deepseek', model: 'deepseek-v4-pro', permission: 'ask', contextBudget: 123456 });
   const loaded = loadConfig();

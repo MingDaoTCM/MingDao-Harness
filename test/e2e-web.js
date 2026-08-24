@@ -673,6 +673,14 @@ let base = await startWeb(work1);
   ok('fs-browse：目录树浏览 / 隐藏目录过滤 / 相对路径与非法路径拒绝');
 }
 
+// ---------- 19. /api/state 首次使用引导字段（桌面版自动初始化配套） ----------
+{
+  const st = await (await fetch(base + '/api/state')).json();
+  assert.equal(typeof st.keyReady, 'boolean', 'state 应返回 keyReady 布尔字段');
+  assert.equal(st.keyReady, true, 'e2e 环境已配置 mock 密钥，keyReady 应为 true');
+  ok('state.keyReady：首次使用引导字段（无 Key → 前端显示 ⚙ 设置横幅）');
+}
+
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();

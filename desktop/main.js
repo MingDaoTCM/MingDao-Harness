@@ -48,16 +48,10 @@ async function startServer() {
     app.quit();
     return null;
   }
-  const { loadConfig } = await import(pathToFileURL(path.join(srcRoot, 'config.js')).href);
-  const cfg = loadConfig();
-  if (!cfg) {
-    dialog.showErrorBox(
-      'MingDao Harness',
-      '尚未初始化配置。\n\n请先在终端运行：mingdao init\n（或 mingdao key set deepseek 设置 API Key）后重新打开桌面版。'
-    );
-    app.quit();
-    return null;
-  }
+  const { ensureMinimalConfig } = await import(pathToFileURL(path.join(srcRoot, 'config.js')).href);
+  // 首次运行自动初始化（审计）：无配置时自动建最小可用配置直接进入界面，
+  // API Key 引导在 WebUI 内完成（顶部横幅 + ⚙ 设置），不再要求先跑终端 mingdao init
+  ensureMinimalConfig();
   const port = 40000 + Math.floor(Math.random() * 20000);
   const authToken = crypto.randomBytes(16).toString('hex');
   try {

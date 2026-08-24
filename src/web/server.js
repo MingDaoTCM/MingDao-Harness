@@ -463,6 +463,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         ok: true,
         model: modelName,
         models,
+        // 首次使用引导：当前模型无可用 API Key 时前端显示「去 ⚙ 设置填 Key」横幅
+        keyReady: Boolean((resolveProviderConfig(cfg, modelName) || {}).apiKey),
         permissions: ['ask', 'auto', 'readonly'],
         permission: cfg.permission ?? 'ask',
         sandbox: cfg.sandbox || 'off',

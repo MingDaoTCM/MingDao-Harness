@@ -666,6 +666,10 @@ async function init(){
     $('#notifyChk').checked=j.notify!==false;
     const env = ('路由'+(j.routing?'开':'关')+' · 沙箱'+((j.sandbox&&j.sandbox!=='off')?(j.sandboxSupported?j.sandbox:'降级'):'off'));
     $('#envBadge').textContent=env; $('#envBadge').style.display='';
+    // 首次使用引导：无 API Key 时明确提示去设置（桌面版自动初始化后必走这里）
+    if (j.keyReady === false) {
+      renderBanner({ text: '🔑 欢迎使用 MingDao Harness！还没有配置 API Key：请点击右上角 ⚙ 设置 →「模型与 API Key」选择模型并填入密钥（DeepSeek 平台申请）后即可对话。' });
+    }
   }catch(e){
     const ms=$('#modelSel'); if(!ms.options.length){ const o=document.createElement('option'); o.textContent='加载失败，刷新重试'; ms.appendChild(o); }
   }
