@@ -48,6 +48,12 @@ const mock = http.createServer((req, res) => {
       res.write(`data: ${JSON.stringify(payload)}\n\n`);
       res.end('data: [DONE]\n\n');
     };
+    // 熔断测试标记：问题文本含 SCHEDFAIL 的任务一律 500（模拟持续性故障）
+    if (JSON.stringify(parsed?.messages || []).includes('SCHEDFAIL')) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'mock 故障' } }));
+      return;
+    }
     if (!parsed.tools || !parsed.tools.length) {
       return sse({ choices: [{ delta: { content: '摘要' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } });
     }
@@ -228,6 +234,23 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   assert.ok(String(job.note || '').includes('避峰'), '任务备注应说明避峰');
   await runCli(['schedule', 'remove', m[0]]);
   ok('避峰调度：--offpeak 标记 / 备注说明');
+}
+
+// ---------- 6. 周期任务连续失败熔断（「失败：避峰任务」通知刷屏根因回归） ----------
+{
+  const r = await runCli(['schedule', 'add', '熔断任务 SCHEDFAIL', '--every', '2s']);
+  assert.equal(r.code, 0, r.err);
+  const id = (r.out.match(/已创建\s+(\S+)/) || [])[1];
+  const j = await waitFor(() => {
+    const jj = readJson(jobFile(id));
+    return jj && jj.status === 'failed' ? jj : null;
+  }, 30000);
+  assert.ok(j, '连续失败后应熔断停止（status=failed）');
+  assert.equal(j.runs, 3, '熔断前应恰好运行 3 次（第 3 次失败即停止）');
+  assert.ok((j.consecutiveFailures || 0) >= 3, '应记录连续失败次数');
+  assert.ok(String(j.note || '').includes('已停止'), '备注应说明已停止重试');
+  await runCli(['schedule', 'remove', id]);
+  ok('周期任务熔断：连续 3 次失败自动停止，不再无限重试/无限弹失败通知');
 }
 
 // 清理

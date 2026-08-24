@@ -54,7 +54,7 @@ export function isValidTaskId(id) {
   return typeof id === 'string' && /^[a-z0-9]+$/.test(id) && id.length >= 4 && id.length <= 40;
 }
 
-export function startTask(home, question, { permission, model, cwd, offpeak } = /** @type {any} */ ({})) {
+export function startTask(home, question, { permission, model, cwd, offpeak, quietNotify } = /** @type {any} */ ({})) {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6) + process.pid.toString(36);
   const task = {
     id,
@@ -78,7 +78,8 @@ export function startTask(home, question, { permission, model, cwd, offpeak } = 
     cwd: cwd || process.cwd(),
     detached: true,
     stdio: 'ignore',
-    env: { ...process.env, MINGDAO_HOME: home },
+    // 连续失败的重试轮次静默：只保留首次失败的系统通知，避免右下角刷屏（审计）
+    env: { ...process.env, MINGDAO_HOME: home, ...(quietNotify ? { MINGDAO_TASK_QUIET_NOTIFY: '1' } : {}) },
   });
   task.pid = child.pid;
   writeTask(home, task);

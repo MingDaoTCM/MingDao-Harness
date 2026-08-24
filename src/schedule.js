@@ -342,10 +342,15 @@ export async function runSleeper(home, id) {
       if (st === false) return 'pending';
       if (st === 'failed') return 'skipped';
     }
+    // 连续失败熔断（审计：右下角「失败：避峰任务」通知刷屏根因）——周期任务失败后按原周期
+    // 无限重试且每次失败都弹系统通知；这里记录连续失败次数：重试轮次静默（quietNotify），
+    // 连续 3 次失败由 every 主循环熔断停止
+    const prevFails = Number(readSchedule(home, id)?.consecutiveFailures) || 0;
     const task = startTask(home, job.question, {
       permission: job.permission || undefined,
       model: job.model || undefined,
       cwd: job.cwd || process.cwd(),
+      quietNotify: prevFails >= 1,
     });
     // 轮询 worker 状态直至结束（最长 2 小时）；超时清理 worker 防孤儿（审计 P2-8）
     let t = readTask(home, task.id);
@@ -369,14 +374,16 @@ export async function runSleeper(home, id) {
       text: (t?.text || t?.error || '').slice(0, 200),
     });
     if (history.length > 50) history.shift();
+    const result = t?.status === 'done' ? 'done' : t?.status === 'timedout' ? 'timedout' : 'failed';
     writeSchedule(home, {
       ...cur0,
       lastRunAt: Date.now(),
       lastTaskId: task.id,
       runs: (cur0?.runs || 0) + 1,
       history,
+      consecutiveFailures: result === 'done' ? 0 : prevFails + 1,
     });
-    return t?.status === 'done' ? 'done' : t?.status === 'timedout' ? 'timedout' : 'failed';
+    return result;
   };
 
   for (;;) {
@@ -389,9 +396,18 @@ export async function runSleeper(home, id) {
         continue;
       }
       writeSchedule(home, { ...cur, status: 'running' });
-      await runOnce();
+      const result = await runOnce();
       const cur2 = readSchedule(home, id);
       if (!cur2) return;
+      // 连续失败熔断（审计：通知刷屏修复）——3 次失败即停止，避免无限重试 + 无限弹通知
+      if (result !== 'done' && (cur2.consecutiveFailures || 0) >= 3) {
+        writeSchedule(home, {
+          ...cur2,
+          status: 'failed',
+          note: '连续失败 3 次已停止重试：请检查 API Key / 模型 / 网络（mingdao schedule list 查看历史）',
+        });
+        return;
+      }
       // 下次 = 完成时间 + 周期（不追赶错过的档期）；有每日锚点时对齐锚点，避免逐日漂移
       const next = cur2.anchor ? nextAnchorAfter(cur2.anchor, cur2.interval) || Date.now() + cur2.interval : Date.now() + cur2.interval;
       writeSchedule(home, { ...cur2, status: 'pending', nextRunAt: next });

@@ -266,14 +266,14 @@ async function runWorkerTask(id, question, { permission, model, offpeak }) {
       session: path.basename(session.file),
       note,
     });
-    if (cfg.notify !== false) notifyTaskDone(question, finalStatus === 'killed' ? 'failed' : finalStatus);
+    if (cfg.notify !== false && !process.env.MINGDAO_TASK_QUIET_NOTIFY) notifyTaskDone(question, finalStatus === 'killed' ? 'failed' : finalStatus);
     try {
       await maybeAutoSync();
     } catch {}
     process.exitCode = res.truncated ? 1 : 0;
   } catch (err) {
     finish({ status: 'failed', error: String(err?.message || err) });
-    if (cfg?.notify !== false) notifyTaskDone(question, 'failed');
+    if (cfg?.notify !== false && !process.env.MINGDAO_TASK_QUIET_NOTIFY) notifyTaskDone(question, 'failed');
     process.exitCode = 2;
   } finally {
     if (mcpFacade) mcpFacade.stop();
@@ -377,14 +377,30 @@ async function main() {
   // 单守护进程调度器（评估 P3-5）：一进程监督全部调度任务（协程复用 runSleeper），无任务自动退出
   if (opts.prompt[0] === 'schedule-daemon') {
     const home0 = ensureHome();
-    const { listSchedules, runSleeper, sleeperAlive, daemonPidFile } = await import('./schedule.js');
+    const { listSchedules, runSleeper, sleeperAlive, daemonPidFile, writeSchedule } = await import('./schedule.js');
     const { readTask } = await import('./tasks.js');
     const handled = new Set();
+    const supervising = new Set(); // 本 daemon 正在监督的任务（防崩溃恢复误判正在执行的任务）
     try {
       for (;;) {
         const jobs = listSchedules(home0);
         if (!jobs.some((j) => j.status === 'pending' || j.status === 'running')) break;
         for (const j of jobs) {
+          // 崩溃恢复（审计）：'running' 但无人监督且 worker 已死 → 按任务结果定案或重新排队，
+          // 避免任务永久卡在 running（此前 daemon 重启后既不重跑也不收尾）
+          if (j.status === 'running' && !supervising.has(j.id) && !sleeperAlive(j.pid)) {
+            const t = j.lastTaskId ? readTask(home0, j.lastTaskId) : null;
+            if (!t) {
+              await writeSchedule(home0, { ...j, status: 'pending' });
+              continue;
+            }
+            if (t.status !== 'running') {
+              const result = t.status === 'done' ? 'done' : t.status === 'timedout' ? 'timedout' : 'failed';
+              await writeSchedule(home0, { ...j, status: result, lastRunAt: t.startedAt || j.lastRunAt, runs: (j.runs || 0) + 1 });
+              continue;
+            }
+            continue; // worker 仍在跑：等它（外层 2s 轮询）
+          }
           if (j.status !== 'pending' || handled.has(j.id)) continue;
           if (sleeperAlive(j.pid)) continue; // 旧式 sleeper 仍在：交回给它，避免双跑
           if (j.lastTaskId) {
@@ -392,9 +408,13 @@ async function main() {
             if (t && t.status === 'running') continue; // worker 仍在跑（异常窗口），不重拉
           }
           handled.add(j.id);
+          supervising.add(j.id);
           runSleeper(home0, j.id)
             .catch(() => {})
-            .finally(() => handled.delete(j.id));
+            .finally(() => {
+              handled.delete(j.id);
+              supervising.delete(j.id);
+            });
         }
         await new Promise((r) => setTimeout(r, 2000));
       }
