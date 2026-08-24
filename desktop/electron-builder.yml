@@ -76,9 +76,12 @@ linux:
   target:
     - AppImage
     - deb
+  # 审计（桌面图标两个齿根因）：app-builder 对单张 PNG 的尺寸检测返回 0，deb/AppImage 把
+  # 图标装进 hicolor/0x0/（主题查不到 → 回退通用齿轮图标）。改用「尺寸命名目录」后
+  # app-builder 按文件名取尺寸（16..512 七档），.desktop Icon=mingdao 正常命中。
+  icon: build/icons
   category: Development
   maintainer: MingDaoTCM
-  icon: build/icon.png
   artifactName: mingdao-${version}-${arch}.${ext}
 
 dmg:
