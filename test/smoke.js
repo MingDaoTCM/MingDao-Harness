@@ -1936,6 +1936,26 @@ const ctx = { cwd: tmp };
   ok('质检回归：坏时区兜底 / 索引子词 / 首推冲突语义');
 }
 
+// ---------- 34. Web 服务器无密钥启动（黑屏根因回归护栏） ----------
+// 桌面版首次运行 = 自动初始化后的无密钥状态：此前 runWebServer 直接退出，
+// 窗口加载不到服务 → 整窗黑屏、无任何提示。必须：服务照常启动 + keyReady=false。
+{
+  const jhome = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-keyless-'));
+  process.env.MINGDAO_HOME = jhome;
+  saveConfig({ provider: 'deepseek', model: 'deepseek-v4-flash', permission: 'ask', sandbox: 'off', contextBudget: 128000 });
+  const { runWebServer } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
+  const srv = await runWebServer({ host: '127.0.0.1', port: 45972, authToken: null });
+  assert.ok(srv, '无密钥时服务器必须正常启动（此前直接退出 → 桌面版黑屏）');
+  const st = await (await fetch('http://127.0.0.1:45972/api/state')).json();
+  assert.equal(st.ok, true, '/api/state 应正常返回');
+  assert.equal(st.keyReady, false, '无密钥时 keyReady 应为 false（前端显示 ⚙ 设置引导横幅）');
+  assert.ok(Array.isArray(st.models), '无密钥时模型列表应为数组（含当前模型占位）');
+  await new Promise((r) => srv.close(r));
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(jhome, { recursive: true, force: true });
+  ok('web 无密钥启动：服务正常 / keyReady=false / 模型占位（黑屏回归护栏）');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 fs.rmSync(smokeHome, { recursive: true, force: true });

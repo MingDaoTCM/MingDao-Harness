@@ -156,9 +156,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   let modelName = cfg.model || 'deepseek-v4-flash';
   const pc = resolveProviderConfig(cfg, modelName);
   if (!pc.apiKey) {
-    console.error(`[MingDao] 未找到 API Key：请运行 mingdao key set ${pc.name} 或 mingdao init`);
-    process.exitCode = 1;
-    return;
+    // 首次运行/未配置密钥：界面照常启动（黑屏根因修复——此前这里直接 return，桌面版窗口
+    // 加载不到任何服务 → 整窗黑屏且无提示）。⚙ 设置里填入 Key 后即可对话。
+    console.error(`[MingDao] ⚠ 未配置 ${modelName} 的 API Key：界面可正常使用，对话前请在 ⚙ 设置 →「模型与 API Key」填入密钥。`);
   }
 
   let workingDir = process.cwd(); // 工作空间切换时随之更新（后续会话/工具都跟随新目录）
@@ -298,6 +298,10 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     const permission = createPermission(cfg.permission ?? 'ask', io);
     let providerNow;
     try {
+      // 首次使用引导：未配置密钥时给明确指引，而不是晦涩的 401 原始报错
+      if (!(resolveProviderConfig(cfg, runModel) || {}).apiKey) {
+        throw new Error(`模型 ${runModel} 尚未配置 API Key：请点击右上角 ⚙ 设置 →「模型与 API Key」填入密钥。`);
+      }
       providerNow = await getProviderFor(runModel); // 审计 P1-1：失败时清理任务占位，避免僵尸 running 耗尽并发
     } catch (err) {
       entry.status = 'failed';
