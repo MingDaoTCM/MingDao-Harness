@@ -306,6 +306,39 @@ if (AUTH_TOKEN) {
   };
 }
 const $ = (s) => document.querySelector(s);
+
+// —— 弹窗三件套（Electron 不实现 window.prompt/confirm/alert：prompt 恒返回 null、confirm 恒 false、
+// alert 静默无反应——桌面版「⚙ 设置里点设Key 没反应」即由此而来）。统一替换为应用内模态框。
+function modalBox(inner){
+  const mask=document.createElement('div'); mask.className='modal-mask';
+  const m=document.createElement('div'); m.className='modal'; m.innerHTML=inner;
+  mask.appendChild(m); document.body.appendChild(mask);
+  return {mask, m};
+}
+function uiPrompt(title, def, opts){
+  opts=opts||{};
+  return new Promise((resolve)=>{
+    const {mask, m}=modalBox('<h3>'+esc(String(title??''))+'</h3><input class="uiPromptInput" '+(opts.hidden?'type="password" ':'')+'style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:8px 10px;font-size:13.5px;margin-top:10px"><div class="row" style="margin-top:12px"><button class="danger" data-a="c">取消</button><button class="primary" data-a="y">确定</button></div>');
+    const inp=m.querySelector('input');
+    if(def!==undefined&&def!==null) inp.value=String(def);
+    const done=(v)=>{ mask.remove(); resolve(v); };
+    m.querySelector('[data-a=y]').onclick=()=>done(inp.value);
+    m.querySelector('[data-a=c]').onclick=()=>done(null);
+    inp.addEventListener('keydown',(e)=>{ if(e.key==='Enter') done(inp.value); if(e.key==='Escape') done(null); });
+    setTimeout(()=>inp.focus(),0);
+  });
+}
+function uiConfirm(title){
+  return new Promise((resolve)=>{
+    const {mask, m}=modalBox('<h3>'+esc(String(title??''))+'</h3><div class="row" style="margin-top:12px"><button class="danger" data-a="c">取消</button><button class="primary" data-a="y">确定</button></div>');
+    m.querySelector('[data-a=y]').onclick=()=>{ mask.remove(); resolve(true); };
+    m.querySelector('[data-a=c]').onclick=()=>{ mask.remove(); resolve(false); };
+  });
+}
+function uiAlert(title){
+  const {mask, m}=modalBox('<h3>'+esc(String(title??''))+'</h3><div class="row" style="margin-top:12px"><button class="primary" data-a="y">确定</button></div>');
+  m.querySelector('[data-a=y]').onclick=()=>mask.remove();
+}
 // —— 目录选择器（新建工作空间 / 改目录）：浏览服务器磁盘目录树 ——
 let pickerCb = null, pickerDir = '/';
 function loadDirList(){
@@ -515,17 +548,17 @@ let attachments=[];
 $('#attachBtn').onclick=()=>{ $('#fileInput').click(); };
 $('#fileInput').addEventListener('change', async e=>{
   for(const f of e.target.files||[]){
-    if(attachments.length>=4){ alert('最多 4 个附件'); break; }
+    if(attachments.length>=4){ uiAlert('最多 4 个附件'); break; }
     if(f.type.startsWith('image/')){
-      if(f.size>5*1024*1024){ alert(f.name+' 超过 5MB'); continue; }
+      if(f.size>5*1024*1024){ uiAlert(f.name+' 超过 5MB'); continue; }
       const dataUrl=await new Promise(r=>{ const fr=new FileReader(); fr.onload=()=>r(fr.result); fr.readAsDataURL(f); });
       attachments.push({type:'image',name:f.name,dataUrl});
     }else if(f.type.startsWith('text/')||/\.(txt|md|json|js|py|log|csv|html|css)$/i.test(f.name)){
-      if(f.size>200*1024){ alert(f.name+' 超过 200KB'); continue; }
+      if(f.size>200*1024){ uiAlert(f.name+' 超过 200KB'); continue; }
       const content=await new Promise(r=>{ const fr=new FileReader(); fr.onload=()=>r(fr.result); fr.readAsText(f); });
       attachments.push({type:'text',name:f.name,content});
     }else{
-      alert(f.name+'：暂只支持图片与文本文件');
+      uiAlert(f.name+'：暂只支持图片与文本文件');
     }
   }
   e.target.value='';
@@ -702,11 +735,11 @@ async function refreshWsSel(){
 $('#wsSel').addEventListener('change', async e=>{
   const v=e.target.value;
   if(v==='__add__'){
-    const name=prompt('新工作空间名称：'); if(!name){ refreshWsSel(); return; }
+    const name=await uiPrompt('新工作空间名称：'); if(!name){ refreshWsSel(); return; }
     openDirPicker(null, (dir)=>{
       fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',name,dir:dir||undefined})})
         .then((r)=>r.json()).then((j)=>{
-          if(j.ok) renderBanner({text:'✓ 已登记工作空间 '+j.name+' → '+j.dir+'（目录已自动创建）'}); else alert(j.error||'创建失败');
+          if(j.ok) renderBanner({text:'✓ 已登记工作空间 '+j.name+' → '+j.dir+'（目录已自动创建）'}); else uiAlert(j.error||'创建失败');
           refreshWsSel(); reloadModels();
         });
     });
@@ -723,7 +756,7 @@ $('#wsSel').addEventListener('change', async e=>{
     if(currentSession) payload.file=currentSession;
     const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     const j=await r.json().catch(()=>({error:'请求失败'}));
-    if(j.ok) renderBanner({text:'✓ 已切换到工作空间 '+j.name+'（'+j.dir+'），后续工具在此目录执行'}); else { alert(j.error||'切换失败'); }
+    if(j.ok) renderBanner({text:'✓ 已切换到工作空间 '+j.name+'（'+j.dir+'），后续工具在此目录执行'}); else { uiAlert(j.error||'切换失败'); }
     refreshWsSel(); reloadModels();
   }
 });
@@ -752,11 +785,11 @@ $('#schAdd').onclick=async ()=>{
   if($('#schOffpeak').checked) payload.offpeak=true;
   if(kind==='at'){ const v=$('#schAt').value; if(!v) return; payload.at=v.replace('T',' '); }
   else if(kind==='every'){ payload.every=$('#schEvery').value; }
-  else if(kind==='chain'){ const v=$('#schChain').value.trim(); if(!v) return; const qs=v.split('\n').map(x=>x.trim()).filter(Boolean); if(qs.length<2){ alert('链式需要至少两行任务'); return; } payload.action='chain'; payload.questions=qs; }
+  else if(kind==='chain'){ const v=$('#schChain').value.trim(); if(!v) return; const qs=v.split('\n').map(x=>x.trim()).filter(Boolean); if(qs.length<2){ uiAlert('链式需要至少两行任务'); return; } payload.action='chain'; payload.questions=qs; }
   else { const v=$('#schAfter').value.trim(); if(!v) return; payload.after=[v]; }
   const r=await fetch('/api/schedule',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const j=await r.json().catch(()=>({error:'请求失败'}));
-  if(j.ok){ $('#schQuestion').value=''; refreshSchList(); } else { alert(j.error||'添加失败'); }
+  if(j.ok){ $('#schQuestion').value=''; refreshSchList(); } else { uiAlert(j.error||'添加失败'); }
 };
 // —— 工作空间 ——
 async function refreshWorkspaces(){
@@ -766,9 +799,9 @@ async function refreshWorkspaces(){
   for(const w of j.workspaces){
     const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px';
     div.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(w.name)+(w.name===j.current?' <span style="color:var(--accent)">●当前</span>':'')+'</span><span style="flex:1.4;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left">'+esc(w.dir||'')+'</span>';
-    const ed=document.createElement('button'); ed.textContent='改目录'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=()=>{ openDirPicker(w.dir||null, async (d)=>{ if(d==null) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'set',name:w.name,dir:d})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshWorkspaces(); refreshWsSel(); reloadModels(); } else alert(jj.error||'修改失败'); }); };
-    const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=prompt('新名称：', w.name); if(!t) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',name:w.name,newName:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshWorkspaces(); refreshWsSel(); } else alert(jj.error||'重命名失败'); };
-    const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!confirm('删除工作空间 '+w.name+'？')) return; await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',name:w.name})}); refreshWorkspaces(); refreshWsSel(); reloadModels(); };
+    const ed=document.createElement('button'); ed.textContent='改目录'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=()=>{ openDirPicker(w.dir||null, async (d)=>{ if(d==null) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'set',name:w.name,dir:d})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshWorkspaces(); refreshWsSel(); reloadModels(); } else uiAlert(jj.error||'修改失败'); }); };
+    const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=await uiPrompt('新名称：', w.name); if(!t) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',name:w.name,newName:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshWorkspaces(); refreshWsSel(); } else uiAlert(jj.error||'重命名失败'); };
+    const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!await uiConfirm('删除工作空间 '+w.name+'？')) return; await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',name:w.name})}); refreshWorkspaces(); refreshWsSel(); reloadModels(); };
     div.appendChild(ed); div.appendChild(rn); div.appendChild(rm); list.appendChild(div);
   }
 }
@@ -777,7 +810,7 @@ $('#wsAdd').onclick=async ()=>{
   const dir=$('#wsDir').value.trim();
   const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',name,dir})});
   const j=await r.json().catch(()=>({error:'请求失败'}));
-  if(j.ok){ $('#wsName').value=''; $('#wsDir').value=''; refreshWorkspaces(); refreshWsSel(); reloadModels(); } else alert(j.error||'添加失败');
+  if(j.ok){ $('#wsName').value=''; $('#wsDir').value=''; refreshWorkspaces(); refreshWsSel(); reloadModels(); } else uiAlert(j.error||'添加失败');
 };
 // —— 长期记忆 ——
 function memFlash(msg, good){ const m=$('#memMsg'); m.textContent=msg; m.style.color=good?'var(--accent)':'var(--err)'; setTimeout(()=>{m.textContent='';},4000); }
@@ -833,7 +866,7 @@ $('#mcpAdd').onclick=async ()=>{
   const arg=$('#mcpArg').value.trim();
   const r=await fetch('/api/mcp-presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,arg})});
   const j=await r.json().catch(()=>({error:'请求失败'}));
-  if(j.ok) alert('✓ 已接入 '+name+'（重启 mingdao web 后生效，/mcp 查看状态）'); else alert(j.error||'接入失败');
+  if(j.ok) uiAlert('✓ 已接入 '+name+'（重启 mingdao web 后生效，/mcp 查看状态）'); else uiAlert(j.error||'接入失败');
 };
 // —— 技能库 ——
 let skillSearchTimer=null;
@@ -863,7 +896,7 @@ async function refreshSkillLib(q, force){
       const body=s.installed?{action:'uninstall',name:s.name}:{action:'install',name:s.name};
       const rr=await fetch('/api/skills',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
       const jj=await rr.json().catch(()=>({error:'请求失败'}));
-      if(jj.ok) refreshSkillLib($('#skillSearch').value.trim()); else alert(jj.error||'操作失败');
+      if(jj.ok) refreshSkillLib($('#skillSearch').value.trim()); else uiAlert(jj.error||'操作失败');
     };
     div.appendChild(b); list.appendChild(div);
   }
@@ -895,9 +928,9 @@ async function refreshModelsCfg(){
     const state=p.keyState==='stored'?'<span style="color:var(--accent)">已存 '+esc(p.keyMasked||'')+'</span>':p.keyState==='env'?'<span style="color:var(--dim)">环境变量 '+esc(p.envKey||'')+'</span>':'<span style="color:var(--err)">未设置</span>';
     div.innerHTML='<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><b>'+esc(p.name)+'</b> '+esc(p.label)+'</span><span style="white-space:nowrap">'+state+'</span>';
     const set=document.createElement('button'); set.textContent='设Key'; set.style.cssText='padding:1px 8px;font-size:11px';
-    set.onclick=async()=>{ const k=prompt('API Key（'+p.name+'）：'); if(k===null) return; const rr=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setProviderKey',provider:p.name,key:k})}); const jj=await rr.json().catch(()=>({error:'请求失败'})); if(jj.ok){ refreshModelsCfg(); reloadModels(); if(jj.modelsNote) alert(jj.modelsNote); } else alert(jj.error||'设置失败'); };
-    if(p.keyState==='stored'&&p.name!=='custom'){ const rf=document.createElement('button'); rf.textContent='刷新模型'; rf.style.cssText='padding:1px 8px;font-size:11px'; rf.onclick=async()=>{ const rr=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'refreshModels',provider:p.name})}); const jj=await rr.json().catch(()=>({error:'请求失败'})); if(jj.ok){ reloadModels(); alert('✓ 已拉取 '+jj.models.length+' 个线上模型'+(jj.fromCache?'（缓存）':'')); } else alert(jj.error||'刷新失败'); }; div.appendChild(rf); }
-    if(p.keyState==='stored'){ const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!confirm('删除 '+p.name+' 的 Key？')) return; await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'removeProviderKey',provider:p.name})}); refreshModelsCfg(); reloadModels(); }; div.appendChild(rm); }
+    set.onclick=async()=>{ const k=await uiPrompt('API Key（'+p.name+'）：', null, {hidden:true}); if(k===null) return; const rr=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setProviderKey',provider:p.name,key:k})}); const jj=await rr.json().catch(()=>({error:'请求失败'})); if(jj.ok){ refreshModelsCfg(); reloadModels(); if(jj.modelsNote) uiAlert(jj.modelsNote); } else uiAlert(jj.error||'设置失败'); };
+    if(p.keyState==='stored'&&p.name!=='custom'){ const rf=document.createElement('button'); rf.textContent='刷新模型'; rf.style.cssText='padding:1px 8px;font-size:11px'; rf.onclick=async()=>{ const rr=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'refreshModels',provider:p.name})}); const jj=await rr.json().catch(()=>({error:'请求失败'})); if(jj.ok){ reloadModels(); uiAlert('✓ 已拉取 '+jj.models.length+' 个线上模型'+(jj.fromCache?'（缓存）':'')); } else uiAlert(jj.error||'刷新失败'); }; div.appendChild(rf); }
+    if(p.keyState==='stored'){ const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!await uiConfirm('删除 '+p.name+' 的 Key？')) return; await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'removeProviderKey',provider:p.name})}); refreshModelsCfg(); reloadModels(); }; div.appendChild(rm); }
     div.appendChild(set); pk.appendChild(div);
   }
   const cl=$('#cmList'); cl.innerHTML='';
@@ -906,9 +939,9 @@ async function refreshModelsCfg(){
     const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px';
     const kstate=c.keyState==='stored'?'<span style="color:var(--accent)">'+esc(c.keyMasked||'')+'</span>':'<span style="color:var(--err)">无Key</span>';
     div.innerHTML='<span style="flex:1;min-width:0"><b>'+esc(c.name)+'</b> <span style="color:var(--faint)">'+esc(c.label)+' · '+esc(c.baseUrl)+'</span></span><span style="white-space:nowrap">'+kstate+'</span>';
-    const sk=document.createElement('button'); sk.textContent='设Key'; sk.style.cssText='padding:1px 8px;font-size:11px'; sk.onclick=()=>{ const k=prompt('API Key（'+c.name+'）：'); if(k===null) return; fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setCustomKey',name:c.name,key:k})}).then(rr=>rr.json()).then(jj=>{ if(jj.ok) refreshModelsCfg(); else alert(jj.error||'设置失败'); }); };
-    const ed=document.createElement('button'); ed.textContent='修改'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=()=>{ const u=prompt('API 地址：', c.baseUrl); if(u===null) return; const l=prompt('标签：', c.label); if(l===null) return; fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'updateCustom',name:c.name,baseUrl:u,label:l})}).then(rr=>rr.json()).then(jj=>{ if(jj.ok){ refreshModelsCfg(); reloadModels(); } else alert(jj.error||'修改失败'); }); };
-    const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!confirm('删除自定义模型 '+c.name+'？')) return; const rr=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'removeCustom',name:c.name})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshModelsCfg(); reloadModels(); } else alert(jj.error||'删除失败'); };
+    const sk=document.createElement('button'); sk.textContent='设Key'; sk.style.cssText='padding:1px 8px;font-size:11px'; sk.onclick=async()=>{ const k=await uiPrompt('API Key（'+c.name+'）：', null, {hidden:true}); if(k===null) return; fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setCustomKey',name:c.name,key:k})}).then(rr=>rr.json()).then(jj=>{ if(jj.ok) refreshModelsCfg(); else uiAlert(jj.error||'设置失败'); }); };
+    const ed=document.createElement('button'); ed.textContent='修改'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=async()=>{ const u=await uiPrompt('API 地址：', c.baseUrl); if(u===null) return; const l=await uiPrompt('标签：', c.label); if(l===null) return; fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'updateCustom',name:c.name,baseUrl:u,label:l})}).then(rr=>rr.json()).then(jj=>{ if(jj.ok){ refreshModelsCfg(); reloadModels(); } else uiAlert(jj.error||'修改失败'); }); };
+    const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!await uiConfirm('删除自定义模型 '+c.name+'？')) return; const rr=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'removeCustom',name:c.name})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshModelsCfg(); reloadModels(); } else uiAlert(jj.error||'删除失败'); };
     div.appendChild(sk); div.appendChild(ed); div.appendChild(rm); cl.appendChild(div);
   }
   $('#baseUrlOverride').value=j.baseUrlOverride||'';
@@ -916,15 +949,15 @@ async function refreshModelsCfg(){
 $('#cmAdd').onclick=async ()=>{
   const name=$('#cmName').value.trim();
   const url=$('#cmUrl').value.trim();
-  if(!name||!url){ alert('模型名与 API 地址必填'); return; }
+  if(!name||!url){ uiAlert('模型名与 API 地址必填'); return; }
   const r=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'addCustom',name,label:$('#cmLabel').value.trim(),baseUrl:url,key:$('#cmKey').value})});
   const j=await r.json().catch(()=>({error:'请求失败'}));
-  if(j.ok){ $('#cmName').value=''; $('#cmLabel').value=''; $('#cmUrl').value=''; $('#cmKey').value=''; refreshModelsCfg(); reloadModels(); } else alert(j.error||'添加失败');
+  if(j.ok){ $('#cmName').value=''; $('#cmLabel').value=''; $('#cmUrl').value=''; $('#cmKey').value=''; refreshModelsCfg(); reloadModels(); } else uiAlert(j.error||'添加失败');
 };
 $('#baseUrlSave').onclick=async ()=>{
   const r=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setBaseUrl',baseUrl:$('#baseUrlOverride').value.trim()})});
   const j=await r.json().catch(()=>({error:'请求失败'}));
-  if(j.ok) alert('✓ API 地址已保存（立即生效）'); else alert(j.error||'保存失败');
+  if(j.ok) uiAlert('✓ API 地址已保存（立即生效）'); else uiAlert(j.error||'保存失败');
 };
 // —— 云同步 ——
 async function refreshSyncUI(){
@@ -943,15 +976,15 @@ async function refreshSyncUI(){
 }
 $('#syncLogin').onclick=async ()=>{
   const url=$('#syncUrl').value.trim(); const username=$('#syncUser').value.trim(); const password=$('#syncPass').value;
-  if(!url||!username||!password){ alert('服务器地址、用户名、密码均必填'); return; }
+  if(!url||!username||!password){ uiAlert('服务器地址、用户名、密码均必填'); return; }
   const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'login',url,username,password,deviceName:$('#syncDevice').value.trim()})});
   const j=await r.json().catch(()=>({error:'请求失败'}));
-  if(j.ok){ $('#syncPass').value=''; refreshSyncUI(); } else alert(j.error||'登录失败');
+  if(j.ok){ $('#syncPass').value=''; refreshSyncUI(); } else uiAlert(j.error||'登录失败');
 };
 $('#syncPush').onclick=async ()=>{
   const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'push'})});
   const j=await r.json().catch(()=>({error:'请求失败'}));
-  alert(j.ok?('✓ 已推送 '+j.pushed+' 个会话'+(j.conflicts?'，'+j.conflicts+' 个远端版本已备份 .server-*':'')):j.error);
+  uiAlert(j.ok?('✓ 已推送 '+j.pushed+' 个会话'+(j.conflicts?'，'+j.conflicts+' 个远端版本已备份 .server-*':'')):j.error);
   refreshSyncUI(); refreshSyncConflicts();
 };
 $('#syncLogout').onclick=async ()=>{ await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'logout'})}); refreshSyncUI(); };
@@ -966,7 +999,7 @@ async function refreshSyncShares(){
       const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:4px 0;border-bottom:1px solid var(--border);font-size:12px';
       div.innerHTML='<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><b>'+esc(s.shareId)+'</b> <span style="color:var(--faint)">'+esc(s.name)+' · 被接受 '+s.pulls+' 次</span></span>';
       const b=document.createElement('button'); b.textContent='撤销'; b.className='danger'; b.style.cssText='padding:1px 8px;font-size:11px';
-      b.onclick=async()=>{ const rr=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'unshare',shareId:s.shareId})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok) refreshSyncShares(); else alert(jj.error||'撤销失败'); };
+      b.onclick=async()=>{ const rr=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'unshare',shareId:s.shareId})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok) refreshSyncShares(); else uiAlert(jj.error||'撤销失败'); };
       div.appendChild(b); ml.appendChild(div);
     }
   } else { ml.innerHTML='<div style="color:var(--faint);font-size:12px;padding:4px 2px">暂无分享（分享后此处显示分享码）</div>'; }
@@ -980,23 +1013,23 @@ async function refreshSyncShares(){
   } else { al.innerHTML='<div style="color:var(--faint);font-size:12px;padding:4px 2px">未接受任何分享</div>'; }
 }
 $('#shareCreate').onclick=async ()=>{
-  const name=$('#shareName').value.trim(); if(!name){ alert('输入会话文件名'); return; }
+  const name=$('#shareName').value.trim(); if(!name){ uiAlert('输入会话文件名'); return; }
   const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'share',name})});
   const j=await r.json().catch(()=>({error:'请求失败'}));
-  if(j.ok){ $('#shareName').value=''; refreshSyncShares(); } else alert(j.error||'创建失败');
+  if(j.ok){ $('#shareName').value=''; refreshSyncShares(); } else uiAlert(j.error||'创建失败');
 };
 $('#shareAccept').onclick=async ()=>{
-  const code=$('#acceptCode').value.trim(); if(!code){ alert('输入分享码'); return; }
+  const code=$('#acceptCode').value.trim(); if(!code){ uiAlert('输入分享码'); return; }
   const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'accept',shareId:code})});
   const j=await r.json().catch(()=>({error:'请求失败'}));
-  if(j.ok){ $('#acceptCode').value=''; refreshSyncShares(); refreshSessions(); } else alert(j.error||'接受失败');
+  if(j.ok){ $('#acceptCode').value=''; refreshSyncShares(); refreshSessions(); } else uiAlert(j.error||'接受失败');
 };
 $('#passwdBtn').onclick=async ()=>{
   const oldPass=$('#oldPass').value, newPass=$('#newPass').value;
-  if(!oldPass||!newPass){ alert('旧密码与新密码均必填'); return; }
+  if(!oldPass||!newPass){ uiAlert('旧密码与新密码均必填'); return; }
   const r=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'passwd',oldPassword:oldPass,newPassword:newPass})});
   const j=await r.json().catch(()=>({error:'请求失败'}));
-  if(j.ok){ $('#oldPass').value=''; $('#newPass').value=''; alert('✓ 密码已修改'); } else alert(j.error||'修改失败');
+  if(j.ok){ $('#oldPass').value=''; $('#newPass').value=''; uiAlert('✓ 密码已修改'); } else uiAlert(j.error||'修改失败');
 };
 async function refreshSyncConflicts(){
   const r=await fetch('/api/sync-conflicts',{cache:'no-store'}).catch(()=>null); if(!r) return;
@@ -1005,7 +1038,7 @@ async function refreshSyncConflicts(){
   for(const c of j.conflicts){
     const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px';
     div.innerHTML='<span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(c.base)+' <span style="color:var(--faint)">'+(c.localExists?'本地有':'本地无')+' · 备份 '+c.entries.length+'</span></span>';
-    const mk=(label,choice,cls)=>{ const b=document.createElement('button'); b.textContent=label; if(cls) b.className=cls; b.style.cssText='padding:1px 8px;font-size:11px'; b.onclick=async()=>{ const rr=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'resolveConflict',base:c.base,choice})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok) refreshSyncConflicts(); else alert(jj.error||'解决失败'); }; return b; };
+    const mk=(label,choice,cls)=>{ const b=document.createElement('button'); b.textContent=label; if(cls) b.className=cls; b.style.cssText='padding:1px 8px;font-size:11px'; b.onclick=async()=>{ const rr=await fetch('/api/sync',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'resolveConflict',base:c.base,choice})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok) refreshSyncConflicts(); else uiAlert(jj.error||'解决失败'); }; return b; };
     div.appendChild(mk('保留本地','local')); div.appendChild(mk('采用远端','remote','danger')); div.appendChild(mk('都保留','both'));
     list.appendChild(div);
   }
@@ -1049,8 +1082,8 @@ async function openSessModal(){
   for(const s of j.sessions){
     const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12.5px';
     div.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.label)+'</span>';
-    const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=prompt('新标题：', s.file.replace(/\.jsonl$/,'')); if(!t) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',file:s.file,title:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshSessions(); openSessModal(); } else alert(jj.error||'重命名失败'); };
-    const dl=document.createElement('button'); dl.textContent='删除'; dl.className='danger'; dl.style.cssText='padding:1px 8px;font-size:11px'; dl.onclick=async()=>{ if(!confirm('删除会话 '+s.file+'？此操作不可恢复。')) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',file:s.file})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ if(currentSession===s.file) currentSession=null; refreshSessions(); openSessModal(); } else alert(jj.error||'删除失败'); };
+    const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=await uiPrompt('新标题：', s.file.replace(/\.jsonl$/,'')); if(!t) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',file:s.file,title:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshSessions(); openSessModal(); } else uiAlert(jj.error||'重命名失败'); };
+    const dl=document.createElement('button'); dl.textContent='删除'; dl.className='danger'; dl.style.cssText='padding:1px 8px;font-size:11px'; dl.onclick=async()=>{ if(!await uiConfirm('删除会话 '+s.file+'？此操作不可恢复。')) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',file:s.file})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ if(currentSession===s.file) currentSession=null; refreshSessions(); openSessModal(); } else uiAlert(jj.error||'删除失败'); };
     div.appendChild(rn); div.appendChild(dl); list.appendChild(div);
   }
 }
