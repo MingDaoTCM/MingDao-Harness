@@ -892,7 +892,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       }
     }
     if (req.method === 'GET' && p === '/api/workspaces') {
-      json(res, 200, { ok: true, workspaces: listWorkspaces(), current: currentWorkspace(workingDir)?.name || null });
+      json(res, 200, { ok: true, workspaces: listWorkspaces(), current: currentWorkspace(workingDir)?.name || null, cwd: workingDir });
       return;
     }
     if (req.method === 'POST' && p === '/api/workspaces') {
@@ -943,6 +943,27 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         return json(res, 200, { ok: removeWorkspace(name) });
       }
       return json(res, 400, { error: '未知操作：add|rename|set|remove' });
+    }
+    // 目录浏览器（「新建工作空间」选择电脑磁盘目录用）：本机运行时即用户电脑的目录树；
+    // 只列子目录（不含隐藏目录），供前端逐级导航选择
+    if (req.method === 'GET' && p === '/api/fs-browse') {
+      let dir = String(url.searchParams.get('dir') || '').trim();
+      if (!path.isAbsolute(dir)) return json(res, 400, { error: '需要绝对路径' });
+      try {
+        const st = fs.statSync(dir);
+        if (!st.isDirectory()) return json(res, 400, { error: '不是目录' });
+        const entries = fs
+          .readdirSync(dir, { withFileTypes: true })
+          .filter((e) => e.isDirectory() && !e.name.startsWith('.'))
+          .map((e) => ({ name: e.name, path: path.join(dir, e.name) }))
+          .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+          .slice(0, 300);
+        const parent = path.dirname(dir);
+        json(res, 200, { ok: true, path: dir, parent: parent === dir ? null : parent, entries });
+      } catch (err) {
+        json(res, 400, { error: String(err?.message || err) });
+      }
+      return;
     }
     if (req.method === 'GET' && p === '/api/memory') {
       json(res, 200, { ok: true, content: loadMemory() });

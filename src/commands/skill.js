@@ -2,10 +2,21 @@
 import { listSkills, tamperedSkillNames } from '../skills.js';
 import { libraryList, searchLibrary, installSkill, uninstallSkill, reinstallSkill, trustSkill } from '../skill-lib.js';
 import { searchRegistry } from '../skill-registry.js';
-import { loadConfig } from '../config.js';
-import { ensureHome } from '../config.js';
+import { loadConfig, saveConfig, ensureHome } from '../config.js';
 import { searchSessions, relativeTime } from '../session.js';
 import { runWebServer } from '../web/server.js';
+import readline from 'node:readline';
+
+// 首次运行询问「是否自动后台启动 WebUI」（交互终端才问；管道/脚本下默认否）
+function askAutoStart() {
+  return new Promise((resolve) => {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    rl.question('是否在每次运行 mingdao 时自动后台启动 WebUI（免敲命令）？[y/N] ', (a) => {
+      rl.close();
+      resolve(/^y(es)?$/i.test(String(a).trim()));
+    });
+  });
+}
 
 export async function handleSkill(cmd, args) {
   const sub = args[0] || 'list';
@@ -102,10 +113,13 @@ export async function handleSkill(cmd, args) {
   return true;
 }
 
-// WebUI：mingdao web [端口] [--auth-token <令牌>]（评估 P3-1：参数结构不合法的按提问处理）
+// WebUI：mingdao web [端口] [--auth-token <令牌>] [--autostart|--no-autostart]（评估 P3-1：参数结构不合法的按提问处理）
+// --autostart/--no-autostart：写 config.web.autoStart——开启后每次运行 mingdao 会自动后台拉起 WebUI；
+// 首次交互运行且未设置时，询问一次「下次是否自动启动」。
 export async function handleWeb(cmd, args) {
   let portIndex = -1;
   let tokenSeen = false;
+  let autoChoice; // undefined=未指定；true/false=显式指定
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === '--auth-token') {
@@ -119,6 +133,11 @@ export async function handleWeb(cmd, args) {
       tokenSeen = true;
       continue;
     }
+    if (a === '--autostart' || a === '--no-autostart') {
+      if (autoChoice !== undefined) return false;
+      autoChoice = a === '--autostart';
+      continue;
+    }
     if (/^\d+$/.test(a) && portIndex === -1) {
       portIndex = i; // 审计 P2-11：记录端口实际位置，而非默认读首参
       continue;
@@ -126,6 +145,21 @@ export async function handleWeb(cmd, args) {
     return false;
   }
   const cfg0 = loadConfig();
+  // 自动启动开关（先落盘再起服务，服务失败也保留用户选择）
+  if (autoChoice !== undefined) {
+    const c = cfg0 ? { ...cfg0, web: { ...(cfg0.web || {}), autoStart: autoChoice } } : { web: { autoStart: autoChoice } };
+    saveConfig(c);
+    console.log(
+      autoChoice
+        ? '✓ 已开启 WebUI 自动启动：以后直接运行 mingdao 即可后台拉起（关闭：mingdao web --no-autostart）'
+        : '✓ 已关闭 WebUI 自动启动'
+    );
+  } else if (cfg0?.web?.autoStart === undefined && process.stdin.isTTY) {
+    const ans = await askAutoStart();
+    const c = { ...cfg0, web: { ...(cfg0.web || {}), autoStart: ans } };
+    saveConfig(c);
+    if (ans) console.log('✓ 已开启：以后直接运行 mingdao 即可自动后台启动 WebUI（关闭：mingdao web --no-autostart）');
+  }
   const portArg = portIndex !== -1 ? Number(args[portIndex]) : NaN;
   const port = Number.isFinite(portArg) && portArg > 0 ? portArg : cfg0?.web?.port || 3820;
   const host = cfg0?.web?.host || '127.0.0.1';

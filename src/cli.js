@@ -436,7 +436,8 @@ async function main() {
     if (opts.init) return;
   }
 
-  let modelName = opts.model || cfg.model || 'deepseek-v4-flash';
+  // 模型回退链（向导允许跳过模型选择 → cfg.model 可缺省）：参数 > config > 该服务商首个预设模型 > flash
+  let modelName = opts.model || cfg.model || PROVIDERS[cfg.provider]?.models?.[0] || 'deepseek-v4-flash';
   const io = createIO();
 
   const pc0 = resolveProviderConfig(cfg, modelName);
@@ -609,6 +610,22 @@ async function main() {
     wsNow ? `工作空间  ${wsNow.name}（${wsNow.dir}）` : '',
   ].filter(Boolean));
   io.print(style('输入问题开始对话 · /help 查看命令 · Tab 补全 · Ctrl+C 中断生成\n', C.dim));
+
+  // WebUI 自动启动（首次运行 mingdao web 时可选开启，存 config.web.autoStart）：
+  // 独立后台进程拉起，退出 TUI 后 WebUI 继续可用；关闭：mingdao web --no-autostart
+  if (cfg.web?.autoStart && !process.env.MINGDAO_NO_WEB_AUTOSTART) {
+    try {
+      const { spawn } = await import('node:child_process');
+      const { fileURLToPath } = await import('node:url');
+      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'web'], {
+        detached: true,
+        stdio: 'ignore',
+        env: process.env,
+      });
+      child.unref();
+      io.print(style(`🌐 WebUI 后台启动中：http://127.0.0.1:${cfg.web?.port || 3820}（关闭自动启动：mingdao web --no-autostart）`, C.dim));
+    } catch {}
+  }
 
   let session = null;
   if (opts.resume) {

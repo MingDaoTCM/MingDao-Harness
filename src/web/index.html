@@ -119,6 +119,8 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 .cfg-row select,.cfg-row input[type=number]{background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px}
 .cfg-hint{font-size:12px;color:var(--faint);margin-top:4px}
 .modal .row{display:flex;gap:10px;justify-content:flex-end}
+.dir-entry{padding:6px 10px;border-radius:6px;cursor:pointer;font-size:13.5px;word-break:break-all}
+.dir-entry:hover{background:var(--bg3)}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
 @keyframes spin{to{transform:rotate(360deg)}}
 </style>
@@ -188,7 +190,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <h4 style="margin:4px 0;color:var(--accent2)">云同步（跨设备会话同步，服务器端运行 mingdao sync-server）</h4>
     <div id="syncStatus" style="font-size:12.5px;color:var(--dim);padding:2px"></div>
     <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap">
-      <input id="syncUrl" placeholder="服务器地址 https://…" style="flex:1.4;min-width:150px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+      <input id="syncUrl" placeholder="默认 https://session.mingdao.ai/" style="flex:1.4;min-width:150px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
       <input id="syncUser" placeholder="用户名" style="flex:1;min-width:90px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
     </div>
     <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap">
@@ -269,6 +271,19 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <div class="row"><button id="cfgCancel">取消</button><button class="primary" id="cfgSave">保存</button></div>
   </div>
 </div>
+<!-- 目录选择器（新建工作空间 / 改目录：浏览服务器磁盘目录树） -->
+<div id="dirModal" class="modal-mask" style="display:none">
+  <div class="modal" style="width:min(520px,92vw);display:flex;flex-direction:column;max-height:78vh">
+    <h4 style="margin:0 0 6px;color:var(--cyan)">选择目录（点目录进入，点「使用此目录」确认）</h4>
+    <div id="dirPath" style="font-size:12px;color:var(--dim);word-break:break-all;margin-bottom:8px;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:6px 10px"></div>
+    <div id="dirList" style="flex:1;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:6px;min-height:220px"></div>
+    <div class="row" style="margin-top:12px">
+      <button id="dirPickNone" class="ghost">不指定（当前目录）</button>
+      <button id="dirPickCancel" class="ghost">取消</button>
+      <button id="dirPickOk" class="primary">使用此目录</button>
+    </div>
+  </div>
+</div>
 <script>
 // 访问令牌（P1-3）：地址带 ?token= 时记入 sessionStorage 并从地址栏移除（防截图/历史外泄），
 // 之后所有同源请求统一附加 X-MingDao-Token 头；无令牌时行为与旧版一致。
@@ -291,6 +306,53 @@ if (AUTH_TOKEN) {
   };
 }
 const $ = (s) => document.querySelector(s);
+// —— 目录选择器（新建工作空间 / 改目录）：浏览服务器磁盘目录树 ——
+let pickerCb = null, pickerDir = '/';
+function loadDirList(){
+  $('#dirPath').textContent = pickerDir;
+  const box = $('#dirList');
+  fetch('/api/fs-browse?dir=' + encodeURIComponent(pickerDir), { cache: 'no-store' })
+    .then((r) => r.json())
+    .then((j) => {
+      box.innerHTML = '';
+      if (!j.ok) {
+        const e = document.createElement('div'); e.className = 'dir-entry'; e.style.color = 'var(--err)';
+        e.textContent = j.error || '无法读取该目录'; box.appendChild(e); return;
+      }
+      if (j.parent != null) {
+        const up = document.createElement('div'); up.className = 'dir-entry'; up.textContent = '⬆ …（上级目录）';
+        up.onclick = () => { pickerDir = j.parent; loadDirList(); };
+        box.appendChild(up);
+      }
+      if (!(j.entries || []).length) {
+        const e = document.createElement('div'); e.className = 'dir-entry'; e.style.color = 'var(--faint)';
+        e.textContent = '（无子目录）'; box.appendChild(e);
+      }
+      for (const en of j.entries || []) {
+        const d = document.createElement('div'); d.className = 'dir-entry'; d.textContent = '📁 ' + en.name;
+        d.onclick = () => { pickerDir = en.path; loadDirList(); };
+        box.appendChild(d);
+      }
+    })
+    .catch(() => {
+      box.innerHTML = '<div class="dir-entry" style="color:var(--err)">请求失败（请重试）</div>';
+    });
+}
+function openDirPicker(startDir, cb){
+  pickerCb = cb;
+  if (startDir) { pickerDir = startDir; loadDirList(); }
+  else {
+    // 无指定起点：从服务器当前工作目录开始浏览
+    fetch('/api/workspaces', { cache: 'no-store' }).then((r) => r.json()).then((j) => {
+      pickerDir = (j && j.cwd) || '/';
+      loadDirList();
+    }).catch(() => { pickerDir = '/'; loadDirList(); });
+  }
+  $('#dirModal').style.display = 'flex';
+}
+$('#dirPickOk').onclick = () => { const cb = pickerCb; pickerCb = null; $('#dirModal').style.display = 'none'; if (cb) cb(pickerDir); };
+$('#dirPickNone').onclick = () => { const cb = pickerCb; pickerCb = null; $('#dirModal').style.display = 'none'; if (cb) cb(null); };
+$('#dirPickCancel').onclick = () => { pickerCb = null; $('#dirModal').style.display = 'none'; };
 const chatEl = $('#chat'), input = $('#input'), sendBtn = $('#sendBtn');
 let generating = false; // 生成中：发送按钮复用为停止按钮
 let currentSession = null, thinking = null;
@@ -637,11 +699,13 @@ $('#wsSel').addEventListener('change', async e=>{
   const v=e.target.value;
   if(v==='__add__'){
     const name=prompt('新工作空间名称：'); if(!name){ refreshWsSel(); return; }
-    const dir=prompt('目录路径（留空 = 当前目录，目录不存在会自动创建）：');
-    const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',name,dir:dir||undefined})});
-    const j=await r.json().catch(()=>({error:'请求失败'}));
-    if(j.ok) renderBanner({text:'✓ 已登记工作空间 '+j.name+' → '+j.dir+'（目录已自动创建）'}); else alert(j.error||'创建失败');
-    refreshWsSel(); reloadModels();
+    openDirPicker(null, (dir)=>{
+      fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',name,dir:dir||undefined})})
+        .then((r)=>r.json()).then((j)=>{
+          if(j.ok) renderBanner({text:'✓ 已登记工作空间 '+j.name+' → '+j.dir+'（目录已自动创建）'}); else alert(j.error||'创建失败');
+          refreshWsSel(); reloadModels();
+        });
+    });
     return;
   }
   if(v==='__manage__'){
@@ -698,7 +762,7 @@ async function refreshWorkspaces(){
   for(const w of j.workspaces){
     const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:6px;padding:5px 0;border-bottom:1px solid var(--border);font-size:12px';
     div.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(w.name)+(w.name===j.current?' <span style="color:var(--accent)">●当前</span>':'')+'</span><span style="flex:1.4;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left">'+esc(w.dir||'')+'</span>';
-    const ed=document.createElement('button'); ed.textContent='改目录'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=async()=>{ const d=prompt('新目录：', w.dir); if(!d) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'set',name:w.name,dir:d})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshWorkspaces(); refreshWsSel(); reloadModels(); } else alert(jj.error||'修改失败'); };
+    const ed=document.createElement('button'); ed.textContent='改目录'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=()=>{ openDirPicker(w.dir||null, async (d)=>{ if(d==null) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'set',name:w.name,dir:d})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshWorkspaces(); refreshWsSel(); reloadModels(); } else alert(jj.error||'修改失败'); }); };
     const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=prompt('新名称：', w.name); if(!t) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',name:w.name,newName:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshWorkspaces(); refreshWsSel(); } else alert(jj.error||'重命名失败'); };
     const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!confirm('删除工作空间 '+w.name+'？')) return; await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',name:w.name})}); refreshWorkspaces(); refreshWsSel(); reloadModels(); };
     div.appendChild(ed); div.appendChild(rn); div.appendChild(rm); list.appendChild(div);
@@ -862,7 +926,7 @@ $('#baseUrlSave').onclick=async ()=>{
 async function refreshSyncUI(){
   const r=await fetch('/api/sync',{cache:'no-store'}).catch(()=>null); if(!r) return;
   const j=await r.json();
-  $('#syncUrl').value=j.url||''; $('#syncUser').value=j.username||''; $('#syncDevice').value=j.deviceName||''; $('#syncAutoChk').checked=Boolean(j.auto);
+  $('#syncUrl').value=j.url||'https://session.mingdao.ai/'; $('#syncUser').value=j.username||''; $('#syncDevice').value=j.deviceName||''; $('#syncAutoChk').checked=Boolean(j.auto);
   const st=$('#syncStatus');
   if(!j.configured) st.innerHTML='<span style="color:var(--faint)">未配置：填服务器地址并登录（服务器端运行 mingdao sync-server）</span>';
   else if(!j.loggedIn) st.innerHTML='<span style="color:var(--warn)">已配置 '+esc(j.url)+' · 未登录（输入密码登录）</span>';

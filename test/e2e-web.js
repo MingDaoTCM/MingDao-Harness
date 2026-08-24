@@ -653,6 +653,26 @@ let base = await startWeb(work1);
   ok('会话级工作空间：新会话记录 / 继续不串目录 / 载入返回 / 显式切换跟随');
 }
 
+// ---------- 18. 目录浏览器 /api/fs-browse（工作空间目录选择器） ----------
+{
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-browse-'));
+  fs.mkdirSync(path.join(dir, '子目录甲'));
+  fs.mkdirSync(path.join(dir, '.hidden-dir'));
+  const r = await (await fetch(base + '/api/fs-browse?dir=' + encodeURIComponent(dir))).json();
+  assert.equal(r.ok, true, '应能浏览目录');
+  assert.equal(r.path, dir, '应返回当前路径');
+  assert.ok(Array.isArray(r.entries), '应返回条目列表');
+  assert.ok(r.entries.some((e) => e.name === '子目录甲' && e.path === path.join(dir, '子目录甲')), '应包含普通子目录');
+  assert.ok(!r.entries.some((e) => e.name.startsWith('.')), '应过滤隐藏目录');
+  assert.equal(r.parent, path.dirname(dir), '应返回上级目录');
+  const bad = await (await fetch(base + '/api/fs-browse?dir=relative%2Fpath')).json();
+  assert.ok(bad.error, '相对路径应被拒绝');
+  const notDir = await (await fetch(base + '/api/fs-browse?dir=' + encodeURIComponent(path.join(dir, '子目录甲')) + '%2Fnope')).json();
+  assert.ok(notDir.error, '不存在目录应报错');
+  safeRm(dir, { recursive: true, force: true });
+  ok('fs-browse：目录树浏览 / 隐藏目录过滤 / 相对路径与非法路径拒绝');
+}
+
 webChild.kill('SIGTERM');
 await new Promise((r) => webChild.once('close', r));
 mock.close();
