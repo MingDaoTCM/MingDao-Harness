@@ -10,6 +10,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+// Linux 桌面渲染加固（审计：deepin 等合成器下 Electron 窗口「只有菜单、内容黑屏」的通用修复）：
+// 1) 强制 X11/XWayland 合成路径（规避 Wayland/DDE 合成器黑屏）；2) 默认禁用 GPU 硬件加速
+// （本应用是文本界面，软渲染足够）。需要时 MINGDAO_GPU=1 / MINGDAO_WAYLAND=1 可恢复默认行为。
+if (process.platform === 'linux') {
+  if (process.env.MINGDAO_WAYLAND !== '1') app.commandLine.appendSwitch('ozone-platform', 'x11');
+  if (process.env.MINGDAO_GPU !== '1') app.disableHardwareAcceleration();
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // 开发态：desktop/ 的上一级即仓库根；打包态：src/ 在 process.resourcesPath 下
 const srcRoot = app.isPackaged ? path.join(process.resourcesPath, 'src') : path.join(__dirname, '..', 'src');
@@ -182,6 +190,17 @@ async function createWindow() {
   win.webContents.session.setPermissionCheckHandler(() => false);
 
   win.loadURL(`http://127.0.0.1:${info.port}/?token=${info.token}`);
+  // 渲染自愈（审计：黑屏僵死兜底）——页面加载失败/渲染进程崩溃时自动重载一次；
+  // dom-ready 兜底显示（个别合成器下 ready-to-show 不触发导致窗口一直不出现）
+  win.once('dom-ready', () => {
+    if (!win.isVisible()) win.show();
+  });
+  win.webContents.on('did-fail-load', (_e, code, _desc, url) => {
+    if (code !== -3 && String(url || '').startsWith('http://127.0.0.1:')) win.webContents.reload();
+  });
+  win.webContents.on('render-process-gone', () => {
+    if (!quitting) win.webContents.reload();
+  });
   // 只允许本机地址在窗口内导航；其余链接交给系统浏览器
   win.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
