@@ -788,7 +788,19 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         res.end();
         return;
       }
-      await handleChat(res, body);
+      try {
+        await handleChat(res, body);
+      } catch (err) {
+        // 兜底（审计：「点发送无反应」根因防护）：handleChat 内任意未捕获异常若直接外抛，
+        // SSE 已开流却无事件 → 前端永远停在「正在思考…」。此处统一转为 error 事件回给界面。
+        try {
+          res.write(`data: ${JSON.stringify({ type: 'error', message: '对话失败：' + String(err?.message || err) })}\n\n`);
+        } catch {}
+        try {
+          res.end();
+        } catch {}
+        pruneTasks();
+      }
       return;
     }
     if (req.method === 'POST' && p === '/api/permission') {
