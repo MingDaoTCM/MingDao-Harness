@@ -77,15 +77,23 @@ jobs:
             desktop/dist/*.zip
             desktop/dist/*.yml
           if-no-files-found: warn
-      - name: 发布到 GitHub Release
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 下载全部工件
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: 发布到 GitHub Release（单任务上传，避免矩阵并发竞态偶发失败）
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            desktop/dist/*.AppImage
-            desktop/dist/*.deb
-            desktop/dist/*.exe
-            desktop/dist/*.dmg
-            desktop/dist/*.zip
-            desktop/dist/*.yml
+            artifacts/**/*.AppImage
+            artifacts/**/*.deb
+            artifacts/**/*.exe
+            artifacts/**/*.dmg
+            artifacts/**/*.zip
+            artifacts/**/*.yml
           draft: false
           generate_release_notes: true
