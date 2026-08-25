@@ -604,8 +604,17 @@ function renderAttachments(){
 }
 
 async function send(){
-  if(generating){ abort(); return; } // 生成中：同一按钮承担停止职责
-  const text=input.value.trim(); if(!text && !attachments.length) return;
+  const text=input.value.trim();
+  console.log('[MingDao] send 点击：generating=' + generating + ' text=' + text.length + ' attachments=' + attachments.length);
+  if(generating){ console.log('[MingDao] send 被生成态拦截 → 走 abort'); abort(); return; } // 生成中：同一按钮承担停止职责
+  if(!text && !attachments.length) return;
+  generating=true; setBtn(); // 本地在途状态：不再依赖 /api/tasks 轮询
+  const turnCtrl=new AbortController();
+  // 回合看门狗：120 秒无任何响应强制中断——无论服务端处于什么状态，界面都能自动恢复可发送
+  const watchdog=setTimeout(()=>{
+    try{ turnCtrl.abort(); }catch{}
+    fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
+  },120000);
   input.value=''; input.style.height='44px';
   const payload={message:text,file:currentSession};
   // 带上文开关：勾选后系统提示注入最近会话日志（默认不注入——新会话全新开始，避免串到历史会话上下文）
@@ -631,7 +640,7 @@ async function send(){
   const onActivity=()=>{ if(think.parentNode) think.remove(); if(reason&&reason.parentElement){ reason.parentElement.open=false; reason.parentElement.querySelector('summary').classList.remove('live'); } };
   updateTasksPanel();
   try{
-    const resp=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const resp=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:turnCtrl.signal});
     if(!resp.ok){ const j=await resp.json().catch(()=>({})); onActivity(); msg.innerHTML='<div class="errline">'+esc(j.error||('HTTP '+resp.status))+'</div>'; updateTasksPanel(); return; }
     await handleEvents(resp.body, ev=>{
       if(ev.taskId) taskId=ev.taskId;
@@ -645,24 +654,27 @@ async function send(){
       else if(ev.type==='banner'){ renderBanner(ev); }
       else if(ev.type==='ask'){ update(); askModal(ev).then(a=>fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:ev.id,answer:a,taskId})}).catch(()=>{})); }
       else if(ev.type==='usage'){ onActivity(); const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; msg.appendChild(u); scroll(); }
-      else if(ev.type==='error'){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); scroll(); }
-      else if(ev.type==='done'){ onActivity(); if(ev.budget){ const b=ev.budget; hintEl.textContent='预算 '+Math.round(b.used/1000)+'K/'+Math.round(b.total/1000)+'K（'+Math.round(b.used/b.total*100)+'%）· 本轮完成 · 提示栏右侧为今日费用与命中率'; } refreshStatusBar(); if(ev.stats&&ev.stats.deliverables&&ev.stats.deliverables.length){ const card=document.createElement('div'); card.className='deliver'; card.innerHTML='<div class="t">📦 交付物（'+ev.stats.deliverables.length+' 个文件）</div>'+ev.stats.deliverables.map(f=>'<div class="i">'+esc(f)+(f.toLowerCase().endsWith('.html')?' <span style="color:var(--accent2)">— 浏览器打开即可运行</span>':'')+'</div>').join(''); msg.appendChild(card); } if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); } currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
+      else if(ev.type==='error'){ console.log('[MingDao] error 事件：' + ev.message); onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); scroll(); }
+      else if(ev.type==='done'){ console.log('[MingDao] done 事件：session=' + ev.session); onActivity(); if(ev.budget){ const b=ev.budget; hintEl.textContent='预算 '+Math.round(b.used/1000)+'K/'+Math.round(b.total/1000)+'K（'+Math.round(b.used/b.total*100)+'%）· 本轮完成 · 提示栏右侧为今日费用与命中率'; } refreshStatusBar(); if(ev.stats&&ev.stats.deliverables&&ev.stats.deliverables.length){ const card=document.createElement('div'); card.className='deliver'; card.innerHTML='<div class="t">📦 交付物（'+ev.stats.deliverables.length+' 个文件）</div>'+ev.stats.deliverables.map(f=>'<div class="i">'+esc(f)+(f.toLowerCase().endsWith('.html')?' <span style="color:var(--accent2)">— 浏览器打开即可运行</span>':'')+'</div>').join(''); msg.appendChild(card); } if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); } currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
     });
-  }catch(e){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=e.message||'网络错误'; msg.appendChild(d); scroll(); }
-  finally{ clearInterval(hintTimer); hintEl.classList.remove('working'); hintEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); scroll(); updateTasksPanel(); }
+  }catch(e){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=(e&&e.name==='AbortError')?'响应超时已中断（120 秒无响应），请重试':(e&&e.message)||'网络错误'; msg.appendChild(d); scroll(); }
+  finally{ clearInterval(hintTimer); clearTimeout(watchdog); generating=false; setBtn(); console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); hintEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); scroll(); updateTasksPanel(); }
 }
 
 function abort(){ fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(()=>updateTasksPanel()).catch(()=>{}); }
 
 // —— 任务面板（多会话并行） ——
+function setBtn(){
+  sendBtn.textContent = generating ? '■ 停止' : '发送';
+  sendBtn.className = generating ? 'danger' : 'primary';
+}
 async function updateTasksPanel(){
   const r=await fetch('/api/tasks').catch(()=>null); if(!r) return;
   const j=await r.json(); const list=$('#tpList'); list.innerHTML='';
   $('#tpCount').textContent='（'+j.running+' 运行中 / 上限 '+j.maxConcurrent+'）';
-  // 发送按钮复用：生成中变「■ 停止」（点击中止全部运行中任务）
-  generating = j.running > 0;
-  sendBtn.textContent = generating ? '■ 停止' : '发送';
-  sendBtn.className = generating ? 'danger' : 'primary';
+  // 审计（第二问无反应修复）：generating 改为「本轮在途」本地状态，由 send/finally 维护，
+  // 不再由 /api/tasks 轮询推导——任务面板瞬时波动或一次轮询失败曾让按钮永久卡在停止态，
+  // 后续发送全部静默。面板仅展示，不参与按钮状态。
   for(const t of j.tasks){
     const div=document.createElement('div'); div.className='tp-item';
     const dot = t.status==='running'?'tp-run':(t.status==='done'?'tp-done':'tp-bad');

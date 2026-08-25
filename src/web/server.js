@@ -198,6 +198,22 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   let taskSeq = 0;
   let draftText = ''; // 外部注入的草稿（VS Code 插件选中代码发送）
 
+  // —— 服务端诊断日志（第二问无反应排查 + 长期运维）：<mingdao-home>/logs/web-server.log ——
+  // 记录每次对话的关键阶段与耗时；2MB 滚动。桌面版与 WebUI 共用同一日志。
+  function srvlog(msg) {
+    try {
+      const dir = path.join(mingdaoHome(), 'logs');
+      fs.mkdirSync(dir, { recursive: true });
+      const f = path.join(dir, 'web-server.log');
+      let prev = '';
+      try {
+        prev = fs.readFileSync(f, 'utf8');
+      } catch {}
+      if (prev.length > 2 * 1024 * 1024) prev = prev.slice(-1024 * 1024);
+      fs.writeFileSync(f, prev + new Date().toISOString() + ' ' + msg + '\n');
+    } catch {}
+  }
+
   function pruneTasks() {
     if (tasks.size <= 100) return;
     for (const [id, t] of tasks) {
@@ -209,6 +225,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   async function handleChat(res, body) {
     const taskId = `t${++taskSeq}`; // 服务端生成：客户端自选 taskId 可能覆盖他人任务
     const entry = { res, send: null, abortHandler: null, pendingAsk: null, session: null, startedAt: Date.now(), status: 'running', message: '', durationMs: 0 };
+    srvlog('chat 开始 ' + taskId + ' session=' + (body.file || '新会话') + ' 消息长度=' + String(body.message || '').length);
     tasks.set(taskId, entry);
     const send = (obj) => {
       try {
@@ -347,15 +364,18 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
 
     try {
       const r = await agent.runTurn(messages);
+      srvlog('chat 回合完成 ' + taskId + ' text=' + String(r.text || '').length + ' ' + (Date.now() - entry.startedAt) + 'ms');
       appendMessages(session.file, messages.slice(persistedBefore));
       io.printUsageLine({ modelName: runModel, usage: r.usage, durationMs: r.durationMs });
       recordUsage(runModel, r.usage, r.perf);
       maybeAutoSync().catch(() => {});
       // 新会话自动标题（可配置关闭）
+      srvlog('chat 标题生成前 ' + taskId);
       if (isNew && cfg.autoTitle !== false && r.text) {
         try {
           const tModel = titleModel(cfg, runModel);
           const title = await generateTitle(await helperProvider(cfg, tModel, providerNow), tModel, built.persistText);
+          srvlog('chat 标题完成 ' + taskId + ' ' + (title || '（无标题）'));
           if (title) {
             const oldName = path.basename(session.file);
             const renamed = renameSessionFile(fs, path, home, session, title);
@@ -365,6 +385,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       }
       entry.status = r.aborted ? 'aborted' : 'done';
       entry.durationMs = Date.now() - entry.startedAt;
+      srvlog('chat 发送 done ' + taskId + ' status=' + entry.status + ' 总耗时=' + entry.durationMs + 'ms');
       // 预算可视化（评估 A5）：会话当前 token 占用 / 预算
       let budgetInfo = null;
       try {
@@ -390,8 +411,10 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     } catch (err) {
       entry.status = 'failed';
       entry.durationMs = Date.now() - entry.startedAt;
+      srvlog('chat 错误 ' + taskId + ' ' + String(err?.message || err));
       send({ type: 'error', message: String(err?.message || err) });
     } finally {
+      srvlog('chat 收尾 ' + taskId + ' res.end 前（客户端将收到流结束）');
       entry.abortHandler = null;
       entry.pendingAsk = null;
       entry.send = null;

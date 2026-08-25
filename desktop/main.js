@@ -24,6 +24,21 @@ const srcRoot = app.isPackaged ? path.join(process.resourcesPath, 'src') : path.
 const buildRoot = path.join(__dirname, 'build');
 const isDev = !app.isPackaged;
 
+// 桌面版诊断日志（渲染层 console + 主进程关键事件）：userData/logs/mingdao.log，1MB 滚动
+function appLog(msg) {
+  try {
+    const dir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(dir, { recursive: true });
+    const f = path.join(dir, 'mingdao.log');
+    let prev = '';
+    try {
+      prev = fs.readFileSync(f, 'utf8');
+    } catch {}
+    if (prev.length > 1024 * 1024) prev = prev.slice(-512 * 1024);
+    fs.writeFileSync(f, prev + new Date().toISOString() + ' ' + msg + '\n');
+  } catch {}
+}
+
 let mainWindow = null;
 let tray = null;
 let quitting = false;
@@ -189,16 +204,25 @@ async function createWindow() {
   win.webContents.session.setPermissionRequestHandler((wc, permission, cb) => cb(false));
   win.webContents.session.setPermissionCheckHandler(() => false);
 
+  appLog('窗口加载 ' + `http://127.0.0.1:${info.port}/?token=***`);
   win.loadURL(`http://127.0.0.1:${info.port}/?token=${info.token}`);
+  // 渲染层控制台捕获（排查「第二问无反应」等前端状态问题）
+  win.webContents.on('console-message', (e, _level, message) => {
+    const m = typeof message === 'string' ? message : e && e.message;
+    if (m) appLog('[renderer] ' + m);
+  });
+  win.webContents.on('did-finish-load', () => appLog('页面加载完成'));
   // 渲染自愈（审计：黑屏僵死兜底）——页面加载失败/渲染进程崩溃时自动重载一次；
   // dom-ready 兜底显示（个别合成器下 ready-to-show 不触发导致窗口一直不出现）
   win.once('dom-ready', () => {
     if (!win.isVisible()) win.show();
   });
   win.webContents.on('did-fail-load', (_e, code, _desc, url) => {
+    appLog('did-fail-load code=' + code + ' ' + url);
     if (code !== -3 && String(url || '').startsWith('http://127.0.0.1:')) win.webContents.reload();
   });
-  win.webContents.on('render-process-gone', () => {
+  win.webContents.on('render-process-gone', (_e, details) => {
+    appLog('render-process-gone ' + JSON.stringify(details || {}));
     if (!quitting) win.webContents.reload();
   });
   // 只允许本机地址在窗口内导航；其余链接交给系统浏览器
