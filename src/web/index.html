@@ -55,14 +55,20 @@ main{flex:1;overflow-y:auto;padding:18px 0 12px;min-width:0}
 .msg-user .bubble{background:var(--user);border:1px solid #2c4a66;border-radius:14px 14px 4px 14px;padding:10px 14px;max-width:78%;white-space:pre-wrap;word-break:break-word}
 .msg-ai{display:flex;flex-direction:column;gap:10px}
 .msg-ai .content{white-space:normal;word-break:break-word}
-.msg-ai .content h1,.msg-ai .content h2,.msg-ai .content h3{font-size:1.05em;margin:.6em 0 .3em;color:var(--accent2)}
-.msg-ai .content h4{font-size:1em;margin:.5em 0 .2em}
-.msg-ai .content p{margin:.35em 0}
-.msg-ai .content ul,.msg-ai .content ol{margin:.3em 0;padding-left:1.4em}
-.msg-ai .content li{margin:.15em 0}
-.msg-ai .content blockquote{margin:.4em 0;padding-left:10px;border-left:3px solid var(--border);color:var(--dim)}
+.msg-ai .content h1,.msg-ai .content h2,.msg-ai .content h3,.msg-ai .content h4{color:var(--text);font-weight:700;line-height:1.4}
+.msg-ai .content h1{font-size:19px;margin:16px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--border)}
+.msg-ai .content h2{font-size:17px;margin:14px 0 8px}
+.msg-ai .content h3{font-size:15.5px;margin:12px 0 6px}
+.msg-ai .content h4{font-size:14.5px;margin:10px 0 5px}
+.msg-ai .content p{margin:0 0 10px;line-height:1.75}
+.msg-ai .content p:last-child{margin-bottom:0}
+.msg-ai .content ul,.msg-ai .content ol{margin:0 0 10px;padding-left:22px;line-height:1.75}
+.msg-ai .content li{margin:3px 0}
+.msg-ai .content blockquote{margin:0 0 10px;padding:6px 12px;border-left:3px solid var(--accent2);background:var(--bg3);border-radius:0 8px 8px 0;color:var(--dim)}
+.msg-ai .content hr{border:none;border-top:1px solid var(--border);margin:14px 0}
+.msg-ai .content b,.msg-ai .content strong{font-weight:700}
 .msg-ai .content code{background:var(--code);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#7ee0b8}
-.msg-ai .content pre{background:var(--code);border:1px solid var(--border);border-radius:10px;padding:12px 14px;overflow-x:auto;margin:.5em 0}
+.msg-ai .content pre{background:var(--code);border:1px solid var(--border);border-radius:10px;padding:12px 14px;overflow-x:auto;margin:.5em 0 12px}
 .msg-ai .content pre code{background:none;border:none;padding:0;color:#c8d3e0}
 .msg-ai .content a{color:var(--accent2)}
 .msg-ai .content .hl-kw{color:#7aa2f7;font-weight:600}.hl-s{color:#9ece6a}.hl-n{color:#e0af68}.hl-c{color:#565f6e;font-style:italic}.hl-f{color:#7dcfff}
@@ -404,26 +410,44 @@ function highlight(code, lang){
   });
 }
 function renderMarkdown(text){
-  const lines = String(text).split('\n'); let out='', code=null, codeLang='';
-  // 审计 P1-3：codeLang 经 esc() 转义防 XSS（信息串闭合 class 注入）
-  const flush=()=>{ if(code!==null){ out+='<pre><code class="lang-'+esc(codeLang)+'">'+highlight(code.join('\n'),codeLang)+'</code></pre>'; code=null; } };
-  for(const line of lines){
-    if(line.trim().startsWith('```')){
-      if(code===null){ code=[]; codeLang=(line.trim().slice(3).trim().split(/\s+/)[0]||''); }
-      else flush();
+  // 块级解析（美化：加粗标题 / 段落 / 真列表 / 引用 / 分割线，参照 DeepSeek-Harness 会话排版）
+  const lines = String(text).split('\n');
+  let out = '', code = null, codeLang = '';
+  const flushCode = () => { if (code !== null) { out += '<pre><code class="lang-' + esc(codeLang) + '">' + highlight(code.join('\n'), codeLang) + '</code></pre>'; code = null; } };
+  let para = [];
+  let list = null; // {type:'ul'|'ol', items:[]}
+  const flushPara = () => { if (para.length) { out += '<p>' + para.join('<br>') + '</p>'; para = []; } };
+  const flushList = () => { if (list) { out += '<' + list.type + '>' + list.items.map((i) => '<li>' + i + '</li>').join('') + '</' + list.type + '>'; list = null; } };
+  // 行内元素（审计 P1-3：内容与 codeLang 均经 esc 转义防 XSS）
+  const inline = (l) => {
+    let s = esc(l);
+    s = s.replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
+      .replace(/\*([^*\s][^*]*)\*/g, '<i>$1</i>')
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s'"<>)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    return s;
+  };
+  for (const line of lines) {
+    const t = line.trim();
+    if (t.startsWith('```')) {
+      if (code === null) { flushList(); flushPara(); code = []; codeLang = (t.slice(3).trim().split(/\s+/)[0] || ''); }
+      else flushCode();
       continue;
     }
-    if(code!==null){ code.push(line); continue; }
-    let l = esc(line);
-    l = l.replace(/`([^`]+)`/g,'<code>$1</code>').replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>').replace(/\*([^*\s][^*]*)\*/g,'<i>$1</i>');
-    l = l.replace(/\[([^\]]+)\]\((https?:\/\/[^\s'"<>)]+)\)/g,'<a href="$2" target="_blank" rel="noopener">$1</a>');
-    if(/^#{1,6}\s/.test(line.trim())){ const m=line.trim().match(/^(#+)\s+(.*)/); const h=Math.min(m[1].length,3); l='<h'+h+'>'+esc(m[2])+'</h'+h+'>'; }
-    else if(/^\s*[-*+]\s/.test(line)) l='• '+l.replace(/^\s*[-*+]\s/,'');
-    else if(/^\s*\d+[.)]\s/.test(line)) l=l.replace(/^\s*(\d+)[.)]\s/,'<b>$1.</b> ');
-    else if(/^>\s?/.test(line)) l='<blockquote>'+l.replace(/^>\s?/,'')+'</blockquote>';
-    out+= l+'<br>';
+    if (code !== null) { code.push(line); continue; }
+    if (t === '') { flushList(); flushPara(); continue; }
+    const h = t.match(/^(#{1,6})\s+(.*)$/);
+    if (h) { flushList(); flushPara(); const level = Math.min(h[1].length, 4); out += '<h' + level + '>' + inline(h[2]) + '</h' + level + '>'; continue; }
+    const ul = t.match(/^([-*+])\s+(.*)$/);
+    if (ul) { flushPara(); if (!list || list.type !== 'ul') { flushList(); list = { type: 'ul', items: [] }; } list.items.push(inline(ul[2])); continue; }
+    const ol = t.match(/^(\d+)[.)]\s+(.*)$/);
+    if (ol) { flushPara(); if (!list || list.type !== 'ol') { flushList(); list = { type: 'ol', items: [] }; } list.items.push(inline(ol[2])); continue; }
+    if (/^>\s?/.test(t)) { flushList(); flushPara(); out += '<blockquote>' + inline(t.replace(/^>\s?/, '')) + '</blockquote>'; continue; }
+    if (/^(-{3,}|\*{3,})$/.test(t)) { flushList(); flushPara(); out += '<hr>'; continue; }
+    flushList();
+    para.push(inline(t));
   }
-  flush();
+  flushCode(); flushList(); flushPara();
   return out;
 }
 function scrollBottom(){ chatEl.scrollTop = chatEl.scrollHeight; }

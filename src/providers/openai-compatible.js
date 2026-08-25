@@ -25,7 +25,11 @@ export async function chat({ baseUrl, apiKey, model, messages, tools, temperatur
   try {
     res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      // 审计（桌面版「第二问挂起」修复）：Node 全局 fetch(undici) 默认连接保活，
+      // 与部分网关/NAT 组合下复用已断开的 keep-alive 连接会静默挂起——首个请求正常、
+      // 后续请求无响应，重启进程恢复。显式 Connection: close 每次新建连接，可靠性优先
+      // （模型请求本身是长流式调用，建连开销占比可忽略）。
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`, Connection: 'close' },
       body: JSON.stringify(payload),
       signal,
     });
