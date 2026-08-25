@@ -226,6 +226,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     const taskId = `t${++taskSeq}`; // 服务端生成：客户端自选 taskId 可能覆盖他人任务
     const entry = { res, send: null, abortHandler: null, pendingAsk: null, session: null, startedAt: Date.now(), status: 'running', message: '', durationMs: 0 };
     srvlog('chat 开始 ' + taskId + ' session=' + (body.file || '新会话') + ' 消息长度=' + String(body.message || '').length);
+    // 硬截止：任何异常路径 6 分钟内强制结束 SSE 流——前端回合必然收尾，按钮必然恢复
+    const hardDeadline = setTimeout(() => {
+      srvlog('chat 硬截止触发 ' + taskId + '（异常路径强制 res.end）');
+      try { res.end(); } catch {}
+    }, 6 * 60000);
     tasks.set(taskId, entry);
     const send = (obj) => {
       try {
@@ -414,6 +419,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       srvlog('chat 错误 ' + taskId + ' ' + String(err?.message || err));
       send({ type: 'error', message: String(err?.message || err) });
     } finally {
+      clearTimeout(hardDeadline);
       srvlog('chat 收尾 ' + taskId + ' res.end 前（客户端将收到流结束）');
       entry.abortHandler = null;
       entry.pendingAsk = null;
