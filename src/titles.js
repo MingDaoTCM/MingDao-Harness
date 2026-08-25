@@ -18,37 +18,48 @@ function cleanTitle(s) {
     .slice(0, 20);
 }
 
-export async function generateTitle(provider, model, firstUserText) {
+export async function generateTitle(provider, model, firstUserText, { timeoutMs = 10000 } = {}) {
+  // 硬超时护栏（审计：「第二问无反应」根因）：标题生成发生在回合收尾阶段，若网关/网络层
+  // 挂起（不抛错），回合永远无法 complete——前端停在生成态、后续发送全部静默。20s 兜底：
+  // 超时放弃标题（会话仍以时间戳命名），绝不阻塞下一问。
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error('标题生成超时')), timeoutMs);
   const user = { role: 'user', content: String(firstUserText).slice(0, 300) };
-  // 结构化输出（评估 4.2-4）：json_object，maxTokens 120→50，解析零失败；网关不支持时回退纯文本
   try {
-    const res = await provider.chat({
-      model,
-      messages: [
-        { role: 'system', content: '为下面的对话开头生成一个简短标题（≤12 字，中文，不要引号、句号、markdown 符号）。只输出 JSON：{"title":"标题"}。' },
-        user,
-      ],
-      tools: [],
-      temperature: 0.3,
-      maxTokens: 50,
-      responseFormat: { type: 'json_object' },
-    });
-    const j = JSON.parse(String(res.text || '').trim());
-    const t = cleanTitle(j?.title);
-    if (t) return t;
-  } catch {}
-  try {
-    const res = await provider.chat({
-      model,
-      messages: [{ role: 'system', content: '为下面的对话开头生成一个简短标题（≤12 字，中文，不要引号、句号、markdown 符号，直接输出标题本身）。' }, user],
-      tools: [],
-      temperature: 0.3,
-      maxTokens: 120,
-    });
-    const t = cleanTitle(res.text);
-    return t || null;
-  } catch {
-    return null;
+    // 结构化输出（评估 4.2-4）：json_object，maxTokens 120→50，解析零失败；网关不支持时回退纯文本
+    try {
+      const res = await provider.chat({
+        model,
+        messages: [
+          { role: 'system', content: '为下面的对话开头生成一个简短标题（≤12 字，中文，不要引号、句号、markdown 符号）。只输出 JSON：{"title":"标题"}。' },
+          user,
+        ],
+        tools: [],
+        temperature: 0.3,
+        maxTokens: 50,
+        responseFormat: { type: 'json_object' },
+        signal: ctrl.signal,
+      });
+      const j = JSON.parse(String(res.text || '').trim());
+      const t = cleanTitle(j?.title);
+      if (t) return t;
+    } catch {}
+    try {
+      const res = await provider.chat({
+        model,
+        messages: [{ role: 'system', content: '为下面的对话开头生成一个简短标题（≤12 字，中文，不要引号、句号、markdown 符号，直接输出标题本身）。' }, user],
+        tools: [],
+        temperature: 0.3,
+        maxTokens: 120,
+        signal: ctrl.signal,
+      });
+      const t = cleanTitle(res.text);
+      return t || null;
+    } catch {
+      return null;
+    }
+  } finally {
+    clearTimeout(timer);
   }
 }
 

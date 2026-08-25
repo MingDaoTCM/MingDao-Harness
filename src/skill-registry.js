@@ -116,6 +116,9 @@ export async function installFromRegistry(name) {
 
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-reg-'));
   try {
+    // 逐文件下载按镜像回退（审计：国内网络下 raw.githubusercontent 常超时/被断，
+    // 此前只试首选主机 → 安装报「This operation was aborted」；gitee/gitcode 国内秒开）
+    const hosts = [r.host, ...registryBase().hosts.filter((h) => h !== r.host)];
     let verified = false; // 是否至少一个文件做了 sha256 校验（索引声明了哈希才校验）
     for (const f of entry.files) {
       const rel = String(f.path || '').replace(/\\/g, '/');
@@ -124,12 +127,17 @@ export async function installFromRegistry(name) {
       }
       const dest = path.join(tmp, rel);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
-      let text;
-      try {
-        text = await fetchText(`${r.host}/skills-lib/${encodeURI(name)}/${rel.split('/').map(encodeURIComponent).join('/')}`, 30000, MAX_FILE);
-      } catch (e) {
-        return { error: `下载 ${name}/${rel} 失败：${e.message}` };
+      let text = null;
+      let lastErr = '';
+      for (const host of hosts) {
+        try {
+          text = await fetchText(`${host}/skills-lib/${encodeURI(name)}/${rel.split('/').map(encodeURIComponent).join('/')}`, 30000, MAX_FILE);
+          break;
+        } catch (e) {
+          lastErr = e?.name === 'AbortError' ? '下载超时' : String(e?.message || e);
+        }
       }
+      if (text === null) return { error: `下载 ${name}/${rel} 失败：${lastErr}（已尝试全部镜像）` };
       if (text.length > MAX_FILE) return { error: `${name}/${rel} 超过 512KB 上限` };
       // 完整性校验（P3-3）：索引声明 sha256 时逐文件比对，不符即拒绝安装（供应链防护）
       if (f.sha256 && typeof f.sha256 === 'string') {
