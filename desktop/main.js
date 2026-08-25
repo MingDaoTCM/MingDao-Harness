@@ -124,6 +124,7 @@ function buildMenu() {
       label: '帮助',
       submenu: [
         { label: '官网', click: () => shell.openExternal('https://harness.mingdao.ai') },
+        { label: '检查更新', click: () => checkUpdatesFromMenu() },
         { label: '文档（Gitee）', click: () => shell.openExternal('https://gitee.com/MingDaoTCM/MingDao-harness') },
         { label: '关于 MingDao Harness', click: () => dialog.showMessageBox({ title: '关于', message: 'MingDao Harness 桌面版', detail: `版本 v${app.getVersion()}\n零依赖 DeepSeek-V4 智能体框架\nhttps://harness.mingdao.ai` }) },
       ],
@@ -238,13 +239,41 @@ async function createWindow() {
   });
 }
 
-// 自动更新（仅打包版；GitHub Releases 发布产物时生效）
+// 菜单「检查更新」：手动触发并弹出结果（静默失败不可见的历史问题兜底）
+async function checkUpdatesFromMenu() {
+  if (process.env.MINGDAO_NO_AUTOUPDATE === '1') {
+    dialog.showMessageBox({ type: 'info', title: '检查更新', message: '自动更新已被环境变量禁用（MINGDAO_NO_AUTOUPDATE=1）' });
+    return;
+  }
+  const { autoUpdater } = await import('electron-updater');
+  autoUpdater.once('error', (err) => {
+    appLog('updater error ' + String(err?.message || err));
+    dialog.showMessageBox({ type: 'warning', title: '检查更新', message: '检查失败：' + String(err?.message || err), detail: '请检查网络后重试；或到官网下载最新安装包。' });
+  });
+  autoUpdater.once('update-not-available', () => {
+    dialog.showMessageBox({ type: 'info', title: '检查更新', message: '当前已是最新版本 v' + app.getVersion() });
+  });
+  autoUpdater.once('update-available', (info) => {
+    dialog.showMessageBox({ type: 'info', title: '检查更新', message: '发现新版本 v' + info.version + '，开始自动下载…', detail: '下载完成后会提示重启安装。' });
+  });
+  autoUpdater.checkForUpdates().catch((err) => {
+    appLog('updater check error ' + String(err?.message || err));
+    dialog.showMessageBox({ type: 'warning', title: '检查更新', message: '检查失败：' + String(err?.message || err) });
+  });
+}
+
+// 自动更新（仅打包版；官网 generic feed 发布产物时生效）
 function setupAutoUpdate() {
   if (!app.isPackaged || process.env.MINGDAO_NO_AUTOUPDATE === '1') return;
   import('electron-updater')
     .then(({ autoUpdater }) => {
       autoUpdater.autoDownload = true;
+      appLog('自动更新检查启动（feed: 官网 /updates）');
+      autoUpdater.on('error', (err) => appLog('updater error ' + String(err?.message || err)));
+      autoUpdater.on('update-not-available', (info) => appLog('updater 已是最新 ' + info.version));
+      autoUpdater.on('update-available', (info) => appLog('updater 发现新版本 ' + info.version));
       autoUpdater.on('update-downloaded', (info) => {
+        appLog('updater 下载完成 ' + info.version);
         dialog
           .showMessageBox({
             type: 'info',
@@ -257,7 +286,7 @@ function setupAutoUpdate() {
             if (r.response === 0) autoUpdater.quitAndInstall();
           });
       });
-      autoUpdater.checkForUpdates().catch(() => {});
+      autoUpdater.checkForUpdates().catch((err) => appLog('updater check error ' + String(err?.message || err)));
     })
     .catch(() => {});
 }
