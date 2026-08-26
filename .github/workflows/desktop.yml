@@ -81,28 +81,43 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - name: 下载全部工件
         uses: actions/download-artifact@v4
         with:
           path: artifacts
       # 同版本重建（0.1.65 等）需要在同一 Release 上覆盖资产。softprops 的 update-a-release-asset
-      # 在资产已存在/并发时偶发 404（"Not Found"）导致整个发布失败——改用 gh CLI：
-      # 已存在的 Release 先清空全部资产再整批上传（--clobber），不存在则创建。确定性行为，无竞态。
+      # 在资产已存在/并发时偶发 404 导致发布失败——改用 gh CLI：清空旧资产后整批覆盖上传（--clobber）。
+      # 失败时把真实错误写入工作流注解（check-runs API 可公开读取，便于无令牌诊断）。
       - name: 发布到 GitHub Release（清空旧资产后整批覆盖上传）
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
           TAG="${{ github.ref_name }}"
           REPO="${{ github.repository }}"
+          echo "gh 版本：$(gh --version | head -1)"
+          gh auth status 2>&1 | sed 's/^/auth: /' | head -6
           FILES=$(find artifacts -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.yml' \) | sort)
           echo "待上传："; echo "$FILES"
           if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            echo "Release 已存在：先清空旧资产"
             while IFS= read -r n; do
               echo "删除旧资产：$n"
-              gh release delete-asset "$TAG" "$n" -R "$REPO" --yes || true
-            done < <(gh release view "$TAG" -R "$REPO" --json assets -q '.assets[].name')
-            gh release upload "$TAG" $FILES -R "$REPO" --clobber
+              gh release delete-asset "$TAG" "$n" -R "$REPO" --yes > /tmp/del.out 2>&1 || echo "  （删除失败，忽略：$(tail -c 200 /tmp/del.out)）"
+            done < <(gh release view "$TAG" -R "$REPO" --json assets -q '.assets[].name' 2>/dev/null || true)
+            if gh release upload "$TAG" $FILES -R "$REPO" --clobber > /tmp/up.out 2>&1; then
+              echo "上传成功"
+            else
+              echo "::error title=gh-release-upload::$(tail -c 1500 /tmp/up.out)"
+              exit 1
+            fi
           else
-            gh release create "$TAG" $FILES -R "$REPO" --generate-notes --title "$TAG"
+            echo "Release 不存在：创建并上传"
+            if gh release create "$TAG" $FILES -R "$REPO" --generate-notes --title "$TAG" > /tmp/cr.out 2>&1; then
+              echo "创建成功"
+            else
+              echo "::error title=gh-release-create::$(tail -c 1500 /tmp/cr.out)"
+              exit 1
+            fi
           fi
