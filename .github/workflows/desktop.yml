@@ -98,8 +98,10 @@ jobs:
           REPO="${{ github.repository }}"
           echo "gh 版本：$(gh --version | head -1)"
           gh auth status 2>&1 | sed 's/^/auth: /' | head -6
-          # mac zip 文件名含空格，必须按行拆成数组再传参（不能直接 $FILES 分词）
-          mapfile -t FILE_ARR < <(find artifacts -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.yml' \) | sort)
+          # 只上传 7 个安装包 + 2 份平台更新清单。排除 builder-debug.yml（每平台 dist 都有一份，
+          # 同批次重名会上传 422）与 latest-mac.yml（双架构合并版由官网发布流程在服务器生成）。
+          # mac zip 文件名含空格，必须按行拆成数组再传参（不能直接 $FILES 分词）。
+          mapfile -t FILE_ARR < <(find artifacts -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name 'latest.yml' -o -name 'latest-linux.yml' \) | sort)
           echo "待上传："; printf '%s\n' "${FILE_ARR[@]}"
           if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
             echo "Release 已存在：先清空旧资产"
