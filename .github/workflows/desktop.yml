@@ -94,14 +94,15 @@ jobs:
         run: |
           set -euo pipefail
           TAG="${{ github.ref_name }}"
+          REPO="${{ github.repository }}"
           FILES=$(find artifacts -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.yml' \) | sort)
           echo "待上传："; echo "$FILES"
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            for n in $(gh release view "$TAG" --json assets -q '.assets[].name'); do
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            while IFS= read -r n; do
               echo "删除旧资产：$n"
-              gh release delete-asset "$TAG" "$n" --yes || true
-            done
-            gh release upload "$TAG" $FILES --clobber
+              gh release delete-asset "$TAG" "$n" -R "$REPO" --yes || true
+            done < <(gh release view "$TAG" -R "$REPO" --json assets -q '.assets[].name')
+            gh release upload "$TAG" $FILES -R "$REPO" --clobber
           else
-            gh release create "$TAG" $FILES --generate-notes --title "$TAG"
+            gh release create "$TAG" $FILES -R "$REPO" --generate-notes --title "$TAG"
           fi
