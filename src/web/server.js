@@ -248,6 +248,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     if (built.error) {
       entry.status = 'failed';
       send({ type: 'error', message: built.error });
+      clearInterval(progressTimer);
       res.end();
       return;
     }
@@ -332,6 +333,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       entry.status = 'failed';
       entry.durationMs = Date.now() - entry.startedAt;
       send({ type: 'error', message: `模型 ${runModel} 不可用：${String(err?.message || err)}` });
+      clearInterval(progressTimer);
       res.end();
       pruneTasks();
       return;
