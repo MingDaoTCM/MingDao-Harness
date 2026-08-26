@@ -33,8 +33,12 @@
 
 ## 校验
 
-- Windows exe sha256：`见 GitHub Release 页面`
-- 全部资产 sha256 详见 harness.mingdao.ai 下载页。
+- Windows exe sha256：`f493de6f9ae4ba617388fcc6efc10fb3858b8972f278fdee899ea8387964fdad`
+- macOS arm64 dmg：`768418d19d84808c82537e04ba884bfd6d7dd161ca9402266ed33194775bd923`
+- macOS x64 dmg：`6204c488688d346aedb4551c3e424849fdcac609e84391c84e958a87759b39fb`
+- Linux deb：`9cfa5e1f0dcc4196e6749bd7dc46e983e91eda129ad6f9045a6e2abd3d6978fa`
+- Linux AppImage：`5b06e462203f0fd8ec2318b2be05c481440d87603f615cb5fbf09585515098c2`
+- 全部资产与官网下载页校验值一致：https://harness.mingdao.ai/#downloads
 
 ## 反馈
 
