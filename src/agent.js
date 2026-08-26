@@ -256,7 +256,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             // 参数 JSON 解析失败：回填错误给模型，不拿空参数去执行工具
             io.renderToolDenied(name, {}, '参数解析失败（输出超限被截断？建议分块）');
             if (auditOn) auditEntry({ denied: true, reason: '参数解析失败' });
-            messages.push({ role: 'tool', tool_call_id: tc.id, content: '工具参数 JSON 解析失败，请重新输出合法参数。' });
+            // 审计（长生成截断循环）：给出明确分块指引，避免模型反复用单个超大 write 撞输出上限
+            messages.push({
+              role: 'tool',
+              tool_call_id: tc.id,
+              content:
+                '工具参数 JSON 解析失败（大概率是输出超过模型单次上限被截断）。请把内容拆分成多个较小文件或多次调用逐步写入：单个 write 的参数总长控制在 6000 字符以内；先写核心骨架，再逐文件补充。',
+            });
             return null;
           }
           if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};

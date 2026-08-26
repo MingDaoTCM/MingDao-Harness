@@ -233,6 +233,14 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       } catch {}
     };
     entry.send = send;
+    // 进度心跳（审计：长时间健康生成的可感知性——模型持续输出工具参数期间可能长时间
+    // 无任何 SSE 事件，界面看似卡死；每 8 秒发一次 progress，前端实时显示已工作时长/步数，
+    // 同时充当客户端无活动看门狗的活动源）
+    const progressTimer = setInterval(() => {
+      try {
+        send({ type: 'progress', seconds: Math.round((Date.now() - entry.startedAt) / 1000), steps: io?.stats?.().toolCount || 0 });
+      } catch {}
+    }, 8000);
     const userMessage = String(body.message ?? '').trim();
     entry.message = (userMessage || '[附件]').slice(0, 40);
     const visionSupported = Boolean(modelPreset(modelName)?.supportsVision || cfg.customModels?.[modelName]?.vision);
@@ -414,6 +422,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       srvlog('chat 错误 ' + taskId + ' ' + String(err?.message || err));
       send({ type: 'error', message: String(err?.message || err) });
     } finally {
+      clearInterval(progressTimer);
       srvlog('chat 收尾 ' + taskId + ' res.end 前（客户端将收到流结束）');
       entry.abortHandler = null;
       entry.pendingAsk = null;
