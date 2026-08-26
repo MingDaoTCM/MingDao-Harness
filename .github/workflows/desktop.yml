@@ -85,15 +85,23 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: 发布到 GitHub Release（单任务上传，避免矩阵并发竞态偶发失败）
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            artifacts/**/*.AppImage
-            artifacts/**/*.deb
-            artifacts/**/*.exe
-            artifacts/**/*.dmg
-            artifacts/**/*.zip
-            artifacts/**/*.yml
-          draft: false
-          generate_release_notes: true
+      # 同版本重建（0.1.65 等）需要在同一 Release 上覆盖资产。softprops 的 update-a-release-asset
+      # 在资产已存在/并发时偶发 404（"Not Found"）导致整个发布失败——改用 gh CLI：
+      # 已存在的 Release 先清空全部资产再整批上传（--clobber），不存在则创建。确定性行为，无竞态。
+      - name: 发布到 GitHub Release（清空旧资产后整批覆盖上传）
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          FILES=$(find artifacts -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.yml' \) | sort)
+          echo "待上传："; echo "$FILES"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            for n in $(gh release view "$TAG" --json assets -q '.assets[].name'); do
+              echo "删除旧资产：$n"
+              gh release delete-asset "$TAG" "$n" --yes || true
+            done
+            gh release upload "$TAG" $FILES --clobber
+          else
+            gh release create "$TAG" $FILES --generate-notes --title "$TAG"
+          fi
