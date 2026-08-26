@@ -69,9 +69,10 @@ main{flex:1;overflow-y:auto;padding:18px 0 12px;min-width:0}
 .msg-ai .content hr{border:none;border-top:1px solid var(--border);margin:16px 0}
 .msg-ai .content b,.msg-ai .content strong{font-weight:700;color:var(--text)}
 .msg-ai .content code{background:var(--code);border:1px solid var(--border);border-radius:4px;padding:1px 6px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;color:#7ee0b8}
-.msg-ai .content pre{background:var(--code);border:1px solid var(--border);border-radius:0 0 10px 10px;padding:12px 14px;overflow-x:auto;margin:0}
-.msg-ai .content .codeblock{border:1px solid var(--border);border-radius:10px;overflow:hidden;margin:.5em 0 12px}
-.msg-ai .content .cb-banner{display:flex;align-items:center;gap:8px;background:var(--bg3);border-bottom:1px solid var(--border);padding:5px 12px;font-size:12px;color:var(--dim);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.msg-ai .content pre{background:var(--code);border:1px solid var(--border);border-radius:0 0 12px 12px;padding:12px 14px;overflow-x:auto;margin:0}
+.msg-ai .content .codeblock{border:1px solid var(--border);border-radius:12px;overflow:hidden;margin:.5em 0 12px}
+.msg-ai .content .cb-banner{display:flex;justify-content:space-between;align-items:center;gap:12px;background:var(--bg3);border-bottom:1px solid var(--border);padding:8px 14px;font-size:12px;color:var(--dim);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.msg-ai .content .cb-lang{display:flex;align-items:center;gap:8px}
 .msg-ai .content .cb-dot{width:8px;height:8px;border-radius:50%;background:var(--accent)}
 .msg-ai .content pre code{background:none;border:none;padding:0;color:#c8d3e0}
 .msg-ai .content a{color:var(--accent2)}
@@ -410,6 +411,14 @@ const chatEl = $('#chat'), input = $('#input'), sendBtn = $('#sendBtn');
     btn.onclick = () => { scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' }); };
   }
 })();
+// 代码块「复制」按钮（事件委托：横幅随 markdown 渲染动态出现）
+chatEl.addEventListener('click', (e) => {
+  const b = e.target.closest('.cb-copy'); if (!b) return;
+  const pre = b.closest('.codeblock')?.querySelector('pre');
+  const t = pre ? pre.textContent : '';
+  const done = () => { b.textContent = '已复制'; setTimeout(() => { b.textContent = '复制'; }, 1200); };
+  if (navigator.clipboard?.writeText) navigator.clipboard.writeText(t).then(done).catch(() => {});
+});
 let generating = false; // 生成中：发送按钮复用为停止按钮
 let currentSession = null, thinking = null;
 
@@ -430,7 +439,7 @@ function renderMarkdown(text){
   // 块级解析（美化：加粗标题 / 段落 / 真列表 / 引用 / 分割线，参照 DeepSeek-Harness 会话排版）
   const lines = String(text).split('\n');
   let out = '', code = null, codeLang = '';
-  const flushCode = () => { if (code !== null) { out += '<div class="codeblock"><div class="cb-banner"><span class="cb-dot"></span>' + (esc(codeLang) || 'code') + '</div><pre><code class="lang-' + esc(codeLang) + '">' + highlight(code.join('\n'), codeLang) + '</code></pre></div>'; code = null; } };
+  const flushCode = () => { if (code !== null) { out += '<div class="codeblock"><div class="cb-banner"><span class="cb-lang"><span class="cb-dot"></span>' + (esc(codeLang) || 'code') + '</span><span class="cb-copy" style="cursor:pointer">复制</span></div><pre><code class="lang-' + esc(codeLang) + '">' + highlight(code.join('\n'), codeLang) + '</code></pre></div>'; code = null; } };
   let para = [];
   let list = null; // {type:'ul'|'ol', items:[]}
   const flushPara = () => { if (para.length) { out += '<p>' + para.join('<br>') + '</p>'; para = []; } };
