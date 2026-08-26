@@ -7,8 +7,9 @@
 #   1. 官网服务器 /opt/1panel/www/sites/mingdao-site/downloads/ 已有该版本的 7 个安装包（收割流程产出）
 #   2. gitee / gitcode 仓库已有对应 tag（本脚本会强制推送本地同名 tag，与 GitHub 发布 commit 对齐）
 #
-# 说明：token 只从环境变量读取，绝不写入仓库文件。上传限速约 200KB/s（服务器出带宽），
-# 7 个包约 640MB，需 ~1 小时，脚本在服务器后台运行：nohup ... & 并 tail /tmp/mirror-release-$V.log
+# 说明：token 只从环境变量读取，绝不写入仓库文件。上传限速约 50–100KB/s（gitee/服务器带宽），
+# 7 个包约 640MB，两平台并行约需 3–5 小时，脚本在服务器后台运行：nohup ... & 并 tail /tmp/mirror-release-$V.log
+# 已知限制：gitee 附件单文件上限 100MB（AppImage 108.6MB 会被拒）——发布文案需自带官网直连链接兜底。
 set -euo pipefail
 V="${1:?用法: publish-mirror-releases.sh <版本号> [备注文件]}"
 NOTES="${2:-}"
