@@ -129,6 +129,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 .dir-entry{padding:6px 10px;border-radius:6px;cursor:pointer;font-size:13.5px;word-break:break-all}
 .dir-entry:hover{background:var(--bg3)}
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
+  #scrollBottomBtn{position:fixed;right:26px;bottom:118px;width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#06121a;font-size:20px;font-weight:800;border:none;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.45);z-index:30;display:none;align-items:center;justify-content:center}
 @keyframes spin{to{transform:rotate(360deg)}}
 </style>
 </head>
@@ -278,6 +279,8 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <div class="row"><button id="cfgCancel">取消</button><button class="primary" id="cfgSave">保存</button></div>
   </div>
 </div>
+<!-- 回到底部悬浮按钮（参照 DeepSeek-Harness：上滚时出现，点击回到最新消息） -->
+<button id="scrollBottomBtn" title="回到最新消息">↓</button>
 <!-- 目录选择器（新建工作空间 / 改目录：浏览服务器磁盘目录树） -->
 <div id="dirModal" class="modal-mask" style="display:none">
   <div class="modal" style="width:min(520px,92vw);display:flex;flex-direction:column;max-height:78vh">
@@ -394,6 +397,16 @@ $('#dirPickOk').onclick = () => { const cb = pickerCb; pickerCb = null; $('#dirM
 $('#dirPickNone').onclick = () => { const cb = pickerCb; pickerCb = null; $('#dirModal').style.display = 'none'; if (cb) cb(null); };
 $('#dirPickCancel').onclick = () => { pickerCb = null; $('#dirModal').style.display = 'none'; };
 const chatEl = $('#chat'), input = $('#input'), sendBtn = $('#sendBtn');
+// 回到底部悬浮按钮：滚动容器为 main；上滚超过 300px 时出现，点击平滑回底
+(function(){
+  const scroller = document.querySelector('main');
+  const btn = $('#scrollBottomBtn');
+  if (scroller && btn) {
+    const farFromBottom = () => scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight > 300;
+    scroller.addEventListener('scroll', () => { btn.style.display = farFromBottom() ? 'flex' : 'none'; });
+    btn.onclick = () => { scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' }); };
+  }
+})();
 let generating = false; // 生成中：发送按钮复用为停止按钮
 let currentSession = null, thinking = null;
 
@@ -609,11 +622,18 @@ async function send(){
   if(generating){ console.log('[MingDao] send 被生成态拦截 → 走 abort'); abort(); return; } // 生成中：同一按钮承担停止职责
   if(!text && !attachments.length) return;
   const turnCtrl=new AbortController();
-  // 回合看门狗：120 秒无任何响应强制中断——无论服务端处于什么状态，界面都能自动恢复可发送
-  const watchdog=setTimeout(()=>{
+  // 回合看门狗（无活动超时，非总时长——审计：此前 120s 定时炸弹误杀长时间健康生成，
+  // 如模型持续输出大文件代码时到点被掐断：write 参数截断 + 「响应超时已中断」）：
+  // 每收到一个 SSE 事件即重置；ask 权限等待期间暂停计时（用户思考不设限），
+  // 回复后的下一个事件自动重新武装。仅当 120 秒内真正没有任何事件（挂死）才强制中断。
+  let watchdog=null; let killedByWatchdog=false;
+  const disarm=()=>{ if(watchdog){ clearTimeout(watchdog); watchdog=null; } };
+  const arm=()=>{ disarm(); watchdog=setTimeout(()=>{
+    killedByWatchdog=true;
     try{ turnCtrl.abort(); }catch{}
     fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
-  },120000);
+  },120000); };
+  arm();
   input.value=''; input.style.height='44px';
   const payload={message:text,file:currentSession};
   // 带上文开关：勾选后系统提示注入最近会话日志（默认不注入——新会话全新开始，避免串到历史会话上下文）
@@ -646,6 +666,7 @@ async function send(){
     if(!resp.ok){ const j=await resp.json().catch(()=>({})); onActivity(); msg.innerHTML='<div class="errline">'+esc(j.error||('HTTP '+resp.status))+'</div>'; updateTasksPanel(); return; }
     await handleEvents(resp.body, ev=>{
       if(ev.taskId) taskId=ev.taskId;
+      if(ev.type==='ask') disarm(); else arm(); // 有活动→重置；权限等待→暂停计时
       if(ev.type==='text'){ onActivity(); raw+=ev.delta; update(); }
       else if(ev.type==='reasoning'){ if(!reason){ reason=addReasoning(msg); } if(!reason.parentElement.open) reason.parentElement.open=true; reason.parentElement.querySelector('summary').classList.add('live'); reason.textContent+=ev.delta; reason.scrollTop=reason.scrollHeight; scroll(); }
       else if(ev.type==='turnStart'){ stepsCount+=1; showThink(); scroll(); }
@@ -659,8 +680,8 @@ async function send(){
       else if(ev.type==='error'){ console.log('[MingDao] error 事件：' + ev.message); onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); scroll(); }
       else if(ev.type==='done'){ console.log('[MingDao] done 事件：session=' + ev.session); onActivity(); if(ev.budget){ const b=ev.budget; if(hintTextEl) hintTextEl.textContent='预算 '+Math.round(b.used/1000)+'K/'+Math.round(b.total/1000)+'K（'+Math.round(b.used/b.total*100)+'%）· 本轮完成 · 提示栏右侧为今日费用与命中率'; } refreshStatusBar(); if(ev.stats&&ev.stats.deliverables&&ev.stats.deliverables.length){ const card=document.createElement('div'); card.className='deliver'; card.innerHTML='<div class="t">📦 交付物（'+ev.stats.deliverables.length+' 个文件）</div>'+ev.stats.deliverables.map(f=>'<div class="i">'+esc(f)+(f.toLowerCase().endsWith('.html')?' <span style="color:var(--accent2)">— 浏览器打开即可运行</span>':'')+'</div>').join(''); msg.appendChild(card); } if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); } currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
     });
-  }catch(e){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=(e&&e.name==='AbortError')?'响应超时已中断（120 秒无响应），请重试':(e&&e.message)||'网络错误'; msg.appendChild(d); scroll(); }
-  finally{ clearInterval(hintTimer); clearTimeout(watchdog); generating=false; setBtn(); console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); scroll(); updateTasksPanel(); }
+  }catch(e){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=(e&&e.name==='AbortError')?(killedByWatchdog?'响应超时已中断（120 秒无任何响应），请重试':'已中断'):(e&&e.message)||'网络错误'; msg.appendChild(d); scroll(); }
+  finally{ clearInterval(hintTimer); disarm(); generating=false; setBtn(); console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); scroll(); updateTasksPanel(); }
 }
 
 function abort(){ fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(()=>updateTasksPanel()).catch(()=>{}); }
