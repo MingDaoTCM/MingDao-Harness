@@ -239,27 +239,58 @@ async function createWindow() {
   });
 }
 
-// 菜单「检查更新」：手动触发并弹出结果（静默失败不可见的历史问题兜底）
+// 菜单「检查更新」：手动触发并弹出结果。
+// 审计（点击无响应根因）：此前依赖 autoUpdater 事件回调，任何一步异常
+// （electron-updater 导入失败 / 事件不触发 / 网络挂起）都会静默吞掉——用户点击后毫无反馈。
+// 修复：全程 try/catch + promise 结果兜底 + 30 秒超时兜底，任何路径必有弹窗；文案含当前版本号。
 async function checkUpdatesFromMenu() {
+  const show = (opts) => dialog.showMessageBox(mainWindow ?? undefined, opts).catch(() => {});
   if (process.env.MINGDAO_NO_AUTOUPDATE === '1') {
-    dialog.showMessageBox({ type: 'info', title: '检查更新', message: '自动更新已被环境变量禁用（MINGDAO_NO_AUTOUPDATE=1）' });
+    show({ type: 'info', title: '检查更新', message: '自动更新已被环境变量禁用（MINGDAO_NO_AUTOUPDATE=1）' });
     return;
   }
-  const { autoUpdater } = await import('electron-updater');
-  autoUpdater.once('error', (err) => {
-    appLog('updater error ' + String(err?.message || err));
-    dialog.showMessageBox({ type: 'warning', title: '检查更新', message: '检查失败：' + String(err?.message || err), detail: '请检查网络后重试；或到官网下载最新安装包。' });
-  });
-  autoUpdater.once('update-not-available', () => {
-    dialog.showMessageBox({ type: 'info', title: '检查更新', message: '当前已是最新版本 v' + app.getVersion() });
-  });
-  autoUpdater.once('update-available', (info) => {
-    dialog.showMessageBox({ type: 'info', title: '检查更新', message: '发现新版本 v' + info.version + '，开始自动下载…', detail: '下载完成后会提示重启安装。' });
-  });
-  autoUpdater.checkForUpdates().catch((err) => {
+  let done = false;
+  const finish = (fn) => { if (!done) { done = true; fn(); } };
+  const ver = app.getVersion();
+  try {
+    const { autoUpdater } = await import('electron-updater');
+    const timer = setTimeout(() => {
+      finish(() => show({ type: 'warning', title: '检查更新', message: '检查超时（30 秒无响应）', detail: '可能网络不通或官网暂不可达；请稍后重试，或到官网下载最新安装包。' }));
+    }, 30000);
+    autoUpdater.once('error', (err) => {
+      clearTimeout(timer);
+      appLog('updater error ' + String(err?.message || err));
+      finish(() => show({ type: 'warning', title: '检查更新', message: '检查失败：' + String(err?.message || err), detail: '请检查网络后重试；或到官网下载最新安装包。' }));
+    });
+    autoUpdater.once('update-not-available', () => {
+      clearTimeout(timer);
+      finish(() => show({ type: 'info', title: '检查更新', message: `当前版本：v${ver}，已是最新版本` }));
+    });
+    autoUpdater.once('update-available', (info) => {
+      clearTimeout(timer);
+      finish(() => show({ type: 'info', title: '检查更新', message: '发现新版本 v' + info.version + '，开始自动下载…', detail: '下载完成后会提示重启安装。' }));
+    });
+    const result = await autoUpdater.checkForUpdates();
+    // promise 直接返回但事件未触发时按结果兜底（避免任何静默路径）
+    if (!done) {
+      clearTimeout(timer);
+      const latest = result?.updateInfo?.version;
+      if (!latest || latest === ver) {
+        finish(() => show({ type: 'info', title: '检查更新', message: `当前版本：v${ver}，已是最新版本` }));
+      } else {
+        finish(() => show({ type: 'info', title: '检查更新', message: '发现新版本 v' + latest + '，开始自动下载…', detail: '下载完成后会提示重启安装。' }));
+      }
+    }
+  } catch (err) {
     appLog('updater check error ' + String(err?.message || err));
-    dialog.showMessageBox({ type: 'warning', title: '检查更新', message: '检查失败：' + String(err?.message || err) });
-  });
+    const msg = String(err?.message || err);
+    if (/progress|already|running/i.test(msg)) {
+      // 启动时的自动检查尚未结束：给出可见反馈而非报错
+      finish(() => show({ type: 'info', title: '检查更新', message: '正在检查更新，请稍候…', detail: '启动时的自动检查尚未结束，结果会随后提示。' }));
+    } else {
+      finish(() => show({ type: 'warning', title: '检查更新', message: '检查失败：' + msg, detail: '请检查网络后重试；或到官网下载最新安装包。' }));
+    }
+  }
 }
 
 // 自动更新（仅打包版；官网 generic feed 发布产物时生效）

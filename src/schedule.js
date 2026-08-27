@@ -134,7 +134,7 @@ export function addSchedule(home, question, /** @type {any} */ { at, every, afte
     runs: 0,
     pid: null,
     createdAt: Date.now(),
-    note: offpeak ? '避峰：高峰时段自动顺延到 14:00 后执行' : '',
+    note: offpeak ? '避峰：高峰时段自动顺延到最近闲时（12:00 / 18:00）执行' : '',
     offpeak: Boolean(offpeak),
   };
   writeSchedule(home, job);
@@ -330,11 +330,12 @@ export async function runSleeper(home, id) {
   }
 
   const runOnce = async () => {
-    // 避峰（评估 A2/Kimi P-1）：高峰时段（北京工作日 9:00–14:00）顺延到 14:00 执行，输入价省 50%
+    // 避峰（评估 A2/Kimi P-1）：高峰时段（北京工作日 9:00–12:00、14:00–18:00）
+    // 顺延到最近闲时起点（12:00 / 18:00）执行，输入价省 50%
     if (job.offpeak && isPeakHour(new Date())) {
       const defer = deferToOffpeak(new Date());
       const curN = readSchedule(home, id);
-      if (curN) writeSchedule(home, { ...curN, note: `避峰等待至 ${defer.toISOString().slice(11, 16)}Z+8` });
+      if (curN) writeSchedule(home, { ...curN, note: `避峰等待至北京时间 ${defer.toISOString().slice(11, 16)}（闲时起执行）` });
       await wait(defer.getTime() - Date.now() + 2000);
     }
     if (job.after?.length) {

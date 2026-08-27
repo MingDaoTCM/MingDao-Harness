@@ -201,10 +201,11 @@ async function runWorkerTask(id, question, { permission, model, offpeak }) {
       perm = 'readonly';
       note = 'ask 权限下后台任务按只读执行';
     }
-    // 避峰（评估 A2/Kimi P-1）：高峰时段（北京工作日 9:00–14:00）自动顺延到 14:00 执行，输入价省 50%
+    // 避峰（评估 A2/Kimi P-1）：高峰时段（北京工作日 9:00–12:00、14:00–18:00）
+    // 自动顺延到最近闲时起点（12:00 / 18:00）执行，输入价省 50%
     if (offpeak && isPeakHour(new Date())) {
       const defer = deferToOffpeak(new Date());
-      finish({ note: `避峰等待至 ${defer.toISOString().slice(11, 16)}（北京时间 14:00 后）` });
+      finish({ note: `避峰等待至北京时间 ${defer.toISOString().slice(11, 16)}（闲时起执行，输入价省 50%）` });
       await new Promise((r) => setTimeout(r, defer.getTime() - Date.now() + 2000));
       finish({ note: '' });
     }

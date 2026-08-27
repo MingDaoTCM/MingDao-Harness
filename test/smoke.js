@@ -1661,18 +1661,26 @@ const ctx = { cwd: tmp };
 
 // ---------- 39. 峰谷时区/周末低价/避峰顺延/Batch 半价计价（A2/Kimi P0-4） ----------
 {
-  const { isPeakHour, deferToOffpeak, estimateBatchCost, BATCH_DISCOUNT } = await import(pathToFileURL(path.join(srcDir, 'pricing.js')).href);
-  // 2026-08-21 是周五：北京 10:00（UTC 02:00）→ 高峰；14:00（UTC 06:00）→ 闲时
-  assert.equal(isPeakHour(new Date('2026-08-21T02:00:00Z')), true, '工作日 10:00 应为高峰');
-  assert.equal(isPeakHour(new Date('2026-08-21T06:00:00Z')), false, '工作日 14:00 起应为闲时');
-  // 2026-08-22 周六 / 2026-08-23 周日：官方邮件确认周末全天闲时低价
+  const { isPeakHour, deferToOffpeak, peakStatusLabel, estimateBatchCost, BATCH_DISCOUNT } = await import(pathToFileURL(path.join(srcDir, 'pricing.js')).href);
+  // 2026-08-21 是周五。官方定义：高峰＝北京工作日 9:00–12:00、14:00–18:00；午间 12:00–14:00 与其余为闲时
+  assert.equal(isPeakHour(new Date('2026-08-21T02:00:00Z')), true, '工作日 10:00（上午高峰段）应为高峰');
+  assert.equal(isPeakHour(new Date('2026-08-21T03:00:00Z')), true, '工作日 11:00 应为高峰');
+  assert.equal(isPeakHour(new Date('2026-08-21T04:00:00Z')), false, '工作日 12:00（午间）应为闲时');
+  assert.equal(isPeakHour(new Date('2026-08-21T05:00:00Z')), false, '工作日 13:00（午间）应为闲时');
+  assert.equal(isPeakHour(new Date('2026-08-21T06:00:00Z')), true, '工作日 14:00（下午高峰段）应为高峰');
+  assert.equal(isPeakHour(new Date('2026-08-21T07:00:00Z')), true, '工作日 15:00 应为高峰');
+  assert.equal(isPeakHour(new Date('2026-08-21T10:00:00Z')), false, '工作日 18:00 起应为闲时');
+  assert.equal(isPeakHour(new Date('2026-08-21T11:00:00Z')), false, '工作日 19:00 应为闲时');
+  // 2026-08-22 周六 / 2026-08-23 周日：周末全天闲时低价
   assert.equal(isPeakHour(new Date('2026-08-22T02:00:00Z')), false, '周六全天应按闲时计价');
   assert.equal(isPeakHour(new Date('2026-08-23T02:00:00Z')), false, '周日全天应按闲时计价');
   assert.equal(isPeakHour(new Date('2026-08-22T23:00:00Z')), false, '周六深夜同样按闲时计价');
-  // 避峰顺延：高峰时刻 → 当天北京 14:00
-  const defer = deferToOffpeak(new Date('2026-08-21T02:00:00Z'));
-  assert.equal(defer.getTime(), new Date('2026-08-21T06:00:00Z').getTime(), '高峰应顺延到当天 14:00');
-  assert.equal(deferToOffpeak(new Date('2026-08-21T06:00:00Z')).getTime(), new Date('2026-08-21T06:00:00Z').getTime(), '闲时应原时刻返回');
+  // 避峰顺延：上午高峰 → 12:00；下午高峰 → 18:00；闲时原时刻返回
+  assert.equal(deferToOffpeak(new Date('2026-08-21T02:00:00Z')).getTime(), new Date('2026-08-21T04:00:00Z').getTime(), '上午高峰应顺延到北京 12:00');
+  assert.equal(deferToOffpeak(new Date('2026-08-21T07:00:00Z')).getTime(), new Date('2026-08-21T10:00:00Z').getTime(), '下午高峰应顺延到北京 18:00');
+  assert.equal(deferToOffpeak(new Date('2026-08-21T04:00:00Z')).getTime(), new Date('2026-08-21T04:00:00Z').getTime(), '午间闲时应原时刻返回');
+  assert.ok(peakStatusLabel(new Date('2026-08-21T02:00:00Z')).startsWith('高峰'), '状态标签应含高峰');
+  assert.equal(peakStatusLabel(new Date('2026-08-21T04:00:00Z')), '闲时', '午间应显示闲时');
   // Batch 半价：flash 闲时 1.5/4.5 → (1.5+4.5)×0.5 = 3.0 元/M
   assert.equal(BATCH_DISCOUNT, 0.5);
   const bc = estimateBatchCost('deepseek-v4-flash', 1000000, 1000000);

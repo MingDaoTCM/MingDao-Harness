@@ -9,7 +9,7 @@ export const PROVIDERS = {
     baseUrl: 'https://api.deepseek.com/v1',
     envKey: 'DEEPSEEK_API_KEY',
     models: ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
-    note: 'DeepSeek-V4 正式版（2026-08-17 起商用）：384K 上下文，峰谷定价（高峰 9:00–14:00 为闲时 2 倍），支持工具调用 / Responses API / Anthropic 兼容接口。',
+    note: 'DeepSeek-V4 正式版（2026-08-17 起商用）：384K 上下文，峰谷定价（高峰＝北京工作日 9:00–12:00、14:00–18:00，闲时价＝高峰一半），支持工具调用 / Responses API / Anthropic 兼容接口。',
   },
   openai: {
     label: 'OpenAI',

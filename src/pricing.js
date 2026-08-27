@@ -12,36 +12,46 @@ import { mingdaoHome } from './config.js';
 // 内置价格表的数据时点（定价可能调整，配置覆盖可随时更新）
 export const PRICE_DATA_AS_OF = '2026-08';
 
-// 峰谷判断锚定北京时间（评估 P0-4：DeepSeek 按北京时间 9:00–14:00 高峰计价，
-// 用本机时区判断会让海外用户计费错位）。config.pricing.timezone 可覆盖，mtime 缓存避免每次读盘。
-let tzCache = { mtime: 0, timezone: 'Asia/Shanghai' };
-function peakTimezone() {
+// 峰谷判断锚定北京时间（DeepSeek 官方定价页：高峰时段 = 北京时间周一至周五
+// 9:00–12:00、14:00–18:00 两段；其余（含午间 12:00–14:00 与周末全天）为闲时，闲时价 = 高峰一半）。
+// 用本机时区判断会让海外用户计费错位。config.pricing.timezone 可覆盖时区、
+// config.pricing.peakWindows 可覆盖高峰窗口（[[起,止],...] 北京时间整点），mtime 缓存避免每次读盘。
+const DEFAULT_PEAK_WINDOWS = [[9, 12], [14, 18]];
+let tzCache = { mtime: 0, timezone: 'Asia/Shanghai', peakWindows: DEFAULT_PEAK_WINDOWS };
+function peakCfg() {
   try {
     const file = path.join(mingdaoHome(), 'config.json');
     const st = fs.statSync(file);
     if (st.mtimeMs !== tzCache.mtime) {
       const cfg = JSON.parse(fs.readFileSync(file, 'utf8'));
-      tzCache = { mtime: st.mtimeMs, timezone: String(cfg?.pricing?.timezone || 'Asia/Shanghai') };
+      const pw = cfg?.pricing?.peakWindows;
+      tzCache = {
+        mtime: st.mtimeMs,
+        timezone: String(cfg?.pricing?.timezone || 'Asia/Shanghai'),
+        peakWindows: Array.isArray(pw) && pw.length ? pw : DEFAULT_PEAK_WINDOWS,
+      };
     }
   } catch {}
-  return tzCache.timezone;
+  return tzCache;
 }
 
 export function isPeakHour(date = new Date()) {
+  const { timezone, peakWindows } = peakCfg();
   try {
     const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: peakTimezone(),
+      timeZone: timezone,
       weekday: 'short',
       hour: 'numeric',
       hourCycle: 'h23',
     }).formatToParts(date);
     const weekday = parts.find((p) => p.type === 'weekday')?.value;
-    // 周末全天按闲时计价（DeepSeek 官方邮件确认：周六/周日全天闲时低价，批量任务周末更划算）
+    // 周末全天按闲时计价
     if (weekday === 'Sat' || weekday === 'Sun') return false;
     const hour = Number(parts.find((p) => p.type === 'hour')?.value);
-    return hour >= 9 && hour < 14;
+    return peakWindows.some(([s, e]) => hour >= s && hour < e);
   } catch {
-    return date.getHours() >= 9 && date.getHours() < 14; // 非法时区回退本机
+    const h = date.getHours();
+    return peakWindows.some(([s, e]) => h >= s && h < e); // 非法时区回退本机
   }
 }
 
@@ -49,7 +59,7 @@ export function isPeakHour(date = new Date()) {
 export function beijingParts(date = new Date()) {
   let tz = 'Asia/Shanghai';
   try {
-    tz = peakTimezone();
+    tz = peakCfg().timezone;
     new Intl.DateTimeFormat('en-US', { timeZone: tz }).format(); // 非法时区在此抛错
   } catch {
     tz = 'Asia/Shanghai'; // 审计 B1：坏时区配置回退北京时间，绝不让计费/护栏崩溃
@@ -73,11 +83,24 @@ export function beijingToDate(parts) {
   return new Date(Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - 8 * 3600 * 1000);
 }
 
-// 避峰：当前处于高峰（9:00–14:00）→ 顺延到当天 14:00；否则原时刻
+// 避峰顺延：当前处于高峰 → 顺延到该高峰段的结束整点（即最近一个闲时起点）
+//   · 9:00–12:00 高峰 → 12:00（午间闲时）
+//   · 14:00–18:00 高峰 → 18:00（晚间闲时）
+// 其余（午间/晚间/清晨/周末）原时刻执行。窗口可经 pricing.peakWindows 覆盖。
 export function deferToOffpeak(date = new Date()) {
   if (!isPeakHour(date)) return date;
   const p = beijingParts(date);
-  return beijingToDate({ ...p, hour: 14, minute: 0, second: 0 });
+  const w = peakCfg().peakWindows.find(([s, e]) => p.hour >= s && p.hour < e);
+  const targetHour = w ? w[1] : 18;
+  return beijingToDate({ ...p, hour: targetHour, minute: 0, second: 0 });
+}
+
+// 当前时段的人类可读描述（设置面板/调度备注共用）
+export function peakStatusLabel(date = new Date()) {
+  if (!isPeakHour(date)) return '闲时';
+  const p = beijingParts(date);
+  const w = peakCfg().peakWindows.find(([s, e]) => p.hour >= s && p.hour < e);
+  return `高峰（至 ${String(w ? w[1] : 18).padStart(2, '0')}:00）`;
 }
 
 // 北京时间当日 0 点（费用护栏按自然日累计）

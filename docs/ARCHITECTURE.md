@@ -91,7 +91,7 @@ PreToolUse（stdin 收 JSON，stdout 输出 `{decision:"block", reason}` 可阻�
 
 1. **预设调优**：v4-pro（推理/规划：温度 0.4、输出上限 32k、预算 200k）；v4-flash（日常：温度 0.6、输出 8k、预算 128k）；两者 `contextWindow` 均为 384K（正式版规格：2026-08-17 起 V4-Pro 转正商用），预算可随时调高。
 2. **推理内容流式展示**：`reasoning_content` 以暗色增量渲染，与正文同流。
-3. **峰谷定价适配**：每轮后展示 prompt/completion tokens，便于用户把批处理放在谷时段（v4 系列 2026-08-17 起峰谷定价，高峰 9:00–14:00 为闲时 2 倍）。官方同时提供 Responses API 与 Anthropic 兼容接口；MingDao 默认走 OpenAI 兼容 chat/completions，如需原生协议可写自定义 Provider 模块。
+3. **峰谷定价适配**：每轮后展示 prompt/completion tokens，便于用户把批处理放在谷时段（v4 系列 2026-08-17 起峰谷定价，高峰＝北京工作日 9:00–12:00、14:00–18:00，闲时价＝高峰一半）。官方同时提供 Responses API 与 Anthropic 兼容接口；MingDao 默认走 OpenAI 兼容 chat/completions，如需原生协议可写自定义 Provider 模块。
 4. **模型路由（路线图）**：规划用 v4-pro、执行用 v4-flash 的自动分工；Provider 抽象已支持任意切换。
 5. **可靠性**：超时 + 指数退避重试，长上下文下避免瞬时错误中断任务。
 

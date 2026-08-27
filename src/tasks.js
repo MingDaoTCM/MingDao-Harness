@@ -67,7 +67,7 @@ export function startTask(home, question, { permission, model, cwd, offpeak, qui
     usage: null,
     durationMs: null,
     error: '',
-    note: offpeak ? '避峰：高峰时段顺延到 14:00 后执行（省 50%）' : '',
+    note: offpeak ? '避峰：高峰时段顺延到最近闲时（12:00 / 18:00）执行（省 50%）' : '',
   };
   writeTask(home, task);
   const args = [CLI_PATH, 'run-worker', id, '--question', String(question)];
