@@ -270,7 +270,14 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     let routeReason = null;
     if (routingConfig(cfg)) {
       try {
-        const route = await routeTask({ cfg, provider, currentModel: modelName, text: built.persistText || userMessage, sticky: session.lastRoute || null });
+        const route = await routeTask({
+          cfg,
+          provider,
+          currentModel: modelName,
+          text: built.persistText || userMessage,
+          sticky: session.lastRoute || null,
+          sessionStats: session.routeStats || null, // 会话级步数/截断统计（路由升级检测）
+        });
         session.lastRoute = route.model;
         if (route.model !== modelName) {
           runModel = route.model;
@@ -375,6 +382,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     try {
       const r = await agent.runTurn(messages);
       srvlog('chat 回合完成 ' + taskId + ' text=' + String(r.text || '').length + ' ' + (Date.now() - entry.startedAt) + 'ms');
+      // 会话级路由统计（Hermes C2 升级检测）：累计工具步数与截断次数，粘滞 flash 会话复杂度上来后自动升 planner
+      const st = session.routeStats || { steps: 0, truncated: 0 };
+      session.routeStats = { steps: st.steps + (io.stats().toolCount || 0), truncated: st.truncated + (r.truncated ? 1 : 0) };
       appendMessages(session.file, messages.slice(persistedBefore));
       io.printUsageLine({ modelName: runModel, usage: r.usage, durationMs: r.durationMs });
       recordUsage(runModel, r.usage, r.perf);

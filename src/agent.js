@@ -26,6 +26,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   const budget = cfg.contextBudget || preset.budgetTokens || 128000;
   const maxOutput = cfg.maxOutputTokens || preset.maxOutputTokens || 8192;
   const temperature = cfg.temperature ?? preset.temperature ?? 0.6;
+  const reasoningEffort = cfg.reasoningEffort ?? preset.reasoningEffort?.default ?? undefined;
   const hooks = createHooks(cfg.hooks, workingDir);
   const todos = [];
   // 会话级共享：调用方传入则复用（/model 切换、子代理均共享，undo 不丢失）
@@ -189,6 +190,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           tools: [...toolSchemas(), ...mcpSchemas()],
           temperature,
           maxTokens: maxOutput,
+          reasoningEffort,
           signal: ac.signal,
           onDelta(d) {
             io.stopSpinner();

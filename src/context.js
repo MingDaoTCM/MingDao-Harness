@@ -65,18 +65,35 @@ export function trimMessages(messages, budget, count = approxTokens) {
   const hasSystem = messages[0]?.role === 'system';
   const system = hasSystem ? [messages[0]] : [];
   const rest = hasSystem ? messages.slice(1) : messages;
-  let total = system.reduce((s, m) => s + messageTokens(m, count), 0);
-  const tail = [];
-  for (let i = rest.length - 1; i >= 0; i--) {
-    const t = messageTokens(rest[i], count);
-    if (total + t > budget) break;
-    total += t;
-    tail.unshift(rest[i]);
+  const totalOf = (arr) => arr.reduce((s, m) => s + messageTokens(m, count), 0);
+  // —— 轻量语义回收（Hermes B1）：预算 >80% 时先对最老消息做无模型压缩 ——
+  // 最老 tool 消息 → 单行摘要；老 assistant 长文 → 前 200 字；逐条向新推进直到回到 80% 线。
+  // 相比直接丢弃，被修改的只有前端旧消息——其后未被触碰的近期尾部字节保持不变，
+  // 下一轮前缀缓存从首个未修改消息起继续命中（直接丢弃反而让整段前缀失配）。
+  if (totalOf(system) + totalOf(rest) > budget * 0.8) {
+    const out = [...rest];
+    for (let i = 0; i < out.length && i < 500; i++) {
+      if (totalOf(system) + totalOf(out) <= budget * 0.8) break;
+      const m = out[i];
+      const c = typeof m.content === 'string' ? m.content : JSON.stringify(m?.content ?? '');
+      if (m.role === 'tool' && c.length > 40) {
+        out[i] = { ...m, content: `[工具 ${m.tool_call_id || ''} 结果摘要：${c.slice(0, 40).replace(/\n/g, ' ')}…（已回收，原 ${c.length} 字）]` };
+      } else if (m.role === 'assistant' && c.length > 200) {
+        out[i] = { ...m, content: c.slice(0, 200) + ` …[已回收，原 ${c.length} 字]` };
+      }
+    }
+    // 回收后仍超预算 → 从尾部保留（必要时继续丢弃最老，清洗 tool 配对）
+    let total = totalOf(system);
+    const tail = [];
+    for (let i = out.length - 1; i >= 0; i--) {
+      const t = messageTokens(out[i], count);
+      if (total + t > budget) break;
+      total += t;
+      tail.unshift(out[i]);
+    }
+    return cleanToolPairing(system.concat(tail));
   }
-  const kept = cleanToolPairing(system.concat(tail));
-  // 静默裁剪：不向中间插入说明消息——保持消息前缀字节稳定，
-  // 让 DeepSeek 等支持上下文缓存的 API 最大化缓存命中（命中价仅为未命中的约 1/30）。
-  return kept;
+  return cleanToolPairing(system.concat(rest));
 }
 
 export function clampText(text, maxChars = TOOL_RESULT_LIMIT) {

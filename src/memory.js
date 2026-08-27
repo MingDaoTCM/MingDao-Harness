@@ -178,7 +178,7 @@ export async function extractMemory(provider, model, messages, existingMemory) {
     ];
     // 结构化输出（评估 4.2-4）：json_object，maxTokens 300→200，解析零失败；网关不支持时回退纯文本
     try {
-      const res = await provider.chat({ model, messages: msgs, tools: [], temperature: 0.2, maxTokens: 200, responseFormat: { type: 'json_object' } });
+      const res = await provider.chat({ model, messages: msgs, tools: [], temperature: 0.2, maxTokens: 200, reasoningEffort: 'low', responseFormat: { type: 'json_object' } });
       const j = JSON.parse(String(res.text || '').trim());
       const items = Array.isArray(j?.items) ? j.items : [];
       const clean = items

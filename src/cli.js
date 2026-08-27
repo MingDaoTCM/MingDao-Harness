@@ -780,6 +780,24 @@ async function main() {
           continue;
         }
         await switchToModel(target);
+      } else if (cmd === '/think') {
+        const vals = ['low', 'high', 'max'];
+        if (!arg) {
+          io.print(`用法：/think low|high|max|off（当前：${cfg.reasoningEffort || '跟随模型默认 high'}）`);
+          continue;
+        }
+        if (arg === 'off') cfg.reasoningEffort = undefined;
+        else if (vals.includes(arg)) cfg.reasoningEffort = arg;
+        else { io.print(style('无效取值：low|high|max|off', C.red)); continue; }
+        agent = createAgent({
+          provider, permission, io, modelName, workingDir, cfg,
+          undoStore: sessionUndoStore, mcp: mcpFacade, sessionRef,
+          onCompact: (msgs) => {
+            rewriteSession(session.file, msgs);
+            persisted = msgs.length;
+          },
+        });
+        io.print(style(`✓ 思考强度：${cfg.reasoningEffort || 'off（模型默认）'}`, C.green));
       } else if (cmd === '/plan') {
         planMode = !planMode;
         io.print(style(`✓ 计划模式：${planMode ? '开' : '关'}${planMode ? '（先出计划，确认后执行）' : ''}`, C.green));

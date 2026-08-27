@@ -6,7 +6,7 @@
  * @typedef {Error & { status?: number, headers?: Headers }} ApiError
  */
 
-export async function chat({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta, includeUsage = true, responseFormat }) {
+export async function chat({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta, includeUsage = true, responseFormat, reasoningEffort }) {
   const url = String(baseUrl).replace(/\/+$/, '') + '/chat/completions';
   const payload = { model, messages };
   if (temperature != null) payload.temperature = temperature;
@@ -16,6 +16,7 @@ export async function chat({ baseUrl, apiKey, model, messages, tools, temperatur
   }
   if (maxTokens) payload.max_tokens = maxTokens;
   if (responseFormat) payload.response_format = responseFormat;
+  if (reasoningEffort) payload.reasoning_effort = reasoningEffort; // 思考强度（官方 thinking_mode）
   payload.stream = true;
   // 流式响应默认不带 usage，显式请求以便展示 token/费用统计
   // （部分网关不支持该字段，可在 config.json 设 "includeUsage": false 关闭）

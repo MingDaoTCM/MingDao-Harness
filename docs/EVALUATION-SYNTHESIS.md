@@ -44,12 +44,12 @@
 
 ## 三、下一步优化路线（按投入产出排序）
 
-### 近期（0.1.67~0.2.0，每项半天~1 天）
-1. **思考强度三档透传**（Kimi P1-B，单点收益最高）：`models.js` 加 `reasoningEffort`、Provider 透传 `reasoning_effort`，辅助调用（标题/记忆/分类器）固定 `low`，`/think low|high|max` 切换。预期简单问答输出 token 降 50%+。
-2. **上下文窗口字段修正**（Kimi P1-C）：`contextWindow` 1M、新增 `maxOutputCeiling`、pro 默认 `maxOutputTokens` 65536，减少大文件生成的续写重复计费。
-3. **价格表外置 + 自动刷新**（Hermes C1）：内置表兜底 + `~/.mingdao/pricing.json` 官方价跟随（TTL 7 天），`/cost` 在数据时点超 60 天时提示"价格表可能过期"。
-4. **轻量语义回收**（Hermes B1）：预算 80% 触发 O(1) 回收（最老 tool 消息 → 摘要行、旧 assistant 长文截前 200 字），不破坏前缀，重压缩线下移到 90%。
-5. **路由升级检测 + 第三态**（Hermes C2 / Kimi）：粘滞会话内按生成词/截断次数/工具步数允许升 planner；分类器"不确定"→ 保守走 planner。
+### 近期（0.1.67 已实施 ✅，其余顺延 0.2.0）
+1. ✅ **思考强度三档透传**（Kimi P1-B）：`models.js` 加 `reasoningEffort`、Provider 透传 `reasoning_effort`（官方 thinking_mode 参数），辅助调用（标题/记忆/分类器）固定 `low`，REPL `/think low|high|max|off` 切换。
+2. ✅ **上下文窗口字段修正**（Kimi P1-C）：`contextWindow` 1M、新增 `maxOutputCeiling:384000`、pro `maxOutputTokens` 32768→65536。
+3. ✅ **价格表外置 + 自动刷新**（Hermes C1）：内置表兜底 + `~/.mingdao/pricing.json`（`mingdao update --pricing` 从 `pricing.source` 拉取，TTL 7 天）；过期时费用标签提示刷新。
+4. ✅ **轻量语义回收**（Hermes B1）：预算 >80% 时最老 tool 消息 → 单行摘要、旧 assistant 长文截前 200 字，无需模型调用；仍超才按尾部保留丢弃。
+5. ✅ **路由升级检测 + 第三态**（Hermes C2 / Kimi）：粘滞 flash 会话累计工具步数 ≥10 或截断 ≥2 自动升 planner（`routing.upgradeSteps/upgradeTruncated` 可调）；分类器"不确定"→ 保守走 planner。
 
 ### 中期（0.2.x，2–5 天）
 6. **reasoning 回填裁剪**（MiniMax P0-2）：推理链 >1000 字符截尾 500 + 关键决策标记；>4000 完全丢弃留一句概括。
@@ -82,4 +82,4 @@
 
 - 峰谷窗口：Kimi 正确（双窗口），MiniMax 漏查 → 已按官方口径修复。
 - "无自动避峰调度"（OfficeACE 二/三）：不实，`run --offpeak` / `schedule add --offpeak` / WebUI 均已实现 → 本版修正了顺延目标。
-- 上下文窗口 384K vs 1M：Kimi 指出 384K 实为最大输出规格 → 已列入近期路线第 2 条。
+- 上下文窗口 384K vs 1M：Kimi 指出 384K 实为最大输出规格 → 0.1.67 已修正（contextWindow=1M、新增 maxOutputCeiling=384K、pro maxOutputTokens 32768→65536）。

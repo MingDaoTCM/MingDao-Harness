@@ -5,6 +5,16 @@ import path from 'node:path';
 import { loadConfig } from '../config.js';
 
 export async function handleUpdateFamily(cmd, args) {
+  // 价格表外置刷新（Hermes C1）：mingdao update --pricing —— 从 cfg.pricing.source 拉取官方价格 JSON
+  if (cmd === 'update' && args.includes('--pricing')) {
+    const cfg = loadConfig();
+    if (!cfg) { console.log('[错误] 未初始化配置：请先运行 mingdao init'); process.exitCode = 1; return true; }
+    const { refreshPricingFromSource } = await import('../pricing.js');
+    const r = await refreshPricingFromSource(cfg);
+    console.log(r.lines.join('\n'));
+    process.exitCode = r.ok ? 0 : 1;
+    return true;
+  }
   // 自更新与回滚（git 安装形态）。
   // 评估 P3-1 子命令劫持防护：参数不合法时回退为普通提问（如 "mingdao update the docs" 是提问而非更新命令）
   if (cmd === 'update' && args.every((a) => a === '--check')) {

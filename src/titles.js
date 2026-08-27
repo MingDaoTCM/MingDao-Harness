@@ -37,6 +37,7 @@ export async function generateTitle(provider, model, firstUserText, { timeoutMs 
         tools: [],
         temperature: 0.3,
         maxTokens: 50,
+        reasoningEffort: 'low',
         responseFormat: { type: 'json_object' },
         signal: ctrl.signal,
       });
@@ -51,6 +52,7 @@ export async function generateTitle(provider, model, firstUserText, { timeoutMs 
         tools: [],
         temperature: 0.3,
         maxTokens: 120,
+        reasoningEffort: 'low',
         signal: ctrl.signal,
       });
       const t = cleanTitle(res.text);

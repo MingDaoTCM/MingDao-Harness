@@ -253,7 +253,14 @@ async function checkUpdatesFromMenu() {
   const finish = (fn) => { if (!done) { done = true; fn(); } };
   const ver = app.getVersion();
   try {
-    const { autoUpdater } = await import('electron-updater');
+    // 审计（"Cannot read properties of undefined (reading 'once')"）：
+    // 打包环境里 ESM 动态导入 CJS 的 electron-updater 时命名导出可能缺失，
+    // 多级兜底解析，并显式校验 API 存在——任何失败都有可见弹窗。
+    const updMod = await import('electron-updater');
+    const autoUpdater = updMod?.autoUpdater ?? updMod?.default?.autoUpdater ?? updMod?.default ?? updMod;
+    if (!autoUpdater || typeof autoUpdater.checkForUpdates !== 'function' || typeof autoUpdater.once !== 'function') {
+      throw new Error('electron-updater 模块导出不可用（打包环境加载异常）');
+    }
     const timer = setTimeout(() => {
       finish(() => show({ type: 'warning', title: '检查更新', message: '检查超时（30 秒无响应）', detail: '可能网络不通或官网暂不可达；请稍后重试，或到官网下载最新安装包。' }));
     }, 30000);
@@ -297,7 +304,12 @@ async function checkUpdatesFromMenu() {
 function setupAutoUpdate() {
   if (!app.isPackaged || process.env.MINGDAO_NO_AUTOUPDATE === '1') return;
   import('electron-updater')
-    .then(({ autoUpdater }) => {
+    .then((updMod) => {
+      const autoUpdater = updMod?.autoUpdater ?? updMod?.default?.autoUpdater ?? updMod?.default ?? updMod;
+      if (!autoUpdater || typeof autoUpdater.on !== 'function') {
+        appLog('updater 模块导出不可用，跳过自动更新');
+        return;
+      }
       autoUpdater.autoDownload = true;
       appLog('自动更新检查启动（feed: 官网 /updates）');
       autoUpdater.on('error', (err) => appLog('updater error ' + String(err?.message || err)));

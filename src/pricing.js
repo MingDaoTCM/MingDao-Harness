@@ -12,6 +12,47 @@ import { mingdaoHome } from './config.js';
 // 内置价格表的数据时点（定价可能调整，配置覆盖可随时更新）
 export const PRICE_DATA_AS_OF = '2026-08';
 
+// 价格表外置（Hermes C1）：~/.mingdao/pricing.json 由「mingdao update --pricing」从
+// cfg.pricing.source 拉取（TTL 默认 7 天，cfg.pricing.ttlDays 可调）；TTL 内覆盖内置表，
+// 过期自动回退内置并置 stale 标记（/cost 与费用标签会提示）。
+function pricingFilePath() { return path.join(mingdaoHome(), 'pricing.json'); }
+let extCache = { mtime: -1, data: null, stale: false };
+function externalPricing() {
+  try {
+    const f = pricingFilePath();
+    const st = fs.statSync(f);
+    if (st.mtimeMs !== extCache.mtime) {
+      const d = JSON.parse(fs.readFileSync(f, 'utf8'));
+      const ttlDays = Number(tzCache.ttlDays ?? 7);
+      const age = Date.now() - Number(d?.fetchedAt || 0);
+      extCache = { mtime: st.mtimeMs, data: d, stale: !Number.isFinite(age) || age > ttlDays * 86400000 };
+    }
+  } catch {
+    extCache = { mtime: -1, data: null, stale: false };
+  }
+  return extCache;
+}
+export function pricingDataStale() { return externalPricing().stale; }
+
+// 拉取官方价格表（零依赖 fetch）：cfg.pricing.source 为 JSON 地址，返回 { models: { <模型名>: { input, output, cacheHit, peak? } } }
+export async function refreshPricingFromSource(cfg) {
+  const src = String(cfg?.pricing?.source || '').trim();
+  if (!src) return { ok: false, lines: ['未配置 pricing.source（config.json 的 pricing.source 填官方价格 JSON 地址后重试）'] };
+  const res = await fetch(src, { signal: AbortSignal.timeout(15000) });
+  if (!res.ok) return { ok: false, lines: ['价格源请求失败：HTTP ' + res.status] };
+  const d = await res.json();
+  const models = d && typeof d === 'object' && !Array.isArray(d) ? /** @type {any} */ (d).models : null;
+  if (!models || typeof models !== 'object' || Array.isArray(models)) {
+    return { ok: false, lines: ['价格源格式不符：应为 {"models": {"模型名": {"input":…,"output":…,"cacheHit":…,"peak":{…}}}}'] };
+  }
+  const file = pricingFilePath();
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify({ fetchedAt: Date.now(), source: src, models }, null, 2));
+  extCache = { mtime: -1, data: null, stale: false };
+  const names = Object.keys(models).join('、');
+  return { ok: true, lines: ['✓ 价格表已刷新（' + names + '），TTL 内费用估算/护栏/避峰自动跟随'] };
+}
+
 // 峰谷判断锚定北京时间（DeepSeek 官方定价页：高峰时段 = 北京时间周一至周五
 // 9:00–12:00、14:00–18:00 两段；其余（含午间 12:00–14:00 与周末全天）为闲时，闲时价 = 高峰一半）。
 // 用本机时区判断会让海外用户计费错位。config.pricing.timezone 可覆盖时区、
@@ -29,6 +70,7 @@ function peakCfg() {
         mtime: st.mtimeMs,
         timezone: String(cfg?.pricing?.timezone || 'Asia/Shanghai'),
         peakWindows: Array.isArray(pw) && pw.length ? pw : DEFAULT_PEAK_WINDOWS,
+        ttlDays: Number(cfg?.pricing?.ttlDays || 7),
       };
     }
   } catch {}
@@ -142,16 +184,19 @@ function pricingOverrides() {
 }
 function effectivePricing(modelName) {
   const preset = modelPreset(modelName);
-  if (!preset?.pricing) return null;
+  const ext = externalPricing().data?.models?.[modelName] || null;
+  if (!preset?.pricing && !ext) return null;
+  const base = ext || preset?.pricing || null;
+  if (!base) return null;
   const over = pricingOverrides()[modelName] || {}; // 审计 Q3：mtime 缓存替代每轮读盘
-  const merge = (base, o = {}) => ({
-    input: Number(o.input ?? base?.input ?? 0),
-    output: Number(o.output ?? base?.output ?? 0),
-    cacheHit: Number(o.cacheHit ?? base?.cacheHit ?? 0),
+  const merge = (b, o = {}) => ({
+    input: Number(o.input ?? b?.input ?? 0),
+    output: Number(o.output ?? b?.output ?? 0),
+    cacheHit: Number(o.cacheHit ?? b?.cacheHit ?? 0),
   });
   return {
-    offpeak: merge(preset.pricing.offpeak, over),
-    peak: merge(preset.pricing.peak || preset.pricing.offpeak, over.peak),
+    offpeak: merge(base.offpeak || base, over),
+    peak: merge(base.peak || base.offpeak || base, over.peak),
   };
 }
 
@@ -175,5 +220,5 @@ export function estimateCostLabel(modelName, promptTokens, completionTokens, usa
   const yuan = estimateCost(modelName, promptTokens, completionTokens, cache).toFixed(5);
   const hitPart =
     cache && cache.hit + cache.miss > 0 ? ` · 缓存命中 ${(cache.rate * 100).toFixed(0)}%` : ' · 未计缓存折扣';
-  return ` ≈¥${yuan}（${isPeakHour() ? '高峰' : '闲时'}${hitPart}）`;
+  return ` ≈¥${yuan}（${isPeakHour() ? '高峰' : '闲时'}${hitPart}）${pricingDataStale() ? ' · ⚠ 价格表过期，运行 mingdao update --pricing 刷新' : ''}`;
 }

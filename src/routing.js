@@ -37,7 +37,7 @@ export function heuristicRoute(text, rc) {
 const ROUTE_CACHE_MAX = 100;
 const routeCache = new Map();
 
-export async function routeTask({ cfg, provider, currentModel, text, sticky = null }) {
+export async function routeTask({ cfg, provider, currentModel, text, sticky = null, sessionStats = null }) {
   const rc = routingConfig(cfg);
   if (!rc) return { model: currentModel, reason: null };
   // 当前模型已在路由池外（用户手动指定）：不干预
@@ -52,8 +52,19 @@ export async function routeTask({ cfg, provider, currentModel, text, sticky = nu
       : { model: quick, reason: quick === rc.planner ? '规划类任务' : '执行类任务' };
   }
 
-  // 会话粘滞：执行类会话不再逐轮分类（生成类关键词已在启发式拦截）
+  // 会话粘滞 + 升级检测（Hermes C2）：执行类会话不再逐轮分类（生成类关键词已在启发式拦截），
+  // 但会话内复杂度信号累积（工具步数/截断次数）时允许升级 planner——「开头简单、中途复杂」不再被 flash 硬扛。
   if (sticky === rc.executor) {
+    const stats = sessionStats || {};
+    const steps = Number(stats.steps) || 0;
+    const truncated = Number(stats.truncated) || 0;
+    const UPGRADE_STEPS = Number(cfg?.routing?.upgradeSteps) || 10;
+    const UPGRADE_TRUNCATED = Number(cfg?.routing?.upgradeTruncated) || 2;
+    if (steps >= UPGRADE_STEPS || truncated >= UPGRADE_TRUNCATED) {
+      return rc.planner === currentModel
+        ? { model: currentModel, reason: null }
+        : { model: rc.planner, reason: `会话升级：执行类已累计 ${steps} 步工具 / ${truncated} 次截断 → planner` };
+    }
     return rc.executor === currentModel
       ? { model: currentModel, reason: null }
       : { model: rc.executor, reason: '会话粘滞：执行类' };
@@ -90,6 +101,7 @@ export async function routeTask({ cfg, provider, currentModel, text, sticky = nu
       tools: [],
       temperature: 0,
       maxTokens: 20, // 结构化输出（评估 4.2-4）：80→20
+      reasoningEffort: 'low',
       responseFormat: { type: 'json_object' },
     });
     let verdict = null;
@@ -102,6 +114,11 @@ export async function routeTask({ cfg, provider, currentModel, text, sticky = nu
       const t = String(res.text || res.reasoning || '').trim().toLowerCase();
       if (t.includes('plan')) verdict = 'plan';
       else if (t.includes('exec')) verdict = 'execute';
+    }
+    if (!verdict) {
+      // 第三态（Kimi C2）：分类器给不出结论 → 保守走 planner，避免复杂任务被 flash 硬扛
+      const m = rc.planner;
+      return m === currentModel ? { model: currentModel, reason: null } : { model: m, reason: '分类器不确定：保守走 planner' };
     }
     if (verdict) {
       if (routeCache.size >= ROUTE_CACHE_MAX) {
