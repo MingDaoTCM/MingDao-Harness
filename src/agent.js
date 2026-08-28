@@ -2,7 +2,7 @@
 // → PostToolUse 钩子 → 结果回填 → 循环，直到模型给出纯文本回复。
 // 附带：子代理（task 工具）、todo 清单状态、undo 备份仓、Ctrl+C 中断。
 
-import { trimMessages, clampText } from './context.js';
+import { trimMessages, clampText, messageTokens } from './context.js';
 import { compactConversation } from './compact.js';
 import { toolSchemas, dispatch } from './tools/index.js';
 import { modelPreset } from './models.js';
@@ -11,7 +11,8 @@ import { createHooks } from './hooks.js';
 import { createIO, style, C } from './ui.js';
 import { subagentModel } from './routing.js';
 import { writeAudit, redactSecrets } from './audit.js';
-import { checkCostGuard } from './cost-guard.js';
+import { checkCostGuard, costGuardConfig, todayCost } from './cost-guard.js';
+import { estimateCost } from './pricing.js';
 
 const MAX_STEPS = 24;
 const SUBAGENT_MAX_STEPS = 12;
@@ -119,6 +120,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     try {
     while (steps < stepLimit) {
       steps += 1;
+      // 同回合只读工具去重（Hermes C4）：相同 name+args 的只读调用只执行一次，结果复用回填
+      const turnToolCache = new Map();
       // 自动压缩（P3-1）：预算不足、静默裁剪即将丢弃早期段落时，先用 executor 模型
       // 把被裁段落压成摘要注入，替代「失忆」；失败/不值得时回退普通裁剪。
       if (cfg.autoCompact !== false) {
@@ -150,6 +153,39 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         } catch {}
       }
       const trimmed = trimMessages(messages, budget, count);
+
+      // reasoning 回填防护（MiniMax P0-2）：推理链只在 UI 流式展示、不回传消息（本就不回填）；
+      // 防御性保证——任何携带 reasoning_content 的消息发送前裁剪：>4000 字仅留概括，>1000 字截尾 500。
+      let sanitized = trimmed;
+      for (const m of sanitized) {
+        const rc = m.reasoning_content;
+        if (typeof rc === 'string' && rc.length > 4000) {
+          sanitized = sanitized.map((x) => (x === m ? { ...x, reasoning_content: `[思考过程已省略（原 ${rc.length} 字）]` } : x));
+        } else if (typeof rc === 'string' && rc.length > 1000) {
+          sanitized = sanitized.map((x) => (x === m ? { ...x, reasoning_content: rc.slice(-500) + ' …[思考过程已截断]' } : x));
+        }
+      }
+
+      // 护栏前置预估（Kimi P2-E）：发送前按本轮最坏成本估算（trimmed prompt × 未命中输入价
+      // + maxOutput × 输出价，峰谷按当前时段）；「今日已用 + 最坏成本」超上限时发送前拦截，
+      // 而不是等 200K 上下文的贵请求发出后才 block。
+      if (cfg.costGuard) {
+        const g = costGuardConfig();
+        if (g && Number(g.dailyLimitYuan) > 0) {
+          let promptTokens = 0;
+          for (const m of sanitized) promptTokens += messageTokens(m, count);
+          const worst = estimateCost(modelName, promptTokens, maxOutput, null, new Date());
+          const used = todayCost();
+          if (used + worst >= Number(g.dailyLimitYuan)) {
+            stripOrphanCalls();
+            return {
+              text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
+              note: `⛔ 护栏前置拦截：本轮最坏成本 ≈¥${worst.toFixed(4)}，今日已用 ≈¥${used.toFixed(4)}，合计将超过上限 ¥${Number(g.dailyLimitYuan).toFixed(2)}——请求未发出。可调高 config.costGuard.dailyLimitYuan 或改用更小模型。`,
+              durationMs: Date.now() - startedAt, perf: perf(),
+            };
+          }
+        }
+      }
 
       // 费用护栏（A2）：每轮开始前按今日实际费用检查；block 时暂停本轮并明确告知
       if (cfg.costGuard) {
@@ -186,7 +222,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       try {
         res = await provider.chat({
           model: modelName,
-          messages: trimmed,
+          messages: sanitized,
           tools: [...toolSchemas(), ...mcpSchemas()],
           temperature,
           maxTokens: maxOutput,
@@ -299,14 +335,25 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         }
 
         // 执行单个工具（渲染「执行中」→ dispatch → 捕获异常转错误结果）
+        // 审计 Hermes C4：同回合相同参数的只读工具（read/ls/glob/grep/skill）合并执行一次，
+        // 后续相同调用直接复用结果（仍逐个回填 tool 消息以保持 tool_call_id 配对）
         async function runTool(prep) {
           io.renderToolStart?.(prep.name, prep.args);
+          const dedupKey = !prep.isMcp && READONLY_TOOLS_SET.has(prep.name) ? prep.name + ':' + JSON.stringify(prep.args || {}) : null;
+          if (dedupKey && turnToolCache.has(dedupKey)) {
+            prep.cached = true;
+            return turnToolCache.get(dedupKey);
+          }
           try {
+            let result;
             if (prep.isMcp) {
               if (!mcp) throw new Error('MCP 工具未启用');
-              return await mcp.call(prep.name, prep.args);
+              result = await mcp.call(prep.name, prep.args);
+            } else {
+              result = await dispatch(prep.name, prep.args, ctx);
             }
-            return await dispatch(prep.name, prep.args, ctx);
+            if (dedupKey) turnToolCache.set(dedupKey, result);
+            return result;
           } catch (err) {
             return JSON.stringify({ ok: false, error: String(err?.message || err) });
           }
@@ -344,7 +391,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             });
           }
           const text = typeof result === 'string' ? result : JSON.stringify(result); // 紧凑 JSON（评估 B3）：嵌套结果省 10-20% 回填 token，且下轮按 prompt 重复计费
-          messages.push({ role: 'tool', tool_call_id: prep.tc.id, content: clampText(text) });
+          const prefix = prep.cached ? '（与同回合相同调用结果一致，已复用）\n' : '';
+          messages.push({ role: 'tool', tool_call_id: prep.tc.id, content: prefix + clampText(text) });
         }
 
         let i = 0;

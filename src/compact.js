@@ -99,16 +99,51 @@ export async function compactConversation({ messages, budget, count, provider, e
     .join('\n')
     .slice(0, INPUT_MAX_CHARS);
 
+  // —— 增量压缩（Kimi P2-D）：已压缩过的会话只压「旧摘要之后的新增段」，与旧摘要合并（摘要的摘要），
+  // 不再反复把早期内容送进摘要输入——第 N 次压缩输入从 O(历史) 降为 O(增量)。 ——
+  const sumIdx = messages.findIndex(
+    (m) => m.role === 'user' && typeof m.content === 'string' && m.content.includes('<conversation_summary>')
+  );
+  let incremental = false;
   let summary = null;
   let usage = null;
-  try {
-    const r = await summarizeConversation(provider, executorModel, convoText);
-    summary = r.text;
-    usage = r.usage;
-  } catch {
-    return null; // 摘要失败：退回普通裁剪
+  if (sumIdx > 0 && sumIdx + 1 < boundary) {
+    incremental = true;
+    const m = /<conversation_summary>\n([\s\S]*?)\n<\/conversation_summary>/.exec(String(messages[sumIdx].content));
+    const oldSummary = (m && m[1]) || '';
+    const newText = messages
+      .slice(sumIdx + 1, boundary)
+      .map((msg) => {
+        if (msg.role === 'tool') {
+          return `工具结果(${msg.tool_call_id ?? ''}): ${clampText(String(msg.content ?? ''), TOOL_OUTPUT_CAP)}`;
+        }
+        const head = msg.role === 'user' ? '用户' : msg.role === 'assistant' ? 'MingDao' : String(msg.role);
+        return `${head}: ${String(msg.content ?? '')}`;
+      })
+      .join('\n')
+      .slice(0, INPUT_MAX_CHARS);
+    try {
+      const r = await summarizeConversation(
+        provider,
+        executorModel,
+        `【既有摘要】\n${oldSummary.slice(0, SUMMARY_MAX_CHARS)}\n\n【新增对话记录】\n${newText}`
+      );
+      summary = r.text;
+      usage = r.usage;
+    } catch {
+      return null;
+    }
+    if (!summary) return null;
+  } else {
+    try {
+      const r = await summarizeConversation(provider, executorModel, convoText);
+      summary = r.text;
+      usage = r.usage;
+    } catch {
+      return null; // 摘要失败：退回普通裁剪
+    }
+    if (!summary) return null;
   }
-  if (!summary) return null;
 
   // 组装：system + 摘要(user) + 保留段（清洗保留段头部因裁剪而孤立的 tool 消息）
   const kept = cleanToolPairing(messages.slice(boundary));
@@ -123,5 +158,5 @@ export async function compactConversation({ messages, budget, count, provider, e
     },
     ...kept,
   ];
-  return { messages: next, droppedCount, droppedTokens, summary, usage };
+  return { messages: next, droppedCount: incremental ? boundary - (sumIdx + 1) : droppedCount, droppedTokens, summary, usage, incremental };
 }

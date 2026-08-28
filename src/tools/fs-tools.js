@@ -70,6 +70,13 @@ export function undo(args, ctx) {
   }
 }
 
+const READ_CACHE_MAX = 200; // 会话级 read 缓存条数上限（超出清最旧，防止无界增长）
+const readCache = new Map(); // 绝对路径 → { mtimeMs, size, lines }
+
+export function invalidateReadCache(p) {
+  readCache.delete(p);
+}
+
 export function read(args, ctx) {
   try {
     const p = resolvePath(ctx.cwd, args.path ?? '');
@@ -82,9 +89,24 @@ export function read(args, ctx) {
         error: `"${p}" 大小 ${(st.size / 1024 / 1024).toFixed(1)}MB，超过 ${MAX_FILE_BYTES / 1024 / 1024}MB 上限。请用 grep 搜索或 bash 分块查看。`,
       };
     }
+    // 重复读取去重（审计 MiniMax P2-2）：同一文件 mtime+size 未变且非强制重读时，
+    // 返回「内容未变化」标记（省下整段重复内容回填的 prompt token）；force=true 强制重读。
+    // 注意：带 offset/limit 的切片读取不能走缓存标记（必须返回所请求的切片）。
+    const wantsSlice = args.offset !== undefined || args.limit !== undefined;
+    const cached = readCache.get(p);
+    if (!args.force && !wantsSlice && cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+      return { ok: true, output: `[内容与上次读取一致（未变化，共 ${cached.lines} 行）——如需强制重读请传 force:true]`, totalLines: cached.lines, cached: true };
+    }
     const buf = fs.readFileSync(p);
     if (isProbablyBinary(buf)) return { ok: false, error: `"${p}" 疑似二进制文件，无法按文本读取。` };
     const lines = buf.toString('utf8').split('\n');
+    if (!wantsSlice) {
+      if (readCache.size >= READ_CACHE_MAX) {
+        const first = readCache.keys().next().value;
+        if (first !== undefined) readCache.delete(first);
+      }
+      readCache.set(p, { mtimeMs: st.mtimeMs, size: st.size, lines: lines.length });
+    }
     const offset = Math.max(1, Number(args.offset) || 1);
     const limit = Math.max(1, Number(args.limit) || 400);
     // 审计质量项：offset 超出文件行数时明确提示，而非返回空内容让模型误以为文件为空
@@ -125,6 +147,7 @@ export function write(args, ctx) {
     }
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, content);
+    invalidateReadCache(p);
     return { ok: true, output: `已写入 ${p}（${Buffer.byteLength(content)} 字节）。` };
   } catch (err) {
     return { ok: false, error: `写入失败：${err?.message || err}` };
@@ -163,6 +186,7 @@ export function edit(args, ctx) {
     const next = replaceAll ? text.split(oldString).join(newString) : text.replace(oldString, newString);
     backup(ctx, p);
     fs.writeFileSync(p, next);
+    invalidateReadCache(p);
     const idx = text.indexOf(oldString);
     const lineStart = text.slice(0, idx).split('\n').length - 1;
     const before = regionAround(text, lineStart, oldString.split('\n').length);

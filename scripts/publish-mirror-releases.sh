@@ -3,6 +3,10 @@
 # 用法：
 #   MINGDAO_GITEE_TOKEN=xxx MINGDAO_GITCODE_TOKEN=yyy bash scripts/publish-mirror-releases.sh 0.1.65 [备注文件.md]
 #
+# 发行政策（2026-08-28）：桌面版安装包统一由官网分发——默认只创建 Release（正文指向官网），
+# 不再上传安装包附件（gitee/gitcode 上传耗时数小时且 gitee 有 1GB 配额）。
+# 如需恢复附件上传：MIRROR_WITH_ATTACH=1 环境变量开启。
+#
 # 前置条件：
 #   1. 官网服务器 /opt/1panel/www/sites/mingdao-site/downloads/ 已有该版本的 7 个安装包（收割流程产出）
 #   2. gitee / gitcode 仓库已有对应 tag（本脚本会强制推送本地同名 tag，与 GitHub 发布 commit 对齐）
@@ -54,6 +58,13 @@ curl -s -X POST "https://api.gitcode.com/api/v5/repos/MingDaoTCM/MingDao-Harness
   -d "$(python3 -c 'import json,sys;print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[1]+" 修复版重建","body":open(sys.argv[2]).read(),"target_commitish":"main"}))' "$TAG" "$BODY")" \
   -o /tmp/gc-rel.json -w "gitcode http=%{http_code}\n"
 grep -q tag_name /tmp/gc-rel.json || { echo "gitcode 创建失败"; head -c 300 /tmp/gc-rel.json; exit 1; }
+
+# 附件上传：默认关闭（发行政策：安装包统一官网分发）
+if [ "${MIRROR_WITH_ATTACH:-}" != "1" ]; then
+  echo "已跳过附件上传（发行政策：安装包统一由官网分发；MIRROR_WITH_ATTACH=1 可恢复）"
+  echo "MIRROR_RELEASE_DONE $TAG"
+  exit 0
+fi
 
 # gitee 附件（curl 逐个上传）
 for f in $FILES; do

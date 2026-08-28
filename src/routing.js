@@ -19,7 +19,7 @@ export function routingConfig(cfg) {
 }
 
 const PLAN_HINTS =
-  /设计|架构|重构|审查|规划|分析|方案|评估|优化|排查|疑难|设计模式|选型|技术债|roadmap|review|design|refactor|plan|architecture|方案设计|评审/;
+  /设计|架构|重构|审查|规划|分析|方案|评估|优化|排查|疑难|报错|怎么修|修复|设计模式|选型|技术债|roadmap|review|design|refactor|plan|architecture|方案设计|评审/;
 
 // 生成类任务（游戏/网页/文档等）需要大输出（planner 32K vs executor 8K），即使短句也路由 planner
 const GENERATION_HINTS =
@@ -28,7 +28,11 @@ const GENERATION_HINTS =
 export function heuristicRoute(text, rc) {
   const s = String(text ?? '');
   if (GENERATION_HINTS.test(s)) return rc.planner; // 生成类：大输出优先
-  if (s.length >= 40 && PLAN_HINTS.test(s)) return rc.planner;
+  if (PLAN_HINTS.test(s)) {
+    // 规划类关键词优先（审计：此前要求 length>=40，导致「设计一个缓存方案」这类
+    // 13 字短句被误路由到 flash 硬扛——关键词强度优先于文本长度）
+    return s.length >= 40 || /设计|规划|分析|评估|审查|架构|重构|方案|优化|报错|修复/.test(s) ? rc.planner : null;
+  }
   if (s.length <= 60) return rc.executor;
   return null; // 需要分类器
 }

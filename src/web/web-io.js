@@ -29,16 +29,21 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
       send({ type: 'banner', title, lines });
     },
     // 每轮生成开始/结束：前端据此显示持续的「正在思考…」动态指示
+    // 审计（阶段切换静默）：turnStart 带累计工具步数；stopSpinner 在回合真正结束时
+    // 发 turnEnd——客户端据此显示「第 N 回合完成，进入下一回合…」，阶段边界不再静默
     beginTurn() {},
     endTurn() {},
     startSpinner() {
       if (!io._turnActive) {
         io._turnActive = true;
-        send({ type: 'turnStart' });
+        send({ type: 'turnStart', toolSteps: io._toolCount });
       }
     },
     stopSpinner() {
-      io._turnActive = false;
+      if (io._turnActive) {
+        io._turnActive = false;
+        send({ type: 'turnEnd', toolSteps: io._toolCount });
+      }
     },
     writeText(t) {
       send({ type: 'text', delta: String(t) });

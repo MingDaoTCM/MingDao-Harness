@@ -240,7 +240,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       try {
         send({ type: 'progress', seconds: Math.round((Date.now() - entry.startedAt) / 1000), steps: io?.stats?.().toolCount || 0 });
       } catch {}
-    }, 8000);
+    }, 5000);
     const userMessage = String(body.message ?? '').trim();
     entry.message = (userMessage || '[附件]').slice(0, 40);
     const visionSupported = Boolean(modelPreset(modelName)?.supportsVision || cfg.customModels?.[modelName]?.vision);
