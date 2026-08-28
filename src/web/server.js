@@ -248,7 +248,15 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     // 同时充当客户端无活动看门狗的活动源）
     const progressTimer = setInterval(() => {
       try {
-        send({ type: 'progress', seconds: Math.round((Date.now() - entry.startedAt) / 1000), steps: io?.stats?.().toolCount || 0 });
+        // 质检（静默深度优化）：progress 附带阶段语义与子代理数，客户端顶部常驻活动条据此实时播报
+        const phase = entry.pendingAsk ? '等待权限确认' : io?._turnActive ? '模型推理中' : '执行工具中';
+        send({
+          type: 'progress',
+          seconds: Math.round((Date.now() - entry.startedAt) / 1000),
+          steps: io?.stats?.().toolCount || 0,
+          tasks: io?.stats?.().taskCount || 0,
+          phase,
+        });
       } catch {}
     }, 5000);
     const userMessage = String(body.message ?? '').trim();
@@ -435,7 +443,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         durationMs: r.durationMs,
         truncated: r.truncated,
         aborted: r.aborted,
-        note: r.note || (r.text ? '' : '（模型本轮没有输出正文）'),
+        note: r.note || (r.text ? '' : `（本轮共执行 ${io.stats().toolCount} 步工具操作${io.stats().deliverables.length ? `、交付 ${io.stats().deliverables.length} 个文件` : ''}，但模型没有输出总结文字——可追问「总结一下刚才的工作」）`),
         stats: io.stats(),
         session: path.basename(session.file),
       });

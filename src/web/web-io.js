@@ -9,11 +9,12 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
     showReasoning: true,
     _pending: null,
     _toolCount: 0,
+    _taskCount: 0, // 子代理（task 工具）次数：进度心跳与轨迹面板用
     _deliverables: [],
     _activeTools: [], // {seq, key}：并行批次下 toolStart↔tool 按 name+args 配对（审计 P2-7）
     // 交付物与步数统计：写/编辑成功的文件路径（去重）
     stats() {
-      return { toolCount: io._toolCount, deliverables: [...new Set(io._deliverables)] };
+      return { toolCount: io._toolCount, taskCount: io._taskCount, deliverables: [...new Set(io._deliverables)] };
     },
     setShowReasoning(v) {
       io.showReasoning = !!v;
@@ -57,6 +58,7 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
     },
     renderTool(name, args, result, durationMs) {
       io._toolCount += 1;
+      if (name === 'task') io._taskCount += 1;
       if ((name === 'write' || name === 'edit') && args?.path && result && result.ok !== false) {
         io._deliverables.push(String(args.path));
       }

@@ -275,7 +275,9 @@ async function checkUpdatesFromMenu() {
     });
     autoUpdater.once('update-available', (info) => {
       clearTimeout(timer);
-      finish(() => show({ type: 'info', title: '检查更新', message: '发现新版本 v' + info.version + '，开始自动下载…', detail: '下载完成后会提示重启安装。' }));
+      // 质检：info 可能为 undefined（打包环境事件参数形状差异），版本号做多层兜底
+      const v = info?.version ?? '';
+      finish(() => show({ type: 'info', title: '检查更新', message: '发现新版本 v' + v + '，开始自动下载…', detail: '下载完成后会提示重启安装。' }));
     });
     const result = await autoUpdater.checkForUpdates();
     // promise 直接返回但事件未触发时按结果兜底（避免任何静默路径）
@@ -313,21 +315,32 @@ function setupAutoUpdate() {
       autoUpdater.autoDownload = true;
       appLog('自动更新检查启动（feed: 官网 /updates）');
       autoUpdater.on('error', (err) => appLog('updater error ' + String(err?.message || err)));
-      autoUpdater.on('update-not-available', (info) => appLog('updater 已是最新 ' + info.version));
-      autoUpdater.on('update-available', (info) => appLog('updater 发现新版本 ' + info.version));
+      autoUpdater.on('update-not-available', (info) => appLog('updater 已是最新 ' + String(info?.version ?? app.getVersion())));
+      // 质检（Linux 更新下载失败根因）：info 在该打包环境为 undefined——旧代码 info.version
+      // 在此抛 TypeError，中断 autoUpdater 事件派发导致下载永不开始。null-safe + 不抛错。
+      autoUpdater.on('update-available', (info) => {
+        appLog('updater 发现新版本 ' + String(info?.version ?? '?'));
+        appLog('开始自动下载（autoDownload=true）');
+      });
       autoUpdater.on('update-downloaded', (info) => {
-        appLog('updater 下载完成 ' + info.version);
+        const v = String(info?.version ?? app.getVersion());
+        appLog('updater 下载完成 ' + v);
+        // 友好的更新就绪提示（用户反馈：此前界面像报错——改为明确的正向语气）
         dialog
           .showMessageBox({
             type: 'info',
-            title: '发现新版本',
-            message: `MingDao Harness v${info.version} 已下载完成`,
-            detail: '重启应用即可完成更新。',
-            buttons: ['立即重启', '稍后'],
+            title: '更新已就绪',
+            message: `MingDao Harness v${v} 下载完成，重启应用即可完成更新`,
+            detail: '更新不会改动你的配置与会话。更新内容见官网：https://harness.mingdao.ai',
+            buttons: ['立即重启安装', '稍后'],
+            defaultId: 0,
+            cancelId: 1,
+            noLink: true,
           })
           .then((r) => {
             if (r.response === 0) autoUpdater.quitAndInstall();
-          });
+          })
+          .catch(() => {});
       });
       autoUpdater.checkForUpdates().catch((err) => appLog('updater check error ' + String(err?.message || err)));
     })
