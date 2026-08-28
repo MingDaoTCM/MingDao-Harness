@@ -8,15 +8,11 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { loadConfig, saveConfig, runWizard, ensureHome, mingdaoHome } from './config.js';
 import { modelPreset, PROVIDERS } from './models.js';
-import {
-  loadCredentials,
-  setStoredKey,
-  removeStoredKey,
-  maskKey,
-  credentialsPath,
-  getStoredKey,
-} from './credentials.js';
+import { maskKey, getStoredKey } from './credentials.js';
 import { createProvider, resolveProviderConfig, helperProvider } from './providers/index.js';
+import { compactConversation } from './compact.js';
+import { makeTokenCounter } from './tokenizer.js';
+import { messageTokens } from './context.js';
 import { startMcpServers } from './mcp.js';
 import { startTask, listTasks, patchTask, killTask, formatTaskRow } from './tasks.js';
 import { enableAutostart, disableAutostart, autostartStatus, autostartPath } from './autostart.js';
@@ -155,30 +151,6 @@ async function generatePlan(provider, modelName, task) {
     maxTokens: 2048,
   });
   return res.text || null;
-}
-
-async function compactContext(provider, modelName, messages) {
-  const mid = messages.slice(1, -2);
-  const res = await provider.chat({
-    model: modelName,
-    messages: [
-      {
-        role: 'system',
-        content:
-          '你是上下文压缩器。把以下对话历史压缩成要点摘要（中文 ≤600 字）：保留未完成任务、关键决策、文件改动、用户偏好；省略已完成的中间过程。',
-      },
-      {
-        role: 'user',
-        content: mid
-          .map((m) => `${m.role}: ${m.content ?? JSON.stringify(m.tool_calls ?? '')}`)
-          .join('\n'),
-      },
-    ],
-    tools: [],
-    temperature: 0.2,
-    maxTokens: 2048,
-  });
-  return res.text || '';
 }
 
 // —— 后台任务 worker：独立进程执行一轮任务并写状态文件 ——
@@ -643,9 +615,12 @@ async function main() {
         stdio: 'ignore',
         env: process.env,
       });
+      child.on('error', (err) => io.print(style(`[WebUI 自启失败] ${err?.message || err}（可手动运行 mingdao web ${cfg.web?.port || 3820}）`, C.red)));
       child.unref();
       io.print(style(`🌐 WebUI 后台启动中：http://127.0.0.1:${cfg.web?.port || 3820}（关闭自动启动：mingdao web --no-autostart）`, C.dim));
-    } catch {}
+    } catch (err) {
+      io.print(style(`[WebUI 自启失败] ${err?.message || err}`, C.red)); // 质检 L6：不再静默吞掉
+    }
   }
 
   let session = null;
@@ -818,18 +793,33 @@ async function main() {
           continue;
         }
         io.startSpinner('正在压缩上下文…');
-        let summary = '';
+        let compacted = null;
         try {
-          summary = await compactContext(provider, modelName, messages);
+          const count = makeTokenCounter(modelName);
+          let total = 0;
+          for (const m of messages) total += messageTokens(m, count);
+          const budget = Math.max(1000, Math.round(total * 0.5)); // 手动触发：保留约 30% 尾部
+          compacted = await compactConversation({
+            messages,
+            budget,
+            count,
+            provider,
+            executorModel: modelName,
+            triggerRatio: 0,
+            force: true, // 手动意图明确：跳过最小裁剪门槛
+          });
         } catch (err) {
           io.print(style('[压缩失败] ' + (err?.message || err), C.red));
         }
         io.stopSpinner();
-        if (!summary) continue;
-        messages = [{ role: 'system', content: systemPrompt }, { role: 'user', content: '[此前对话摘要]\n' + summary }];
+        if (!compacted?.messages) {
+          io.print(style('未能压缩（被裁段落不足或摘要失败）。', C.dim));
+          continue;
+        }
+        messages = compacted.messages;
         appendMessages(session.file, [{ role: 'system', content: '── /compact 压缩点 ──' }, ...messages.slice(1)]);
         persisted = messages.length;
-        io.print(style('✓ 已压缩上下文（完整历史保留在会话文件中）。', C.green));
+        io.print(style(`✓ 已压缩上下文：${compacted.droppedCount} 条早期消息 → 摘要（回收约 ${compacted.droppedTokens} tokens）`, C.green));
       } else if (cmd === '/init') {
         const target = path.join(workingDir, 'AGENTS.md');
         if (fs.existsSync(target) && arg !== 'force') {

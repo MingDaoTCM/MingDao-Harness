@@ -773,7 +773,7 @@ async function send(){
     const resp=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:turnCtrl.signal});
     if(!resp.ok){ const j=await resp.json().catch(()=>({})); onActivity(); msg.innerHTML='<div class="errline">'+esc(j.error||('HTTP '+resp.status))+'</div>'; updateTasksPanel(); return; }
     await handleEvents(resp.body, ev=>{
-      if(ev.taskId) taskId=ev.taskId;
+      if(ev.taskId){ taskId=ev.taskId; curTaskId=taskId; } // 质检 L1：主停止按钮只断本任务
       if(ev.type==='ask') disarm(); else arm(); // 有活动→重置；权限等待→暂停计时
       if(ev.type==='progress'){ const p=ev.seconds||0; showThink(); think.textContent='💭 正在工作 '+Math.floor(p/60)+' 分 '+Math.round(p%60)+' 秒 · 第 '+msg._steps+' 回合 · 已执行 '+ev.steps+' 步…'; renderWorkStatus(); }
       if(ev.type==='text'){ onActivity(); raw+=ev.delta; update(); }
@@ -791,10 +791,11 @@ async function send(){
       else if(ev.type==='done'){ console.log('[MingDao] done 事件：session=' + ev.session); onActivity(); if(ev.budget){ const b=ev.budget; if(hintTextEl) hintTextEl.textContent='预算 '+Math.round(b.used/1000)+'K/'+Math.round(b.total/1000)+'K（'+Math.round(b.used/b.total*100)+'%）· 本轮完成 · 提示栏右侧为今日费用与命中率'; } refreshStatusBar(); if(ev.stats&&ev.stats.deliverables&&ev.stats.deliverables.length){ const card=document.createElement('div'); card.className='deliver'; card.innerHTML='<div class="t">📦 交付物（'+ev.stats.deliverables.length+' 个文件）</div>'+ev.stats.deliverables.map(f=>'<div class="i">'+esc(f)+(f.toLowerCase().endsWith('.html')?' <span style="color:var(--accent2)">— 浏览器打开即可运行</span>':'')+'</div>').join(''); msg.appendChild(card); } if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); } currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
     });
   }catch(e){ onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=(e&&e.name==='AbortError')?(killedByWatchdog?'响应超时已中断（120 秒无任何响应），请重试':'已中断'):(e&&e.message)||'网络错误'; msg.appendChild(d); scroll(); }
-  finally{ clearInterval(hintTimer); disarm(); generating=false; setBtn(); console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); activeAiMsg=null; curWorkT0=0; renderWorkStatus(); scroll(); updateTasksPanel(); }
+  finally{ clearInterval(hintTimer); disarm(); generating=false; setBtn(); curTaskId=null; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); activeAiMsg=null; curWorkT0=0; renderWorkStatus(); scroll(); updateTasksPanel(); }
 }
 
-function abort(){ fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).then(()=>updateTasksPanel()).catch(()=>{}); }
+let curTaskId=null; // 本轮 SSE 任务 id（质检 L1：主停止按钮只断本任务，不再误伤其他 tab）
+function abort(){ fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(curTaskId?{taskId:curTaskId}:{})}).then(()=>updateTasksPanel()).catch(()=>{}); }
 
 // —— 输入框上方工作状态条（审计：长任务静默硬伤 → 实时进度可见） ——
 function renderWorkStatus(){

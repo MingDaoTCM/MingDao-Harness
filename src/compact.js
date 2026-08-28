@@ -54,7 +54,7 @@ export async function summarizeConversation(provider, model, convoText) {
   return { text: text.slice(0, SUMMARY_MAX_CHARS), usage };
 }
 
-export async function compactConversation({ messages, budget, count, provider, executorModel, triggerRatio }) {
+export async function compactConversation({ messages, budget, count, provider, executorModel, triggerRatio, force = false }) {
   if (!messages.length) return null;
   // 各消息 token 与总量；低于触发线（默认预算 80%）无需压缩
   const sizes = [];
@@ -77,10 +77,10 @@ export async function compactConversation({ messages, budget, count, provider, e
     keepTokens += sizes[i];
   }
   const droppedCount = boundary - 1; // 不含 system
-  if (droppedCount < MIN_DROP_MESSAGES) return null;
+  if (!force && droppedCount < MIN_DROP_MESSAGES) return null;
   let droppedTokens = 0;
   for (let i = 1; i < boundary; i++) droppedTokens += sizes[i];
-  if (droppedTokens < MIN_DROP_TOKENS) return null;
+  if (!force && droppedTokens < MIN_DROP_TOKENS) return null;
 
   // 被裁段落 → 文本（工具结果截断；tool_calls 带名称标注）
   const convoText = messages

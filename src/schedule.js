@@ -19,6 +19,7 @@ function isRunningTask(home, taskId) {
 const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url));
 
 import { isPeakHour, deferToOffpeak } from './pricing.js';
+import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
 
 export function scheduleDir(home) {
   return path.join(home, 'schedule');
@@ -39,7 +40,10 @@ export function parseAt(s) {
   const full = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/.exec(t);
   if (full) {
     const d = new Date(Number(full[1]), Number(full[2]) - 1, Number(full[3]), Number(full[4]), Number(full[5]));
-    if (!isNaN(d.getTime())) return d.getTime();
+    // 质检 L3：Date 对非法日期（如 2026-02-30）会静默回滚成 3 月——round-trip 校验拒绝
+    if (d.getFullYear() === Number(full[1]) && d.getMonth() === Number(full[2]) - 1 && d.getDate() === Number(full[3]) && !isNaN(d.getTime())) {
+      return d.getTime();
+    }
     return null;
   }
   const hm = /^(\d{2}):(\d{2})$/.exec(t);
@@ -87,9 +91,7 @@ export function writeSchedule(home, job) {
   if (!isValidScheduleId(job?.id)) return null;
   fs.mkdirSync(scheduleDir(home), { recursive: true });
   const target = path.join(scheduleDir(home), job.id + '.json');
-  const tmp = target + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(job, null, 2) + '\n');
-  fs.renameSync(tmp, target);
+  atomicWriteFileSync(target, JSON.stringify(job, null, 2) + '\n'); // 质检 H4：tmp 名含 pid+随机，杜绝跨进程共名
   return job;
 }
 
@@ -99,7 +101,7 @@ export function addSchedule(home, question, /** @type {any} */ { at, every, afte
   const interval = every != null ? parseInterval(every) : null;
   const afterList = Array.isArray(after) ? after.filter(Boolean).map(String) : after ? String(after).split(',').map((x) => x.trim()).filter(Boolean) : [];
   const hasAfter = afterList.length > 0 || (after !== undefined && after !== null);
-  if (at == null && interval == null && !hasAfter && afterList.length === 0 && after === undefined) return { error: '需要 --at、--every 或 --after 之一' };
+  if (at == null && interval == null && !hasAfter) return { error: '需要 --at、--every 或 --after 之一' }; // 质检 L2：hasAfter 已蕴含后两子条件
   if (at != null && parseAt(at) == null) return { error: `无法解析时间 "${at}"（格式：YYYY-MM-DD HH:MM 或 HH:MM）` };
   if (every != null && interval == null) return { error: `无法解析周期 "${every}"（格式：<数字>s|m|h|d）` };
   let nextRunAt = null;
@@ -142,33 +144,58 @@ export function addSchedule(home, question, /** @type {any} */ { at, every, afte
   return { id, job };
 }
 
-export function removeSchedule(home, id) {
-  const job = readSchedule(home, id);
-  if (!job) return false;
-  if (job.pid) {
-    try {
-      process.kill(job.pid, 'SIGTERM');
-    } catch {}
+// 质检 H2（pause 失效确定性回归）：runOnce 返回后的状态决策抽为纯函数——
+// 用户在执行期间 pause/remove 的指令（paused/failed/文件已删）绝不被 pending 覆盖；
+// 连续失败 3 次熔断；否则排下一次（锚点对齐避免逐日漂移）。
+export function postRunStatus(cur2, result) {
+  if (!cur2) return null;
+  if (cur2.status === 'paused' || cur2.status === 'failed') return null;
+  if (result !== 'done' && (cur2.consecutiveFailures || 0) >= 3) {
+    return { status: 'failed', note: '连续失败 3 次已停止重试：请检查 API Key / 模型 / 网络（mingdao schedule list 查看历史）' };
   }
-  // 正在跑的 worker 同步停止，避免成孤儿继续执行
-  if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
-  try {
-    fs.unlinkSync(path.join(scheduleDir(home), id + '.json'));
-  } catch {}
-  return true;
+  const next = cur2.anchor ? nextAnchorAfter(cur2.anchor, cur2.interval) || Date.now() + cur2.interval : Date.now() + cur2.interval;
+  return { status: 'pending', nextRunAt: next };
+}
+
+export function removeSchedule(home, id) {
+  // 质检 H3：读-改-写序列加锁，与 sleeper 循环的状态写互斥（防丢更新）
+  return withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+    const job = readSchedule(home, id);
+    if (!job) return false;
+    if (job.pid) {
+      const owned = pidOwnedBy(job.pid, id); // 质检 M11：cmdline 含调度 id 才 kill
+      if (owned !== false) {
+        try {
+          process.kill(job.pid, 'SIGTERM');
+        } catch {}
+      }
+    }
+    // 正在跑的 worker 同步停止，避免成孤儿继续执行
+    if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
+    try {
+      fs.unlinkSync(path.join(scheduleDir(home), id + '.json'));
+    } catch {}
+    return true;
+  });
 }
 
 export function pauseSchedule(home, id) {
-  const job = readSchedule(home, id);
-  if (!job) return false;
-  if (job.pid) {
-    try {
-      process.kill(job.pid, 'SIGTERM');
-    } catch {}
-  }
-  if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
-  writeSchedule(home, { ...job, status: 'paused', pid: null, lastTaskId: null });
-  return true;
+  // 质检 H3：读-改-写序列加锁（pause 与 sleeper 的 postRunStatus 写互斥，杜绝 pause 被覆盖）
+  return withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+    const job = readSchedule(home, id);
+    if (!job) return false;
+    if (job.pid) {
+      const owned = pidOwnedBy(job.pid, id); // 质检 M11：cmdline 含调度 id 才 kill
+      if (owned !== false) {
+        try {
+          process.kill(job.pid, 'SIGTERM');
+        } catch {}
+      }
+    }
+    if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
+    writeSchedule(home, { ...job, status: 'paused', pid: null, lastTaskId: null });
+    return true;
+  });
 }
 
 export function resumeSchedule(home, id) {
@@ -226,6 +253,7 @@ function spawnSleeper(home, job) {
     stdio: 'ignore',
     env: { ...process.env, MINGDAO_HOME: home },
   });
+  child.on('error', () => {}); // 质检 M12：error 事件必须有监听（ENOENT 等）
   writeSchedule(home, { ...job, pid: child.pid });
   child.unref();
   return child.pid;
@@ -236,6 +264,16 @@ export function daemonPidFile(home) {
   return path.join(scheduleDir(home), 'daemon.pid');
 }
 // pid 文件内容 "pid nonce"：校验进程存在 + 命令行含同一 nonce，防止陈旧 PID 被无关进程复用而误判（审计 P2-7）
+// 质检 M11：kill 前校验 PID 归属（/proc/<pid>/cmdline 含 needle 才动手，防 PID 复用误杀）
+function pidOwnedBy(pid, needle) {
+  try {
+    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+    return cmdline.includes(needle);
+  } catch {
+    return null; // 非 Linux 读不到 /proc：调用方按 best-effort 处理
+  }
+}
+
 export function daemonAlive(home) {
   try {
     const [pidStr, nonce] = fs.readFileSync(daemonPidFile(home), 'utf8').trim().split(/\s+/);
@@ -275,12 +313,11 @@ export function spawnDaemon(home) {
     stdio: 'ignore',
     env: { ...process.env, MINGDAO_HOME: home },
   });
+  child.on('error', () => {}); // 质检 M12：error 事件必须有监听（ENOENT 等）
   try {
     // 原子写（审计 workbuddy P3-4）：tmp+rename 与 writeSchedule 同款——崩溃不留半截 pid 文件
     const target = daemonPidFile(home);
-    const tmp = target + '.tmp';
-    fs.writeFileSync(tmp, `${child.pid} ${nonce}`);
-    fs.renameSync(tmp, target);
+    atomicWriteFileSync(target, `${child.pid} ${nonce}`);
   } catch {}
   child.unref();
   return true;
@@ -398,20 +435,17 @@ export async function runSleeper(home, id) {
       }
       writeSchedule(home, { ...cur, status: 'running' });
       const result = await runOnce();
-      const cur2 = readSchedule(home, id);
-      if (!cur2) return;
-      // 连续失败熔断（审计：通知刷屏修复）——3 次失败即停止，避免无限重试 + 无限弹通知
-      if (result !== 'done' && (cur2.consecutiveFailures || 0) >= 3) {
-        writeSchedule(home, {
-          ...cur2,
-          status: 'failed',
-          note: '连续失败 3 次已停止重试：请检查 API Key / 模型 / 网络（mingdao schedule list 查看历史）',
-        });
-        return;
-      }
-      // 下次 = 完成时间 + 周期（不追赶错过的档期）；有每日锚点时对齐锚点，避免逐日漂移
-      const next = cur2.anchor ? nextAnchorAfter(cur2.anchor, cur2.interval) || Date.now() + cur2.interval : Date.now() + cur2.interval;
-      writeSchedule(home, { ...cur2, status: 'pending', nextRunAt: next });
+      // 质检 H3：状态读-改-写加锁（与 pause/remove 互斥，防丢更新）
+      const nextState = withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+        const cur2 = readSchedule(home, id);
+        if (!cur2) return null;
+        const ns = postRunStatus(cur2, result);
+        if (!ns) return null;
+        writeSchedule(home, { ...cur2, ...ns });
+        return ns;
+      });
+      if (!nextState) return;
+      if (nextState.status === 'failed') return; // 熔断后退出主循环（与旧行为一致）
     } else if (cur.kind === 'once') {
       if (cur.nextRunAt && cur.nextRunAt > now) {
         await wait(Math.min(cur.nextRunAt - now, 60000));

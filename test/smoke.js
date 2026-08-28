@@ -73,6 +73,33 @@ function ok(name) {
   ok('context：token 估算 / 预算裁剪 / 输出截断 / 工具配对清洗');
 }
 
+// ---------- 1.5 原子写与文件锁（质检 H3/H4：并发写地基） ----------
+{
+  const { atomicWriteFileSync, atomicWriteJsonSync, withFileLockSync } = await import(pathToFileURL(path.join(srcDir, 'atomic-write.js')).href);
+  const tmpA = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-aw-'));
+  const f = path.join(tmpA, 'x.json');
+  atomicWriteFileSync(f, '{"a":1}');
+  assert.equal(fs.readFileSync(f, 'utf8'), '{"a":1}', '原子写内容应完整落盘');
+  // 失败注入后不残留 .tmp（rename 前目录应无临时文件）
+  assert.equal(fs.readdirSync(tmpA).filter((n) => n.includes('.tmp')).length, 0, '不应残留临时文件');
+  atomicWriteJsonSync(f, { a: 2 });
+  assert.equal(JSON.parse(fs.readFileSync(f, 'utf8')).a, 2, 'JSON 原子写应可读');
+  // 文件锁：互斥语义（不可重入，嵌套获取应超时）+ 陈旧锁回收
+  const lock = path.join(tmpA, 'x.lock');
+  let threw = false;
+  try {
+    withFileLockSync(lock, () => { withFileLockSync(lock, () => {}, { timeoutMs: 300 }); });
+  } catch { threw = true; }
+  assert.equal(threw, true, '锁不可重入（跨进程互斥语义），嵌套获取应超时');
+  // 陈旧锁回收：伪造 20 秒前的锁文件，应能自动回收获取
+  fs.writeFileSync(lock, JSON.stringify({ pid: 999999, at: Date.now() - 20000 }));
+  fs.utimesSync(lock, new Date(Date.now() - 20000), new Date(Date.now() - 20000));
+  let got = false;
+  withFileLockSync(lock, () => { got = true; }, { timeoutMs: 2000, staleMs: 15000 });
+  assert.equal(got, true, '陈旧锁应被回收');
+  ok('atomic-write：原子写 / 无残留 tmp / 文件锁互斥与陈旧回收');
+}
+
 // ---------- 2. 文件工具（真实文件系统，临时目录） ----------
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-test-'));
 const ctx = { cwd: tmp };
@@ -1681,6 +1708,19 @@ const ctx = { cwd: tmp };
   assert.equal(deferToOffpeak(new Date('2026-08-21T04:00:00Z')).getTime(), new Date('2026-08-21T04:00:00Z').getTime(), '午间闲时应原时刻返回');
   assert.ok(peakStatusLabel(new Date('2026-08-21T02:00:00Z')).startsWith('高峰'), '状态标签应含高峰');
   assert.equal(peakStatusLabel(new Date('2026-08-21T04:00:00Z')), '闲时', '午间应显示闲时');
+  // 价格覆盖传播到 peak（质检 H1）：根级 overrides 是价格主体，高峰时段必须同样生效
+  {
+    const prevHome = process.env.MINGDAO_HOME;
+    const homeP = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-price-'));
+    process.env.MINGDAO_HOME = homeP;
+    fs.writeFileSync(path.join(homeP, 'config.json'), JSON.stringify({ pricing: { overrides: { 'deepseek-v4-flash': { input: 10, output: 20 } } } }));
+    const { estimateCost: ec2, isPeakHour: ip2 } = await import(pathToFileURL(path.join(srcDir, 'pricing.js')).href + '?override-test');
+    const peakAt = new Date('2026-08-21T02:00:00Z'); // 北京 10:00 高峰
+    assert.equal(ip2(peakAt), true, '测试前提：应为高峰');
+    assert.ok(Math.abs(ec2('deepseek-v4-flash', 1000000, 0, null, peakAt) - 10) < 1e-9, `高峰时段应使用根级覆盖价 10（得到 ${ec2('deepseek-v4-flash', 1000000, 0, null, peakAt)}）`);
+    assert.ok(Math.abs(ec2('deepseek-v4-flash', 0, 1000000, null, peakAt) - 20) < 1e-9, '高峰时段输出价应使用根级覆盖价 20');
+    process.env.MINGDAO_HOME = prevHome;
+  }
   // Batch 半价：flash 闲时 1.5/4.5 → (1.5+4.5)×0.5 = 3.0 元/M
   assert.equal(BATCH_DISCOUNT, 0.5);
   const bc = estimateBatchCost('deepseek-v4-flash', 1000000, 1000000);

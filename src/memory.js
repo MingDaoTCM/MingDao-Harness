@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
+import { beijingParts } from './pricing.js';
 
 export function memoryFile() {
   return path.join(mingdaoHome(), 'AGENTS.md');
@@ -28,14 +29,9 @@ export function appendMemory(lines) {
   const add = lines.map((l) => l.trim()).filter(Boolean);
   if (!add.length) return 0;
   ensureHome();
-  // 审计 B9：与费用统计同口径，用北京时间自然日做记忆日期戳
-  let date = new Date().toISOString().slice(0, 10);
-  try {
-    const p = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit' })
-      .formatToParts(new Date());
-    const g = (t) => p.find((x) => x.type === t)?.value;
-    date = `${g('year')}-${g('month')}-${g('day')}`;
-  } catch {}
+  // 审计 B9 + 质检 M8：与费用统计同口径，用配置时区（默认北京时间）自然日做记忆日期戳
+  const bp = beijingParts(new Date());
+  const date = `${bp.year}-${String(bp.month).padStart(2, '0')}-${String(bp.day).padStart(2, '0')}`;
   fs.appendFileSync(memoryFile(), add.map((l) => (l.startsWith('-') ? `- [${date}] ${l.slice(1).trim()}` : `- [${date}] ${l}`)).join('\n') + '\n');
   return add.length;
 }
@@ -153,7 +149,11 @@ export function recentJournalBlock(home) {
   return (
     '\n\n<recent_sessions>\n' +
     entries
-      .map((e) => `- ${new Date(e.at).toISOString().slice(0, 10)} ${(e.workspace || '').replace(/[<>]/g, '')}：${(e.firstUser?.slice(0, 40) ?? '').replace(/[<>]/g, '')} → ${(e.outcome?.slice(0, 40) ?? '').replace(/[<>]/g, '')}`)
+      .map((e) => {
+        const bp = beijingParts(new Date(e.at)); // 质检 M8：UTC 日期 → 配置时区日期（与全系统口径一致）
+        const d = `${bp.year}-${String(bp.month).padStart(2, '0')}-${String(bp.day).padStart(2, '0')}`;
+        return `- ${d} ${(e.workspace || '').replace(/[<>]/g, '')}：${(e.firstUser?.slice(0, 40) ?? '').replace(/[<>]/g, '')} → ${(e.outcome?.slice(0, 40) ?? '').replace(/[<>]/g, '')}`;
+      })
       .join('\n') +
     '\n</recent_sessions>'
   );

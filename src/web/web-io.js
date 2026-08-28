@@ -73,6 +73,11 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
       send({ type: 'toolStart', name, args, seq: io._toolSeq });
     },
     renderToolDenied(name, args, reason) {
+      // 质检 L2：被拒的 toolStart 也要从 _activeTools 移除——否则条目无界增长、
+      // 且后续同名同参工具可能 findIndex 命中陈旧 seq 导致卡片配对错位
+      const key = name + ':' + JSON.stringify(args || {});
+      const idx = io._activeTools.findIndex((a) => a.key === key);
+      if (idx !== -1) io._activeTools.splice(idx, 1);
       send({ type: 'toolDenied', name, args, reason: reason || '未授权' });
     },
     renderTodo(todos) {

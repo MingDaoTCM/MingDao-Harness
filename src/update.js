@@ -10,6 +10,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mingdaoHome, ensureHome } from './config.js';
+import { atomicWriteFileSync } from './atomic-write.js';
 
 function git(args, cwd) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 120000 });
@@ -72,7 +73,7 @@ function readState() {
 }
 function writeState(s) {
   ensureHome();
-  fs.writeFileSync(stateFile(), JSON.stringify(s, null, 2) + '\n', { mode: 0o600 });
+  atomicWriteFileSync(stateFile(), JSON.stringify(s, null, 2) + '\n', { mode: 0o600 }); // 质检 H4：更新状态原子写
 }
 
 // 直接向远端指定分支要版本（评估 D6）：fetch 到 FETCH_HEAD 再读 package.json，

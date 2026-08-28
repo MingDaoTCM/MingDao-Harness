@@ -7,6 +7,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { relativeTime } from './session.js';
+import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
 
 const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url));
 
@@ -45,9 +46,7 @@ export function writeTask(home, task) {
   fs.mkdirSync(tasksDir(home), { recursive: true });
   // 原子写：先临时文件再改名，避免崩溃留下半截 JSON
   const target = path.join(tasksDir(home), task.id + '.json');
-  const tmp = target + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(task, null, 2) + '\n');
-  fs.renameSync(tmp, target);
+  atomicWriteFileSync(target, JSON.stringify(task, null, 2) + '\n'); // 质检 H4：tmp 名含 pid+随机
 }
 
 export function isValidTaskId(id) {
@@ -81,6 +80,12 @@ export function startTask(home, question, { permission, model, cwd, offpeak, qui
     // 连续失败的重试轮次静默：只保留首次失败的系统通知，避免右下角刷屏（审计）
     env: { ...process.env, MINGDAO_HOME: home, ...(quietNotify ? { MINGDAO_TASK_QUIET_NOTIFY: '1' } : {}) },
   });
+  // 质检 M12：spawn 失败（ENOENT/ARG_MAX）必须有 error 监听，否则未捕获事件直接崩进程
+  child.on('error', (err) => {
+    try {
+      patchTask(home, id, { status: 'failed', error: `worker 启动失败：${err?.message || err}`, durationMs: Date.now() - task.startedAt });
+    } catch {}
+  });
   task.pid = child.pid;
   writeTask(home, task);
   child.unref();
@@ -88,23 +93,37 @@ export function startTask(home, question, { permission, model, cwd, offpeak, qui
 }
 
 export function patchTask(home, id, patch) {
-  const t = readTask(home, id);
-  if (!t) return;
-  writeTask(home, { ...t, ...patch });
+  // 质检 H3：读-改-写加锁（worker finish 与 CLI kill 互斥，防 killed/done 互相覆盖）
+  return withFileLockSync(path.join(tasksDir(home), '.lock'), () => {
+    const t = readTask(home, id);
+    if (!t) return;
+    writeTask(home, { ...t, ...patch });
+  });
 }
 
 export function killTask(home, id) {
   if (!isValidTaskId(id)) return false;
+  // 质检 H3：读-改-写加锁（与 worker 自身的状态写互斥）
+  return withFileLockSync(path.join(tasksDir(home), '.lock'), () => killTaskInner(home, id));
+}
+function killTaskInner(home, id) {
   const t = readTask(home, id);
   if (!t) return false;
   if (t.status === 'running' && t.pid) {
+    // 质检 M11：cmdline 含任务 id 才 kill（防 PID 复用误杀无关进程）
+    let owned = null;
     try {
-      // worker 是 detached 进程（自成进程组）：优先杀整组，避免工具子进程成孤儿
-      process.kill(-t.pid, 'SIGTERM');
-    } catch {
+      owned = fs.readFileSync(`/proc/${t.pid}/cmdline`, 'utf8').includes(id);
+    } catch {}
+    if (owned !== false) {
       try {
-        process.kill(t.pid, 'SIGTERM');
-      } catch {}
+        // worker 是 detached 进程（自成进程组）：优先杀整组，避免工具子进程成孤儿
+        process.kill(-t.pid, 'SIGTERM');
+      } catch {
+        try {
+          process.kill(t.pid, 'SIGTERM');
+        } catch {}
+      }
     }
   }
   patchTask(home, id, { status: 'killed', durationMs: t.durationMs ?? Date.now() - t.startedAt });

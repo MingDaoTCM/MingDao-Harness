@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -234,6 +234,27 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   assert.ok(String(job.note || '').includes('避峰'), '任务备注应说明避峰');
   await runCli(['schedule', 'remove', m[0]]);
   ok('避峰调度：--offpeak 标记 / 备注说明');
+}
+
+// ---------- 5.5 质检 H2：pause 失效确定性回归（postRunStatus 纯函数） ----------
+{
+  const { postRunStatus } = await import(pathToFileURL(path.join(root, 'src', 'schedule.js')).href + '?postrun-test');
+  // 执行期间用户 pause → 状态保持 paused（绝不覆盖为 pending/failed）
+  const paused = postRunStatus({ status: 'paused', consecutiveFailures: 0, anchor: null, interval: 1000 }, 'failed');
+  assert.equal(paused, null, 'paused 状态不得被覆盖');
+  // 文件已删（cur2=null）→ 无操作
+  assert.equal(postRunStatus(null, 'done'), null, '已删除任务应无操作');
+  // 失败 3 次熔断
+  const fused = postRunStatus({ status: 'running', consecutiveFailures: 3, anchor: null, interval: 1000 }, 'failed');
+  assert.equal(fused.status, 'failed', '连续失败应熔断');
+  // 正常完成 → 排下一次
+  const next = postRunStatus({ status: 'running', consecutiveFailures: 0, anchor: null, interval: 60000 }, 'done');
+  assert.equal(next.status, 'pending', '完成应回 pending');
+  assert.ok(next.nextRunAt > Date.now(), '应排下一次执行时间');
+  // 锚点对齐
+  const anchored = postRunStatus({ status: 'running', consecutiveFailures: 0, anchor: '09:00', interval: 86400000 }, 'done');
+  assert.equal(anchored.status, 'pending', '锚点任务应回 pending');
+  ok('质检 H2：pause 状态决策回归（postRunStatus 纯函数）');
 }
 
 // ---------- 6. 周期任务连续失败熔断（「失败：避峰任务」通知刷屏根因回归） ----------

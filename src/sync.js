@@ -15,6 +15,7 @@ import https from 'node:https';
 import { loadConfig, saveConfig, mingdaoHome, ensureHome } from './config.js';
 import { loadCredentials, saveCredentials } from './credentials.js';
 import { listSessions } from './session.js';
+import { atomicWriteFileSync } from './atomic-write.js';
 
 const TIMEOUT_MS = 20000;
 // 自签证书（--insecure）只影响同步请求本身，不再改写进程级 NODE_TLS_REJECT_UNAUTHORIZED
@@ -216,9 +217,7 @@ function readState() {
 function writeState(state) {
   ensureHome();
   const target = stateFile();
-  const tmp = target + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 });
-  fs.renameSync(tmp, target);
+  atomicWriteFileSync(target, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 }); // 质检 H4
 }
 
 // 推送单个/全部会话。仅当远端被其他设备改过（mtime 与本地记录不一致且内容不同）才视为冲突并备份远端。
@@ -312,7 +311,7 @@ export async function syncPull(name) {
     if (!r.ok) continue;
     if (local !== null && local !== r.content) {
       const copy = path.join(home, 'sessions', conflictCopyName(s.name, 'remote'));
-      fs.writeFileSync(copy, r.content, { mode: 0o600 });
+      atomicWriteFileSync(copy, r.content, { mode: 0o600 }); // 质检 H4
       conflicts.push(s.name);
       state[s.name] = { remoteMtime: r.mtime };
       continue;
@@ -322,7 +321,7 @@ export async function syncPull(name) {
       continue;
     }
     fs.mkdirSync(path.join(home, 'sessions'), { recursive: true });
-    fs.writeFileSync(target, r.content, { mode: 0o600 });
+    atomicWriteFileSync(target, r.content, { mode: 0o600 }); // 质检 H4
     pulled.push(s.name);
     state[s.name] = { remoteMtime: r.mtime };
   }
@@ -377,7 +376,7 @@ export async function syncShareAccept(shareId) {
     if (!isValidRemoteName(r.savedAs)) return { error: '服务器返回的会话名非法，已拒绝落盘' };
     const home = mingdaoHome();
     fs.mkdirSync(path.join(home, 'sessions'), { recursive: true });
-    fs.writeFileSync(path.join(home, 'sessions', r.savedAs), r.content, { mode: 0o600 });
+    atomicWriteFileSync(path.join(home, 'sessions', r.savedAs), r.content, { mode: 0o600 }); // 质检 H4
     const state = readState();
     state[r.savedAs] = { remoteMtime: r.mtime };
     writeState(state);

@@ -42,9 +42,7 @@ export function appendMessages(file, messages) {
 // 整文件原子重写：自动压缩后把会话文件同步为压缩形态（否则每次加载历史都会重新触发压缩）
 export function rewriteSession(file, messages) {
   const lines = messages.map((m) => JSON.stringify(m)).join('\n');
-  const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, lines + (lines ? '\n' : ''), { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  atomicWriteFileSync(file, lines + (lines ? '\n' : ''), { mode: 0o600 }); // 质检 H4：会话文件原子写
 }
 
 export function loadSession(file) {
@@ -92,6 +90,7 @@ export function relativeTime(mtime) {
 // 全文检索历史会话（P3-2 索引化）：增量词表倒排 + AND 匹配（中文 bigram），
 // 只对命中的少数文件读原文生成片段；未命中/无关键词时回退列表。
 import { syncSessionIndex, tokenize, extractSessionText } from './session-index.js';
+import { atomicWriteFileSync } from './atomic-write.js';
 
 export function searchSessions(home, keyword, { limit = 20 } = {}) {
   const kw = String(keyword ?? '').trim();

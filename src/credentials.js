@@ -9,6 +9,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
+import { atomicWriteFileSync } from './atomic-write.js';
 
 export function credentialsPath() {
   return path.join(mingdaoHome(), 'credentials.json');
@@ -26,7 +27,7 @@ export function loadCredentials() {
 export function saveCredentials(creds) {
   ensureHome();
   const p = credentialsPath();
-  fs.writeFileSync(p, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 });
+  atomicWriteFileSync(p, JSON.stringify(creds, null, 2) + '\n', { mode: 0o600 }); // 质检 H4：密钥文件原子写
   // mode 只在创建时生效：对已存在但权限过宽的文件强制收权
   try {
     fs.chmodSync(p, 0o600);

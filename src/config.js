@@ -6,6 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { PROVIDERS, modelPreset, providerPreset } from './models.js';
 import { setStoredKey, resolveApiKey, maskKey } from './credentials.js';
+import { atomicWriteFileSync } from './atomic-write.js';
 
 export function mingdaoHome() {
   return process.env.MINGDAO_HOME || path.join(os.homedir(), '.mingdao');
@@ -56,7 +57,7 @@ export function ensureMinimalConfig() {
 export function saveConfig(cfg) {
   ensureHome();
   const p = configPath();
-  fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+  atomicWriteFileSync(p, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 }); // 质检 H4：原子写（tmp+rename）
   try {
     fs.chmodSync(p, 0o600);
   } catch {}

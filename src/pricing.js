@@ -194,9 +194,17 @@ function effectivePricing(modelName) {
     output: Number(o.output ?? b?.output ?? 0),
     cacheHit: Number(o.cacheHit ?? b?.cacheHit ?? 0),
   });
+  // 审计 H1（质检 0.1.68）：根级 overrides.{input,output,cacheHit} 是价格主体（offpeak 口径），
+  // 必须同样传播到 peak——此前 peak 只吃 over.peak，高峰时段自定义价格被内置 peak 价替代，
+  // 费用估算/护栏/前置预估全部失真且无任何信号。现在：peak 缺省沿用根级覆盖，over.peak 可再细分。
+  const peakOver = {
+    input: over.peak?.input ?? over.input,
+    output: over.peak?.output ?? over.output,
+    cacheHit: over.peak?.cacheHit ?? over.cacheHit,
+  };
   return {
     offpeak: merge(base.offpeak || base, over),
-    peak: merge(base.peak || base.offpeak || base, over.peak),
+    peak: merge(base.peak || base.offpeak || base, peakOver),
   };
 }
 

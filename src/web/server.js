@@ -215,10 +215,20 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   }
 
   function pruneTasks() {
-    if (tasks.size <= 100) return;
+    // 质检 L3：完成条目 10 分钟后或总量超 60 时清理（任务面板展示最近完成历史），
+    // 持留的 res/闭包随条目一并释放；运行中任务不受影响
+    const cutoff = Date.now() - 10 * 60 * 1000;
     for (const [id, t] of tasks) {
-      if (t.status !== 'running') tasks.delete(id);
-      if (tasks.size <= 60) break;
+      if (t.status !== 'running' && t.startedAt && Date.now() - (t.durationMs || 0) - t.startedAt > 0) {
+        // startedAt+durationMs 为完成时刻
+        if (t.startedAt + (t.durationMs || 0) < cutoff) tasks.delete(id);
+      }
+    }
+    if (tasks.size > 60) {
+      for (const [id, t] of tasks) {
+        if (t.status !== 'running') tasks.delete(id);
+        if (tasks.size <= 30) break;
+      }
     }
   }
 
@@ -250,6 +260,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       send({ type: 'error', message: built.error });
       clearInterval(progressTimer);
       res.end();
+      pruneTasks(); // 质检 L3：早退分支与主路径一致清理任务占位
       return;
     }
 
@@ -1247,7 +1258,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         console.log('  ℹ 已启用访问令牌：地址需带 ?token=… 才能访问。');
       }
     } else if (!isLoopbackHost(host)) {
-      console.warn('  ⚠ 警告：当前监听 ' + host + '（非本机回环）且未启用令牌，任何能到达端口的人都可访问。建议：mingdao web --auth-token <令牌>。');
+      // 质检 L6：实际 trustedHost 白名单只放行回环 Host（远程浏览器带 LAN IP 的 Host 会 403），
+      // 文案按真实行为修正——非浏览器客户端/伪造 Host 仍可达，务必启用令牌
+      console.warn('  ⚠ 警告：当前监听 ' + host + '（非本机回环）且未启用令牌，浏览器直接访问会被拒绝（Host 白名单），但非浏览器客户端仍可直连。强烈建议：mingdao web --auth-token <令牌>。');
     }
     console.log(`  模型: ${modelName} · 权限: ${cfg.permission ?? 'ask'} · 工作目录: ${workingDir}`);
     if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) console.log('  MCP:  后台连接中，/api/state 可查看状态');

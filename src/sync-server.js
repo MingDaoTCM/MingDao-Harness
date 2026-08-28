@@ -19,6 +19,7 @@ import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { atomicWriteFileSync } from './atomic-write.js';
 
 const DEFAULT_DATA_DIR = process.env.SYNC_DATA_DIR || '/var/lib/mingdao-sync';
 let ACTIVE_DIR = DEFAULT_DATA_DIR;
@@ -50,9 +51,7 @@ function readJson(file, fallback) {
 }
 function writeJson(file, obj) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  atomicWriteFileSync(file, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 }); // 质检 H4
 }
 function usersFile() {
   return path.join(ACTIVE_DIR, 'users.json');
@@ -382,7 +381,7 @@ function doShareAccept(username, shareId) {
   let conflict = false;
   if (prev && existing !== null && sha(existing) === prev.copyHash && existing !== content) {
     // 接受者未修改副本：就地刷新到最新
-    fs.writeFileSync(target, content, { mode: 0o600 });
+    atomicWriteFileSync(target, content, { mode: 0o600 }); // 质检 H4
   } else if (existing !== null && existing !== content) {
     // 目标名已有不同内容：另存时间戳副本（绝不覆盖）
     savedAs = prevName.replace(/\.jsonl$/, `.shared-${Date.now()}.jsonl`);
@@ -391,7 +390,7 @@ function doShareAccept(username, shareId) {
     conflict = true;
   } else {
     fs.mkdirSync(sessionsDir(username), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(target, content, { mode: 0o600 });
+    atomicWriteFileSync(target, content, { mode: 0o600 }); // 质检 H4
   }
   const meta = readJson(metaFile(username), {});
   meta[savedAs] = { mtime: Date.now(), size: Buffer.byteLength(content) };

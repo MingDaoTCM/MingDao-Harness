@@ -8,6 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
+import { atomicWriteFileSync } from './atomic-write.js';
 
 const INDEX_MAX_FILE = 8 * 1024 * 1024;
 
@@ -28,9 +29,7 @@ export function saveSessionIndex(idx) {
   try {
     ensureHome();
     const target = sessionIndexFile();
-    const tmp = target + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(idx) + '\n');
-    fs.renameSync(tmp, target);
+    atomicWriteFileSync(target, JSON.stringify(idx) + '\n'); // 质检 H4：索引原子写
   } catch {}
 }
 

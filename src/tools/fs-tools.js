@@ -22,7 +22,9 @@ function isProbablyBinary(buf) {
   return false;
 }
 
-// —— undo 备份（会话级，每文件最多 10 份） ——
+// —— undo 备份（会话级，每文件最多 10 份 + 全局上限，质检 M9） ——
+const UNDO_MAX_FILES = 64;
+const UNDO_MAX_BYTES = 20 * 1024 * 1024;
 function backup(ctx, p) {
   try {
     const store = ctx?.undoStore?.backups;
@@ -32,6 +34,26 @@ function backup(ctx, p) {
     list.push({ time: Date.now(), content: buf });
     if (list.length > 10) list.shift();
     store.set(p, list);
+    // 质检 M9：文件数超限删最旧文件；总字节超限按最旧时间戳逐条淘汰（防长会话内存膨胀）
+    if (store.size > UNDO_MAX_FILES) {
+      const first = store.keys().next().value;
+      if (first !== undefined) store.delete(first);
+    }
+    let bytes = 0;
+    for (const v of store.values()) for (const b of v) bytes += b.content.length;
+    while (bytes > UNDO_MAX_BYTES && store.size) {
+      let oldestKey = null;
+      let oldestTime = Infinity;
+      for (const [k, v] of store) {
+        const t0 = v[0]?.time ?? Infinity;
+        if (t0 < oldestTime) { oldestTime = t0; oldestKey = k; }
+      }
+      if (oldestKey == null) break;
+      const v = store.get(oldestKey);
+      bytes -= v[0]?.content.length ?? 0;
+      v.shift();
+      if (!v.length) store.delete(oldestKey);
+    }
   } catch {}
 }
 
