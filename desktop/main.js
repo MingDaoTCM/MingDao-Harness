@@ -75,16 +75,27 @@ async function startServer() {
   // 首次运行自动初始化（审计）：无配置时自动建最小可用配置直接进入界面，
   // API Key 引导在 WebUI 内完成（顶部横幅 + ⚙ 设置），不再要求先跑终端 mingdao init
   ensureMinimalConfig();
-  const port = 40000 + Math.floor(Math.random() * 20000);
   const authToken = crypto.randomBytes(16).toString('hex');
-  try {
-    await mod.runWebServer({ host: '127.0.0.1', port, authToken });
-  } catch (err) {
-    dialog.showErrorBox('MingDao Harness', `WebUI 启动失败：${err?.message || err}`);
-    app.quit();
-    return null;
+  // 质检 C2/D1：端口占用重试——listen 现在会 reject，随机段被占时换端口重试，不再黑屏空转
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const port = 40000 + Math.floor(Math.random() * 20000);
+    try {
+      await mod.runWebServer({ host: '127.0.0.1', port, authToken });
+      return { port, token: authToken };
+    } catch (err) {
+      const code = /** @type {Error & { code?: string }} */ (err).code;
+      if (code === 'EADDRINUSE') {
+        appLog('端口被占用，重试随机端口（' + (attempt + 1) + '/6）');
+        continue;
+      }
+      dialog.showErrorBox('MingDao Harness', `WebUI 启动失败：${err?.message || err}`);
+      app.quit();
+      return null;
+    }
   }
-  return { port, token: authToken };
+  dialog.showErrorBox('MingDao Harness', 'WebUI 启动失败：连续 6 次随机端口均被占用，请稍后重试');
+  app.quit();
+  return null;
 }
 
 function buildMenu() {
@@ -314,14 +325,32 @@ function setupAutoUpdate() {
       }
       autoUpdater.autoDownload = true;
       appLog('自动更新检查启动（feed: 官网 /updates）');
-      autoUpdater.on('error', (err) => appLog('updater error ' + String(err?.message || err)));
+      let updateSeen = false;
+      autoUpdater.on('error', (err) => {
+        appLog('updater error ' + String(err?.message || err));
+        // 质检（下载失败不可见）：发现新版本之后发生的错误直接弹窗告知，并引导官网手动下载
+        if (updateSeen) {
+          dialog
+            .showMessageBox({
+              type: 'warning',
+              title: '更新下载失败',
+              message: '新版本下载失败：' + String(err?.message || err),
+              detail: '可稍后重试，或到官网手动下载：https://harness.mingdao.ai/#downloads',
+              buttons: ['知道了'],
+              noLink: true,
+            })
+            .catch(() => {});
+        }
+      });
       autoUpdater.on('update-not-available', (info) => appLog('updater 已是最新 ' + String(info?.version ?? app.getVersion())));
       // 质检（Linux 更新下载失败根因）：info 在该打包环境为 undefined——旧代码 info.version
       // 在此抛 TypeError，中断 autoUpdater 事件派发导致下载永不开始。null-safe + 不抛错。
       autoUpdater.on('update-available', (info) => {
+        updateSeen = true;
         appLog('updater 发现新版本 ' + String(info?.version ?? '?'));
         appLog('开始自动下载（autoDownload=true）');
       });
+      autoUpdater.on('download-progress', (p) => appLog('updater 下载进度 ' + Math.round(Number(p?.percent) || 0) + '%'));
       autoUpdater.on('update-downloaded', (info) => {
         const v = String(info?.version ?? app.getVersion());
         appLog('updater 下载完成 ' + v);

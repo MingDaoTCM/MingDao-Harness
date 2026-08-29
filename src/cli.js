@@ -267,21 +267,30 @@ async function main() {
   const withJournal = Boolean(opts.journal);
 
   // —— 命令分发（已拆至 src/commands/，评估 P0-1 拆 cli.js）——
-  // 各 handler 返回 true = 已处理；false = 按普通提问继续（保留词劫持防护）
+  // 各 handler 返回 true = 已处理；false = 按普通提问继续（保留词劫持防护）。
+  // 质检 M3：显式命令映射（命令 → {module, handler}），模块与命令一一对应、handler 名显式可查
   {
-    const dispatchTable = [
-      ['update', 'update'], ['rollback', 'update'], ['batch', 'update'], ['cost', 'update'], ['audit', 'update'],
-      ['tasks', 'schedule'], ['schedule', 'schedule'],
-      ['workspace', 'workspace'], ['mcp', 'workspace'],
-      ['sync', 'sync'],
-      ['skill', 'skill'], ['web', 'skill'], ['sessions', 'skill'],
-      ['key', 'key'],
-      ['desktop', 'desktop'],
-    ];
-    const hit = dispatchTable.find(([name]) => name === opts.prompt[0]);
+    const dispatchTable = {
+      update: { module: 'update', handler: 'handleUpdateFamily' },
+      rollback: { module: 'update', handler: 'handleUpdateFamily' },
+      batch: { module: 'update', handler: 'handleUpdateFamily' },
+      cost: { module: 'update', handler: 'handleUpdateFamily' },
+      audit: { module: 'update', handler: 'handleUpdateFamily' },
+      tasks: { module: 'schedule', handler: 'handleTasks' },
+      schedule: { module: 'schedule', handler: 'handleSchedule' },
+      workspace: { module: 'workspace', handler: 'handleWorkspace' },
+      mcp: { module: 'workspace', handler: 'handleMcp' },
+      sync: { module: 'sync', handler: 'handleSync' },
+      skill: { module: 'skill', handler: 'handleSkill' },
+      web: { module: 'skill', handler: 'handleWeb' },
+      sessions: { module: 'skill', handler: 'handleSessions' },
+      key: { module: 'key', handler: 'handleKey' },
+      desktop: { module: 'desktop', handler: 'handleDesktop' },
+    };
+    const hit = dispatchTable[opts.prompt[0]];
     if (hit) {
-      const mod = await import(`./commands/${hit[1]}.js`);
-      const fn = mod[hit[1] === 'update' ? 'handleUpdateFamily' : hit[1] === 'schedule' ? (opts.prompt[0] === 'tasks' ? 'handleTasks' : 'handleSchedule') : hit[1] === 'workspace' ? (opts.prompt[0] === 'mcp' ? 'handleMcp' : 'handleWorkspace') : hit[1] === 'skill' ? (opts.prompt[0] === 'skill' ? 'handleSkill' : opts.prompt[0] === 'web' ? 'handleWeb' : 'handleSessions') : 'handle' + hit[1][0].toUpperCase() + hit[1].slice(1)];
+      const mod = await import(`./commands/${hit.module}.js`);
+      const fn = mod[hit.handler];
       const handled = await fn(opts.prompt[0], opts.prompt.slice(1));
       if (handled) return;
     }

@@ -106,9 +106,20 @@ function isValidSessionName(n) {
 }
 
 // ---------- 限速（防爆破/枚举；内存表，进程级） ----------
+const TRUST_PROXY = process.env.SYNC_TRUST_PROXY === '1'; // 仅部署在可信反代后时开启
 const rateBuckets = new Map();
-function rateLimited(req, limit = 20) {
-  const key = (req.socket?.remoteAddress || 'x') + '|' + req.url;
+function clientKey(req) {
+  let ip = req.socket?.remoteAddress || 'x';
+  if (TRUST_PROXY) {
+    const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+    if (/^[\d.]+$/.test(xff) || xff.includes(':')) ip = xff;
+  }
+  return ip;
+}
+function rateLimited(req, limit = 20, extra = '') {
+  // 质检 M5：键 = IP + 路由 + 用户名——单账号爆破按用户名限（分布式 IP 无法绕过）；
+  // 表满按最旧淘汰而非整表 clear（整表 clear 可被攻击者重置全员限额）
+  const key = clientKey(req) + '|' + req.url + '|' + String(extra || '');
   const now = Date.now();
   const b = rateBuckets.get(key);
   if (b && now - b.t0 < 60000) {
@@ -116,7 +127,14 @@ function rateLimited(req, limit = 20) {
     if (b.n > limit) return true;
   } else {
     rateBuckets.set(key, { t0: now, n: 1 });
-    if (rateBuckets.size > 5000) rateBuckets.clear();
+    if (rateBuckets.size > 10000) {
+      let oldestKey = null;
+      let oldestT = Infinity;
+      for (const [k, v] of rateBuckets) {
+        if (v.t0 < oldestT) { oldestT = v.t0; oldestKey = k; }
+      }
+      if (oldestKey !== null) rateBuckets.delete(oldestKey);
+    }
   }
   return false;
 }
@@ -423,6 +441,7 @@ async function handle(req, res) {
       if (rateLimited(req, 10)) return json(res, 429, { error: '尝试过于频繁，请稍后再试' });
       const body = await parseBody(req);
       if (body.__error) return json(res, 400, { error: 'JSON 解析失败' });
+      if (rateLimited(req, 5, String(body.username || '').toLowerCase())) return json(res, 429, { error: '该用户名的尝试过于频繁，请稍后再试' });
       if (REGISTRATION === 'closed') return json(res, 403, { error: '注册已关闭（管理员已禁用自助注册）' });
       if (REGISTRATION === 'invite') {
         const code = String(body.inviteCode || '').trim();
@@ -437,6 +456,7 @@ async function handle(req, res) {
       if (rateLimited(req, 10)) return json(res, 429, { error: '尝试过于频繁，请稍后再试' });
       const body = await parseBody(req);
       if (body.__error) return json(res, 400, { error: 'JSON 解析失败' });
+      if (rateLimited(req, 5, String(body.username || '').toLowerCase())) return json(res, 429, { error: '该用户名的尝试过于频繁，请稍后再试' });
       const r = doPair(body);
       if (r.notFound) return json(res, 404, r);
       if (r.unauthorized) return json(res, 401, r);
@@ -549,6 +569,8 @@ export function runSyncServer({ port, host, dataDir, cert, key } = {}) {
     server = http.createServer(handler);
     console.log(new Date().toISOString(), '警告：HTTP 明文模式（仅限内网/过渡，公网请配置 SYNC_CERT/SYNC_KEY）');
   }
+  // 质检 M5：全局并发连接上限（防连接耗尽）
+  if (typeof server.maxConnections === 'number') server.maxConnections = 500;
   server.listen(listenPort, listenHost, () => {
     console.log(
       new Date().toISOString(),

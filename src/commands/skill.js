@@ -175,7 +175,13 @@ export async function handleWeb(cmd, args) {
       return true;
     }
   }
-  await runWebServer({ host, port, authToken });
+  try {
+    await runWebServer({ host, port, authToken });
+  } catch (err) {
+    // 质检 C2：listen 现在会 reject（如端口占用），CLI 给出明确提示而非挂起
+    console.error(`[MingDao] WebUI 启动失败：${err?.message || err}`);
+    process.exitCode = 1;
+  }
   return true;
 }
 

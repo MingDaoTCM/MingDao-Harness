@@ -2,6 +2,22 @@
 
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
+## v0.2.0（2026-08-28）— Phase 2 结构治理
+
+### 结构
+- **server.js 拆路由模块**：全部 HTTP 路由抽至 `src/web/routes/api.js`（1299 → 579 行），服务器局部状态经 deps 显式传入（可变原语 state/refs 包装）
+- **SPA JS 外置**：index.html 内联脚本抽至 `src/web/app.js`，CSP 收紧移除 `script-src 'unsafe-inline'`（417 行壳 + 1008 行逻辑）
+- **cli.js 命令分发显式化**：`命令 → {module, handler}` 映射表替换字符串拼接三元嵌套；死导入清理
+
+### 安全与正确性
+- **SSRF 防护**：自定义模型/同步端点校验目标地址——对外监听时拒绝私网/回环/链路本地（本机回环绑定时放行本机模型服务，`web.allowPrivateEndpoints` 显式放行）
+- **并发上限修复**：inflight 计数绑定请求生命周期（readBody 期间不再并发超限）
+- **会话写互斥**：同一会话文件的追加与压缩重写按文件串行化
+- **listen 修复**：runWebServer 等待绑定成功才 resolve，失败 reject；桌面端端口占用自动换端口重试（6 次），CLI 明确报错
+- **sync-server 限流加固**：整表 clear → 最旧淘汰；键含用户名（防分布式 IP 绕过）；SYNC_TRUST_PROXY 控制 X-Forwarded-For；maxConnections 500
+- **API Key 即时生效**：设置/删除 Key 后 provider 缓存失效，无需重启
+- **更新下载失败可见**：发现新版本后下载出错弹窗提示官网手动下载；下载进度写日志
+
 ## v0.1.70（2026-08-28）— 更新器修复 · 静默可见性 · 布局重构
 
 ### 修复

@@ -184,7 +184,10 @@ let base = await startWeb(work1);
 {
   const html = await (await fetch(base + '/')).text();
   assert.ok(html.includes('MingDao'), '首页应包含标题');
-  assert.ok(html.includes('/api/chat'), '前端应引用聊天接口');
+  // 质检 Q2：SPA JS 已外置到 /app.js（CSP 收紧去 unsafe-inline），聊天接口引用随之移到 app.js
+  assert.ok(html.includes('/app.js'), '首页应引用外部 app.js');
+  const appjs = await (await fetch(base + '/app.js')).text();
+  assert.ok(appjs.includes('/api/chat'), '前端应引用聊天接口');
   const st = await (await fetch(base + '/api/state')).json();
   assert.equal(st.ok, true);
   assert.equal(st.model, 'test-model');
@@ -384,7 +387,8 @@ let base = await startWeb(work1);
   const b1 = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setBaseUrl', baseUrl: `http://127.0.0.1:${mockPort}/v1` }) })).json();
   assert.equal(b1.ok, true);
   const html = await (await fetch(base + '/')).text();
-  assert.ok(html.includes('pkList') && html.includes('cmAdd'), '前端应包含模型与 Key 管理面板');
+  const appjs2 = await (await fetch(base + '/app.js')).text();
+  assert.ok(appjs2.includes('pkList') && appjs2.includes('cmAdd'), '前端应包含模型与 Key 管理面板（SPA JS 已外置）');
   ok('模型与 API Key：添加/修改/删除自定义模型 + 服务商 Key 管理');
 }
 
