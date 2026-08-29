@@ -87,8 +87,9 @@
 - L1/L2/L3/L6/L11/L12/L13 顺手修
 - 验收：94 组测试 + 38 组 bench 全绿、tsc 0 错误、三平台 CI 过
 
-### Phase 2 —「结构治理」v0.2.0（≈4–6 天）
-目标：拆巨石、补安全短板，为后续演进铺路。
+### Phase 2 —「结构治理」v0.2.0（≈4–6 天）✅ 已实施（2026-08-29）
+实施项：server.js 拆路由模块（src/web/routes/api.js，1299→579 行）、cli.js 命令分发显式化、SPA JS 外置 app.js + CSP 收紧、SSRF 目标校验、inflight 并发、会话写互斥、listen Promise + 桌面端口重试、sync-server 限流加固、API Key 即时生效、更新下载失败可见化。
+（cli.js 的 REPL/worker 进一步拆分与 routes/api.js 按域细分留待 0.2.1 渐进完成。）
 - H5 server.js 拆 `src/web/routes/*.js`（chat/sessions/config/sync/schedule/skills/workspace/fs-browse 等）+ 共享中间件
 - M13 cli.js 命令分发重构 + REPL/worker 拆分 + 重复逻辑抽取
 - M14 index.html JS 外置 `app.js` + CSP 收紧（去 unsafe-inline）+ 图标表/双拉取去重
