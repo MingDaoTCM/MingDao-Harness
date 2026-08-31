@@ -25,19 +25,8 @@ const buildRoot = path.join(__dirname, 'build');
 const isDev = !app.isPackaged;
 
 // 桌面版诊断日志（渲染层 console + 主进程关键事件）：userData/logs/mingdao.log，1MB 滚动
-function appLog(msg) {
-  try {
-    const dir = path.join(app.getPath('userData'), 'logs');
-    fs.mkdirSync(dir, { recursive: true });
-    const f = path.join(dir, 'mingdao.log');
-    let prev = '';
-    try {
-      prev = fs.readFileSync(f, 'utf8');
-    } catch {}
-    if (prev.length > 1024 * 1024) prev = prev.slice(-512 * 1024);
-    fs.writeFileSync(f, prev + new Date().toISOString() + ' ' + msg + '\n');
-  } catch {}
-}
+// 质检 A6：统一日志写入器（append + 按行截断 + 原子替换），与服务端 srvlog 同款
+const appLog = createLogWriter(path.join(app.getPath('userData'), 'logs', 'mingdao.log'));
 
 let mainWindow = null;
 let tray = null;
@@ -230,13 +219,47 @@ async function createWindow() {
   win.once('dom-ready', () => {
     if (!win.isVisible()) win.show();
   });
+  // 质检 A7：崩溃循环护栏——连续快速崩溃超过阈值后弹窗提示，避免无限重载闪烁
+  let crashCount = 0;
+  let crashWindowT0 = Date.now();
+  const guardCrash = () => {
+    const now = Date.now();
+    if (now - crashWindowT0 > 60000) {
+      crashWindowT0 = now;
+      crashCount = 0;
+    }
+    crashCount += 1;
+    if (crashCount >= 3) {
+      appLog('渲染进程连续崩溃 3 次，停止自动重载');
+      dialog
+        .showMessageBox({
+          type: 'error',
+          title: '界面异常',
+          message: '界面连续多次崩溃，已停止自动重载',
+          detail: '请重启应用；若反复出现，请到论坛反馈：https://harness.mingdao.ai/forum/',
+          buttons: ['重启应用', '退出'],
+          noLink: true,
+        })
+        .then((r) => {
+          if (r.response === 0) {
+            crashCount = 0;
+            win.webContents.reload();
+          } else {
+            app.quit();
+          }
+        })
+        .catch(() => {});
+      return false;
+    }
+    return true;
+  };
   win.webContents.on('did-fail-load', (_e, code, _desc, url) => {
     appLog('did-fail-load code=' + code + ' ' + url);
-    if (code !== -3 && String(url || '').startsWith('http://127.0.0.1:')) win.webContents.reload();
+    if (code !== -3 && String(url || '').startsWith('http://127.0.0.1:') && guardCrash()) win.webContents.reload();
   });
   win.webContents.on('render-process-gone', (_e, details) => {
     appLog('render-process-gone ' + JSON.stringify(details || {}));
-    if (!quitting) win.webContents.reload();
+    if (!quitting && guardCrash()) win.webContents.reload();
   });
   // 只允许本机地址在窗口内导航；其余链接交给系统浏览器
   win.webContents.setWindowOpenHandler(({ url }) => {

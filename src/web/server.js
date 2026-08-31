@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import { createLogWriter } from '../log-writer.js';
 import { createApiDispatch } from './routes/api.js';
 import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
 import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credentials.js';
@@ -163,6 +164,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   }
 
   let workingDir = process.cwd(); // 工作空间切换时随之更新（后续会话/工具都跟随新目录）
+  const startupCwd = workingDir; // 质检 A3：启动工作目录恒为合法浏览根（工作空间切换后仍可浏览原位）
   // Provider 按模型懒加载缓存：界面切换模型后即时生效
   const providerCache = new Map();
   async function getProviderFor(m) {
@@ -206,23 +208,12 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     sessionLocks.set(file, next.then(() => sessionLocks.delete(file), () => sessionLocks.delete(file)));
     return next;
   }
-  let draftText = ''; // 外部注入的草稿（VS Code 插件选中代码发送）
+  const draftTexts = new Map(); // 质检 A5：草稿按会话维度存储（此前单槽多客户端互相覆盖）
 
   // —— 服务端诊断日志（第二问无反应排查 + 长期运维）：<mingdao-home>/logs/web-server.log ——
   // 记录每次对话的关键阶段与耗时；2MB 滚动。桌面版与 WebUI 共用同一日志。
-  function srvlog(msg) {
-    try {
-      const dir = path.join(mingdaoHome(), 'logs');
-      fs.mkdirSync(dir, { recursive: true });
-      const f = path.join(dir, 'web-server.log');
-      let prev = '';
-      try {
-        prev = fs.readFileSync(f, 'utf8');
-      } catch {}
-      if (prev.length > 2 * 1024 * 1024) prev = prev.slice(-1024 * 1024);
-      fs.writeFileSync(f, prev + new Date().toISOString() + ' ' + msg + '\n');
-    } catch {}
-  }
+  // 质检 A6：统一日志写入器（append + 按行截断 + 原子替换），与桌面 appLog 同款实现
+  const srvlog = createLogWriter(path.join(mingdaoHome(), 'logs', 'web-server.log'));
 
   // —— SSRF 防护（质检 S1）：远端地址校验 ——
   function isPrivateHost(hostname) {
@@ -506,10 +497,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     providerCache, getProviderFor, tasks,
     MAX_CONCURRENT, pruneTasks, handleChat,
     mcpFacade, provider, validateRemoteUrl, isPrivateHost,
-    authEnabled, tokenMatches, requestToken, trustedHost, INDEX_HTML,
+    authEnabled, tokenMatches, requestToken, trustedHost, INDEX_HTML, draftTexts, startupCwd,
     state: { get modelName() { return modelName; }, set modelName(v) { modelName = v; },
-             get workingDir() { return workingDir; }, set workingDir(v) { workingDir = v; },
-             get draftText() { return draftText; }, set draftText(v) { draftText = v; } },
+             get workingDir() { return workingDir; }, set workingDir(v) { workingDir = v; } },
     refs: { get inflight() { return inflight; }, set inflight(v) { inflight = v; } },
   });
   const server = http.createServer((req, res) => {

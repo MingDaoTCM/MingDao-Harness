@@ -35,21 +35,31 @@ export async function handleSync(cmd, args) {
   if (sub === 'login') {
     const username = args[1];
     if (!username) {
-      console.log('用法：mingdao sync login <用户名> [密码] [服务器地址]（地址默认取已配置项）');
+      console.log('用法：mingdao sync login <用户名> [服务器地址] [--insecure]（密码将隐藏输入，绝不走命令行参数）');
+      process.exitCode = 1;
+      return true;
+    }
+    // 质检 A2：密码绝不接受位置参数（明文出现在 ps/shell history）——隐藏输入或 stdin 单行
+    if (args[2] && !String(args[2]).startsWith('http')) {
+      console.log('[错误] 出于安全考虑，密码不再支持命令行参数——运行 mingdao sync login <用户名> <地址> 后按提示隐藏输入。');
       process.exitCode = 1;
       return true;
     }
     const s0 = syncStatus();
-    const url = args[3] || s0.url;
+    const url = args[2] && String(args[2]).startsWith('http') ? args[2] : s0.url;
     if (!url) {
-      console.log('缺少服务器地址：mingdao sync login <用户名> [密码] <http(s)://地址>');
+      console.log('缺少服务器地址：mingdao sync login <用户名> <http(s)://地址>');
       process.exitCode = 1;
       return true;
     }
-    let password = args[2];
-    if (!password) password = await askHidden('密码（至少 8 位）：');
-    const insecureFlag = args[4] === '--insecure' || args[5] === '--insecure';
-    const r = await syncLogin({ url, username, password, deviceName: args[4] === '--insecure' ? undefined : args[4], insecure: insecureFlag });
+    const insecureFlag = args.includes('--insecure');
+    let password = await askHidden('密码（至少 8 位）：');
+    if (!password) {
+      console.log('[错误] 未输入密码');
+      process.exitCode = 1;
+      return true;
+    }
+    const r = await syncLogin({ url, username, password, deviceName: undefined, insecure: insecureFlag });
     if (r.error) {
       console.log('[错误] ' + r.error);
       process.exitCode = 1;

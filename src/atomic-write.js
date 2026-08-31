@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-export function atomicWriteFileSync(target, data, options = {}) {
+export function atomicWriteFileSync(/** @type {string} */ target, /** @type {string|Buffer} */ data, /** @type {any} */ options = {}) {
   const dir = path.dirname(target);
   const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`);
   try {
@@ -25,16 +25,16 @@ export function atomicWriteFileSync(target, data, options = {}) {
   }
 }
 
-export function atomicWriteJsonSync(target, value, { mode = 0o600 } = {}) {
+export function atomicWriteJsonSync(/** @type {string} */ target, /** @type {any} */ value, { mode = 0o600 } = {}) {
   atomicWriteFileSync(target, JSON.stringify(value, null, 2) + '\n', { mode });
 }
 
 // 极简互斥锁：O_EXCL 创建 lockfile；持锁期间执行 fn（同步）；异常/完成释放。
 // 进程崩溃遗留的陈旧锁（> staleMs 未更新）自动回收，避免永久卡死。
 const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
-const sleepMs = (ms) => Atomics.wait(sleepBuf, 0, 0, ms);
+const sleepMs = (/** @type {number} */ ms) => Atomics.wait(sleepBuf, 0, 0, ms);
 
-export function withFileLockSync(lockPath, fn, { timeoutMs = 5000, staleMs = 15000 } = {}) {
+export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() => any} */ fn, { timeoutMs = 5000, staleMs = 15000 } = {}) {
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   const t0 = Date.now();
   for (;;) {
@@ -53,7 +53,7 @@ export function withFileLockSync(lockPath, fn, { timeoutMs = 5000, staleMs = 150
         } catch {}
       }
     } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
+      if (/** @type {any} */ (err).code !== 'EEXIST') throw err;
       try {
         const st = fs.statSync(lockPath);
         if (Date.now() - st.mtimeMs > staleMs) {

@@ -296,45 +296,36 @@ async function main() {
     }
   }
 
+  // 质检 A9：run/run-worker 共用同一参数解析（此前两份重复且语义微妙不同）
+  const parseRunArgs = (argv, { questionFlag = false } = {}) => {
+    const out = { question: '', permission: null, model: null, offpeak: false };
+    for (let i = 0; i < argv.length; i++) {
+      const a = argv[i];
+      if (a === '--permission') out.permission = argv[++i];
+      else if (a === '--model') out.model = argv[++i];
+      else if (a === '--offpeak') out.offpeak = true;
+      else if (a === '--question') {
+        const parts = [];
+        while (i + 1 < argv.length && !['--permission', '--model', '--offpeak'].includes(argv[i + 1])) {
+          parts.push(argv[++i]);
+        }
+        out.question = parts.join(' ');
+      } else if (!out.question) out.question = a;
+    }
+    return out;
+  };
+
   // 后台任务 worker（内部入口，由 mingdao run 启动）
   if (opts.prompt[0] === 'run-worker') {
     const id = opts.prompt[1];
-    let question = '';
-    let permission = null;
-    let model = null;
-    let offpeak = false;
-    for (let i = 2; i < opts.prompt.length; i++) {
-      const a = opts.prompt[i];
-      if (a === '--permission') permission = opts.prompt[++i];
-      else if (a === '--model') model = opts.prompt[++i];
-      else if (a === '--offpeak') offpeak = true;
-      else if (a === '--question') {
-        // 收集到下一个已知 flag 为止（参数顺序：--question <任务> --permission … --model …）
-        const parts = [];
-        while (i + 1 < opts.prompt.length && !['--permission', '--model', '--offpeak'].includes(opts.prompt[i + 1])) {
-          parts.push(opts.prompt[++i]);
-        }
-        question = parts.join(' ');
-      }
-    }
+    const { question, permission, model, offpeak } = parseRunArgs(opts.prompt.slice(2));
     await runWorkerTask(id, question, { permission, model, offpeak });
     return;
   }
 
   // 后台任务启动：mingdao run "<任务>" [--permission auto] [--model x]
   if (opts.prompt[0] === 'run') {
-    const rest = opts.prompt.slice(1);
-    let question = '';
-    let permission = null;
-    let model = null;
-    let offpeak = false;
-    for (let i = 0; i < rest.length; i++) {
-      const a = rest[i];
-      if (a === '--permission') permission = rest[++i];
-      else if (a === '--model') model = rest[++i];
-      else if (a === '--offpeak') offpeak = true;
-      else if (question === '') question = a;
-    }
+    const { question, permission, model, offpeak } = parseRunArgs(opts.prompt.slice(1));
     if (!question) {
       console.log('用法：mingdao run "<任务>" [--permission auto|readonly] [--model 模型名] [--offpeak]');
       process.exitCode = 1;

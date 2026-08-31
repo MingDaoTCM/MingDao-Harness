@@ -1,6 +1,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../../config.js';
@@ -49,9 +50,10 @@ import { presetList, buildPreset } from '../../mcp-presets.js';
 import { syncStatus, syncLogin, syncLogout, syncPush, syncPull, syncRemoteList, maybeAutoSync, syncChangePassword, syncShareCreate, syncShareList, syncShareAccept, syncShareRevoke, listSyncConflicts, resolveSyncConflict } from '../../sync.js';
 
 export function createApiDispatch(deps) {
-  const { json, srvlog, readBody, cfg, home, providerCache, getProviderFor, tasks, MAX_CONCURRENT, pruneTasks, handleChat, mcpFacade, provider, validateRemoteUrl, isPrivateHost, authEnabled, tokenMatches, requestToken, trustedHost, INDEX_HTML } = deps;
-  const state = deps.state; // { modelName, workingDir, draftText }
+  const { json, srvlog, readBody, cfg, home, providerCache, getProviderFor, tasks, MAX_CONCURRENT, pruneTasks, handleChat, mcpFacade, provider, validateRemoteUrl, isPrivateHost, authEnabled, tokenMatches, requestToken, trustedHost, INDEX_HTML, draftTexts, startupCwd } = deps;
+  const state = deps.state; // { modelName, workingDir }
   const refs = deps.refs; // { inflight }
+  const MAX_API_BODY = 1024 * 1024; // 质检 A4：普通 JSON 接口 1MB；chat 保持 readBody 默认 40MB
   const dispatch = async (req, res) => {
     const url = new URL(req.url, 'http://localhost');
     const p = url.pathname;
@@ -151,7 +153,7 @@ export function createApiDispatch(deps) {
       return;
     }
     if (req.method === 'POST' && p === '/api/config') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_API_BODY);
       // 内存 cfg 可能比磁盘旧（如 CLI 改过同步地址）：先从磁盘刷新 sync，避免保存时回滚
       cfg.sync = loadConfig()?.sync || cfg.sync;
       const next = { model: state.modelName, permission: cfg.permission ?? 'ask' };
@@ -258,7 +260,7 @@ export function createApiDispatch(deps) {
       return;
     }
     if (req.method === 'POST' && p === '/api/models-config') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_API_BODY);
       const action = body.action;
       // —— 服务商 Key 管理 ——
       if (action === 'setProviderKey') {
@@ -401,7 +403,7 @@ export function createApiDispatch(deps) {
       return;
     }
     if (req.method === 'POST' && p === '/api/session') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_API_BODY);
       const file = path.basename(String(body.file || ''));
       const full = path.join(home, 'sessions', file);
       if (!file || !fs.existsSync(full)) return json(res, 404, { error: '会话不存在' });
@@ -485,7 +487,7 @@ export function createApiDispatch(deps) {
       });
       let body;
       try {
-        body = await readBody(req);
+        body = await readBody(req, MAX_API_BODY);
       } catch (e) {
         refs.inflight -= 1;
         res.write(`data: ${JSON.stringify({ type: 'error', message: e.message })}\n\n`);
@@ -509,7 +511,7 @@ export function createApiDispatch(deps) {
       return;
     }
     if (req.method === 'POST' && p === '/api/permission') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_API_BODY);
       const entry = tasks.get(body.taskId);
       if (!entry || !entry.pendingAsk) return json(res, 409, { error: '没有挂起的权限确认' });
       const pa = entry.pendingAsk;
@@ -525,7 +527,7 @@ export function createApiDispatch(deps) {
       return;
     }
     if (req.method === 'POST' && p === '/api/abort') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_API_BODY);
       if (body.taskId) {
         const entry = tasks.get(body.taskId);
         if (entry?.abortHandler) {
@@ -547,14 +549,17 @@ export function createApiDispatch(deps) {
       return;
     }
     if (req.method === 'GET' && p === '/api/draft') {
-      const text = state.draftText;
-      state.draftText = ''; // 读取即清除
+      // 质检 A5：按会话维度读取（无 file 参数用全局槽，兼容旧客户端）
+      const key = String(url.searchParams.get('file') || '');
+      const text = draftTexts.get(key) || '';
+      draftTexts.delete(key); // 读取即清除
       json(res, 200, { ok: true, text });
       return;
     }
     if (req.method === 'POST' && p === '/api/draft') {
-      const body = await readBody(req);
-      state.draftText = String(body.text ?? '').slice(0, 200000);
+      const body = await readBody(req, MAX_API_BODY);
+      const key = String(body.file || '');
+      draftTexts.set(key, String(body.text ?? '').slice(0, 200000));
       json(res, 200, { ok: true });
       return;
     }
@@ -579,7 +584,7 @@ export function createApiDispatch(deps) {
       return;
     }
     if (req.method === 'POST' && p === '/api/schedule') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_API_BODY);
       const action = String(body.action || '');
       try {
         if (action === 'add') {
@@ -619,7 +624,7 @@ export function createApiDispatch(deps) {
       return;
     }
     if (req.method === 'POST' && p === '/api/workspaces') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_API_BODY);
       const name = String(body.name || '').trim();
       if (body.action === 'add') {
         if (!name) return json(res, 400, { error: '名称不能为空' });
@@ -672,6 +677,11 @@ export function createApiDispatch(deps) {
     if (req.method === 'GET' && p === '/api/fs-browse') {
       let dir = String(url.searchParams.get('dir') || '').trim();
       if (!path.isAbsolute(dir)) return json(res, 400, { error: '需要绝对路径' });
+      // 质检 A3：目录浏览限定基目录（默认家目录 + config.web.browseRoots 显式授权），
+      // 拒绝越界——此前可枚举服务器任意绝对路径（整机目录结构探测面）
+      const browseRoots = [os.homedir(), startupCwd, state.workingDir, ...(Array.isArray(cfg.web?.browseRoots) ? cfg.web.browseRoots : [])].map((r) => path.resolve(String(r)));
+      const inRoot = browseRoots.some((r) => dir === r || dir.startsWith(r + path.sep));
+      if (!inRoot) return json(res, 403, { error: '目录不在可浏览范围内（家目录或 web.browseRoots 授权目录）' });
       try {
         const st = fs.statSync(dir);
         if (!st.isDirectory()) return json(res, 400, { error: '不是目录' });
@@ -681,7 +691,9 @@ export function createApiDispatch(deps) {
           .map((e) => ({ name: e.name, path: path.join(dir, e.name) }))
           .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
           .slice(0, 300);
-        const parent = path.dirname(dir);
+        let parent = path.dirname(dir);
+        // 父目录同样不得越出基目录
+        if (!browseRoots.some((r) => parent === r || parent.startsWith(r + path.sep))) parent = null;
         json(res, 200, { ok: true, path: dir, parent: parent === dir ? null : parent, entries });
       } catch (err) {
         json(res, 400, { error: String(err?.message || err) });
@@ -693,7 +705,7 @@ export function createApiDispatch(deps) {
       return;
     }
     if (req.method === 'POST' && p === '/api/memory') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_API_BODY);
       if (body.action === 'dedupe') {
         const removed = dedupeMemory();
         return json(res, 200, { ok: true, removed });
@@ -720,7 +732,7 @@ export function createApiDispatch(deps) {
       return;
     }
     if (req.method === 'POST' && p === '/api/mcp-presets') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_API_BODY);
       const name = String(body.name || '').trim();
       const r = buildPreset(name, body.arg, state.workingDir);
       if (r.error) return json(res, 400, { error: r.error });
@@ -754,7 +766,7 @@ export function createApiDispatch(deps) {
       return;
     }
     if (req.method === 'POST' && p === '/api/skills') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_API_BODY);
       if (body.action === 'install') {
         const r = await installSkill(body.arg || body.name || '');
         if (r.error) return json(res, 400, { error: r.error });
@@ -778,7 +790,7 @@ export function createApiDispatch(deps) {
       return;
     }
     if (req.method === 'POST' && p === '/api/sync') {
-      const body = await readBody(req);
+      const body = await readBody(req, MAX_API_BODY);
       if (body.action === 'login') {
         const vurl = validateRemoteUrl(body.url); // 质检 S1：SSRF 防护（同步端点同样只允许公网）
         if (vurl.error) return json(res, 400, { error: vurl.error });

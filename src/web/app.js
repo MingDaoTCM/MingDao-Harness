@@ -634,7 +634,7 @@ async function init(){
   refreshSessions();
   refreshWsSel();
   try{
-    const dr=await fetch('/api/draft',{cache:'no-store'}); const dj=await dr.json();
+    const dr=await fetch('/api/draft?file='+encodeURIComponent(currentSession||''),{cache:'no-store'}); const dj=await dr.json();
     if(dj.text){ input.value=dj.text; input.style.height=Math.min(input.scrollHeight,200)+'px'; input.focus(); }
   }catch(e){}
 }

@@ -384,7 +384,7 @@ function ok(name) {
   const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: syncDir });
   await new Promise((r) => srv.once('listening', r));
   const syncUrl = `http://127.0.0.1:${srv.address().port}`;
-  const l1 = await runCli(['sync', 'login', 'cli-user', 'password123', syncUrl]);
+  const l1 = await runCli(['sync', 'login', 'cli-user', syncUrl], { stdin: 'password123\n' });
   assert.equal(l1.code, 0, l1.err + l1.out);
   assert.ok(l1.out.includes('已登录'), '登录应成功');
   const p1 = await runCli(['sync', 'push']);
@@ -400,7 +400,7 @@ function ok(name) {
   const pw = await runCli(['sync', 'passwd', 'newpassword456'], { stdin: 'password123\n' });
   assert.equal(pw.code, 0, pw.err + pw.out);
   assert.ok(pw.out.includes('已修改'), '密码修改应成功');
-  const relogin = await runCli(['sync', 'login', 'cli-user', 'newpassword456', syncUrl]);
+  const relogin = await runCli(['sync', 'login', 'cli-user', syncUrl], { stdin: 'newpassword456\n' });
   assert.equal(relogin.code, 0, relogin.err + relogin.out);
   assert.ok(relogin.out.includes('已登录'), '改密后应能用新密码重新登录');
   // 分享与撤销（用本地真实会话名）
@@ -421,12 +421,12 @@ function ok(name) {
   assert.ok(cl2.out.includes('暂无冲突'), '解决后应无冲突');
   const o1 = await runCli(['sync', 'logout']);
   assert.ok(o1.out.includes('已退出'), '退出应成功');
-  const bad1 = await runCli(['sync', 'login', 'cli-user', 'wrongpass', syncUrl]);
+  const bad1 = await runCli(['sync', 'login', 'cli-user', syncUrl], { stdin: 'wrongpass\n' });
   assert.equal(bad1.code, 1);
   assert.ok(bad1.out.includes('密码'), '错误密码应提示');
   // 新密码在新设备登录
   const tempHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-newpw-'));
-  const ln = await runCli(['sync', 'login', 'cli-user', 'newpassword456', syncUrl], { env: { MINGDAO_HOME: tempHome } });
+  const ln = await runCli(['sync', 'login', 'cli-user', syncUrl], { stdin: 'newpassword456\n', env: { MINGDAO_HOME: tempHome } });
   assert.equal(ln.code, 0, ln.err + ln.out);
   assert.ok(ln.out.includes('已登录'), '新密码登录应成功');
   safeRm(tempHome, { recursive: true, force: true });

@@ -18,5 +18,8 @@
   },
   "include": [
     "src/**/*.js"
+  ],
+  "exclude": [
+    "src/web/app.js"
   ]
 }

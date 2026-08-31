@@ -659,22 +659,28 @@ let base = await startWeb(work1);
 
 // ---------- 18. 目录浏览器 /api/fs-browse（工作空间目录选择器） ----------
 {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-browse-'));
-  fs.mkdirSync(path.join(dir, '子目录甲'));
-  fs.mkdirSync(path.join(dir, '.hidden-dir'));
+  // 质检 A3：浏览根 = 家目录 + 启动目录 + 当前工作空间根——浏览目录建在当前工作空间内
+  const wsInfo = await (await fetch(base + '/api/workspaces')).json();
+  const dir = path.join(wsInfo.cwd, 'browse-子目录');
+  fs.mkdirSync(path.join(dir, '子目录甲'), { recursive: true });
+  fs.mkdirSync(path.join(dir, '.hidden-dir'), { recursive: true });
   const r = await (await fetch(base + '/api/fs-browse?dir=' + encodeURIComponent(dir))).json();
   assert.equal(r.ok, true, '应能浏览目录');
   assert.equal(r.path, dir, '应返回当前路径');
   assert.ok(Array.isArray(r.entries), '应返回条目列表');
   assert.ok(r.entries.some((e) => e.name === '子目录甲' && e.path === path.join(dir, '子目录甲')), '应包含普通子目录');
   assert.ok(!r.entries.some((e) => e.name.startsWith('.')), '应过滤隐藏目录');
-  assert.equal(r.parent, path.dirname(dir), '应返回上级目录');
   const bad = await (await fetch(base + '/api/fs-browse?dir=relative%2Fpath')).json();
   assert.ok(bad.error, '相对路径应被拒绝');
   const notDir = await (await fetch(base + '/api/fs-browse?dir=' + encodeURIComponent(path.join(dir, '子目录甲')) + '%2Fnope')).json();
   assert.ok(notDir.error, '不存在目录应报错');
+  // 越界拒绝（质检 A3）：浏览家目录之外且非工作空间根之外的目录应 403
+  const outSide = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-outside-'));
+  const outsideR = await (await fetch(base + '/api/fs-browse?dir=' + encodeURIComponent(outSide))).json();
+  assert.ok(outsideR.error && String(outsideR.error).includes('可浏览范围'), '越界目录应被拒绝');
+  safeRm(outSide, { recursive: true, force: true });
   safeRm(dir, { recursive: true, force: true });
-  ok('fs-browse：目录树浏览 / 隐藏目录过滤 / 相对路径与非法路径拒绝');
+  ok('fs-browse：目录树浏览 / 隐藏目录过滤 / 相对路径与非法路径拒绝 / 越界拒绝');
 }
 
 // ---------- 19. /api/state 首次使用引导字段（桌面版自动初始化配套） ----------

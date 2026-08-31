@@ -201,6 +201,21 @@ function findDeviceByToken(token) {
 }
 
 // ---------- 业务 ----------
+// 质检 A1：通用写互斥（注册/pair/lastSeen/meta 更新串行化），防 devices.json/meta.json 读改写竞态
+let writeLock = null;
+async function withWriteLock(fn) {
+  const prev = writeLock || Promise.resolve();
+  let release;
+  writeLock = new Promise((resolve) => {
+    release = resolve;
+  });
+  await prev;
+  try {
+    return await fn();
+  } finally {
+    release();
+  }
+}
 let registerLock = null;
 async function doRegister(body) {
   const username = String(body.username || '').trim();
@@ -232,7 +247,7 @@ async function doRegister(body) {
   }
 }
 
-function doPair(body) {
+async function doPair(body) {
   const username = String(body.username || '').trim();
   const password = String(body.password || '');
   const deviceName = String(body.deviceName || '').trim().slice(0, 60) || '未命名设备';
@@ -240,15 +255,17 @@ function doPair(body) {
   const u = users[username];
   if (!u) return { notFound: '用户不存在（请先注册）' };
   if (!verifyPassword(password, u.salt, u.hash)) return { unauthorized: '密码错误' };
-  const deviceId = crypto.randomBytes(8).toString('hex');
-  const token = crypto.randomBytes(24).toString('hex');
-  const devices = readJson(devicesFile(), {});
-  devices[username] = devices[username] || {};
-  devices[username][deviceId] = { name: deviceName, tokenHash: sha(token), createdAt: Date.now(), lastSeen: Date.now() };
-  writeJson(devicesFile(), devices);
-  invalidateDeviceCache();
-  log('pair', username, deviceName, deviceId);
-  return { ok: true, username, deviceId, deviceName, token };
+  return withWriteLock(() => {
+    const deviceId = crypto.randomBytes(8).toString('hex');
+    const token = crypto.randomBytes(24).toString('hex');
+    const devices = readJson(devicesFile(), {});
+    devices[username] = devices[username] || {};
+    devices[username][deviceId] = { name: deviceName, tokenHash: sha(token), createdAt: Date.now(), lastSeen: Date.now() };
+    writeJson(devicesFile(), devices);
+    invalidateDeviceCache();
+    log('pair', username, deviceName, deviceId);
+    return { ok: true, username, deviceId, deviceName, token };
+  });
 }
 
 function doListSessions(username) {
@@ -280,10 +297,12 @@ function doPush(username, body) {
   const tmp = file + '.tmp';
   fs.writeFileSync(tmp, content, { mode: 0o600 });
   fs.renameSync(tmp, file);
-  const meta = readJson(metaFile(username), {});
-  meta[name] = { mtime: Date.now(), size: Buffer.byteLength(content) };
-  writeJson(metaFile(username), meta);
-  return { ok: true, name, mtime: meta[name].mtime, size: meta[name].size };
+  return withWriteLock(() => {
+    const meta = readJson(metaFile(username), {});
+    meta[name] = { mtime: Date.now(), size: Buffer.byteLength(content) };
+    writeJson(metaFile(username), meta);
+    return { ok: true, name, mtime: meta[name].mtime, size: meta[name].size };
+  });
 }
 
 function doPull(username, name) {
@@ -307,10 +326,12 @@ function doDelete(username, name) {
   } catch {
     return { notFound: '会话不存在' };
   }
-  const meta = readJson(metaFile(username), {});
-  delete meta[name];
-  writeJson(metaFile(username), meta);
-  return { ok: true, name };
+  return withWriteLock(() => {
+    const meta = readJson(metaFile(username), {});
+    delete meta[name];
+    writeJson(metaFile(username), meta);
+    return { ok: true, name };
+  });
 }
 
 // ---------- 密码修改 ----------
@@ -410,23 +431,25 @@ function doShareAccept(username, shareId) {
     fs.mkdirSync(sessionsDir(username), { recursive: true, mode: 0o700 });
     atomicWriteFileSync(target, content, { mode: 0o600 }); // 质检 H4
   }
-  const meta = readJson(metaFile(username), {});
-  meta[savedAs] = { mtime: Date.now(), size: Buffer.byteLength(content) };
-  writeJson(metaFile(username), meta);
-  accepted[username] = accepted[username] || {};
-  accepted[username][shareId] = { owner: s.owner, name: s.name, savedAs, acceptedAt: Date.now(), copyHash: sha(content) };
-  writeJson(acceptedFile(), accepted);
-  shares[shareId].pulls = (shares[shareId].pulls || 0) + 1;
-  writeJson(sharesFile(), shares);
-  log('share-accept', username, shareId, savedAs, conflict ? '(conflict-copy)' : '(refresh)');
-  return {
-    ok: true,
-    shareId,
-    savedAs,
-    conflict,
-    content,
-    mtime: meta[savedAs]?.mtime || Date.now(),
-  };
+  return withWriteLock(() => {
+    const meta = readJson(metaFile(username), {});
+    meta[savedAs] = { mtime: Date.now(), size: Buffer.byteLength(content) };
+    writeJson(metaFile(username), meta);
+    accepted[username] = accepted[username] || {};
+    accepted[username][shareId] = { owner: s.owner, name: s.name, savedAs, acceptedAt: Date.now(), copyHash: sha(content) };
+    writeJson(acceptedFile(), accepted);
+    shares[shareId].pulls = (shares[shareId].pulls || 0) + 1;
+    writeJson(sharesFile(), shares);
+    log('share-accept', username, shareId, savedAs, conflict ? '(conflict-copy)' : '(refresh)');
+    return {
+      ok: true,
+      shareId,
+      savedAs,
+      conflict,
+      content,
+      mtime: meta[savedAs]?.mtime || Date.now(),
+    };
+  });
 }
 
 // ---------- 路由 ----------
@@ -457,7 +480,7 @@ async function handle(req, res) {
       const body = await parseBody(req);
       if (body.__error) return json(res, 400, { error: 'JSON 解析失败' });
       if (rateLimited(req, 5, String(body.username || '').toLowerCase())) return json(res, 429, { error: '该用户名的尝试过于频繁，请稍后再试' });
-      const r = doPair(body);
+      const r = await doPair(body);
       if (r.notFound) return json(res, 404, r);
       if (r.unauthorized) return json(res, 401, r);
       return json(res, 200, r);
@@ -469,11 +492,14 @@ async function handle(req, res) {
     const nowSeen = Date.now();
     if (nowSeen - (dev.device.lastSeen || 0) > 60000) {
       dev.device.lastSeen = nowSeen;
-      const devices = readJson(devicesFile(), {});
-      if (devices[dev.username]?.[dev.deviceId]) {
-        devices[dev.username][dev.deviceId] = dev.device;
-        writeJson(devicesFile(), devices);
-      }
+      // 质检 A1：与 pair 的 devices 写入互斥（60s 节流只降频，不消除竞态——加锁消除）
+      withWriteLock(() => {
+        const devices = readJson(devicesFile(), {});
+        if (devices[dev.username]?.[dev.deviceId]) {
+          devices[dev.username][dev.deviceId] = dev.device;
+          writeJson(devicesFile(), devices);
+        }
+      });
     }
 
     if (req.method === 'POST' && p === '/api/devices') {
@@ -492,7 +518,7 @@ async function handle(req, res) {
     if (req.method === 'POST' && p === '/api/sessions/push') {
       const body = await parseBody(req);
       if (body.__error) return json(res, 400, { error: 'JSON 解析失败' });
-      const r = doPush(dev.username, body);
+      const r = await doPush(dev.username, body);
       if (r.error) return json(res, 400, r);
       return json(res, 200, r);
     }
@@ -504,7 +530,7 @@ async function handle(req, res) {
     }
     if (req.method === 'POST' && p === '/api/sessions/delete') {
       const body = await parseBody(req);
-      const r = doDelete(dev.username, String(body.name || '').trim());
+      const r = await doDelete(dev.username, String(body.name || '').trim());
       if (r.notFound) return json(res, 404, r);
       return json(res, 200, r);
     }
@@ -536,7 +562,7 @@ async function handle(req, res) {
     if (req.method === 'POST' && p === '/api/share/accept') {
       if (rateLimited(req, 10)) return json(res, 429, { error: '尝试过于频繁，请稍后再试' });
       const body = await parseBody(req);
-      const r = doShareAccept(dev.username, String(body.shareId || '').trim());
+      const r = await doShareAccept(dev.username, String(body.shareId || '').trim());
       if (r.error) return json(res, 400, r);
       if (r.notFound) return json(res, 404, r);
       return json(res, 200, r);
