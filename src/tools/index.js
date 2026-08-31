@@ -11,9 +11,9 @@ export const READONLY_TOOLS = new Set(['read', 'glob', 'grep', 'ls', 'skill']);
 const READ_SCHEMA = {
   type: 'object',
   properties: {
-    path: { type: 'string', description: '要读取的文件路径（相对或绝对）。' },
+    path: { type: 'string', description: '文件路径（相对或绝对）。' },
     offset: { type: 'integer', description: '起始行号，默认 1。' },
-    limit: { type: 'integer', description: '最大返回行数，默认 400。' },
+    limit: { type: 'integer', description: '最大行数，默认 400。' },
   },
   required: ['path'],
 };
@@ -21,7 +21,7 @@ const READ_SCHEMA = {
 const WRITE_SCHEMA = {
   type: 'object',
   properties: {
-    path: { type: 'string', description: '要创建或覆盖的文件路径。' },
+    path: { type: 'string', description: '文件路径。' },
     content: { type: 'string', description: '完整文件内容（UTF-8）。' },
   },
   required: ['path', 'content'],
@@ -30,10 +30,10 @@ const WRITE_SCHEMA = {
 const EDIT_SCHEMA = {
   type: 'object',
   properties: {
-    path: { type: 'string', description: '要修改的文件路径。' },
-    old_string: { type: 'string', description: '文件中真实存在的原文片段，必须逐字符完全一致。' },
-    new_string: { type: 'string', description: '替换后的文本。' },
-    replace_all: { type: 'boolean', description: '是否替换所有匹配处，默认 false。' },
+    path: { type: 'string', description: '文件路径。' },
+    old_string: { type: 'string', description: '原文片段，必须逐字一致。' },
+    new_string: { type: 'string', description: '替换后文本。' },
+    replace_all: { type: 'boolean', description: '替换所有匹配，默认 false。' },
   },
   required: ['path', 'old_string', 'new_string'],
 };
@@ -41,15 +41,15 @@ const EDIT_SCHEMA = {
 const LS_SCHEMA = {
   type: 'object',
   properties: {
-    path: { type: 'string', description: '目录路径，默认当前工作目录。' },
+    path: { type: 'string', description: '目录路径，默认当前目录。' },
   },
 };
 
 const GLOB_SCHEMA = {
   type: 'object',
   properties: {
-    pattern: { type: 'string', description: '通配符模式，如 src/**/*.js、*.md。' },
-    path: { type: 'string', description: '搜索根目录，默认当前工作目录。' },
+    pattern: { type: 'string', description: '通配符模式，如 src/**/*.js。' },
+    path: { type: 'string', description: '搜索根目录。' },
   },
   required: ['pattern'],
 };
@@ -58,8 +58,8 @@ const GREP_SCHEMA = {
   type: 'object',
   properties: {
     pattern: { type: 'string', description: '正则表达式。' },
-    path: { type: 'string', description: '搜索根目录，默认当前工作目录。' },
-    include: { type: 'string', description: '文件名通配符过滤，如 *.js。' },
+    path: { type: 'string', description: '搜索根目录。' },
+    include: { type: 'string', description: '文件名过滤，如 *.js。' },
   },
   required: ['pattern'],
 };
@@ -67,7 +67,7 @@ const GREP_SCHEMA = {
 const BASH_SCHEMA = {
   type: 'object',
   properties: {
-    command: { type: 'string', description: '要执行的 shell 命令。执行前会请求用户授权。' },
+    command: { type: 'string', description: 'shell 命令。执行前需用户授权。' },
     timeout: { type: 'integer', description: '超时秒数，默认 120。' },
   },
   required: ['command'],
@@ -76,16 +76,16 @@ const BASH_SCHEMA = {
 const SKILL_SCHEMA = {
   type: 'object',
   properties: {
-    name: { type: 'string', description: '技能名；省略时列出所有可用技能。' },
+    name: { type: 'string', description: '技能名；省略则列出全部。' },
   },
 };
 
 const TASK_SCHEMA = {
   type: 'object',
   properties: {
-    description: { type: 'string', description: '子任务一句话描述（用于进度展示）。' },
-    prompt: { type: 'string', description: '交给子代理的完整任务说明（它没有当前对话上下文）。' },
-    readOnly: { type: 'boolean', description: '只读调研任务（不写文件不执行命令）。多个 readOnly 子任务会并行执行。' },
+    description: { type: 'string', description: '子任务一句话描述。' },
+    prompt: { type: 'string', description: '子代理的完整任务说明。' },
+    readOnly: { type: 'boolean', description: '只读调研任务，可并行。' },
   },
   required: ['prompt'],
 };
@@ -112,7 +112,7 @@ const TODO_SCHEMA = {
 const UNDO_SCHEMA = {
   type: 'object',
   properties: {
-    path: { type: 'string', description: '要撤销的文件；省略时撤销最近一次修改的文件。' },
+    path: { type: 'string', description: '要撤销的文件；省略撤销最近一次。' },
   },
 };
 
@@ -121,7 +121,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'read',
-      description: '读取文本文件，返回带行号的内容。修改文件前务必先读取。',
+      description: '读取文件内容（带行号）。修改文件前必须先读。',
       parameters: READ_SCHEMA,
     },
   },
@@ -129,7 +129,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'write',
-      description: '创建新文件或完全覆盖已有文件（自动创建父目录）。',
+      description: '创建新文件或整体覆盖（自动建父目录）。',
       parameters: WRITE_SCHEMA,
     },
   },
@@ -137,7 +137,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'edit',
-      description: '对文件做精确文本替换。old_string 必须与文件内容完全一致；匹配多处时需 replace_all=true 或提供更精确上下文。',
+      description: '精确文本替换：old_string 必须逐字匹配原文；多处匹配需 replace_all=true。',
       parameters: EDIT_SCHEMA,
     },
   },
@@ -145,7 +145,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'ls',
-      description: '列出目录内容，目录以 / 结尾。',
+      description: '列出目录内容（目录以 / 结尾）。',
       parameters: LS_SCHEMA,
     },
   },
@@ -153,7 +153,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'glob',
-      description: '按通配符模式查找文件路径（支持 * 与 **）。',
+      description: '按通配符查找文件路径（支持 * 与 **）。',
       parameters: GLOB_SCHEMA,
     },
   },
@@ -161,7 +161,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'grep',
-      description: '在文件内容中按正则表达式搜索，返回「文件:行号: 内容」。',
+      description: '正则搜索文件内容，返回「文件:行号: 内容」。',
       parameters: GREP_SCHEMA,
     },
   },
@@ -169,7 +169,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'bash',
-      description: '执行 shell 命令并返回输出（stdout/stderr/退出码）。需要用户授权。',
+      description: '执行 shell 命令，返回输出与退出码。需用户授权。',
       parameters: BASH_SCHEMA,
     },
   },
@@ -177,7 +177,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'skill',
-      description: '加载指定技能的 SKILL.md 全文；省略 name 时列出可用技能。任务与技能匹配时应先加载。',
+      description: '加载技能 SKILL.md 全文；省略 name 则列出可用技能。',
       parameters: SKILL_SCHEMA,
     },
   },
@@ -185,7 +185,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'task',
-      description: '把独立子任务委托给一个全新上下文的子代理，返回其汇报。适合搜索调研、独立实现、复核验证等可并行的工作。',
+      description: '把独立子任务委托给新上下文子代理并返回汇报；readOnly 只读任务可并行。',
       parameters: TASK_SCHEMA,
     },
   },
@@ -193,7 +193,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'todo',
-      description: '维护任务清单（全量替换）。多步骤任务开始前建立清单，完成一项更新一项。',
+      description: '维护任务清单（全量替换）。多步任务先建清单再逐项更新。',
       parameters: TODO_SCHEMA,
     },
   },
@@ -201,7 +201,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'undo',
-      description: '撤销 write/edit 造成的最近一次文件修改；指定 path 则撤销该文件。',
+      description: '撤销最近一次 write/edit 修改；指定 path 撤销该文件。',
       parameters: UNDO_SCHEMA,
     },
   },
@@ -209,6 +209,47 @@ const TOOLS = [
 
 export function toolSchemas() {
   return TOOLS;
+}
+
+/**
+ * 递归去除对象中的全部 description 键（保留类型/required/enum 等结构性字段）。
+ * @param {any} obj
+ * @returns {any}
+ */
+function stripDescriptions(obj) {
+  if (Array.isArray(obj)) return obj.map(stripDescriptions);
+  if (obj && typeof obj === 'object') {
+    const out = /** @type {Record<string, any>} */ ({});
+    for (const [k, v] of Object.entries(obj)) {
+      if (k === 'description') continue;
+      out[k] = stripDescriptions(v);
+    }
+    return out;
+  }
+  return obj;
+}
+
+/**
+ * 按需构建工具 Schema（省钱 B1）：本会话已调用过的工具省略全部描述（工具级 + 参数级，
+ * 模型已在消息历史里见过其用途，保留 name/parameters 结构与类型即可），未用过的保留完整描述。
+ * 返回浅拷贝新数组，不修改原 TOOLS；extra（如 MCP 工具）按同一规则处理。
+ * @param {Set<string>} usedNames 已调用工具名（内置名或 MCP 前缀名）
+ * @param {Array<object>} [extra] 附加工具 Schema（MCP 等）
+ * @returns {Array<any>}
+ */
+export function buildToolSchemas(usedNames, extra = []) {
+  const strip = (/** @type {any[]} */ arr) =>
+    arr.map((/** @type {any} */ t) => {
+      const name = t?.function?.name;
+      if (name && usedNames.has(name)) {
+        return {
+          ...t,
+          function: { ...t.function, description: '', parameters: stripDescriptions(t.function?.parameters) },
+        };
+      }
+      return t;
+    });
+  return [...strip(TOOLS), ...strip(extra)];
 }
 
 function runSkill(args, ctx) {

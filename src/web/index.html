@@ -372,6 +372,18 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <h4 style="margin:4px 0;color:var(--accent2)">缓存命中率仪表盘（最近 10 次）</h4>
     <div id="cacheSummary" style="font-size:12.5px;color:var(--dim);padding:2px"></div>
     <div id="cacheRecent" style="max-height:130px;overflow-y:auto"></div>
+    <h4 style="margin:10px 0 4px;color:var(--accent2)">费用二级分账（模型 / 工具 Top5 · 近 14 天）</h4>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">
+      <div style="flex:1;min-width:170px">
+        <div style="font-size:11.5px;color:var(--faint)">模型 Top5（费用）</div>
+        <div id="costTopModels" style="font-size:12px;color:var(--dim)"></div>
+      </div>
+      <div style="flex:1;min-width:170px">
+        <div style="font-size:11.5px;color:var(--faint)">工具 Top5（耗时）</div>
+        <div id="costTopTools" style="font-size:12px;color:var(--dim)"></div>
+      </div>
+    </div>
+    <div id="costLine" style="margin-top:8px"></div>
       </section>
     <section class="cfg-panel" data-panel="mcp">
     <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">

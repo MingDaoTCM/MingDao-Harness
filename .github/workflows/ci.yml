@@ -35,7 +35,7 @@ jobs:
         run: npm run bench
       - name: 全量 strict 棘轮（错误数只降不升）
         run: node scripts/strict-ratchet.mjs
-      - name: 覆盖率门禁（V8 行覆盖率 ≥55%）
+      - name: 覆盖率门禁（V8 行覆盖率 ≥60%）
         if: runner.os == 'Linux' && matrix.node == 20
         run: npm run coverage
       - name: 端到端：本地 Agent / 同步 / 分享

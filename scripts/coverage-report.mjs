@@ -1,5 +1,5 @@
 // 覆盖率汇总（质检 Phase 3）：解析 .coverage/ 下 V8 覆盖率 JSON，输出行覆盖率；
-// 低于阈值（默认 55%）以非零码退出（CI 门禁）。零依赖。
+// 低于阈值（默认 60%）以非零码退出（CI 门禁）。零依赖。
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -57,7 +57,7 @@ for (const [file, st] of fileStats) {
   perFile.push([path.relative(root, file), lines, hit]);
 }
 const pct = totalLines ? Math.round((coveredLines / totalLines) * 1000) / 10 : 0;
-const threshold = Number(process.env.MINGDAO_COVERAGE_THRESHOLD || 55);
+const threshold = Number(process.env.MINGDAO_COVERAGE_THRESHOLD || 60);
 perFile.sort((a, b) => b[1] - a[1]);
 console.log(`行覆盖率（src 已执行文件）：${pct}%（${coveredLines}/${totalLines} 行）· 阈值 ${threshold}%`);
 console.log('覆盖率最低的 8 个文件：');

@@ -14,6 +14,7 @@ const { createAgent } = await import(pathToFileURL(path.join(srcDir, 'agent.js')
 const { parseStream } = await import(pathToFileURL(path.join(srcDir, 'providers/openai-compatible.js')).href);
 const { approxTokens, trimMessages, clampText } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
 const { dispatch } = await import(pathToFileURL(path.join(srcDir, 'tools/index.js')).href);
+const { toolSchemas, buildToolSchemas } = await import(pathToFileURL(path.join(srcDir, 'tools/index.js')).href);
 const { saveConfig, loadConfig } = await import(pathToFileURL(path.join(srcDir, 'config.js')).href);
 const { createIO } = await import(pathToFileURL(path.join(srcDir, 'ui.js')).href);
 
@@ -281,6 +282,76 @@ const ctx = { cwd: tmp };
     '最终纯文本回复应回填消息历史'
   );
   ok('agent：工具调用循环 + 结果回填 + usage 汇总');
+}
+
+// ---------- 5t. 省钱 B1：工具按需挂载（只读阶段只发只读工具，写意图后注入全量） ----------
+{
+  const io = createIO({ quiet: true });
+  const seen = []; // 记录每轮收到的工具名集合
+  let round = 0;
+  const fakeProvider = {
+    async chat(opts) {
+      round += 1;
+      seen.push((opts.tools || []).map((t) => t.function.name).sort());
+      if (round === 1) {
+        // 只读阶段：模型边查边说要改文件 → 触发注入
+        return {
+          text: '我发现需要修改 package.json 来修复这个问题。',
+          toolCalls: [
+            { id: 'call_t1', type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: 'package.json' }) } },
+          ],
+          usage: { prompt_tokens: 5, completion_tokens: 3 },
+          finish: 'tool_calls',
+        };
+      }
+      return { text: '已完成', toolCalls: null, usage: { prompt_tokens: 5, completion_tokens: 3 }, finish: 'stop' };
+    },
+  };
+  const agent = createAgent({
+    provider: fakeProvider,
+    permission: { async check() { return true; } },
+    io,
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmp,
+    cfg: { permission: 'auto' },
+  });
+  await agent.runTurn([{ role: 'user', content: '帮我诊断一下这个报错的原因' }]);
+  assert.equal(round, 2, '应跑两轮（第二轮是注入后的续轮）');
+  const tier = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo']);
+  assert.ok(seen[0].every((n) => tier.has(n)), `只读阶段应只发只读工具，实际 ${seen[0]}`);
+  assert.ok(seen[0].includes('read') && seen[0].includes('grep'), '只读阶段含核心只读工具');
+  assert.equal(seen[1].length, 11, '模型表达写意图后应注入全量 11 个工具');
+  assert.ok(seen[1].includes('write') && seen[1].includes('bash'), '注入后含写类工具');
+  ok('省钱 B1：只读阶段工具集收缩 / 写意图后注入全量');
+}
+
+// ---------- 5u. 省钱 B1：写意图提示直接全量 / 纯查询提示只读收缩 ----------
+{
+  const runOnce = async (prompt) => {
+    const io = createIO({ quiet: true });
+    let first = null;
+    const fakeProvider = {
+      async chat(opts) {
+        if (!first) first = (opts.tools || []).map((t) => t.function.name).sort();
+        return { text: '好的', toolCalls: null, usage: { prompt_tokens: 5, completion_tokens: 2 }, finish: 'stop' };
+      },
+    };
+    const agent = createAgent({
+      provider: fakeProvider,
+      permission: { async check() { return true; } },
+      io,
+      modelName: 'deepseek-v4-flash',
+      workingDir: tmp,
+      cfg: { permission: 'auto' },
+    });
+    await agent.runTurn([{ role: 'user', content: prompt }]);
+    return first;
+  };
+  const full = await runOnce('帮我新建一个配置文件');
+  assert.equal(full.length, 11, '写意图提示首轮即全量工具');
+  const ro = await runOnce('帮我看看这个项目里有哪些文件');
+  assert.ok(ro.length < 8 && ro.every((n) => ['read', 'ls', 'glob', 'grep', 'skill', 'todo'].includes(n)), `纯查询首轮应只读收缩，实际 ${ro}`);
+  ok('省钱 B1：写意图首轮全量 / 纯查询首轮只读');
 }
 
 // ---------- 5b. 空/截断输出自动续写（推理吃满上限返回空正文时不能静默结束） ----------
@@ -1822,6 +1893,132 @@ const ctx = { cwd: tmp };
   ok('batch：上传/轮询/取回/半价计费/结果落盘/分账标记/端点不可用报错');
 }
 
+// ---------- 41b. 省钱 B2：批量去重回填 / 超窗口预检 / --max-cost 拦截 ----------
+{
+  const http = await import('node:http');
+  const homeB2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-batch-b2-'));
+  process.env.MINGDAO_HOME = homeB2;
+  process.env.MINGDAO_BATCH_POLL_MS = '100';
+  let uploadedBody = '';
+  let pollCount = 0;
+  const mockB2 = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    if (req.method === 'POST' && u.pathname === '/files') {
+      req.on('data', (c) => (uploadedBody += c));
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: 'file-1' }));
+      });
+    } else if (req.method === 'POST' && u.pathname === '/batches') {
+      req.on('data', () => {});
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id: 'batch-1', status: 'validating' }));
+      });
+    } else if (req.method === 'GET' && u.pathname === '/batches/batch-1') {
+      pollCount += 1;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(pollCount < 2 ? { id: 'batch-1', status: 'in_progress' } : { id: 'batch-1', status: 'completed', output_file_id: 'out-1' }));
+    } else if (req.method === 'GET' && u.pathname === '/batches/batch-1/files/result') {
+      res.writeHead(200, { 'Content-Type': 'application/x-jsonlines' });
+      res.end(
+        JSON.stringify({ custom_id: 'md-0', response: { status_code: 200, body: { usage: { prompt_tokens: 100, completion_tokens: 10 }, choices: [{ message: { content: '答案一' } }] } } }) + '\n' +
+        JSON.stringify({ custom_id: 'md-1', response: { status_code: 200, body: { usage: { prompt_tokens: 120, completion_tokens: 8 }, choices: [{ message: { content: '答案二' } }] } } }) + '\n'
+      );
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'not found' } }));
+    }
+  });
+  await new Promise((r) => mockB2.listen(0, '127.0.0.1', r));
+  const batchPort2 = mockB2.address().port;
+  fs.writeFileSync(path.join(homeB2, 'config.json'), JSON.stringify({ provider: 'custom', model: 'deepseek-v4-flash', baseUrl: `http://127.0.0.1:${batchPort2}/v1` }));
+  fs.writeFileSync(path.join(homeB2, 'credentials.json'), JSON.stringify({ deepseek: 'sk-batch-test-1234567890' }));
+  const { runBatch } = await import(pathToFileURL(path.join(srcDir, 'batch.js')).href);
+  const cfgB2 = { provider: 'custom', model: 'deepseek-v4-flash', baseUrl: `http://127.0.0.1:${batchPort2}/v1` };
+  // ① 去重 + 回填
+  const r = await runBatch({ cfg: cfgB2, model: 'deepseek-v4-flash', questions: ['问题一', '问题一', '问题二'], workingDir: homeB2, onStatus: () => {} });
+  assert.ok(r.ok === true, r.error || '去重批处理应成功');
+  assert.equal(r.deduped, 1, '应报告去重 1 条');
+  assert.equal(r.results.length, 3, '结果应回填到全部 3 个位置');
+  assert.ok(r.results[0].content.includes('答案一') && r.results[1].content.includes('答案一'), '重复位置应回填同一答案');
+  assert.ok(r.results[2].content.includes('答案二'), '唯一位置答案正确');
+  const submitted = uploadedBody.split('\n').filter((l) => l.startsWith('{"custom_id')).map((l) => JSON.parse(l));
+  assert.equal(submitted.length, 2, '上传 jsonl 应只有 2 条（去重后）');
+  assert.equal(fs.readFileSync(r.outputFile, 'utf8').trim().split('\n').length, 3, '输出文件应与输入行数一致');
+  // ② 超窗口预检：maxTokens 超过窗口 95% 时提交前报错
+  const over = await runBatch({ cfg: cfgB2, model: 'deepseek-v4-flash', questions: ['短问题'], workingDir: homeB2, maxTokens: 130000, onStatus: () => {} });
+  assert.ok(over.error && over.error.includes('超窗口'), '超窗口应在提交前报错');
+  // ③ --max-cost 上限：估算费用超上限时提交前拦截
+  const capped = await runBatch({ cfg: cfgB2, model: 'deepseek-v4-flash', questions: ['问题一', '问题二'], workingDir: homeB2, maxCost: 0.000001, onStatus: () => {} });
+  assert.ok(capped.error && capped.error.includes('--max-cost'), '超预算应在提交前拦截');
+  assert.ok(Number.isFinite(capped.estimatedCost), '拦截时附估算费用');
+  mockB2.close();
+  delete process.env.MINGDAO_BATCH_POLL_MS;
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeB2, { recursive: true, force: true });
+  ok('省钱 B2：批量去重回填 / 超窗口预检 / --max-cost 提交前拦截');
+}
+
+// ---------- 41c. 省钱 B3：费用二级分账（reasoning/byTool/byDay 维度） ----------
+{
+  const homeC = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-costb3-'));
+  process.env.MINGDAO_HOME = homeC;
+  const { recordUsage, costBreakdown } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+  recordUsage(
+    'deepseek-v4-flash',
+    { prompt_tokens: 100, completion_tokens: 10, prompt_cache_hit_tokens: 50, prompt_cache_miss_tokens: 50 },
+    { steps: 2, reasoningTokens: 50, toolStats: [{ tool: 'read', calls: 2, ms: 120 }, { tool: 'bash', calls: 1, ms: 800 }] }
+  );
+  const bd = costBreakdown();
+  assert.equal(bd.byTool.length, 2, 'byTool 应有 2 个工具');
+  assert.equal(bd.byTool[0].tool, 'bash', 'byTool 按耗时降序');
+  assert.equal(bd.byTool[0].calls, 1);
+  assert.equal(bd.byTool[1].ms, 120);
+  assert.equal(bd.reasoning, 50, 'reasoning 维度应累计');
+  assert.equal(bd.byDay.length, 14, 'byDay 应补全 14 天');
+  assert.ok(bd.byDay[13].cost > 0, '今日应有费用记录');
+  assert.equal(bd.byModel[0].reasoning, 50, 'byModel 应含 reasoning 维度');
+  // 落盘行含新字段（WebUI 读取兼容）
+  const line = fs.readFileSync(path.join(homeC, 'cache-stats.jsonl'), 'utf8');
+  assert.ok(line.includes('"reasoning":50') && line.includes('"byTool":[{"tool":"read"'), 'jsonl 应落盘 reasoning/byTool');
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeC, { recursive: true, force: true });
+  ok('省钱 B3：分账维度（reasoning / byTool 累加 / byDay 14 天折线）');
+}
+
+// ---------- 41d. 省钱 B4：护栏降级（action=downgrade 触顶切 flash） ----------
+{
+  const homeD = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-guardb4-'));
+  process.env.MINGDAO_HOME = homeD;
+  saveConfig({ provider: 'deepseek', model: 'deepseek-v4-pro', permission: 'auto', costGuard: { dailyLimitYuan: 0.001, action: 'downgrade', downgradeModel: 'deepseek-v4-flash' } });
+  const { recordUsage } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+  // 预置今日费用远超上限（触发降级）
+  recordUsage('deepseek-v4-pro', { prompt_tokens: 1000000, completion_tokens: 100 });
+  const io = createIO({ quiet: true });
+  let gotModel = null;
+  const stubProvider = {
+    async chat(opts) {
+      if (!gotModel) gotModel = opts.model;
+      return { text: '降级后继续完成', toolCalls: null, usage: { prompt_tokens: 5, completion_tokens: 3 }, finish: 'stop' };
+    },
+  };
+  const agent = createAgent({ provider: stubProvider, permission: { async check() { return true; } }, io, modelName: 'deepseek-v4-pro', workingDir: tmp, cfg: { permission: 'auto', costGuard: { dailyLimitYuan: 0.001, action: 'downgrade' } } });
+  const res = await agent.runTurn([{ role: 'user', content: '你好' }]);
+  assert.equal(gotModel, 'deepseek-v4-flash', '超限后应自动降级到 flash 继续执行');
+  assert.equal(res.text, '降级后继续完成', '降级后回合应正常完成');
+  assert.equal(res.perf.usedModel, 'deepseek-v4-flash', 'perf.usedModel 应归属降级后模型');
+  // block 模式仍拦截
+  saveConfig({ provider: 'deepseek', model: 'deepseek-v4-pro', permission: 'auto', costGuard: { dailyLimitYuan: 0.001, action: 'block' } });
+  const agent2 = createAgent({ provider: stubProvider, permission: { async check() { return true; } }, io, modelName: 'deepseek-v4-pro', workingDir: tmp, cfg: { permission: 'auto', costGuard: { dailyLimitYuan: 0.001, action: 'block' } } });
+  const res2 = await agent2.runTurn([{ role: 'user', content: '你好' }]);
+  assert.equal(res2.text, null, 'block 模式应暂停');
+  assert.ok((res2.note || '').includes('拦截') || (res2.note || '').includes('暂停'), 'block 模式应给出拦截/暂停说明');
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeD, { recursive: true, force: true });
+  ok('省钱 B4：护栏降级（downgrade 切 flash 继续跑 / block 仍拦截）');
+}
+
 
 // ---------- 42. 月度费用报告（/cost 导出） ----------
 {
@@ -2019,6 +2216,32 @@ const ctx = { cwd: tmp };
   );
   assert.ok(fs.existsSync(path.join(repoRoot, 'src', 'log-writer.js')), 'src/log-writer.js 必须存在');
   ok('桌面主进程静态护栏：src 动态导入 / createLogWriter 显式绑定（0.2.2 启动崩溃回归）');
+}
+
+{
+  // 省钱 B1：工具 schema 按需下发——已用工具省描述（工具级 + 参数级），未用工具保留；
+  // 全部用过时 schema token 至少降 40%（基准 1051）；结构（name/parameters/required）不受影响。
+  const full = toolSchemas();
+  const fullTokens = approxTokens(JSON.stringify(full));
+  assert.equal(full.length, 11, '内置工具应为 11 个');
+  assert.ok(full[0].function.description.length > 0, 'toolSchemas() 应保留完整描述');
+  const usedAll = new Set(full.map((t) => t.function.name));
+  const stripped = buildToolSchemas(usedAll);
+  assert.equal(stripped.length, 11, '数量不变');
+  assert.equal(stripped[0].function.description, '', '已用工具 description 应清空');
+  assert.ok(!('description' in stripped[0].function.parameters.properties.path), '已用工具参数 description 应清除');
+  assert.equal(JSON.stringify(stripped[0].function.parameters.properties.path.type), '"string"', '参数 type 保留');
+  assert.deepEqual(stripped[0].function.parameters.required, ['path'], 'required 保留');
+  const usedHalf = buildToolSchemas(new Set(['read', 'bash']));
+  assert.equal(usedHalf[0].function.description, '', 'read 用过 → 清');
+  assert.equal(usedHalf[6].function.description, '', 'bash 用过 → 清');
+  assert.ok(usedHalf[1].function.description.length > 0, 'write 未用 → 保留');
+  // 原数组不被修改（缓存安全）
+  assert.ok(full[0].function.description.length > 0, '原 TOOLS 不被 buildToolSchemas 修改');
+  const strippedTokens = approxTokens(JSON.stringify(stripped));
+  const saving = 1 - strippedTokens / fullTokens;
+  assert.ok(saving >= 0.4, `全用过时 schema 应降 ≥40%，实际 ${(saving * 100).toFixed(1)}%`);
+  ok(`省钱 B1：schema 按需瘦身（全用过降 ${(saving * 100).toFixed(0)}%，参数结构保留）`);
 }
 
 fs.rmSync(tmp, { recursive: true, force: true });

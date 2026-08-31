@@ -2,9 +2,9 @@
 // → PostToolUse 钩子 → 结果回填 → 循环，直到模型给出纯文本回复。
 // 附带：子代理（task 工具）、todo 清单状态、undo 备份仓、Ctrl+C 中断。
 
-import { trimMessages, clampText, messageTokens } from './context.js';
+import { trimMessages, clampText, messageTokens, approxTokens } from './context.js';
 import { compactConversation } from './compact.js';
-import { toolSchemas, dispatch } from './tools/index.js';
+import { buildToolSchemas, dispatch } from './tools/index.js';
 import { modelPreset } from './models.js';
 import { makeTokenCounter } from './tokenizer.js';
 import { createHooks } from './hooks.js';
@@ -39,6 +39,25 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   const count = makeTokenCounter(modelName);
   // MCP 工具集（每次取，服务器晚就绪也能在后续轮次出现）
   const mcpSchemas = () => (mcp ? mcp.toolSchemas() : []);
+  // 省钱 B1：本会话已调用过的工具名（内置名/MCP 前缀名）——其 schema 在后续轮次省略 description，
+  // 模型已在消息历史里见过用途；未用过的保留完整描述。省输入 token（工具 schema 按需瘦身）。
+  const usedToolNames = new Set();
+  // 省钱 B1（按需挂载）：回合起始为「只读阶段」时只发只读工具（read/ls/glob/grep/skill/todo）
+  // + 已用过的工具；检测到写意图（用户消息或模型明说需要写/改/建）后注入全量工具。
+  const READONLY_TIER_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo']);
+  const WRITE_INTENT_RE = /写|建|创|改|修|删|装|加|添|增|补|换|移|部署|执行|运行|实现|重构|生成|迁移|安装|更新|升级|发布|调整|优化|修复|提交|推送|打包|编译|测试/;
+  const hasWriteIntent = (/** @type {any} */ text) => WRITE_INTENT_RE.test(String(text || ''));
+  const toolsFor = (/** @type {boolean} */ readOnlyPhase) => {
+    const schemas = buildToolSchemas(usedToolNames, mcpSchemas());
+    if (!readOnlyPhase) return schemas;
+    return schemas.filter((/** @type {any} */ t) => {
+      const n = t?.function?.name;
+      if (!n) return true;
+      if (READONLY_TIER_SET.has(n) || usedToolNames.has(n)) return true;
+      if (n.startsWith('mcp__')) return mcp ? mcp.isReadonly(n) : false;
+      return false;
+    });
+  };
 
   // 子代理：全新上下文 + 同一 Provider/权限（提示带「子任务」标记），独立完成子任务后汇报
   async function spawnTask(prompt, { description = '', readOnly = false } = {}) {
@@ -104,10 +123,34 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     let llmMsTotal = 0;
     let toolMsTotal = 0;
     let firstTokenAt = null;
-    const perf = () => ({ llmMs: llmMsTotal, toolMs: toolMsTotal, firstTokenMs: firstTokenAt == null ? null : firstTokenAt - startedAt, steps });
+    // 省钱 B3（费用二级分账）：推理 token 估算（按增量累计）与逐工具调用/耗时累加
+    let reasoningTokens = 0;
+    const toolStats = /** @type {Map<string, {calls: number, ms: number}>} */ (new Map());
+    const perf = () => ({
+      llmMs: llmMsTotal,
+      toolMs: toolMsTotal,
+      firstTokenMs: firstTokenAt == null ? null : firstTokenAt - startedAt,
+      steps,
+      reasoningTokens,
+      toolStats: [...toolStats.entries()].map(([tool, s]) => ({ tool, calls: s.calls, ms: s.ms })),
+      usedModel: activeModel, // 省钱 B4：本回合实际使用模型（降级后归属它）
+    });
     let aborted = false;
     let emptyRounds = 0; // 连续空/截断输出计数（防止无限续写）
     let currentAc = null;
+    // 省钱 B4（护栏降级）：action='downgrade' 超限后本回合切换到便宜模型继续执行；
+    // activeModel 是本回合实际使用的模型（分账/记录归属它），downgraded 保证只提示一次。
+    let activeModel = modelName;
+    let downgraded = false;
+    // 省钱 B1：本回合只读阶段判定——最新用户消息无写意图则先只发只读工具，
+    // 模型明确表达写意图后（下一轮）注入全量。cfg.schemaTier=false 可关。
+    let readOnlyPhase = true;
+    if (cfg.schemaTier !== false) {
+      const lastUser = [...messages].reverse().find((m) => m?.role === 'user');
+      readOnlyPhase = !hasWriteIntent(lastUser?.content);
+    } else {
+      readOnlyPhase = false;
+    }
     // 整个回合注册一次 SIGINT：思考、工具执行、权限询问期间都能中断
     const offSigint = io.onSigint ? io.onSigint(() => { aborted = true; currentAc?.abort(); }) : () => {};
     const ctx = makeCtx();
@@ -168,13 +211,14 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
 
       // 护栏前置预估（Kimi P2-E）：发送前按本轮最坏成本估算（trimmed prompt × 未命中输入价
       // + maxOutput × 输出价，峰谷按当前时段）；「今日已用 + 最坏成本」超上限时发送前拦截，
-      // 而不是等 200K 上下文的贵请求发出后才 block。
+      // 而不是等 200K 上下文的贵请求发出后才 block。action='downgrade'（省钱 B4）不在此拦截——
+      // 由降级流程接管：切到便宜模型后按 flash 价格重新估算，通常即可放行。
       if (cfg.costGuard) {
         const g = costGuardConfig();
-        if (g && Number(g.dailyLimitYuan) > 0) {
+        if (g && Number(g.dailyLimitYuan) > 0 && g.action !== 'downgrade') {
           let promptTokens = 0;
           for (const m of sanitized) promptTokens += messageTokens(m, count);
-          const worst = estimateCost(modelName, promptTokens, maxOutput, null, new Date());
+          const worst = estimateCost(activeModel, promptTokens, maxOutput, null, new Date());
           const used = todayCost();
           if (used + worst >= Number(g.dailyLimitYuan)) {
             stripOrphanCalls();
@@ -187,7 +231,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         }
       }
 
-      // 费用护栏（A2）：每轮开始前按今日实际费用检查；block 时暂停本轮并明确告知
+      // 费用护栏（A2/B4）：每轮开始前按今日实际费用检查；block 暂停本轮；
+      // downgrade 自动切换便宜模型继续执行（每回合只切一次，切换即粘滞）
       if (cfg.costGuard) {
         const guard = checkCostGuard();
         if (guard) {
@@ -206,7 +251,23 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               perf: perf(),
             };
           }
-          io.print(style(guard.message, C.yellow));
+          if (guard.downgrade && !downgraded) {
+            if (guard.downgradeModel !== activeModel) {
+              activeModel = guard.downgradeModel;
+              downgraded = true;
+              io.print(style(guard.message, C.yellow));
+            } else {
+              // 已经是降级目标模型：无法再降，按 block 处理
+              stripOrphanCalls();
+              return {
+                text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
+                note: `今日费用已达上限（实际 ¥${String(todayCost().toFixed(4))}），且已在最便宜模型上执行，已暂停——调整 config.costGuard 或明天自动恢复。`,
+                durationMs: Date.now() - startedAt, perf: perf(),
+              };
+            }
+          } else if (!guard.downgrade) {
+            io.print(style(guard.message, C.yellow));
+          }
         }
       }
 
@@ -221,9 +282,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       const llmT0 = Date.now();
       try {
         res = await provider.chat({
-          model: modelName,
+          model: activeModel,
           messages: sanitized,
-          tools: [...toolSchemas(), ...mcpSchemas()],
+          tools: toolsFor(readOnlyPhase),
           temperature,
           maxTokens: maxOutput,
           reasoningEffort,
@@ -232,7 +293,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             io.stopSpinner();
             if (firstTokenAt == null) firstTokenAt = Date.now(); // 首个增量即首 token
             if (d.text) io.writeText(d.text);
-            if (d.reasoning) io.writeReasoning(d.reasoning);
+            if (d.reasoning) {
+              reasoningTokens += approxTokens(d.reasoning); // 省钱 B3：推理 token 估算（分账维度）
+              io.writeReasoning(d.reasoning);
+            }
           },
         });
         llmMsTotal += Date.now() - llmT0;
@@ -248,6 +312,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       }
 
       finish = res.finish ?? finish;
+      // 省钱 B1：只读阶段中模型文字明确表达写意图 → 下一轮注入全量工具（多一轮，几乎无感）
+      if (readOnlyPhase && hasWriteIntent(res.text)) readOnlyPhase = false;
       if (res.usage) {
         usage.prompt_tokens += res.usage.prompt_tokens || 0;
         usage.completion_tokens += res.usage.completion_tokens || 0;
@@ -339,6 +405,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 后续相同调用直接复用结果（仍逐个回填 tool 消息以保持 tool_call_id 配对）
         async function runTool(prep) {
           io.renderToolStart?.(prep.name, prep.args);
+          usedToolNames.add(prep.name); // 省钱 B1：执行过即标记，后续轮次省略其 description
           const dedupKey = !prep.isMcp && READONLY_TOOLS_SET.has(prep.name) ? prep.name + ':' + JSON.stringify(prep.args || {}) : null;
           if (dedupKey && turnToolCache.has(dedupKey)) {
             prep.cached = true;
@@ -363,6 +430,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         function finishTool(prep, result, t0) {
           const ms = Date.now() - t0;
           toolMsTotal += ms;
+          // 省钱 B3：逐工具调用/耗时累加（费用二级分账的 byTool 维度）
+          const ts = toolStats.get(prep.name) || { calls: 0, ms: 0 };
+          ts.calls += 1;
+          ts.ms += ms;
+          toolStats.set(prep.name, ts);
           io.renderTool(prep.name, prep.args, result, ms);
           if (prep.name === 'todo' && result?.todos) io.renderTodo(result.todos);
           hooks.post(prep.name, prep.args, typeof result === 'string' ? { output: result } : result).catch(() => {});

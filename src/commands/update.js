@@ -33,7 +33,7 @@ export async function handleUpdateFamily(cmd, args) {
     return true;
   }
 
-  // Batch API 半价批处理（A1）：mingdao batch <问题文件|-> [--model 名] [--max-tokens n]
+  // Batch API 半价批处理（A1/B2）：mingdao batch <问题文件|-> [--model 名] [--max-tokens n] [--max-cost 元]
   if (cmd === 'batch') {
     const { runBatch } = await import('../batch.js');
     const cfgB = loadConfig();
@@ -44,16 +44,18 @@ export async function handleUpdateFamily(cmd, args) {
     }
     let model = cfgB.model || 'deepseek-v4-flash';
     let maxTokens = 4096;
+    let maxCost = 0; // 省钱 B2：预算上限（元），提交前按估算拦截
     let srcFile = null;
     for (let i = 0; i < args.length; i++) {
       const a = args[i];
       if (a === '--model') model = args[++i];
       else if (a === '--max-tokens') maxTokens = Number(args[++i]) || 4096;
+      else if (a === '--max-cost') maxCost = Number(args[++i]) || 0;
       else if (a === '--out') { i += 1; /* 输出默认落工作目录 */ }
       else if (!srcFile) srcFile = a;
     }
     if (!srcFile) {
-      console.log('用法：mingdao batch <问题文件|-> 每行一个问题（--model 名 --max-tokens n）');
+      console.log('用法：mingdao batch <问题文件|-> 每行一个问题（--model 名 --max-tokens n --max-cost 元）');
       process.exitCode = 1;
       return true;
     }
@@ -80,6 +82,7 @@ export async function handleUpdateFamily(cmd, args) {
       questions,
       workingDir: process.cwd(),
       maxTokens,
+      maxCost,
       signal: ac.signal,
       onStatus: (st) => console.log('  ' + st),
     });
@@ -90,6 +93,7 @@ export async function handleUpdateFamily(cmd, args) {
       return true;
     }
     console.log(`✓ 完成 ${r.results.length} 条 · ↑${r.usage.prompt_tokens} ↓${r.usage.completion_tokens} tokens · 费用 ≈¥${r.cost.toFixed(5)}（已按半价）`);
+    if (r.deduped) console.log(`  （去重合并 ${r.deduped} 条重复问题，结果已回填全部位置）`);
     console.log(`  结果文件：${r.outputFile}`);
     console.log(`  任务 ID：${r.batchId}（结果已计入 /cost 分账）`);
     return true;
@@ -123,13 +127,21 @@ export async function handleUpdateFamily(cmd, args) {
       md.push('');
       md.push(`- 实际费用 ≈¥${r.cost.toFixed(5)}${r.batchCost > 0 ? `（含 Batch 半价任务 ≈¥${r.batchCost.toFixed(5)}）` : ''}`);
       md.push(`- 相比全未命中已节省 ≈¥${r.saved.toFixed(5)}${r.rate != null ? ` · 缓存命中率 ${(r.rate * 100).toFixed(0)}%` : ''}`);
-      md.push(`- Tokens：↑${r.prompt} / ↓${r.completion}`);
+      md.push(`- Tokens：↑${r.prompt} / ↓${r.completion}${r.reasoning ? ` · 推理 ${r.reasoning}` : ''}`);
       md.push('');
       md.push('## 按模型分账');
       md.push('');
       md.push('| 模型 | 轮次 | ↑prompt | ↓completion | 费用 |');
       md.push('| --- | --- | --- | --- | --- |');
       for (const m of r.models) md.push(`| ${m.model} | ${m.turns} | ${m.prompt} | ${m.completion} | ≈¥${m.cost.toFixed(5)} |`);
+      if (r.tools.length) {
+        md.push('');
+        md.push('## 按工具分账');
+        md.push('');
+        md.push('| 工具 | 调用 | 耗时(ms) |');
+        md.push('| --- | --- | --- |');
+        for (const t of r.tools.slice(0, 10)) md.push(`| ${t.tool} | ${t.calls} | ${t.ms} |`);
+      }
       md.push('');
       md.push('## 每日费用');
       md.push('');

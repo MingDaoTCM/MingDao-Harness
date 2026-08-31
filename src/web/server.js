@@ -435,7 +435,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       session.routeStats = { steps: st.steps + (io.stats().toolCount || 0), truncated: st.truncated + (r.truncated ? 1 : 0) };
       await withSessionLock(session.file, () => appendMessages(session.file, messages.slice(persistedBefore)));
       io.printUsageLine({ modelName: runModel, usage: r.usage, durationMs: r.durationMs });
-      recordUsage(runModel, r.usage, r.perf);
+      recordUsage(r.perf?.usedModel || runModel, r.usage, r.perf);
       maybeAutoSync().catch(() => {});
       // 新会话自动标题（可配置关闭）
       srvlog('chat 标题生成前 ' + taskId);

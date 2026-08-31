@@ -763,12 +763,55 @@ $('#memDedupe').onclick=async ()=>{
 };
 // —— 缓存命中率仪表盘 ——
 function fmtT(n){ n=Number(n||0); return n>=1000?(n/1000).toFixed(1)+'k':String(n); }
+// 省钱 B3：费用二级分账面板（模型/工具 Top5 + 近 14 天折线，零依赖 SVG）
+function renderCostBreakdown(bd){
+  const models=$('#costTopModels'); models.innerHTML='';
+  for(const m of ((bd.byModel||[]).slice(0,5))){
+    const bar=document.createElement('div'); bar.style.cssText='height:3px;border-radius:2px;background:var(--bg3);margin:1px 0;overflow:hidden';
+    const max=bd.byModel&&bd.byModel[0]?bd.byModel[0].cost:1;
+    bar.innerHTML='<div style="height:100%;width:'+Math.max(2,Math.round((m.cost||0)/Math.max(max,1e-9)*100))+'%;background:var(--accent2)"></div>';
+    const row=document.createElement('div'); row.style.cssText='display:flex;justify-content:space-between;font-size:11.5px;padding:1px 0';
+    row.innerHTML='<span>'+esc(m.model||'—')+'</span><span>¥'+(m.cost||0).toFixed(4)+' · '+m.turns+' 轮</span>';
+    const w=document.createElement('div'); w.appendChild(row); w.appendChild(bar); models.appendChild(w);
+  }
+  if(!(bd.byModel||[]).length) models.innerHTML='<div style="color:var(--faint);font-size:11.5px">暂无记录</div>';
+  const tools=$('#costTopTools'); tools.innerHTML='';
+  for(const t of ((bd.byTool||[]).slice(0,5))){
+    const bar=document.createElement('div'); bar.style.cssText='height:3px;border-radius:2px;background:var(--bg3);margin:1px 0;overflow:hidden';
+    const max=bd.byTool&&bd.byTool[0]?bd.byTool[0].ms:1;
+    bar.innerHTML='<div style="height:100%;width:'+Math.max(2,Math.round((t.ms||0)/Math.max(max,1e-9)*100))+'%;background:var(--cyan)"></div>';
+    const row=document.createElement('div'); row.style.cssText='display:flex;justify-content:space-between;font-size:11.5px;padding:1px 0';
+    row.innerHTML='<span>'+esc(t.tool||'—')+'</span><span>'+t.calls+' 次 · '+fmtDur(t.ms)+'</span>';
+    const w=document.createElement('div'); w.appendChild(row); w.appendChild(bar); tools.appendChild(w);
+  }
+  if(!(bd.byTool||[]).length) tools.innerHTML='<div style="color:var(--faint);font-size:11.5px">暂无记录</div>';
+  const line=$('#costLine');
+  const days=(bd.byDay||[]).slice(-14);
+  if(!days.length){ line.innerHTML=''; return; }
+  const W=320, H=56, P=4;
+  const maxC=Math.max(...days.map(d=>d.cost), 1e-9);
+  const pts=days.map((d,i)=>{
+    const x=P+i*(W-2*P)/Math.max(days.length-1,1);
+    const y=H-4-(d.cost/maxC)*(H-10);
+    return [x.toFixed(1), y.toFixed(1)];
+  });
+  const poly=pts.map(p=>p.join(',')).join(' ');
+  const last=pts[pts.length-1];
+  line.innerHTML='<div style="font-size:11.5px;color:var(--faint);margin-bottom:2px">近 14 天费用折线（¥，最高 ¥'+maxC.toFixed(4)+'）</div>'
+    +'<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;background:var(--bg3);border-radius:8px">'
+    +'<polyline points="'+poly+'" fill="none" style="stroke:var(--accent2);stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round"/>'
+    +'<circle cx="'+last[0]+'" cy="'+last[1]+'" r="2.6" style="fill:var(--accent)"/>'
+    +'<text x="4" y="10" font-size="8" style="fill:var(--faint)">'+days[0].day+'</text>'
+    +'<text x="'+(W-52)+'" y="10" font-size="8" style="fill:var(--faint)">'+days[days.length-1].day+'</text>'
+    +'</svg>';
+}
 async function refreshCache(){
   const r=await fetch('/api/cache-stats',{cache:'no-store'}).catch(()=>null); if(!r) return;
   const j=await r.json(); if(!j.ok) return;
   const s=j.summary||{};
   const rate=s.rate!=null?(s.rate*100).toFixed(0)+'%':'暂无缓存数据';
   $('#cacheSummary').innerHTML='轮次 '+s.turns+' · ↑'+fmtT(s.prompt)+' ↓'+fmtT(s.completion)+' tokens · 命中率 <b style="color:var(--accent)">'+rate+'</b> · 累计 ≈¥'+Number(s.cost||0).toFixed(5)+'（比全未命中省 ≈¥'+Number(s.saved||0).toFixed(5)+'）';
+  renderCostBreakdown(j.breakdown||{});
   const list=$('#cacheRecent'); list.innerHTML='';
   if(!(j.recent||[]).length){ list.innerHTML='<div style="color:var(--faint);font-size:12px;padding:6px 2px">暂无记录（每次对话后自动统计）</div>'; return; }
   for(const e of j.recent){

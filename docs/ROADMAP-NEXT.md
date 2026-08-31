@@ -26,15 +26,15 @@
 9. cli.js 共享助手抽取（offpeak defer、mcpFacade 构建、run/run-worker 参数解析合一）
 - 验收：全绿 + 新增 fs-browse 越界与限流回归断言。
 
-### Phase B「省钱第二轮」v0.2.3（约 2–3 天）
-1. **工具 Schema 按需挂载**（每请求省 1–2K tokens）：只读阶段只发 read/ls/glob/grep/skill + 本回合已用工具；写类工具首次调用时动态注入
-2. **Batch 输入侧**：文本哈希去重（结果按 custom_id 回填全部位置）、单问超窗口预检报错、`--max-cost` 上限
-3. **费用二级分账 + 看板**：cache-stats 增 reasoning/tool 维度与 byTool 累加；WebUI 仪表盘加模型/工具 Top5 与按天折线（零依赖 SVG）
-4. **护栏 downgrade**：`action:'downgrade'` —— 触顶后自动切 flash + 明确提示（默认仍 warn/block 可选）
-5. **评测基准扩充**：压缩质量集（5 组长会话样本→压缩→关键事实追问断言）、路由 100 条标注集入 bench
-- 验收：bench 断言数 38→60+；覆盖率阈值上调至 60%。
+### Phase B「省钱第二轮」v0.2.4（已完成 ✅）
+1. ✅ **工具 Schema 按需挂载**：只读阶段只发 read/ls/glob/grep/skill/todo + 已用工具；模型表达写意图后下一轮注入全量（`cfg.schemaTier=false` 可关）；已用工具深度瘦身（工具级 + 参数级描述清除，全用过降 48%）
+2. ✅ **Batch 输入侧**：文本哈希去重（结果按 custom_id 回填全部位置）、单问超窗口预检报错、`--max-cost` 提交前估算拦截
+3. ✅ **费用二级分账 + 看板**：cache-stats 增 reasoning / byTool 维度；WebUI 仪表盘加模型/工具 Top5 与近 14 天费用折线（零依赖 SVG）；`mingdao cost report` 增按工具分账表
+4. ✅ **护栏 downgrade**：`action:'downgrade'` —— 触顶后自动切 flash 继续执行 + 明确提示（warn/block 仍可选；已是 flash 则按 block 处理）
+5. ✅ **评测基准扩充**：压缩质量集（5 组长会话样本 → 压缩 → 关键事实存活断言 + 尾部字节不变）、路由标注集扩至 100 条；bench 断言数 38 → 150+；覆盖率阈值 55% → 60%
+- 版本说明：v0.2.3 被 0.2.2 桌面启动崩溃的紧急修复占用，Phase B 顺延为 v0.2.4。
 
-### Phase C「结构渐进」v0.2.4（约 2 天）
+### Phase C「结构渐进」v0.2.5（约 2 天）
 1. routes/api.js 按域细分（config/sessions/sync/schedule/skills/workspace/misc 7 模块 + 共享中间件），每域配 API 契约测试
 2. cli.js REPL → commands/repl.js、worker → tasks/worker.js（e2e-local 16 项全绿做护栏）
 3. strict 棘轮削 300 条（先 credentials/permissions/config/sync-server/session 五个安全关键模块全量注解）

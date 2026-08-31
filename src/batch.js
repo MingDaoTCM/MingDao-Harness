@@ -8,9 +8,12 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { resolveProviderConfig } from './providers/index.js';
 import { estimateBatchCost, BATCH_DISCOUNT } from './pricing.js';
 import { recordCacheStats } from './cachestats.js';
+import { approxTokens } from './context.js';
+import { modelPreset } from './models.js';
 
 const DEFAULT_WINDOW = '24h';
 const DEFAULT_ENDPOINT = '/v1/chat/completions';
@@ -84,9 +87,11 @@ async function downloadResults(base, apiKey, batch) {
   throw new Error('批处理结果文件不可用（端点不支持或文件已过期）');
 }
 
-/** 执行一次批处理。questions: string[]。返回 { ok, outputFile, results, usage, cost, batchId }
- * @param {{ cfg: any, model: any, questions: any, workingDir?: string, maxTokens?: number, temperature?: any, signal?: any, onStatus?: any }} opts */
-export async function runBatch({ cfg, model, questions, workingDir = process.cwd(), maxTokens = 4096, temperature, signal, onStatus }) {
+/** 执行一次批处理。questions: string[]。返回 { ok, outputFile, results, usage, cost, batchId, deduped }
+ * 省钱 B2：①文本哈希去重（重复问题只提交一次，结果回填全部位置）；②单问超窗口预检（提交前报错，不烧钱）；
+ * ③maxCost 预算上限（提交前按估算费用拦截，超出直接中止不提交）。
+ * @param {{ cfg: any, model: any, questions: any, workingDir?: string, maxTokens?: number, temperature?: any, signal?: any, onStatus?: any, maxCost?: number }} opts */
+export async function runBatch({ cfg, model, questions, workingDir = process.cwd(), maxTokens = 4096, temperature, signal, onStatus, maxCost = 0 }) {
   const list = (questions || []).map((q) => String(q).trim()).filter(Boolean);
   if (!list.length) return { error: '没有可批处理的问题（每行一个问题）' };
   const pc = resolveProviderConfig(cfg, model);
@@ -97,6 +102,50 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
   // 不再携带完整系统提示（技能清单/用户记忆/AGENTS.md 对无工具批任务毫无意义，1000 问
   // 可白烧 50-80 万 token）；改用一行精简角色提示，剩余能力损失为零。
   const systemPrompt = '你是 MingDao Harness 编程助手。直接针对每个问题给出准确、完整的答案，不要复述问题、不要解释过程。';
+
+  // —— 省钱 B2：文本哈希去重（trim 后逐字节一致视为重复）——
+  const positions = /** @type {Map<string, number[]>} */ (new Map()); // hash → [输入行下标...]
+  const unique = /** @type {string[]} */ ([]);
+  list.forEach((/** @type {string} */ q, /** @type {number} */ i) => {
+    const h = crypto.createHash('sha256').update(q).digest('hex');
+    if (!positions.has(h)) {
+      positions.set(h, [i]);
+      unique.push(q);
+    } else {
+      positions.get(h)?.push(i);
+    }
+  });
+  const posByUniqueIdx = unique.map((/** @type {string} */ q) => positions.get(crypto.createHash('sha256').update(q).digest('hex')) || []);
+  const deduped = list.length - unique.length;
+  if (deduped > 0) onStatus?.(`去重：${deduped} 条重复问题合并（${list.length} → ${unique.length} 条实际提交）`);
+
+  // —— 省钱 B2：单问超窗口预检（估算输入 + max_tokens 超过模型窗口 95% 即报错，绝不提交烧钱）——
+  const preset = modelPreset(model) || {};
+  const windowTokens = Number(preset.budgetTokens) || 128000;
+  const sysTokens = approxTokens(systemPrompt);
+  for (let i = 0; i < unique.length; i++) {
+    const est = sysTokens + approxTokens(unique[i]);
+    if (est + maxTokens > windowTokens * 0.95) {
+      return {
+        error: `第 ${posByUniqueIdx[i][0] + 1} 个问题超窗口：估算输入 ${est} + max_tokens ${maxTokens} > 模型窗口 ${windowTokens}（可 --max-tokens 调小或拆分问题）`,
+      };
+    }
+  }
+
+  // —— 省钱 B2：--max-cost 预算上限（提交前估算拦截）——
+  let estimatedCost = 0;
+  if (maxCost > 0) {
+    const estPrompt = unique.reduce((s, q) => s + sysTokens + approxTokens(q), 0);
+    const estCompletion = unique.length * Math.min(maxTokens, 2048); // 保守按平均 2K 输出估算
+    estimatedCost = estimateBatchCost(model, estPrompt, estCompletion);
+    if (estimatedCost > maxCost) {
+      return {
+        error: `预计费用 ≈¥${estimatedCost.toFixed(4)}（已按半价）超过 --max-cost ¥${maxCost}，已中止提交。可缩小问题集或调高上限。`,
+        estimatedCost,
+      };
+    }
+  }
+
   const bodyTemplate = {
     model,
     messages: null, // 逐行填充
@@ -105,7 +154,7 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
     stream: false,
   };
   const jsonl =
-    list
+    unique
       .map((q, i) =>
         JSON.stringify({
           custom_id: `md-${i}`,
@@ -164,24 +213,33 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
     }
     onStatus?.('下载结果…');
     const results = await downloadResults(base, apiKey, batch);
-    // 汇总 usage 与费用（batch 半价）
+    // 汇总 usage 与费用（batch 半价）；结果按 custom_id 回填到全部重复位置（省钱 B2）
     let prompt = 0;
     let completion = 0;
-    const outputs = [];
+    const outputs = /** @type {Array<{id: string, content: string}>} */ (new Array(list.length));
     for (const r of results) {
       const body = r?.response?.body || {};
       prompt += body.usage?.prompt_tokens || 0;
       completion += body.usage?.completion_tokens || 0;
       const content = body.choices?.[0]?.message?.content ?? body.choices?.[0]?.text ?? (r?.response?.status_code !== 200 ? `（错误 ${r?.response?.status_code}）` : '');
-      outputs.push({ id: r.custom_id, content: String(content || '').trim() });
+      const m = /^md-(\d+)$/.exec(String(r.custom_id || ''));
+      const ui = m ? Number(m[1]) : -1;
+      const idxs = ui >= 0 && ui < posByUniqueIdx.length ? posByUniqueIdx[ui] : [];
+      for (const pos of idxs) {
+        outputs[pos] = { id: String(pos), content: String(content || '').trim() };
+      }
+    }
+    // 防御：服务端漏回的 custom_id 用占位补全，保证输出行数与输入行数一一对应
+    for (let i = 0; i < outputs.length; i++) {
+      if (!outputs[i]) outputs[i] = { id: String(i), content: '' };
     }
     const usage = { prompt_tokens: prompt, completion_tokens: completion };
     const cost = estimateBatchCost(model, prompt, completion);
     const outFile = path.join(workingDir, `mingdao-batch-result-${Date.now()}.jsonl`);
     fs.writeFileSync(outFile, outputs.map((o) => JSON.stringify(o)).join('\n') + '\n');
     recordCacheStats({ model, prompt, completion, hit: null, miss: null, cost, saved: null, batch: true });
-    onStatus?.(`完成：${outputs.length} 条结果`);
-    return { ok: true, batchId: batch.id, outputFile: outFile, results: outputs, usage, cost, discount: BATCH_DISCOUNT };
+    onStatus?.(`完成：${outputs.length} 条结果${deduped ? `（去重合并 ${deduped} 条）` : ''}`);
+    return { ok: true, batchId: batch.id, outputFile: outFile, results: outputs, usage, cost, discount: BATCH_DISCOUNT, deduped, estimatedCost };
   } catch (err) {
     // 批处理端点不支持（404/405 等）→ 明确告知，不静默
     return { error: `批处理不可用：${err?.message || err}（该服务商可能不支持 Batch API，可用 config.batchBaseUrl 指定支持的网关）` };
