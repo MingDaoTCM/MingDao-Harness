@@ -1,7 +1,7 @@
 // 评测基准（Hermes E2-2）：路由准确率标注集 + 升级检测离线回归。
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import path from 'node:path';
-const srcDir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'src');
+const srcDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src');
 const { heuristicRoute, routeTask } = await import(pathToFileURL(path.join(srcDir, 'routing.js')).href);
 
 let pass = 0, fail = 0;

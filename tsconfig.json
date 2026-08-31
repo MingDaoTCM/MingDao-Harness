@@ -9,8 +9,12 @@
     "strict": false,
     "noImplicitAny": false,
     "skipLibCheck": true,
-    "lib": ["ES2022"],
-    "types": ["node"]
+    "lib": [
+      "ES2022"
+    ],
+    "types": [
+      "node"
+    ]
   },
   "include": [
     "src/pricing.js",
@@ -28,6 +32,7 @@
     "src/compact.js",
     "src/memory.js",
     "src/schedule.js",
-    "src/tools/bash.js"
+    "src/tools/bash.js",
+    "src/atomic-write.js"
   ]
 }

@@ -137,6 +137,7 @@ function buildMenu() {
         { label: '官网', click: () => shell.openExternal('https://harness.mingdao.ai') },
         { label: '检查更新', click: () => checkUpdatesFromMenu() },
         { label: '文档（Gitee）', click: () => shell.openExternal('https://gitee.com/MingDaoTCM/MingDao-harness') },
+        { label: '问题反馈（社区论坛）', click: () => shell.openExternal('https://harness.mingdao.ai/forum/') },
         { label: '关于 MingDao Harness', click: () => dialog.showMessageBox({ title: '关于', message: 'MingDao Harness 桌面版', detail: `版本 v${app.getVersion()}\n零依赖 DeepSeek-V4 智能体框架\nhttps://harness.mingdao.ai` }) },
       ],
     },
@@ -263,6 +264,10 @@ async function checkUpdatesFromMenu() {
   let done = false;
   const finish = (fn) => { if (!done) { done = true; fn(); } };
   const ver = app.getVersion();
+  const LINUX_NO_APPIMAGE = process.platform === 'linux' && !process.env.APPIMAGE; // deb 安装形态
+  if (LINUX_NO_APPIMAGE) {
+    finish(() => show({ type: 'info', title: '检查更新', message: `当前版本：v${ver}`, detail: 'deb 安装不支持自动更新（electron-updater 仅支持 AppImage）。检测到新版时会直接引导到官网下载。' }));
+  }
   try {
     // 审计（"Cannot read properties of undefined (reading 'once')"）：
     // 打包环境里 ESM 动态导入 CJS 的 electron-updater 时命名导出可能缺失，
@@ -288,6 +293,24 @@ async function checkUpdatesFromMenu() {
       clearTimeout(timer);
       // 质检：info 可能为 undefined（打包环境事件参数形状差异），版本号做多层兜底
       const v = info?.version ?? '';
+      if (LINUX_NO_APPIMAGE) {
+        // deb 安装：无法自动下载——引导到官网
+        finish(() =>
+          show({
+            type: 'info',
+            title: '发现新版本',
+            message: '发现新版本 v' + v + '（当前 v' + ver + '）',
+            detail: 'deb 安装不支持自动更新，请到官网下载安装：https://harness.mingdao.ai/#downloads',
+            buttons: ['去官网下载', '稍后'],
+            defaultId: 0,
+            cancelId: 1,
+            noLink: true,
+          }).then((r) => {
+            if (r.response === 0) shell.openExternal('https://harness.mingdao.ai/#downloads');
+          })
+        );
+        return;
+      }
       finish(() => show({ type: 'info', title: '检查更新', message: '发现新版本 v' + v + '，开始自动下载…', detail: '下载完成后会提示重启安装。' }));
     });
     const result = await autoUpdater.checkForUpdates();
@@ -323,8 +346,9 @@ function setupAutoUpdate() {
         appLog('updater 模块导出不可用，跳过自动更新');
         return;
       }
-      autoUpdater.autoDownload = true;
-      appLog('自动更新检查启动（feed: 官网 /updates）');
+      const LINUX_NO_APPIMAGE = process.platform === 'linux' && !process.env.APPIMAGE; // deb 安装形态
+      autoUpdater.autoDownload = !LINUX_NO_APPIMAGE;
+      appLog('自动更新检查启动（feed: 官网 /updates' + (LINUX_NO_APPIMAGE ? '，deb 形态：仅检测不下载' : '') + '）');
       let updateSeen = false;
       autoUpdater.on('error', (err) => {
         appLog('updater error ' + String(err?.message || err));
@@ -347,7 +371,27 @@ function setupAutoUpdate() {
       // 在此抛 TypeError，中断 autoUpdater 事件派发导致下载永不开始。null-safe + 不抛错。
       autoUpdater.on('update-available', (info) => {
         updateSeen = true;
-        appLog('updater 发现新版本 ' + String(info?.version ?? '?'));
+        const v = String(info?.version ?? '?');
+        appLog('updater 发现新版本 ' + v);
+        if (LINUX_NO_APPIMAGE) {
+          // deb 安装：无法自动下载——静默弹一次引导（不打断工作，点按钮才跳官网）
+          dialog
+            .showMessageBox({
+              type: 'info',
+              title: '发现新版本',
+              message: `发现新版本 v${v}（当前 v${app.getVersion()}）`,
+              detail: 'deb 安装不支持自动更新，请到官网下载安装：https://harness.mingdao.ai/#downloads',
+              buttons: ['去官网下载', '稍后'],
+              defaultId: 0,
+              cancelId: 1,
+              noLink: true,
+            })
+            .then((r) => {
+              if (r.response === 0) shell.openExternal('https://harness.mingdao.ai/#downloads');
+            })
+            .catch(() => {});
+          return;
+        }
         appLog('开始自动下载（autoDownload=true）');
       });
       autoUpdater.on('download-progress', (p) => appLog('updater 下载进度 ' + Math.round(Number(p?.percent) || 0) + '%'));

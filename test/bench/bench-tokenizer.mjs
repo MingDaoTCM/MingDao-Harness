@@ -1,8 +1,8 @@
 // 评测基准（Hermes E2-3）：tokenizer 黄金值回归——离线、零 API 成本。
 // 黄金值取自 DeepSeek-V3 官方 tokenizer.json + HF tokenizers 真实输出（与 smoke #16 同源）。
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import path from 'node:path';
-const srcDir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'src');
+const srcDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src');
 const { countTokens, heuristicTokens, makeTokenCounter } = await import(pathToFileURL(path.join(srcDir, 'tokenizer.js')).href);
 
 let pass = 0, fail = 0;

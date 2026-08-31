@@ -48,13 +48,18 @@
   "license": "MIT",
   "scripts": {
     "start": "node src/cli.js",
-    "test": "node test/smoke.js",
+    "test": "node test/run-all.mjs",
     "typecheck": "tsc -p tsconfig.json",
     "prepublishOnly": "node test/smoke.js && node test/e2e-local.js && node test/e2e-schedule.js",
     "desktop": "npm --prefix desktop start",
     "desktop:dist": "node scripts/sync-versions.mjs && npm --prefix desktop run dist:dir",
     "desktop:sync": "node scripts/sync-versions.mjs",
-    "bench": "node test/bench/bench-tokenizer.mjs && node test/bench/bench-routing.mjs && node test/bench/bench-compaction.mjs"
+    "bench": "node test/bench/bench-tokenizer.mjs && node test/bench/bench-routing.mjs && node test/bench/bench-compaction.mjs",
+    "coverage": "node test/run-all.mjs --coverage && node scripts/coverage-report.mjs",
+    "typecheck:strict": "node scripts/strict-ratchet.mjs",
+    "preversion": "node test/smoke.js && node test/e2e-local.js && npm run bench",
+    "version": "node scripts/bump-changelog.mjs",
+    "postversion": "git add package.json package-lock.json CHANGELOG.md 2>/dev/null; git commit -m \"chore: release v$npm_package_version\" --no-verify || true"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

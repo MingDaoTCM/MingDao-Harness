@@ -31,6 +31,13 @@ jobs:
           node-version: ${{ matrix.node }}
       - name: 冒烟测试（40+ 组断言）
         run: node test/smoke.js
+      - name: 评测基准回归（tokenizer/routing/compaction）
+        run: npm run bench
+      - name: 全量 strict 棘轮（错误数只降不升）
+        run: node scripts/strict-ratchet.mjs
+      - name: 覆盖率门禁（V8 行覆盖率 ≥55%）
+        if: runner.os == 'Linux' && matrix.node == 20
+        run: npm run coverage
       - name: 端到端：本地 Agent / 同步 / 分享
         run: node test/e2e-local.js
       - name: 端到端：WebUI HTTP/SSE/权限/访问控制

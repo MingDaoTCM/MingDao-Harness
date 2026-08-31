@@ -39,6 +39,7 @@ import {
   reconcileSchedules,
 } from '../../schedule.js';
 import { enableAutostart, disableAutostart, autostartStatus } from '../../autostart.js';
+import { listTasks } from '../../tasks.js';
 import { currentWorkspace, workspaceForDir, listWorkspaces, addWorkspace, removeWorkspace, renameWorkspace, setWorkspaceDir, workspacePath, touchWorkspace, getSessionWorkspace, setSessionWorkspace, removeSessionWorkspace, moveSessionWorkspace } from '../../workspace.js';
 import { loadMemory, writeMemory, dedupeMemory } from '../../memory.js';
 import { recordUsage, listCacheStats, summarizeCacheStats, costBreakdown } from '../../cachestats.js';
@@ -330,6 +331,22 @@ export function createApiDispatch(deps) {
         saveConfig(cfg);
         return json(res, 200, { ok: true, name, model: state.modelName });
       }
+      // 质检（自定义模型连通性）：发起一次最小对话验证 baseUrl+Key 可用
+      if (action === 'testCustom') {
+        const name = String(body.name || '').trim();
+        const cm = (cfg.customModels || {})[name];
+        if (!cm) return json(res, 400, { error: `自定义模型 ${name} 不存在` });
+        const pc = resolveProviderConfig(cfg, name);
+        if (!pc.apiKey) return json(res, 400, { error: '该模型未设置 API Key，请先「设Key」再测试' });
+        const t0 = Date.now();
+        try {
+          const tp = await createProvider(cfg, name);
+          const r = await tp.chat({ model: name, messages: [{ role: 'user', content: 'ping' }], tools: [], temperature: 0, maxTokens: 8 });
+          return json(res, 200, { ok: true, name, latencyMs: Date.now() - t0, reply: String(r.text || r.reasoning || '').slice(0, 60) || '（空回复，但连接成功）' });
+        } catch (e) {
+          return json(res, 200, { ok: false, name, latencyMs: Date.now() - t0, error: String(e?.message || e) });
+        }
+      }
       if (action === 'setCustomKey') {
         const name = String(body.name || '').trim();
         if (!(cfg.customModels || {})[name]) return json(res, 400, { error: `自定义模型 ${name} 不存在` });
@@ -420,7 +437,36 @@ export function createApiDispatch(deps) {
         durationMs: t.status === 'running' ? Date.now() - t.startedAt : t.durationMs,
         session: t.session ? path.basename(t.session.file) : null,
       }));
-      json(res, 200, { ok: true, running, maxConcurrent: MAX_CONCURRENT, tasks: list });
+      // 质检（等待状态静默）：后台 worker 任务与运行中的调度任务并入面板与状态条计数——
+      // 此前 /api/tasks 只含聊天 SSE 任务，后台下载/长任务期间界面完全无感知
+      let bgRunning = 0;
+      const background = [];
+      try {
+        for (const t of listTasks(home)) {
+          if (t.status === 'running') bgRunning += 1;
+          background.push({
+            id: t.id,
+            kind: 'worker',
+            status: t.status,
+            message: t.message || t.question || '',
+            startedAt: t.startedAt,
+            durationMs: t.status === 'running' ? Date.now() - t.startedAt : t.durationMs,
+            error: t.error || '',
+          });
+        }
+        for (const sch of listSchedules(home)) {
+          if (sch.status === 'running') bgRunning += 1;
+          background.push({
+            id: sch.id,
+            kind: 'schedule',
+            status: sch.status,
+            message: sch.question || sch.id || '',
+            startedAt: sch.createdAt || null,
+            durationMs: sch.status === 'running' ? Date.now() - (sch.lastRunAt || Date.now()) : null,
+          });
+        }
+      } catch {}
+      json(res, 200, { ok: true, running, bgRunning, maxConcurrent: MAX_CONCURRENT, tasks: list, background });
       return;
     }
     if (req.method === 'POST' && p === '/api/chat') {

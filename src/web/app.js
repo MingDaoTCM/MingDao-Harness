@@ -423,7 +423,7 @@ function renderWorkStatus(){
     const secs=curWorkT0?Math.round((Date.now()-curWorkT0)/1000):0;
     html='<span class="ws-busy"><span class="spinner"></span>⏳ '+curSteps+' 步 · '+Math.floor(secs/60)+' 分 '+Math.round(secs%60)+' 秒 · '+curTools+' 工具步</span>';
   } else if(bgRunning>0){
-    html='<span class="ws-bg">🛠 '+bgRunning+' 个后台任务运行中 — 点击查看</span>';
+    html='<span class="ws-bg">🛠 '+bgRunning+' 个后台任务运行中（下载/定时任务等）— 点击查看，完成后会自动提示</span>';
   }
   el.style.display=html?'flex':'none';
   el.innerHTML=html;
@@ -481,10 +481,8 @@ function openTraj(msg){
     list.appendChild(div);
   }
   $('#trajPanel').style.display='flex';
-  $('#tasksPanel').style.display='none';
-  $('#subPanel').style.display='none';
+  $('#tasksPanel').style.display='none'; // 仅任务面板（右侧）与轨迹互斥；子代理面板可与轨迹同显
   $('#trajRailBtn').classList.add('on');
-  $('#subRailBtn').classList.remove('on');
 }
 function resultText(r){
   if(r==null||r===undefined) return '';
@@ -529,7 +527,7 @@ const toggleSubPanel=()=>{
   const willShow=p.style.display==='none';
   p.style.display=willShow?'flex':'none';
   $('#subRailBtn').classList.toggle('on', willShow);
-  if(willShow){ $('#tasksPanel').style.display='none'; $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); renderSubPanel(); }
+  if(willShow){ $('#tasksPanel').style.display='none'; renderSubPanel(); } // 轨迹（左侧）可与子代理（右侧）同显
 };
 $('#subRailBtn').onclick=toggleSubPanel;
 $('#sbClose').onclick=()=>{ $('#subPanel').style.display='none'; $('#subRailBtn').classList.remove('on'); };
@@ -538,10 +536,21 @@ function setBtn(){
   sendBtn.textContent = generating ? '■ 停止' : '发送';
   sendBtn.className = generating ? 'danger' : 'primary';
 }
+const lastBgStatus = new Map(); // 后台任务状态跟踪（完成/失败转换 → 聊天横幅反馈）
 async function updateTasksPanel(){
   const r=await fetch('/api/tasks').catch(()=>null); if(!r) return;
   const j=await r.json(); const list=$('#tpList'); list.innerHTML='';
-  bgRunning=Number(j.running)||0; renderWorkStatus();
+  // 质检（等待状态静默）：后台任务（worker/调度）并入计数与面板；状态转换时在聊天区弹可见横幅
+  bgRunning=(Number(j.running)||0)+(Number(j.bgRunning)||0);
+  for(const t of (j.background||[])){
+    const prev=lastBgStatus.get(t.id);
+    if(prev && prev.status==='running' && t.status!=='running'){
+      if(t.status==='done') renderBanner({text:'✅ 后台任务「'+esc(String(t.message||'').slice(0,30)||'任务')+'」已完成'+(t.durationMs!=null?'（用时 '+(t.durationMs/1000).toFixed(1)+' 秒）':'')});
+      else if(t.status==='failed') renderBanner({text:'✖ 后台任务「'+esc(String(t.message||'').slice(0,30)||'任务')+'」失败：'+esc(String(t.error||'').slice(0,60))});
+    }
+    lastBgStatus.set(t.id,{status:t.status});
+  }
+  renderWorkStatus();
   $('#tpCount').textContent='（'+j.running+' 运行中 / 上限 '+j.maxConcurrent+'）';
   // 审计（第二问无反应修复）：generating 改为「本轮在途」本地状态，由 send/finally 维护，
   // 不再由 /api/tasks 轮询推导——任务面板瞬时波动或一次轮询失败曾让按钮永久卡在停止态，
@@ -552,6 +561,14 @@ async function updateTasksPanel(){
     const secs = t.status==='running'?'…':' '+(t.durationMs/1000).toFixed(1)+'s';
     div.innerHTML='<div class="tp-title">'+esc(t.message||'任务')+'</div><div class="tp-meta"><span class="tp-dot '+dot+'"></span>'+t.status+secs+'</div>';
     if(t.status==='running'){ const b=document.createElement('button'); b.textContent='中断'; b.className='danger'; b.style.cssText='margin-left:auto;padding:2px 8px;font-size:11px'; b.onclick=()=>fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({taskId:t.id})}).catch(()=>{}); div.querySelector('.tp-meta').appendChild(b); }
+    list.appendChild(div);
+  }
+  for(const t of (j.background||[])){
+    const div=document.createElement('div'); div.className='tp-item';
+    const dot = t.status==='running'?'tp-run':(t.status==='done'?'tp-done':'tp-bad');
+    const secs = t.status==='running'?'…':(t.durationMs!=null?' '+(t.durationMs/1000).toFixed(1)+'s':'');
+    const kindLabel = t.kind==='schedule'?'⏰ ':(t.kind==='worker'?'🛠 ':'');
+    div.innerHTML='<div class="tp-title">'+kindLabel+esc(t.message||t.id||'任务')+'</div><div class="tp-meta"><span class="tp-dot '+dot+'"></span>'+t.status+secs+'</div>';
     list.appendChild(div);
   }
 }
@@ -856,9 +873,10 @@ async function refreshModelsCfg(){
     const kstate=c.keyState==='stored'?'<span style="color:var(--accent)">'+esc(c.keyMasked||'')+'</span>':'<span style="color:var(--err)">无Key</span>';
     div.innerHTML='<span style="flex:1;min-width:0"><b>'+esc(c.name)+'</b> <span style="color:var(--faint)">'+esc(c.label)+' · '+esc(c.baseUrl)+'</span></span><span style="white-space:nowrap">'+kstate+'</span>';
     const sk=document.createElement('button'); sk.textContent='设Key'; sk.style.cssText='padding:1px 8px;font-size:11px'; sk.onclick=async()=>{ const k=await uiPrompt('API Key（'+c.name+'）：', null, {hidden:true}); if(k===null) return; fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setCustomKey',name:c.name,key:k})}).then(rr=>rr.json()).then(jj=>{ if(jj.ok) refreshModelsCfg(); else uiAlert(jj.error||'设置失败'); }); };
+    const test=document.createElement('button'); test.textContent='测试'; test.style.cssText='padding:1px 8px;font-size:11px'; test.onclick=async()=>{ test.disabled=true; test.textContent='测试中…'; try{ const rr=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'testCustom',name:c.name})}); const jj=await rr.json().catch(()=>({error:'请求失败'})); if(jj.ok){ await uiAlert('✅ 连接成功（'+jj.latencyMs+'ms）：'+esc(jj.reply||'空回复')); } else { await uiAlert('✖ 连接失败：'+esc(jj.error||'未知错误')); } } finally { test.disabled=false; test.textContent='测试'; } };
     const ed=document.createElement('button'); ed.textContent='修改'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=async()=>{ const u=await uiPrompt('API 地址：', c.baseUrl); if(u===null) return; const l=await uiPrompt('标签：', c.label); if(l===null) return; fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'updateCustom',name:c.name,baseUrl:u,label:l})}).then(rr=>rr.json()).then(jj=>{ if(jj.ok){ refreshModelsCfg(); reloadModels(); } else uiAlert(jj.error||'修改失败'); }); };
     const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!await uiConfirm('删除自定义模型 '+c.name+'？')) return; const rr=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'removeCustom',name:c.name})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshModelsCfg(); reloadModels(); } else uiAlert(jj.error||'删除失败'); };
-    div.appendChild(sk); div.appendChild(ed); div.appendChild(rm); cl.appendChild(div);
+    div.appendChild(sk); div.appendChild(test); div.appendChild(ed); div.appendChild(rm); cl.appendChild(div);
   }
   $('#baseUrlOverride').value=j.baseUrlOverride||'';
 }

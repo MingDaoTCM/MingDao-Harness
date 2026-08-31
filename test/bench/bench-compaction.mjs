@@ -1,8 +1,8 @@
 // 评测基准（Hermes E2-1）：压缩质量结构回归——离线 mock provider，零 API 成本。
 // 断言：触发线/摘要标记/保留尾部字节不变/增量压缩只压新增段（摘要的摘要）。
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 import path from 'node:path';
-const srcDir = path.join(path.dirname(new URL(import.meta.url).pathname), '..', '..', 'src');
+const srcDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src');
 const { compactConversation } = await import(pathToFileURL(path.join(srcDir, 'compact.js')).href);
 const { messageTokens, approxTokens } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
 
