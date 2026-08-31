@@ -440,6 +440,15 @@ function setupAutoUpdate() {
         downloaded = true;
         const v = String(info?.version ?? app.getVersion());
         appLog('updater 下载完成 ' + v);
+        // 官网下载统计信标：下载完成上报一次（按次精确计数，不受 Range 分片影响）。
+        // 仅打包版上报；fire-and-forget，失败不影响更新流程。
+        if (app.isPackaged) {
+          fetch('https://harness.mingdao.ai/updok', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ kind: 'update', os: process.platform, ver: v }),
+          }).catch(() => {});
+        }
         // 友好的更新就绪提示（用户反馈：此前界面像报错——改为明确的正向语气）
         dialog
           .showMessageBox({
