@@ -2,6 +2,10 @@
 
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
+## v0.2.3（2026-08-31）
+
+- 紧急修复 0.2.2 桌面三平台启动即崩：main.js 顶层 createLogWriter 漏导入（A6 重构遗留）——改为顶层 await import(srcRoot/log-writer.js)；新增静态护栏 + CI 打包冒烟（xvfb + MINGDAO_DESKTOP_SMOKE）
+
 ## v0.2.2（2026-08-31）
 
 - Phase A 正确性收尾：sync 写锁、密码隐藏输入、fs-browse 基目录、body 分级、草稿按会话、日志统一、崩溃护栏、notify 结构化、run 参数合一
