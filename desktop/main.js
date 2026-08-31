@@ -376,21 +376,36 @@ function setupAutoUpdate() {
       autoUpdater.autoDownload = !LINUX_NO_APPIMAGE;
       appLog('自动更新检查启动（feed: 官网 /updates' + (LINUX_NO_APPIMAGE ? '，deb 形态：仅检测不下载' : '') + '）');
       let updateSeen = false;
+      let downloaded = false;
+      let downloadRetries = 0;
       autoUpdater.on('error', (err) => {
-        appLog('updater error ' + String(err?.message || err));
-        // 质检（下载失败不可见）：发现新版本之后发生的错误直接弹窗告知，并引导官网手动下载
-        if (updateSeen) {
-          dialog
-            .showMessageBox({
-              type: 'warning',
-              title: '更新下载失败',
-              message: '新版本下载失败：' + String(err?.message || err),
-              detail: '可稍后重试，或到官网手动下载：https://harness.mingdao.ai/#downloads',
-              buttons: ['知道了'],
-              noLink: true,
-            })
-            .catch(() => {});
+        const msg = String(err?.message || err);
+        appLog('updater error ' + msg);
+        if (!updateSeen) return;
+        // 瞬时网络错误（切网/VPN/代理抖动，如 net::ERR_NETWORK_CHANGED）：自动重试下载
+        // 最多 2 次、间隔 5s——多数情况重试即恢复，不用打扰用户；重试失败再弹窗。
+        const netErr = /ERR_NETWORK|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ERR_INTERNET_DISCONNECTED|ENOTFOUND|EPIPE|ECONNREFUSED/i.test(msg);
+        if (!downloaded && netErr && downloadRetries < 2) {
+          downloadRetries += 1;
+          appLog(`updater 网络错误，5s 后自动重试下载（${downloadRetries}/2）`);
+          setTimeout(() => autoUpdater.downloadUpdate().catch(() => {}), 5000);
+          return;
         }
+        // Linux AppImage 替换旧文件失败（ENOENT：旧文件被移动/删除）→ 针对性指引
+        const hint =
+          process.platform === 'linux' && /ENOENT/i.test(msg)
+            ? '（旧的 AppImage 文件可能已被移动或删除——请到官网手动下载安装一次，之后可恢复自动更新）'
+            : '可稍后重试，或到官网手动下载：https://harness.mingdao.ai/#downloads';
+        dialog
+          .showMessageBox({
+            type: 'warning',
+            title: '更新下载失败',
+            message: '新版本下载失败：' + msg,
+            detail: hint,
+            buttons: ['知道了'],
+            noLink: true,
+          })
+          .catch(() => {});
       });
       autoUpdater.on('update-not-available', (info) => appLog('updater 已是最新 ' + String(info?.version ?? app.getVersion())));
       // 质检（Linux 更新下载失败根因）：info 在该打包环境为 undefined——旧代码 info.version
@@ -422,6 +437,7 @@ function setupAutoUpdate() {
       });
       autoUpdater.on('download-progress', (p) => appLog('updater 下载进度 ' + Math.round(Number(p?.percent) || 0) + '%'));
       autoUpdater.on('update-downloaded', (info) => {
+        downloaded = true;
         const v = String(info?.version ?? app.getVersion());
         appLog('updater 下载完成 ' + v);
         // 友好的更新就绪提示（用户反馈：此前界面像报错——改为明确的正向语气）
@@ -437,7 +453,22 @@ function setupAutoUpdate() {
             noLink: true,
           })
           .then((r) => {
-            if (r.response === 0) autoUpdater.quitAndInstall();
+            if (r.response !== 0) return;
+            // Linux AppImage：安装前确认当前文件仍在（用户可能已手动移动/删除 → 历史 ENOENT 事故）
+            if (process.platform === 'linux' && process.env.APPIMAGE && !fs.existsSync(process.env.APPIMAGE)) {
+              dialog
+                .showMessageBox({
+                  type: 'warning',
+                  title: '无法自动安装更新',
+                  message: '当前 AppImage 文件已不存在（可能被移动或删除），无法原地替换安装。',
+                  detail: '请到官网下载安装一次（建议保存到固定位置，如 ~/Applications/mingdao.AppImage），之后自动更新即可恢复。\nhttps://harness.mingdao.ai/#downloads',
+                  buttons: ['知道了'],
+                  noLink: true,
+                })
+                .catch(() => {});
+              return;
+            }
+            autoUpdater.quitAndInstall();
           })
           .catch(() => {});
       });
