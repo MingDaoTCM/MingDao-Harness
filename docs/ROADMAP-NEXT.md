@@ -44,10 +44,12 @@
 1. **跨平台沙箱补位**：Windows Job Object + 降权 token（零依赖原生 API）、macOS seatbelt 规则；敏感命令平台无关拦截清单兜底
 2. **记忆语义检索**：零依赖实现（内存向量 + 余弦/哈希相似度；Node 22 可用 node:sqlite 持久化，Node 18 回退 JSONL 索引），记忆注入从「最近 3 条」升级为「相关 3 条」
 3. **WebUI 看板扩展**：预算燃尽预测、费用导出 CSV
-4. GitHub Release 附件自动清理（如你提供 PAT）+ 发布清单文档化
+4. GitHub Release 附件自动清理 + 发布清单文档化
 
-## 需要你拍板的三件事
+## 已落地（本轮 Phase D 部分项提前完成）
+- **GitHub Release 附件自动清理（PAT 已接入）**：新增 `scripts/github-release-cleanup.mjs`——官网同步（收割 + sha512 MATCH 校验）后删除 Release 上的全部构建转运附件，只留指向官网的正文。用法：`MINGDAO_GITHUB_TOKEN=<PAT> node scripts/github-release-cleanup.mjs <版本号> [--dry-run]`。token 存本地 gitignored `.env`（`MINGDAO_GITHUB_TOKEN`，模式 600），不入库。验证：v0.2.2 官网同步后已清理 9 个附件，官网下载不受影响。
 
-1. **Phase 顺序**：A→B→C→D 直接推进，还是把 B（省钱）提前到 A 之前？
-2. **GitHub PAT**：是否提供（用于 Release 附件自动清理与发版自动化）？
-3. **Phase D 裁剪**：跨平台沙箱与语义检索是否都进 0.3.0，还是只做其一？
+## 需要你拍板的事
+
+1. **Phase 顺序**：A→B→C→D 直接推进，还是把 B（省钱）提前到 A 之前？（PAT 已到位，Phase D 附件清理已基本完成）
+2. **Phase D 裁剪**：跨平台沙箱与语义检索是否都进 0.3.0，还是只做其一？

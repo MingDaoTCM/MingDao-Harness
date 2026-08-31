@@ -125,5 +125,6 @@ jobs:
             fi
           fi
           # 发行政策（2026-08-28）：桌面版安装包统一由官网分发——Release 正文指向官网，
-          # 本仓库附件仅作官网收割的构建转运，官网同步后由发布流程移除。
-          gh release edit "$TAG" -R "$REPO" --notes '桌面版安装包请到官网下载（国内直连极速）：https://harness.mingdao.ai/#downloads —— 校验值与更新日志以官网为准；本 Release 附件仅作构建转运，将在官网同步后移除。' >/dev/null 2>&1 || true
+          # 本仓库附件仅作官网收割的构建转运。官网同步（收割 + MATCH 校验）后由本地流程
+          # scripts/github-release-cleanup.mjs 自动删除转运附件（见 ROADMAP-NEXT.md Phase D）。
+          gh release edit "$TAG" -R "$REPO" --notes '桌面版安装包请到官网下载（国内直连极速）：https://harness.mingdao.ai/#downloads —— 校验值与更新日志以官网为准；本 Release 附件仅作构建转运的临时暂存，官网同步后即由发布流程自动移除。' >/dev/null 2>&1 || true
