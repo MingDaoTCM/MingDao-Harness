@@ -62,6 +62,17 @@ jobs:
             if [ -z "${!k}" ]; then unset "$k"; fi
           done
           npx electron-builder ${{ matrix.args }} --publish never
+      # 打包冒烟（0.2.2 事故护栏）：真实运行打包产物主进程（xvfb 无窗口），模块求值通过即退出 0。
+      # 只跑 Linux 腿：导入缺失/路径错误这类 bug 平台无关，一个平台就足以拦截；三平台都跑浪费时长。
+      - name: 打包冒烟（主进程模块求值，xvfb）
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          MINGDAO_DESKTOP_SMOKE: '1'
+        run: |
+          cd desktop
+          test -x dist/linux-unpacked/mingdao || { echo "缺少 dist/linux-unpacked/mingdao"; ls dist; exit 1; }
+          xvfb-run -a dist/linux-unpacked/mingdao --no-sandbox
       - name: 生成更新清单（GitHub 渠道 latest*.yml）
         working-directory: desktop
         run: node gen-update-yml.mjs

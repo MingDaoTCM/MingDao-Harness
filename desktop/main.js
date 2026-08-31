@@ -25,7 +25,10 @@ const buildRoot = path.join(__dirname, 'build');
 const isDev = !app.isPackaged;
 
 // 桌面版诊断日志（渲染层 console + 主进程关键事件）：userData/logs/mingdao.log，1MB 滚动
-// 质检 A6：统一日志写入器（append + 按行截断 + 原子替换），与服务端 srvlog 同款
+// 质检 A6：统一日志写入器（append + 按行截断 + 原子替换），与服务端 srvlog 同款。
+// 必须从 srcRoot 动态加载（开发态 ../src、打包态 resourcesPath/src），静态 import 会在打包版找不到路径
+// （0.2.2 事故：此处调用 createLogWriter 却漏了导入，三平台启动即崩；冒烟见 MINGDAO_DESKTOP_SMOKE）。
+const { createLogWriter } = await import(pathToFileURL(path.join(srcRoot, 'log-writer.js')).href);
 const appLog = createLogWriter(path.join(app.getPath('userData'), 'logs', 'mingdao.log'));
 
 let mainWindow = null;
@@ -443,8 +446,12 @@ function setupAutoUpdate() {
     .catch(() => {});
 }
 
-// 单实例：二次启动聚焦已有窗口
-if (!app.requestSingleInstanceLock()) {
+// 冒烟自检（CI/无窗口环境）：MINGDAO_DESKTOP_SMOKE=1 时模块求值完成后直接退出，不创建窗口。
+// 历史教训：0.2.2 三平台启动即崩（createLogWriter 漏导入），打包期不报错、运行期才炸——此自检专门拦截该类问题。
+if (process.env.MINGDAO_DESKTOP_SMOKE === '1') {
+  app.whenReady().then(() => { console.log('MINGDAO_DESKTOP_SMOKE_OK'); app.exit(0); });
+} else if (!app.requestSingleInstanceLock()) {
+  // 单实例：二次启动聚焦已有窗口
   app.quit();
 } else {
   app.on('second-instance', () => showMainWindow());

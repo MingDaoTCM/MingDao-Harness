@@ -2004,6 +2004,23 @@ const ctx = { cwd: tmp };
   ok('web 无密钥启动：服务正常 / keyReady=false / 模型占位（黑屏回归护栏）');
 }
 
+{
+  // 质检回归（0.2.2 桌面三平台启动即崩）：main.js 顶层调用 createLogWriter 却漏了导入——
+  // 打包期不报错、运行期才炸。本地静态护栏：顶层引用的 src 模块必须经动态加载显式解构绑定；
+  // 权威验证在 CI 的 xvfb 打包冒烟（MINGDAO_DESKTOP_SMOKE=1）。
+  const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const mainJs = fs.readFileSync(path.join(repoRoot, 'desktop', 'main.js'), 'utf8');
+  // 1) 不得出现指向 ../src 的静态 import（打包态 src 在 resourcesPath，静态相对路径必炸）
+  assert.ok(!/import\s+[^;]*from\s+['"]\.\.\/src/.test(mainJs), 'main.js 不得静态 import ../src（打包态路径不同）');
+  // 2) createLogWriter 必须经顶层 await import(log-writer.js) 解构绑定
+  assert.ok(
+    /const\s*\{\s*createLogWriter\s*\}\s*=\s*await\s+import\([^)]*log-writer\.js/.test(mainJs),
+    'createLogWriter 必须从 log-writer.js 动态导入（0.2.2 回归护栏）'
+  );
+  assert.ok(fs.existsSync(path.join(repoRoot, 'src', 'log-writer.js')), 'src/log-writer.js 必须存在');
+  ok('桌面主进程静态护栏：src 动态导入 / createLogWriter 显式绑定（0.2.2 启动崩溃回归）');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 fs.rmSync(smokeHome, { recursive: true, force: true });
