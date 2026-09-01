@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+  <dict>
+    <!-- Electron 主进程所需：JIT 与内存页执行（不启用则打包版启动即崩） -->
+    <key>com.apple.security.cs.allow-jit</key><true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key><true/>
+    <key>com.apple.security.cs.allow-dyld-environment-variables</key><true/>
+    <!-- 本应用为本地 WebUI + SSE 网络客户端：允许出站网络（默认即允许，显式声明供审计） -->
+    <key>com.apple.security.network.client</key><true/>
+  </dict>
+</plist>

@@ -70,6 +70,14 @@ mac:
     - zip # 自动更新需要 zip（MacUpdater 差分/全量下载），dmg 供手动安装
   category: public.app-category.developer-tools
   icon: build/icon.png
+  # 签名 + 公证（2026-09-01 接入 Developer ID）：CI 的 macOS runner 用 CSC_LINK/CSC_KEY_PASSWORD
+  # 自动签名；notarize + APPLE_ID/APPLE_APP_SPECIFIC_PASSWORD/APPLE_TEAM_ID 走 notarytool 公证并 stapling。
+  # 未配置 Secrets 时这些字段不生效（构建回退未签名，行为与历史一致）。
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  notarize: true
 
 linux:
   executableName: mingdao
