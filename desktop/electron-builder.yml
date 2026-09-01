@@ -77,7 +77,8 @@ mac:
   gatekeeperAssess: false
   entitlements: build/entitlements.mac.plist
   entitlementsInherit: build/entitlements.mac.plist
-  notarize: true
+  notarize:
+    teamId: 3VZLHJCG48 # notarytool 需要显式 teamId（electron-builder 24.x 不读 APPLE_TEAM_ID 环境变量）
 
 linux:
   executableName: mingdao
