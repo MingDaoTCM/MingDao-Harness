@@ -96,7 +96,6 @@ linux:
 dmg:
   artifactName: mingdao-${version}-${arch}.${ext}
   # 安装指引布局（2026-09-01）：深色背景 + 「拖到 Applications」箭头提示，图标摆位左右对齐
-  backgroundColor: '#0f1115'
   background: build/dmg-bg.png
   iconSize: 100
   iconTextSize: 13
