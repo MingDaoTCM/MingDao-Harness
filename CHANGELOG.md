@@ -2,6 +2,10 @@
 
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
+## v0.2.5（2026-09-01）
+
+- Phase C 结构渐进：routes/api.js 按域拆分（7 域 + 编排器 + API 契约测试 8 组，修 icon 路径 bug）· cli REPL→commands/repl.js、worker→tasks/worker.js（tuiState 共享槽修复 onCompact 跨文件闭包）· strict 棘轮 1112→0（全量注解 + annotate-strict 辅助器，基线归零）
+
 ## v0.2.4（2026-08-31）
 
 - Phase B 省钱第二轮：工具 schema 按需挂载（只读阶段收缩/已用工具瘦身-48%）· Batch 去重回填/超窗口预检/--max-cost · 费用二级分账（reasoning/byTool/byDay + WebUI Top5/折线）· 护栏 downgrade 切 flash · bench 扩到 150+ 断言 + 覆盖率阈值 60%
