@@ -495,6 +495,12 @@ if (process.env.MINGDAO_DESKTOP_SMOKE === '1') {
   app.quit();
 } else {
   app.on('second-instance', () => showMainWindow());
+  // macOS 退出修复（2026-09-01）：Cmd+Q / 菜单「退出」走 role:'quit' → app.quit()，此前 quitting
+  // 从未置位，窗口 close 处理器 preventDefault+hide 把退出吞成「隐藏到托盘」——进程常驻退不出。
+  // before-quit 在 app.quit() 触发（含 Cmd+Q 与菜单 role:'quit'）前统一置位，close 不再拦截。
+  app.on('before-quit', () => {
+    quitting = true;
+  });
   app.whenReady().then(() => {
     buildMenu();
     buildTray();
