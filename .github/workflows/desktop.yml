@@ -61,6 +61,11 @@ jobs:
           for k in CSC_LINK CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID AZURE_TENANT_ID AZURE_CLIENT_ID AZURE_CLIENT_SECRET; do
             if [ -z "${!k}" ]; then unset "$k"; fi
           done
+          # Apple Developer ID 证书只用于 macOS：非 macOS 腿强制清空 CSC_*，防止 electron-builder
+          # 拿 Apple 证书给 Windows exe 做 Authenticode「签名」（产生无效签名，比不签更糟）
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            unset CSC_LINK CSC_KEY_PASSWORD
+          fi
           npx electron-builder ${{ matrix.args }} --publish never
       # 打包冒烟（0.2.2 事故护栏）：真实运行打包产物主进程（xvfb 无窗口），模块求值通过即退出 0。
       # 只跑 Linux 腿：导入缺失/路径错误这类 bug 平台无关，一个平台就足以拦截；三平台都跑浪费时长。
