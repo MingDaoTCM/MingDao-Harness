@@ -25,38 +25,38 @@ function loadCache() {
   }
 }
 
-function saveCache(data) {
+function saveCache(/** @type {any} */ data) {
   try {
     ensureHome();
     fs.writeFileSync(modelCacheFile(), JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
   } catch {}
 }
 
-export function providerHasKey(providerName) {
-  const pp = PROVIDERS[providerName];
+export function providerHasKey(/** @type {any} */ providerName) {
+  const pp = /** @type {any} */ (PROVIDERS)[providerName];
   if (!pp) return false;
   if (getStoredKey(providerName)) return true;
   if (pp.envKey && process.env[pp.envKey]) return true;
   return false;
 }
 
-export function providerBaseUrl(cfg, providerName) {
-  const pp = PROVIDERS[providerName];
+export function providerBaseUrl(/** @type {any} */ cfg, /** @type {any} */ providerName) {
+  const pp = /** @type {any} */ (PROVIDERS)[providerName];
   if (!pp) return '';
   // 当前服务商的 baseUrl 覆盖优先
   if (providerName === cfg?.provider && cfg?.baseUrl) return cfg.baseUrl;
   return pp.baseUrl || '';
 }
 
-export function providerApiKey(providerName) {
-  const pp = PROVIDERS[providerName];
+export function providerApiKey(/** @type {any} */ providerName) {
+  const pp = /** @type {any} */ (PROVIDERS)[providerName];
   const stored = getStoredKey(providerName);
   if (stored) return stored;
   if (pp?.envKey && process.env[pp.envKey]) return process.env[pp.envKey];
   return '';
 }
 
-function isChatModel(id) {
+function isChatModel(/** @type {any} */ id) {
   return !/embedding|rerank|moderation/i.test(id);
 }
 
@@ -64,7 +64,7 @@ function isChatModel(id) {
 // 返回 { models: [名称], fromCache, fetchedAt }；失败返回 { error }
 const inflight = new Map(); // 同服务商并发去重：合并为同一请求
 
-export async function fetchProviderModels(cfg, providerName, { force = false } = {}) {
+export async function fetchProviderModels(/** @type {any} */ cfg, /** @type {any} */ providerName, { force = false } = {}) {
   const base = providerBaseUrl(cfg, providerName).replace(/\/+$/, '');
   const key = providerApiKey(providerName);
   if (!base || !key) return { error: '该服务商未设置 API Key' };
@@ -86,8 +86,8 @@ export async function fetchProviderModels(cfg, providerName, { force = false } =
       if (!res.ok) return { error: `HTTP ${res.status}` };
       const j = /** @type {any} */ (await res.json().catch(() => null));
       const list = (j?.data || [])
-        .map((m) => String(m?.id || '').trim())
-        .filter((id) => id && isChatModel(id))
+        .map((/** @type {any} */ m) => String(m?.id || '').trim())
+        .filter((/** @type {any} */ id) => id && isChatModel(id))
         .slice(0, 200);
       if (!list.length) return { error: '接口未返回可用模型' };
       const cache2 = loadCache(); // 重新读取：避免与并发写入互相覆盖
@@ -95,7 +95,8 @@ export async function fetchProviderModels(cfg, providerName, { force = false } =
       saveCache(cache2);
       return { models: list, fromCache: false, fetchedAt: Date.now() };
     } catch (e) {
-      return { error: e.name === 'AbortError' ? '请求超时（8s）' : e.message };
+      const ee = /** @type {any} */ (e);
+      return { error: ee.name === 'AbortError' ? '请求超时（8s）' : ee.message };
     } finally {
       clearTimeout(timer);
     }
@@ -109,7 +110,7 @@ export async function fetchProviderModels(cfg, providerName, { force = false } =
 }
 
 // 合并可用模型列表：只含已设置 Key 的服务商；动态名单优先、预设回退；自定义模型恒在。
-export async function availableModels(cfg, currentModel) {
+export async function availableModels(/** @type {any} */ cfg, /** @type {any} */ currentModel) {
   const out = [];
   const seen = new Set();
   for (const [pname, pp] of Object.entries(PROVIDERS)) {
@@ -120,13 +121,13 @@ export async function availableModels(cfg, currentModel) {
     for (const n of names) {
       if (seen.has(n)) continue;
       seen.add(n);
-      const preset = MODELS[n];
+      const preset = /** @type {any} */ (MODELS)[n];
       out.push({
         name: n,
         label: preset ? `${n} — ${preset.label}` : `${n}（线上最新）`,
         provider: pname,
         providerLabel: pp.label,
-        dynamic: !MODELS[n],
+        dynamic: !(/** @type {any} */ (MODELS))[n],
       });
     }
   }

@@ -7,7 +7,7 @@
 const MAX_IMAGE_DATAURL = 7 * 1024 * 1024; // base64 膨胀 1.33 倍，对应约 5MB 原图
 const MAX_TEXT = 200 * 1024;
 
-export function buildUserContent(message, attachments, visionSupported) {
+export function buildUserContent(/** @type {any} */ message, /** @type {any} */ attachments, /** @type {any} */ visionSupported) {
   const text = String(message ?? '').trim();
   const list = Array.isArray(attachments) ? attachments.slice(0, 4) : [];
   const imageParts = [];

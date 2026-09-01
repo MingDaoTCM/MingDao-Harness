@@ -4,7 +4,7 @@ import { ensureHome } from '../config.js';
 import { setStoredKey, removeStoredKey, credentialsPath, loadCredentials, maskKey } from '../credentials.js';
 import { PROVIDERS } from '../models.js';
 
-export async function handleKey(cmd, args) {
+export async function handleKey(/** @type {any} */ cmd, /** @type {any} */ args) {
   const io = createIO();
   try {
     const sub = args[0] || 'status';

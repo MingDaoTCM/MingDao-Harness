@@ -15,22 +15,22 @@ const MAX_TIMEOUT_SECONDS = 600;
 // 整体关闭（回到完全透传）。
 const SENSITIVE_ENV_PAIR = /(api[_-]?key|access[_-]?key|client[_-]?secret|private[_-]?key)/i;
 const SENSITIVE_ENV_SEGMENT = /(^|_)(token|secret|password|passwd|credential|authorization|auth)(_|$)/i;
-const isSensitiveEnv = (k) => SENSITIVE_ENV_PAIR.test(k) || SENSITIVE_ENV_SEGMENT.test(k);
+const isSensitiveEnv = (/** @type {any} */ k) => SENSITIVE_ENV_PAIR.test(k) || SENSITIVE_ENV_SEGMENT.test(k);
 
-function buildChildEnv(ctx, filterSensitive) {
+function buildChildEnv(/** @type {any} */ ctx, /** @type {any} */ filterSensitive) {
   if (!filterSensitive) return process.env;
   const keep = new Set((ctx?.cfg?.bashEnvKeep || []).map(String));
   const env = {};
   for (const [k, v] of Object.entries(process.env)) {
-    if (!isSensitiveEnv(k) || keep.has(k)) env[k] = v;
+    if (!isSensitiveEnv(k) || keep.has(k)) (/** @type {any} */ (env))[k] = v;
   }
   return env;
 }
 
-let sandboxSupport = null;
+let /** @type {any} */ sandboxSupport = null;
 
 export function detectSandbox() {
-  if (sandboxSupport !== null) return sandboxSupport;
+  if (/** @type {any} */ sandboxSupport !== null) return /** @type {any} */ sandboxSupport;
   sandboxSupport = 'none';
   if (process.platform === 'linux') {
     try {
@@ -46,12 +46,12 @@ export function detectSandbox() {
 // 输出折叠（审计 MiniMax §3.3-E / v0.1.48 P1-G）：模型回填的 bash 输出先折叠再截断——
 // 1) 剥离 ANSI 转义序列（CSI/OSC）；2) 连续重复行（>3 行相同）折叠为「首行 + 重复标记」。
 // npm install 类输出通常 30-50KB → 折叠后 5-10KB，单次工具回填省 60-70% prompt token。
-function stripAnsi(s) {
+function stripAnsi(/** @type {any} */ s) {
   return s
     .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '')
     .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
 }
-function foldRepeats(s) {
+function foldRepeats(/** @type {any} */ s) {
   const lines = s.split('\n');
   const out = [];
   let i = 0;
@@ -69,12 +69,12 @@ function foldRepeats(s) {
   }
   return out.join('\n');
 }
-function tail(s, n) {
+function tail(/** @type {any} */ s, /** @type {any} */ n) {
   const folded = foldRepeats(stripAnsi(s));
   return folded.length > n ? `…[输出过长，已截断头部]\n${folded.slice(-n)}` : folded;
 }
 
-export function runBash(args, ctx) {
+export function runBash(/** @type {any} */ args, /** @type {any} */ ctx) {
   const command = String(args.command ?? '');
   if (!command.trim()) return { ok: false, error: 'command 参数为空。' };
   const timeoutSec = Math.min(Number(args.timeout) || 120, MAX_TIMEOUT_SECONDS);
@@ -125,13 +125,13 @@ export function runBash(args, ctx) {
     let done = false;
     let timedOut = false;
     // 输出增量截断：超长输出只保留尾部，避免内存无限累积
-    const cap = (s, d) => {
+    const cap = (/** @type {any} */ s, /** @type {any} */ d) => {
       const t = s + d;
       return t.length > MAX_OUTPUT * 2 ? t.slice(-MAX_OUTPUT * 2) : t;
     };
-    const killGroup = (sig) => {
+    const killGroup = (/** @type {any} */ sig) => {
       try {
-        process.kill(-child.pid, sig);
+        process.kill(-(/** @type {any} */ (child)).pid, sig);
       } catch {
         try {
           child.kill(sig);

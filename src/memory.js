@@ -25,14 +25,14 @@ export function loadMemory() {
   }
 }
 
-export function appendMemory(lines) {
-  const add = lines.map((l) => l.trim()).filter(Boolean);
+export function appendMemory(/** @type {any} */ lines) {
+  const add = lines.map((/** @type {any} */ l) => l.trim()).filter(Boolean);
   if (!add.length) return 0;
   ensureHome();
   // 审计 B9 + 质检 M8：与费用统计同口径，用配置时区（默认北京时间）自然日做记忆日期戳
   const bp = beijingParts(new Date());
   const date = `${bp.year}-${String(bp.month).padStart(2, '0')}-${String(bp.day).padStart(2, '0')}`;
-  fs.appendFileSync(memoryFile(), add.map((l) => (l.startsWith('-') ? `- [${date}] ${l.slice(1).trim()}` : `- [${date}] ${l}`)).join('\n') + '\n');
+  fs.appendFileSync(memoryFile(), add.map((/** @type {any} */ l) => (l.startsWith('-') ? `- [${date}] ${l.slice(1).trim()}` : `- [${date}] ${l}`)).join('\n') + '\n');
   return add.length;
 }
 
@@ -43,7 +43,7 @@ function backupMemory() {
 }
 
 // 整体覆写（编辑面板保存用，自动备份）
-export function writeMemory(content) {
+export function writeMemory(/** @type {any} */ content) {
   backupMemory();
   ensureHome();
   fs.writeFileSync(memoryFile(), String(content ?? ''));
@@ -75,7 +75,7 @@ export function dedupeMemory() {
 }
 
 // 删除包含关键词的条目
-export function removeMemoryLines(keyword) {
+export function removeMemoryLines(/** @type {any} */ keyword) {
   const raw = loadMemory();
   const kw = String(keyword).trim().toLowerCase();
   if (!raw.trim() || !kw) return 0;
@@ -97,7 +97,7 @@ export function removeMemoryLines(keyword) {
 
 let journalCount = 0; // 内存计数（评估 P3-2）：避免每次写入都整文件读一遍只为查行数
 
-export function appendJournal(home, entry) {
+export function appendJournal(/** @type {any} */ home, /** @type {any} */ entry) {
   try {
     // journalFile() 已含 mingdaoHome()（home 参数仅为兼容旧签名保留）。
     // 不能 path.join(home, dirname(journalFile()))：journalFile() 是绝对路径，join 会拼出
@@ -108,7 +108,7 @@ export function appendJournal(home, entry) {
     journalCount += 1;
   } catch (err) {
     // 静默吞错面收窄（评估建议 3）：调试开关可见原因，正常使用仍零打扰
-    if (process.env.MINGDAO_DEBUG) console.warn('[MingDao] journal 写入失败：' + (err?.message || err));
+    if (process.env.MINGDAO_DEBUG) console.warn('[MingDao] journal 写入失败：' + ((/** @type {any} */ (err))?.message || err));
   }
   // 低频截断：超过 600 行时重写保留最近 500 行（跨过上限后每 200 条检查一次）
   if (journalCount > 600 && journalCount % 200 === 0) {
@@ -123,7 +123,7 @@ export function appendJournal(home, entry) {
   }
 }
 
-export function recentJournal(home, n = 3) {
+export function recentJournal(/** @type {any} */ home, n = 3) {
   try {
     const raw = fs.readFileSync(journalFile(), 'utf8');
     return raw
@@ -143,7 +143,7 @@ export function recentJournal(home, n = 3) {
   }
 }
 
-export function recentJournalBlock(home) {
+export function recentJournalBlock(/** @type {any} */ home) {
   const entries = recentJournal(home, 3);
   if (!entries.length) return '';
   return (
@@ -160,12 +160,12 @@ export function recentJournalBlock(home) {
 }
 
 // 自动记忆提取：从对话提炼值得长期记住的用户偏好/事实（去重：已有记忆会先提供给模型）
-export async function extractMemory(provider, model, messages, existingMemory) {
+export async function extractMemory(/** @type {any} */ provider, /** @type {any} */ model, /** @type {any} */ messages, /** @type {any} */ existingMemory) {
   try {
     const convo = messages
-      .filter((m) => m.role === 'user' || m.role === 'assistant')
+      .filter((/** @type {any} */ m) => m.role === 'user' || m.role === 'assistant')
       .slice(-20)
-      .map((m) => `${m.role === 'user' ? '用户' : 'MingDao'}：${String(m.content || '').slice(0, 500)}`)
+      .map((/** @type {any} */ m) => `${m.role === 'user' ? '用户' : 'MingDao'}：${String(m.content || '').slice(0, 500)}`)
       .join('\n');
     const msgs = [
       {
@@ -182,9 +182,9 @@ export async function extractMemory(provider, model, messages, existingMemory) {
       const j = JSON.parse(String(res.text || '').trim());
       const items = Array.isArray(j?.items) ? j.items : [];
       const clean = items
-        .map((l) => String(l).trim())
+        .map((/** @type {any} */ l) => String(l).trim())
         .filter(Boolean)
-        .map((l) => (/^[·•]/.test(l) ? '- ' + l.replace(/^[·•]\s*/, '') : l.startsWith('-') ? l : '- ' + l)) // 审计 Q4：非前缀条目规整为 "- "，不再二次回退调用
+        .map((/** @type {any} */ l) => (/^[·•]/.test(l) ? '- ' + l.replace(/^[·•]\s*/, '') : l.startsWith('-') ? l : '- ' + l)) // 审计 Q4：非前缀条目规整为 "- "，不再二次回退调用
         .slice(0, 10);
       if (clean.length || items.length === 0) return clean; // 空数组 = 无新增；有内容即返回
     } catch {}
@@ -217,8 +217,8 @@ export async function extractMemory(provider, model, messages, existingMemory) {
 }
 
 // 会话收尾：写日志 + 自动记忆（turns 太少的一次性会话只记日志不提取）
-export async function finalizeSession({ cfg, provider, model, home, workingDir, messages, turns, lastText }) {
-  const firstUser = messages.find((m) => m.role === 'user')?.content || '';
+export async function finalizeSession(/** @type {any} */ { cfg, provider, model, home, workingDir, messages, turns, lastText }) {
+  const firstUser = messages.find((/** @type {any} */ m) => m.role === 'user')?.content || '';
   try {
     const wsName = null; // 由调用方通过 currentWorkspace 提供会更好，这里保持轻量
     appendJournal(home, {

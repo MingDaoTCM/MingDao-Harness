@@ -9,11 +9,18 @@ const MAX_GLOB_RESULTS = 1000;
 const MAX_GREP_MATCHES = 250;
 const MAX_FILE_BYTES = 5 * 1024 * 1024;
 
+/**
+ * @param {any} cwd
+ * @param {any} p
+ */
 function resolvePath(cwd, p) {
   if (path.isAbsolute(p)) return path.normalize(p);
   return path.resolve(cwd, p);
 }
 
+/**
+ * @param {any} buf
+ */
 function isProbablyBinary(buf) {
   const head = buf.subarray(0, 8192);
   for (let i = 0; i < head.length; i++) {
@@ -25,6 +32,10 @@ function isProbablyBinary(buf) {
 // —— undo 备份（会话级，每文件最多 10 份 + 全局上限，质检 M9） ——
 const UNDO_MAX_FILES = 64;
 const UNDO_MAX_BYTES = 20 * 1024 * 1024;
+/**
+ * @param {any} ctx
+ * @param {any} p
+ */
 function backup(ctx, p) {
   try {
     const store = ctx?.undoStore?.backups;
@@ -57,6 +68,10 @@ function backup(ctx, p) {
   } catch {}
 }
 
+/**
+ * @param {any} args
+ * @param {any} ctx
+ */
 export function undo(args, ctx) {
   const store = ctx?.undoStore?.backups;
   if (!(store instanceof Map) || !store.size) return { ok: false, error: '没有可撤销的修改。' };
@@ -68,7 +83,7 @@ export function undo(args, ctx) {
     try {
       fs.writeFileSync(p, last.content);
       return { ok: true, output: `已撤销 ${p} 的最近一次修改（该文件剩余备份 ${list.length} 个）。` };
-    } catch (err) {
+    } catch (/** @type {any} */ err) {
       return { ok: false, error: `撤销失败：${err?.message || err}` };
     }
   }
@@ -87,7 +102,7 @@ export function undo(args, ctx) {
   try {
     fs.writeFileSync(latestFile, last.content);
     return { ok: true, output: `已撤销 ${latestFile} 的最近一次修改。` };
-  } catch (err) {
+  } catch (/** @type {any} */ err) {
     return { ok: false, error: `撤销失败：${err?.message || err}` };
   }
 }
@@ -95,10 +110,17 @@ export function undo(args, ctx) {
 const READ_CACHE_MAX = 200; // 会话级 read 缓存条数上限（超出清最旧，防止无界增长）
 const readCache = new Map(); // 绝对路径 → { mtimeMs, size, lines }
 
+/**
+ * @param {any} p
+ */
 export function invalidateReadCache(p) {
   readCache.delete(p);
 }
 
+/**
+ * @param {any} args
+ * @param {any} ctx
+ */
 export function read(args, ctx) {
   try {
     const p = resolvePath(ctx.cwd, args.path ?? '');
@@ -145,13 +167,17 @@ export function read(args, ctx) {
         out.join('\n') + (truncated ? `\n…[共 ${lines.length} 行，已显示第 ${offset}-${end} 行]` : ''),
       totalLines: lines.length,
     };
-  } catch (err) {
+  } catch (/** @type {any} */ err) {
     return { ok: false, error: `读取失败：${err?.message || err}` };
   }
 }
 
 const MAX_WRITE_BYTES = 2 * 1024 * 1024; // write 单次内容上限（防模型输出超大文件打爆磁盘）
 
+/**
+ * @param {any} args
+ * @param {any} ctx
+ */
 export function write(args, ctx) {
   try {
     const p = resolvePath(ctx.cwd, args.path ?? '');
@@ -171,12 +197,17 @@ export function write(args, ctx) {
     fs.writeFileSync(p, content);
     invalidateReadCache(p);
     return { ok: true, output: `已写入 ${p}（${Buffer.byteLength(content)} 字节）。` };
-  } catch (err) {
+  } catch (/** @type {any} */ err) {
     return { ok: false, error: `写入失败：${err?.message || err}` };
   }
 }
 
 // 提取替换区域（含上下文），供 TUI 渲染变更预览
+/**
+ * @param {any} text
+ * @param {any} lineStart
+ * @param {any} lineCount
+ */
 function regionAround(text, lineStart, lineCount, context = 2) {
   const lines = text.split('\n');
   const from = Math.max(0, lineStart - context);
@@ -184,6 +215,10 @@ function regionAround(text, lineStart, lineCount, context = 2) {
   return lines.slice(from, to).join('\n');
 }
 
+/**
+ * @param {any} args
+ * @param {any} ctx
+ */
 export function edit(args, ctx) {
   try {
     const p = resolvePath(ctx.cwd, args.path ?? '');
@@ -218,11 +253,15 @@ export function edit(args, ctx) {
       output: `已编辑 ${p}（替换 ${count} 处）。`,
       diff: { before, after },
     };
-  } catch (err) {
+  } catch (/** @type {any} */ err) {
     return { ok: false, error: `编辑失败：${err?.message || err}` };
   }
 }
 
+/**
+ * @param {any} args
+ * @param {any} ctx
+ */
 export function ls(args, ctx) {
   try {
     const p = resolvePath(ctx.cwd, args.path || '.');
@@ -243,11 +282,14 @@ export function ls(args, ctx) {
         return ad - bd || a.localeCompare(b);
       });
     return { ok: true, output: rows.join('\n') || '(空目录)' };
-  } catch (err) {
+  } catch (/** @type {any} */ err) {
     return { ok: false, error: `列目录失败：${err?.message || err}` };
   }
 }
 
+/**
+ * @param {any} pattern
+ */
 function globToRegExp(pattern) {
   let re = '';
   for (let i = 0; i < pattern.length; i++) {
@@ -275,6 +317,10 @@ function globToRegExp(pattern) {
   return new RegExp('^' + re + '$');
 }
 
+/**
+ * @param {any} root
+ * @param {(full: any) => any} visitor
+ */
 function walkFiles(root, visitor) {
   const stack = [root];
   let scanned = 0;
@@ -300,6 +346,10 @@ function walkFiles(root, visitor) {
   return scanned;
 }
 
+/**
+ * @param {any} args
+ * @param {any} ctx
+ */
 export function glob(args, ctx) {
   try {
     const pattern = String(args.pattern ?? '*');
@@ -307,6 +357,7 @@ export function glob(args, ctx) {
     if (!fs.existsSync(root)) return { ok: false, error: `目录不存在：${root}` };
     const re = globToRegExp(pattern);
     const matchRel = pattern.includes('/');
+    /** @type {any[]} */
     const results = [];
     let truncated = false;
     walkFiles(root, (full) => {
@@ -321,11 +372,15 @@ export function glob(args, ctx) {
     if (!results.length) output = '(无匹配)';
     if (truncated) output += `\n…[结果超过 ${MAX_GLOB_RESULTS} 条，已截断]`;
     return { ok: true, output };
-  } catch (err) {
+  } catch (/** @type {any} */ err) {
     return { ok: false, error: `glob 失败：${err?.message || err}` };
   }
 }
 
+/**
+ * @param {any} args
+ * @param {any} ctx
+ */
 export function grep(args, ctx) {
   try {
     const pattern = String(args.pattern ?? '');
@@ -338,14 +393,16 @@ export function grep(args, ctx) {
     let re;
     try {
       re = new RegExp(pattern);
-    } catch (e) {
+    } catch (/** @type {any} */ e) {
       return { ok: false, error: `无效的正则表达式：${e.message}` };
     }
     // 单行截断：超长行（如压缩的 JS/日志）截到 20KB 再匹配，防止正则开销失控
     const MAX_LINE = 20 * 1024;
+    /** @type {(line: any) => any} */
     const testLine = (line) => (line.length > MAX_LINE ? re.test(line.slice(0, MAX_LINE)) : re.test(line));
     const root = resolvePath(ctx.cwd, args.path || '.');
     const include = args.include ? globToRegExp(String(args.include)) : null;
+    /** @type {any[]} */
     const matches = [];
     let truncated = false;
     let scannedFiles = 0;
@@ -386,7 +443,7 @@ export function grep(args, ctx) {
       ? `\n…[匹配超过 ${MAX_GREP_MATCHES} 条，已截断；已扫描 ${scannedFiles} 个文件]`
       : `\n[已扫描 ${scannedFiles} 个文件]`;
     return { ok: true, output };
-  } catch (err) {
+  } catch (/** @type {any} */ err) {
     return { ok: false, error: `grep 失败：${err?.message || err}` };
   }
 }

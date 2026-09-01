@@ -57,22 +57,22 @@ export function presetList() {
   return Object.entries(MCP_PRESETS).map(([name, p]) => ({
     name,
     label: p.label,
-    argLabel: p.argLabel || null,
+    argLabel: (/** @type {any} */ (p)).argLabel || null,
     args: p.args,
     command: p.command,
   }));
 }
 
-export function buildPreset(name, arg, cwd) {
-  const p = MCP_PRESETS[name];
+export function buildPreset(/** @type {any} */ name, /** @type {any} */ arg, /** @type {any} */ cwd) {
+  const p = /** @type {any} */ (MCP_PRESETS)[name];
   if (!p) return { error: `未知预设 ${name}（mingdao mcp preset list 查看）` };
-  if (p.argLabel && !arg) {
+  if ((/** @type {any} */ (p)).argLabel && !arg) {
     if (p.args.includes('{dir}')) {
       arg = cwd; // 目录类参数默认当前工作目录
     } else {
       return { error: `该预设需要参数：${p.argLabel}` };
     }
   }
-  const args = p.args.map((a) => (a === '{dir}' ? arg : a));
+  const args = p.args.map((/** @type {any} */ a) => (a === '{dir}' ? arg : a));
   return { config: { command: p.command, args } };
 }

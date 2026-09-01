@@ -4,21 +4,21 @@
 import { modelPreset } from './models.js';
 import { routingConfig } from './routing.js';
 
-export function titleModel(cfg, currentModel) {
+export function titleModel(/** @type {any} */ cfg, /** @type {any} */ currentModel) {
   const rc = routingConfig(cfg);
   if (rc) return rc.executor;
   // 路由关闭：辅助调用用当前模型（评估 P2-2：硬编码 flash 会在自定义网关 404 静默失败）
   return currentModel;
 }
 
-function cleanTitle(s) {
+function cleanTitle(/** @type {any} */ s) {
   return String(s ?? '')
     .trim()
     .replace(/["「」『』"'`*#\n\r]/g, '')
     .slice(0, 20);
 }
 
-export async function generateTitle(provider, model, firstUserText, { timeoutMs = 10000 } = {}) {
+export async function generateTitle(/** @type {any} */ provider, /** @type {any} */ model, /** @type {any} */ firstUserText, { timeoutMs = 10000 } = {}) {
   // 硬超时护栏（审计：「第二问无反应」根因）：标题生成发生在回合收尾阶段，若网关/网络层
   // 挂起（不抛错），回合永远无法 complete——前端停在生成态、后续发送全部静默。20s 兜底：
   // 超时放弃标题（会话仍以时间戳命名），绝不阻塞下一问。
@@ -65,13 +65,13 @@ export async function generateTitle(provider, model, firstUserText, { timeoutMs 
   }
 }
 
-export function sanitizeTitle(s) {
+export function sanitizeTitle(/** @type {any} */ s) {
   const clean = String(s).replace(/[^\w\u4e00-\u9fa5 .-]/g, '_').slice(0, 40).trim();
   return clean || '会话';
 }
 
 // 重命名会话文件（与 /title 一致：确保存在、同名加随机后缀）
-export function renameSessionFile(fs, pathMod, home, session, title) {
+export function renameSessionFile(/** @type {any} */ fs, /** @type {any} */ pathMod, /** @type {any} */ home, /** @type {any} */ session, /** @type {any} */ title) {
   const safe = sanitizeTitle(title);
   let newFile = pathMod.join(home, 'sessions', safe + '.jsonl');
   try {

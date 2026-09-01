@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadConfig } from '../config.js';
 
-export async function handleUpdateFamily(cmd, args) {
+export async function handleUpdateFamily(/** @type {any} */ cmd, /** @type {any} */ args) {
   // 价格表外置刷新（Hermes C1）：mingdao update --pricing —— 从 cfg.pricing.source 拉取官方价格 JSON
   if (cmd === 'update' && args.includes('--pricing')) {
     const cfg = loadConfig();
@@ -17,7 +17,7 @@ export async function handleUpdateFamily(cmd, args) {
   }
   // 自更新与回滚（git 安装形态）。
   // 评估 P3-1 子命令劫持防护：参数不合法时回退为普通提问（如 "mingdao update the docs" 是提问而非更新命令）
-  if (cmd === 'update' && args.every((a) => a === '--check')) {
+  if (cmd === 'update' && args.every((/** @type {any} */ a) => a === '--check')) {
     const { updateCheck, mingdaoUpdate } = await import('../update.js');
     const checkOnly = args.includes('--check');
     const r = await (checkOnly ? updateCheck() : mingdaoUpdate());
@@ -64,7 +64,7 @@ export async function handleUpdateFamily(cmd, args) {
       const raw = srcFile === '-' ? fs.readFileSync(0, 'utf8') : fs.readFileSync(srcFile, 'utf8');
       questions = raw.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).slice(0, 1000);
     } catch (err) {
-      console.log('[错误] 读取问题文件失败：' + (err?.message || err));
+      console.log('[错误] 读取问题文件失败：' + ((/** @type {any} */ (err))?.message || err));
       process.exitCode = 1;
       return true;
     }
@@ -84,7 +84,7 @@ export async function handleUpdateFamily(cmd, args) {
       maxTokens,
       maxCost,
       signal: ac.signal,
-      onStatus: (st) => console.log('  ' + st),
+      onStatus: (/** @type {any} */ st) => console.log('  ' + st),
     });
     process.removeAllListeners('SIGINT');
     if (r.error) {
@@ -92,7 +92,8 @@ export async function handleUpdateFamily(cmd, args) {
       process.exitCode = 1;
       return true;
     }
-    console.log(`✓ 完成 ${r.results.length} 条 · ↑${r.usage.prompt_tokens} ↓${r.usage.completion_tokens} tokens · 费用 ≈¥${r.cost.toFixed(5)}（已按半价）`);
+    const rr = /** @type {any} */ (r);
+    console.log(`✓ 完成 ${rr.results.length} 条 · ↑${rr.usage.prompt_tokens} ↓${rr.usage.completion_tokens} tokens · 费用 ≈¥${rr.cost.toFixed(5)}（已按半价）`);
     if (r.deduped) console.log(`  （去重合并 ${r.deduped} 条重复问题，结果已回填全部位置）`);
     console.log(`  结果文件：${r.outputFile}`);
     console.log(`  任务 ID：${r.batchId}（结果已计入 /cost 分账）`);
@@ -119,7 +120,7 @@ export async function handleUpdateFamily(cmd, args) {
       console.log('月度报告导出：mingdao cost report [YYYY-MM|all]');
       return true;
     }
-    const bar = (cost, max) => '█'.repeat(Math.max(1, Math.round((cost / max) * 20)));
+    const bar = (/** @type {any} */ cost, /** @type {any} */ max) => '█'.repeat(Math.max(1, Math.round((cost / max) * 20)));
     const md = [];
     for (const r of rows) {
       const maxDay = Math.max(...r.days.map((d) => d.cost), 1e-9);

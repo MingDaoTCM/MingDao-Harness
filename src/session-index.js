@@ -25,6 +25,7 @@ export function loadSessionIndex() {
   }
 }
 
+/** @param {any} idx */
 export function saveSessionIndex(idx) {
   try {
     ensureHome();
@@ -34,9 +35,10 @@ export function saveSessionIndex(idx) {
 }
 
 // 分词：ASCII 词（小写）+ 中文 bigram + 中文单字；返回 Map<词, 次数>
+/** @param {any} text */
 export function tokenize(text) {
   const terms = new Map();
-  const add = (t) => {
+  const add = (/** @type {any} */ t) => {
     if (t) terms.set(t, (terms.get(t) || 0) + 1);
   };
   const s = String(text ?? '');
@@ -61,6 +63,7 @@ export function tokenize(text) {
 }
 
 // 从会话文件提取可检索文本（user/assistant 内容拼接）
+/** @param {any} file */
 export function extractSessionText(file) {
   const parts = [];
   for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
@@ -79,6 +82,7 @@ export function extractSessionText(file) {
 }
 
 // 增量同步索引（对比 mtime/size，只重算变化的文件；清理已删除条目）
+/** @param {any} home @param {any} sessions */
 export function syncSessionIndex(home, sessions) {
   const idx = loadSessionIndex();
   const dir = path.join(home, 'sessions');

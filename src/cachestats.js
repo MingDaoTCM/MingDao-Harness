@@ -16,7 +16,7 @@ const MAX_LINES = 20000;
 const KEEP_LINES = 10000;
 let cacheStatsCount = 0;
 
-export function recordCacheStats(entry) {
+export function recordCacheStats(/** @type {any} */ entry) {
   try {
     ensureHome(); // 审计 B10：与 audit/journal 一致，目录缺失不静默丢统计
     const line = JSON.stringify({
@@ -54,13 +54,13 @@ export function recordCacheStats(entry) {
 // listCacheStats 读取缓存（审计：costGuard 每步 / WebUI 每 15s / /cost 命令都调用——
 // 四报告共识 P2-2/§3.3-A：全文件读+逐行 parse 会随 JSONL 增长线性放大 IO。
 // 按 mtimeMs+size 双键缓存；写入追加会改两者，轮转重写同样改，缓存自动失效）
-let _statsCache = null;
+let /** @type {any} */ _statsCache = null;
 
 export function listCacheStats(limit = 2000) {
   try {
     const file = cacheStatsFile();
     const st = fs.statSync(file);
-    if (!_statsCache || _statsCache.mtimeMs !== st.mtimeMs || _statsCache.size !== st.size || _statsCache.limit < limit) {
+    if (!/** @type {any} */ _statsCache || _statsCache.mtimeMs !== st.mtimeMs || _statsCache.size !== st.size || _statsCache.limit < limit) {
       const raw = fs.readFileSync(file, 'utf8');
       const out = [];
       for (const l of raw.split('\n')) {
@@ -77,8 +77,8 @@ export function listCacheStats(limit = 2000) {
   }
 }
 
-export function summarizeCacheStats(entries) {
-  const sum = { turns: entries.length, prompt: 0, completion: 0, hit: 0, miss: 0, cost: 0, saved: 0, steps: 0, llmMs: 0, toolMs: 0, firstTokenCount: 0, firstTokenSumMs: 0 };
+export function summarizeCacheStats(/** @type {any} */ entries) {
+  const sum = /** @type {any} */ ({ turns: entries.length, prompt: 0, completion: 0, hit: 0, miss: 0, cost: 0, saved: 0, steps: 0, llmMs: 0, toolMs: 0, firstTokenCount: 0, firstTokenSumMs: 0 });
   for (const e of entries) {
     sum.prompt += e.prompt || 0;
     sum.completion += e.completion || 0;
@@ -102,7 +102,7 @@ export function summarizeCacheStats(entries) {
 
 // 记录一次用量（agent 侧调用）：自动计算命中拆分与节省额
 // 记录一次用量（agent 侧调用）：自动计算命中拆分与节省额；perf 为回合性能指标（状态栏）
-export function recordUsage(modelName, usage, perf = null) {
+export function recordUsage(/** @type {any} */ modelName, /** @type {any} */ usage, /** @type {any} */ perf = null) {
   const split = cacheSplit(usage);
   const prompt = usage?.prompt_tokens || 0;
   const completion = usage?.completion_tokens || 0;
@@ -132,8 +132,8 @@ export function recordUsage(modelName, usage, perf = null) {
   });
 }
 
-export function formatCacheSummary(sum) {
-  const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+export function formatCacheSummary(/** @type {any} */ sum) {
+  const fmt = (/** @type {any} */ n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
   const lines = [
     `轮次  ${sum.turns} · ↑${fmt(sum.prompt)} ↓${fmt(sum.completion)} tokens`,
     `缓存命中率  ${sum.rate != null ? (sum.rate * 100).toFixed(0) + '%' : '暂无缓存数据'}`,
@@ -213,7 +213,7 @@ export function costBreakdown() {
 
 // 月度费用报告（/cost 导出）：按北京时间月份聚合，month 形如 'YYYY-MM'，缺省返回全部月份
 // 省钱 B3：月度聚合增加 reasoning 与 byTool 维度
-export function costMonthlyReport(month) {
+export function costMonthlyReport(/** @type {any} */ month) {
   const entries = listCacheStats(100000);
   const want = String(month || '').trim();
   const months = new Map();

@@ -11,7 +11,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { startTask, readTask, killTask } from './tasks.js';
 
-function isRunningTask(home, taskId) {
+function isRunningTask(/** @type {any} */ home, /** @type {any} */ taskId) {
   const t = readTask(home, taskId);
   return Boolean(t && t.status === 'running');
 }
@@ -21,21 +21,21 @@ const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url));
 import { isPeakHour, deferToOffpeak } from './pricing.js';
 import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
 
-export function scheduleDir(home) {
+export function scheduleDir(/** @type {any} */ home) {
   return path.join(home, 'schedule');
 }
 
-export function parseInterval(s) {
+export function parseInterval(/** @type {any} */ s) {
   const m = /^(\d+)(s|m|h|d)$/.exec(String(s).trim());
   if (!m) return null;
   const n = Number(m[1]);
-  const unit = { s: 1000, m: 60000, h: 3600000, d: 86400000 }[m[2]];
+  const unit = /** @type {Record<string, number>} */ ({ s: 1000, m: 60000, h: 3600000, d: 86400000 })[m[2]];
   if (!(n > 0)) return null;
   return n * unit;
 }
 
 // 解析 --at：'YYYY-MM-DD HH:MM' 或 'HH:MM'（今天；已过则明天）
-export function parseAt(s) {
+export function parseAt(/** @type {any} */ s) {
   const t = String(s).trim();
   const full = /^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})$/.exec(t);
   if (full) {
@@ -56,7 +56,7 @@ export function parseAt(s) {
   return null;
 }
 
-export function listSchedules(home) {
+export function listSchedules(/** @type {any} */ home) {
   const dir = scheduleDir(home);
   let files;
   try {
@@ -74,11 +74,11 @@ export function listSchedules(home) {
   return out.sort((a, b) => (a.nextRunAt || 0) - (b.nextRunAt || 0));
 }
 
-function isValidScheduleId(id) {
+function isValidScheduleId(/** @type {any} */ id) {
   return typeof id === 'string' && /^[a-z0-9]+$/.test(id) && id.length >= 2 && id.length <= 40;
 }
 
-export function readSchedule(home, id) {
+export function readSchedule(/** @type {any} */ home, /** @type {any} */ id) {
   if (!isValidScheduleId(id)) return null; // 防 id 路径穿越
   try {
     return JSON.parse(fs.readFileSync(path.join(scheduleDir(home), id + '.json'), 'utf8'));
@@ -87,7 +87,7 @@ export function readSchedule(home, id) {
   }
 }
 
-export function writeSchedule(home, job) {
+export function writeSchedule(/** @type {any} */ home, /** @type {any} */ job) {
   if (!isValidScheduleId(job?.id)) return null;
   fs.mkdirSync(scheduleDir(home), { recursive: true });
   const target = path.join(scheduleDir(home), job.id + '.json');
@@ -96,7 +96,7 @@ export function writeSchedule(home, job) {
 }
 
 /** 新建调度任务；after: 依赖的任务 ID（全部成功后才启动，任一失败则跳过） */
-export function addSchedule(home, question, /** @type {any} */ { at, every, after, permission, model, cwd, anchor, offpeak }) {
+export function addSchedule(/** @type {any} */ home, /** @type {any} */ question, /** @type {any} */ { at, every, after, permission, model, cwd, anchor, offpeak }) {
   const id = 'sc' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
   const interval = every != null ? parseInterval(every) : null;
   const afterList = Array.isArray(after) ? after.filter(Boolean).map(String) : after ? String(after).split(',').map((x) => x.trim()).filter(Boolean) : [];
@@ -147,7 +147,7 @@ export function addSchedule(home, question, /** @type {any} */ { at, every, afte
 // 质检 H2（pause 失效确定性回归）：runOnce 返回后的状态决策抽为纯函数——
 // 用户在执行期间 pause/remove 的指令（paused/failed/文件已删）绝不被 pending 覆盖；
 // 连续失败 3 次熔断；否则排下一次（锚点对齐避免逐日漂移）。
-export function postRunStatus(cur2, result) {
+export function postRunStatus(/** @type {any} */ cur2, /** @type {any} */ result) {
   if (!cur2) return null;
   if (cur2.status === 'paused' || cur2.status === 'failed') return null;
   if (result !== 'done' && (cur2.consecutiveFailures || 0) >= 3) {
@@ -157,7 +157,7 @@ export function postRunStatus(cur2, result) {
   return { status: 'pending', nextRunAt: next };
 }
 
-export function removeSchedule(home, id) {
+export function removeSchedule(/** @type {any} */ home, /** @type {any} */ id) {
   // 质检 H3：读-改-写序列加锁，与 sleeper 循环的状态写互斥（防丢更新）
   return withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
     const job = readSchedule(home, id);
@@ -179,7 +179,7 @@ export function removeSchedule(home, id) {
   });
 }
 
-export function pauseSchedule(home, id) {
+export function pauseSchedule(/** @type {any} */ home, /** @type {any} */ id) {
   // 质检 H3：读-改-写序列加锁（pause 与 sleeper 的 postRunStatus 写互斥，杜绝 pause 被覆盖）
   return withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
     const job = readSchedule(home, id);
@@ -198,7 +198,7 @@ export function pauseSchedule(home, id) {
   });
 }
 
-export function resumeSchedule(home, id) {
+export function resumeSchedule(/** @type {any} */ home, /** @type {any} */ id) {
   const job = readSchedule(home, id);
   if (!job || job.status !== 'paused') return false;
   let next = job.nextRunAt;
@@ -215,7 +215,7 @@ export function resumeSchedule(home, id) {
 }
 
 // 每日锚点：锚点时刻（HH:MM）对齐到 now 之后的最近一次
-function nextAnchorAfter(anchor, interval) {
+function nextAnchorAfter(/** @type {any} */ anchor, /** @type {any} */ interval) {
   const a = parseAt(anchor);
   if (a == null) return null;
   let n = a;
@@ -224,7 +224,7 @@ function nextAnchorAfter(anchor, interval) {
 }
 
 // 链式编排：A→B→C，后者依赖前者成功
-export function chainSchedules(home, questions, opts = {}) {
+export function chainSchedules(/** @type {any} */ home, /** @type {any} */ questions, opts = {}) {
   const ids = [];
   let prev = null;
   for (const q of questions) {
@@ -237,7 +237,7 @@ export function chainSchedules(home, questions, opts = {}) {
   return { ids };
 }
 
-export function sleeperAlive(pid) {
+export function sleeperAlive(/** @type {any} */ pid) {
   if (!pid) return false;
   try {
     process.kill(pid, 0);
@@ -247,7 +247,7 @@ export function sleeperAlive(pid) {
   }
 }
 
-function spawnSleeper(home, job) {
+function spawnSleeper(/** @type {any} */ home, /** @type {any} */ job) {
   const child = spawn(process.execPath, [CLI_PATH, 'schedule-worker', job.id], {
     detached: true,
     stdio: 'ignore',
@@ -260,12 +260,12 @@ function spawnSleeper(home, job) {
 }
 
 // —— 单守护进程调度器（评估 P3-5）：一进程监督全部任务 ——
-export function daemonPidFile(home) {
+export function daemonPidFile(/** @type {any} */ home) {
   return path.join(scheduleDir(home), 'daemon.pid');
 }
 // pid 文件内容 "pid nonce"：校验进程存在 + 命令行含同一 nonce，防止陈旧 PID 被无关进程复用而误判（审计 P2-7）
 // 质检 M11：kill 前校验 PID 归属（/proc/<pid>/cmdline 含 needle 才动手，防 PID 复用误杀）
-function pidOwnedBy(pid, needle) {
+function pidOwnedBy(/** @type {any} */ pid, /** @type {any} */ needle) {
   try {
     const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
     return cmdline.includes(needle);
@@ -274,7 +274,7 @@ function pidOwnedBy(pid, needle) {
   }
 }
 
-export function daemonAlive(home) {
+export function daemonAlive(/** @type {any} */ home) {
   try {
     const [pidStr, nonce] = fs.readFileSync(daemonPidFile(home), 'utf8').trim().split(/\s+/);
     const pid = Number(pidStr);
@@ -291,7 +291,7 @@ export function daemonAlive(home) {
     return false;
   }
 }
-export function stopDaemon(home) {
+export function stopDaemon(/** @type {any} */ home) {
   try {
     const pid = Number(fs.readFileSync(daemonPidFile(home), 'utf8'));
     if (pid) {
@@ -305,7 +305,7 @@ export function stopDaemon(home) {
   } catch {}
   return true;
 }
-export function spawnDaemon(home) {
+export function spawnDaemon(/** @type {any} */ home) {
   if (daemonAlive(home)) return true;
   const nonce = Math.random().toString(36).slice(2, 10);
   const child = spawn(process.execPath, [CLI_PATH, 'schedule-daemon', nonce], {
@@ -324,7 +324,7 @@ export function spawnDaemon(home) {
 }
 
 // 重启自愈：有非终态任务且 daemon 不在 → 拉起单守护（失败才回退旧式逐任务 sleeper）
-export function reconcileSchedules(home) {
+export function reconcileSchedules(/** @type {any} */ home) {
   const jobs = listSchedules(home);
   const hasPending = jobs.some((j) => j.status === 'pending' || j.status === 'running');
   if (!hasPending) return;
@@ -343,14 +343,14 @@ export function reconcileSchedules(home) {
   spawnDaemon(home);
 }
 // —— sleeper 主循环（schedule-worker 进程内运行）——
-export async function runSleeper(home, id) {
+export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id) {
   const job = readSchedule(home, id);
   if (!job) return;
 
-  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+  const wait = (/** @type {any} */ ms) => new Promise((r) => setTimeout(r, ms));
 
   // 依赖检查：支持两种依赖——调度任务 id（chain 编排）或后台任务 id（mingdao run 输出）
-  async function depsSatisfied(deps) {
+  async function depsSatisfied(/** @type {any} */ deps) {
     for (const dep of deps) {
       const sch = readSchedule(home, dep);
       if (sch) {
@@ -476,7 +476,7 @@ export async function runSleeper(home, id) {
   }
 }
 
-export function formatScheduleRow(j) {
+export function formatScheduleRow(/** @type {any} */ j) {
   const mark = j.status === 'pending' ? '⏳' : j.status === 'running' ? '▶' : j.status === 'paused' ? '⏸' : j.status === 'done' ? '✓' : '✖';
   const when =
     j.kind === 'every'

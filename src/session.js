@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+/** @param {any} home */
 export function listSessions(home) {
   const dir = path.join(home, 'sessions');
   try {
@@ -20,10 +21,12 @@ export function listSessions(home) {
   }
 }
 
+/** @param {any} home */
 export function latestSession(home) {
   return listSessions(home)[0] || null;
 }
 
+/** @param {any} home */
 export function createSession(home) {
   const dir = path.join(home, 'sessions');
   fs.mkdirSync(dir, { recursive: true });
@@ -33,18 +36,21 @@ export function createSession(home) {
   return { file, name: path.basename(file) };
 }
 
+/** @param {any} file @param {any} messages */
 export function appendMessages(file, messages) {
   if (!messages?.length) return;
-  const lines = messages.map((m) => JSON.stringify(m)).join('\n') + '\n';
+  const lines = messages.map((/** @type {any} */ m) => JSON.stringify(m)).join('\n') + '\n';
   fs.appendFileSync(file, lines);
 }
 
 // 整文件原子重写：自动压缩后把会话文件同步为压缩形态（否则每次加载历史都会重新触发压缩）
+/** @param {any} file @param {any} messages */
 export function rewriteSession(file, messages) {
-  const lines = messages.map((m) => JSON.stringify(m)).join('\n');
+  const lines = messages.map((/** @type {any} */ m) => JSON.stringify(m)).join('\n');
   atomicWriteFileSync(file, lines + (lines ? '\n' : ''), { mode: 0o600 }); // 质检 H4：会话文件原子写
 }
 
+/** @param {any} file */
 export function loadSession(file) {
   const raw = fs.readFileSync(file, 'utf8');
   const messages = [];
@@ -61,6 +67,7 @@ export function loadSession(file) {
 }
 
 // 会话预览：第一条用户消息（用于会话选择器）
+/** @param {any} file */
 export function sessionPreview(file) {
   try {
     const raw = fs.readFileSync(file, 'utf8');
@@ -79,6 +86,7 @@ export function sessionPreview(file) {
   }
 }
 
+/** @param {any} mtime */
 export function relativeTime(mtime) {
   const diff = Date.now() - mtime;
   if (diff < 60000) return '刚刚';
@@ -92,6 +100,7 @@ export function relativeTime(mtime) {
 import { syncSessionIndex, tokenize, extractSessionText } from './session-index.js';
 import { atomicWriteFileSync } from './atomic-write.js';
 
+/** @param {any} home @param {any} keyword */
 export function searchSessions(home, keyword, { limit = 20 } = {}) {
   const kw = String(keyword ?? '').trim();
   if (!kw) return listSessions(home).slice(0, limit);

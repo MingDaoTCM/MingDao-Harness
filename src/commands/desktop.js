@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { findRepoRoot } from '../update.js';
 
-export async function handleDesktop(args) {
+export async function handleDesktop(/** @type {any} */ args) {
   const repo = findRepoRoot();
   if (!repo) {
     console.log('mingdao desktop 需要「仓库安装形态」（npm 全局安装不含桌面壳）。');

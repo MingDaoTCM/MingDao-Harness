@@ -21,7 +21,7 @@ const BASE = `你是 MingDao Harness，一个由 MingDao Harness 驱动的 AI �
 9. 善用工具：能用工具确认的事实就用工具确认；多个只读工具可连续调用以提高效率。
 10. 交付收尾：完成工具操作后必须给出简短交付总结——生成了哪些文件（路径）、如何运行/使用（如「浏览器打开 angry-birds.html 即可游玩」或运行命令）、以及未完成或注意事项（若有）。绝不能不声不响结束。`;
 
-function loadFile(p, cap) {
+function loadFile(/** @type {any} */ p, /** @type {any} */ cap) {
   try {
     const s = fs.readFileSync(p, 'utf8');
     return s.length > cap ? s.slice(0, cap) + '\n…[过长已截断]' : s;

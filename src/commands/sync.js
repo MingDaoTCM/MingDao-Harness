@@ -16,13 +16,13 @@ import {
   resolveSyncConflict,
 } from '../sync.js';
 
-async function askHidden(question) {
+async function askHidden(/** @type {any} */ question) {
   return new Promise((resolve) => {
     // _writeToOutput 为 readline 内部接口：静音回显（密码输入），类型护栏下显式 any
     const rl = /** @type {any} */ (readline.createInterface({ input: process.stdin, output: process.stdout }));
     const orig = rl._writeToOutput;
     rl._writeToOutput = () => {};
-    rl.question(question, (a) => {
+    rl.question(question, (/** @type {any} */ a) => {
       if (typeof orig === 'function') rl._writeToOutput = orig;
       rl.close();
       resolve(a.trim());
@@ -30,7 +30,7 @@ async function askHidden(question) {
   });
 }
 
-export async function handleSync(cmd, args) {
+export async function handleSync(/** @type {any} */ cmd, /** @type {any} */ args) {
   const sub = args[0] || 'status';
   if (sub === 'login') {
     const username = args[1];
@@ -191,7 +191,7 @@ export async function handleSync(cmd, args) {
     return true;
   }
   if (sub === 'push') {
-    const r = await syncPush(args[1]);
+    const r = /** @type {any} */ (await syncPush(args[1]));
     if (r.error) {
       console.log('[错误] ' + r.error);
       process.exitCode = 1;
@@ -201,7 +201,7 @@ export async function handleSync(cmd, args) {
     return true;
   }
   if (sub === 'pull') {
-    const r = await syncPull(args[1]);
+    const r = /** @type {any} */ (await syncPull(args[1]));
     if (r.error) {
       console.log('[错误] ' + r.error);
       process.exitCode = 1;

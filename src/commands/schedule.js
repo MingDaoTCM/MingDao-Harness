@@ -14,7 +14,7 @@ import {
 import { listTasks, killTask, formatTaskRow } from '../tasks.js';
 import { ensureHome } from '../config.js';
 
-function printTasks(home) {
+function printTasks(/** @type {any} */ home) {
   const tasks = listTasks(home);
   if (!tasks.length) {
     console.log('暂无任务。启动：mingdao run "<任务>"');
@@ -26,7 +26,7 @@ function printTasks(home) {
   console.log(running ? `\n${running} 个运行中 · mingdao tasks watch 实时刷新 · kill <id> 停止` : '\n无运行中任务');
 }
 
-async function watchTasks(home) {
+async function watchTasks(/** @type {any} */ home) {
   if (!process.stdout.isTTY) {
     printTasks(home);
     return;
@@ -45,7 +45,7 @@ async function watchTasks(home) {
   }
 }
 
-export async function handleTasks(cmd, args) {
+export async function handleTasks(/** @type {any} */ cmd, /** @type {any} */ args) {
   const home0 = ensureHome();
   reconcileSchedules(home0);
   const sub = args[0];
@@ -67,7 +67,7 @@ export async function handleTasks(cmd, args) {
   return true;
 }
 
-export async function handleSchedule(cmd, args) {
+export async function handleSchedule(/** @type {any} */ cmd, /** @type {any} */ args) {
   const home0 = ensureHome();
   reconcileSchedules(home0);
   const sub = args[0];
@@ -86,7 +86,7 @@ export async function handleSchedule(cmd, args) {
     let at = null;
     let every = null;
     let anchor = null;
-    let after = [];
+    let /** @type {any} */ after = [];
     let permission = null;
     let model = null;
     let offpeak = false;
@@ -106,7 +106,7 @@ export async function handleSchedule(cmd, args) {
       process.exitCode = 1;
       return true;
     }
-    const r = addSchedule(home0, question, { at, every, after, permission, model, cwd: process.cwd(), anchor, offpeak });
+    const r = addSchedule(home0, question, { at, every, /** @type {any} */ after, permission, model, cwd: process.cwd(), anchor, offpeak });
     if (r.error) {
       console.log('[错误] ' + r.error);
       process.exitCode = 1;
@@ -162,7 +162,7 @@ export async function handleSchedule(cmd, args) {
       process.exitCode = 1;
       return true;
     }
-    const r = chainSchedules(home0, rest);
+    const r = /** @type {any} */ (chainSchedules(home0, rest));
     if (r.error) {
       console.log('[错误] ' + r.error);
       process.exitCode = 1;

@@ -23,7 +23,7 @@ const SUMMARY_SYSTEM =
   '保留用户目标与关键要求、已完成的步骤与结论、修改/创建的文件、未完成事项、重要约定与决策；' +
   '省略已完成的中间过程与细节。只输出 JSON：{"summary": "摘要内容"}。';
 
-export async function summarizeConversation(provider, model, convoText) {
+export async function summarizeConversation(/** @type {any} */ provider, /** @type {any} */ model, /** @type {any} */ convoText) {
   const base = {
     model,
     messages: [
@@ -54,7 +54,7 @@ export async function summarizeConversation(provider, model, convoText) {
   return { text: text.slice(0, SUMMARY_MAX_CHARS), usage };
 }
 
-export async function compactConversation({ messages, budget, count, provider, executorModel, triggerRatio, force = false }) {
+export async function compactConversation(/** @type {any} */ { messages, budget, count, provider, executorModel, triggerRatio, force = false }) {
   if (!messages.length) return null;
   // 各消息 token 与总量；低于触发线（默认预算 80%）无需压缩
   const sizes = [];
@@ -85,14 +85,14 @@ export async function compactConversation({ messages, budget, count, provider, e
   // 被裁段落 → 文本（工具结果截断；tool_calls 带名称标注）
   const convoText = messages
     .slice(1, boundary)
-    .map((m) => {
+    .map((/** @type {any} */ m) => {
       if (m.role === 'tool') {
         return `工具结果(${m.tool_call_id ?? ''}): ${clampText(String(m.content ?? ''), TOOL_OUTPUT_CAP)}`;
       }
       const head = m.role === 'user' ? '用户' : m.role === 'assistant' ? 'MingDao' : String(m.role);
       const calls =
         Array.isArray(m.tool_calls) && m.tool_calls.length
-          ? ` [调用: ${m.tool_calls.map((tc) => `${tc.function?.name ?? ''}(${String(tc.function?.arguments ?? '').slice(0, 200)})`).join('; ')}]`
+          ? ` [调用: ${m.tool_calls.map((/** @type {any} */ tc) => `${tc.function?.name ?? ''}(${String(tc.function?.arguments ?? '').slice(0, 200)})`).join('; ')}]`
           : '';
       return `${head}: ${String(m.content ?? '')}${calls}`;
     })
@@ -102,7 +102,7 @@ export async function compactConversation({ messages, budget, count, provider, e
   // —— 增量压缩（Kimi P2-D）：已压缩过的会话只压「旧摘要之后的新增段」，与旧摘要合并（摘要的摘要），
   // 不再反复把早期内容送进摘要输入——第 N 次压缩输入从 O(历史) 降为 O(增量)。 ——
   const sumIdx = messages.findIndex(
-    (m) => m.role === 'user' && typeof m.content === 'string' && m.content.includes('<conversation_summary>')
+    (/** @type {any} */ m) => m.role === 'user' && typeof m.content === 'string' && m.content.includes('<conversation_summary>')
   );
   let incremental = false;
   let summary = null;
@@ -113,7 +113,7 @@ export async function compactConversation({ messages, budget, count, provider, e
     const oldSummary = (m && m[1]) || '';
     const newText = messages
       .slice(sumIdx + 1, boundary)
-      .map((msg) => {
+      .map((/** @type {any} */ msg) => {
         if (msg.role === 'tool') {
           return `工具结果(${msg.tool_call_id ?? ''}): ${clampText(String(msg.content ?? ''), TOOL_OUTPUT_CAP)}`;
         }

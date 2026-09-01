@@ -29,7 +29,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   const temperature = cfg.temperature ?? preset.temperature ?? 0.6;
   const reasoningEffort = cfg.reasoningEffort ?? preset.reasoningEffort?.default ?? undefined;
   const hooks = createHooks(cfg.hooks, workingDir);
-  const todos = [];
+  const todos = /** @type {any[]} */ ([]);
   // 会话级共享：调用方传入则复用（/model 切换、子代理均共享，undo 不丢失）
   const undo = undoStore || { backups: new Map() };
   const stepLimit = maxSteps || MAX_STEPS;
@@ -60,12 +60,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   };
 
   // 子代理：全新上下文 + 同一 Provider/权限（提示带「子任务」标记），独立完成子任务后汇报
-  async function spawnTask(prompt, { description = '', readOnly = false } = {}) {
+  async function spawnTask(/** @type {any} */ prompt, { description = '', readOnly = false } = {}) {
     const subIo = createIO({ quiet: true });
     // 只读子代理（评估 A4：可并行）：只读工具自动放行、写类直接拒绝，无交互询问
     const subPermission = readOnly
-      ? { mode: 'readonly-noask', check: (name) => READONLY_TOOLS_SET.has(name) }
-      : { check: (name, args) => permission.check(name, args, '（子任务）') };
+      ? { mode: 'readonly-noask', check: (/** @type {any} */ name) => READONLY_TOOLS_SET.has(name) }
+      : { check: (/** @type {any} */ name, /** @type {any} */ args) => permission.check(name, args, '（子任务）') };
     // 自动路由：子代理固定走 executor 模型（便宜的执行单元）
     const subModel = subagentModel(cfg, modelName);
     const subAgent = createAgent({
@@ -110,19 +110,19 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       budget,
       todos,
       undoStore: undo,
-      spawnTask: (prompt, opts) => spawnTask(prompt, opts),
+      spawnTask: (/** @type {any} */ prompt, /** @type {any} */ opts) => spawnTask(prompt, opts),
     };
   }
 
-  async function runTurn(messages) {
+  async function runTurn(/** @type {any} */ messages) {
     let steps = 0;
     let finish = null;
-    const usage = { prompt_tokens: 0, completion_tokens: 0 };
+    const usage = /** @type {{ prompt_tokens: number, completion_tokens: number, prompt_cache_hit_tokens?: number, prompt_cache_miss_tokens?: number }} */ ({ prompt_tokens: 0, completion_tokens: 0 });
     const startedAt = Date.now();
     // 回合性能指标（状态栏：LLM 时长 / 工具时长 / 首 token 延迟 / 步数）
     let llmMsTotal = 0;
     let toolMsTotal = 0;
-    let firstTokenAt = null;
+    let firstTokenAt = /** @type {any} */ (null);
     // 省钱 B3（费用二级分账）：推理 token 估算（按增量累计）与逐工具调用/耗时累加
     let reasoningTokens = 0;
     const toolStats = /** @type {Map<string, {calls: number, ms: number}>} */ (new Map());
@@ -137,7 +137,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     });
     let aborted = false;
     let emptyRounds = 0; // 连续空/截断输出计数（防止无限续写）
-    let currentAc = null;
+    let currentAc = /** @type {any} */ (null);
     // 省钱 B4（护栏降级）：action='downgrade' 超限后本回合切换到便宜模型继续执行；
     // activeModel 是本回合实际使用的模型（分账/记录归属它），downgraded 保证只提示一次。
     let activeModel = modelName;
@@ -203,9 +203,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       for (const m of sanitized) {
         const rc = m.reasoning_content;
         if (typeof rc === 'string' && rc.length > 4000) {
-          sanitized = sanitized.map((x) => (x === m ? { ...x, reasoning_content: `[思考过程已省略（原 ${rc.length} 字）]` } : x));
+          sanitized = sanitized.map((/** @type {any} */ x) => (x === m ? { ...x, reasoning_content: `[思考过程已省略（原 ${rc.length} 字）]` } : x));
         } else if (typeof rc === 'string' && rc.length > 1000) {
-          sanitized = sanitized.map((x) => (x === m ? { ...x, reasoning_content: rc.slice(-500) + ' …[思考过程已截断]' } : x));
+          sanitized = sanitized.map((/** @type {any} */ x) => (x === m ? { ...x, reasoning_content: rc.slice(-500) + ' …[思考过程已截断]' } : x));
         }
       }
 
@@ -289,7 +289,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           maxTokens: maxOutput,
           reasoningEffort,
           signal: ac.signal,
-          onDelta(d) {
+          onDelta(/** @type {any} */ d) {
             io.stopSpinner();
             if (firstTokenAt == null) firstTokenAt = Date.now(); // 首个增量即首 token
             if (d.text) io.writeText(d.text);
@@ -339,7 +339,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
 
         // 预检：解析参数 → PreToolUse 钩子 → 权限检查；拒绝/失败只回填不执行（返回 null）
         // task 工具标记 readOnly 时也可并行（评估 A4：只读子代理 Promise.all）
-        async function prepTool(tc) {
+        async function prepTool(/** @type {any} */ tc) {
           const name = tc.function?.name || '';
           // 审计（P3-5）：参数与拒绝原因都记录（配置 audit:false 可关）
           const auditOn = cfg.audit !== false;
@@ -353,7 +353,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               args: auditArgs(),
               ...extra,
             });
-          let args = null;
+          let args = /** @type {any} */ (null);
           try {
             args = JSON.parse(tc.function?.arguments || '{}');
           } catch {
@@ -403,7 +403,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 执行单个工具（渲染「执行中」→ dispatch → 捕获异常转错误结果）
         // 审计 Hermes C4：同回合相同参数的只读工具（read/ls/glob/grep/skill）合并执行一次，
         // 后续相同调用直接复用结果（仍逐个回填 tool 消息以保持 tool_call_id 配对）
-        async function runTool(prep) {
+        async function runTool(/** @type {any} */ prep) {
           io.renderToolStart?.(prep.name, prep.args);
           usedToolNames.add(prep.name); // 省钱 B1：执行过即标记，后续轮次省略其 description
           const dedupKey = !prep.isMcp && READONLY_TOOLS_SET.has(prep.name) ? prep.name + ':' + JSON.stringify(prep.args || {}) : null;
@@ -421,13 +421,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             }
             if (dedupKey) turnToolCache.set(dedupKey, result);
             return result;
-          } catch (err) {
+          } catch (/** @type {any} */ err) {
             return JSON.stringify({ ok: false, error: String(err?.message || err) });
           }
         }
 
         // 收尾：渲染结果 → todo 更新 → PostToolUse 钩子 → 回填消息（顺序与串行一致）
-        function finishTool(prep, result, t0) {
+        function finishTool(/** @type {any} */ prep, /** @type {any} */ result, /** @type {any} */ t0) {
           const ms = Date.now() - t0;
           toolMsTotal += ms;
           // 省钱 B3：逐工具调用/耗时累加（费用二级分账的 byTool 维度）
@@ -473,7 +473,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           const batch = []; // {prep, batchable}
           while (i < res.toolCalls.length) {
             const tc = res.toolCalls[i];
-            const prep = await prepTool(tc);
+            const prep = /** @type {any} */ (await prepTool(tc));
             const name = tc.function?.name || '';
             let batchable = canBatch && Boolean(prep) && !prep.isMcp && READONLY_BATCH.has(name);
             if (!batchable && canBatch && Boolean(prep) && name === 'task' && prep.args?.readOnly === true) batchable = true;
@@ -601,7 +601,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     maxOutput,
     temperature,
     runTurn,
-    spawnTask: (prompt, opts) => spawnTask(prompt, opts),
+    spawnTask: (/** @type {any} */ prompt, /** @type {any} */ opts) => spawnTask(prompt, opts),
     getTodos: () => todos.slice(),
   };
 }

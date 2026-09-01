@@ -34,11 +34,11 @@
 5. ✅ **评测基准扩充**：压缩质量集（5 组长会话样本 → 压缩 → 关键事实存活断言 + 尾部字节不变）、路由标注集扩至 100 条；bench 断言数 38 → 150+；覆盖率阈值 55% → 60%
 - 版本说明：v0.2.3 被 0.2.2 桌面启动崩溃的紧急修复占用，Phase B 顺延为 v0.2.4。
 
-### Phase C「结构渐进」v0.2.5（约 2 天）
-1. routes/api.js 按域细分（config/sessions/sync/schedule/skills/workspace/misc 7 模块 + 共享中间件），每域配 API 契约测试
-2. cli.js REPL → commands/repl.js、worker → tasks/worker.js（e2e-local 16 项全绿做护栏）
-3. strict 棘轮削 300 条（先 credentials/permissions/config/sync-server/session 五个安全关键模块全量注解）
-- 验收：tsc full 错误数 ≤1284；结构清单在文档登记。
+### Phase C「结构渐进」v0.2.5（进行中）
+1. ✅ routes/api.js 按域细分：`src/web/routes/domains/{config,sessions,skills,schedule,sync,workspace,misc}.js`（7 域，handle(ctx,deps,shared) 契约：命中返回 true）+ api.js 瘦身为编排器（访问控制/CSRF/静态壳 + 域循环）；`test/api-contracts.js` 8 组契约测试入 run-all；顺带修复 icon 路由路径 bug（routes/icons → web/icons，契约测试捕获）
+2. ✅ cli.js REPL → `src/commands/repl.js`（runRepl(ctx)）、worker → `src/tasks/worker.js`（runWorkerTask）；e2e-local 16 项全绿护栏
+3. ⏳ strict 棘轮削 300 条（五安全关键模块 credentials/permissions/config/sync-server/session 全量注解 + 批量文件注解）
+- 验收：tsc full 错误数 ≤812；结构清单在文档登记。
 
 ### Phase D「能力演进」v0.3.0（约 3–5 天，可按需裁剪）
 1. **跨平台沙箱补位**：Windows Job Object + 降权 token（零依赖原生 API）、macOS seatbelt 规则；敏感命令平台无关拦截清单兜底

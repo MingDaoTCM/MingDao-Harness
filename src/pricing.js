@@ -16,6 +16,7 @@ export const PRICE_DATA_AS_OF = '2026-08';
 // cfg.pricing.source 拉取（TTL 默认 7 天，cfg.pricing.ttlDays 可调）；TTL 内覆盖内置表，
 // 过期自动回退内置并置 stale 标记（/cost 与费用标签会提示）。
 function pricingFilePath() { return path.join(mingdaoHome(), 'pricing.json'); }
+/** @type {{ mtime: number, data: any, stale: boolean }} */
 let extCache = { mtime: -1, data: null, stale: false };
 function externalPricing() {
   try {
@@ -35,6 +36,9 @@ function externalPricing() {
 export function pricingDataStale() { return externalPricing().stale; }
 
 // 拉取官方价格表（零依赖 fetch）：cfg.pricing.source 为 JSON 地址，返回 { models: { <模型名>: { input, output, cacheHit, peak? } } }
+/**
+ * @param {any} cfg
+ */
 export async function refreshPricingFromSource(cfg) {
   const src = String(cfg?.pricing?.source || '').trim();
   if (!src) return { ok: false, lines: ['未配置 pricing.source（config.json 的 pricing.source 填官方价格 JSON 地址后重试）'] };
@@ -58,6 +62,7 @@ export async function refreshPricingFromSource(cfg) {
 // 用本机时区判断会让海外用户计费错位。config.pricing.timezone 可覆盖时区、
 // config.pricing.peakWindows 可覆盖高峰窗口（[[起,止],...] 北京时间整点），mtime 缓存避免每次读盘。
 const DEFAULT_PEAK_WINDOWS = [[9, 12], [14, 18]];
+/** @type {{ mtime: number, timezone: string, peakWindows: number[][], ttlDays?: number }} */
 let tzCache = { mtime: 0, timezone: 'Asia/Shanghai', peakWindows: DEFAULT_PEAK_WINDOWS };
 function peakCfg() {
   try {
@@ -116,11 +121,14 @@ export function beijingParts(date = new Date()) {
     second: '2-digit',
     hourCycle: 'h23',
   }).formatToParts(date);
-  const g = (t) => Number(parts.find((p) => p.type === t)?.value);
+  const g = /** @type {(t: any) => number} */ ((t) => Number(parts.find((p) => p.type === t)?.value));
   return { year: g('year'), month: g('month'), day: g('day'), hour: g('hour'), minute: g('minute'), second: g('second') };
 }
 
 // 北京时间墙钟 → Date（UTC+8）
+/**
+ * @param {any} parts
+ */
 export function beijingToDate(parts) {
   return new Date(Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - 8 * 3600 * 1000);
 }
@@ -153,6 +161,11 @@ export function beijingDayStart(date = new Date()) {
 
 // —— Batch API 半价计价：批量任务无缓存语义，按闲时全未命中 × 0.5 ——
 export const BATCH_DISCOUNT = 0.5;
+/**
+ * @param {any} modelName
+ * @param {any} promptTokens
+ * @param {any} completionTokens
+ */
 export function estimateBatchCost(modelName, promptTokens, completionTokens) {
   const pricing = effectivePricing(modelName);
   if (!pricing) return 0;
@@ -160,6 +173,9 @@ export function estimateBatchCost(modelName, promptTokens, completionTokens) {
 }
 
 // usage 中的缓存拆分（DeepSeek 返回字段）
+/**
+ * @param {any} usage
+ */
 export function cacheSplit(usage) {
   const hit = usage?.prompt_cache_hit_tokens;
   const miss = usage?.prompt_cache_miss_tokens;
@@ -170,6 +186,7 @@ export function cacheSplit(usage) {
 }
 
 // 合并内置价与用户覆盖：offpeak 字段覆盖 offpeak，over.peak 覆盖 peak（缺省沿用 offpeak）
+/** @type {{ mtime: number, overrides: Record<string, any> }} */
 let overridesCache = { mtime: 0, overrides: {} };
 function pricingOverrides() {
   try {
@@ -182,6 +199,9 @@ function pricingOverrides() {
   } catch {}
   return overridesCache.overrides;
 }
+/**
+ * @param {any} modelName
+ */
 function effectivePricing(modelName) {
   const preset = modelPreset(modelName);
   const ext = externalPricing().data?.models?.[modelName] || null;
@@ -189,6 +209,7 @@ function effectivePricing(modelName) {
   const base = ext || preset?.pricing || null;
   if (!base) return null;
   const over = pricingOverrides()[modelName] || {}; // 审计 Q3：mtime 缓存替代每轮读盘
+  /** @type {(b: any, o?: any) => { input: number, output: number, cacheHit: number }} */
   const merge = (b, o = {}) => ({
     input: Number(o.input ?? b?.input ?? 0),
     output: Number(o.output ?? b?.output ?? 0),
@@ -208,6 +229,13 @@ function effectivePricing(modelName) {
   };
 }
 
+/**
+ * @param {any} modelName
+ * @param {any} promptTokens
+ * @param {any} completionTokens
+ * @param {{ hit: number, miss: number, rate?: number } | null} [cache]
+ * @param {Date} [date]
+ */
 export function estimateCost(modelName, promptTokens, completionTokens, cache = null, date = new Date()) {
   const pricing = effectivePricing(modelName);
   if (!pricing) return 0;
@@ -221,6 +249,12 @@ export function estimateCost(modelName, promptTokens, completionTokens, cache = 
   return (promptTokens * price.input + completionTokens * price.output) / 1e6;
 }
 
+/**
+ * @param {any} modelName
+ * @param {any} promptTokens
+ * @param {any} completionTokens
+ * @param {any} [usage]
+ */
 export function estimateCostLabel(modelName, promptTokens, completionTokens, usage = null) {
   const pricing = effectivePricing(modelName);
   if (!pricing) return '';

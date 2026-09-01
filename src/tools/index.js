@@ -252,10 +252,10 @@ export function buildToolSchemas(usedNames, extra = []) {
   return [...strip(TOOLS), ...strip(extra)];
 }
 
-function runSkill(args, ctx) {
+function runSkill(/** @type {any} */ args, /** @type {any} */ ctx) {
   const name = String(args.name ?? '').trim();
   const skills = listSkills(ctx.workingDir);
-  const label = (s) => `${s.name}${s.source === 'user' ? '（用户级）' : s.source === 'builtin' ? '（内置）' : ''}`;
+  const label = (/** @type {any} */ s) => `${s.name}${s.source === 'user' ? '（用户级）' : s.source === 'builtin' ? '（内置）' : ''}`;
   if (!name) {
     return {
       ok: true,
@@ -271,7 +271,7 @@ function runSkill(args, ctx) {
   return { ok: true, output: `技能 ${name}${s.source === 'builtin' ? '（内置）' : ''}（${s.path}）：\n\n${s.content}` };
 }
 
-async function runTask(args, ctx) {
+async function runTask(/** @type {any} */ args, /** @type {any} */ ctx) {
   const prompt = String(args.prompt ?? '');
   const description = String(args.description ?? '');
   if (!prompt) return { ok: false, error: '缺少 prompt 参数。' };
@@ -280,11 +280,11 @@ async function runTask(args, ctx) {
     const out = await ctx.spawnTask(prompt, { description, readOnly: args.readOnly === true });
     return { ok: true, output: out };
   } catch (err) {
-    return { ok: false, error: `子任务失败：${err?.message || err}` };
+    return { ok: false, error: `子任务失败：${(/** @type {any} */ (err))?.message || err}` };
   }
 }
 
-function runTodo(args, ctx) {
+function runTodo(/** @type {any} */ args, /** @type {any} */ ctx) {
   const list = Array.isArray(args.todos) ? args.todos : [];
   if (Array.isArray(ctx.todos)) {
     ctx.todos.splice(0, ctx.todos.length, ...list);
@@ -293,12 +293,12 @@ function runTodo(args, ctx) {
     ok: true,
     output:
       `任务清单已更新（${list.length} 项）：\n` +
-      list.map((t) => `- [${t.status || 'pending'}] ${t.content}`).join('\n'),
+      list.map((/** @type {any} */ t) => `- [${t.status || 'pending'}] ${t.content}`).join('\n'),
     todos: list,
   };
 }
 
-export async function dispatch(name, args, ctx) {
+export async function dispatch(/** @type {any} */ name, /** @type {any} */ args, /** @type {any} */ ctx) {
   switch (name) {
     case 'read':
       return read(args, ctx);

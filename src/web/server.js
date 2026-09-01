@@ -64,14 +64,17 @@ import { syncStatus, syncLogin, syncLogout, syncPush, syncPull, syncRemoteList, 
 
 const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html');
 
+/** @param {any} res @param {any} code @param {any} obj */
 function json(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(obj));
 }
 
+/** @param {any} req */
 function readBody(req) {
   const MAX_BODY = 40 * 1024 * 1024; // 附件 base64 上限（4×5MB 图片 + 文本）留余量
   return new Promise((resolve, reject) => {
+    /** @type {any[]} */
     const chunks = [];
     let size = 0;
     // 审计 P2-6：慢速连接防护——60s 未传完请求体即断开，防占满 socket
@@ -83,7 +86,7 @@ function readBody(req) {
     }, 60000);
     req.on('end', () => clearTimeout(slowTimer));
     req.on('close', () => clearTimeout(slowTimer));
-    req.on('data', (d) => {
+    req.on('data', (/** @type {any} */ d) => {
       size += d.length;
       if (size > MAX_BODY) {
         const err = /** @type {Error & { status?: number }} */ (new Error('请求体过大（>40MB）'));
@@ -117,6 +120,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   }
   // 访问令牌（P1-3）：非回环绑定时强制——配置的 token / 启动参数 / 环境变量优先，
   // 都没有则本次随机生成并打印带 token 的访问地址。回环绑定且未配置时保持无认证（本机信任）。
+  /** @param {any} h */
   const isLoopbackHost = (h) => h === '127.0.0.1' || h === 'localhost' || h === '::1';
   let webToken = String(authToken || cfg?.web?.token || '').trim() || null;
   let tokenGenerated = false;
@@ -125,6 +129,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     tokenGenerated = true;
   }
   const authEnabled = Boolean(webToken);
+  /** @param {any} got */
   const tokenMatches = (got) => {
     if (!webToken) return true;
     if (!got) return false;
@@ -132,6 +137,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     const b = Buffer.from(webToken);
     return a.length === b.length && crypto.timingSafeEqual(a, b);
   };
+  /** @param {any} req @param {any} url */
   const requestToken = (req, url) => {
     const q = url.searchParams.get('token');
     if (q) return q;
@@ -143,6 +149,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   // Host 白名单（P1-4，防 DNS rebinding）：只接受回环名 + 绑定地址；
   // 绑定 0.0.0.0 且启用 token 时放行任意 Host（此时 token 才是访问边界，攻击者页面拿不到）。
   let boundPort = port;
+  /** @param {any} reqHost */
   const trustedHost = (reqHost) => {
     const h = String(reqHost || '').toLowerCase();
     const names = new Set(['127.0.0.1', 'localhost', '::1']);
@@ -167,6 +174,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   const startupCwd = workingDir; // 质检 A3：启动工作目录恒为合法浏览根（工作空间切换后仍可浏览原位）
   // Provider 按模型懒加载缓存：界面切换模型后即时生效
   const providerCache = new Map();
+  /** @param {any} m */
   async function getProviderFor(m) {
     if (!providerCache.has(m)) {
       providerCache.set(m, await createProvider(cfg, m));
@@ -177,6 +185,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   const undoStore = { backups: new Map() };
 
   // MCP：后台启动，就绪后工具并入后续轮次
+  /** @type {any} */
   let mcpManager = null;
   if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) {
     startMcpServers(cfg.mcpServers, workingDir)
@@ -187,8 +196,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   }
   const mcpFacade = {
     toolSchemas: () => (mcpManager ? mcpManager.toolSchemas() : []),
-    call: (n, a) => (mcpManager ? mcpManager.call(n, a) : Promise.reject(new Error('MCP 未就绪'))),
-    isReadonly: (n) => (mcpManager ? mcpManager.isReadonly(n) : false),
+    call: (/** @type {any} */ n, /** @type {any} */ a) => (mcpManager ? mcpManager.call(n, a) : Promise.reject(new Error('MCP 未就绪'))),
+    isReadonly: (/** @type {any} */ n) => (mcpManager ? mcpManager.isReadonly(n) : false),
     status: () => (mcpManager ? mcpManager.status() : []),
     stop: () => {
       if (mcpManager) mcpManager.stop();
@@ -202,6 +211,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   let taskSeq = 0;
   // 会话文件互斥（质检 C1/M3）：同一 session 文件的 append 与 compact 整文件重写必须串行
   const sessionLocks = new Map();
+  /** @param {any} file @param {any} fn */
   function withSessionLock(file, fn) {
     const prev = sessionLocks.get(file) || Promise.resolve();
     const next = prev.then(fn, fn);
@@ -216,6 +226,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   const srvlog = createLogWriter(path.join(mingdaoHome(), 'logs', 'web-server.log'));
 
   // —— SSRF 防护（质检 S1）：远端地址校验 ——
+  /** @param {any} hostname */
   function isPrivateHost(hostname) {
     const h = String(hostname || '').toLowerCase();
     if (!h) return true;
@@ -226,6 +237,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     const b = Number(m[2]);
     return a === 10 || a === 127 || a === 0 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
   }
+  /** @param {any} raw */
   function validateRemoteUrl(raw) {
     let u;
     try {
@@ -261,11 +273,13 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     }
   }
 
+  /** @param {any} res @param {any} body */
   async function handleChat(res, body) {
     const taskId = `t${++taskSeq}`; // 服务端生成：客户端自选 taskId 可能覆盖他人任务
-    const entry = { res, send: null, abortHandler: null, pendingAsk: null, session: null, startedAt: Date.now(), status: 'running', message: '', durationMs: 0 };
+    const entry = /** @type {any} */ ({ res, send: null, abortHandler: null, pendingAsk: null, session: null, startedAt: Date.now(), status: 'running', message: '', durationMs: 0 });
     srvlog('chat 开始 ' + taskId + ' session=' + (body.file || '新会话') + ' 消息长度=' + String(body.message || '').length);
     tasks.set(taskId, entry);
+    /** @param {any} obj */
     const send = (obj) => {
       try {
         res.write(`data: ${JSON.stringify({ ...obj, taskId })}\n\n`);
@@ -301,6 +315,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       return;
     }
 
+    /** @type {any} */
     let session = null;
     const isNew = !body.file;
     if (body.file) {
@@ -355,7 +370,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     let persistedBefore = messages.length;
 
     // 权限/选择类交互：发 ask 事件（带 taskId），等待 POST /api/permission 应答
-    const askHandler = ({ question, hidden, options, label, confirm }) =>
+    const askHandler = (/** @type {any} */ { question, hidden, options, label, confirm }) =>
       new Promise((resolve) => {
         const id = Math.random().toString(36).slice(2);
         entry.pendingAsk = { id, resolve };
@@ -363,19 +378,19 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
           type: 'ask',
           id,
           question: question ?? label ?? '',
-          options: options ? options.map((o) => ({ value: o.value, label: o.label })) : null,
+          options: options ? options.map((/** @type {any} */ o) => ({ value: o.value, label: o.label })) : null,
           confirm: Boolean(confirm ?? !options),
           hidden: Boolean(hidden),
         });
       });
 
-    const io = createWebIO({
+    const io = /** @type {any} */ (createWebIO({
       send,
       askHandler,
-      setAbortHandler: (fn) => {
+      setAbortHandler: (/** @type {any} */ fn) => {
         entry.abortHandler = fn;
       },
-    });
+    }));
     const permission = createPermission(cfg.permission ?? 'ask', io);
     let providerNow;
     try {
@@ -384,7 +399,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         throw new Error(`模型 ${runModel} 尚未配置 API Key：请点击右上角 ⚙ 设置 →「模型与 API Key」填入密钥。`);
       }
       providerNow = await getProviderFor(runModel); // 审计 P1-1：失败时清理任务占位，避免僵尸 running 耗尽并发
-    } catch (err) {
+    } catch (/** @type {any} */ err) {
       entry.status = 'failed';
       entry.durationMs = Date.now() - entry.startedAt;
       send({ type: 'error', message: `模型 ${runModel} 不可用：${String(err?.message || err)}` });
@@ -403,7 +418,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       undoStore,
       mcp: mcpFacade,
       // 自动压缩后重写会话文件（否则每次加载历史都会重新触发压缩），并同步落盘游标
-      onCompact: (msgs) => {
+      onCompact: (/** @type {any} */ msgs) => {
         withSessionLock(session.file, () => rewriteSession(session.file, msgs)).catch(() => {}); // onCompact 为同步回调：入队串行即可
         persistedBefore = msgs.length;
       },
@@ -435,7 +450,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       session.routeStats = { steps: st.steps + (io.stats().toolCount || 0), truncated: st.truncated + (r.truncated ? 1 : 0) };
       await withSessionLock(session.file, () => appendMessages(session.file, messages.slice(persistedBefore)));
       io.printUsageLine({ modelName: runModel, usage: r.usage, durationMs: r.durationMs });
-      recordUsage(r.perf?.usedModel || runModel, r.usage, r.perf);
+      recordUsage(r.perf?.usedModel || runModel, r.usage, /** @type {any} */ (r.perf));
       maybeAutoSync().catch(() => {});
       // 新会话自动标题（可配置关闭）
       srvlog('chat 标题生成前 ' + taskId);
@@ -460,7 +475,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         const { makeTokenCounter } = await import('../tokenizer.js');
         const { messageTokens } = await import('../context.js');
         const counter = makeTokenCounter(runModel);
-        const used = messages.reduce((sum, m) => sum + messageTokens(m, counter), 0);
+        const used = messages.reduce((/** @type {any} */ sum, /** @type {any} */ m) => sum + messageTokens(m, counter), 0);
         budgetInfo = { used, total: cfg.contextBudget || modelPreset(runModel)?.budgetTokens || 128000 };
       } catch {}
       send({
@@ -476,7 +491,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         stats: io.stats(),
         session: path.basename(session.file),
       });
-    } catch (err) {
+    } catch (/** @type {any} */ err) {
       entry.status = 'failed';
       entry.durationMs = Date.now() - entry.startedAt;
       srvlog('chat 错误 ' + taskId + ' ' + String(err?.message || err));

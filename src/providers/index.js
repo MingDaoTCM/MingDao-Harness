@@ -16,7 +16,7 @@ import { modelPreset, providerPreset } from '../models.js';
 import { mingdaoHome } from '../config.js';
 import { resolveApiKey } from '../credentials.js';
 
-export function resolveProviderConfig(cfg, modelName) {
+export function resolveProviderConfig(/** @type {any} */ cfg, /** @type {any} */ modelName) {
   // 自定义模型（config.customModels，WebUI 可增删改）：优先于内置预设
   const cm = cfg?.customModels?.[modelName];
   if (cm) {
@@ -47,16 +47,16 @@ export function resolveProviderConfig(cfg, modelName) {
   };
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (/** @type {any} */ ms) => new Promise((r) => setTimeout(r, ms));
 
-function isTransient(err) {
+function isTransient(/** @type {any} */ err) {
   const status = err?.status;
   if (status === 429 || (status >= 500 && status <= 504)) return true;
   // 注意：不含 abort —— 用户 Ctrl+C 主动中断不应触发重试
   return /timeout|超时|ECONNRESET|fetch failed/i.test(String(err?.message || ''));
 }
 
-export async function createProvider(cfg, modelName, { timeoutMs = 300000, retries = 2 } = {}) {
+export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ modelName, { timeoutMs = 300000, retries = 2 } = {}) {
   const pc = resolveProviderConfig(cfg, modelName);
 
   // 自定义 Provider 模块优先（仅普通自定义端点；custom:<模型名> 走 OpenAI 兼容直连）
@@ -77,7 +77,7 @@ export async function createProvider(cfg, modelName, { timeoutMs = 300000, retri
   return {
     name: pc.name,
     config: pc,
-    async chat(opts) {
+    async chat(/** @type {any} */ opts) {
       let attempt = 0;
       for (;;) {
         const ac = new AbortController();
@@ -105,7 +105,7 @@ export async function createProvider(cfg, modelName, { timeoutMs = 300000, retri
           attempt += 1;
           // 指数退避 + 尊重 Retry-After（评估 P3-1）：基础 1s/2s，服务端指定时取其值（封顶 30s）
           let backoff = 1000 * attempt;
-          const ra = Number(err?.headers?.get?.('retry-after'));
+          const ra = Number((/** @type {any} */ (err))?.headers?.get?.('retry-after'));
           if (Number.isFinite(ra) && ra > 0) backoff = Math.max(backoff, ra * 1000);
           backoff = Math.min(backoff, 30000);
           await sleep(backoff);
@@ -121,7 +121,7 @@ export async function createProvider(cfg, modelName, { timeoutMs = 300000, retri
 // 辅助调用（标题生成/记忆提取等）的 provider 解析（评估 P2-2）：辅助模型与当前模型
 // 分属不同服务商时单独创建 provider——避免拿 deepseek-v4-flash 模型名去自定义网关请求
 // 而 404 被静默吞掉（标题缺失、记忆永不沉淀且零感知）。
-export async function helperProvider(cfg, helperModel, currentProvider) {
+export async function helperProvider(/** @type {any} */ cfg, /** @type {any} */ helperModel, /** @type {any} */ currentProvider) {
   try {
     const curName = String(currentProvider?.name || '');
     const helperName = String(resolveProviderConfig(cfg, helperModel)?.name || '');

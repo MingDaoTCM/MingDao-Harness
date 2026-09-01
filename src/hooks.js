@@ -10,12 +10,12 @@
 
 import { spawn } from 'node:child_process';
 
-function normalize(list) {
+function normalize(/** @type {any} */ list) {
   if (!Array.isArray(list)) return [];
   return list.filter((h) => h && typeof h.cmd === 'string' && h.cmd.trim());
 }
 
-function match(hook, toolName) {
+function match(/** @type {any} */ hook, /** @type {any} */ toolName) {
   const m = String(hook.matcher || '*').trim();
   if (!m || m === '*') return true;
   return m.split(',').some((part) => {
@@ -25,11 +25,11 @@ function match(hook, toolName) {
   });
 }
 
-export function createHooks(hooksCfg = {}, workingDir) {
-  const pre = normalize(hooksCfg?.PreToolUse);
-  const post = normalize(hooksCfg?.PostToolUse);
+export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir) {
+  const pre = normalize((/** @type {any} */ (hooksCfg))?.PreToolUse);
+  const post = normalize((/** @type {any} */ (hooksCfg))?.PostToolUse);
 
-  function run(hook, payload) {
+  function run(/** @type {any} */ hook, /** @type {any} */ payload) {
     return new Promise((resolve) => {
       const child = spawn(hook.cmd, {
         shell: true,
@@ -40,12 +40,12 @@ export function createHooks(hooksCfg = {}, workingDir) {
       let out = '';
       let err = '';
       const MAX_HOOK_OUT = 64 * 1024;
-      const cap = (acc, d) => {
+      const cap = (/** @type {any} */ acc, /** @type {any} */ d) => {
         const t = acc + d;
         return t.length > MAX_HOOK_OUT ? t.slice(-MAX_HOOK_OUT) : t;
       };
       let settled = false;
-      const finish = (result) => {
+      const finish = (/** @type {any} */ result) => {
         if (settled) return;
         settled = true;
         resolve(result);
@@ -53,7 +53,7 @@ export function createHooks(hooksCfg = {}, workingDir) {
       const timer = setTimeout(() => {
         // 审计质量项：超时杀整组（shell:true 的孙进程不成孤儿）
         try {
-          process.kill(-child.pid, 'SIGKILL');
+          process.kill(-(/** @type {any} */ (child)).pid, 'SIGKILL');
         } catch {
           child.kill('SIGKILL');
         }
@@ -77,7 +77,7 @@ export function createHooks(hooksCfg = {}, workingDir) {
   }
 
   return {
-    async pre(toolName, args) {
+    async pre(/** @type {any} */ toolName, /** @type {any} */ args) {
       let decision = 'approve';
       let reason = '';
       for (const h of pre) {
@@ -106,7 +106,7 @@ export function createHooks(hooksCfg = {}, workingDir) {
       }
       return { decision, reason };
     },
-    async post(toolName, args, result) {
+    async post(/** @type {any} */ toolName, /** @type {any} */ args, /** @type {any} */ result) {
       for (const h of post) {
         if (!match(h, toolName)) continue;
         try {

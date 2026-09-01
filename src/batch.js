@@ -19,7 +19,7 @@ const DEFAULT_WINDOW = '24h';
 const DEFAULT_ENDPOINT = '/v1/chat/completions';
 
 // 批处理端点基址：config.batchBaseUrl 优先；否则取当前服务商 baseUrl 去掉 /v1 后缀
-function batchBase(cfg, model) {
+function batchBase(/** @type {any} */ cfg, /** @type {any} */ model) {
   const explicit = String(cfg?.batchBaseUrl || '').trim().replace(/\/+$/, '');
   if (explicit) return explicit;
   const pc = resolveProviderConfig(cfg, model);
@@ -29,7 +29,7 @@ function batchBase(cfg, model) {
 }
 
 /** @returns {Promise<any>} */
-async function api(base, apiKey, methodPath, payload, httpMethod = 'POST') {
+async function api(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type {any} */ methodPath, /** @type {any} */ payload, httpMethod = 'POST') {
   const res = await fetch(base + methodPath, {
     method: httpMethod,
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -44,7 +44,7 @@ async function api(base, apiKey, methodPath, payload, httpMethod = 'POST') {
   return j;
 }
 
-async function uploadFile(base, apiKey, jsonl) {
+async function uploadFile(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type {any} */ jsonl) {
   const form = new FormData();
   form.append('file', new Blob([jsonl], { type: 'application/jsonl' }), 'mingdao-batch.jsonl');
   form.append('purpose', 'batch');
@@ -62,7 +62,7 @@ async function uploadFile(base, apiKey, jsonl) {
   return j.id;
 }
 
-async function downloadResults(base, apiKey, batch) {
+async function downloadResults(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type {any} */ batch) {
   // DeepSeek 风格：直接取结果文件；回退 OpenAI 风格：按 output_file_id 取内容
   const attempts = [
     `/batches/${batch.id}/files/result`,
@@ -92,7 +92,7 @@ async function downloadResults(base, apiKey, batch) {
  * ③maxCost 预算上限（提交前按估算费用拦截，超出直接中止不提交）。
  * @param {{ cfg: any, model: any, questions: any, workingDir?: string, maxTokens?: number, temperature?: any, signal?: any, onStatus?: any, maxCost?: number }} opts */
 export async function runBatch({ cfg, model, questions, workingDir = process.cwd(), maxTokens = 4096, temperature, signal, onStatus, maxCost = 0 }) {
-  const list = (questions || []).map((q) => String(q).trim()).filter(Boolean);
+  const list = (questions || []).map((/** @type {any} */ q) => String(q).trim()).filter(Boolean);
   if (!list.length) return { error: '没有可批处理的问题（每行一个问题）' };
   const pc = resolveProviderConfig(cfg, model);
   if (!pc.apiKey) return { error: `模型 ${model} 没有可用 API Key（mingdao key set ${pc.name}）` };
@@ -192,7 +192,7 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
         failures = 0;
       } catch (err) {
         failures += 1;
-        if (failures >= 10) return { error: `轮询失败：${err?.message || err}（任务仍在服务端，ID ${batch.id}）`, batchId: batch.id };
+        if (failures >= 10) return { error: `轮询失败：${(/** @type {any} */ (err))?.message || err}（任务仍在服务端，ID ${batch.id}）`, batchId: batch.id };
         await new Promise((r) => setTimeout(r, Math.min(baseInterval * 1.5 ** failures, 30000)));
         continue;
       }
@@ -242,6 +242,6 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
     return { ok: true, batchId: batch.id, outputFile: outFile, results: outputs, usage, cost, discount: BATCH_DISCOUNT, deduped, estimatedCost };
   } catch (err) {
     // 批处理端点不支持（404/405 等）→ 明确告知，不静默
-    return { error: `批处理不可用：${err?.message || err}（该服务商可能不支持 Batch API，可用 config.batchBaseUrl 指定支持的网关）` };
+    return { error: `批处理不可用：${(/** @type {any} */ (err))?.message || err}（该服务商可能不支持 Batch API，可用 config.batchBaseUrl 指定支持的网关）` };
   }
 }

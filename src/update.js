@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { mingdaoHome, ensureHome } from './config.js';
 import { atomicWriteFileSync } from './atomic-write.js';
 
-function git(args, cwd) {
+function git(/** @type {any} */ args, /** @type {any} */ cwd) {
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 120000 });
   return {
     ok: r.status === 0 && !r.error,
@@ -36,11 +36,11 @@ export function findRepoRoot() {
   return null;
 }
 
-function resolveRepo(override) {
+function resolveRepo(/** @type {any} */ override) {
   return override || findRepoRoot();
 }
 
-function versionAt(repo, ref = 'HEAD') {
+function versionAt(/** @type {any} */ repo, ref = 'HEAD') {
   const r = git(['show', `${ref}:package.json`], repo);
   if (!r.ok) return null;
   try {
@@ -50,7 +50,7 @@ function versionAt(repo, ref = 'HEAD') {
   }
 }
 
-function compareVersions(a, b) {
+function compareVersions(/** @type {any} */ a, /** @type {any} */ b) {
   const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
   const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
   for (let i = 0; i < 3; i++) {
@@ -71,7 +71,7 @@ function readState() {
     return null;
   }
 }
-function writeState(s) {
+function writeState(/** @type {any} */ s) {
   ensureHome();
   atomicWriteFileSync(stateFile(), JSON.stringify(s, null, 2) + '\n', { mode: 0o600 }); // 质检 H4：更新状态原子写
 }
@@ -79,20 +79,20 @@ function writeState(s) {
 // 直接向远端指定分支要版本（评估 D6）：fetch 到 FETCH_HEAD 再读 package.json，
 // 不依赖本地 refs 落盘——部分 Windows git 环境存在「fetch 成功但 refs 不更新」的异常，
 // 按本地 refs 判断会误报「已是最新」。ls-remote 思路的等价实现。
-function remoteVersion(repo, remote, branch) {
+function remoteVersion(/** @type {any} */ repo, /** @type {any} */ remote, /** @type {any} */ branch) {
   const r = git(['fetch', '--quiet', remote, branch], repo);
   if (!r.ok) return null;
   return versionAt(repo, 'FETCH_HEAD');
 }
 
-function listRemotes(repo) {
+function listRemotes(/** @type {any} */ repo) {
   const r = git(['remote'], repo);
   if (!r.ok) return [];
   return r.out.split('\n').filter(Boolean);
 }
 
 // 各远端（main/master 任一存在）中版本号最大的（多镜像部署：github/gitee/gitcode 谁新跟谁）
-function newestRemote(repo) {
+function newestRemote(/** @type {any} */ repo) {
   let latest = '';
   let ref = '';
   for (const remote of listRemotes(repo)) {

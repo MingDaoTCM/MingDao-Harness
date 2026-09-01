@@ -25,13 +25,13 @@ const HANDSHAKE_TIMEOUT_MS = 20000;
 let nextId = 1;
 
 export class McpClient {
-  constructor(name, { command, args = [], env = {} }, workingDir) {
+  constructor(/** @type {any} */ name, /** @type {any} */ { command, args = [], env = {} }, /** @type {any} */ workingDir) {
     this.name = name;
     this.command = command;
     this.args = args;
     this.env = env;
     this.workingDir = workingDir;
-    this.tools = [];
+    this.tools = /** @type {any[]} */ ([]);
     this.child = null;
     this.pending = new Map();
     this.buf = '';
@@ -66,14 +66,14 @@ export class McpClient {
       await this._handshake();
       await this._listTools();
     } catch (err) {
-      this.error = String(err?.message || err);
+      this.error = String((/** @type {any} */ (err))?.message || err);
       this.stop(); // 审计 P1-3：握手/列工具失败时清理 detached 子进程树，防孤儿
       throw err;
     }
     return this;
   }
 
-  _onData(d) {
+  _onData(/** @type {any} */ d) {
     this.buf += d.toString('utf8');
     if (this.buf.length > 20 * 1024 * 1024) {
       // 恶意/异常服务器灌入超量数据：放弃解析，避免内存膨胀
@@ -104,7 +104,7 @@ export class McpClient {
     }
   }
 
-  _failAll(reason) {
+  _failAll(/** @type {any} */ reason) {
     for (const [, p] of this.pending) {
       clearTimeout(p.timer);
       p.reject(new Error(reason));
@@ -112,7 +112,7 @@ export class McpClient {
     this.pending.clear();
   }
 
-  request(method, params = {}) {
+  request(/** @type {any} */ method, params = {}) {
     if (!this.child || this.child.killed) {
       return Promise.reject(new Error(`MCP 服务器 ${this.name} 未运行`));
     }
@@ -124,16 +124,16 @@ export class McpClient {
       }, REQUEST_TIMEOUT_MS);
       this.pending.set(id, { resolve, reject, timer });
       try {
-        this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
+        (/** @type {any} */ (this.child)).stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n');
       } catch (err) {
         clearTimeout(timer);
         this.pending.delete(id);
-        reject(new Error(`MCP [${this.name}] 写入失败：${err.message}`));
+        reject(new Error(`MCP [${this.name}] 写入失败：${(/** @type {any} */ (err)).message}`));
       }
     });
   }
 
-  notify(method, params = {}) {
+  notify(/** @type {any} */ method, params = {}) {
     try {
       this.child?.stdin?.write(JSON.stringify({ jsonrpc: '2.0', method, params }) + '\n');
     } catch {}
@@ -165,7 +165,7 @@ export class McpClient {
     this.tools = Array.isArray(res?.tools) ? res.tools : [];
   }
 
-  prefixedName(toolName) {
+  prefixedName(/** @type {any} */ toolName) {
     return `mcp__${this.name}__${toolName}`;
   }
 
@@ -182,18 +182,18 @@ export class McpClient {
       }));
   }
 
-  isReadonly(toolName) {
+  isReadonly(/** @type {any} */ toolName) {
     const t = this.tools.find((x) => x.name === toolName);
     return Boolean(t?.annotations?.readOnlyHint);
   }
 
-  async callTool(toolName, args) {
+  async callTool(/** @type {any} */ toolName, /** @type {any} */ args) {
     const res = await this.request('tools/call', { name: toolName, arguments: args });
     if (res?.isError) {
-      const text = (res.content || []).map((c) => c.text || '').join('\n');
+      const text = (res.content || []).map((/** @type {any} */ c) => c.text || '').join('\n');
       return { ok: false, error: text || 'MCP 工具返回错误' };
     }
-    let parts = (res?.content || []).map((c) => (c.type === 'text' ? c.text : `[${c.type}] ${JSON.stringify(c)}`));
+    let parts = (res?.content || []).map((/** @type {any} */ c) => (c.type === 'text' ? c.text : `[${c.type}] ${JSON.stringify(c)}`));
     let text = parts.join('\n') || '(无输出)';
     if (text.length > 100 * 1024) text = text.slice(0, 100 * 1024) + `\n…[MCP 输出过长已截断，原文共 ${text.length} 字符]`;
     return { ok: true, output: text };
@@ -214,7 +214,7 @@ export class McpClient {
 }
 
 // 多服务器管理器：部分服务器启动失败不影响其余
-export async function startMcpServers(mcpCfg, workingDir) {
+export async function startMcpServers(/** @type {any} */ mcpCfg, /** @type {any} */ workingDir) {
   const clients = new Map();
   const entries = Object.entries(mcpCfg || {});
   await Promise.all(
@@ -225,7 +225,7 @@ export async function startMcpServers(mcpCfg, workingDir) {
       try {
         await client.start();
       } catch (err) {
-        client.error = String(err?.message || err);
+        client.error = String((/** @type {any} */ (err))?.message || err);
       }
     })
   );
@@ -246,7 +246,7 @@ export async function startMcpServers(mcpCfg, workingDir) {
       }
       return out;
     },
-    lookup(prefixedName) {
+    lookup(/** @type {any} */ prefixedName) {
       const exact = managerExact.get(prefixedName);
       if (exact) {
         const c = clients.get(exact.server);
@@ -255,12 +255,12 @@ export async function startMcpServers(mcpCfg, workingDir) {
       }
       return null;
     },
-    async call(prefixedName, args) {
+    async call(/** @type {any} */ prefixedName, /** @type {any} */ args) {
       const found = this.lookup(prefixedName);
       if (!found) return { ok: false, error: `MCP 工具不可用：${prefixedName}` };
       return found.client.callTool(found.toolName, args);
     },
-    isReadonly(prefixedName) {
+    isReadonly(/** @type {any} */ prefixedName) {
       const found = this.lookup(prefixedName);
       return found ? found.client.isReadonly(found.toolName) : false;
     },

@@ -22,6 +22,7 @@ const SPLIT_RES = [
   /[!"#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+/gu,
 ];
 
+/** @param {string} text */
 function pretokenize(text) {
   let pieces = [text];
   for (const re of SPLIT_RES) {
@@ -48,6 +49,7 @@ function pretokenize(text) {
 // 汉字会退化为逐字节计数（如「的」被计为 3 tokens 而非 1）。
 const BYTE_TO_UNICODE = (() => {
   const m = new Array(256);
+  /** @param {number} b */
   const self = (b) => (b >= 0x21 && b <= 0x7e) || (b >= 0xa1 && b <= 0xac) || (b >= 0xae);
   let n = 0;
   for (let b = 0; b < 256; b++) {
@@ -60,11 +62,14 @@ const BYTE_TO_UNICODE = (() => {
   return m;
 })();
 
+/** @param {string} s */
 function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** @type {any} */
 let data = null;
+/** @type {any} */
 let loadError = null;
 
 function loadData() {
@@ -78,7 +83,7 @@ function loadData() {
       const [a, b] = parsed.merges[i];
       mergeRank.set(a + '\u0001' + b, i);
     }
-    const added = (parsed.added || []).filter(Boolean).sort((a, b) => b.length - a.length);
+    const added = (parsed.added || []).filter(Boolean).sort((/** @type {any} */ a, /** @type {any} */ b) => b.length - a.length);
     // 全部 added token 合并成单个正则（按长度降序排列 → 左起最长优先，与逐 token startsWith 语义一致），
     // 一次 matchAll 定位所有特殊 token，把 O(文本长 × 818 个 indexOf) 降到 O(n)
     const addedRe = added.length ? new RegExp(added.map(escapeRe).join('|'), 'gu') : null;
@@ -89,6 +94,7 @@ function loadData() {
   return data;
 }
 
+/** @param {any} modelName */
 export function isTokenizable(modelName) {
   if (typeof modelName !== 'string') return false;
   if (modelName.startsWith('deepseek')) return true;
@@ -124,15 +130,17 @@ const CJK_RANGES = [
   [0x3400, 0x4dbf], [0x4e00, 0x9fff], [0xf900, 0xfaff], // CJK 扩展/基本区/兼容
   [0x3040, 0x30ff], [0xac00, 0xd7af], // 假名 / 谚文
 ];
+/** @param {number} code */
 const isCjk = (code) => CJK_RANGES.some(([lo, hi]) => code >= lo && code <= hi);
 
+/** @param {any} text */
 export function heuristicTokens(text) {
   if (!text) return 0;
   let ascii = 0;
   let cjk = 0;
   let other = 0;
   for (const ch of String(text)) {
-    const code = ch.codePointAt(0);
+    const code = /** @type {number} */ (ch.codePointAt(0));
     if (code < 128) ascii += 1;
     else if (isCjk(code)) cjk += 1;
     else other += code > 0xffff ? 2 : 1; // 审计 B5：增补平面 emoji 按 2 token 保守计
@@ -144,6 +152,7 @@ export function heuristicTokens(text) {
 
 // 单个预分词片段的 BPE 计数（tiktoken 语义：优先合并 rank 最小的对，同 rank 取最左）。
 // 惰性最小堆实现（O(n log n)）：大文本（中文长文/工具输出）不再 O(n²) 全表扫描。
+/** @param {any} piece @param {any} d */
 function countPiece(piece, d) {
   const bytes = Buffer.from(piece, 'utf8');
   const syms = [];
@@ -151,17 +160,21 @@ function countPiece(piece, d) {
   if (syms.length <= 1) return syms.length;
 
   const alive = new Uint8Array(syms.length).fill(1);
+  /** @param {number} i */
   const leftOf = (i) => {
     for (let j = i - 1; j >= 0; j--) if (alive[j]) return j;
     return -1;
   };
+  /** @param {number} i */
   const rightOf = (i) => {
     for (let j = i + 1; j < syms.length; j++) if (alive[j]) return j;
     return -1;
   };
 
   // 最小堆（rank, leftIndex）；过期条目惰性丢弃/重推
+  /** @type {any[]} */
   const heap = [];
+  /** @param {number} rank @param {number} idx */
   const push = (rank, idx) => {
     heap.push([rank, idx]);
     let c = heap.length - 1;
@@ -182,6 +195,7 @@ function countPiece(piece, d) {
         const l = c * 2 + 1;
         const r = l + 1;
         let m = c;
+        /** @param {number} x */
         const better = (x) => heap[x][0] < heap[m][0] || (heap[x][0] === heap[m][0] && heap[x][1] < heap[m][1]);
         if (l < heap.length && better(l)) m = l;
         if (r < heap.length && better(r)) m = r;
@@ -238,6 +252,7 @@ const TOKEN_CACHE_MAX_ENTRIES = 512;
 const TOKEN_CACHE_MAX_LEN = 50000;
 const tokenCache = new Map();
 
+/** @param {string} s */
 function countDeepseek(s) {
   const d = loadData();
   if (!d) return heuristicTokens(s); // 词表缺失时优雅回退
@@ -254,12 +269,14 @@ function countDeepseek(s) {
   return total;
 }
 
+/** @param {any} piece @param {any} d */
 function countGap(piece, d) {
   let total = 0;
   for (const m of pretokenize(piece)) total += countPiece(m, d);
   return total;
 }
 
+/** @param {any} text @param {any} modelName */
 export function countTokens(text, modelName) {
   if (!text) return 0;
   const s = String(text);
@@ -279,9 +296,10 @@ export function countTokens(text, modelName) {
 }
 
 // 供上下文预算使用的计数器工厂
+/** @param {any} modelName */
 export function makeTokenCounter(modelName) {
   if (isTokenizable(modelName)) {
-    return (text) => countTokens(text, modelName);
+    return (/** @type {any} */ text) => countTokens(text, modelName);
   }
-  return (text) => heuristicTokens(text);
+  return (/** @type {any} */ text) => heuristicTokens(text);
 }

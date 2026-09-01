@@ -12,6 +12,7 @@
 import { style, C } from './ui.js';
 import { READONLY_TOOLS } from './tools/index.js';
 
+/** @param {any} name @param {any} args */
 function summarize(name, args) {
   try {
     if (name === 'bash') return ` ${args.command ?? ''}`;
@@ -22,6 +23,7 @@ function summarize(name, args) {
   }
 }
 
+/** @param {any} rule @param {any} name @param {any} args */
 function ruleMatches(rule, name, args) {
   const idx = rule.indexOf(':');
   if (idx > 0) {
@@ -37,6 +39,7 @@ function ruleMatches(rule, name, args) {
   return rule === name;
 }
 
+/** @param {any} rawMode @param {any} io */
 export function createPermission(rawMode, io) {
   let mode = 'ask';
   let allow = [];
@@ -52,8 +55,9 @@ export function createPermission(rawMode, io) {
 
   return {
     mode,
+    /** @param {any} name @param {any} args @param {any} label */
     async check(name, args = {}, label = '') {
-      const askOverride = async (question) => {
+      const askOverride = async (/** @type {any} */ question) => {
         try {
           const answer = await io.ask(style(question, C.yellow));
           return /^y(es)?$/i.test(answer);
@@ -63,10 +67,10 @@ export function createPermission(rawMode, io) {
       };
       // 需要特殊授权时弹出对话框与用户交互，而不是静默拒绝：
       // 1) 被 deny 规则拦截 → 询问是否本次强制放行
-      if (deny.some((r) => ruleMatches(r, name, args))) {
+      if (deny.some((/** @type {any} */ r) => ruleMatches(r, name, args))) {
         return askOverride(`规则拦截了 ${name}${summarize(name, args)}，是否本次强制放行？[y/N] `);
       }
-      if (allow.some((r) => ruleMatches(r, name, args))) return true;
+      if (allow.some((/** @type {any} */ r) => ruleMatches(r, name, args))) return true;
       if (mode === 'auto') return true;
       if (mode === 'readonly') {
         // 2) 只读模式下的写操作 → 询问是否本次放行

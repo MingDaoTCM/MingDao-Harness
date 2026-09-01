@@ -23,15 +23,21 @@ const insecureOn = () => syncSettings()?.insecure === true;
 
 // 请求级不安全 TLS 传输（P1-6）：为本次请求单独建立 rejectUnauthorized:false 的 https.Agent，
 // 与并发的 provider 请求（各自的 TLS 校验）互不干扰；安全路径仍走 fetch（连接复用）。
+/**
+ * @param {any} target
+ * @param {{ headers?: any, body?: any, timeoutMs?: any, insecure?: any }} opts
+ */
 function rawRequest(target, { headers, body, timeoutMs, insecure }) {
   return new Promise((resolve, reject) => {
     const mod = target.protocol === 'http:' ? http : https;
+    /** @type {any} */
     const opts = { method: 'POST', headers };
     if (insecure && target.protocol === 'https:') opts.agent = new https.Agent({ rejectUnauthorized: false });
     const req = mod.request(target, opts, (res) => {
+      /** @type {any[]} */
       const chunks = [];
       let size = 0;
-      res.on('data', (d) => {
+      res.on('data', (/** @type {any} */ d) => {
         size += d.length;
         if (size > 25 * 1024 * 1024) {
           req.destroy();
@@ -56,6 +62,12 @@ function rawRequest(target, { headers, body, timeoutMs, insecure }) {
   });
 }
 
+/**
+ * @param {any} baseUrl
+ * @param {any} method
+ * @param {any} payload
+ * @param {any} token
+ */
 async function apiCall(baseUrl, method, payload, token, timeoutMs = TIMEOUT_MS, insecure = false) {
   const target = new URL(baseUrl.replace(/\/+$/, '') + method);
   const body = JSON.stringify(payload || {});
@@ -92,7 +104,7 @@ async function apiCall(baseUrl, method, payload, token, timeoutMs = TIMEOUT_MS, 
       clearTimeout(timer);
     }
   } catch (e) {
-    if (e.name === 'AbortError' || e.message === '请求超时') throw new Error('请求超时（20s）');
+    if (/** @type {any} */ (e).name === 'AbortError' || /** @type {any} */ (e).message === '请求超时') throw new Error('请求超时（20s）');
     throw e;
   }
 }
@@ -120,6 +132,9 @@ export function syncStatus() {
 }
 
 // 登录/注册 + 设备配对：注册失败（用户不存在）先注册再配对
+/**
+ * @param {{ url?: any, username?: any, password?: any, deviceName?: any, insecure?: any }} opts
+ */
 export async function syncLogin({ url, username, password, deviceName, insecure = false }) {
   const base = String(url || '').trim().replace(/\/+$/, '');
   if (!/^https?:\/\//i.test(base)) return { error: '服务器地址需以 http(s):// 开头' };
@@ -133,8 +148,8 @@ export async function syncLogin({ url, username, password, deviceName, insecure 
     try {
       pair = await apiCall(base, '/api/pair', { username: name, password, deviceName: dev }, undefined, TIMEOUT_MS, loginInsecure);
     } catch (e) {
-      if (e.status === 401) return { error: '用户名或密码错误' };
-      if (e.status !== 404) return { error: `连接失败：${e.message}` };
+      if (/** @type {any} */ (e).status === 401) return { error: '用户名或密码错误' };
+      if (/** @type {any} */ (e).status !== 404) return { error: `连接失败：${/** @type {any} */ (e).message}` };
       pair = { notFound: true }; // 用户不存在 → 先注册
     }
     if (pair.notFound) {
@@ -152,9 +167,9 @@ export async function syncLogin({ url, username, password, deviceName, insecure 
     saveCredentials(creds);
     return { ok: true, username: name, deviceName: dev, url: base };
   } catch (e) {
-    if (e.status === 401) return { error: '用户名或密码错误' };
-    if (e.status === 404) return { error: '服务器接口不存在（确认是 mingdao 同步服务端）' };
-    return { error: `连接失败：${e.message}` };
+    if (/** @type {any} */ (e).status === 401) return { error: '用户名或密码错误' };
+    if (/** @type {any} */ (e).status === 404) return { error: '服务器接口不存在（确认是 mingdao 同步服务端）' };
+    return { error: `连接失败：${/** @type {any} */ (e).message}` };
   }
 }
 
@@ -190,15 +205,20 @@ export async function syncRemoteList() {
     const r = await apiCall(g.url, '/api/sessions/list', {}, g.token, TIMEOUT_MS, insecureOn());
     return { ok: true, sessions: r.sessions || [] };
   } catch (e) {
-    return { error: e.message };
+    return { error: /** @type {any} */ (e).message };
   }
 }
 
 // 会话名白名单（与 sync-server 同款）：远端返回的名字不满足即拒绝落盘，防恶意服务器任意文件写
+/** @param {any} n */
 function isValidRemoteName(n) {
   return typeof n === 'string' && /^[\w\u4e00-\u9fa5.-]{1,140}\.jsonl$/.test(n) && !n.includes('..');
 }
 // 冲突副本名：时间戳 + 随机后缀，防同一毫秒冲突静默覆盖
+/**
+ * @param {any} base
+ * @param {any} side
+ */
 function conflictCopyName(base, side) {
   return base.replace(/\.jsonl$/, `.${side}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}.jsonl`);
 }
@@ -214,6 +234,7 @@ function readState() {
     return {};
   }
 }
+/** @param {any} state */
 function writeState(state) {
   ensureHome();
   const target = stateFile();
@@ -221,6 +242,7 @@ function writeState(state) {
 }
 
 // 推送单个/全部会话。仅当远端被其他设备改过（mtime 与本地记录不一致且内容不同）才视为冲突并备份远端。
+/** @param {any} [name] */
 export async function syncPush(name) {
   const g = tokenGuard();
   if (g.error) return { error: g.error };
@@ -257,7 +279,7 @@ export async function syncPush(name) {
     try {
       remote = await apiCall(g.url, '/api/sessions/pull', { name: s.name }, g.token, TIMEOUT_MS, insecureOn());
     } catch (e) {
-      if (e.status !== 404) return { error: `读取远端 ${s.name} 失败：${e.message}` };
+      if (/** @type {any} */ (e).status !== 404) return { error: `读取远端 ${s.name} 失败：${/** @type {any} */ (e).message}` };
     }
     if (remote?.ok) {
       const lastMtime = state[s.name]?.remoteMtime;
@@ -275,7 +297,7 @@ export async function syncPush(name) {
         state[s.name] = { remoteMtime: r.mtime, localMtime: localStat.mtimeMs };
       }
     } catch (e) {
-      return { error: `推送 ${s.name} 失败：${e.message}` };
+      return { error: `推送 ${s.name} 失败：${/** @type {any} */ (e).message}` };
     }
   }
   writeState(state);
@@ -283,6 +305,7 @@ export async function syncPush(name) {
 }
 
 // 拉取单个/全部会话。本地有不同内容时保留本地，远端写入 .remote- 副本。
+/** @param {any} [name] */
 export async function syncPull(name) {
   const g = tokenGuard();
   if (g.error) return { error: g.error };
@@ -290,9 +313,9 @@ export async function syncPull(name) {
   let sessions;
   try {
     const r = await apiCall(g.url, '/api/sessions/list', {}, g.token, TIMEOUT_MS, insecureOn());
-    sessions = (r.sessions || []).filter((s) => !name || s.name === name);
+    sessions = (r.sessions || []).filter((/** @type {any} */ s) => !name || s.name === name);
   } catch (e) {
-    return { error: `获取远端清单失败：${e.message}` };
+    return { error: `获取远端清单失败：${/** @type {any} */ (e).message}` };
   }
   if (!sessions.length) return { error: name ? `远端没有会话 ${name}` : '远端没有会话' };
   const state = readState();
@@ -330,6 +353,9 @@ export async function syncPull(name) {
 }
 
 // ---------- 密码修改 ----------
+/**
+ * @param {{ oldPassword?: any, newPassword?: any }} opts
+ */
 export async function syncChangePassword({ oldPassword, newPassword }) {
   const g = tokenGuard();
   if (g.error) return { error: g.error };
@@ -338,12 +364,13 @@ export async function syncChangePassword({ oldPassword, newPassword }) {
     const r = await apiCall(g.url, '/api/password', { oldPassword: oldPassword || '', newPassword }, g.token, TIMEOUT_MS, insecureOn());
     return r.ok ? { ok: true } : { error: r.error || '修改失败' };
   } catch (e) {
-    if (e.status === 401) return { error: '旧密码错误' };
-    return { error: `修改失败：${e.message}` };
+    if (/** @type {any} */ (e).status === 401) return { error: '旧密码错误' };
+    return { error: `修改失败：${/** @type {any} */ (e).message}` };
   }
 }
 
 // ---------- 会话分享与协作 ----------
+/** @param {any} name */
 export async function syncShareCreate(name) {
   const g = tokenGuard();
   if (g.error) return { error: g.error };
@@ -351,7 +378,7 @@ export async function syncShareCreate(name) {
     const r = await apiCall(g.url, '/api/share/create', { name }, g.token, TIMEOUT_MS, insecureOn());
     return r.ok ? { ok: true, shareId: r.shareId, name: r.name } : { error: r.error };
   } catch (e) {
-    return { error: `分享失败：${e.status === 404 ? '你还没有这个会话' : e.message}` };
+    return { error: `分享失败：${/** @type {any} */ (e).status === 404 ? '你还没有这个会话' : /** @type {any} */ (e).message}` };
   }
 }
 
@@ -362,10 +389,11 @@ export async function syncShareList() {
     const r = await apiCall(g.url, '/api/share/list', {}, g.token, TIMEOUT_MS, insecureOn());
     return { ok: true, mine: r.mine || [], accepted: r.accepted || [] };
   } catch (e) {
-    return { error: `获取分享列表失败：${e.message}` };
+    return { error: `获取分享列表失败：${/** @type {any} */ (e).message}` };
   }
 }
 
+/** @param {any} shareId */
 export async function syncShareAccept(shareId) {
   const g = tokenGuard();
   if (g.error) return { error: g.error };
@@ -382,10 +410,11 @@ export async function syncShareAccept(shareId) {
     writeState(state);
     return { ok: true, shareId, savedAs: r.savedAs, conflict: r.conflict || false };
   } catch (e) {
-    return { error: `接受分享失败：${e.status === 404 ? '分享不存在（可能已撤销）' : e.message}` };
+    return { error: `接受分享失败：${/** @type {any} */ (e).status === 404 ? '分享不存在（可能已撤销）' : /** @type {any} */ (e).message}` };
   }
 }
 
+/** @param {any} shareId */
 export async function syncShareRevoke(shareId) {
   const g = tokenGuard();
   if (g.error) return { error: g.error };
@@ -393,7 +422,7 @@ export async function syncShareRevoke(shareId) {
     const r = await apiCall(g.url, '/api/share/revoke', { shareId }, g.token, TIMEOUT_MS, insecureOn());
     return r.ok ? { ok: true } : { error: r.error };
   } catch (e) {
-    return { error: `撤销失败：${e.status === 404 ? '分享不存在' : e.status === 403 ? '只能撤销自己的分享' : e.message}` };
+    return { error: `撤销失败：${/** @type {any} */ (e).status === 404 ? '分享不存在' : /** @type {any} */ (e).status === 403 ? '只能撤销自己的分享' : /** @type {any} */ (e).message}` };
   }
 }
 
@@ -421,12 +450,16 @@ export function listSyncConflicts() {
     .map(([base, entries]) => ({
       base,
       localExists: fs.existsSync(path.join(home, 'sessions', base)),
-      entries: entries.sort((a, b) => b.ts - a.ts),
+      entries: entries.sort((/** @type {any} */ a, /** @type {any} */ b) => b.ts - a.ts),
     }))
     .sort((a, b) => a.base.localeCompare(b.base));
 }
 
 // choice: local（保留本地，删除备份）| remote（采用远端备份替换本地）| both（把最新备份转正为可见会话）
+/**
+ * @param {any} base
+ * @param {any} choice
+ */
 export function resolveSyncConflict(base, choice) {
   const home = mingdaoHome();
   if (!/^[\w\u4e00-\u9fa5.-]{1,140}\.jsonl$/.test(base)) return { error: '会话名非法' };
@@ -443,7 +476,7 @@ export function resolveSyncConflict(base, choice) {
       const mm = f.match(m);
       return mm && `${mm[1]}.jsonl` === base;
     })
-    .sort((a, b) => Number(b.match(m)[3]) - Number(a.match(m)[3]));
+    .sort((a, b) => Number(/** @type {any} */ (b.match(m))[3]) - Number(/** @type {any} */ (a.match(m))[3]));
   if (!backups.length) return { error: `没有找到 ${base} 的冲突备份` };
   const newest = backups[0];
   if (choice === 'local') {

@@ -22,8 +22,13 @@ const LIB_DIR = fileURLToPath(new URL('../skills-lib', import.meta.url));
 // ---------- 完整性（P3-3）：技能目录联合哈希 ----------
 // 对目录内全部文件（排除 .mingdao-source.json 自身）按相对路径排序，
 // 逐文件 sha256 后拼成 "rel:hash\n" 再取一次 sha256，作为目录内容指纹。
+/**
+ * @param {any} dir
+ */
 export function skillDirHash(dir) {
+  /** @type {any[]} */
   const out = [];
+  /** @type {(d: any, base: any) => void} */
   const walk = (d, base) => {
     let entries;
     try {
@@ -47,6 +52,9 @@ export function skillDirHash(dir) {
     .digest('hex');
 }
 
+/**
+ * @param {any} dir
+ */
 export function readSourceMeta(dir) {
   try {
     return JSON.parse(fs.readFileSync(path.join(dir, '.mingdao-source.json'), 'utf8'));
@@ -55,11 +63,18 @@ export function readSourceMeta(dir) {
   }
 }
 
+/**
+ * @param {any} dir
+ * @param {any} meta
+ */
 export function writeSourceMeta(dir, meta) {
   fs.writeFileSync(path.join(dir, '.mingdao-source.json'), JSON.stringify(meta, null, 2) + '\n', { mode: 0o600 });
 }
 
 // 显式信任当前内容（用户改过 registry/library 安装的技能后重新记录指纹）
+/**
+ * @param {any} name
+ */
 export function trustSkill(name) {
   const target = path.join(userSkillsDir(), name);
   const meta = readSourceMeta(target);
@@ -79,6 +94,10 @@ export function userSkillsDir() {
 }
 
 // 从技能目录读取 name / description（frontmatter 优先，回退标题/目录名）
+/**
+ * @param {any} dir
+ * @returns {any}
+ */
 function readSkillMeta(dir) {
   try {
     const text = fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf8');
@@ -116,6 +135,7 @@ export function installedUserSkillNames() {
 
 export function libraryList() {
   const installed = installedUserSkillNames();
+  /** @type {any[]} */
   const out = [];
   let entries;
   try {
@@ -132,6 +152,9 @@ export function libraryList() {
   return out.sort((a, b) => a.name.localeCompare(b.name));
 }
 
+/**
+ * @param {any} kw
+ */
 export function searchLibrary(kw) {
   const k = String(kw || '').trim().toLowerCase();
   return libraryList().filter(
@@ -144,6 +167,10 @@ export function searchLibrary(kw) {
 //  - name：字母/数字/连字符/点/下划线，1–64 位
 //  - description：非空且 ≤ 200 字
 // 校验失败返回具体错误，绝不装入技能目录。
+/**
+ * @param {any} text
+ * @param {any} hint
+ */
 export function validateSkillMarkdown(text, hint) {
   const src = hint ? `（${hint}）` : '';
   if (!text || !String(text).trim()) return { error: `SKILL.md 为空${src}` };
@@ -159,6 +186,10 @@ export function validateSkillMarkdown(text, hint) {
   return { ok: true, name, description: desc };
 }
 
+/**
+ * @param {any} dir
+ * @param {any} hint
+ */
 export function validateSkillDir(dir, hint) {
   const skillMd = path.join(dir, 'SKILL.md');
   let text;
@@ -170,6 +201,12 @@ export function validateSkillDir(dir, hint) {
   return validateSkillMarkdown(text, hint);
 }
 
+/**
+ * @param {any} dir
+ * @param {any} name
+ * @param {any} source
+ * @param {any} extra
+ */
 function copySkillIntoUser(dir, name, source, extra) {
   ensureHome();
   const target = path.join(userSkillsDir(), name);
@@ -188,12 +225,18 @@ function copySkillIntoUser(dir, name, source, extra) {
   return { name, dir: target };
 }
 
+/**
+ * @param {any} name
+ */
 export function installFromLibrary(name) {
   const found = libraryList().find((s) => s.name === name);
   if (!found) return { error: `技能库中没有 ${name}（mingdao skill search 查看全部）` };
   return copySkillIntoUser(found.dir, found.name, 'library', {});
 }
 
+/**
+ * @param {any} dir
+ */
 export function installFromDir(dir) {
   const abs = path.resolve(dir);
   if (!fs.existsSync(path.join(abs, 'SKILL.md'))) {
@@ -204,6 +247,9 @@ export function installFromDir(dir) {
   return copySkillIntoUser(abs, meta.name, 'dir', { from: abs });
 }
 
+/**
+ * @param {any} url
+ */
 export async function installFromUrl(url) {
   let u;
   try {
@@ -222,7 +268,7 @@ export async function installFromUrl(url) {
     if (!res.ok) return { error: `下载失败：HTTP ${res.status}` };
     text = await res.text();
     if (text.length > 512 * 1024) return { error: 'SKILL.md 超过 512KB 上限' };
-  } catch (e) {
+  } catch (/** @type {any} */ e) {
     return { error: `下载失败：${e.name === 'AbortError' ? '30 秒超时' : e.message}` };
   } finally {
     clearTimeout(timer);
@@ -244,6 +290,9 @@ export async function installFromUrl(url) {
   return r;
 }
 
+/**
+ * @param {any} gitUrl
+ */
 export function installFromGit(gitUrl) {
   if (typeof gitUrl !== 'string' || gitUrl.trim().startsWith('-')) {
     return { error: 'git 地址不能以 - 开头（防选项注入）' };
@@ -262,7 +311,8 @@ export function installFromGit(gitUrl) {
   const found = [];
   const stack = [tmp];
   while (stack.length && found.length < 20) {
-    const dir = stack.pop();
+    const dir = /** @type {any} */ (stack.pop());
+    /** @type {any[]} */
     let entries = [];
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -297,6 +347,9 @@ export function installFromGit(gitUrl) {
   return { names: installed.map((i) => i.name), dirs: installed.map((i) => i.dir), skipped };
 }
 
+/**
+ * @param {any} name
+ */
 export function uninstallSkill(name) {
   const key = String(name).trim();
   // '.'/'..' 会拼出上级目录，必须硬拒绝（正则 [A-Za-z0-9_.-]+ 会放行纯点号名）
@@ -310,9 +363,12 @@ export function uninstallSkill(name) {
 }
 
 // 按元数据来源重新安装（库：重新复制；url：重新下载；git：重新克隆）
+/**
+ * @param {any} name
+ */
 export async function reinstallSkill(name) {
   const target = path.join(userSkillsDir(), name);
-  let meta = {};
+  let meta = /** @type {any} */ ({});
   try {
     meta = JSON.parse(fs.readFileSync(path.join(target, '.mingdao-source.json'), 'utf8'));
   } catch {
@@ -330,6 +386,9 @@ export async function reinstallSkill(name) {
 }
 
 // 统一入口：自动识别 库名 | 本地目录 | SKILL.md URL | git 仓库
+/**
+ * @param {any} arg
+ */
 export async function installSkill(arg) {
   const a = String(arg || '').trim();
   if (!a) return { error: '缺少参数：mingdao skill install <库名|目录|SKILL.md URL|git 仓库地址>' };

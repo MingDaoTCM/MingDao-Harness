@@ -42,14 +42,14 @@ function loadCache() {
   }
 }
 
-function saveCache(data, host) {
+function saveCache(/** @type {any} */ data, /** @type {any} */ host) {
   try {
     ensureHome();
     fs.writeFileSync(cacheFile(), JSON.stringify({ fetchedAt: Date.now(), host, data }, null, 2) + '\n', { mode: 0o600 });
   } catch {}
 }
 
-async function fetchText(url, timeoutMs = 20000, maxBytes = 2 * 1024 * 1024) {
+async function fetchText(/** @type {any} */ url, timeoutMs = 20000, maxBytes = 2 * 1024 * 1024) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -91,26 +91,26 @@ export async function fetchRegistryIndex({ force = false, allowNetwork = true } 
   }
   // 网络失败时回退旧缓存（过期也可用）
   if (cached?.data?.skills) return { data: cached.data, host: cached.host, fromCache: true, stale: true };
-  return { error: `无法获取线上技能库：${lastErr?.message || '网络不可达'}（可用 MINGDAO_REGISTRY_URL 指向自建 registry）` };
+  return { error: `无法获取线上技能库：${(/** @type {any} */ (lastErr))?.message || '网络不可达'}（可用 MINGDAO_REGISTRY_URL 指向自建 registry）` };
 }
 
 // 远端搜索（合并展示：name/description/source/installed）
-export async function searchRegistry(kw, { force = false, allowNetwork = true } = {}) {
+export async function searchRegistry(/** @type {any} */ kw, { force = false, allowNetwork = true } = {}) {
   const r = await fetchRegistryIndex({ force, allowNetwork });
   if (r.error) return { error: r.error };
   const k = String(kw || '').trim().toLowerCase();
   const installed = installedUserSkillNames();
   const skills = r.data.skills
-    .filter((s) => !k || s.name.toLowerCase().includes(k) || (s.description || '').toLowerCase().includes(k))
-    .map((s) => ({ name: s.name, description: s.description, source: 'registry', installed: installed.has(s.name) }));
+    .filter((/** @type {any} */ s) => !k || s.name.toLowerCase().includes(k) || (s.description || '').toLowerCase().includes(k))
+    .map((/** @type {any} */ s) => ({ name: s.name, description: s.description, source: 'registry', installed: installed.has(s.name) }));
   return { skills, host: r.host, updatedAt: r.data.updatedAt, fromCache: r.fromCache, stale: r.stale || false };
 }
 
 // 按索引安装（逐文件下载 + dry-run 校验）
-export async function installFromRegistry(name) {
+export async function installFromRegistry(/** @type {any} */ name) {
   const r = await fetchRegistryIndex();
   if (r.error) return { error: r.error };
-  const entry = r.data.skills.find((s) => s.name === name);
+  const entry = r.data.skills.find((/** @type {any} */ s) => s.name === name);
   if (!entry) return { error: `线上技能库中没有 ${name}（mingdao skill search 查看）` };
   if (!Array.isArray(entry.files) || !entry.files.length) return { error: `技能 ${name} 的索引缺少文件清单` };
 
@@ -134,7 +134,8 @@ export async function installFromRegistry(name) {
           text = await fetchText(`${host}/skills-lib/${encodeURI(name)}/${rel.split('/').map(encodeURIComponent).join('/')}`, 30000, MAX_FILE);
           break;
         } catch (e) {
-          lastErr = e?.name === 'AbortError' ? '下载超时' : String(e?.message || e);
+          const ee = /** @type {any} */ (e);
+          lastErr = ee?.name === 'AbortError' ? '下载超时' : String(ee?.message || ee);
         }
       }
       if (text === null) return { error: `下载 ${name}/${rel} 失败：${lastErr}（已尝试全部镜像）` };

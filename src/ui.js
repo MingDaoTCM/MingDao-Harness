@@ -26,6 +26,10 @@ export const C = {
 
 const stdoutTTY = () => Boolean(process.stdout.isTTY);
 
+/**
+ * @param {any} text
+ * @param {any} code
+ */
 export function style(text, code) {
   if (!stdoutTTY()) {
     // 非 TTY（管道/重定向）：剥离所有内嵌 ANSI 码，保证输出干净可解析
@@ -35,10 +39,11 @@ export function style(text, code) {
 }
 
 // ---------- 终端显示宽度（CJK 占 2 列） ----------
+/** @param {any} s */
 function displayWidth(s) {
   let w = 0;
   for (const ch of String(s)) {
-    const c = ch.codePointAt(0);
+    const c = /** @type {any} */ (ch.codePointAt(0));
     const wide =
       c >= 0x1100 &&
       (c <= 0x115f ||
@@ -57,10 +62,18 @@ function displayWidth(s) {
   return w;
 }
 
+/**
+ * @param {any} s
+ * @param {any} w
+ */
 function padTo(s, w) {
   return String(s) + ' '.repeat(Math.max(0, w - displayWidth(s)));
 }
 
+/**
+ * @param {any} s
+ * @param {any} prefix
+ */
 function indent(s, prefix) {
   return String(s)
     .split('\n')
@@ -70,6 +83,7 @@ function indent(s, prefix) {
 
 // ---------- 轻量代码高亮 ----------
 const HASH_LANGS = new Set(['py', 'python', 'sh', 'bash', 'yaml', 'yml', 'toml', 'markdown', 'md']);
+/** @type {Record<string, string[]>} */
 const LANG_KEYWORDS = {
   js: ['const', 'let', 'var', 'function', 'return', 'if', 'else', 'for', 'while', 'import', 'from', 'export', 'default', 'class', 'extends', 'new', 'await', 'async', 'try', 'catch', 'finally', 'throw', 'typeof', 'instanceof', 'null', 'undefined', 'true', 'false', 'this', 'super', 'switch', 'case', 'break', 'continue', 'do', 'of', 'in', 'static', 'get', 'set', 'delete', 'void', 'yield'],
   ts: ['interface', 'type', 'enum', 'implements', 'readonly', 'private', 'public', 'protected', 'namespace', 'declare', 'as', 'any', 'unknown', 'never', 'string', 'number', 'boolean'],
@@ -83,6 +97,10 @@ const LANG_KEYWORDS = {
   yaml: [],
 };
 
+/**
+ * @param {any} code
+ * @param {any} lang
+ */
 export function highlightCode(code, lang = '') {
   if (!stdoutTTY()) return code;
   const kws = new Set([...(LANG_KEYWORDS[lang] || []), ...(LANG_KEYWORDS[lang.replace(/-.*/, '')] || [])]);
@@ -117,6 +135,7 @@ export function highlightCode(code, lang = '') {
 }
 
 // ---------- Markdown 行内样式 ----------
+/** @param {any} s */
 function inline(s) {
   const parts = [];
   const re = /(`[^`]+`|\*\*[^*]+\*\*|\*[^*\s][^*]*\*)/g;
@@ -134,6 +153,7 @@ function inline(s) {
   return parts.join('');
 }
 
+/** @param {any} line */
 function renderInline(line) {
   const trimmed = line.trim();
   if (/^#{1,6}\s/.test(trimmed)) return style(inline(line), C.bold + C.cyan);
@@ -145,13 +165,16 @@ function renderInline(line) {
 }
 
 // ---------- 流式渲染器 ----------
+/** @param {any} io */
 function createStreamRenderer(io) {
   let buf = '';
   let inCode = false;
   let lang = '';
+  /** @type {any[]} */
   let codeLines = [];
   let streamed = false;
 
+  /** @param {any} line */
   function renderLine(line) {
     const trimmed = line.trim();
     if (trimmed.startsWith('```')) {
@@ -174,6 +197,7 @@ function createStreamRenderer(io) {
   }
 
   return {
+    /** @param {any} text */
     push(text) {
       streamed = true;
       buf += String(text);
@@ -202,6 +226,10 @@ function createStreamRenderer(io) {
 }
 
 // ---------- 行级 diff（编辑预览用，仅小区域） ----------
+/**
+ * @param {any} a
+ * @param {any} b
+ */
 function diffLines(a, b) {
   const n = a.length;
   const m = b.length;
@@ -253,6 +281,7 @@ const COMMANDS = [
   '/quit',
 ];
 
+/** @param {any} line */
 function completeLine(line) {
   if (line.startsWith('/model ') && line.length >= 7) {
     const pre = line.slice(7);
@@ -261,6 +290,10 @@ function completeLine(line) {
   return [COMMANDS.filter((c) => c.startsWith(line)), line];
 }
 
+/**
+ * @param {any} name
+ * @param {any} args
+ */
 function summarizeArgs(name, args) {
   try {
     if (name === 'bash') return ` ${args.command ?? ''}`;
@@ -274,12 +307,19 @@ function summarizeArgs(name, args) {
 
 // ---------- io 工厂 ----------
 export function createIO({ quiet = false } = {}) {
+  /** @type {any} */
   let rl = null;
+  /** @type {any} */
   let spinnerTimer = null;
+  /** @type {any} */
   let renderer = null;
+  /** @type {any[]} */
   let askQueue = []; // 非 TTY：挂起的输入请求
+  /** @type {any[]} */
   let lineQueue = []; // 非 TTY：已缓冲但未被消费的行
+  /** @type {any} */
   let sigintHandler = null; // TTY 下 rl 'SIGINT' 事件转发目标
+  /** @type {any} */
   let ttyPending = null;
   let closed = false;
 
@@ -291,6 +331,7 @@ export function createIO({ quiet = false } = {}) {
     isTTY: Boolean(process.stdin.isTTY),
     showReasoning: true,
 
+    /** @param {any} v */
     setShowReasoning(v) {
       io.showReasoning = !!v;
     },
@@ -304,7 +345,7 @@ export function createIO({ quiet = false } = {}) {
           output: process.stdout,
           terminal,
           historySize: 200,
-          completer: (line) => completeLine(line),
+          completer: (/** @type {any} */ line) => completeLine(line),
         });
         if (terminal) {
           // 关键：TTY 下 Ctrl+C 由 readline 捕获（raw 模式），需要在这里转发给中断处理器；
@@ -321,7 +362,7 @@ export function createIO({ quiet = false } = {}) {
         }
         if (!terminal) {
           // 非 TTY（管道输入）：持久 line 监听 + 队列，避免 rl.question 丢弃首行之后的输入
-          rl.on('line', (line) => {
+          rl.on('line', (/** @type {any} */ line) => {
             const trimmed = line.trim();
             const pending = askQueue.shift();
             if (pending) pending.resolve(trimmed);
@@ -344,6 +385,7 @@ export function createIO({ quiet = false } = {}) {
       return rl;
     },
 
+    /** @param {any} lines */
     setHistory(lines) {
       try {
         const r = io.ensureRl();
@@ -357,6 +399,10 @@ export function createIO({ quiet = false } = {}) {
       if (!quiet) console.log(text);
     },
 
+    /**
+     * @param {any} title
+     * @param {any} lines
+     */
     box(title, lines) {
       if (quiet) return;
       if (!stdoutTTY()) {
@@ -389,6 +435,7 @@ export function createIO({ quiet = false } = {}) {
       io.stopSpinner();
     },
 
+    /** @param {any} label */
     startSpinner(label) {
       if (quiet || !stdoutTTY()) return;
       io.stopSpinner();
@@ -408,6 +455,7 @@ export function createIO({ quiet = false } = {}) {
       }
     },
 
+    /** @param {any} text */
     writeText(text) {
       if (quiet) return;
       if (io._reasoningStarted && !io._answerStarted && stdoutTTY()) {
@@ -417,6 +465,7 @@ export function createIO({ quiet = false } = {}) {
       renderer?.push(String(text));
     },
 
+    /** @param {any} text */
     writeReasoning(text) {
       if (quiet || !io.showReasoning) return;
       if (!io._reasoningStarted) {
@@ -426,6 +475,7 @@ export function createIO({ quiet = false } = {}) {
       process.stdout.write(style(String(text), C.dim));
     },
 
+    /** @param {any} todos */
     renderTodo(todos) {
       if (quiet || !todos?.length) return;
       io.print(style('  ☑ 任务清单', C.bold));
@@ -436,6 +486,10 @@ export function createIO({ quiet = false } = {}) {
       }
     },
 
+    /**
+     * @param {any} code
+     * @param {any} lang
+     */
     printCodeBlock(code, lang) {
       if (quiet) return;
       const label = lang || 'code';
@@ -446,6 +500,12 @@ export function createIO({ quiet = false } = {}) {
     },
 
     // —— 工具执行可视化 ——
+    /**
+     * @param {any} name
+     * @param {any} args
+     * @param {any} result
+     * @param {any} durationMs
+     */
     renderTool(name, args, result, durationMs) {
       if (quiet) return;
       const r = result && typeof result === 'object' ? result : { ok: false, error: String(result ?? '') };
@@ -525,6 +585,11 @@ export function createIO({ quiet = false } = {}) {
       io.print(style(`  ✓ 输出 ${out.length} 字符${ms}`, C.green));
     },
 
+    /**
+     * @param {any} name
+     * @param {any} args
+     * @param {any} reason
+     */
     renderToolDenied(name, args, reason) {
       if (quiet) return;
       const label = reason === '未授权' || !reason ? '未授权，已跳过' : reason;
@@ -532,11 +597,12 @@ export function createIO({ quiet = false } = {}) {
     },
 
     // —— 用量与费用状态行 ——
+    /** @param {{ modelName: any, usage: any, durationMs: any }} param0 */
     printUsageLine({ modelName, usage, durationMs }) {
       if (quiet) return;
       const p = usage?.prompt_tokens ?? 0;
       const c = usage?.completion_tokens ?? 0;
-      const fmt = (n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+      const fmt = (/** @type {any} */ n) => (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
       const secs = ((durationMs ?? 0) / 1000).toFixed(1) + 's';
       const costPart = estimateCostLabel(modelName, p, c, usage);
       io.print(
@@ -550,6 +616,7 @@ export function createIO({ quiet = false } = {}) {
     // —— SIGINT（Ctrl+C 中断生成，不退出程序） ——
     // TTY 下 readline raw 模式会把 Ctrl+C 转成 rl 的 'SIGINT' 事件（ensureRl 转发到 sigintHandler），
     // 非 TTY/其他来源走 process 级 SIGINT；两层都注册，保证任何路径都能中断
+    /** @param {any} fn */
     onSigint(fn) {
       const h = () => {
         try {
@@ -564,6 +631,10 @@ export function createIO({ quiet = false } = {}) {
       };
     },
 
+    /**
+     * @param {any} question
+     * @param {any} opts
+     */
     ask(question, opts = {}) {
       if (!process.stdin.isTTY) {
         // 非 TTY：优先消费已缓冲的行（接口关闭后仍可能有剩余行），不打印提示符
@@ -592,7 +663,7 @@ export function createIO({ quiet = false } = {}) {
         }
         const entry = { resolve, restore };
         ttyPending = entry;
-        r.question(question, (answer) => {
+        r.question(question, (/** @type {any} */ answer) => {
           restore();
           if (ttyPending === entry) ttyPending = null;
           resolve(answer.trim());
@@ -601,6 +672,7 @@ export function createIO({ quiet = false } = {}) {
     },
 
     // 行尾反斜杠续行，支持多行输入
+    /** @param {any} prompt */
     async askMultiline(prompt, continuation = '…> ') {
       const lines = [];
       for (;;) {
@@ -615,14 +687,19 @@ export function createIO({ quiet = false } = {}) {
       }
     },
 
+    /** @param {any} question */
     async confirm(question) {
       const a = await io.ask(question + ' ');
       return /^y(es)?$/i.test(a);
     },
 
+    /**
+     * @param {any} label
+     * @param {any} options
+     */
     async choose(label, options) {
       io.print(style(label, C.bold));
-      options.forEach((o, i) => io.print(`  ${style(String(i + 1), C.cyan)}. ${o.label}`));
+      options.forEach((/** @type {any} */ o, /** @type {any} */ i) => io.print(`  ${style(String(i + 1), C.cyan)}. ${o.label}`));
       for (;;) {
         const ans = await io.ask('请输入序号：');
         const n = Number(ans);

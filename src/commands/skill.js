@@ -18,14 +18,14 @@ function askAutoStart() {
   });
 }
 
-export async function handleSkill(cmd, args) {
+export async function handleSkill(/** @type {any} */ cmd, /** @type {any} */ args) {
   const sub = args[0] || 'list';
   const arg = args[1];
   if (sub === 'search') {
     const local = searchLibrary(arg || '');
     const remote = await searchRegistry(arg || '');
     const localNames = new Set(local.map((s) => s.name));
-    const remoteOnly = remote.skills ? remote.skills.filter((s) => !localNames.has(s.name)) : [];
+    const remoteOnly = remote.skills ? remote.skills.filter((/** @type {any} */ s) => !localNames.has(s.name)) : [];
     console.log(
       `技能库匹配：内置 ${local.length}${remote.error ? '' : ` + 线上 ${remoteOnly.length}`} · 安装：mingdao skill install <名称>`
     );
@@ -41,15 +41,17 @@ export async function handleSkill(cmd, args) {
   if (sub === 'install') {
     const r = await installSkill(arg);
     if (r.error) {
-      console.log('[错误] ' + r.error);
+      console.log('[错误] ' + (/** @type {any} */ (r)).error);
       process.exitCode = 1;
       return true;
     }
-    if (r.names) {
-      console.log(`✓ 已从 git 仓库安装 ${r.names.length} 个技能：${r.names.join(', ')}`);
+    if ((/** @type {any} */ (r)).names) {
+      const rn = /** @type {any} */ (r);
+      console.log(`✓ 已从 git 仓库安装 ${rn.names.length} 个技能：${rn.names.join(', ')}`);
     } else {
-      const srcLabel = r.host ? '（线上 registry）' : '';
-      console.log(`✓ 已安装技能 ${r.name}${srcLabel} → ~/.mingdao/skills/${r.name}/（可编辑/删除，下次会话生效）`);
+      const rn = /** @type {any} */ (r);
+      const srcLabel = rn.host ? '（线上 registry）' : '';
+      console.log(`✓ 已安装技能 ${rn.name}${srcLabel} → ~/.mingdao/skills/${rn.name}/（可编辑/删除，下次会话生效）`);
     }
     return true;
   }
@@ -61,7 +63,7 @@ export async function handleSkill(cmd, args) {
     }
     const r = uninstallSkill(arg);
     if (r.error) {
-      console.log('[错误] ' + r.error);
+      console.log('[错误] ' + (/** @type {any} */ (r)).error);
       process.exitCode = 1;
       return true;
     }
@@ -76,11 +78,11 @@ export async function handleSkill(cmd, args) {
     }
     const r = await reinstallSkill(arg);
     if (r.error) {
-      console.log('[错误] ' + r.error);
+      console.log('[错误] ' + (/** @type {any} */ (r)).error);
       process.exitCode = 1;
       return true;
     }
-    console.log(`✓ 已更新技能 ${r.name}`);
+    console.log(`✓ 已更新技能 ${(/** @type {any} */ (r)).name}`);
     return true;
   }
   if (sub === 'trust') {
@@ -91,7 +93,7 @@ export async function handleSkill(cmd, args) {
     }
     const r = trustSkill(arg);
     if (r.error) {
-      console.log('[错误] ' + r.error);
+      console.log('[错误] ' + (/** @type {any} */ (r)).error);
       process.exitCode = 1;
       return true;
     }
@@ -116,7 +118,7 @@ export async function handleSkill(cmd, args) {
 // WebUI：mingdao web [端口] [--auth-token <令牌>] [--autostart|--no-autostart]（评估 P3-1：参数结构不合法的按提问处理）
 // --autostart/--no-autostart：写 config.web.autoStart——开启后每次运行 mingdao 会自动后台拉起 WebUI；
 // 首次交互运行且未设置时，询问一次「下次是否自动启动」。
-export async function handleWeb(cmd, args) {
+export async function handleWeb(/** @type {any} */ cmd, /** @type {any} */ args) {
   let portIndex = -1;
   let tokenSeen = false;
   let autoChoice; // undefined=未指定；true/false=显式指定
@@ -165,7 +167,7 @@ export async function handleWeb(cmd, args) {
   const host = cfg0?.web?.host || '127.0.0.1';
   // 访问令牌优先级：--auth-token 参数 > 环境变量 MINGDAO_WEB_TOKEN > config.json 的 web.token
   let authToken = process.env.MINGDAO_WEB_TOKEN || cfg0?.web?.token || undefined;
-  const atIdx = args.findIndex((a) => typeof a === 'string' && a.startsWith('--auth-token'));
+  const atIdx = args.findIndex((/** @type {any} */ a) => typeof a === 'string' && a.startsWith('--auth-token'));
   if (atIdx !== -1) {
     const raw = args[atIdx];
     authToken = raw.includes('=') ? raw.slice(raw.indexOf('=') + 1) : args[atIdx + 1];
@@ -179,14 +181,14 @@ export async function handleWeb(cmd, args) {
     await runWebServer({ host, port, authToken });
   } catch (err) {
     // 质检 C2：listen 现在会 reject（如端口占用），CLI 给出明确提示而非挂起
-    console.error(`[MingDao] WebUI 启动失败：${err?.message || err}`);
+    console.error(`[MingDao] WebUI 启动失败：${(/** @type {any} */ (err))?.message || err}`);
     process.exitCode = 1;
   }
   return true;
 }
 
 // 会话检索：mingdao sessions search <关键词>
-export async function handleSessions(cmd, args) {
+export async function handleSessions(/** @type {any} */ cmd, /** @type {any} */ args) {
   if (args[0] !== 'search') return false;
   const kw = args.slice(1).join(' ').trim();
   if (!kw) {
@@ -200,7 +202,7 @@ export async function handleSessions(cmd, args) {
   else {
     console.log(`找到 ${hits.length} 个会话：`);
     for (const h of hits) {
-      console.log(`  ${h.name}（${relativeTime(h.mtime)}）\n    ${h.snippet}`);
+      console.log(`  ${h.name}（${relativeTime(h.mtime)}）\n    ${(/** @type {any} */ (h)).snippet}`);
     }
     console.log(`\n恢复：mingdao --resume（选择器中可见全部会话）`);
   }

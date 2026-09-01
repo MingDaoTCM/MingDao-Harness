@@ -6,9 +6,9 @@
  * @typedef {Error & { status?: number, headers?: Headers }} ApiError
  */
 
-export async function chat({ baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta, includeUsage = true, responseFormat, reasoningEffort }) {
+export async function chat(/** @type {any} */ { baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta, includeUsage = true, responseFormat, reasoningEffort }) {
   const url = String(baseUrl).replace(/\/+$/, '') + '/chat/completions';
-  const payload = { model, messages };
+  const payload = /** @type {Record<string, any>} */ ({ model, messages });
   if (temperature != null) payload.temperature = temperature;
   if (tools && tools.length) {
     payload.tools = tools;
@@ -36,7 +36,7 @@ export async function chat({ baseUrl, apiKey, model, messages, tools, temperatur
     });
   } catch (err) {
     /** @type {ApiError} */
-    const e = new Error(`网络请求失败：${err?.message || err}`);
+    const e = new Error(`网络请求失败：${(/** @type {any} */ (err))?.message || err}`);
     e.status = 0;
     throw e;
   }
@@ -64,7 +64,7 @@ export async function chat({ baseUrl, apiKey, model, messages, tools, temperatur
   return parseStream(res.body, onDelta);
 }
 
-export function parseNonStream(json, onDelta) {
+export function parseNonStream(/** @type {any} */ json, /** @type {any} */ onDelta) {
   const choice = json?.choices?.[0];
   const msg = choice?.message ?? {};
   if (msg.content) onDelta?.({ text: msg.content });
@@ -80,7 +80,7 @@ export function parseNonStream(json, onDelta) {
 }
 
 // 解析 SSE 流：处理跨 chunk 断行、增量 content / reasoning_content / tool_calls。
-export async function parseStream(body, onDelta) {
+export async function parseStream(/** @type {any} */ body, /** @type {any} */ onDelta) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -90,15 +90,15 @@ export async function parseStream(body, onDelta) {
   const indexKeys = new Map(); // index -> key（id 只在首片出现，后续分片按 index 找回同一条目）
   let autoKey = 0;
   let usage = null;
-  let finish = null;
+  let /** @type {any} */ finish = null;
 
   let doneFlag = false;
-  const handleLine = (lineRaw) => {
+  const handleLine = (/** @type {any} */ lineRaw) => {
     const line = lineRaw.trim();
     if (!line.startsWith('data:')) return;
     const data = line.slice(5).trim();
     if (data === '[DONE]') {
-      finish = finish || 'stop';
+      finish = /** @type {any} */ finish || 'stop';
       doneFlag = true;
       return true; // 通知外层终止读取（审计 P2-4：[DONE] 后不再消费残帧、不挂到超时）
     }

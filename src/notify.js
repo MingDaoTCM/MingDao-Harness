@@ -6,7 +6,7 @@
 
 import { spawn } from 'node:child_process';
 
-export function notify(title, message) {
+export function notify(/** @type {any} */ title, /** @type {any} */ message) {
   try {
     const text = String(message).replace(/\s+/g, ' ').slice(0, 120);
     // 审计 P2-12：title 同样转义（mac 反斜杠/引号、win 单引号），防注入破坏命令
@@ -33,6 +33,6 @@ export function notify(title, message) {
   }
 }
 
-export function notifyTaskDone(question, status) {
+export function notifyTaskDone(/** @type {any} */ question, /** @type {any} */ status) {
   notify('MingDao', `${status === 'done' ? '✓ 完成' : '✖ 失败'}：${String(question).slice(0, 60)}`);
 }

@@ -54,6 +54,7 @@ export function ensureMinimalConfig() {
   return cfg;
 }
 
+/** @param {any} cfg */
 export function saveConfig(cfg) {
   ensureHome();
   const p = configPath();
@@ -63,10 +64,12 @@ export function saveConfig(cfg) {
   } catch {}
 }
 
+/** @param {any} cfg @param {any} providerName */
 export function effectiveApiKey(cfg, providerName) {
   return resolveApiKey(cfg, providerName, providerPreset(providerName)?.envKey);
 }
 
+/** @param {any} io */
 export async function runWizard(io) {
   io.box('MingDao Harness 初始化向导', ['① 选服务商 → ② 填 API Key（自动验证）→ ③ 选模型（可跳过）']);
   io.print('');
@@ -74,9 +77,9 @@ export async function runWizard(io) {
   const providerKeys = Object.keys(PROVIDERS);
   const provider = await io.choose(
     '① 选择模型服务商：',
-    providerKeys.map((k) => ({ value: k, label: `${k} — ${PROVIDERS[k].label}` }))
+    providerKeys.map((k) => ({ value: k, label: `${k} — ${/** @type {Record<string, any>} */ (PROVIDERS)[k].label}` }))
   );
-  const pp = PROVIDERS[provider];
+  const pp = /** @type {Record<string, any>} */ (PROVIDERS)[provider];
 
   let baseUrl = '';
   if (provider === 'custom') {
@@ -163,13 +166,13 @@ export async function runWizard(io) {
   const contextBudget = Number(budgetInput) > 0 ? Number(budgetInput) : defaultBudget;
 
   // 注意：config.json 不含任何密钥（可安全分享/提交），密钥只存 credentials.json。
-  const cfg = {
+  const cfg = /** @type {any} */ ({
     provider,
     baseUrl: baseUrl || pp.baseUrl,
     permission: perm,
     sandbox,
     contextBudget,
-  };
+  });
   if (model) cfg.model = model;
   if (routing) cfg.routing = routing;
   saveConfig(cfg);

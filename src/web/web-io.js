@@ -3,6 +3,9 @@
 
 import { estimateCostLabel } from '../pricing.js';
 
+/**
+ * @param {{ send: any, askHandler: any, setAbortHandler: any }} param0
+ */
 export function createWebIO({ send, askHandler, setAbortHandler }) {
   const io = {
     isTTY: false,
@@ -10,12 +13,13 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
     _pending: null,
     _toolCount: 0,
     _taskCount: 0, // 子代理（task 工具）次数：进度心跳与轨迹面板用
-    _deliverables: [],
-    _activeTools: [], // {seq, key}：并行批次下 toolStart↔tool 按 name+args 配对（审计 P2-7）
+    _deliverables: /** @type {any[]} */ ([]),
+    _activeTools: /** @type {any[]} */ ([]), // {seq, key}：并行批次下 toolStart↔tool 按 name+args 配对（审计 P2-7）
     // 交付物与步数统计：写/编辑成功的文件路径（去重）
     stats() {
       return { toolCount: io._toolCount, taskCount: io._taskCount, deliverables: [...new Set(io._deliverables)] };
     },
+    /** @param {any} v */
     setShowReasoning(v) {
       io.showReasoning = !!v;
     },
@@ -26,6 +30,10 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
     print(text = '') {
       send({ type: 'banner', text });
     },
+    /**
+     * @param {any} title
+     * @param {any} lines
+     */
     box(title, lines) {
       send({ type: 'banner', title, lines });
     },
@@ -35,27 +43,39 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
     beginTurn() {},
     endTurn() {},
     startSpinner() {
-      if (!io._turnActive) {
-        io._turnActive = true;
+      if (!/** @type {any} */ (io)._turnActive) {
+        /** @type {any} */ (io)._turnActive = true;
         send({ type: 'turnStart', toolSteps: io._toolCount });
       }
     },
     stopSpinner() {
-      if (io._turnActive) {
-        io._turnActive = false;
+      if (/** @type {any} */ (io)._turnActive) {
+        /** @type {any} */ (io)._turnActive = false;
         send({ type: 'turnEnd', toolSteps: io._toolCount });
       }
     },
+    /** @param {any} t */
     writeText(t) {
       send({ type: 'text', delta: String(t) });
     },
+    /** @param {any} t */
     writeReasoning(t) {
       if (!io.showReasoning) return;
       send({ type: 'reasoning', delta: String(t) });
     },
+    /**
+     * @param {any} code
+     * @param {any} lang
+     */
     printCodeBlock(code, lang) {
       send({ type: 'code', code, lang });
     },
+    /**
+     * @param {any} name
+     * @param {any} args
+     * @param {any} result
+     * @param {any} durationMs
+     */
     renderTool(name, args, result, durationMs) {
       io._toolCount += 1;
       if (name === 'task') io._taskCount += 1;
@@ -64,16 +84,25 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
       }
       // 审计 P2-7：按 name+args 找回 toolStart 的 seq（并行批次下各卡片配对正确）
       const key = name + ':' + JSON.stringify(args || {});
-      const idx = io._activeTools.findIndex((a) => a.key === key);
-      const seq = idx !== -1 ? io._activeTools.splice(idx, 1)[0].seq : (io._toolSeq || 0) + 1;
+      const idx = io._activeTools.findIndex((/** @type {any} */ a) => a.key === key);
+      const seq = idx !== -1 ? io._activeTools.splice(idx, 1)[0].seq : (/** @type {any} */ (io)._toolSeq || 0) + 1;
       send({ type: 'tool', name, args, result, durationMs, seq });
     },
     // 工具开始执行：前端先渲染带旋转状态的卡片，完成后原地更新（seq 配对）
+    /**
+     * @param {any} name
+     * @param {any} args
+     */
     renderToolStart(name, args) {
-      io._toolSeq = (io._toolSeq || 0) + 1;
-      io._activeTools.push({ seq: io._toolSeq, key: name + ':' + JSON.stringify(args || {}) });
-      send({ type: 'toolStart', name, args, seq: io._toolSeq });
+      /** @type {any} */ (io)._toolSeq = (/** @type {any} */ (io)._toolSeq || 0) + 1;
+      io._activeTools.push({ seq: /** @type {any} */ (io)._toolSeq, key: name + ':' + JSON.stringify(args || {}) });
+      send({ type: 'toolStart', name, args, seq: /** @type {any} */ (io)._toolSeq });
     },
+    /**
+     * @param {any} name
+     * @param {any} args
+     * @param {any} reason
+     */
     renderToolDenied(name, args, reason) {
       // 质检 L2：被拒的 toolStart 也要从 _activeTools 移除——否则条目无界增长、
       // 且后续同名同参工具可能 findIndex 命中陈旧 seq 导致卡片配对错位
@@ -82,9 +111,11 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
       if (idx !== -1) io._activeTools.splice(idx, 1);
       send({ type: 'toolDenied', name, args, reason: reason || '未授权' });
     },
+    /** @param {any} todos */
     renderTodo(todos) {
       send({ type: 'todo', todos });
     },
+    /** @param {{ modelName: any, usage: any, durationMs: any }} param0 */
     printUsageLine({ modelName, usage, durationMs }) {
       send({
         type: 'usage',
@@ -94,22 +125,33 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
         cost: estimateCostLabel(modelName, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0, usage),
       });
     },
+    /** @param {any} fn */
     onSigint(fn) {
       if (setAbortHandler) setAbortHandler(fn);
       return () => {
         if (setAbortHandler) setAbortHandler(null);
       };
     },
+    /**
+     * @param {any} question
+     * @param {any} opts
+     */
     ask(question, opts = {}) {
       return askHandler({ question, hidden: Boolean(opts.hidden) });
     },
+    /** @param {any} prompt */
     async askMultiline(prompt) {
       return askHandler({ question: prompt });
     },
+    /** @param {any} question */
     async confirm(question) {
       const a = await askHandler({ question: question + ' ', confirm: true });
       return /^y(es)?$/i.test(String(a));
     },
+    /**
+     * @param {any} label
+     * @param {any} options
+     */
     async choose(label, options) {
       return askHandler({ label, options });
     },

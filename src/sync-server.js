@@ -39,9 +39,14 @@ const INVITE_CODES = new Set(
     .filter(Boolean)
 );
 
+/** @type {(...a: any[]) => void} */
 const log = (...a) => console.log(new Date().toISOString(), ...a);
 
 // ---------- 存储 ----------
+/**
+ * @param {any} file
+ * @param {any} fallback
+ */
 function readJson(file, fallback) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -49,6 +54,10 @@ function readJson(file, fallback) {
     return fallback;
   }
 }
+/**
+ * @param {any} file
+ * @param {any} obj
+ */
 function writeJson(file, obj) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   atomicWriteFileSync(file, JSON.stringify(obj, null, 2) + '\n', { mode: 0o600 }); // 质检 H4
@@ -59,12 +68,15 @@ function usersFile() {
 function devicesFile() {
   return path.join(ACTIVE_DIR, 'devices.json');
 }
+/** @param {any} username */
 function userDir(username) {
   return path.join(ACTIVE_DIR, 'data', username);
 }
+/** @param {any} username */
 function sessionsDir(username) {
   return path.join(userDir(username), 'sessions');
 }
+/** @param {any} username */
 function metaFile(username) {
   return path.join(userDir(username), 'meta.json');
 }
@@ -75,8 +87,13 @@ function acceptedFile() {
   return path.join(ACTIVE_DIR, 'accepted.json');
 }
 
+/** @type {(s: any) => string} */
 const sha = (s) => crypto.createHash('sha256').update(String(s)).digest('hex');
 // 常量时间比较（P3-10）：token/密码哈希等值判断防时序侧信道
+/**
+ * @param {any} a
+ * @param {any} b
+ */
 function safeEqualHex(a, b) {
   try {
     const ba = Buffer.from(String(a), 'hex');
@@ -87,9 +104,18 @@ function safeEqualHex(a, b) {
   }
 }
 // 密码存储用 scrypt（带盐 KDF）；旧数据兼容：verify 时 sha256 回退
+/**
+ * @param {any} password
+ * @param {any} salt
+ */
 function hashPassword(password, salt) {
   return crypto.scryptSync(String(password), String(salt), 32).toString('hex');
 }
+/**
+ * @param {any} password
+ * @param {any} salt
+ * @param {any} hash
+ */
 function verifyPassword(password, salt, hash) {
   if (!hash) return false;
   try {
@@ -98,9 +124,11 @@ function verifyPassword(password, salt, hash) {
   // 兼容早期 sha256 存储
   return safeEqualHex(hash, sha(`${salt}:${password}`));
 }
+/** @param {any} u */
 function isValidUsername(u) {
   return typeof u === 'string' && /^[A-Za-z0-9_.-]{2,32}$/.test(u) && u !== '.' && u !== '..';
 }
+/** @param {any} n */
 function isValidSessionName(n) {
   return typeof n === 'string' && /^[\w\u4e00-\u9fa5.-]{1,140}\.jsonl$/.test(n) && !n.includes('..');
 }
@@ -108,6 +136,7 @@ function isValidSessionName(n) {
 // ---------- 限速（防爆破/枚举；内存表，进程级） ----------
 const TRUST_PROXY = process.env.SYNC_TRUST_PROXY === '1'; // 仅部署在可信反代后时开启
 const rateBuckets = new Map();
+/** @param {any} req */
 function clientKey(req) {
   let ip = req.socket?.remoteAddress || 'x';
   if (TRUST_PROXY) {
@@ -116,6 +145,7 @@ function clientKey(req) {
   }
   return ip;
 }
+/** @param {any} req */
 function rateLimited(req, limit = 20, extra = '') {
   // 质检 M5：键 = IP + 路由 + 用户名——单账号爆破按用户名限（分布式 IP 无法绕过）；
   // 表满按最旧淘汰而非整表 clear（整表 clear 可被攻击者重置全员限额）
@@ -140,11 +170,13 @@ function rateLimited(req, limit = 20, extra = '') {
 }
 
 // ---------- HTTP 工具 ----------
+/** @param {any} req */
 function readBody(req, limit = MAX_BODY) {
   return new Promise((resolve, reject) => {
+    /** @type {any[]} */
     const chunks = [];
     let size = 0;
-    req.on('data', (d) => {
+    req.on('data', (/** @type {any} */ d) => {
       size += d.length;
       if (size > limit) {
         reject(new Error('body 超限'));
@@ -157,20 +189,27 @@ function readBody(req, limit = MAX_BODY) {
     req.on('error', reject);
   });
 }
+/**
+ * @param {any} res
+ * @param {any} code
+ * @param {any} obj
+ */
 function json(res, code, obj) {
   const body = JSON.stringify(obj);
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Content-Length': Buffer.byteLength(body) });
   res.end(body);
 }
+/** @param {any} req */
 async function parseBody(req) {
   try {
     return JSON.parse(await readBody(req) || '{}');
   } catch (e) {
-    return { __error: e.message };
+    return { __error: /** @type {any} */ (e).message };
   }
 }
 
 // ---------- 认证 ----------
+/** @param {any} req */
 function tokenOf(req) {
   const h = req.headers.authorization || '';
   const m = h.match(/^Bearer\s+(.+)$/i);
@@ -181,6 +220,7 @@ const deviceTokenCache = new Map();
 function invalidateDeviceCache() {
   deviceTokenCache.clear();
 }
+/** @param {any} token */
 function findDeviceByToken(token) {
   if (!token) return null;
   const tokenHash = sha(token);
@@ -202,9 +242,12 @@ function findDeviceByToken(token) {
 
 // ---------- 业务 ----------
 // 质检 A1：通用写互斥（注册/pair/lastSeen/meta 更新串行化），防 devices.json/meta.json 读改写竞态
+/** @type {any} */
 let writeLock = null;
+/** @param {any} fn */
 async function withWriteLock(fn) {
   const prev = writeLock || Promise.resolve();
+  /** @type {any} */
   let release;
   writeLock = new Promise((resolve) => {
     release = resolve;
@@ -216,7 +259,9 @@ async function withWriteLock(fn) {
     release();
   }
 }
+/** @type {any} */
 let registerLock = null;
+/** @param {any} body */
 async function doRegister(body) {
   const username = String(body.username || '').trim();
   const password = String(body.password || '');
@@ -229,6 +274,7 @@ async function doRegister(body) {
     });
   }
   const prev = registerLock;
+  /** @type {any} */
   let release;
   registerLock = new Promise((resolve) => {
     release = resolve;
@@ -247,6 +293,7 @@ async function doRegister(body) {
   }
 }
 
+/** @param {any} body */
 async function doPair(body) {
   const username = String(body.username || '').trim();
   const password = String(body.password || '');
@@ -268,10 +315,12 @@ async function doPair(body) {
   });
 }
 
+/** @param {any} username */
 function doListSessions(username) {
   const dir = sessionsDir(username);
   const meta = readJson(metaFile(username), {});
   const out = [];
+  /** @type {any[]} */
   let entries = [];
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -285,6 +334,10 @@ function doListSessions(username) {
   return out;
 }
 
+/**
+ * @param {any} username
+ * @param {any} body
+ */
 function doPush(username, body) {
   const name = String(body.name || '').trim();
   const content = typeof body.content === 'string' ? body.content : '';
@@ -305,6 +358,10 @@ function doPush(username, body) {
   });
 }
 
+/**
+ * @param {any} username
+ * @param {any} name
+ */
 function doPull(username, name) {
   if (!isValidSessionName(name)) return { notFound: '会话不存在' };
   const file = path.join(sessionsDir(username), name);
@@ -317,6 +374,10 @@ function doPull(username, name) {
   }
 }
 
+/**
+ * @param {any} username
+ * @param {any} name
+ */
 function doDelete(username, name) {
   if (!isValidSessionName(name)) return { notFound: '会话不存在' };
   const dir = sessionsDir(username);
@@ -335,6 +396,10 @@ function doDelete(username, name) {
 }
 
 // ---------- 密码修改 ----------
+/**
+ * @param {any} username
+ * @param {any} body
+ */
 function doChangePassword(username, body) {
   const oldPassword = String(body.oldPassword || '');
   const newPassword = String(body.newPassword || '');
@@ -356,6 +421,10 @@ function doChangePassword(username, body) {
 }
 
 // ---------- 会话分享 ----------
+/**
+ * @param {any} username
+ * @param {any} name
+ */
 function doShareCreate(username, name) {
   if (!isValidSessionName(name)) return { error: `会话名非法：${name}` };
   if (!fs.existsSync(path.join(sessionsDir(username), name))) return { notFound: '你还没有这个会话' };
@@ -367,6 +436,7 @@ function doShareCreate(username, name) {
   return { ok: true, shareId, name };
 }
 
+/** @param {any} username */
 function doShareList(username) {
   const shares = readJson(sharesFile(), {});
   const accepted = readJson(acceptedFile(), {})[username] || {};
@@ -383,6 +453,10 @@ function doShareList(username) {
   return { ok: true, mine, accepted: mineAccepted };
 }
 
+/**
+ * @param {any} username
+ * @param {any} shareId
+ */
 function doShareRevoke(username, shareId) {
   const shares = readJson(sharesFile(), {});
   const s = shares[shareId];
@@ -396,6 +470,10 @@ function doShareRevoke(username, shareId) {
 // 接受/刷新分享：克隆（或更新）到接受者自己的会话列表。
 //  - 首次接受 → 写入同名文件（同名已有不同内容则另存 .shared- 副本，绝不覆盖）
 //  - 再次接受：接受者未修改过副本 → 就地刷新；已修改 → 另存新副本（冲突保留双方）
+/**
+ * @param {any} username
+ * @param {any} shareId
+ */
 function doShareAccept(username, shareId) {
   const shares = readJson(sharesFile(), {});
   const s = shares[shareId];
@@ -453,6 +531,10 @@ function doShareAccept(username, shareId) {
 }
 
 // ---------- 路由 ----------
+/**
+ * @param {any} req
+ * @param {any} res
+ */
 async function handle(req, res) {
   const u = new URL(req.url, 'http://x');
   const p = u.pathname;
@@ -569,7 +651,7 @@ async function handle(req, res) {
     }
     return json(res, 404, { error: '未知接口' });
   } catch (e) {
-    log('error', p, e.message);
+    log('error', p, /** @type {any} */ (e).message);
     return json(res, 500, { error: '服务器内部错误' });
   }
 }
@@ -584,6 +666,7 @@ export function runSyncServer({ port, host, dataDir, cert, key } = {}) {
   const certFile = cert || CERT;
   const keyFile = key || KEY;
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  /** @type {(req: any, res: any) => void} */
   const handler = (req, res) => {
     handle(req, res).catch(() => {});
   };

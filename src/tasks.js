@@ -11,11 +11,11 @@ import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
 
 const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url));
 
-export function tasksDir(home) {
+export function tasksDir(/** @type {any} */ home) {
   return path.join(home, 'tasks');
 }
 
-export function listTasks(home) {
+export function listTasks(/** @type {any} */ home) {
   const dir = tasksDir(home);
   let files;
   try {
@@ -33,7 +33,7 @@ export function listTasks(home) {
   return out.sort((a, b) => b.startedAt - a.startedAt);
 }
 
-export function readTask(home, id) {
+export function readTask(/** @type {any} */ home, /** @type {any} */ id) {
   if (!isValidTaskId(id)) return null; // 防 id 路径穿越（id 直接拼进文件路径）
   try {
     return JSON.parse(fs.readFileSync(path.join(tasksDir(home), id + '.json'), 'utf8'));
@@ -42,18 +42,18 @@ export function readTask(home, id) {
   }
 }
 
-export function writeTask(home, task) {
+export function writeTask(/** @type {any} */ home, /** @type {any} */ task) {
   fs.mkdirSync(tasksDir(home), { recursive: true });
   // 原子写：先临时文件再改名，避免崩溃留下半截 JSON
   const target = path.join(tasksDir(home), task.id + '.json');
   atomicWriteFileSync(target, JSON.stringify(task, null, 2) + '\n'); // 质检 H4：tmp 名含 pid+随机
 }
 
-export function isValidTaskId(id) {
+export function isValidTaskId(/** @type {any} */ id) {
   return typeof id === 'string' && /^[a-z0-9]+$/.test(id) && id.length >= 4 && id.length <= 40;
 }
 
-export function startTask(home, question, { permission, model, cwd, offpeak, quietNotify } = /** @type {any} */ ({})) {
+export function startTask(/** @type {any} */ home, /** @type {any} */ question, { permission, model, cwd, offpeak, quietNotify } = /** @type {any} */ ({})) {
   const id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6) + process.pid.toString(36);
   const task = {
     id,
@@ -83,16 +83,16 @@ export function startTask(home, question, { permission, model, cwd, offpeak, qui
   // 质检 M12：spawn 失败（ENOENT/ARG_MAX）必须有 error 监听，否则未捕获事件直接崩进程
   child.on('error', (err) => {
     try {
-      patchTask(home, id, { status: 'failed', error: `worker 启动失败：${err?.message || err}`, durationMs: Date.now() - task.startedAt });
+      patchTask(home, id, { status: 'failed', error: `worker 启动失败：${(/** @type {any} */ (err))?.message || err}`, durationMs: Date.now() - task.startedAt });
     } catch {}
   });
-  task.pid = child.pid;
+  task.pid = /** @type {any} */ (child.pid);
   writeTask(home, task);
   child.unref();
   return task;
 }
 
-export function patchTask(home, id, patch) {
+export function patchTask(/** @type {any} */ home, /** @type {any} */ id, /** @type {any} */ patch) {
   // 质检 H3：读-改-写加锁（worker finish 与 CLI kill 互斥，防 killed/done 互相覆盖）
   return withFileLockSync(path.join(tasksDir(home), '.lock'), () => {
     const t = readTask(home, id);
@@ -101,12 +101,12 @@ export function patchTask(home, id, patch) {
   });
 }
 
-export function killTask(home, id) {
+export function killTask(/** @type {any} */ home, /** @type {any} */ id) {
   if (!isValidTaskId(id)) return false;
   // 质检 H3：读-改-写加锁（与 worker 自身的状态写互斥）
   return withFileLockSync(path.join(tasksDir(home), '.lock'), () => killTaskInner(home, id));
 }
-function killTaskInner(home, id) {
+function killTaskInner(/** @type {any} */ home, /** @type {any} */ id) {
   const t = readTask(home, id);
   if (!t) return false;
   if (t.status === 'running' && t.pid) {
@@ -132,8 +132,8 @@ function killTaskInner(home, id) {
 
 const MARK = { running: '▶', done: '✓', failed: '✖', killed: '■' };
 
-export function formatTaskRow(t) {
-  const mark = MARK[t.status] || '?';
+export function formatTaskRow(/** @type {any} */ t) {
+  const mark = /** @type {any} */ (MARK)[t.status] || '?';
   const elapsed =
     t.status === 'running'
       ? relativeTime(t.startedAt).replace('前', '')

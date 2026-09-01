@@ -183,10 +183,10 @@ export const MODELS = {
   },
 };
 
-export function modelPreset(name) {
-  return MODELS[name] || null;
+export function modelPreset(/** @type {any} */ name) {
+  return /** @type {any} */ (MODELS)[name] || null;
 }
 
-export function providerPreset(name) {
-  return PROVIDERS[name] || null;
+export function providerPreset(/** @type {any} */ name) {
+  return /** @type {any} */ (PROVIDERS)[name] || null;
 }

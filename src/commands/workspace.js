@@ -3,7 +3,7 @@ import { addWorkspace, listWorkspaces, removeWorkspace, workspacePath, touchWork
 import { presetList, buildPreset } from '../mcp-presets.js';
 import { ensureHome, loadConfig, saveConfig } from '../config.js';
 
-export async function handleWorkspace(cmd, args) {
+export async function handleWorkspace(/** @type {any} */ cmd, /** @type {any} */ args) {
   const sub = args[0] || 'list';
   const name = args[1];
   if (sub === 'add') {
@@ -73,7 +73,7 @@ export async function handleWorkspace(cmd, args) {
 }
 
 // MCP 预设：mingdao mcp preset list|add <名称> [参数]
-export async function handleMcp(cmd, args) {
+export async function handleMcp(/** @type {any} */ cmd, /** @type {any} */ args) {
   if (args[0] !== 'preset') return false;
   const home0 = ensureHome();
   if (args[1] === 'add') {

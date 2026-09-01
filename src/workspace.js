@@ -20,7 +20,7 @@ export function loadWorkspaces() {
   }
 }
 
-export function saveWorkspaces(ws) {
+export function saveWorkspaces(/** @type {any} */ ws) {
   try {
     ensureHome();
     // 原子写：临时文件 + rename，避免崩溃后注册表被冲空
@@ -31,7 +31,7 @@ export function saveWorkspaces(ws) {
   } catch {}
 }
 
-export function addWorkspace(name, dir) {
+export function addWorkspace(/** @type {any} */ name, /** @type {any} */ dir) {
   const key = String(name).trim();
   if (!key) return { error: '名称不能为空' };
   if (/[\\/]/.test(key)) return { error: '名称不能包含路径分隔符' };
@@ -43,7 +43,7 @@ export function addWorkspace(name, dir) {
   return { ok: true, name: key, dir: target };
 }
 
-export function removeWorkspace(name) {
+export function removeWorkspace(/** @type {any} */ name) {
   const ws = loadWorkspaces();
   if (!ws[name]) return false;
   delete ws[name];
@@ -51,7 +51,7 @@ export function removeWorkspace(name) {
   return true;
 }
 
-export function renameWorkspace(name, newName) {
+export function renameWorkspace(/** @type {any} */ name, /** @type {any} */ newName) {
   const key = String(newName).trim();
   if (!key) return { error: '新名称不能为空' };
   if (/[\\/]/.test(key)) return { error: '名称不能包含路径分隔符' };
@@ -66,15 +66,15 @@ export function renameWorkspace(name, newName) {
 }
 
 // 修改目录：登记同名即可覆盖目录
-export function setWorkspaceDir(name, dir) {
+export function setWorkspaceDir(/** @type {any} */ name, /** @type {any} */ dir) {
   return addWorkspace(name, dir);
 }
 
-export function workspacePath(name) {
+export function workspacePath(/** @type {any} */ name) {
   return loadWorkspaces()[name]?.dir || null;
 }
 
-export function touchWorkspace(name) {
+export function touchWorkspace(/** @type {any} */ name) {
   const ws = loadWorkspaces();
   if (!ws[name]) return false;
   ws[name].lastUsed = Date.now();
@@ -89,14 +89,14 @@ export function listWorkspaces() {
 }
 
 // 当前目录是否已登记（供横幅/提示）
-export function currentWorkspace(cwd) {
+export function currentWorkspace(/** @type {any} */ cwd) {
   const target = path.resolve(cwd);
   const hit = listWorkspaces().find((w) => path.resolve(w.dir) === target);
   return hit || null;
 }
 
 // 按目录反查工作空间名（会话记录的是目录，展示时需要名字）
-export function workspaceForDir(dir) {
+export function workspaceForDir(/** @type {any} */ dir) {
   if (!dir) return null;
   const target = path.resolve(dir);
   return listWorkspaces().find((w) => path.resolve(w.dir) === target) || null;
@@ -118,7 +118,7 @@ export function loadSessionWorkspaces() {
   }
 }
 
-export function saveSessionWorkspaces(map) {
+export function saveSessionWorkspaces(/** @type {any} */ map) {
   try {
     ensureHome();
     const target = sessionWorkspacesFile();
@@ -128,17 +128,17 @@ export function saveSessionWorkspaces(map) {
   } catch {}
 }
 
-export function getSessionWorkspace(sessionName) {
+export function getSessionWorkspace(/** @type {any} */ sessionName) {
   return loadSessionWorkspaces()[sessionName]?.dir || null;
 }
 
-export function setSessionWorkspace(sessionName, dir, wsName = null) {
+export function setSessionWorkspace(/** @type {any} */ sessionName, /** @type {any} */ dir, wsName = null) {
   const map = loadSessionWorkspaces();
   map[sessionName] = { dir: path.resolve(dir), name: wsName || workspaceForDir(dir)?.name || null, at: Date.now() };
   saveSessionWorkspaces(map);
 }
 
-export function removeSessionWorkspace(sessionName) {
+export function removeSessionWorkspace(/** @type {any} */ sessionName) {
   const map = loadSessionWorkspaces();
   if (!map[sessionName]) return false;
   delete map[sessionName];
@@ -147,7 +147,7 @@ export function removeSessionWorkspace(sessionName) {
 }
 
 // 会话改名时迁移映射（记录保留）
-export function moveSessionWorkspace(oldName, newName) {
+export function moveSessionWorkspace(/** @type {any} */ oldName, /** @type {any} */ newName) {
   const map = loadSessionWorkspaces();
   if (!map[oldName]) return false;
   map[newName] = map[oldName];

@@ -9,7 +9,7 @@
 import crypto from 'node:crypto';
 import { modelPreset } from './models.js';
 
-export function routingConfig(cfg) {
+export function routingConfig(/** @type {any} */ cfg) {
   const r = cfg?.routing;
   if (!r || r.enabled === false) return null;
   const planner = r.planner || 'deepseek-v4-pro';
@@ -25,7 +25,7 @@ const PLAN_HINTS =
 const GENERATION_HINTS =
   /(生成|制作|编写|创建|写|开发|实现|做).{0,30}(游戏|网页|页面|网站|应用|程序|文档|报告|简历|PPT|演示|完整|详细|小工具)|网页版|游戏/;
 
-export function heuristicRoute(text, rc) {
+export function heuristicRoute(/** @type {any} */ text, /** @type {any} */ rc) {
   const s = String(text ?? '');
   if (GENERATION_HINTS.test(s)) return rc.planner; // 生成类：大输出优先
   if (PLAN_HINTS.test(s)) {
@@ -41,7 +41,7 @@ export function heuristicRoute(text, rc) {
 const ROUTE_CACHE_MAX = 100;
 const routeCache = new Map();
 
-export async function routeTask({ cfg, provider, currentModel, text, sticky = null, sessionStats = null }) {
+export async function routeTask(/** @type {any} */ { cfg, provider, currentModel, text, sticky = null, sessionStats = null }) {
   const rc = routingConfig(cfg);
   if (!rc) return { model: currentModel, reason: null };
   // 当前模型已在路由池外（用户手动指定）：不干预
@@ -59,7 +59,7 @@ export async function routeTask({ cfg, provider, currentModel, text, sticky = nu
   // 会话粘滞 + 升级检测（Hermes C2）：执行类会话不再逐轮分类（生成类关键词已在启发式拦截），
   // 但会话内复杂度信号累积（工具步数/截断次数）时允许升级 planner——「开头简单、中途复杂」不再被 flash 硬扛。
   if (sticky === rc.executor) {
-    const stats = sessionStats || {};
+    const stats = /** @type {any} */ (sessionStats || {});
     const steps = Number(stats.steps) || 0;
     const truncated = Number(stats.truncated) || 0;
     const UPGRADE_STEPS = Number(cfg?.routing?.upgradeSteps) || 10;
@@ -140,7 +140,7 @@ export async function routeTask({ cfg, provider, currentModel, text, sticky = nu
 }
 
 // 子代理模型选择：路由开启时固定 executor
-export function subagentModel(cfg, currentModel) {
+export function subagentModel(/** @type {any} */ cfg, /** @type {any} */ currentModel) {
   const rc = routingConfig(cfg);
   if (!rc) return currentModel;
   return modelPreset(rc.executor) ? rc.executor : currentModel;

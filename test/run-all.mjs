@@ -12,6 +12,7 @@ const SUITES = [
   ['e2e-local', 'node', ['test/e2e-local.js']],
   ['e2e-web', 'node', ['test/e2e-web.js']],
   ['e2e-schedule', 'node', ['test/e2e-schedule.js']],
+  ['api-contracts', 'node', ['test/api-contracts.js']],
   ['bench', 'npm', ['run', 'bench']],
 ];
 

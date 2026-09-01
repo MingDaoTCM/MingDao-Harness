@@ -15,7 +15,7 @@ import { skillDirHash, readSourceMeta } from './skill-lib.js';
 
 const BUILTIN_DIR = fileURLToPath(new URL('../skills', import.meta.url));
 
-export function skillDirs(workingDir) {
+export function skillDirs(/** @type {any} */ workingDir) {
   return [
     { dir: path.join(mingdaoHome(), 'skills'), source: 'user' },
     { dir: path.join(workingDir, '.mingdao', 'skills'), source: 'project' },
@@ -23,7 +23,7 @@ export function skillDirs(workingDir) {
   ];
 }
 
-function readDescription(skillMd) {
+function readDescription(/** @type {any} */ skillMd) {
   try {
     const text = fs.readFileSync(skillMd, 'utf8');
     const fm = text.match(/^---\n([\s\S]*?)\n---/);
@@ -39,7 +39,7 @@ function readDescription(skillMd) {
 }
 
 // 完整性校验（P3-3）：带指纹（sha256）来源记录的技能，内容与安装时不一致 → 拒绝加载
-function isTampered(dir) {
+function isTampered(/** @type {any} */ dir) {
   const meta = readSourceMeta(dir);
   if (!meta?.sha256) return false; // 旧版安装（无指纹）不拦截
   try {
@@ -50,14 +50,14 @@ function isTampered(dir) {
 }
 
 // 被篡改的用户级技能清单（CLI/WebUI 提示用；这些技能已被 listSkills 排除加载）
-export function tamperedSkillNames(workingDir) {
+export function tamperedSkillNames(/** @type {any} */ workingDir) {
   const dir = path.join(mingdaoHome(), 'skills');
-  const out = [];
+  const /** @type {any} */ out = [];
   let entries;
   try {
     entries = fs.readdirSync(dir, { withFileTypes: true });
   } catch {
-    return out;
+    return /** @type {any} */ out;
   }
   for (const e of entries) {
     if (!e.isDirectory()) continue;
@@ -75,7 +75,7 @@ export function tamperedSkillNames(workingDir) {
   return out;
 }
 
-export function listSkills(workingDir) {
+export function listSkills(/** @type {any} */ workingDir) {
   const seen = new Set();
   const out = [];
   for (const { dir, source } of skillDirs(workingDir)) {
@@ -108,7 +108,7 @@ export function listSkills(workingDir) {
   return out;
 }
 
-export function loadSkill(workingDir, name) {
+export function loadSkill(/** @type {any} */ workingDir, /** @type {any} */ name) {
   const s = listSkills(workingDir).find((x) => x.name === name);
   if (!s) return null;
   try {
@@ -118,14 +118,14 @@ export function loadSkill(workingDir, name) {
   }
 }
 
-function sourceLabel(source) {
+function sourceLabel(/** @type {any} */ source) {
   if (source === 'user') return '（用户级）';
   if (source === 'builtin') return '（内置）';
   return '';
 }
 
 // 注入系统提示的技能清单（仅名称+描述）
-export function skillsRegistryBlock(workingDir) {
+export function skillsRegistryBlock(/** @type {any} */ workingDir) {
   const skills = listSkills(workingDir);
   if (!skills.length) return '';
   return (

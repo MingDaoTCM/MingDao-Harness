@@ -24,6 +24,7 @@ export function loadCredentials() {
   }
 }
 
+/** @param {any} creds */
 export function saveCredentials(creds) {
   ensureHome();
   const p = credentialsPath();
@@ -34,10 +35,12 @@ export function saveCredentials(creds) {
   } catch {}
 }
 
+/** @param {any} providerName */
 export function getStoredKey(providerName) {
   return loadCredentials()[providerName] || null;
 }
 
+/** @param {any} providerName @param {any} key */
 export function setStoredKey(providerName, key) {
   const creds = loadCredentials();
   if (key) creds[providerName] = String(key);
@@ -45,11 +48,13 @@ export function setStoredKey(providerName, key) {
   saveCredentials(creds);
 }
 
+/** @param {any} providerName */
 export function removeStoredKey(providerName) {
   setStoredKey(providerName, null);
 }
 
 // 脱敏展示：只显示首 6 位与末 4 位，永不输出完整 Key。
+/** @param {any} key */
 export function maskKey(key) {
   if (!key) return null;
   const s = String(key);
@@ -58,6 +63,7 @@ export function maskKey(key) {
 }
 
 // 统一的 Key 解析链：环境变量 → 本地凭证库 → config.json 显式字段
+/** @param {any} cfg @param {any} providerName @param {any} envKeyHint */
 export function resolveApiKey(cfg, providerName, envKeyHint) {
   const envKeys = [envKeyHint, 'MINGDAO_API_KEY'].filter((k, i, a) => k && a.indexOf(k) === i);
   for (const k of envKeys) {

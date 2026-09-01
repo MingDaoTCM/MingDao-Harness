@@ -17,11 +17,11 @@ export function auditFile() {
 }
 
 // 轻量脱敏：sk- 系 API Key 掩码（审计日志可安全共享排查）
-export function redactSecrets(text) {
+export function redactSecrets(/** @type {any} */ text) {
   return String(text ?? '').replace(/(sk-[A-Za-z0-9_-]{6,})/g, 'sk-***');
 }
 
-export function writeAudit(entry) {
+export function writeAudit(/** @type {any} */ entry) {
   try {
     ensureHome();
     const file = auditFile();
