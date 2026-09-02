@@ -427,7 +427,7 @@ function renderWorkStatus(){
   }
   el.style.display=html?'flex':'none';
   el.innerHTML=html;
-  const bg=el.querySelector('.ws-bg'); if(bg) bg.onclick=()=>{ const tp=$('#tasksPanel'); tp.style.display = tp.style.display==='none'?'flex':'none'; if(tp.style.display==='flex'){ $('#trajPanel').style.display='none'; $('#subPanel').style.display='none'; updateTasksPanel(); } };
+  const bg=el.querySelector('.ws-bg'); if(bg) bg.onclick=()=>{ const tp=$('#tasksPanel'); tp.style.display = tp.style.display==='none'?'flex':'none'; if(tp.style.display==='flex'){ $('#trajPanel').style.display='none'; $('#subPanel').style.display='none'; updateTasksPanel(); } syncPanelLayout(); };
 }
 // 顶部常驻活动条（静默完美解决层）：生成期间始终可见，滚动不影响
 function renderLiveBar(){
@@ -483,6 +483,15 @@ function openTraj(msg){
   $('#trajPanel').style.display='flex';
   $('#tasksPanel').style.display='none'; // 仅任务面板（右侧）与轨迹互斥；子代理面板可与轨迹同显
   $('#trajRailBtn').classList.add('on');
+  syncPanelLayout();
+}
+// 面板布局同步（2026-09-02）：轨迹/子代理/任务面板打开时以 body class 推开内容区，
+// 聊天文本与附件行不再被固定面板遮挡；面板宽度随屏宽自动收窄（CSS 媒体查询）。
+function syncPanelLayout(){
+  const open=(id)=>document.getElementById(id)?.style.display==='flex';
+  document.body.classList.toggle('traj-open', open('trajPanel'));
+  document.body.classList.toggle('sub-open', open('subPanel'));
+  document.body.classList.toggle('tasks-open', open('tasksPanel'));
 }
 function resultText(r){
   if(r==null||r===undefined) return '';
@@ -492,13 +501,14 @@ function resultText(r){
   return JSON.stringify(r);
 }
 function truncText(t,n){ t=String(t||''); return t.length>n?t.slice(0,n)+'\n…（截断，共 '+t.length+' 字）':t; }
-$('#tjClose').onclick=()=>{ $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); };
+$('#tjClose').onclick=()=>{ $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); syncPanelLayout(); };
 $('#trajRailBtn').onclick=()=>{
   const p=$('#trajPanel');
   const willShow=p.style.display==='none';
   if(willShow){ const m=lastMsgWithTraj(); if(!m){ uiAlert('本轮还没有可展示的轨迹（先发起一个任务）'); return; } openTraj(m); }
   else p.style.display='none';
   $('#trajRailBtn').classList.toggle('on', willShow);
+  syncPanelLayout();
 };
 function lastMsgWithTraj(){
   const msgs=[...document.querySelectorAll('#chat .msg-ai')].reverse();
@@ -528,9 +538,10 @@ const toggleSubPanel=()=>{
   p.style.display=willShow?'flex':'none';
   $('#subRailBtn').classList.toggle('on', willShow);
   if(willShow){ $('#tasksPanel').style.display='none'; renderSubPanel(); } // 轨迹（左侧）可与子代理（右侧）同显
+  syncPanelLayout();
 };
 $('#subRailBtn').onclick=toggleSubPanel;
-$('#sbClose').onclick=()=>{ $('#subPanel').style.display='none'; $('#subRailBtn').classList.remove('on'); };
+$('#sbClose').onclick=()=>{ $('#subPanel').style.display='none'; $('#subRailBtn').classList.remove('on'); syncPanelLayout(); };
 // —— 任务面板（多会话并行） ——
 function setBtn(){
   sendBtn.textContent = generating ? '■ 停止' : '发送';
@@ -597,8 +608,8 @@ async function refreshStatusBar(){
   $('#statusBar').textContent = s.turns+' 轮 · '+s.steps+' 步 | LLM '+fmtDur(s.llmMs)+' · 工具调用 '+fmtDur(s.toolMs)+' | 首 token 平均 '+ft+' · '+tps+' | 缓存命中 '+rate+' | 输入 '+fmtTok(s.prompt)+' tok · 输出 '+fmtTok(s.completion)+' tok';
 }
 refreshStatusBar(); setInterval(refreshStatusBar, 15000);
-$('#tasksBtn').onclick=()=>{ const p=$('#tasksPanel'); p.style.display = p.style.display==='none'?'flex':'none'; if(p.style.display==='flex'){ $('#subPanel').style.display='none'; $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); $('#subRailBtn').classList.remove('on'); updateTasksPanel(); } };
-$('#tpClose').onclick=()=>{ $('#tasksPanel').style.display='none'; };
+$('#tasksBtn').onclick=()=>{ const p=$('#tasksPanel'); p.style.display = p.style.display==='none'?'flex':'none'; if(p.style.display==='flex'){ $('#subPanel').style.display='none'; $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); $('#subRailBtn').classList.remove('on'); updateTasksPanel(); } syncPanelLayout(); };
+$('#tpClose').onclick=()=>{ $('#tasksPanel').style.display='none'; syncPanelLayout(); };
 
 async function refreshSessions(q){ const u=q?'/api/sessions?q='+encodeURIComponent(q):'/api/sessions'; const r=await fetch(u).catch(()=>null); if(!r)return; const j=await r.json(); const sel=$('#sessions'); sel.innerHTML='<option value="">历史会话</option>'; for(const s of j.sessions){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; sel.appendChild(o); } if(currentSession&&!q) sel.value=currentSession; }
 let searchTimer=null;

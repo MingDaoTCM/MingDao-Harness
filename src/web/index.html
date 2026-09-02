@@ -25,7 +25,27 @@
 *::-webkit-scrollbar-thumb:hover{background:#545557;border:2px solid transparent;background-clip:content-box}
 *::-webkit-scrollbar-track{background:transparent}
 html,body{height:100%}
-body{margin:0;background:var(--bg);color:var(--text);font:15px/1.65 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;display:flex;flex-direction:column;overflow-x:hidden}
+body{margin:0;background:var(--bg);color:var(--text);font:15px/1.65 -apple-system,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;display:flex;flex-direction:column;overflow-x:hidden;transition:padding .16s ease}
+/* 面板推开布局（2026-09-02）：轨迹/子代理/任务面板打开时推开内容区，聊天文本与附件行不被遮挡；
+   面板宽度随屏宽自动收窄，保证聊天区始终可读（≤560px 退化为全宽面板） */
+body.traj-open{padding-left:294px}
+body.sub-open{padding-right:320px}
+body.tasks-open{padding-right:280px}
+@media (max-width:1200px){
+  #trajPanel{width:210px}body.traj-open{padding-left:252px}
+  #subPanel{width:270px}body.sub-open{padding-right:270px}
+  #tasksPanel{width:230px}body.tasks-open{padding-right:230px}
+}
+@media (max-width:860px){
+  #trajPanel{width:160px}body.traj-open{padding-left:202px}
+  #subPanel{width:190px}body.sub-open{padding-right:190px}
+  #tasksPanel{width:190px}body.tasks-open{padding-right:190px}
+}
+@media (max-width:560px){
+  body.traj-open,body.sub-open,body.tasks-open{padding:0}
+  #trajPanel{width:calc(100vw - 42px);left:42px}
+  #subPanel,#tasksPanel{width:100vw}
+}
 header{min-height:52px;display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--bg2);flex:none;flex-wrap:nowrap;white-space:nowrap;overflow-x:auto}
 header .logo{font-weight:700;font-size:16px;color:var(--accent);letter-spacing:.5px;flex:none}
 header .logo span{color:var(--text)}
