@@ -9,7 +9,9 @@ export function createLogWriter(/** @type {string} */ file, { maxBytes = 512 * 1
     try {
       fs.mkdirSync(path.dirname(file), { recursive: true });
       const line = new Date().toISOString() + ' ' + String(msg) + '\n';
-      fs.appendFileSync(file, line);
+      // 自查 #5：日志可能含工具参数等敏感信息——创建与轮转一律 600（多用户机器防同机读取）
+      if (!fs.existsSync(file)) fs.appendFileSync(file, line, { mode: 0o600 });
+      else fs.appendFileSync(file, line);
       const st = fs.statSync(file);
       if (st.size > maxBytes) {
         const raw = fs.readFileSync(file, 'utf8');
@@ -17,8 +19,9 @@ export function createLogWriter(/** @type {string} */ file, { maxBytes = 512 * 1
         const nl = raw.indexOf('\n', cut);
         const keep = nl === -1 ? raw.slice(cut) : raw.slice(nl + 1); // 行对齐保留尾部
         const tmp = file + '.' + process.pid + '.' + crypto.randomBytes(3).toString('hex') + '.tmp';
-        fs.writeFileSync(tmp, keep);
+        fs.writeFileSync(tmp, keep, { mode: 0o600 }); // 轮转重建保持 600
         fs.renameSync(tmp, file);
+        try { fs.chmodSync(file, 0o600); } catch {} // rename 后兜底收权（历史 644 日志迁移）
       }
     } catch {
       // 日志失败绝不抛错（best-effort）

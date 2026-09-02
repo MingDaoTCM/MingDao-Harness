@@ -274,6 +274,41 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   ok('周期任务熔断：连续 3 次失败自动停止，不再无限重试/无限弹失败通知');
 }
 
+// ---------- 7. 守护进程租约：spawn/stopDaemon 真正终止 + 孤儿自退（双 daemon 回归） ----------
+{
+  const { spawnDaemon, stopDaemon, daemonAlive, daemonPidFile } = await import(pathToFileURL(path.join(root, 'src', 'schedule.js')).href);
+  const aliveCheck = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  // 造一个 pending 周期任务让 daemon 有活可干、持续存活
+  const r = await runCli(['schedule', 'add', '租约测试 LEASEKEEP', '--every', '30s']);
+  assert.equal(r.code, 0, r.err);
+  const sid = (r.out.match(/已创建\s+(\S+)/) || [])[1];
+  // 1) spawnDaemon 成功且 daemon 存活
+  assert.equal(spawnDaemon(home), true, 'spawnDaemon 应成功');
+  const pidLine = await waitFor(() => {
+    try {
+      const l = fs.readFileSync(daemonPidFile(home), 'utf8').trim().split(/\s+/);
+      return aliveCheck(Number(l[0])) && l[1] ? { pid: Number(l[0]) } : null;
+    } catch { return null; }
+  }, 15000);
+  assert.ok(pidLine, 'daemon 应存活且 pidfile 格式正确');
+  // 2) 租约自退：篡改 pidfile 指向别的进程 → 真 daemon 进程应在数秒内自行退出
+  fs.writeFileSync(daemonPidFile(home), '99999999 someone-else');
+  const selfExited = await waitFor(() => (aliveCheck(pidLine.pid) ? null : true), 20000);
+  assert.ok(selfExited, '租约被改写后 daemon 应自退（防双 daemon 重复执行）');
+  // 3) stopDaemon 解析 "pid nonce" 首段并真正终止目标进程（此前 Number("pid nonce")=NaN 杀不掉）
+  const victim = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)']);
+  fs.writeFileSync(daemonPidFile(home), `${victim.pid} abcdefg`);
+  let victimExited = false;
+  victim.on('exit', () => { victimExited = true; });
+  stopDaemon(home);
+  await waitFor(() => (victimExited ? true : null), 5000);
+  assert.ok(victimExited, 'stopDaemon 应真正终止 pidfile 指向的进程');
+  assert.ok(!fs.existsSync(daemonPidFile(home)), 'stopDaemon 应删除 pidfile');
+  victim.kill('SIGKILL');
+  if (sid) await runCli(['schedule', 'remove', sid]);
+  ok('守护进程租约：spawn 存活 / 租约自退 / stopDaemon 真正终止');
+}
+
 // 清理
 mock.close();
 safeRm(home, { recursive: true, force: true });

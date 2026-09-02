@@ -257,8 +257,16 @@ async function main() {
     const { readTask } = await import('./tasks.js');
     const handled = new Set();
     const supervising = new Set(); // 本 daemon 正在监督的任务（防崩溃恢复误判正在执行的任务）
+    const nonce = String(opts.prompt[1] || '');
     try {
       for (;;) {
+        // 守护进程租约自检（2026-09-03，防双 daemon）：pidfile 不再等于「我的 pid nonce」
+        // 即视为已被 stop 或已被新 daemon 取代——立即退出，绝不与新 daemon 并跑重复执行任务
+        try {
+          if (fs.readFileSync(daemonPidFile(home0), 'utf8').trim() !== `${process.pid} ${nonce}`) break;
+        } catch {
+          break; // pidfile 被删 = 已被 stop
+        }
         const jobs = listSchedules(home0);
         if (!jobs.some((j) => j.status === 'pending' || j.status === 'running')) break;
         for (const j of jobs) {
@@ -295,8 +303,12 @@ async function main() {
         await new Promise((r) => setTimeout(r, 2000));
       }
     } finally {
+      // 只删除「仍指向自己」的 pidfile：租约被改写/被新 daemon 取代而退出时，
+      // 绝不误删新 daemon 的 pidfile（否则新 daemon 下一次租约检查会连锁退出，双守护全灭）
       try {
-        fs.rmSync(daemonPidFile(home0), { force: true });
+        if (fs.readFileSync(daemonPidFile(home0), 'utf8').trim() === `${process.pid} ${nonce}`) {
+          fs.rmSync(daemonPidFile(home0), { force: true });
+        }
       } catch {}
     }
     return;
@@ -368,11 +380,14 @@ async function main() {
     },
   };
   if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) {
-    // A2：预热——await 连接（6s 超时）；超时本会话冻结工具集（不再中途注入，保护前缀缓存）
+    // A2：预热——await 连接（6s 超时）；超时本会话冻结工具集（不再中途注入，保护前缀缓存）。
+    // 超时后输家 promise 仍在跑：迟到就绪的 manager 立即 stop，防 detached 子进程成孤儿（自查 #2）
+    const mcpStartP = startMcpServers(cfg.mcpServers, workingDir).catch(() => null);
     mcpManager = await Promise.race([
-      startMcpServers(cfg.mcpServers, workingDir).catch(() => null),
+      mcpStartP,
       new Promise((/** @type {any} */ r) => setTimeout(() => r(null), 6000)),
     ]);
+    if (!mcpManager) mcpStartP.then((/** @type {any} */ m) => { if (m) m.stop(); });
     if (mcpManager) {
       const ready = mcpManager.status().filter((/** @type {any} */ s) => s.ok).length;
       if (io && !opts.prompt.length) {

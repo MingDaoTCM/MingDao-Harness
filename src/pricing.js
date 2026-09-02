@@ -42,9 +42,18 @@ export function pricingDataStale() { return externalPricing().stale; }
 export async function refreshPricingFromSource(cfg) {
   const src = String(cfg?.pricing?.source || '').trim();
   if (!src) return { ok: false, lines: ['未配置 pricing.source（config.json 的 pricing.source 填官方价格 JSON 地址后重试）'] };
+  // 自查 #4：与 sync/自定义模型同类的第三外联入口——协议白名单 + 响应大小上限（防误配/恶意源灌内存）
+  try {
+    const u = new URL(src);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return { ok: false, lines: ['价格源仅支持 http/https 地址'] };
+  } catch {
+    return { ok: false, lines: ['价格源必须是合法的 http(s) URL'] };
+  }
   const res = await fetch(src, { signal: AbortSignal.timeout(15000) });
   if (!res.ok) return { ok: false, lines: ['价格源请求失败：HTTP ' + res.status] };
-  const d = await res.json();
+  const buf = await res.arrayBuffer();
+  if (buf.byteLength > 512 * 1024) return { ok: false, lines: ['价格源响应超过 512KB 上限，已拒绝'] };
+  const d = JSON.parse(Buffer.from(buf).toString('utf8'));
   const models = d && typeof d === 'object' && !Array.isArray(d) ? /** @type {any} */ (d).models : null;
   if (!models || typeof models !== 'object' || Array.isArray(models)) {
     return { ok: false, lines: ['价格源格式不符：应为 {"models": {"模型名": {"input":…,"output":…,"cacheHit":…,"peak":{…}}}}'] };

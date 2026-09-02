@@ -101,6 +101,7 @@ $('#dirPickNone').onclick = () => { const cb = pickerCb; pickerCb = null; $('#di
 $('#dirPickCancel').onclick = () => { pickerCb = null; $('#dirModal').style.display = 'none'; };
 const chatEl = $('#chat'), input = $('#input'), sendBtn = $('#sendBtn');
 let activeAiMsg=null, bgRunning=0, curSteps=0, curWorkT0=0, curTools=0, curTasks=0; // 本轮进度（活动条/状态条/轨迹共用）
+let bgTasks=[]; // 后台任务列表快照（chip tooltip 详情用，updateTasksPanel 每 2s 刷新）
 let curPhase='模型推理中'; // 阶段语义（服务端 progress 事件下发）
 const sessionSubs=[]; // 本会话全部子代理（task 工具）条目：{seq, question, result, msg}
 // 回到底部悬浮按钮：滚动容器为 main；上滚超过 300px 时出现，点击平滑回底
@@ -421,9 +422,13 @@ function renderWorkStatus(){
   let html='';
   if(generating){
     const secs=curWorkT0?Math.round((Date.now()-curWorkT0)/1000):0;
-    html='<span class="ws-busy"><span class="spinner"></span>⏳ '+curSteps+' 步 · '+Math.floor(secs/60)+' 分 '+Math.round(secs%60)+' 秒 · '+curTools+' 工具步</span>';
+    html='<span class="ws-busy"><span class="spinner"></span><span class="ws-phase">'+esc(curPhase)+'</span><span>⏳ 第 '+curSteps+' 步 · '+Math.floor(secs/60)+' 分 '+Math.round(secs%60)+' 秒 · '+curTools+' 工具步'+(curTasks>0?' · '+curTasks+' 个子代理':'')+'</span></span>';
   } else if(bgRunning>0){
-    html='<span class="ws-bg">🛠 '+bgRunning+' 个后台任务运行中（下载/定时任务等）— 点击查看，完成后会自动提示</span>';
+    // 后台任务 chip（非顶部，位于输入框上方）：计数 + 最新任务 + 悬浮详情 tooltip，点击打开详情面板
+    const running=bgTasks.filter((/** @type {any} */ t)=>t.status==='running');
+    const latest=running.length?running[running.length-1]:null;
+    const tip=bgTasks.map((/** @type {any} */ t)=>(t.kind==='schedule'?'⏰':'🛠')+' '+String(t.message||t.id||'').slice(0,40)+' · '+t.status).join('\n');
+    html='<span class="ws-bg" title="'+esc(String(tip)).replace(/"/g,'&quot;')+'">🛠 '+bgRunning+' 个后台任务运行中'+(latest?' · '+esc(String(latest.message||'').slice(0,22)):'')+' — 点击查看详情</span>';
   }
   el.style.display=html?'flex':'none';
   el.innerHTML=html;
@@ -553,6 +558,7 @@ async function updateTasksPanel(){
   const j=await r.json(); const list=$('#tpList'); list.innerHTML='';
   // 质检（等待状态静默）：后台任务（worker/调度）并入计数与面板；状态转换时在聊天区弹可见横幅
   bgRunning=(Number(j.running)||0)+(Number(j.bgRunning)||0);
+  bgTasks=j.background||[];
   for(const t of (j.background||[])){
     const prev=lastBgStatus.get(t.id);
     if(prev && prev.status==='running' && t.status!=='running'){
@@ -591,7 +597,7 @@ async function refreshCostBadge(){
   const bd=j.breakdown||{}; const gd=j.guard||null;
   let t='今日 ≈¥'+(bd.today||0).toFixed(4);
   if(bd.rate!=null) t+=' · 命中 '+(bd.rate*100).toFixed(0)+'%';
-  if(gd&&gd.limit>0) t+=' · 护栏 '+(gd.cost/gd.limit*100).toFixed(0)+'%';
+  if(gd&&gd.limit>0&&gd.cost!=null) t+=' · 护栏 '+(gd.cost/gd.limit*100).toFixed(0)+'%';
   $('#costBadge').textContent=t;
 }
 refreshCostBadge(); setInterval(refreshCostBadge, 15000);

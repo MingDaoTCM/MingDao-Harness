@@ -62,7 +62,8 @@ header select{flex:none}
 #tasksPanel{position:fixed;right:0;top:52px;bottom:0;width:280px;background:var(--bg2);border-left:1px solid var(--border);z-index:40;display:flex;flex-direction:column}
 /* 输入框上方工作状态条（审计：长任务静默硬伤——实时显示执行步数/耗时与后台任务数）。
    与输入框同宽对齐（复用 #composer 的居中容器），不再横贯整个聊天窗口 */
-#workStatus{max-width:860px;margin:0 auto 4px;display:flex;align-items:center;gap:10px;padding:6px 14px;background:var(--panel);border:1px solid var(--border);border-radius:12px;font-size:12.5px;color:var(--dim);flex:none}
+#workStatus{width:fit-content;max-width:100%;margin:0 auto 4px;display:flex;align-items:center;gap:10px;padding:6px 14px;background:var(--panel);border:1px solid var(--border);border-radius:12px;font-size:12.5px;color:var(--dim);flex:none;overflow:hidden}
+#workStatus .ws-busy{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 /* 状态条 busy 行：承载完整阶段信息（合并原顶部活动条），与输入框同列不遮挡聊天区 */
 #workStatus .ws-phase{color:var(--accent2);font-weight:600;white-space:nowrap}
 /* 左侧轨迹固定栏 + 右侧子代理面板（布局重构：轨迹在左、子代理在右） */

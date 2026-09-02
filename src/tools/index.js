@@ -83,9 +83,9 @@ const SKILL_SCHEMA = {
 const TASK_SCHEMA = {
   type: 'object',
   properties: {
-    description: { type: 'string', description: '子任务一句话描述。' },
-    prompt: { type: 'string', description: '子代理的完整任务说明。' },
-    readOnly: { type: 'boolean', description: '只读调研任务，可并行。' },
+    description: { type: 'string', description: '子任务一句话描述（用于进度展示）。' },
+    prompt: { type: 'string', description: '子代理的完整任务说明（全新上下文，需自带全部必要背景）。' },
+    readOnly: { type: 'boolean', description: '只读调研任务（不写文件不执行命令）。多个 readOnly 子任务同一轮派发会并行执行，效率最高。' },
   },
   required: ['prompt'],
 };
@@ -185,7 +185,7 @@ const TOOLS = [
     type: 'function',
     function: {
       name: 'task',
-      description: '把独立子任务委托给新上下文子代理并返回汇报；readOnly 只读任务可并行。',
+      description: '把独立、可并行的子任务委托给全新上下文子代理并返回汇报。适合：多方向调研/复核/独立实现等互不依赖的任务（多个只读调研子任务应同一轮一起派发，自动并行，效率最高）；不适合：依赖当前对话细节的小改动。',
       parameters: TASK_SCHEMA,
     },
   },

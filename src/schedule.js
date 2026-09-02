@@ -293,7 +293,9 @@ export function daemonAlive(/** @type {any} */ home) {
 }
 export function stopDaemon(/** @type {any} */ home) {
   try {
-    const pid = Number(fs.readFileSync(daemonPidFile(home), 'utf8'));
+    // pidfile 格式 "<pid> <nonce>"——必须取首段（此前整串 Number()=NaN，SIGTERM 永远不发，
+    // 只删 pidfile → 孤儿 daemon 继续跑，新 daemon 再被拉起 → 双守护重复执行任务）
+    const pid = Number(String(fs.readFileSync(daemonPidFile(home), 'utf8')).trim().split(/\s+/)[0]);
     if (pid) {
       try {
         process.kill(pid, 'SIGTERM');

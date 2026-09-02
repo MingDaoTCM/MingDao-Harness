@@ -195,11 +195,16 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   /** @type {any} */
   let mcpManager = null;
   if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) {
+    // 超时后输家 promise 仍在跑：迟到就绪的 manager 立即 stop，防 detached 子进程成孤儿（自查 #2）
+    const mcpStartP = startMcpServers(cfg.mcpServers, workingDir).catch(() => null);
     mcpManager = await Promise.race([
-      startMcpServers(cfg.mcpServers, workingDir).catch(() => null),
+      mcpStartP,
       new Promise((/** @type {any} */ r) => setTimeout(() => r(null), 6000)),
     ]);
-    if (!mcpManager) console.error('[MingDao] ⚠ MCP 连接超时（6s）：本会话不注入 MCP 工具（重启 mingdao web 可重试）');
+    if (!mcpManager) {
+      console.error('[MingDao] ⚠ MCP 连接超时（6s）：本会话不注入 MCP 工具（重启 mingdao web 可重试）');
+      mcpStartP.then((/** @type {any} */ m) => { if (m) m.stop(); });
+    }
   }
   const mcpFacade = {
     toolSchemas: () => (mcpManager ? mcpManager.toolSchemas() : []),
