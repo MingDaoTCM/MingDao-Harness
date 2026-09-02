@@ -156,8 +156,11 @@ const post = async (p, body, opts) => {
   assert.equal(rel.status, 400, '相对路径应 400');
   const outside = await get('/api/fs-browse?dir=/etc');
   assert.equal(outside.status, 403, '越界目录应 403');
-  const browse = await get('/api/fs-browse?dir=' + encodeURIComponent(os.homedir()));
-  assert.ok(browse.j.ok === true && Array.isArray(browse.j.entries), '家目录浏览结构');
+  // 浏览根各平台不同（Windows 收紧为 桌面/文档/下载，家目录本身不在根内）——
+  // 用服务器工作目录（恒为合法根）做正向用例
+  const wsRoot = (await get('/api/workspaces')).j.cwd;
+  const browse = await get('/api/fs-browse?dir=' + encodeURIComponent(wsRoot));
+  assert.ok(browse.j.ok === true && Array.isArray(browse.j.entries), '工作目录浏览结构');
   ok('workspace：workspaces/fs-browse 契约');
 }
 
