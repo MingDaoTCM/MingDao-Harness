@@ -2,6 +2,10 @@
 
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
+## v0.2.6（2026-09-02）
+
+- A 计划（前缀缓存稳定性与费用基准）：A1 工具 Schema 两态冻结（回合内 ≤2 payload，剥描述按回合快照）· A2 MCP 预热（6s 超时本会话冻结工具集）· A3 bench-cost 费用基准（schema 收益/两态冻结/护栏拦截/batch 半价 14 断言入 bench 链）· A4 回收幂等守卫（修复嵌套重截导致保留区字节逐轮漂移）+ 前沿对齐结论入基准
+
 ## v0.2.5（2026-09-01）
 
 - Phase C 结构渐进：routes/api.js 按域拆分（7 域 + 编排器 + API 契约测试 8 组，修 icon 路径 bug）· cli REPL→commands/repl.js、worker→tasks/worker.js（tuiState 共享槽修复 onCompact 跨文件闭包）· strict 棘轮 1112→0（全量注解 + annotate-strict 辅助器，基线归零）
