@@ -49,13 +49,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // 中英双语写意图（CodeArts 报告：纯中文正则让英文会话整回合只读死锁）
   const WRITE_INTENT_RE = /写|建|创|改|修|删|装|加|添|增|补|换|移|部署|执行|运行|实现|重构|生成|迁移|安装|更新|升级|发布|调整|优化|修复|提交|推送|打包|编译|测试|implement|fix|create|modify|update|delete|deploy|build|make|generate|install|write|refactor|migrate|test|run|commit|push|remove|add|change|patch/i;
   const hasWriteIntent = (/** @type {any} */ text) => WRITE_INTENT_RE.test(String(text || ''));
-  const toolsFor = (/** @type {boolean} */ readOnlyPhase) => {
-    const schemas = buildToolSchemas(usedToolNames, mcpSchemas());
+  // A1（前缀稳定）：剥描述集合按「回合冻结快照」——回合内恒定（至多两态：只读档/全量档），
+  // 新使用的工具只在下一回合才进入剥描述集合；回合边界本身就有新 user 消息，schema 变化免费。
+  const toolsFor = (/** @type {boolean} */ readOnlyPhase, /** @type {Set<string>} */ strippedSet) => {
+    const schemas = buildToolSchemas(strippedSet, mcpSchemas());
     if (!readOnlyPhase) return schemas;
     return schemas.filter((/** @type {any} */ t) => {
       const n = t?.function?.name;
       if (!n) return true;
-      if (READONLY_TIER_SET.has(n) || usedToolNames.has(n)) return true;
+      if (READONLY_TIER_SET.has(n) || strippedSet.has(n)) return true;
       if (n.startsWith('mcp__')) return mcp ? mcp.isReadonly(n) : false;
       return false;
     });
@@ -160,6 +162,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     } else {
       readOnlyPhase = false;
     }
+    // A1：本回合的剥描述冻结快照（会话级 usedToolNames 的副本）——回合内 schema 字节不变
+    const turnStrippedSet = new Set(usedToolNames);
     // 整个回合注册一次 SIGINT：思考、工具执行、权限询问期间都能中断
     const offSigint = io.onSigint ? io.onSigint(() => { aborted = true; currentAc?.abort(); }) : () => {};
     const ctx = makeCtx();
@@ -311,7 +315,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         res = await provider.chat({
           model: activeModel,
           messages: sanitized,
-          tools: toolsFor(readOnlyPhase),
+          tools: toolsFor(readOnlyPhase, turnStrippedSet),
           temperature,
           maxTokens: maxOutput,
           // MiniMax P0：仅当 activeModel 声明支持 reasoning 才发送（否则 400 终止回合）；'off' 显式禁用例外

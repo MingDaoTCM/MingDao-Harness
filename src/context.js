@@ -88,6 +88,9 @@ export function trimMessages(/** @type {any} */ messages, /** @type {any} */ bud
       if (total <= budget) break;
       const m = out[i];
       const c = typeof m.content === 'string' ? m.content : JSON.stringify(m?.content ?? '');
+      // 幂等守卫（A4）：已回收过的内容跳过——否则「截断标记」把长度再次顶过阈值，逐轮嵌套重截，
+      // 被保留消息字节逐轮漂移（前缀缓存连尾部都失配）
+      if (c.includes('已回收')) continue;
       let next = null;
       if (m.role === 'tool' && c.length > 40) {
         next = { ...m, content: `[工具 ${m.tool_call_id || ''} 结果摘要：${c.slice(0, 40).replace(/\n/g, ' ')}…（已回收，原 ${c.length} 字）]` };

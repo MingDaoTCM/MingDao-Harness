@@ -191,15 +191,15 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   const provider = await getProviderFor(modelName);
   const undoStore = { backups: new Map() };
 
-  // MCP：后台启动，就绪后工具并入后续轮次
+  // MCP：A2 预热——await 连接（6s 超时）；超时本会话冻结工具集（不再中途注入，保护前缀缓存）
   /** @type {any} */
   let mcpManager = null;
   if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) {
-    startMcpServers(cfg.mcpServers, workingDir)
-      .then((m) => {
-        mcpManager = m;
-      })
-      .catch(() => {});
+    mcpManager = await Promise.race([
+      startMcpServers(cfg.mcpServers, workingDir).catch(() => null),
+      new Promise((/** @type {any} */ r) => setTimeout(() => r(null), 6000)),
+    ]);
+    if (!mcpManager) console.error('[MingDao] ⚠ MCP 连接超时（6s）：本会话不注入 MCP 工具（重启 mingdao web 可重试）');
   }
   const mcpFacade = {
     toolSchemas: () => (mcpManager ? mcpManager.toolSchemas() : []),

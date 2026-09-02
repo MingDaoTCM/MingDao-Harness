@@ -368,15 +368,19 @@ async function main() {
     },
   };
   if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) {
-    startMcpServers(cfg.mcpServers, workingDir)
-      .then((mgr) => {
-        mcpManager = mgr;
-        const ready = mgr.status().filter((s) => s.ok).length;
-        if (io && !opts.prompt.length) {
-          io.print(style(`✓ MCP 就绪：${ready}/${mgr.status().length} 个服务器，共 ${mgr.toolSchemas().length} 个工具`, C.dim));
-        }
-      })
-      .catch(() => {});
+    // A2：预热——await 连接（6s 超时）；超时本会话冻结工具集（不再中途注入，保护前缀缓存）
+    mcpManager = await Promise.race([
+      startMcpServers(cfg.mcpServers, workingDir).catch(() => null),
+      new Promise((/** @type {any} */ r) => setTimeout(() => r(null), 6000)),
+    ]);
+    if (mcpManager) {
+      const ready = mcpManager.status().filter((/** @type {any} */ s) => s.ok).length;
+      if (io && !opts.prompt.length) {
+        io.print(style(`✓ MCP 就绪：${ready}/${mcpManager.status().length} 个服务器，共 ${mcpManager.toolSchemas().length} 个工具`, C.dim));
+      }
+    } else if (io && !opts.prompt.length) {
+      io.print(style('⚠ MCP 连接超时（6s）：本会话不注入 MCP 工具（重启 mingdao 可重试）', C.dim));
+    }
   }
   const sessionRef = { name: null }; // 会话名在下方 REPL 初始化中回填（审计归因用）
   // 会话文件与落盘游标共享槽：REPL（commands/repl.js）创建会话/更新游标后回填，
