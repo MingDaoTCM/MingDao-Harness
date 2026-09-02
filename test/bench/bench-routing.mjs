@@ -80,6 +80,19 @@ const LABELS = [
   ['请帮我优化这个页面的性能，先分析首屏渲染慢的原因，再给出具体的优化手段和验证方法。', P],
   ['双十一大促前需要做一次容量评估，请帮我规划压测方案，包括压测场景、指标阈值和回滚预案。', P],
   ['请帮我审查这份技术方案文档的可行性，重点关注数据一致性、故障恢复和灰度发布这几个部分。', P],
+  // 英文回归子集（CodeArts 报告：GENERATION/PLAN 曾纯中文导致英文生成误路由 executor）
+  ['make a snake game website', P],
+  ['implement a full markdown preview tool', P],
+  ['create a personal resume page', P],
+  ['write a detailed project report', P],
+  ['fix the TypeError in this function', P],
+  ['help me plan the module split', P],
+  ['review this architecture design', P],
+  ['analyze the performance bottleneck', P],
+  ['hello', E],
+  ['translate this sentence to English', E],
+  ['what is a closure', E],
+  ['format this json for me', E],
   // 简单执行类 → executor（25 条）
   ['你好', E],
   ['ls 一下当前目录', E],
@@ -111,18 +124,19 @@ const LABELS = [
   ['排查', N],
   ['技术债', N],
   ['roadmap 怎么定', N],
-  ['review 一下', N],
-  ['plan 一下', N],
-  ['refactor', N],
+  ['review 一下', P],
+  ['plan 一下', P],
+  ['refactor', P],
   ['疑难问题', N],
   ['疑难', N],
   ['选型', N],
+  ['roadmap', N],
 ];
 for (const [text, want] of LABELS) {
   const got = heuristicRoute(text, RC);
   ok(got === want, `启发式「${text.slice(0, 18)}」期望 ${String(want)} 实际 ${String(got)}`);
 }
-ok(LABELS.length === 100, `标注集应为 100 条（实际 ${LABELS.length}）`);
+ok(LABELS.length === 113, `标注集应为 113 条（实际 ${LABELS.length}）`);
 
 // —— 升级检测（Hermes C2）：粘滞 executor + 复杂度信号 ——
 const fakeProvider = { chat: async () => ({ text: '{"verdict":"execute"}' }) };

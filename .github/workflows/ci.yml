@@ -44,6 +44,8 @@ jobs:
         run: node test/e2e-web.js
       - name: 端到端：调度
         run: node test/e2e-schedule.js
+      - name: API 域契约测试（7 域路由契约 + body 上限）
+        run: node test/api-contracts.js
       - name: 安装类型检查依赖（typescript + @types/node）
         run: npm ci --no-audit --no-fund
       - name: 类型护栏（tsc --checkJs 核心模块）

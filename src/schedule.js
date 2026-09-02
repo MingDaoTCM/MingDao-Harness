@@ -164,7 +164,7 @@ export function removeSchedule(/** @type {any} */ home, /** @type {any} */ id) {
     if (!job) return false;
     if (job.pid) {
       const owned = pidOwnedBy(job.pid, id); // 质检 M11：cmdline 含调度 id 才 kill
-      if (owned !== false) {
+      if (owned === true) { // 非 Linux/无法校验（null）不盲杀（CodeBuddy 报告：PID 复用误杀风险）
         try {
           process.kill(job.pid, 'SIGTERM');
         } catch {}
@@ -186,7 +186,7 @@ export function pauseSchedule(/** @type {any} */ home, /** @type {any} */ id) {
     if (!job) return false;
     if (job.pid) {
       const owned = pidOwnedBy(job.pid, id); // 质检 M11：cmdline 含调度 id 才 kill
-      if (owned !== false) {
+      if (owned === true) { // 非 Linux/无法校验（null）不盲杀（CodeBuddy 报告：PID 复用误杀风险）
         try {
           process.kill(job.pid, 'SIGTERM');
         } catch {}

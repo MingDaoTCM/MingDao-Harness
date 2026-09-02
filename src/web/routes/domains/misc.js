@@ -30,7 +30,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     });
     let body;
     try {
-      body = await readBody(req, MAX_API_BODY);
+      // chat 保留默认 40MB 上限（附件 base64 可达 ~26MB）；普通 JSON 接口才用 MAX_API_BODY=1MB
+      body = await readBody(req);
     } catch (/** @type {any} */ e) {
       refs.inflight -= 1;
       res.write(`data: ${JSON.stringify({ type: 'error', message: e.message })}\n\n`);

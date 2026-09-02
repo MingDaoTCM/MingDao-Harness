@@ -176,6 +176,11 @@ const post = async (p, body, opts) => {
   assert.equal(perm.status, 409, '无挂起确认应 409');
   const abort = await post('/api/abort', {});
   assert.equal(abort.status, 200, 'abort 全量中断应 200');
+  // body 上限（质检 A4 回归：此前 readBody 忽略 limit 参数，1MB 限制形同虚设）——
+  // 普通 JSON 接口超 1MB 必须 413；chat 保留 40MB 通道（附件 base64）
+  const big = 'x'.repeat(1024 * 1024 + 10);
+  const over = await fetch(base + '/api/memory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: big }) });
+  assert.equal(over.status, 413, '普通接口 >1MB body 应 413（readBody limit 生效）');
   // chat 契约：POST 无 body 也应返回 SSE 错误事件而非挂起
   const chatRes = await fetch(base + '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   assert.equal(chatRes.status, 200);

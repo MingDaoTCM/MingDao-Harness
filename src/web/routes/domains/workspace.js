@@ -85,11 +85,17 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
   if (method === 'GET' && p === '/api/fs-browse') {
     let dir = String(url.searchParams.get('dir') || '').trim();
     if (!path.isAbsolute(dir)) return json(res, 400, { error: '需要绝对路径' });
-    // 质检 A3：目录浏览限定基目录（默认家目录 + config.web.browseRoots 显式授权），
-    // 拒绝越界——此前可枚举服务器任意绝对路径（整机目录结构探测面）
-    const browseRoots = [os.homedir(), startupCwd, state.workingDir, ...(Array.isArray(cfg.web?.browseRoots) ? cfg.web.browseRoots : [])].map((r) => path.resolve(String(r)));
-    const inRoot = browseRoots.some((r) => dir === r || dir.startsWith(r + path.sep));
-    if (!inRoot) return json(res, 403, { error: '目录不在可浏览范围内（家目录或 web.browseRoots 授权目录）' });
+    // 质检 A3：目录浏览限定基目录，拒绝越界。Windows（CodeArts 报告）：家目录覆盖整个用户配置树
+    // （AppData 等）——收紧为 桌面/文档/下载 三常用目录 + 启动目录 + 工作目录 + web.browseRoots 显式授权；
+    // 路径比较在 win32 下大小写归一（D:\\ vs d:\\ 不再误拒）。
+    const base = process.platform === 'win32' && process.env.USERPROFILE
+      ? [path.join(process.env.USERPROFILE, 'Desktop'), path.join(process.env.USERPROFILE, 'Documents'), path.join(process.env.USERPROFILE, 'Downloads')]
+      : [os.homedir()];
+    const norm = (/** @type {string} */ x) => (process.platform === 'win32' ? x.toLowerCase() : x);
+    const browseRoots = [...base, startupCwd, state.workingDir, ...(Array.isArray(cfg.web?.browseRoots) ? cfg.web.browseRoots : [])].map((r) => norm(path.resolve(String(r))));
+    const ndir = norm(dir);
+    const inRoot = browseRoots.some((r) => ndir === r || ndir.startsWith(r + path.sep));
+    if (!inRoot) return json(res, 403, { error: '目录不在可浏览范围内（授权目录或 web.browseRoots 显式添加）' });
     try {
       const st = fs.statSync(dir);
       if (!st.isDirectory()) return json(res, 400, { error: '不是目录' });
@@ -101,7 +107,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         .slice(0, 300);
       let parent = path.dirname(dir);
       // 父目录同样不得越出基目录
-      if (!browseRoots.some((r) => parent === r || parent.startsWith(r + path.sep))) parent = /** @type {any} */ (null);
+      if (!browseRoots.some((r) => norm(parent) === r || norm(parent).startsWith(r + path.sep))) parent = /** @type {any} */ (null);
       json(res, 200, { ok: true, path: dir, parent: parent === dir ? null : parent, entries });
     } catch (/** @type {any} */ err) {
       json(res, 400, { error: String(err?.message || err) });

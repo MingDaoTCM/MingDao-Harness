@@ -13,6 +13,7 @@ import { subagentModel } from './routing.js';
 import { writeAudit, redactSecrets } from './audit.js';
 import { checkCostGuard, costGuardConfig, todayCost } from './cost-guard.js';
 import { estimateCost } from './pricing.js';
+import { resolveProviderConfig } from './providers/index.js';
 
 const MAX_STEPS = 24;
 const SUBAGENT_MAX_STEPS = 12;
@@ -45,7 +46,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // 省钱 B1（按需挂载）：回合起始为「只读阶段」时只发只读工具（read/ls/glob/grep/skill/todo）
   // + 已用过的工具；检测到写意图（用户消息或模型明说需要写/改/建）后注入全量工具。
   const READONLY_TIER_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo']);
-  const WRITE_INTENT_RE = /写|建|创|改|修|删|装|加|添|增|补|换|移|部署|执行|运行|实现|重构|生成|迁移|安装|更新|升级|发布|调整|优化|修复|提交|推送|打包|编译|测试/;
+  // 中英双语写意图（CodeArts 报告：纯中文正则让英文会话整回合只读死锁）
+  const WRITE_INTENT_RE = /写|建|创|改|修|删|装|加|添|增|补|换|移|部署|执行|运行|实现|重构|生成|迁移|安装|更新|升级|发布|调整|优化|修复|提交|推送|打包|编译|测试|implement|fix|create|modify|update|delete|deploy|build|make|generate|install|write|refactor|migrate|test|run|commit|push|remove|add|change|patch/i;
   const hasWriteIntent = (/** @type {any} */ text) => WRITE_INTENT_RE.test(String(text || ''));
   const toolsFor = (/** @type {boolean} */ readOnlyPhase) => {
     const schemas = buildToolSchemas(usedToolNames, mcpSchemas());
@@ -142,6 +144,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     // activeModel 是本回合实际使用的模型（分账/记录归属它），downgraded 保证只提示一次。
     let activeModel = modelName;
     let downgraded = false;
+    // 护栏在途费用（MiniMax P0）：本回合已累计 usage 的保守估算（无缓存折扣），
+    // 护栏检查/前置拦截时并入今日已用——否则长回合内统计文件不变，可烧穿日限。
+    const inFlightCost = () => estimateCost(activeModel, usage.prompt_tokens, usage.completion_tokens, null, new Date());
+    const usedTodayWithInflight = () => {
+      const today = todayCost();
+      return today == null ? null : today + inFlightCost();
+    };
     // 省钱 B1：本回合只读阶段判定——最新用户消息无写意图则先只发只读工具，
     // 模型明确表达写意图后（下一轮）注入全量。cfg.schemaTier=false 可关。
     let readOnlyPhase = true;
@@ -197,14 +206,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       }
       const trimmed = trimMessages(messages, budget, count);
 
-      // reasoning 回填防护（MiniMax P0-2）：推理链只在 UI 流式展示、不回传消息（本就不回填）；
-      // 防御性保证——任何携带 reasoning_content 的消息发送前裁剪：>4000 字仅留概括，>1000 字截尾 500。
+      // reasoning 回填防护（Kimi P0 修正）：带 tool_calls 的 assistant 消息必须「完整」回传
+      // reasoning_content（DeepSeek thinking_mode 官方要求：后续请求含 tools 时缺/截断即 400，
+      // 多轮工具会话必崩）；仅纯文本回复的 reasoning 可裁剪（不回传也不影响）。
       let sanitized = trimmed;
       for (const m of sanitized) {
         const rc = m.reasoning_content;
-        if (typeof rc === 'string' && rc.length > 4000) {
+        if (typeof rc !== 'string' || (Array.isArray(m.tool_calls) && m.tool_calls.length)) continue;
+        if (rc.length > 4000) {
           sanitized = sanitized.map((/** @type {any} */ x) => (x === m ? { ...x, reasoning_content: `[思考过程已省略（原 ${rc.length} 字）]` } : x));
-        } else if (typeof rc === 'string' && rc.length > 1000) {
+        } else if (rc.length > 1000) {
           sanitized = sanitized.map((/** @type {any} */ x) => (x === m ? { ...x, reasoning_content: rc.slice(-500) + ' …[思考过程已截断]' } : x));
         }
       }
@@ -219,8 +230,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           let promptTokens = 0;
           for (const m of sanitized) promptTokens += messageTokens(m, count);
           const worst = estimateCost(activeModel, promptTokens, maxOutput, null, new Date());
-          const used = todayCost();
-          if (used + worst >= Number(g.dailyLimitYuan)) {
+          const used = usedTodayWithInflight(); // 含本回合在途费用（防长回合烧穿）
+          if (used == null) {
+            // todayCost 读取失败：无法判断，跳过前置拦截（护栏主检查同样跳过并告警）
+          } else if (used + worst >= Number(g.dailyLimitYuan)) {
             stripOrphanCalls();
             return {
               text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
@@ -253,15 +266,29 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           }
           if (guard.downgrade && !downgraded) {
             if (guard.downgradeModel !== activeModel) {
-              activeModel = guard.downgradeModel;
-              downgraded = true;
-              io.print(style(guard.message, C.yellow));
+              // MiniMax P0：降级目标零校验会崩溃——必须与当前模型同服务商且已有 Key，
+              // 否则 provider.chat 必然 400；校验失败按 block 处理并给修复指引。
+              const curPc = resolveProviderConfig(cfg, activeModel);
+              const dgPc = resolveProviderConfig(cfg, guard.downgradeModel);
+              // Key 归属服务商（provider 级），同服务商即天然共享同一 Key，无需再查 apiKey
+              if (dgPc && dgPc.name === curPc.name) {
+                activeModel = guard.downgradeModel;
+                downgraded = true;
+                io.print(style(guard.message, C.yellow));
+              } else {
+                stripOrphanCalls();
+                return {
+                  text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
+                  note: `费用护栏想降级到 ${guard.downgradeModel}，但它与当前服务商不一致或缺少 API Key——已暂停执行。请把 config.costGuard.downgradeModel 改为与当前模型同服务商（当前：${curPc.name}）的模型名，或调高 dailyLimitYuan。`,
+                  durationMs: Date.now() - startedAt, perf: perf(),
+                };
+              }
             } else {
               // 已经是降级目标模型：无法再降，按 block 处理
               stripOrphanCalls();
               return {
                 text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
-                note: `今日费用已达上限（实际 ¥${String(todayCost().toFixed(4))}），且已在最便宜模型上执行，已暂停——调整 config.costGuard 或明天自动恢复。`,
+                note: `今日费用已达上限（实际 ¥${String((todayCost() ?? 0).toFixed(4))}），且已在最便宜模型上执行，已暂停——调整 config.costGuard 或明天自动恢复。`,
                 durationMs: Date.now() - startedAt, perf: perf(),
               };
             }
@@ -287,7 +314,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           tools: toolsFor(readOnlyPhase),
           temperature,
           maxTokens: maxOutput,
-          reasoningEffort,
+          // MiniMax P0：仅当 activeModel 声明支持 reasoning 才发送（否则 400 终止回合）；'off' 显式禁用例外
+          reasoningEffort: modelPreset(activeModel)?.supportsReasoning || reasoningEffort === 'off' ? reasoningEffort : undefined,
           signal: ac.signal,
           onDelta(/** @type {any} */ d) {
             io.stopSpinner();
@@ -328,7 +356,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
 
       if (res.toolCalls?.length) {
         io.endTurn();
-        const assistantMsg = { role: 'assistant', content: res.text || null, tool_calls: res.toolCalls };
+        const assistantMsg = {
+          role: 'assistant',
+          content: res.text || null,
+          tool_calls: res.toolCalls,
+          // Kimi P0：带工具调用的消息必须携带完整 reasoning_content（否则下一轮 400）
+          ...(res.toolCalls?.length && res.reasoning ? { reasoning_content: res.reasoning } : {}),
+        };
         messages.push(assistantMsg);
 
         // 只读工具并行（P2-8）：同一 response 里的连续 read/ls/glob/grep 无相互依赖，

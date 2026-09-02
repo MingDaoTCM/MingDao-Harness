@@ -322,7 +322,7 @@ export async function runRepl(ctx) {
           io.print(`用法：/think low|high|max|off（当前：${cfg.reasoningEffort || '跟随模型默认 high'}）`);
           continue;
         }
-        if (arg === 'off') cfg.reasoningEffort = undefined;
+        if (arg === 'off') cfg.reasoningEffort = 'off'; // 显式禁用（provider 转 thinking:{type:'disabled'}）
         else if (vals.includes(arg)) cfg.reasoningEffort = arg;
         else { io.print(style('无效取值：low|high|max|off', C.red)); continue; }
         agent = createAgent({
@@ -579,7 +579,7 @@ export async function runRepl(ctx) {
         if (guard) {
           io.print(
             style(
-              `费用护栏：今日 ¥${guard.cost.toFixed(4)} / 上限 ¥${guard.limit.toFixed(2)}${guard.overLimit ? '（已达上限' + (guard.action === 'block' ? '，执行已暂停' : '，仅提醒') + '）' : ''}`,
+              `费用护栏：今日 ¥${(guard.cost ?? 0).toFixed(4)} / 上限 ¥${guard.limit.toFixed(2)}${guard.overLimit ? '（已达上限' + (guard.action === 'block' ? '，执行已暂停' : '，仅提醒') + '）' : ''}`,
               guard.overLimit ? C.yellow : C.dim
             )
           );

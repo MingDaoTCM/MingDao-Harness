@@ -674,11 +674,12 @@ let base = await startWeb(work1);
   assert.ok(bad.error, '相对路径应被拒绝');
   const notDir = await (await fetch(base + '/api/fs-browse?dir=' + encodeURIComponent(path.join(dir, '子目录甲')) + '%2Fnope')).json();
   assert.ok(notDir.error, '不存在目录应报错');
-  // 越界拒绝（质检 A3）：浏览家目录之外且非工作空间根之外的目录应 403
-  const outSide = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-outside-'));
+  // 越界拒绝（质检 A3）：浏览家目录之外且非工作空间根之外的目录应 403。
+  // 用系统级目录（Linux/macOS：/etc；Windows：%SystemDrive%\Windows）——
+  // 此前用 os.tmpdir() 在 Windows 上 Temp 位于用户目录内（恰是白名单根），断言必红（workbuddy 报告）。
+  const outSide = process.platform === 'win32' ? path.join(path.parse(os.homedir()).root, 'Windows') : '/etc';
   const outsideR = await (await fetch(base + '/api/fs-browse?dir=' + encodeURIComponent(outSide))).json();
   assert.ok(outsideR.error && String(outsideR.error).includes('可浏览范围'), '越界目录应被拒绝');
-  safeRm(outSide, { recursive: true, force: true });
   safeRm(dir, { recursive: true, force: true });
   ok('fs-browse：目录树浏览 / 隐藏目录过滤 / 相对路径与非法路径拒绝 / 越界拒绝');
 }

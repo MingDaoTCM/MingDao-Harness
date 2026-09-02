@@ -19,11 +19,11 @@ export function routingConfig(/** @type {any} */ cfg) {
 }
 
 const PLAN_HINTS =
-  /设计|架构|重构|审查|规划|分析|方案|评估|优化|排查|疑难|报错|怎么修|修复|设计模式|选型|技术债|roadmap|review|design|refactor|plan|architecture|方案设计|评审/;
+  /设计|架构|重构|审查|规划|分析|方案|评估|优化|排查|疑难|报错|怎么修|修复|设计模式|选型|技术债|roadmap|review|design|refactor|plan|architecture|方案设计|评审|fix|analyze|analyse|evaluate|audit|optimize|bug|issue|error|performance/i;
 
 // 生成类任务（游戏/网页/文档等）需要大输出（planner 32K vs executor 8K），即使短句也路由 planner
 const GENERATION_HINTS =
-  /(生成|制作|编写|创建|写|开发|实现|做).{0,30}(游戏|网页|页面|网站|应用|程序|文档|报告|简历|PPT|演示|完整|详细|小工具)|网页版|游戏/;
+  /(生成|制作|编写|创建|写|开发|实现|做|make|build|create|generate|write|implement|develop).{0,30}(游戏|网页|页面|网站|应用|程序|文档|报告|简历|PPT|演示|完整|详细|小工具|game|website|page|site|app|program|document|report|resume|ppt|tool)|网页版|游戏|webpage|website/i;
 
 export function heuristicRoute(/** @type {any} */ text, /** @type {any} */ rc) {
   const s = String(text ?? '');
@@ -31,7 +31,7 @@ export function heuristicRoute(/** @type {any} */ text, /** @type {any} */ rc) {
   if (PLAN_HINTS.test(s)) {
     // 规划类关键词优先（审计：此前要求 length>=40，导致「设计一个缓存方案」这类
     // 13 字短句被误路由到 flash 硬扛——关键词强度优先于文本长度）
-    return s.length >= 40 || /设计|规划|分析|评估|审查|架构|重构|方案|优化|报错|修复/.test(s) ? rc.planner : null;
+    return s.length >= 40 || /设计|规划|分析|评估|审查|架构|重构|方案|优化|报错|修复|fix|analy|review|design|plan|optimiz|refactor|evaluat|audit|error|bug/i.test(s) ? rc.planner : null;
   }
   if (s.length <= 60) return rc.executor;
   return null; // 需要分类器

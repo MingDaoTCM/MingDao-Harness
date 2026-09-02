@@ -208,7 +208,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       const label = String(body.label || '').trim();
       const baseUrl = String(body.baseUrl || '').trim();
       if (!baseUrl) return json(res, 400, { error: 'API 地址（baseUrl）不能为空' });
-      const vurl = shared.validateRemoteUrl(baseUrl); // 质检 S1：SSRF 防护
+      const vurl = await shared.validateRemoteUrl(baseUrl); // 质检 S1：SSRF 防护
       if (vurl.error) return json(res, 400, { error: vurl.error });
       if (action === 'addCustom' && (cfg.customModels || {})[name]) {
         return json(res, 400, { error: `自定义模型 ${name} 已存在（可修改）` });
@@ -265,7 +265,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     if (action === 'setBaseUrl') {
       const baseUrl = String(body.baseUrl || '').trim();
       if (baseUrl) {
-        const vurl = shared.validateRemoteUrl(baseUrl); // 质检 S1：SSRF 防护
+        const vurl = await shared.validateRemoteUrl(baseUrl); // 质检 S1：SSRF 防护
         if (vurl.error) return json(res, 400, { error: vurl.error });
       }
       cfg.baseUrl = baseUrl || undefined;

@@ -57,10 +57,16 @@ export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() =
       try {
         const st = fs.statSync(lockPath);
         if (Date.now() - st.mtimeMs > staleMs) {
+          // TOCTOU 防护（OfficeACE 报告）：unlink 前读锁内容并二次 stat 比对，
+          // 防两个进程同时判定陈旧、后者误删前者刚创建的新锁（互斥失效）
           try {
-            fs.unlinkSync(lockPath);
+            const before = fs.readFileSync(lockPath, 'utf8');
+            const st2 = fs.statSync(lockPath);
+            if (st2.mtimeMs === st.mtimeMs && before === fs.readFileSync(lockPath, 'utf8')) {
+              fs.unlinkSync(lockPath);
+            }
           } catch {}
-          continue; // 回收陈旧锁后立即重试
+          continue; // 无论是否回收成功都重试一次（若锁刚被他人更新则继续等待）
         }
       } catch {
         continue; // 锁文件刚被释放

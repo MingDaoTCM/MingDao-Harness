@@ -32,9 +32,15 @@ export function todayCost() {
     todayCache = { mtime: st.mtimeMs, size: st.size, start, sum };
     return sum;
   } catch {
-    return 0;
+    // MiniMax P0：统计文件损坏/不可读时返回 null（护栏全部失效）而不是静默 0——并一次性告警
+    if (!todayCostWarned) {
+      todayCostWarned = true;
+      console.warn('[MingDao] 费用统计读取失败：今日费用护栏暂时无法判断（修复 cache-stats.jsonl 或重启后恢复）。');
+    }
+    return null;
   }
 }
+let todayCostWarned = false;
 
 export function costGuardStatus() {
   const g = costGuardConfig();
@@ -49,8 +55,9 @@ export function costGuardStatus() {
     warnAt,
     action,
     downgradeModel: String(g.downgradeModel || 'deepseek-v4-flash'),
-    overWarn: limit > 0 && cost >= warnAt,
-    overLimit: limit > 0 && cost >= limit,
+    degraded: cost === null, // 统计不可读：护栏降级为「无法判断」
+    overWarn: cost !== null && limit > 0 && cost >= warnAt,
+    overLimit: cost !== null && limit > 0 && cost >= limit,
   };
 }
 
@@ -58,10 +65,11 @@ export function costGuardStatus() {
 export function checkCostGuard() {
   const st = costGuardStatus();
   if (!st) return null;
+  if (st.degraded) return null; // 统计不可读：不误拦也不放水（已告警），按无法判断处理
   if (st.overLimit && st.action === 'block') {
     return {
       blocked: true,
-      message: `今日费用已达上限 ¥${st.limit.toFixed(2)}（实际 ¥${st.cost.toFixed(4)}），已暂停执行——调整 config.costGuard 或明天自动恢复。`,
+      message: `今日费用已达上限 ¥${st.limit.toFixed(2)}（实际 ¥${(st.cost ?? 0).toFixed(4)}），已暂停执行——调整 config.costGuard 或明天自动恢复。`,
     };
   }
   if (st.overLimit && st.action === 'downgrade') {
@@ -69,13 +77,13 @@ export function checkCostGuard() {
       blocked: false,
       downgrade: true,
       downgradeModel: st.downgradeModel,
-      message: `⚠ 费用护栏：今日已用 ¥${st.cost.toFixed(4)} 超上限 ¥${st.limit.toFixed(2)}——已自动降级到便宜模型 ${st.downgradeModel} 继续执行（config.costGuard.action 可改回 warn/block）。`,
+      message: `⚠ 费用护栏：今日已用 ¥${(st.cost ?? 0).toFixed(4)} 超上限 ¥${st.limit.toFixed(2)}——已自动降级到便宜模型 ${st.downgradeModel} 继续执行（config.costGuard.action 可改回 warn/block）。`,
     };
   }
   if (st.overWarn) {
     return {
       blocked: false,
-      message: `⚠ 费用护栏：今日已用 ¥${st.cost.toFixed(4)} / 上限 ¥${st.limit.toFixed(2)}${st.action !== 'warn' ? `（${st.action === 'block' ? '到达即暂停' : '到达自动降级 ' + st.downgradeModel}）` : '（仅提醒）'}。`,
+      message: `⚠ 费用护栏：今日已用 ¥${(st.cost ?? 0).toFixed(4)} / 上限 ¥${st.limit.toFixed(2)}${st.action !== 'warn' ? `（${st.action === 'block' ? '到达即暂停' : '到达自动降级 ' + st.downgradeModel}）` : '（仅提醒）'}。`,
     };
   }
   return null;

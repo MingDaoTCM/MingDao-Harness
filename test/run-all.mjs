@@ -13,7 +13,8 @@ const SUITES = [
   ['e2e-web', 'node', ['test/e2e-web.js']],
   ['e2e-schedule', 'node', ['test/e2e-schedule.js']],
   ['api-contracts', 'node', ['test/api-contracts.js']],
-  ['bench', 'npm', ['run', 'bench']],
+  // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
+  ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];
 
 const args = process.argv.slice(2);
@@ -30,6 +31,11 @@ function run(cmd, cmdArgs, suite) {
     let out = '';
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (out += d));
+    // spawn 错误监听（workbuddy 报告）：npm 缺失等 ENOENT 不再让汇总器整体崩溃
+    child.on('error', (/** @type {any} */ err) => {
+      console.log(`❌ ${suite}（进程启动失败：${err?.message || err}）`);
+      resolve({ suite, ok: false, out: out + String(err?.message || err) });
+    });
     child.on('close', (code) => {
       const ok = code === 0;
       console.log(`${ok ? '✅' : '❌'} ${suite}${ok ? '' : '（详见末尾失败输出）'}`);

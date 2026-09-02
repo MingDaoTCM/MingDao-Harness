@@ -115,7 +115,7 @@ function killTaskInner(/** @type {any} */ home, /** @type {any} */ id) {
     try {
       owned = fs.readFileSync(`/proc/${t.pid}/cmdline`, 'utf8').includes(id);
     } catch {}
-    if (owned !== false) {
+    if (owned === true) { // 非 Linux/无法校验（null）不盲杀（CodeBuddy 报告：PID 复用误杀风险）
       try {
         // worker 是 detached 进程（自成进程组）：优先杀整组，避免工具子进程成孤儿
         process.kill(-t.pid, 'SIGTERM');

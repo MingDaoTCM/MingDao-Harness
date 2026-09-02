@@ -290,7 +290,7 @@ export function countTokens(text, modelName) {
   const hit = byModel.get(s);
   if (hit !== undefined) return hit;
   const n = countDeepseek(s);
-  if (byModel.size >= TOKEN_CACHE_MAX_ENTRIES) byModel.clear();
+  if (byModel.size >= TOKEN_CACHE_MAX_ENTRIES) byModel.delete(byModel.keys().next().value); // LRU：删最旧（Map 迭代序）
   byModel.set(s, n);
   return n;
 }

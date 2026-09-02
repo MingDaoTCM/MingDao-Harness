@@ -16,7 +16,8 @@ export async function chat(/** @type {any} */ { baseUrl, apiKey, model, messages
   }
   if (maxTokens) payload.max_tokens = maxTokens;
   if (responseFormat) payload.response_format = responseFormat;
-  if (reasoningEffort) payload.reasoning_effort = reasoningEffort; // 思考强度（官方 thinking_mode）
+  if (reasoningEffort === 'off') payload.thinking = { type: 'disabled' }; // /think off：显式关闭思考（官方 thinking_mode）
+  else if (reasoningEffort) payload.reasoning_effort = reasoningEffort; // 思考强度（官方 thinking_mode）
   payload.stream = true;
   // 流式响应默认不带 usage，显式请求以便展示 token/费用统计
   // （部分网关不支持该字段，可在 config.json 设 "includeUsage": false 关闭）
@@ -153,8 +154,9 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
       if (handleLine(line)) break;
     }
   }
-  // 收尾：残行（网关最后一帧不带换行）与多字节字符冲刷
-  content += decoder.decode();
+  // 收尾：残行（网关最后一帧不带换行）与多字节字符冲刷——decode 残余并入 buf 统一走行解析，
+  // 不再直接拼进 content（此前尾字节绕过 doneFlag/行解析，流中途截断时正文混入杂质）
+  buf += decoder.decode();
   if (buf.trim()) handleLine(buf); // [DONE] 后残留 usage 尾帧仍吸收（正文/推理已被 doneFlag 拦截）
 
   const toolCalls = [...calls.entries()]

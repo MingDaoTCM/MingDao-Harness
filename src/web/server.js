@@ -68,11 +68,16 @@ const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'inde
 function json(res, code, obj) {
   res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(obj));
+  // 返回 truthy：域路由 `return json(...)` 必须被编排器视为「已处理」——
+  // 否则兜底 404 会对已结束的响应二次写入（Node 18 下 write-after-end 未捕获 → 整服务崩溃）
+  return true;
 }
 
-/** @param {any} req */
-function readBody(req) {
-  const MAX_BODY = 40 * 1024 * 1024; // 附件 base64 上限（4×5MB 图片 + 文本）留余量
+/** 读取请求体。limit 默认 40MB（附件 base64 上限：4×5MB 图片 + 文本）；
+ * 普通 JSON 接口必须显式传较小 limit（质检 A4；此前第二参数被忽略 → 1MB 限制形同虚设）。 */
+/** @param {any} req @param {number} [limit] */
+function readBody(req, limit = 40 * 1024 * 1024) {
+  const MAX_BODY = limit; // 附件 base64 上限（4×5MB 图片 + 文本）留余量
   return new Promise((resolve, reject) => {
     /** @type {any[]} */
     const chunks = [];
@@ -89,9 +94,11 @@ function readBody(req) {
     req.on('data', (/** @type {any} */ d) => {
       size += d.length;
       if (size > MAX_BODY) {
-        const err = /** @type {Error & { status?: number }} */ (new Error('请求体过大（>40MB）'));
+        const err = /** @type {Error & { status?: number }} */ (new Error(`请求体过大（>${Math.round(MAX_BODY / 1048576)}MB）`));
         err.status = 413;
-        req.destroy();
+        // 排空残余数据但保留连接：让上层 catch 返回真 413（此前 destroy 导致客户端只收到连接重置）
+        req.pause();
+        req.resume();
         reject(err);
         return;
       }
@@ -228,17 +235,23 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   // —— SSRF 防护（质检 S1）：远端地址校验 ——
   /** @param {any} hostname */
   function isPrivateHost(hostname) {
-    const h = String(hostname || '').toLowerCase();
+    let h = String(hostname || '').toLowerCase();
     if (!h) return true;
-    if (h === 'localhost' || h.endsWith('.localhost') || h === '::1' || h === '::ffff:127.0.0.1') return true;
+    h = h.replace(/^\[|\]$/g, ''); // IPv6 字面量去括号（URL('http://[::1]/').hostname 带方括号）
+    if (h === 'localhost' || h.endsWith('.localhost') || h === '::1') return true;
+    if (h.includes(':')) {
+      // IPv6：回环 ::1、链路本地 fe80::/10、唯一本地 fc00::/7、IPv4 映射 ::ffff:私网
+      if (/^::ffff:/.test(h)) return isPrivateHost(h.slice(7));
+      return /^fe[89ab]/.test(h) || /^f[c d]/.test(h) || h === '::' || h === '::1';
+    }
     const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (!m) return false; // 域名：交给 DNS 解析（无法静态判定）
+    if (!m) return false; // 域名：由 validateRemoteUrl 的 DNS 解析复检
     const a = Number(m[1]);
     const b = Number(m[2]);
     return a === 10 || a === 127 || a === 0 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
   }
   /** @param {any} raw */
-  function validateRemoteUrl(raw) {
+  async function validateRemoteUrl(raw) {
     let u;
     try {
       u = new URL(String(raw));
@@ -247,10 +260,24 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     }
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return { error: '仅支持 http/https 地址' };
     // 威胁模型：本机回环绑定时（默认/桌面版），本机模型服务（如 Ollama）属可信场景，放行；
-    // 对外监听（0.0.0.0）时拒绝私网目标——除非显式 allowPrivateEndpoints
+    // 对外监听（0.0.0.0）时拒绝私网目标——除非显式 allowPrivateEndpoints。
+    // 域名目标：DNS 解析后逐条校验（2026-09-02 加固，防 DNS 重绑定把域名指向内网绕过字面量检查）。
     const serverBoundLocal = isLoopbackHost(host);
-    if (!cfg.web?.allowPrivateEndpoints && !serverBoundLocal && isPrivateHost(u.hostname)) {
-      return { error: `拒绝访问内网/本机地址（${u.hostname}）——服务已对外监听，如确需连接可信内网服务，请在 config.json 设 web.allowPrivateEndpoints: true` };
+    if (!cfg.web?.allowPrivateEndpoints && !serverBoundLocal) {
+      const h = String(u.hostname || '').toLowerCase();
+      let blocked = isPrivateHost(h);
+      if (!blocked && h && h !== 'localhost' && !/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) {
+        try {
+          const { lookup } = await import('node:dns/promises');
+          const addrs = await lookup(h, { all: true, verbatim: true });
+          blocked = addrs.some((/** @type {any} */ a) => isPrivateHost(a.address));
+        } catch {
+          // DNS 解析失败：保持放行（服务端会在连接时报错）；解析成功且指向内网 → 拦截
+        }
+      }
+      if (blocked) {
+        return { error: `拒绝访问内网/本机地址（${u.hostname}）——服务已对外监听，如确需连接可信内网服务，请在 config.json 设 web.allowPrivateEndpoints: true` };
+      }
     }
     return { ok: true };
   }

@@ -39,7 +39,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
   if (method === 'POST' && p === '/api/sync') {
     const body = await readBody(req, MAX_API_BODY);
     if (body.action === 'login') {
-      const vurl = validateRemoteUrl(body.url); // 质检 S1：SSRF 防护（同步端点同样只允许公网）
+      const vurl = await validateRemoteUrl(body.url); // 质检 S1：SSRF 防护（同步端点同样只允许公网）
       if (vurl.error) return json(res, 400, { error: vurl.error });
       const r = await syncLogin({ url: body.url, username: body.username, password: body.password, deviceName: body.deviceName });
       if (r.error) return json(res, 400, { error: r.error });

@@ -64,14 +64,27 @@ fun startServer(project: Project) {
 
 fun postDraft(project: Project, text: String): Boolean {
     return try {
-        val escaped = text.replace("\\", "\\\\").replace("\"", "\\\"")
+        // 完整 JSON 转义（CodeBuddy 报告：此前漏 \n/\r/控制字符，多行选中必产出非法 JSON，发送静默失败）
+        val sb = StringBuilder()
+        for (ch in text) {
+            when (ch) {
+                '\\' -> sb.append("\\\\")
+                '"' -> sb.append("\\\"")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                else -> if (ch.code < 0x20) sb.append("\\u%04x".format(ch.code)) else sb.append(ch)
+            }
+        }
+        val escaped = sb.toString()
         val conn = URL(baseUrl(project) + "/api/draft").openConnection() as HttpURLConnection
         conn.requestMethod = "POST"
         conn.doOutput = true
         conn.setRequestProperty("Content-Type", "application/json")
         conn.outputStream.use { it.write("{\"text\":\"$escaped\"}".toByteArray()) }
+        val code = (conn as? HttpURLConnection)?.responseCode ?: 200
         conn.inputStream.use { it.readBytes() }
-        true
+        code in 200..299
     } catch (_: Exception) {
         false
     }

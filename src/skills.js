@@ -94,8 +94,10 @@ export function listSkills(/** @type {any} */ workingDir) {
         continue;
       }
       seen.add(e.name); // 优先级：user > project > builtin，先出现的生效
-      // P3-3：用户级技能指纹不符 → 拒绝加载（绝不静默执行被篡改的提示词）
-      if (source === 'user' && isTampered(path.join(dir, e.name))) continue;
+      // P3-3：技能指纹不符 → 拒绝加载（绝不静默执行被篡改的提示词）。
+      // project 级（.mingdao/skills/）同样校验（CodeBuddy 报告：仓库投毒可直通提示词注入）；
+      // 无 .source.json 指纹的旧仓库/手写技能不受影响（isTampered 返回 false）。
+      if ((source === 'user' || source === 'project') && isTampered(path.join(dir, e.name))) continue;
       out.push({
         name: e.name,
         dir: path.join(dir, e.name),

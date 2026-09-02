@@ -66,17 +66,26 @@ export function trimMessages(/** @type {any} */ messages, /** @type {any} */ bud
   const system = hasSystem ? [messages[0]] : [];
   const rest = hasSystem ? messages.slice(1) : messages;
   const totalOf = (/** @type {any} */ arr) => arr.reduce((/** @type {any} */ s, /** @type {any} */ m) => s + messageTokens(m, count), 0);
-  // —— 轻量语义回收（Hermes B1）：预算 >80% 时先对最老消息做无模型压缩 ——
-  // 最老 tool 消息 → 单行摘要；老 assistant 长文 → 前 200 字；逐条向新推进直到回到 80% 线。
-  // 相比直接丢弃，被修改的只有前端旧消息——其后未被触碰的近期尾部字节保持不变，
-  // 下一轮前缀缓存从首个未修改消息起继续命中（直接丢弃反而让整段前缀失配）。
-  // 质检 M10：维护增量 total（替换消息后按新旧 token 差调整），不再每步全量重算（原 ≤500×n）。
+  // —— 轻量语义回收（Hermes B1 + workbuddy P0-1 修正）——
+  // 只在「真的超预算」时回收（此前 >80% 即动手，能塞下的会话也被白白截断丢内容）；
+  // 回收边界 = 按尾部保留规则确定将被丢弃的前缀（此前固定扫前 500 条，超长会话时回收全白做）；
+  // 替换仅当摘要确实更短才接受（防短消息被摘要撑长）。
   const sysTokens = totalOf(system);
   let total = sysTokens + totalOf(rest);
-  if (total > budget * 0.8) {
+  if (total > budget) {
     const out = [...rest];
-    for (let i = 0; i < out.length && i < 500; i++) {
-      if (total <= budget * 0.8) break;
+    // 丢弃边界：从后往前贪心，确定尾部保留起点 s（s 之前的消息将被丢弃，只对它们回收）
+    let s = out.length;
+    {
+      let acc = sysTokens;
+      for (let i = out.length - 1; i >= 0; i--) {
+        const t = messageTokens(out[i], count);
+        if (acc + t > budget) { s = i + 1; break; }
+        acc += t;
+      }
+    }
+    for (let i = 0; i < s && i < 500; i++) {
+      if (total <= budget) break;
       const m = out[i];
       const c = typeof m.content === 'string' ? m.content : JSON.stringify(m?.content ?? '');
       let next = null;
@@ -86,8 +95,12 @@ export function trimMessages(/** @type {any} */ messages, /** @type {any} */ bud
         next = { ...m, content: c.slice(0, 200) + ` …[已回收，原 ${c.length} 字]` };
       }
       if (next) {
-        total += messageTokens(next, count) - messageTokens(m, count);
-        out[i] = next;
+        const oldT = messageTokens(m, count);
+        const newT = messageTokens(next, count);
+        if (newT < oldT) {
+          total += newT - oldT;
+          out[i] = next;
+        }
       }
     }
     // 回收后仍超预算 → 从尾部保留（必要时继续丢弃最老，清洗 tool 配对）
