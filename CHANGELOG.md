@@ -6,8 +6,9 @@
 
 - 任务收尾总结对齐 DSH：跑满步数前注入收尾指令、末轮仍调工具时补 no-tool 兜底总结，交付物清单随总结输出（agent.js + server.js 兜底文案改写 + smoke 5c/5d 回归）
 - B/C/D 计划：会话索引按会话名 sha1 分片（256 片，>1000 会话免单文件全量解析 + 增量只写脏片 + 旧单文件自动迁移）· 常量单源化（MAX_CONCURRENT/5MB/200KB 附件上限收敛到 src/web/constants.js，app.js/attachments.js/fs-tools.js 不再漂移）· WebUI ES Modules 拆分（app.js → util.js 纯工具 + constants.js）· 文档门禁（QA-REPORT 断言规模快照、CONFIG 补 downgrade/思考档位、CI 类型门禁统一 tsconfig.full.json）
-- 思考模式开关 + 推理等级改为**按模型独立**（`reasoningByModel[模型]` 覆盖，旧全局 reasoningEffort 兼容；/api/state reasoning 字段 + /api/config 校验 + REPL /think 同步），入口挪到「模型与密钥」面板
-- UI 对齐 DSH：模型（紧凑选择器）与权限下移到输入区（发送键左侧 / 最左），顶栏瘦身；轨迹/子代理「关闭」按钮字号缩小 + 不换行
+- 思考模式/推理等级**按模型独立**（`reasoningByModel[模型]` 覆盖，旧全局 reasoningEffort 兼容；/api/state reasoning 字段 + /api/config 校验 + REPL /think 同步）
+- UI 对齐 DSH：模型（紧凑选择器）、权限、思考下拉下移到输入区（发送键左侧），顶栏瘦身；权限/思考中文选项（询问/自动/只读 · 关/低/高/最高）
+- 自绘悬浮气泡 tooltip 替换原生 title（权限/模型/思考/附件按钮/后台任务 chip，暗色主题一致）；轨迹/子代理「关闭」按钮字号缩小 + 不换行
 
 ## v0.2.7（2026-09-02）
 

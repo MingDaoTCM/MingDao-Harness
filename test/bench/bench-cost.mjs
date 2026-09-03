@@ -147,9 +147,12 @@ const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.error('  �
 // ---------- 5. Batch 半价 ----------
 {
   ok(BATCH_DISCOUNT === 0.5, 'BATCH_DISCOUNT 应为 0.5');
-  const full = estimateCost('deepseek-v4-flash', 1000, 100, null, new Date());
+  // Batch 按设计恒为「闲时全未命中 × 0.5」（异步任务等价闲时，见 pricing.js 注释）。
+  // 测试须用固定闲时基准对比，否则高峰时段 new Date() 让 full 取峰值、断言偶发失败（v0.2.8 自检修复）。
+  const offpeakDate = new Date('2026-08-15T04:00:00Z'); // 周六 12:00 北京时间，必为闲时
+  const full = estimateCost('deepseek-v4-flash', 1000, 100, null, offpeakDate);
   const batch = estimateBatchCost('deepseek-v4-flash', 1000, 100);
-  ok(Math.abs(batch - full * 0.5) < 1e-9, `batch 应恰为全价一半（${batch} vs ${full}）`);
+  ok(Math.abs(batch - full * 0.5) < 1e-9, `batch 应恰为闲时全价一半（${batch} vs ${full}）`);
 }
 
 console.log(`\ncost 基准：${pass} 通过 / ${fail} 失败`);
