@@ -83,6 +83,7 @@ const HELP_LINES = [
   ['  mingdao update [--check]   一键自更新（git 安装形态；--check 只对比版本）', null],
   ['  mingdao rollback           回滚到上次 update 之前的提交', null],
   ['  mingdao audit [数量]       查看工具调用审计日志（默认最近 20 条）', null],
+  ['  mingdao diagnose           一键生成诊断报告（脱敏打包日志/审计/配置，便于反馈排查）', null],
   ['  mingdao desktop            启动桌面版（Electron，任意目录可用，托盘常驻）', null],
   ['  mingdao --help / --version 帮助 / 版本', null],
   ['', null],
@@ -189,6 +190,7 @@ async function main() {
       sessions: { module: 'skill', handler: 'handleSessions' },
       key: { module: 'key', handler: 'handleKey' },
       desktop: { module: 'desktop', handler: 'handleDesktop' },
+      diagnose: { module: 'diagnose', handler: 'handleDiagnose' },
     });
     const hit = dispatchTable[opts.prompt[0]];
     if (hit) {

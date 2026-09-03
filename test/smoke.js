@@ -2383,6 +2383,22 @@ const ctx = { cwd: tmp };
   ok(`省钱 B1：schema 按需瘦身（全用过降 ${(saving * 100).toFixed(0)}%，参数结构保留）`);
 }
 
+// ---------- 诊断命令（v0.3.0 P2-5）：一键生成脱敏诊断报告 ----------
+{
+  const homeD = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-diag-'));
+  process.env.MINGDAO_HOME = homeD;
+  const { handleDiagnose } = await import(pathToFileURL(path.join(srcDir, 'commands', 'diagnose.js')).href);
+  await handleDiagnose('diagnose', []);
+  const files = fs.readdirSync(homeD).filter((f) => f.startsWith('diagnose-') && f.endsWith('.txt'));
+  assert.equal(files.length, 1, '诊断命令应生成一个报告文件');
+  const content = fs.readFileSync(path.join(homeD, files[0]), 'utf8');
+  assert.ok(content.includes('MingDao Harness 诊断报告') && content.includes('## 环境') && content.includes('## 审计'), '报告应含环境/审计等分区');
+  assert.ok(!/(sk-[A-Za-z0-9]{6,}|ghp_[A-Za-z0-9]{20,})/.test(content), '报告不应泄漏明文密钥');
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeD, { recursive: true, force: true });
+  ok('diagnose：一键脱敏诊断报告生成');
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 fs.rmSync(smokeHome, { recursive: true, force: true });
