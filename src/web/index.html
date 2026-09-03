@@ -265,18 +265,18 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
   <div id="composer">
     <button id="attachBtn" title="上传图片或文本文件（图片需视觉模型，如 deepseek-v4-flash-vision-exp）">📎</button>
     <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送，Shift+Enter 换行）"></textarea>
-    <select id="permSel" title="权限模式（写文件 / 执行命令时是否询问）">
-      <option value="ask">ask</option>
-      <option value="auto">auto</option>
-      <option value="readonly">readonly</option>
+    <select id="permSel" title="权限模式：询问＝写文件/执行命令前先确认（推荐） · 自动＝全部直接放行 · 只读＝禁止修改与执行">
+      <option value="ask">询问</option>
+      <option value="auto">自动</option>
+      <option value="readonly">只读</option>
     </select>
-    <select id="reasoningSel" title="思考模式 / 推理等级（按当前模型独立，仅 reasoning 模型）" style="display:none">
+    <select id="modelSel" title="切换模型"></select>
+    <select id="reasoningSel" title="思考模式（推理等级）：关＝不推理省 token · 低 · 高（默认）· 最高＝最强推理" style="display:none">
       <option value="off">关</option>
       <option value="low">低</option>
       <option value="high">高</option>
       <option value="max">最高</option>
     </select>
-    <select id="modelSel" title="切换模型"></select>
     <button id="sendBtn" class="primary">发送</button>
   </div>
   <div id="hint"><span id="hintText">工具执行与权限确认会实时展示；生成中可点「中断」停止。</span><label style="margin-left:12px;cursor:pointer;user-select:none"><input type="checkbox" id="journalChk" style="vertical-align:-2px;margin:0 4px 0 0">📌 带上文（最近会话日志，默认关＝新会话全新开始）</label></div>
