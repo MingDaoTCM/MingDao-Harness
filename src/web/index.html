@@ -226,6 +226,8 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
   #scrollBottomBtn{position:fixed;right:26px;bottom:118px;width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#06121a;font-size:20px;font-weight:800;border:none;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.45);z-index:30;display:none;align-items:center;justify-content:center}
 @keyframes spin{to{transform:rotate(360deg)}}
+/* 自绘悬浮气泡 tooltip（替换原生 title）：暗色悬浮层 + 阴影，跟随锚点居中，越界自动回弹 */
+.mdtip{position:fixed;z-index:1000;max-width:320px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.6;box-shadow:0 8px 24px rgba(0,0,0,.55);pointer-events:none;white-space:pre-line;word-break:break-word;display:none}
 </style>
 </head>
 <body>

@@ -22,6 +22,52 @@ if (AUTH_TOKEN) {
   };
 }
 
+// —— 自绘悬浮气泡 tooltip（替换原生 title：出现快、样式与暗色主题一致） ——
+let tipEl = null;
+function ensureTip() {
+  if (!tipEl) {
+    tipEl = document.createElement('div');
+    tipEl.className = 'mdtip';
+    document.body.appendChild(tipEl);
+  }
+  return tipEl;
+}
+function showTip(text, anchor) {
+  if (!text || !anchor) return;
+  const t = ensureTip();
+  t.textContent = text;
+  t.style.display = 'block';
+  const r = anchor.getBoundingClientRect();
+  const w = t.offsetWidth, h = t.offsetHeight;
+  let left = r.left + r.width / 2 - w / 2;
+  left = Math.max(8, Math.min(left, window.innerWidth - w - 8));
+  let top = r.top - h - 8;
+  if (top < 8) top = r.bottom + 8;
+  t.style.left = left + 'px';
+  t.style.top = top + 'px';
+}
+function hideTip() { if (tipEl) tipEl.style.display = 'none'; }
+function attachTip(el, text) {
+  if (!el || !text) return;
+  el.removeAttribute('title'); // 去掉原生 title，避免双提示
+  const get = typeof text === 'function' ? text : () => text;
+  el.addEventListener('mouseenter', () => showTip(get(), el));
+  el.addEventListener('mouseleave', hideTip);
+  el.addEventListener('focus', () => showTip(get(), el));
+  el.addEventListener('blur', hideTip);
+  el.addEventListener('mousedown', hideTip); // 打开下拉/点击时隐藏，避免遮挡
+}
+window.addEventListener('scroll', hideTip, true);
+
+// 输入区下拉 / 附件按钮：把原生 title 换成自绘气泡（文本取自原 title，一次性读取后移除）
+function initTips() {
+  const perm = $('#permSel'); if (perm) attachTip(perm, perm.getAttribute('title'));
+  const reas = $('#reasoningSel'); if (reas) attachTip(reas, reas.getAttribute('title'));
+  const model = $('#modelSel'); if (model) attachTip(model, () => { const o = model.options[model.selectedIndex]; return (o && o.title) ? o.title : '切换模型'; });
+  const at = $('#attachBtn'); if (at) attachTip(at, at.getAttribute('title'));
+}
+initTips();
+
 // —— 弹窗三件套（Electron 不实现 window.prompt/confirm/alert：prompt 恒返回 null、confirm 恒 false、
 // alert 静默无反应——桌面版「⚙ 设置里点设Key 没反应」即由此而来）。统一替换为应用内模态框。
 function modalBox(inner){
@@ -359,6 +405,7 @@ function renderWorkStatus(){
   renderLiveBar();
   const el=$('#workStatus'); if(!el) return;
   let html='';
+  let tip='';
   if(generating){
     const secs=curWorkT0?Math.round((Date.now()-curWorkT0)/1000):0;
     html='<span class="ws-busy"><span class="spinner"></span><span class="ws-phase">'+esc(curPhase)+'</span><span>⏳ 第 '+curSteps+' 步 · '+Math.floor(secs/60)+' 分 '+Math.round(secs%60)+' 秒 · '+curTools+' 工具步'+(curTasks>0?' · '+curTasks+' 个子代理':'')+'</span></span>';
@@ -366,12 +413,12 @@ function renderWorkStatus(){
     // 后台任务 chip（非顶部，位于输入框上方）：计数 + 最新任务 + 悬浮详情 tooltip，点击打开详情面板
     const running=bgTasks.filter((/** @type {any} */ t)=>t.status==='running');
     const latest=running.length?running[running.length-1]:null;
-    const tip=bgTasks.map((/** @type {any} */ t)=>(t.kind==='schedule'?'⏰':'🛠')+' '+String(t.message||t.id||'').slice(0,40)+' · '+t.status).join('\n');
-    html='<span class="ws-bg" title="'+esc(String(tip)).replace(/"/g,'&quot;')+'">🛠 '+bgRunning+' 个后台任务运行中'+(latest?' · '+esc(String(latest.message||'').slice(0,22)):'')+' — 点击查看详情</span>';
+    tip=bgTasks.map((/** @type {any} */ t)=>(t.kind==='schedule'?'⏰':'🛠')+' '+String(t.message||t.id||'').slice(0,40)+' · '+t.status).join('\n');
+    html='<span class="ws-bg">🛠 '+bgRunning+' 个后台任务运行中'+(latest?' · '+esc(String(latest.message||'').slice(0,22)):'')+' — 点击查看详情</span>';
   }
   el.style.display=html?'flex':'none';
   el.innerHTML=html;
-  const bg=el.querySelector('.ws-bg'); if(bg) bg.onclick=()=>{ const tp=$('#tasksPanel'); tp.style.display = tp.style.display==='none'?'flex':'none'; if(tp.style.display==='flex'){ $('#trajPanel').style.display='none'; $('#subPanel').style.display='none'; updateTasksPanel(); } syncPanelLayout(); };
+  const bg=el.querySelector('.ws-bg'); if(bg){ bg.onclick=()=>{ const tp=$('#tasksPanel'); tp.style.display = tp.style.display==='none'?'flex':'none'; if(tp.style.display==='flex'){ $('#trajPanel').style.display='none'; $('#subPanel').style.display='none'; updateTasksPanel(); } syncPanelLayout(); }; attachTip(bg, tip); }
 }
 // 顶部常驻活动条（静默完美解决层）：生成期间始终可见，滚动不影响
 function renderLiveBar(){
