@@ -497,6 +497,45 @@ const ctx = { cwd: tmp };
   ok('agent：任务检查点 save/load/clear/resumePrompt + 正常完成不标记 capHit');
 }
 
+// ---------- 5f. 续跑闭环（v0.3.0 P0-2）：跑满 → 落检查点 → 注入续跑提示 → 第二轮完成且不重做 ----------
+{
+  const homeR = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-resume-'));
+  const prevHomeR = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = homeR;
+  const { saveTaskState, loadTaskState, resumePrompt } = await import(pathToFileURL(path.join(srcDir, 'task-state.js')).href);
+  // 第一轮：maxSteps=2，模型连发两次 write → 跑满 capHit；write 只执行了第一轮那次（第二轮被 guard 拦截）
+  let writes = 0;
+  let call = 0;
+  const fakeCap = {
+    async chat() {
+      call += 1;
+      return { text: '', toolCalls: [{ id: 'r' + call, type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: 'a.txt', content: 'x' }) } }], usage: { prompt_tokens: 3, completion_tokens: 2 }, finish: 'tool_calls' };
+    },
+  };
+  const agentCap = createAgent({ provider: fakeCap, permission: { async check() { return true; } }, io: createIO({ quiet: true }), modelName: 'deepseek-v4-flash', workingDir: homeR, cfg: { permission: 'auto' }, maxSteps: 2 });
+  const m1 = [{ role: 'system', content: '系统' }, { role: 'user', content: '写 a.txt' }];
+  const r1 = await agentCap.runTurn(m1);
+  assert.equal(r1.capHit, true, '第一轮应跑满步数');
+  writes = fs.existsSync(path.join(homeR, 'a.txt')) ? 1 : 0;
+  saveTaskState('s1.jsonl', { goal: '写 a.txt', progress: '已写 a.txt，还差 b.txt', artifacts: ['a.txt'], status: 'cap', updatedAt: 'x' });
+  // 第二轮：注入续跑提示后继续；mock 断言收到了「勿重复重做」且不再要求写 a.txt
+  let sawResume = false;
+  const fakeResume = { async chat(opts) {
+    const msgs = JSON.stringify(opts.messages || []);
+    if (msgs.includes('勿重复重做') && msgs.includes('a.txt')) sawResume = true;
+    return { text: '续跑完成：已补齐 b.txt', toolCalls: null, usage: { prompt_tokens: 3, completion_tokens: 2 }, finish: 'stop' };
+  } };
+  const agentResume = createAgent({ provider: fakeResume, permission: { async check() { return true; } }, io: createIO({ quiet: true }), modelName: 'deepseek-v4-flash', workingDir: homeR, cfg: { permission: 'auto' }, maxSteps: 5 });
+  const m2 = [...m1, { role: 'user', content: resumePrompt(loadTaskState('s1.jsonl')) }, { role: 'user', content: '继续' }];
+  const r2 = await agentResume.runTurn(m2);
+  assert.equal(r2.text, '续跑完成：已补齐 b.txt', '续跑第二轮应正常完成');
+  assert.ok(sawResume, '续跑提示应注入到第二轮模型上下文（含勿重复重做）');
+  assert.equal(writes, 1, '续跑不应重复写已交付的 a.txt（写次数仍为 1）');
+  process.env.MINGDAO_HOME = prevHomeR;
+  fs.rmSync(homeR, { recursive: true, force: true });
+  ok('agent：续跑闭环（跑满→检查点→注入→完成且不重做）');
+}
+
 // ---------- 5c. 只读工具并行（P2-8）：auto 模式连续只读 Promise.all，事件/结果顺序不变 ----------
 {
   const ioP = createIO({ quiet: true });
