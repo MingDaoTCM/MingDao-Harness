@@ -101,6 +101,8 @@ const post = async (p, body, opts) => {
   assert.equal(del.status, 404, '删除不存在会话应 404');
   const badAct = await post('/api/session', { action: 'nope', file: 'x' });
   assert.equal(badAct.status, 404, '会话不存在先于操作校验');
+  const finNoFile = await post('/api/session-finalize', {});
+  assert.equal(finNoFile.status, 400, 'finalize 缺 file 应 400');
   const draft = await post('/api/draft', { file: 's1', text: '草稿内容' });
   assert.equal(draft.status, 200);
   const dg = await get('/api/draft?file=s1');

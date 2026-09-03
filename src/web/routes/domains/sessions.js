@@ -9,7 +9,7 @@ import {
   relativeTime,
   sessionPreview,
 } from '../../../session.js';
-import { sanitizeTitle, renameSessionFile } from '../../../titles.js';
+import { sanitizeTitle, renameSessionFile, titleModel } from '../../../titles.js';
 import { loadTaskState } from '../../../task-state.js';
 import {
   workspaceForDir,
@@ -85,6 +85,36 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       }
     }
     return json(res, 400, { error: '未知操作：rename|delete' });
+  }
+
+  // v0.3.0 P0-3：会话收尾（前端「新对话/切换会话」时调用）——在会话边界提取项目记忆+日志，
+  // 而非逐轮提取，避免项目记忆文件在会话中途变化破坏前缀缓存（省钱核心）。
+  if (method === 'POST' && p === '/api/session-finalize') {
+    const body = await readBody(req, MAX_API_BODY);
+    const file = path.basename(String(body.file || ''));
+    if (!file) return json(res, 400, { error: '缺少 file 参数' });
+    try {
+      const loaded = loadSession(path.join(home, 'sessions', file));
+      if (loaded.messages.length) {
+        const wsDir = getSessionWorkspace(file) || state.workingDir;
+        const { finalizeSession } = await import('../../../memory.js');
+        const lastAsst = [...loaded.messages].reverse().find((/** @type {any} */ m) => m.role === 'assistant');
+        await finalizeSession({
+          cfg: deps.cfg,
+          provider: deps.provider,
+          model: titleModel(deps.cfg, state.modelName),
+          home,
+          workingDir: wsDir,
+          messages: loaded.messages,
+          turns: loaded.messages.filter((/** @type {any} */ m) => m.role === 'user').length,
+          lastText: lastAsst?.content || '',
+        });
+      }
+      json(res, 200, { ok: true });
+    } catch (/** @type {any} */ e) {
+      json(res, 500, { error: String(e?.message || e) });
+    }
+    return true;
   }
 
   if (method === 'GET' && p === '/api/draft') {

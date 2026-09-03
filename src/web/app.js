@@ -1049,12 +1049,17 @@ async function applyConfig(payload, revertTarget){
 }
 $('#modelSel').addEventListener('change', e=>{ applyConfig({model:e.target.value}, e.target); });
 $('#permSel').addEventListener('change', e=>{ applyConfig({permission:e.target.value}, e.target); });
-async function loadSession(file){ currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。'}); } scrollBottom(); }
+// v0.3.0 P0-3：会话边界收尾（切换/新对话时提取项目记忆+日志，fire-and-forget 不阻塞 UI）
+function finalizeCurrentSession(){
+  if(!currentSession) return;
+  fetch('/api/session-finalize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:currentSession})}).catch(()=>{});
+}
+async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。'}); } scrollBottom(); }
 
 sendBtn.onclick=()=>{ if(generating){ abort(); } else { send(); } };
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
 input.addEventListener('input',()=>{ input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; });
-$('#newChat').onclick=()=>{ currentSession=null; chatEl.innerHTML=''; refreshSessions(); };
+$('#newChat').onclick=()=>{ finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; refreshSessions(); };
 $('#sessMgrBtn').onclick=openSessModal;
 $('#sessClose').onclick=()=>{ $('#sessModal').style.display='none'; };
 async function openSessModal(){
@@ -1070,6 +1075,6 @@ async function openSessModal(){
     div.appendChild(rn); div.appendChild(dl); list.appendChild(div);
   }
 }
-$('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { currentSession=null; chatEl.innerHTML=''; } };
+$('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; } };
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
 init();
