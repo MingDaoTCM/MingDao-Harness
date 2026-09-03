@@ -318,13 +318,16 @@ export async function runRepl(ctx) {
         await switchToModel(target);
       } else if (cmd === '/think') {
         const vals = ['low', 'high', 'max'];
+        const cur = cfg.reasoningByModel?.[modelName] ?? cfg.reasoningEffort ?? '跟随模型默认';
         if (!arg) {
-          io.print(`用法：/think low|high|max|off（当前：${cfg.reasoningEffort || '跟随模型默认 high'}）`);
+          io.print(`用法：/think low|high|max|off（当前：${cur}）`);
           continue;
         }
-        if (arg === 'off') cfg.reasoningEffort = 'off'; // 显式禁用（provider 转 thinking:{type:'disabled'}）
-        else if (vals.includes(arg)) cfg.reasoningEffort = arg;
-        else { io.print(style('无效取值：low|high|max|off', C.red)); continue; }
+        if (arg === 'off' || vals.includes(arg)) {
+          cfg.reasoningByModel = cfg.reasoningByModel || {};
+          cfg.reasoningByModel[modelName] = arg; // 按模型独立：只改当前模型（off 转 thinking:{type:'disabled'}）
+          saveConfig(cfg);
+        } else { io.print(style('无效取值：low|high|max|off', C.red)); continue; }
         agent = createAgent({
           provider, permission, io, modelName, workingDir, cfg,
           undoStore: sessionUndoStore, mcp: mcpFacade, sessionRef,
@@ -333,7 +336,7 @@ export async function runRepl(ctx) {
             tuiState.persisted = msgs.length;
           },
         });
-        io.print(style(`✓ 思考强度：${cfg.reasoningEffort || 'off（模型默认）'}`, C.green));
+        io.print(style(`✓ 思考强度（${modelName}）：${cfg.reasoningByModel[modelName]}`, C.green));
       } else if (cmd === '/plan') {
         planMode = !planMode;
         io.print(style(`✓ 计划模式：${planMode ? '开' : '关'}${planMode ? '（先出计划，确认后执行）' : ''}`, C.green));

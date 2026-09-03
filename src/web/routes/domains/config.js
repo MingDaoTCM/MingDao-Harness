@@ -29,11 +29,12 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       .map((s) => ({ file: s.name, mtime: s.mtime, label: `${relativeTime(s.mtime)} · ${sessionPreview(s.file)}` }));
     // 模型列表：只列已设置 Key 的服务商，名称以 /models 接口线上名单为准（预设仅回退与补价）
     const models = await availableModels(cfg, state.modelName);
-    // 思考模式 / 推理等级（v0.2.8）：当前模型是否支持 reasoning、当前档位与可选档位
+    // 思考模式 / 推理等级（v0.2.8）：当前模型是否支持 reasoning、当前档位与可选档位。
+    // 按模型独立：reasoningByModel[当前模型] 覆盖 > 全局 reasoningEffort（旧配置兼容）> 模型预设默认。
     const rp = modelPreset(state.modelName);
     const reasoning = {
       supported: Boolean(rp?.supportsReasoning),
-      effort: cfg.reasoningEffort ?? rp?.reasoningEffort?.default ?? (rp?.supportsReasoning ? 'high' : 'off'),
+      effort: cfg.reasoningByModel?.[state.modelName] ?? cfg.reasoningEffort ?? rp?.reasoningEffort?.default ?? (rp?.supportsReasoning ? 'high' : 'off'),
       options: rp?.reasoningEffort?.options ?? ['low', 'high', 'max'],
     };
     json(res, 200, {
@@ -116,7 +117,9 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (!['off', 'low', 'high', 'max'].includes(re)) {
         return json(res, 400, { error: '思考强度必须是 off / low / high / max' });
       }
-      cfg.reasoningEffort = re;
+      // 按模型独立：写入当前模型的覆盖档位（不污染其他模型）
+      cfg.reasoningByModel = cfg.reasoningByModel || {};
+      cfg.reasoningByModel[state.modelName] = re;
     }
     let autostartChanged = false;
     if (body.autostart !== undefined) {
@@ -136,7 +139,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     cfg.model = next.model;
     cfg.permission = next.permission;
     saveConfig(cfg);
-    json(res, 200, { ok: true, model: state.modelName, permission: cfg.permission, sandbox: cfg.sandbox, routing: cfg.routing?.enabled, contextBudget: cfg.contextBudget, reasoningEffort: cfg.reasoningEffort, autostart: autostartChanged ? autostartStatus() : undefined, notify: cfg.notify !== false });
+    json(res, 200, { ok: true, model: state.modelName, permission: cfg.permission, sandbox: cfg.sandbox, routing: cfg.routing?.enabled, contextBudget: cfg.contextBudget, reasoningEffort: cfg.reasoningByModel?.[state.modelName] ?? cfg.reasoningEffort, autostart: autostartChanged ? autostartStatus() : undefined, notify: cfg.notify !== false });
     return true;
   }
 

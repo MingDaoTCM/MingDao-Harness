@@ -572,7 +572,7 @@ async function init(){
     for(const m of (j.models||[])){ const g=m.providerLabel||'其他'; if(!groups[g]){groups[g]=[];order.push(g);} groups[g].push(m); }
     for(const g of order){
       const og=document.createElement('optgroup'); og.label=g;
-      for(const m of groups[g]){ const o=document.createElement('option'); o.value=m.name; o.textContent=m.label; if(m.name===j.model) o.selected=true; og.appendChild(o); }
+      for(const m of groups[g]){ const o=document.createElement('option'); o.value=m.name; o.textContent=m.name; o.title=m.label; if(m.name===j.model) o.selected=true; og.appendChild(o); }
       ms.appendChild(og);
     }
     if(!(j.models||[]).length){ const o=document.createElement('option'); o.value=j.model; o.textContent=j.model; ms.appendChild(o); }
@@ -848,7 +848,7 @@ async function reloadModels(){
     for(const m of (j.models||[])){ const g=m.providerLabel||'其他'; if(!groups[g]){groups[g]=[];order.push(g);} groups[g].push(m); }
     for(const g of order){
       const og=document.createElement('optgroup'); og.label=g;
-      for(const m of groups[g]){ const o=document.createElement('option'); o.value=m.name; o.textContent=m.label; if(m.name===j.model) o.selected=true; og.appendChild(o); }
+      for(const m of groups[g]){ const o=document.createElement('option'); o.value=m.name; o.textContent=m.name; o.title=m.label; if(m.name===j.model) o.selected=true; og.appendChild(o); }
       ms.appendChild(og);
     }
     if(!(j.models||[]).length){ const o=document.createElement('option'); o.value=j.model; o.textContent=j.model; ms.appendChild(o); }

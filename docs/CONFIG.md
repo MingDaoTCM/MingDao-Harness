@@ -182,7 +182,7 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
   ——高峰时段（北京时间工作日 9:00–12:00、14:00–18:00 两段）自动顺延到最近闲时（12:00 / 18:00）执行；**周末与午间 12:00–14:00 按闲时计价**
   · `pricing.peakWindows`：高峰窗口覆盖（[[起,止],...] 北京时间整点）；`pricing.timezone`：计价时区
   · `pricing.source`：官方价格 JSON 地址（`mingdao update --pricing` 拉取，TTL 默认 7 天，`pricing.ttlDays` 可调）；`pricing.overrides`：按模型覆盖价格
-  · `reasoningEffort`：思考强度 `off`/`low`/`high`/`max`（默认模型内置 high；`off` 显式关闭思考省推理 token；REPL `/think` 或 WebUI 设置「通用与权限」→ 思考模式开关 + 推理等级）
+  · `reasoningByModel`：思考强度按模型独立覆盖，`{ "deepseek-v4-pro": "low" }`（`off`/`low`/`high`/`max`，默认模型内置 high；`off` 显式关闭思考省推理 token；REPL `/think` 或 WebUI 设置「模型与密钥」→ 思考模式开关 + 推理等级）；旧版全局 `reasoningEffort` 仍兼容，优先级低于 `reasoningByModel`
   · `routing.upgradeSteps` / `routing.upgradeTruncated`：粘滞 flash 会话累计步数/截断超过阈值自动升 planner（默认 10 / 2）
   （DeepSeek 官方邮件确认），不触发避峰等待。WebUI 调度面板勾选「🌙 避峰执行」。
 

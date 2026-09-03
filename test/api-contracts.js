@@ -69,6 +69,12 @@ const post = async (p, body, opts) => {
   assert.ok(st.j.reasoning && typeof st.j.reasoning.supported === 'boolean' && Array.isArray(st.j.reasoning.options) && typeof st.j.reasoning.effort === 'string', '/api/state reasoning 字段');
   const badReasoning = await post('/api/config', { reasoningEffort: 'nope' });
   assert.equal(badReasoning.status, 400, '非法思考强度应 400');
+  // 按模型独立：合法档位写当前模型（reasoningByModel），/api/state 回读一致
+  const okReasoning = await post('/api/config', { reasoningEffort: 'low' });
+  assert.equal(okReasoning.status, 200, '合法思考强度应 200');
+  assert.equal(okReasoning.j.reasoningEffort, 'low', '响应回显按模型档位');
+  const st2 = await get('/api/state');
+  assert.equal(st2.j.reasoning.effort, 'low', '思考强度按当前模型持久化并回读');
   const mc = await get('/api/models-config');
   assert.ok(Array.isArray(mc.j.providers) && mc.j.providers.length >= 2 && Array.isArray(mc.j.customModels), '/api/models-config 结构');
   assert.ok(mc.j.providers.every((p) => p.name && p.label && p.keyState), '服务商条目字段完整');
