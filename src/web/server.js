@@ -29,6 +29,7 @@ import { MAX_CONCURRENT } from './constants.js';
 import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
 import { buildSystemPrompt } from '../prompts.js';
+import { extractAndAppendProjectMemory } from '../memory.js';
 import { saveTaskState, clearTaskState, loadTaskState, resumePrompt } from '../task-state.js';
 import { createWebIO } from './web-io.js';
 import { startMcpServers } from '../mcp.js';
@@ -491,6 +492,10 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       await withSessionLock(session.file, () => appendMessages(session.file, messages.slice(persistedBefore)));
       io.printUsageLine({ modelName: runModel, usage: r.usage, durationMs: r.durationMs });
       recordUsage(r.perf?.usedModel || runModel, r.usage, /** @type {any} */ (r.perf));
+      // v0.3.0 P0-3：项目级自动记忆（有实际工具工作才提取，fire-and-forget 不阻塞收尾）
+      if (io.stats().toolCount > 0) {
+        extractAndAppendProjectMemory({ cfg, provider: providerNow, model: titleModel(cfg, runModel), messages, workingDir: taskDir }).catch(() => {});
+      }
       maybeAutoSync().catch(() => {});
       // 新会话自动标题（可配置关闭）
       srvlog('chat 标题生成前 ' + taskId);

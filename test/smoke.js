@@ -1023,6 +1023,37 @@ const ctx = { cwd: tmp };
   ok('memory：提取 / 追加 / 无新增 / 日志 / 最近块');
 }
 
+// ---------- 22b. 项目级自动记忆（v0.3.0 P0-3）：按工作空间沉淀 + 注入不串 ----------
+{
+  const homeP = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-pmem-'));
+  process.env.MINGDAO_HOME = homeP;
+  const wsA = path.join(homeP, 'proj-a');
+  const wsB = path.join(homeP, 'proj-b');
+  fs.mkdirSync(wsA, { recursive: true });
+  fs.mkdirSync(wsB, { recursive: true });
+  const { loadProjectMemory, appendProjectMemory, dedupeProjectMemory, extractProjectMemory } = await import(pathToFileURL(path.join(srcDir, 'memory.js')).href);
+  const { buildSystemPrompt } = await import(pathToFileURL(path.join(srcDir, 'prompts.js')).href);
+  // 追加/读回/去重：项目记忆只落在各自工作空间
+  appendProjectMemory(wsA, ['决定：config 拆成多文件', '坑：Node 18 不支持某 API']);
+  appendProjectMemory(wsA, ['决定：config 拆成多文件']); // 重复，去重后应只保留一条
+  const before = loadProjectMemory(wsA).split('\n').filter(Boolean).length;
+  const removed = dedupeProjectMemory(wsA);
+  const after = loadProjectMemory(wsA).split('\n').filter(Boolean).length;
+  assert.ok(removed >= 1 && after === before - removed, '项目记忆去重应删重复');
+  assert.equal(loadProjectMemory(wsB), '', '工作空间 B 不应读到 A 的项目记忆');
+  // 提取（json 路径）
+  const fake = { async chat() { return { text: '{"items": ["结构：src 下分 core/web"]}' }; } };
+  const lines = await extractProjectMemory(fake, 'deepseek-v4-flash', [{ role: 'user', content: '重构项目结构' }], '');
+  assert.ok(lines.length >= 1, '项目记忆提取应返回条目');
+  // 注入：buildSystemPrompt 应包含该工作空间的项目记忆、且不串
+  const sp = buildSystemPrompt({ workingDir: wsA });
+  assert.ok(sp.includes('<project_memory>') && sp.includes('config 拆成多文件'), '系统提示应注入项目记忆');
+  assert.ok(!sp.includes('src 下分 core/web'), '未追加到文件的项目记忆不应注入');
+  process.env.MINGDAO_HOME = smokeHome;
+  fs.rmSync(homeP, { recursive: true, force: true });
+  ok('memory：项目级自动记忆按工作空间沉淀/去重/注入不串');
+}
+
 // ---------- 23. 缓存感知计价 ----------
 {
   const { estimateCost, estimateCostLabel, cacheSplit } = await import(pathToFileURL(path.join(srcDir, 'pricing.js')).href);

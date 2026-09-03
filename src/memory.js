@@ -216,6 +216,126 @@ export async function extractMemory(/** @type {any} */ provider, /** @type {any}
   }
 }
 
+// —— 项目级自动记忆（v0.3.0 P0-3）——
+// 与用户记忆（偏好/约定）区分：项目记忆沉淀「关键决定/事实/结构/教训」，随工作空间走，
+// 换会话/换项目不串。存储：<工作空间>/.mingdao/memory.md（git 可忽略，属本机智能体的项目笔记）。
+export function projectMemoryFile(/** @type {any} */ workingDir) {
+  return path.join(String(workingDir || ''), '.mingdao', 'memory.md');
+}
+
+export function loadProjectMemory(/** @type {any} */ workingDir) {
+  try {
+    return fs.readFileSync(projectMemoryFile(workingDir), 'utf8');
+  } catch {
+    return '';
+  }
+}
+
+export function appendProjectMemory(/** @type {any} */ workingDir, /** @type {any} */ lines) {
+  const add = lines.map((/** @type {any} */ l) => l.trim()).filter(Boolean);
+  if (!add.length || !workingDir) return 0;
+  try {
+    fs.mkdirSync(path.dirname(projectMemoryFile(workingDir)), { recursive: true, mode: 0o700 });
+    const bp = beijingParts(new Date());
+    const date = `${bp.year}-${String(bp.month).padStart(2, '0')}-${String(bp.day).padStart(2, '0')}`;
+    fs.appendFileSync(
+      projectMemoryFile(workingDir),
+      add.map((/** @type {any} */ l) => (l.startsWith('-') ? `- [${date}] ${l.slice(1).trim()}` : `- [${date}] ${l}`)).join('\n') + '\n'
+    );
+    return add.length;
+  } catch {
+    return 0;
+  }
+}
+
+export function dedupeProjectMemory(/** @type {any} */ workingDir) {
+  const raw = loadProjectMemory(workingDir);
+  if (!raw.trim()) return 0;
+  const seen = new Set();
+  const kept = [];
+  let removed = 0;
+  for (const line of raw.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    const norm = t.replace(/^-\s*\[\d{4}-\d{2}-\d{2}\]\s*/, '').trim().toLowerCase();
+    if (seen.has(norm)) { removed += 1; continue; }
+    seen.add(norm);
+    kept.push(t);
+  }
+  if (removed > 0) {
+    try { fs.writeFileSync(projectMemoryFile(workingDir), kept.join('\n') + '\n'); } catch {}
+  }
+  return removed;
+}
+
+// 项目记忆提取：关键决定及其原因、文件/目录结构、依赖与约定、踩过的坑与教训、未完成事项
+export async function extractProjectMemory(/** @type {any} */ provider, /** @type {any} */ model, /** @type {any} */ messages, /** @type {any} */ existing) {
+  try {
+    const convo = messages
+      .filter((/** @type {any} */ m) => m.role === 'user' || m.role === 'assistant')
+      .slice(-20)
+      .map((/** @type {any} */ m) => `${m.role === 'user' ? '用户' : 'MingDao'}：${String(m.content || '').slice(0, 500)}`)
+      .join('\n');
+    const msgs = [
+      {
+        role: 'system',
+        content:
+          '你是 MingDao Harness 的项目记忆提取器。从对话中提取值得长期记住的「项目级事实」：关键决定及其原因、文件/目录结构、依赖与约定、踩过的坑与教训、未完成事项。每条 ≤50 字，只输出新条目（与「已有记忆」重复或对话中未提及的不要输出）。只输出 JSON：{"items": ["条目1", "条目2"]}；没有新增时输出 {"items": []}。\n已有记忆：\n' +
+          (existing || '（空）'),
+      },
+      { role: 'user', content: convo.slice(0, 8000) },
+    ];
+    try {
+      const res = await provider.chat({ model, messages: msgs, tools: [], temperature: 0.2, maxTokens: 250, reasoningEffort: 'low', responseFormat: { type: 'json_object' } });
+      const j = JSON.parse(String(res.text || '').trim());
+      const items = Array.isArray(j?.items) ? j.items : [];
+      const clean = items
+        .map((/** @type {any} */ l) => String(l).trim())
+        .filter(Boolean)
+        .map((/** @type {any} */ l) => (/^[·•]/.test(l) ? '- ' + l.replace(/^[·•]\s*/, '') : l.startsWith('-') ? l : '- ' + l))
+        .slice(0, 10);
+      if (clean.length || items.length === 0) return clean;
+    } catch {}
+    const res = await provider.chat({
+      model,
+      messages: [
+        {
+          role: 'system',
+          content:
+            '你是 MingDao Harness 的项目记忆提取器。从对话中提取值得长期记住的项目级事实（关键决定及原因、结构、依赖约定、教训、未完成事项）。每条一行，以 - 开头，≤50 字，只输出新条目（与「已有记忆」重复或未提及的不要输出）；没有新增就只输出「无新增」。\n已有记忆：\n' +
+            (existing || '（空）'),
+        },
+        { role: 'user', content: convo.slice(0, 8000) },
+      ],
+      tools: [],
+      temperature: 0.2,
+      maxTokens: 300,
+    });
+    const text = String(res.text || '').trim();
+    if (!text || text.includes('无新增')) return [];
+    return text
+      .split('\n')
+      .map((/** @type {any} */ l) => l.trim())
+      .filter((/** @type {any} */ l) => l.startsWith('-') || /^[·•]/.test(l))
+      .map((/** @type {any} */ l) => l.replace(/^[·•]\s*/, '- '))
+      .slice(0, 10);
+  } catch {
+    return [];
+  }
+}
+
+// 项目记忆提取 + 追加（CLI finalizeSession 与 WebUI 收尾共用；配置 autoProjectMemory 默认开）
+export async function extractAndAppendProjectMemory(/** @type {any} */ { cfg, provider, model, messages, workingDir }) {
+  if (!workingDir || cfg?.autoProjectMemory === false) return;
+  try {
+    const existing = loadProjectMemory(workingDir);
+    const { helperProvider } = await import('./providers/index.js');
+    const memProvider = await helperProvider(cfg, model, provider);
+    const lines = await extractProjectMemory(memProvider, model, messages, existing);
+    if (lines.length) appendProjectMemory(workingDir, lines);
+  } catch {}
+}
+
 // 会话收尾：写日志 + 自动记忆（turns 太少的一次性会话只记日志不提取）
 export async function finalizeSession(/** @type {any} */ { cfg, provider, model, home, workingDir, messages, turns, lastText }) {
   const firstUser = messages.find((/** @type {any} */ m) => m.role === 'user')?.content || '';
@@ -238,5 +358,9 @@ export async function finalizeSession(/** @type {any} */ { cfg, provider, model,
       const lines = await extractMemory(memProvider, model, messages, existing);
       if (lines.length) appendMemory(lines);
     } catch {}
+  }
+  // v0.3.0 P0-3：项目级自动记忆（有实际工具工作才提取，避免空话污染项目记忆）
+  if (workingDir && turns >= 2) {
+    await extractAndAppendProjectMemory({ cfg, provider, model, messages, workingDir });
   }
 }

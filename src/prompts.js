@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { skillsRegistryBlock } from './skills.js';
 import { mingdaoHome, loadConfig } from './config.js';
-import { recentJournalBlock } from './memory.js';
+import { recentJournalBlock, loadProjectMemory } from './memory.js';
 
 const BASE = `你是 MingDao Harness，一个由 MingDao Harness 驱动的 AI 编程助手。你在用户的电脑上工作：通过工具读写文件、搜索代码、执行命令，帮助用户完成编程、调试与自动化任务。
 
@@ -43,6 +43,11 @@ export function buildSystemPrompt({ workingDir, withJournal = false }) {
   // 用户级记忆（~/.mingdao/AGENTS.md，/memory add 手动追加 + 会话结束自动提炼）
   const memory = loadFile(path.join(mingdaoHome(), 'AGENTS.md'), 8000);
   if (memory) prompt += `\n\n<user_memory>\n${memory}\n</user_memory>`;
+
+  // 项目级自动记忆（v0.3.0 P0-3）：<工作空间>/.mingdao/memory.md 自动沉淀的决定/事实/教训。
+  // 与 AGENTS.md（手动约定）区分；默认截 4K 保持系统提示前缀稳定，超长可 read 工具按需读。
+  const projMem = loadProjectMemory(workingDir);
+  if (projMem) prompt += `\n\n<project_memory>\n${projMem.length > 4000 ? projMem.slice(0, 4000) + '\n…[过长已截断]' : projMem}\n</project_memory>`;
 
   // 最近会话日志（跨会话连续性）：默认不注入——新会话应当全新开始，避免串到
   // 上一次会话的上下文（曾出现「新会话却接着给上个会话的游戏升级」的混淆）。
