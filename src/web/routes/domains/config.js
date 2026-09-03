@@ -6,7 +6,7 @@ import { loadConfig, saveConfig } from '../../../config.js';
 import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../../../credentials.js';
 import { availableModels, fetchProviderModels, providerHasKey } from '../../../model-discovery.js';
 import { createProvider, resolveProviderConfig } from '../../../providers/index.js';
-import { MODELS, PROVIDERS } from '../../../models.js';
+import { MODELS, PROVIDERS, modelPreset } from '../../../models.js';
 import { detectSandbox } from '../../../tools/bash.js';
 import { enableAutostart, disableAutostart, autostartStatus } from '../../../autostart.js';
 import { PRICE_DATA_AS_OF } from '../../../pricing.js';
@@ -29,6 +29,13 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       .map((s) => ({ file: s.name, mtime: s.mtime, label: `${relativeTime(s.mtime)} · ${sessionPreview(s.file)}` }));
     // 模型列表：只列已设置 Key 的服务商，名称以 /models 接口线上名单为准（预设仅回退与补价）
     const models = await availableModels(cfg, state.modelName);
+    // 思考模式 / 推理等级（v0.2.8）：当前模型是否支持 reasoning、当前档位与可选档位
+    const rp = modelPreset(state.modelName);
+    const reasoning = {
+      supported: Boolean(rp?.supportsReasoning),
+      effort: cfg.reasoningEffort ?? rp?.reasoningEffort?.default ?? (rp?.supportsReasoning ? 'high' : 'off'),
+      options: rp?.reasoningEffort?.options ?? ['low', 'high', 'max'],
+    };
     json(res, 200, {
       ok: true,
       model: state.modelName,
@@ -40,6 +47,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       sandbox: cfg.sandbox || 'off',
       sandboxSupported: detectSandbox() !== 'none',
       routing: cfg.routing?.enabled ? cfg.routing : null,
+      reasoning,
       contextBudget: cfg.contextBudget || 128000,
       pricingAsOf: PRICE_DATA_AS_OF,
       autostart: autostartStatus(),
@@ -103,6 +111,13 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       next.contextBudget = n;
       cfg.contextBudget = n;
     }
+    if (body.reasoningEffort !== undefined) {
+      const re = String(body.reasoningEffort);
+      if (!['off', 'low', 'high', 'max'].includes(re)) {
+        return json(res, 400, { error: '思考强度必须是 off / low / high / max' });
+      }
+      cfg.reasoningEffort = re;
+    }
     let autostartChanged = false;
     if (body.autostart !== undefined) {
       autostartChanged = true;
@@ -121,7 +136,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     cfg.model = next.model;
     cfg.permission = next.permission;
     saveConfig(cfg);
-    json(res, 200, { ok: true, model: state.modelName, permission: cfg.permission, sandbox: cfg.sandbox, routing: cfg.routing?.enabled, contextBudget: cfg.contextBudget, autostart: autostartChanged ? autostartStatus() : undefined, notify: cfg.notify !== false });
+    json(res, 200, { ok: true, model: state.modelName, permission: cfg.permission, sandbox: cfg.sandbox, routing: cfg.routing?.enabled, contextBudget: cfg.contextBudget, reasoningEffort: cfg.reasoningEffort, autostart: autostartChanged ? autostartStatus() : undefined, notify: cfg.notify !== false });
     return true;
   }
 

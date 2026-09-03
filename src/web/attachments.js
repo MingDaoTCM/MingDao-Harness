@@ -4,12 +4,11 @@
 //  - 文本文件：直接拼接进消息文本（≤200KB），并留文件名标注
 //  - 返回 { content（模型消息内容：字符串或图文数组）, persistText（落盘文本）, error }
 
-const MAX_IMAGE_DATAURL = 7 * 1024 * 1024; // base64 膨胀 1.33 倍，对应约 5MB 原图
-const MAX_TEXT = 200 * 1024;
+import { MAX_ATTACHMENTS, MAX_IMAGE_DATAURL, MAX_TEXT_BYTES } from './constants.js';
 
 export function buildUserContent(/** @type {any} */ message, /** @type {any} */ attachments, /** @type {any} */ visionSupported) {
   const text = String(message ?? '').trim();
-  const list = Array.isArray(attachments) ? attachments.slice(0, 4) : [];
+  const list = Array.isArray(attachments) ? attachments.slice(0, MAX_ATTACHMENTS) : [];
   const imageParts = [];
   const persistParts = [];
   let finalText = text;
@@ -31,7 +30,7 @@ export function buildUserContent(/** @type {any} */ message, /** @type {any} */ 
     } else if (a.type === 'text') {
       const content = String(a.content ?? '');
       if (!content.trim()) continue;
-      if (content.length > MAX_TEXT) {
+      if (content.length > MAX_TEXT_BYTES) {
         return { error: `文本文件过大：${a.name || '未命名'}（≤200KB）` };
       }
       finalText += `${finalText ? '\n\n' : ''}[文件 ${a.name || '未命名'}]\n${content}`;

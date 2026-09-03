@@ -25,6 +25,7 @@ import { createProvider, resolveProviderConfig, helperProvider } from '../provid
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { routeTask, routingConfig } from '../routing.js';
 import { buildUserContent } from './attachments.js';
+import { MAX_CONCURRENT } from './constants.js';
 import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
 import { buildSystemPrompt } from '../prompts.js';
@@ -217,7 +218,6 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   };
 
   // 任务注册表：支持多会话并行——每个任务独立的 SSE 流、权限确认、中断控制
-  const MAX_CONCURRENT = 8;
   let inflight = 0; // 质检 S2：在途聊天请求计数（与请求生命周期绑定，防 readBody 期间并发超限）
   const tasks = new Map(); // taskId -> { res, send, abortHandler, pendingAsk, session, startedAt, status, message, durationMs }
   let taskSeq = 0;
@@ -519,7 +519,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         durationMs: r.durationMs,
         truncated: r.truncated,
         aborted: r.aborted,
-        note: r.note || (r.text ? '' : `（本轮共执行 ${io.stats().toolCount} 步工具操作${io.stats().deliverables.length ? `、交付 ${io.stats().deliverables.length} 个文件` : ''}，但模型没有输出总结文字——可追问「总结一下刚才的工作」）`),
+        note: r.note || (r.text ? '' : `（任务已执行 ${io.stats().toolCount} 步工具操作${io.stats().deliverables.length ? `、交付 ${io.stats().deliverables.length} 个文件` : ''}，自动收尾总结未能生成——可追问「总结一下刚才的工作」）`),
         stats: io.stats(),
         session: path.basename(session.file),
       });

@@ -31,7 +31,7 @@ export function createApiDispatch(deps) {
     // 访问控制（P1-3/P1-4）：token 校验覆盖数据与操作接口；壳页面与 PWA 静态资源公开
     // （壳不含任何数据，SPA 需要先加载才能读取 ?token=）；Host 白名单覆盖一切请求
     const isStaticAsset =
-      p === '/' || p === '/index.html' || p === '/app.js' || p === '/favicon.ico' || p === '/icon.svg' || p === '/icon-192.png' || p === '/icon-512.png' || p === '/manifest.webmanifest' || p === '/sw.js';
+      p === '/' || p === '/index.html' || p === '/app.js' || p === '/util.js' || p === '/constants.js' || p === '/favicon.ico' || p === '/icon.svg' || p === '/icon-192.png' || p === '/icon-512.png' || p === '/manifest.webmanifest' || p === '/sw.js';
     if (authEnabled && !isStaticAsset && !tokenMatches(requestToken(req, url))) {
       return json(res, 401, { error: '未授权：缺少或无效的访问令牌（地址需带 ?token=…，或请求头携带 X-MingDao-Token）' });
     }
@@ -60,15 +60,17 @@ export function createApiDispatch(deps) {
     }
 
     // —— 静态壳资源（公开；不经过域分发） ——
-    if (method === 'GET' && p === '/app.js') {
-      // 质检 Q2/S5：SPA 外部 JS——从磁盘读取（与 index.html 同目录）
+    // 质检 Q2/S5：SPA 外部 JS——从磁盘读取（与 index.html 同目录）。
+    // v0.2.8 C2：app.js 拆分为 ES Modules（app.js / util.js / constants.js），统一从此处伺服。
+    const WEB_JS_FILES = new Set(['app.js', 'util.js', 'constants.js']);
+    if (method === 'GET' && WEB_JS_FILES.has(p.slice(1))) {
       try {
-        const js = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'app.js'), 'utf8');
+        const js = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', p.slice(1)), 'utf8');
         res.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' });
         res.end(js);
       } catch {
         res.writeHead(500, { 'Content-Type': 'text/plain; charset=utf-8' });
-        res.end('app.js 加载失败');
+        res.end(p.slice(1) + ' 加载失败');
       }
       return;
     }
@@ -124,8 +126,8 @@ export function createApiDispatch(deps) {
     }
     if (method === 'GET' && p === '/sw.js') {
       res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
-      // 缓存键去掉 query（?token= 不落缓存）；mingdao-v4：随 token 认证版本升版本号，强制替换旧 SW 缓存
-      res.end(`self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!=='mingdao-v4').map(k=>caches.delete(k)))).then(()=>clients.claim())));self.addEventListener('fetch',e=>{if(e.request.method==='GET'&&new URL(e.request.url).origin===location.origin&&!e.request.url.includes('/api/')){const u=new URL(e.request.url);u.search='';e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open('mingdao-v4').then(cache=>cache.put(u.toString(),c));return r;}).catch(()=>caches.match(u.toString()).then(m=>m||caches.match('/'))));}});`);
+      // 缓存键去掉 query（?token= 不落缓存）；mingdao-v5：随 token 认证版本升版本号，强制替换旧 SW 缓存
+      res.end(`self.addEventListener('install',()=>self.skipWaiting());self.addEventListener('activate',e=>e.waitUntil(caches.keys().then(ks=>Promise.all(ks.filter(k=>k!=='mingdao-v5').map(k=>caches.delete(k)))).then(()=>clients.claim())));self.addEventListener('fetch',e=>{if(e.request.method==='GET'&&new URL(e.request.url).origin===location.origin&&!e.request.url.includes('/api/')){const u=new URL(e.request.url);u.search='';e.respondWith(fetch(e.request).then(r=>{const c=r.clone();caches.open('mingdao-v5').then(cache=>cache.put(u.toString(),c));return r;}).catch(()=>caches.match(u.toString()).then(m=>m||caches.match('/'))));}});`);
       return;
     }
 

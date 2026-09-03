@@ -20,6 +20,7 @@
     "src/**/*.js"
   ],
   "exclude": [
-    "src/web/app.js"
+    "src/web/app.js",
+    "src/web/util.js"
   ]
 }

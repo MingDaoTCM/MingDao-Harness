@@ -49,7 +49,7 @@
   "scripts": {
     "start": "node src/cli.js",
     "test": "node test/run-all.mjs",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.full.json",
     "prepublishOnly": "node test/smoke.js && node test/e2e-local.js && node test/e2e-schedule.js",
     "desktop": "npm --prefix desktop start",
     "desktop:dist": "node scripts/sync-versions.mjs && npm --prefix desktop run dist:dir",

@@ -57,9 +57,9 @@ MingDao 先用 executor 模型（路由关闭时为当前模型）把被裁段�
 ## 会话检索索引（P3-2）
 
 `mingdao sessions search <关键词>` 与 WebUI 历史会话搜索走增量词表索引
-（`~/.mingdao/sessions-index.json`）：中文按 bigram+单字、英文按词，多词 AND 匹配；
-只有内容变化（mtime/size）的会话才重新分词，删除的会话自动清出索引。索引文件可随时
-删除（下次搜索自动重建）。
+（`~/.mingdao/sessions-index/` 分片目录，v0.2.8 起按会话名 sha1 前 2 位分 256 片）：
+中文按 bigram+单字、英文按词，多词 AND 匹配；只有内容变化（mtime/size）的会话才重新
+分词，删除的会话自动清出索引。索引目录可随时删除（下次搜索自动重建）。
 
 ## 会话级工作空间（P3-4）
 
@@ -169,7 +169,7 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
 { "costGuard": { "dailyLimitYuan": 10, "warnAtYuan": 8, "action": "block" } }
 ```
 
-- `action: "warn"`（默认）超限仅提醒；`"block"` 到达上限暂停执行（明天自动恢复）；
+- `action: "warn"`（默认）超限仅提醒；`"block"` 到达上限暂停执行（明天自动恢复）；`"downgrade"` 触顶后自动切换到同服务商更便宜模型（如 flash）继续执行并提示（已是 flash 则按 block 处理）；
 - `/cost` 与 WebUI 头部费用徽标实时显示「今日费用 / 上限百分比」。
 
 ## 战略省钱：Batch 半价 + 避峰调度
@@ -182,7 +182,7 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
   ——高峰时段（北京时间工作日 9:00–12:00、14:00–18:00 两段）自动顺延到最近闲时（12:00 / 18:00）执行；**周末与午间 12:00–14:00 按闲时计价**
   · `pricing.peakWindows`：高峰窗口覆盖（[[起,止],...] 北京时间整点）；`pricing.timezone`：计价时区
   · `pricing.source`：官方价格 JSON 地址（`mingdao update --pricing` 拉取，TTL 默认 7 天，`pricing.ttlDays` 可调）；`pricing.overrides`：按模型覆盖价格
-  · `reasoningEffort`：思考强度 low/high/max（默认模型内置 high；REPL `/think` 切换）
+  · `reasoningEffort`：思考强度 `off`/`low`/`high`/`max`（默认模型内置 high；`off` 显式关闭思考省推理 token；REPL `/think` 或 WebUI 设置「通用与权限」→ 思考模式开关 + 推理等级）
   · `routing.upgradeSteps` / `routing.upgradeTruncated`：粘滞 flash 会话累计步数/截断超过阈值自动升 planner（默认 10 / 2）
   （DeepSeek 官方邮件确认），不触发避峰等待。WebUI 调度面板勾选「🌙 避峰执行」。
 

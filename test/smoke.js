@@ -397,6 +397,78 @@ const ctx = { cwd: tmp };
   ok('agent：空/截断输出续写与兜底');
 }
 
+// ---------- 5c. 步数上限收尾（v0.2.8）：末轮注入收尾指令并产出总结（对齐 DSH） ----------
+{
+  const io2 = createIO({ quiet: true });
+  let t = 0;
+  const fake = {
+    async chat() {
+      t += 1;
+      if (t <= 2) {
+        return {
+          text: '',
+          toolCalls: [{ id: 'call_w' + t, type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: 'x.txt' }) } }],
+          usage: { prompt_tokens: 5, completion_tokens: 2 },
+          finish: 'tool_calls',
+        };
+      }
+      return { text: '总结：已完成 A，交付 x.txt。', toolCalls: null, usage: { prompt_tokens: 6, completion_tokens: 8 }, finish: 'stop' };
+    },
+  };
+  const agent = createAgent({
+    provider: fake,
+    permission: { async check() { return true; } },
+    io: io2,
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmp,
+    cfg: { permission: 'auto' },
+    maxSteps: 3,
+  });
+  const m = [{ role: 'system', content: '系统' }, { role: 'user', content: '做任务' }];
+  const r = await agent.runTurn(m);
+  assert.equal(r.text, '总结：已完成 A，交付 x.txt。', '末轮应产出总结文字');
+  assert.equal(r.truncated, false);
+  assert.ok(m.some((x) => x.role === 'user' && String(x.content).includes('停止调用工具')), '应注入收尾指令');
+  ok('agent：步数上限前注入收尾指令，末轮产出总结');
+}
+
+// ---------- 5d. 步数上限兜底总结（v0.2.8）：末轮仍调用工具时自动补一次 no-tool 总结 ----------
+{
+  const io2 = createIO({ quiet: true });
+  let t = 0;
+  const fake = {
+    async chat(opts) {
+      t += 1;
+      if (t <= 3) {
+        return {
+          text: '',
+          toolCalls: [{ id: 'call_e' + t, type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: 'y.txt' }) } }],
+          usage: { prompt_tokens: 5, completion_tokens: 2 },
+          finish: 'tool_calls',
+        };
+      }
+      // 第 4 次：兜底总结请求（tools 应为空）
+      assert.equal((opts.tools || []).length, 0, '兜底总结应 no-tool');
+      return { text: '最终总结：交付 y.txt。', toolCalls: null, usage: { prompt_tokens: 6, completion_tokens: 8 }, finish: 'stop' };
+    },
+  };
+  const agent = createAgent({
+    provider: fake,
+    permission: { async check() { return true; } },
+    io: io2,
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmp,
+    cfg: { permission: 'auto' },
+    maxSteps: 3,
+  });
+  const m = [{ role: 'system', content: '系统' }, { role: 'user', content: '做任务' }];
+  const r = await agent.runTurn(m);
+  assert.equal(r.text, '最终总结：交付 y.txt。', '末轮仍调工具时应补总结');
+  assert.equal(r.truncated, false);
+  assert.equal(t, 4, '应跑满 3 步 + 1 次兜底总结');
+  ok('agent：跑满步数仍无正文时补一次兜底总结');
+}
+
 // ---------- 5c. 只读工具并行（P2-8）：auto 模式连续只读 Promise.all，事件/结果顺序不变 ----------
 {
   const ioP = createIO({ quiet: true });
@@ -1696,8 +1768,16 @@ const ctx = { cwd: tmp };
   // 删除会话 → 索引清理 + 不再命中
   fs.unlinkSync(s3.file);
   assert.equal(searchSessions(homeI, 'WebUI').length, 0, '删除的会话不应再命中');
-  const idx = JSON.parse(fs.readFileSync(path.join(homeI, 'sessions-index.json'), 'utf8'));
-  assert.ok(!idx.files[s3.name], '索引应清理已删除条目');
+  // 分片索引（v0.2.8 B1）：聚合所有分片后确认已删除条目被清理、存活会话仍在
+  const shardFiles = fs.readdirSync(path.join(homeI, 'sessions-index')).filter((f) => f.endsWith('.json'));
+  assert.ok(shardFiles.length >= 1, '应生成分片索引目录');
+  const allFiles = {};
+  for (const f of shardFiles) {
+    const j = JSON.parse(fs.readFileSync(path.join(homeI, 'sessions-index', f), 'utf8'));
+    Object.assign(allFiles, j.files || {});
+  }
+  assert.ok(!allFiles[s3.name], '索引应清理已删除条目');
+  assert.ok(allFiles[s1.name] && allFiles[s2.name], '存活会话仍在分片索引中');
   // 空关键词 → 列表回退
   assert.equal(searchSessions(homeI, '').length, 2, '空关键词应返回会话列表');
   // 分词单元：中文 bigram + 单字 + 英文词

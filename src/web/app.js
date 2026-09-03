@@ -1,3 +1,6 @@
+import { $, esc, highlight, renderMarkdown, scrollBottom, expandableBody, resultText, truncText, fmtDur, fmtTok, fmtT } from './util.js';
+import { MAX_ATTACHMENTS, MAX_IMAGE_BYTES, MAX_TEXT_BYTES } from './constants.js';
+
 // 访问令牌（P1-3）：地址带 ?token= 时记入 sessionStorage 并从地址栏移除（防截图/历史外泄），
 // 之后所有同源请求统一附加 X-MingDao-Token 头；无令牌时行为与旧版一致。
 const AUTH_TOKEN = (() => {
@@ -18,7 +21,6 @@ if (AUTH_TOKEN) {
     return rawFetch(input, init);
   };
 }
-const $ = (s) => document.querySelector(s);
 
 // —— 弹窗三件套（Electron 不实现 window.prompt/confirm/alert：prompt 恒返回 null、confirm 恒 false、
 // alert 静默无反应——桌面版「⚙ 设置里点设Key 没反应」即由此而来）。统一替换为应用内模态框。
@@ -125,61 +127,7 @@ chatEl.addEventListener('click', (e) => {
 let generating = false; // 生成中：发送按钮复用为停止按钮
 let currentSession = null, thinking = null;
 
-function esc(s){return String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}
 
-function highlight(code, lang){
-  const kws = new Set('const let var function return if else for while import from export class new await async try catch throw null undefined true false def elif raise with as lambda None True False self echo exit if then else fi done local function'.split(' '));
-  const re = /(\/\/[^\n]*|#[^\n]*|"(?:\\.|[^"\\])*"|'[^']*'|`[^`]*`|\b\d[\d._]*\b|[A-Za-z_$][\w$]*)/g;
-  return esc(code).replace(re, (tok)=>{
-    if(tok.startsWith('//')||tok.startsWith('#')) return '<span class="hl-c">'+tok+'</span>';
-    if(/^["'`]/.test(tok)) return '<span class="hl-s">'+tok+'</span>';
-    if(/^\d/.test(tok)) return '<span class="hl-n">'+tok+'</span>';
-    if(kws.has(tok)) return '<span class="hl-kw">'+tok+'</span>';
-    return tok;
-  });
-}
-function renderMarkdown(text){
-  // 块级解析（美化：加粗标题 / 段落 / 真列表 / 引用 / 分割线，参照 DeepSeek-Harness 会话排版）
-  const lines = String(text).split('\n');
-  let out = '', code = null, codeLang = '';
-  const flushCode = () => { if (code !== null) { out += '<div class="codeblock"><div class="cb-banner"><span class="cb-lang"><span class="cb-dot"></span>' + (esc(codeLang) || 'code') + '</span><span class="cb-copy" style="cursor:pointer">复制</span></div><pre><code class="lang-' + esc(codeLang) + '">' + highlight(code.join('\n'), codeLang) + '</code></pre></div>'; code = null; } };
-  let para = [];
-  let list = null; // {type:'ul'|'ol', items:[]}
-  const flushPara = () => { if (para.length) { out += '<p>' + para.join('<br>') + '</p>'; para = []; } };
-  const flushList = () => { if (list) { out += '<' + list.type + '>' + list.items.map((i) => '<li>' + i + '</li>').join('') + '</' + list.type + '>'; list = null; } };
-  // 行内元素（审计 P1-3：内容与 codeLang 均经 esc 转义防 XSS）
-  const inline = (l) => {
-    let s = esc(l);
-    s = s.replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>')
-      .replace(/\*([^*\s][^*]*)\*/g, '<i>$1</i>')
-      .replace(/\[([^\]]+)\]\((https?:\/\/[^\s'"<>)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
-    return s;
-  };
-  for (const line of lines) {
-    const t = line.trim();
-    if (t.startsWith('```')) {
-      if (code === null) { flushList(); flushPara(); code = []; codeLang = (t.slice(3).trim().split(/\s+/)[0] || ''); }
-      else flushCode();
-      continue;
-    }
-    if (code !== null) { code.push(line); continue; }
-    if (t === '') { flushList(); flushPara(); continue; }
-    const h = t.match(/^(#{1,6})\s+(.*)$/);
-    if (h) { flushList(); flushPara(); const level = Math.min(h[1].length, 4); out += '<h' + level + '>' + inline(h[2]) + '</h' + level + '>'; continue; }
-    const ul = t.match(/^([-*+])\s+(.*)$/);
-    if (ul) { flushPara(); if (!list || list.type !== 'ul') { flushList(); list = { type: 'ul', items: [] }; } list.items.push(inline(ul[2])); continue; }
-    const ol = t.match(/^(\d+)[.)]\s+(.*)$/);
-    if (ol) { flushPara(); if (!list || list.type !== 'ol') { flushList(); list = { type: 'ol', items: [] }; } list.items.push(inline(ol[2])); continue; }
-    if (/^>\s?/.test(t)) { flushList(); flushPara(); out += '<blockquote>' + inline(t.replace(/^>\s?/, '')) + '</blockquote>'; continue; }
-    if (/^(-{3,}|\*{3,})$/.test(t)) { flushList(); flushPara(); out += '<hr>'; continue; }
-    flushList();
-    para.push(inline(t));
-  }
-  flushCode(); flushList(); flushPara();
-  return out;
-}
-function scrollBottom(){ const sc=document.querySelector('main'); if(sc) sc.scrollTop = sc.scrollHeight; }
 
 function newAiMsg(){ const el=document.createElement('div'); el.className='msg-ai'; chatEl.appendChild(el); scrollBottom(); return el; }
 function aiContent(msg){ const c=msg.querySelector('.content'); return c || (()=>{const d=document.createElement('div');d.className='content';msg.appendChild(d);return d;})(); }
@@ -187,15 +135,6 @@ function addReasoning(msg){ const d=document.createElement('details'); d.classNa
 
 function addUser(text){ const el=document.createElement('div'); el.className='msg-user'; el.innerHTML='<div class="bubble">'+esc(text)+'</div>'; chatEl.appendChild(el); scrollBottom(); }
 
-function expandableBody(previewHtml, fullHtml){
-  const b=document.createElement('div'); b.className='body';
-  const prev=document.createElement('div'); const full=document.createElement('div');
-  prev.innerHTML=previewHtml; full.innerHTML=fullHtml; full.style.display='none';
-  const btn=document.createElement('button'); btn.textContent='展开全文'; btn.style.cssText='padding:1px 8px;font-size:11px;margin-top:4px';
-  btn.onclick=()=>{ const open=full.style.display!=='none'; full.style.display=open?'none':'block'; btn.textContent=open?'展开全文':'收起'; scrollBottom(); };
-  b.appendChild(prev); b.appendChild(full); b.appendChild(btn);
-  return b;
-}
 const runningTools = new Map();
 function renderToolStartEvent(ev){
   const card=document.createElement('div'); card.className='tool';
@@ -302,13 +241,13 @@ let attachments=[];
 $('#attachBtn').onclick=()=>{ $('#fileInput').click(); };
 $('#fileInput').addEventListener('change', async e=>{
   for(const f of e.target.files||[]){
-    if(attachments.length>=4){ uiAlert('最多 4 个附件'); break; }
+    if(attachments.length>=MAX_ATTACHMENTS){ uiAlert('最多 '+MAX_ATTACHMENTS+' 个附件'); break; }
     if(f.type.startsWith('image/')){
-      if(f.size>5*1024*1024){ uiAlert(f.name+' 超过 5MB'); continue; }
+      if(f.size>MAX_IMAGE_BYTES){ uiAlert(f.name+' 超过 5MB'); continue; }
       const dataUrl=await new Promise(r=>{ const fr=new FileReader(); fr.onload=()=>r(fr.result); fr.readAsDataURL(f); });
       attachments.push({type:'image',name:f.name,dataUrl});
     }else if(f.type.startsWith('text/')||/\.(txt|md|json|js|py|log|csv|html|css)$/i.test(f.name)){
-      if(f.size>200*1024){ uiAlert(f.name+' 超过 200KB'); continue; }
+      if(f.size>MAX_TEXT_BYTES){ uiAlert(f.name+' 超过 200KB'); continue; }
       const content=await new Promise(r=>{ const fr=new FileReader(); fr.onload=()=>r(fr.result); fr.readAsText(f); });
       attachments.push({type:'text',name:f.name,content});
     }else{
@@ -498,14 +437,6 @@ function syncPanelLayout(){
   document.body.classList.toggle('sub-open', open('subPanel'));
   document.body.classList.toggle('tasks-open', open('tasksPanel'));
 }
-function resultText(r){
-  if(r==null||r===undefined) return '';
-  if(typeof r==='string') return r;
-  if(r.output) return String(r.output);
-  if(r.stdout||r.stderr) return String(r.stdout||'')+String(r.stderr||'');
-  return JSON.stringify(r);
-}
-function truncText(t,n){ t=String(t||''); return t.length>n?t.slice(0,n)+'\n…（截断，共 '+t.length+' 字）':t; }
 $('#tjClose').onclick=()=>{ $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); syncPanelLayout(); };
 $('#trajRailBtn').onclick=()=>{
   const p=$('#trajPanel');
@@ -602,8 +533,6 @@ async function refreshCostBadge(){
 }
 refreshCostBadge(); setInterval(refreshCostBadge, 15000);
 // 底部状态栏：轮次/步数/LLM 与工具时长/首 token 平均/吞吐/缓存命中/输入输出 tokens
-function fmtDur(ms){ if(!ms) return '0s'; const sec=Math.round(ms/1000); const m=Math.floor(sec/60); return m>0 ? m+'m'+String(sec%60).padStart(2,'0')+'s' : sec+'s'; }
-function fmtTok(n){ if(n>=1e9) return (n/1e9).toFixed(1)+'B'; if(n>=1e6) return (n/1e6).toFixed(0)+'M'; if(n>=1e3) return (n/1e3).toFixed(1)+'K'; return String(n); }
 async function refreshStatusBar(){
   const r=await fetch('/api/cache-stats',{cache:'no-store'}).catch(()=>null); if(!r) return;
   const j=await r.json().catch(()=>null); if(!j) return;
@@ -620,6 +549,21 @@ $('#tpClose').onclick=()=>{ $('#tasksPanel').style.display='none'; syncPanelLayo
 async function refreshSessions(q){ const u=q?'/api/sessions?q='+encodeURIComponent(q):'/api/sessions'; const r=await fetch(u).catch(()=>null); if(!r)return; const j=await r.json(); const sel=$('#sessions'); sel.innerHTML='<option value="">历史会话</option>'; for(const s of j.sessions){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; sel.appendChild(o); } if(currentSession&&!q) sel.value=currentSession; }
 let searchTimer=null;
 $('#sessionSearch').addEventListener('input',e=>{ clearTimeout(searchTimer); searchTimer=setTimeout(()=>refreshSessions(e.target.value.trim()),300); });
+// 思考模式 / 推理等级（v0.2.8）：根据 /api/state 的 reasoning 字段同步设置面板 UI
+function applyReasoningUI(reasoning){
+  const chk=$('#thinkChk'), sel=$('#reasoningSel'), row=$('#reasoningRow'), hint=$('#thinkHint');
+  if(!chk || !sel) return;
+  const supported = Boolean(reasoning && reasoning.supported);
+  chk.disabled = !supported;
+  sel.disabled = !supported || !chk.checked;
+  row.style.opacity = supported ? '' : '.5';
+  const effort = reasoning && reasoning.effort ? reasoning.effort : 'off';
+  chk.checked = supported && effort !== 'off';
+  sel.value = (effort !== 'off' && reasoning && reasoning.options && reasoning.options.includes(effort)) ? effort : 'high';
+  if(!supported){ chk.checked=false; hint.textContent='当前模型不支持思考模式（DeepSeek-V4 Pro 等 reasoning 模型才生效）'; }
+  else hint.textContent='关闭思考可省推理 token；开启后按推理等级发送 reasoning_effort。';
+}
+$('#thinkChk').onchange=()=>{ $('#reasoningSel').disabled = !$('#thinkChk').checked; };
 async function init(){
   try{
     const r=await fetch('/api/state',{cache:'no-store'}); const j=await r.json();
@@ -639,6 +583,7 @@ async function init(){
     $('#budgetInput').value=j.contextBudget||128000;
     $('#autoStartChk').checked=Boolean(j.autostart);
     $('#notifyChk').checked=j.notify!==false;
+    applyReasoningUI(j.reasoning);
     const env = ('路由'+(j.routing?'开':'关')+' · 沙箱'+((j.sandbox&&j.sandbox!=='off')?(j.sandboxSupported?j.sandbox:'降级'):'off'));
     $('#envBadge').textContent=env; $('#envBadge').style.display='';
     // 首次使用引导：无 API Key 时明确提示去设置（桌面版自动初始化后必走这里）
@@ -779,7 +724,6 @@ $('#memDedupe').onclick=async ()=>{
   if(j.ok){ memFlash('✓ 去重完成，移除 '+j.removed+' 行', true); loadMemoryUI(); } else memFlash('✖ '+(j.error||'去重失败'), false);
 };
 // —— 缓存命中率仪表盘 ——
-function fmtT(n){ n=Number(n||0); return n>=1000?(n/1000).toFixed(1)+'k':String(n); }
 // 省钱 B3：费用二级分账面板（模型/工具 Top5 + 近 14 天折线，零依赖 SVG）
 function renderCostBreakdown(bd){
   const models=$('#costTopModels'); models.innerHTML='';
@@ -910,6 +854,7 @@ async function reloadModels(){
     if(!(j.models||[]).length){ const o=document.createElement('option'); o.value=j.model; o.textContent=j.model; ms.appendChild(o); }
     const env=('路由'+(j.routing?'开':'关')+' · 沙箱'+((j.sandbox&&j.sandbox!=='off')?(j.sandboxSupported?j.sandbox:'降级'):'off'));
     $('#envBadge').textContent=env; $('#envBadge').style.display='';
+    applyReasoningUI(j.reasoning);
   }catch(e){}
 }
 async function refreshModelsCfg(){
@@ -1037,7 +982,7 @@ async function refreshSyncConflicts(){
     list.appendChild(div);
   }
 }
-$('#cfgSave').onclick=()=>{ applyConfig({sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}); $('#cfgModal').style.display='none'; };
+$('#cfgSave').onclick=()=>{ applyConfig({sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, reasoningEffort:$('#thinkChk').checked?$('#reasoningSel').value:'off', contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}); $('#cfgModal').style.display='none'; };
 async function applyConfig(payload, revertTarget){
   const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const j=await r.json().catch(()=>({error:'请求失败'}));

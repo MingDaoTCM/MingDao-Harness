@@ -43,10 +43,15 @@ const post = async (p, body, opts) => {
   assert.ok(html.includes('MingDao'), '首页 HTML 应可加载');
   const appjs = await (await fetch(base + '/app.js')).text();
   assert.ok(appjs.includes('refreshCache') && appjs.includes('pkList'), 'SPA JS 应完整');
+  // v0.2.8 C2：ES Modules 拆分后，工具/常量模块应可独立加载
+  const utiljs = await (await fetch(base + '/util.js')).text();
+  assert.ok(utiljs.includes('renderMarkdown') && utiljs.includes('esc'), 'util.js 应伺服 Markdown/转义工具');
+  const constjs = await (await fetch(base + '/constants.js')).text();
+  assert.ok(constjs.includes('MAX_IMAGE_BYTES') && constjs.includes('MAX_CONCURRENT'), 'constants.js 应伺服共享常量');
   const mf = await (await fetch(base + '/manifest.webmanifest')).json();
   assert.equal(mf.name, 'MingDao Harness', 'PWA manifest 正确');
   const sw = await (await fetch(base + '/sw.js')).text();
-  assert.ok(sw.includes('mingdao-v4'), 'ServiceWorker 缓存版本正确');
+  assert.ok(sw.includes('mingdao-v5'), 'ServiceWorker 缓存版本正确');
   const icon = await fetch(base + '/icon-192.png');
   assert.equal(icon.status, 200, '图标应 200');
   const notfound = await get('/api/nope');
@@ -61,6 +66,9 @@ const post = async (p, body, opts) => {
   assert.ok(st.j.ok === true && Array.isArray(st.j.models) && Array.isArray(st.j.sessions), '/api/state 结构');
   assert.equal(st.j.keyReady, false, '无 Key 时 keyReady=false');
   assert.ok(Array.isArray(st.j.permissions) && ['ask', 'auto', 'readonly'].every((x) => st.j.permissions.includes(x)), '权限模式枚举');
+  assert.ok(st.j.reasoning && typeof st.j.reasoning.supported === 'boolean' && Array.isArray(st.j.reasoning.options) && typeof st.j.reasoning.effort === 'string', '/api/state reasoning 字段');
+  const badReasoning = await post('/api/config', { reasoningEffort: 'nope' });
+  assert.equal(badReasoning.status, 400, '非法思考强度应 400');
   const mc = await get('/api/models-config');
   assert.ok(Array.isArray(mc.j.providers) && mc.j.providers.length >= 2 && Array.isArray(mc.j.customModels), '/api/models-config 结构');
   assert.ok(mc.j.providers.every((p) => p.name && p.label && p.keyState), '服务商条目字段完整');

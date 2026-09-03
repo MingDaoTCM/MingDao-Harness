@@ -3,11 +3,12 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { MAX_FILE_READ_BYTES } from '../web/constants.js';
 
 const MAX_SCAN_FILES = 20000;
 const MAX_GLOB_RESULTS = 1000;
 const MAX_GREP_MATCHES = 250;
-const MAX_FILE_BYTES = 5 * 1024 * 1024;
+const MAX_FILE_BYTES = MAX_FILE_READ_BYTES; // 单源化（v0.2.8 B2）：read/edit 单文件读取上限
 
 /**
  * @param {any} cwd

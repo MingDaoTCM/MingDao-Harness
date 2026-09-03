@@ -2,6 +2,13 @@
 
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
+## v0.2.8（2026-09-03）
+
+- 任务收尾总结对齐 DSH：跑满步数前注入收尾指令、末轮仍调工具时补 no-tool 兜底总结，交付物清单随总结输出（agent.js + server.js 兜底文案改写 + smoke 5c/5d 回归）
+- B/C/D 计划：会话索引按会话名 sha1 分片（256 片，>1000 会话免单文件全量解析 + 增量只写脏片 + 旧单文件自动迁移）· 常量单源化（MAX_CONCURRENT/5MB/200KB 附件上限收敛到 src/web/constants.js，app.js/attachments.js/fs-tools.js 不再漂移）· WebUI ES Modules 拆分（app.js → util.js 纯工具 + constants.js）· 文档门禁（QA-REPORT 断言规模快照、CONFIG 补 downgrade/思考档位、CI 类型门禁统一 tsconfig.full.json）
+- 设置新增思考模式开关 + 推理等级（off/low/high/max，/api/state reasoning 字段 + /api/config 校验 + 通用面板 UI）
+- 轨迹/子代理面板「关闭」按钮字号缩小 + 不换行
+
 ## v0.2.7（2026-09-02）
 
 - 自查 6 条修复 + 界面三项：stopDaemon 解析 pid + daemon 租约自退（防双守护重复执行，含 finally 条件删 pidfile 自检拦截的连锁退出回归）+ e2e-schedule 回归 · MCP 超时孤儿清理 · 护栏徽标 NaN 守卫 · 价格源协议/大小校验 · 日志权限 600 · 任务活动条宽度自适应+阶段回归 · task 子代理派发时机引导 · 后台任务 chip 详情 tooltip

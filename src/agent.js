@@ -359,6 +359,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       }
 
       if (res.toolCalls?.length) {
+        // v0.2.8 步数上限收尾（对齐 DSH）：末轮仍返回工具调用（无视收尾指令）时不再执行工具——
+        // 有正文直接收尾，无正文跳出循环进入兜底总结，避免再次跑满步数后静默结束。
+        if (steps === stepLimit) {
+          io.endTurn();
+          if (res.text) {
+            messages.push({ role: 'assistant', content: res.text });
+            return { text: res.text, reasoning: res.reasoning || '', usage, steps, finish, truncated: false, aborted: false, durationMs: Date.now() - startedAt, perf: perf() };
+          }
+          break;
+        }
         io.endTurn();
         const assistantMsg = {
           role: 'assistant',
@@ -553,6 +563,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             }
           }
         }
+        // v0.2.8 步数预留收尾（对齐 DSH）：仅剩最后一轮时，工具结果回填后追加收尾指令，
+        // 让模型在末轮输出「总结文字 + 交付物清单」，而非跑满步数后静默结束。
+        if (steps === stepLimit - 1) {
+          messages.push({
+            role: 'user',
+            content:
+              '（系统提示）已达到工具调用步数上限，请停止调用工具，直接输出最终总结：① 已完成的工作；② 交付物清单（文件路径）；③ 遗留问题与后续建议。',
+          });
+        }
       } else {
         io.endTurn();
         // 最终纯文本回复回填消息历史（会话持久化与多轮上下文依赖它）；
@@ -626,6 +645,38 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     io.endTurn();
     // 步数上限：清掉未执行的 tool_calls，避免下一轮/恢复后 API 400
     stripOrphanCalls();
+    // v0.2.8 兜底总结（对齐 DSH）：跑满步数/末轮无正文且未中断时，补一次 no-tool 小输出请求，
+    // 让任务以「总结文字 + 交付物清单」收尾，而非静默结束；失败则回退旧行为（text:null）。
+    if (!aborted && messages.length) {
+      try {
+        // stripOrphanCalls 残留的空 assistant（无 tool_calls 且 content 为空）回传会触发 API 400，先清掉
+        const lastMsg = messages[messages.length - 1];
+        if (lastMsg.role === 'assistant' && !lastMsg.content && !Array.isArray(lastMsg.tool_calls)) messages.pop();
+        const wrapReq = [
+          ...trimMessages(messages, budget, count),
+          { role: 'user', content: '（系统提示）任务已执行完毕。请用一段话总结刚才完成的工作，列出交付物（文件路径），并说明遗留问题与后续建议。' },
+        ];
+        currentAc = new AbortController();
+        const wrapRes = await provider.chat({
+          model: activeModel,
+          messages: wrapReq,
+          tools: [],
+          temperature,
+          maxTokens: Math.min(maxOutput, 2048),
+          reasoningEffort: modelPreset(activeModel)?.supportsReasoning ? 'low' : undefined,
+          signal: currentAc.signal,
+          onDelta(/** @type {any} */ d) {
+            if (d.text) io.writeText(d.text);
+          },
+        });
+        if (wrapRes.usage) {
+          usage.prompt_tokens += wrapRes.usage.prompt_tokens || 0;
+          usage.completion_tokens += wrapRes.usage.completion_tokens || 0;
+        }
+        if (wrapRes.text) messages.push({ role: 'assistant', content: wrapRes.text });
+        return { text: wrapRes.text || null, reasoning: wrapRes.reasoning || '', usage, steps, finish, truncated: false, aborted: false, durationMs: Date.now() - startedAt, perf: perf() };
+      } catch {}
+    }
     return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, durationMs: Date.now() - startedAt, perf: perf() };
     } finally {
       currentAc = null;

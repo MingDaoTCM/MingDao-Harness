@@ -94,6 +94,7 @@ header select{flex:none}
 #trajPanel{position:fixed;left:42px;top:52px;bottom:0;width:252px;background:var(--bg2);border-right:1px solid var(--border);z-index:40;display:flex;flex-direction:column;box-shadow:4px 0 24px rgba(0,0,0,.35)}
 .tj-head{padding:12px 14px;font-size:14px;font-weight:600;border-bottom:1px solid var(--border);color:var(--accent2);display:flex;align-items:center;gap:8px}
 .tj-head button{margin-left:auto}
+#tjClose,#sbClose{font-size:12px;white-space:nowrap;padding:3px 10px}
 #tjList{flex:1;overflow-y:auto;padding:8px}
 .tj-turn{color:var(--accent2);font-size:12px;font-weight:600;margin:8px 2px 4px}
 .tj-item{padding:6px 10px;border:1px solid var(--border);border-radius:8px;margin-bottom:6px;font-size:12.5px;background:var(--bg3);cursor:pointer}
@@ -347,6 +348,14 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
       <div class="cfg-hint" id="sbxHint"></div>
     </div>
     <div class="cfg-row"><label><input type="checkbox" id="routeChk"> 自动模型路由（规划→pro / 执行→flash）</label></div>
+    <div class="cfg-row"><label><input type="checkbox" id="thinkChk"> 开启思考模式（DeepSeek 推理，仅 reasoning 模型生效）</label><div class="cfg-hint" id="thinkHint"></div></div>
+    <div class="cfg-row" id="reasoningRow"><label>推理等级
+      <select id="reasoningSel">
+        <option value="low">low — 省 token</option>
+        <option value="high">high — 默认</option>
+        <option value="max">max — 最强</option>
+      </select>
+    </label></div>
     <div class="cfg-row"><label>上下文预算 tokens <input type="number" id="budgetInput" min="1000" step="1000"></label></div>
     <div class="cfg-row"><label><input type="checkbox" id="autoStartChk"> 开机自启（登录后自动启动服务器）</label></div>
     <div class="cfg-row"><label><input type="checkbox" id="notifyChk"> 后台任务完成/失败时桌面通知</label></div>
@@ -442,6 +451,6 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     </div>
   </div>
 </div>
-<script src="/app.js"></script>
+<script type="module" src="/app.js"></script>
 </body>
 </html>
