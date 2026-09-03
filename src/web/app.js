@@ -549,21 +549,18 @@ $('#tpClose').onclick=()=>{ $('#tasksPanel').style.display='none'; syncPanelLayo
 async function refreshSessions(q){ const u=q?'/api/sessions?q='+encodeURIComponent(q):'/api/sessions'; const r=await fetch(u).catch(()=>null); if(!r)return; const j=await r.json(); const sel=$('#sessions'); sel.innerHTML='<option value="">历史会话</option>'; for(const s of j.sessions){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; sel.appendChild(o); } if(currentSession&&!q) sel.value=currentSession; }
 let searchTimer=null;
 $('#sessionSearch').addEventListener('input',e=>{ clearTimeout(searchTimer); searchTimer=setTimeout(()=>refreshSessions(e.target.value.trim()),300); });
-// 思考模式 / 推理等级（v0.2.8）：根据 /api/state 的 reasoning 字段同步设置面板 UI
+// 思考模式 / 推理等级（v0.2.8）：与模型选择并列在输入区，按当前模型独立。
+// 仅 reasoning 模型显示该下拉（关/低/高/最高）；切换模型时随 /api/state 的 reasoning 字段刷新。
 function applyReasoningUI(reasoning){
-  const chk=$('#thinkChk'), sel=$('#reasoningSel'), row=$('#reasoningRow'), hint=$('#thinkHint');
-  if(!chk || !sel) return;
+  const sel=$('#reasoningSel');
+  if(!sel) return;
   const supported = Boolean(reasoning && reasoning.supported);
-  chk.disabled = !supported;
-  sel.disabled = !supported || !chk.checked;
-  row.style.opacity = supported ? '' : '.5';
-  const effort = reasoning && reasoning.effort ? reasoning.effort : 'off';
-  chk.checked = supported && effort !== 'off';
-  sel.value = (effort !== 'off' && reasoning && reasoning.options && reasoning.options.includes(effort)) ? effort : 'high';
-  if(!supported){ chk.checked=false; hint.textContent='当前模型不支持思考模式（DeepSeek-V4 Pro 等 reasoning 模型才生效）'; }
-  else hint.textContent='关闭思考可省推理 token；开启后按推理等级发送 reasoning_effort。';
+  sel.style.display = supported ? '' : 'none';
+  if(!supported) return;
+  const effort = reasoning && reasoning.effort ? reasoning.effort : 'high';
+  sel.value = ['off','low','high','max'].includes(effort) ? effort : 'high';
 }
-$('#thinkChk').onchange=()=>{ $('#reasoningSel').disabled = !$('#thinkChk').checked; };
+$('#reasoningSel').onchange=()=>{ applyConfig({reasoningEffort:$('#reasoningSel').value}); };
 async function init(){
   try{
     const r=await fetch('/api/state',{cache:'no-store'}); const j=await r.json();
@@ -982,7 +979,7 @@ async function refreshSyncConflicts(){
     list.appendChild(div);
   }
 }
-$('#cfgSave').onclick=()=>{ applyConfig({sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, reasoningEffort:$('#thinkChk').checked?$('#reasoningSel').value:'off', contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}); $('#cfgModal').style.display='none'; };
+$('#cfgSave').onclick=()=>{ applyConfig({sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}); $('#cfgModal').style.display='none'; };
 async function applyConfig(payload, revertTarget){
   const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const j=await r.json().catch(()=>({error:'请求失败'}));
