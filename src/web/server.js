@@ -29,6 +29,7 @@ import { MAX_CONCURRENT } from './constants.js';
 import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
 import { buildSystemPrompt } from '../prompts.js';
+import { saveTaskState, clearTaskState, loadTaskState, resumePrompt } from '../task-state.js';
 import { createWebIO } from './web-io.js';
 import { startMcpServers } from '../mcp.js';
 import {
@@ -396,6 +397,13 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         ? session.messages
         : [{ role: 'system', content: systemPrompt }, ...(session.messages || [])];
     messages[0] = { role: 'system', content: systemPrompt }; // 总是刷新 system（记忆/技能/AGENTS.md 最新）
+    // v0.3.0 P0-2：续跑——继续一个有未完成检查点的会话时，先注入进度摘要让模型从断点接着做
+    if (!isNew) {
+      const ts = loadTaskState(sessionName);
+      if (ts && (ts.status === 'cap' || ts.status === 'interrupted')) {
+        messages.push({ role: 'user', content: resumePrompt(ts) });
+      }
+    }
     messages.push({ role: 'user', content: built.content });
     // 落盘用文本版（图文数组只发给模型，会话文件保持字符串可渲染）
     await withSessionLock(session.file, () => appendMessages(session.file, [{ role: 'user', content: built.persistText }]));
@@ -497,6 +505,19 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
             if (renamed) moveSessionWorkspace(oldName, path.basename(renamed)); // 会话改名 → 工作空间映射跟随
           }
         } catch {}
+      }
+      // v0.3.0 P0-2：任务检查点——跑满步数(capHit)或中断(aborted)时落盘供续跑，正常完成清除
+      const finalSessionName = path.basename(session.file);
+      if (r.capHit || r.aborted) {
+        saveTaskState(finalSessionName, {
+          goal: built.persistText,
+          progress: r.text || '',
+          artifacts: io.stats().deliverables,
+          status: r.capHit ? 'cap' : 'interrupted',
+          updatedAt: new Date().toISOString(),
+        });
+      } else {
+        clearTaskState(finalSessionName);
       }
       entry.status = r.aborted ? 'aborted' : 'done';
       entry.durationMs = Date.now() - entry.startedAt;

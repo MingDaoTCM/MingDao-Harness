@@ -466,7 +466,35 @@ const ctx = { cwd: tmp };
   assert.equal(r.text, '最终总结：交付 y.txt。', '末轮仍调工具时应补总结');
   assert.equal(r.truncated, false);
   assert.equal(t, 4, '应跑满 3 步 + 1 次兜底总结');
+  assert.equal(r.capHit, true, '跑满步数应标记 capHit（供续跑检查点）');
   ok('agent：跑满步数仍无正文时补一次兜底总结');
+}
+
+// ---------- 5e. 任务检查点（v0.3.0 P0-2）：save/load/clear/resumePrompt + 正常完成不清 capHit ----------
+{
+  const { saveTaskState, loadTaskState, clearTaskState, resumePrompt } = await import(pathToFileURL(path.join(srcDir, 'task-state.js')).href);
+  const homeT = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-taskstate-'));
+  const prevHomeT = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = homeT;
+  // 落盘/读回/清除 + resumePrompt 含关键字段
+  saveTaskState('s1.jsonl', { goal: '重构 config', progress: '已完成 A，待做 B', artifacts: ['/tmp/a.js'], status: 'cap', updatedAt: 'x' });
+  const ts = loadTaskState('s1.jsonl');
+  assert.equal(ts.status, 'cap', '应读回 cap 状态');
+  assert.equal(ts.artifacts[0], '/tmp/a.js', '应读回交付物');
+  const prompt = resumePrompt(ts);
+  assert.ok(prompt.includes('重构 config') && prompt.includes('/tmp/a.js') && prompt.includes('勿重复重做'), '续跑提示应含目标/交付物/勿重做');
+  clearTaskState('s1.jsonl');
+  assert.equal(loadTaskState('s1.jsonl'), null, '清除后应读不到');
+  // 正常完成（非 capHit）不产生 capHit 标记：两轮写工具后文本收尾
+  let t2 = 0;
+  const fake2 = { async chat() { t2 += 1; if (t2 === 1) return { text: '', toolCalls: [{ id: 'z1', type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: 'x.txt', content: 'x' }) } }], usage: { prompt_tokens: 3, completion_tokens: 2 }, finish: 'tool_calls' }; return { text: '完成', toolCalls: null, usage: { prompt_tokens: 3, completion_tokens: 2 }, finish: 'stop' }; } };
+  const agent2 = createAgent({ provider: fake2, permission: { async check() { return true; } }, io: createIO({ quiet: true }), modelName: 'deepseek-v4-flash', workingDir: homeT, cfg: { permission: 'auto' }, maxSteps: 5 });
+  const r2 = await agent2.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: '写文件' }]);
+  assert.equal(r2.text, '完成', '正常收尾应产出文本');
+  assert.ok(!r2.capHit, '正常完成不应标记 capHit');
+  process.env.MINGDAO_HOME = prevHomeT;
+  fs.rmSync(homeT, { recursive: true, force: true });
+  ok('agent：任务检查点 save/load/clear/resumePrompt + 正常完成不标记 capHit');
 }
 
 // ---------- 5c. 只读工具并行（P2-8）：auto 模式连续只读 Promise.all，事件/结果顺序不变 ----------

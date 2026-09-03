@@ -34,6 +34,7 @@ import {
   formatScheduleRow,
 } from './schedule.js';
 import { createAgent } from './agent.js';
+import { saveTaskState, clearTaskState } from './task-state.js';
 import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
 import { listSkills, tamperedSkillNames } from './skills.js';
@@ -468,6 +469,18 @@ async function main() {
           const renamed = renameSessionFile(fs, path, home, session, title);
           if (renamed) io.print(style(`✓ 会话标题：${path.basename(renamed)}`, C.dim));
         }
+      }
+      // v0.3.0 P0-2：单次提问跑满步数/中断落检查点（--continue 可续跑），正常完成清除
+      if (res.capHit || res.aborted) {
+        saveTaskState(path.basename(session.file), {
+          goal: question,
+          progress: res.text || '',
+          artifacts: [],
+          status: res.capHit ? 'cap' : 'interrupted',
+          updatedAt: new Date().toISOString(),
+        });
+      } else {
+        clearTaskState(path.basename(session.file));
       }
       try {
         await finalizeSession({ cfg, provider, model: titleModel(cfg, modelName), home, workingDir, messages, turns: 1, lastText: res.text || '' });

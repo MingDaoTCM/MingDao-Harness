@@ -674,10 +674,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           usage.completion_tokens += wrapRes.usage.completion_tokens || 0;
         }
         if (wrapRes.text) messages.push({ role: 'assistant', content: wrapRes.text });
-        return { text: wrapRes.text || null, reasoning: wrapRes.reasoning || '', usage, steps, finish, truncated: false, aborted: false, durationMs: Date.now() - startedAt, perf: perf() };
+        // capHit：本轮因步数上限被迫收尾（任务可能未真正完成）→ 供上层落检查点续跑
+        return { text: wrapRes.text || null, reasoning: wrapRes.reasoning || '', usage, steps, finish, truncated: false, aborted: false, capHit: true, durationMs: Date.now() - startedAt, perf: perf() };
       } catch {}
     }
-    return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, durationMs: Date.now() - startedAt, perf: perf() };
+    return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, capHit: true, durationMs: Date.now() - startedAt, perf: perf() };
     } finally {
       currentAc = null;
       offSigint();

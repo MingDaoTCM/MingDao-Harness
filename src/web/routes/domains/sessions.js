@@ -10,6 +10,7 @@ import {
   sessionPreview,
 } from '../../../session.js';
 import { sanitizeTitle, renameSessionFile } from '../../../titles.js';
+import { loadTaskState } from '../../../task-state.js';
 import {
   workspaceForDir,
   touchWorkspace,
@@ -53,6 +54,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         ok: true,
         messages: loaded.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ role: m.role, content: m.content ?? '' })),
         workspace: ws?.name || null,
+        // v0.3.0 P0-2：未完成检查点（供前端提示续跑）
+        taskState: loadTaskState(path.basename(file)),
       });
     } catch {
       json(res, 404, { error: '会话不存在' });

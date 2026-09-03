@@ -54,6 +54,7 @@ import {
   relativeTime,
   searchSessions,
 } from '../session.js';
+import { loadTaskState, saveTaskState, clearTaskState, resumePrompt } from '../task-state.js';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 
@@ -223,6 +224,12 @@ export async function runRepl(ctx) {
   let messages = hasOldSystem
     ? [{ role: 'system', content: systemPrompt }, ...loadedMsgs.slice(1)]
     : [{ role: 'system', content: systemPrompt }, ...loadedMsgs];
+  // v0.3.0 P0-2：续跑——载入有未完成检查点的会话时注入进度摘要，让模型从断点继续
+  const resumeTs = loadTaskState(path.basename(session.file));
+  if (resumeTs && (resumeTs.status === 'cap' || resumeTs.status === 'interrupted')) {
+    messages.push({ role: 'user', content: resumePrompt(resumeTs) });
+    io.print(style('⚠ 检测到未完成任务，已注入续跑提示（完成后自动清除）。', C.yellow));
+  }
   tuiState.persisted = messages.length;
   let lastUsage = null;
   let lastText = '';
@@ -672,6 +679,18 @@ export async function runRepl(ctx) {
           const renamed = renameSessionFile(fs, path, home, session, title);
           if (renamed) io.print(style(`✓ 会话标题：${path.basename(renamed)}`, C.dim));
         }
+      }
+      // v0.3.0 P0-2：跑满步数(capHit)或中断(aborted)落检查点，正常完成清除
+      if (res.capHit || res.aborted) {
+        saveTaskState(path.basename(session.file), {
+          goal: input,
+          progress: res.text || '',
+          artifacts: [],
+          status: res.capHit ? 'cap' : 'interrupted',
+          updatedAt: new Date().toISOString(),
+        });
+      } else {
+        clearTaskState(path.basename(session.file));
       }
       if (res.aborted) {
         io.print(style('（已中断）', C.dim));
