@@ -10,13 +10,17 @@ import { makeTokenCounter } from './tokenizer.js';
 import { createHooks } from './hooks.js';
 import { createIO, style, C } from './ui.js';
 import { subagentModel } from './routing.js';
-import { writeAudit, redactSecrets } from './audit.js';
+import { writeAudit } from './audit.js';
+import { redactSecrets } from './redact.js';
 import { checkCostGuard, costGuardConfig, todayCost } from './cost-guard.js';
 import { estimateCost } from './pricing.js';
 import { resolveProviderConfig } from './providers/index.js';
 
 const MAX_STEPS = 24;
-const SUBAGENT_MAX_STEPS = 12;
+// 子代理步数上限：审计/精读类只读子任务需要读多个文件 + 交叉引用，12 步易在「读不全」时被截断
+// （v0.3.0 桌面版审计实测：多个只读子代理报「因达到步数上限停止读取」或「子任务无输出」）。
+// 提到与主循环一致（24），只读子任务每步是 read/grep（输入便宜、无输出 token），成本增量可忽略。
+const SUBAGENT_MAX_STEPS = 24;
 
 /**
  * 创建 Agent 循环（调用方只需传 provider/permission/io/modelName/workingDir，其余可选）
@@ -34,8 +38,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // 会话级共享：调用方传入则复用（/model 切换、子代理均共享，undo 不丢失）
   const undo = undoStore || { backups: new Map() };
   const stepLimit = maxSteps || MAX_STEPS;
-  // 只读工具集合（子代理只读模式 + 并行批次共用）
-  const READONLY_TOOLS_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill']);
+  // 只读工具集合（子代理只读模式 + 并行批次共用）。v0.3.1 起含 git/fetch（只读、审计常用）
+  const READONLY_TOOLS_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'git', 'fetch']);
   // 精确 token 计数：DeepSeek 词表，其他模型回退启发式
   const count = makeTokenCounter(modelName);
   // MCP 工具集（每次取，服务器晚就绪也能在后续轮次出现）
@@ -130,6 +134,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     // 省钱 B3（费用二级分账）：推理 token 估算（按增量累计）与逐工具调用/耗时累加
     let reasoningTokens = 0;
     const toolStats = /** @type {Map<string, {calls: number, ms: number}>} */ (new Map());
+    const deliverables = /** @type {string[]} */ ([]); // 本回合 write/edit 成功落盘的文件路径（去重）
     const perf = () => ({
       llmMs: llmMsTotal,
       toolMs: toolMsTotal,
@@ -138,6 +143,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       reasoningTokens,
       toolStats: [...toolStats.entries()].map(([tool, s]) => ({ tool, calls: s.calls, ms: s.ms })),
       usedModel: activeModel, // 省钱 B4：本回合实际使用模型（降级后归属它）
+      deliverables: [...deliverables], // v0.3.1：CLI/REPL 续跑检查点复用（此前 artifacts 恒空）
     });
     let aborted = false;
     let emptyRounds = 0; // 连续空/截断输出计数（防止无限续写）
@@ -484,6 +490,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           ts.ms += ms;
           toolStats.set(prep.name, ts);
           io.renderTool(prep.name, prep.args, result, ms);
+          // v0.3.1 P1-2 修复：write/edit 成功落盘的路径记入交付物（CLI/REPL 续跑检查点用）
+          if ((prep.name === 'write' || prep.name === 'edit') && prep.args?.path && result && result.ok !== false) {
+            const p = String(prep.args.path);
+            if (p && !deliverables.includes(p)) deliverables.push(p);
+          }
           if (prep.name === 'todo' && result?.todos) io.renderTodo(result.todos);
           hooks.post(prep.name, prep.args, typeof result === 'string' ? { output: result } : result).catch(() => {});
           // 审计（P3-5）：执行结果摘要（含退出码/超时/输出大小）

@@ -30,7 +30,7 @@ import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
 import { buildSystemPrompt } from '../prompts.js';
 import { loadProjectMemory, loadProjectMemoryEntries, retrieveRelevant, extractAndAppendProjectMemory } from '../memory.js';
-import { saveTaskState, clearTaskState, loadTaskState, resumePrompt } from '../task-state.js';
+import { saveTaskStateMerge, clearTaskState, loadTaskState, resumePrompt } from '../task-state.js';
 import { createWebIO } from './web-io.js';
 import { startMcpServers } from '../mcp.js';
 import {
@@ -531,7 +531,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       // v0.3.0 P0-2：任务检查点——跑满步数(capHit)或中断(aborted)时落盘供续跑，正常完成清除
       const finalSessionName = path.basename(session.file);
       if (r.capHit || r.aborted) {
-        saveTaskState(finalSessionName, {
+        saveTaskStateMerge(finalSessionName, {
           goal: built.persistText,
           progress: r.text || '',
           artifacts: io.stats().deliverables,

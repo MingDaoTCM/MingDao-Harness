@@ -367,7 +367,14 @@ export async function extractAndAppendProjectMemory(/** @type {any} */ { cfg, pr
 export async function finalizeSession(/** @type {any} */ { cfg, provider, model, home, workingDir, messages, turns, lastText }) {
   const firstUser = messages.find((/** @type {any} */ m) => m.role === 'user')?.content || '';
   try {
-    const wsName = null; // 由调用方通过 currentWorkspace 提供会更好，这里保持轻量
+    // v0.3.1 P1-3 修复：journal 归属信息——优先工作空间名，回退目录 basename（不再恒 null）
+    let wsName = null;
+    try {
+      const { workspaceForDir } = await import('./workspace.js');
+      wsName = workspaceForDir(workingDir)?.name || (workingDir ? path.basename(workingDir) : null);
+    } catch {
+      wsName = workingDir ? path.basename(workingDir) : null;
+    }
     appendJournal(home, {
       at: Date.now(),
       workspace: wsName,

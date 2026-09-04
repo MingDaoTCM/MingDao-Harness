@@ -44,6 +44,24 @@ export function clearTaskState(sessionName) {
   } catch {}
 }
 
+// 合并落盘（v0.3.1 P2-3 修复）：续跑再中断时保留原始 goal、合并 artifacts，只更新 progress/status。
+// 避免「第二次续跑」时把 goal 覆盖成「继续」、把已交付文件清单清零。
+/** @param {any} sessionName @param {any} ts */
+export function saveTaskStateMerge(sessionName, ts) {
+  const prev = loadTaskState(sessionName);
+  const prevUnfinished = prev && (prev.status === 'cap' || prev.status === 'interrupted');
+  const merged = prevUnfinished
+    ? {
+        goal: prev.goal || ts.goal,
+        artifacts: [...new Set([...(Array.isArray(prev.artifacts) ? prev.artifacts : []), ...(Array.isArray(ts.artifacts) ? ts.artifacts : [])])],
+        progress: ts.progress || prev.progress,
+        status: ts.status,
+        updatedAt: ts.updatedAt,
+      }
+    : ts;
+  saveTaskState(sessionName, merged);
+}
+
 // 续跑提示：注入到消息历史，让模型先核对现状（已完成文件不重做）、再做未完成部分。
 /** @param {any} ts */
 export function resumePrompt(ts) {

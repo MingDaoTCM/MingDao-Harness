@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
+import { redactSecrets } from './redact.js';
 
 const MAX_LINES = 20000;
 const KEEP_LINES = 10000;
@@ -16,10 +17,8 @@ export function auditFile() {
   return path.join(mingdaoHome(), 'audit.jsonl');
 }
 
-// 轻量脱敏：sk- 系 API Key 掩码（审计日志可安全共享排查）
-export function redactSecrets(/** @type {any} */ text) {
-  return String(text ?? '').replace(/(sk-[A-Za-z0-9_-]{6,})/g, 'sk-***');
-}
+// 轻量脱敏（统一单一来源 v0.3.1 P1-1）：sk-/ghp_ 等常见前缀掩码，见 src/redact.js
+export { redactSecrets };
 
 export function writeAudit(/** @type {any} */ entry) {
   try {

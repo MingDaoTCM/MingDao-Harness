@@ -54,7 +54,7 @@ import {
   relativeTime,
   searchSessions,
 } from '../session.js';
-import { loadTaskState, saveTaskState, clearTaskState, resumePrompt } from '../task-state.js';
+import { loadTaskState, saveTaskStateMerge, clearTaskState, resumePrompt } from '../task-state.js';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 
@@ -682,10 +682,10 @@ export async function runRepl(ctx) {
       }
       // v0.3.0 P0-2：跑满步数(capHit)或中断(aborted)落检查点，正常完成清除
       if (res.capHit || res.aborted) {
-        saveTaskState(path.basename(session.file), {
+        saveTaskStateMerge(path.basename(session.file), {
           goal: input,
           progress: res.text || '',
-          artifacts: [],
+          artifacts: res.perf?.deliverables || [],
           status: res.capHit ? 'cap' : 'interrupted',
           updatedAt: new Date().toISOString(),
         });

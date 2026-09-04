@@ -7,21 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { createIO, style, C } from '../ui.js';
 import { mingdaoHome, ensureHome, loadConfig } from '../config.js';
 import { credentialsPath } from '../credentials.js';
-import { listAudit, redactSecrets } from '../audit.js';
+import { listAudit } from '../audit.js';
+import { redactSensitive } from '../redact.js';
 import { projectMemoryFile, loadProjectMemory } from '../memory.js';
 import { listWorkspaces } from '../workspace.js';
 import { detectSandbox } from '../tools/bash.js';
-
-// 更严格的脱敏：sk-/ghp_ token、key/token/secret/password=值、私网 IP、家目录路径
-function redactSensitive(/** @type {any} */ text) {
-  let s = redactSecrets(text);
-  s = s.replace(/(ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})/g, 'ghp_***');
-  s = s.replace(/((?:api[_-]?key|token|secret|password|passwd|access_token)\s*[=:]\s*["']?)[^\s"',}]+/gi, '$1***');
-  s = s.replace(/\b(?:10|127)(?:\.\d{1,3}){3}\b|\b192\.168(?:\.\d{1,3}){2}\b|\b172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}\b/g, '[私网IP]');
-  const home = os.homedir();
-  if (home && home.length > 1) s = s.split(home).join('~');
-  return s;
-}
 
 function tailFile(/** @type {any} */ file, /** @type {number} */ lines = 60) {
   try {

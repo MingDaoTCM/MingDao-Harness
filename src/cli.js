@@ -34,7 +34,7 @@ import {
   formatScheduleRow,
 } from './schedule.js';
 import { createAgent } from './agent.js';
-import { saveTaskState, clearTaskState } from './task-state.js';
+import { saveTaskStateMerge, clearTaskState } from './task-state.js';
 import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
 import { listSkills, tamperedSkillNames } from './skills.js';
@@ -474,10 +474,10 @@ async function main() {
       }
       // v0.3.0 P0-2：单次提问跑满步数/中断落检查点（--continue 可续跑），正常完成清除
       if (res.capHit || res.aborted) {
-        saveTaskState(path.basename(session.file), {
+        saveTaskStateMerge(path.basename(session.file), {
           goal: question,
           progress: res.text || '',
-          artifacts: [],
+          artifacts: res.perf?.deliverables || [],
           status: res.capHit ? 'cap' : 'interrupted',
           updatedAt: new Date().toISOString(),
         });

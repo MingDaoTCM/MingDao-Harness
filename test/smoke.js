@@ -495,7 +495,7 @@ const ctx = { cwd: tmp };
 
 // ---------- 5e. 任务检查点（v0.3.0 P0-2）：save/load/clear/resumePrompt + 正常完成不清 capHit ----------
 {
-  const { saveTaskState, loadTaskState, clearTaskState, resumePrompt } = await import(pathToFileURL(path.join(srcDir, 'task-state.js')).href);
+  const { saveTaskState, loadTaskState, clearTaskState, resumePrompt, saveTaskStateMerge } = await import(pathToFileURL(path.join(srcDir, 'task-state.js')).href);
   const homeT = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-taskstate-'));
   const prevHomeT = process.env.MINGDAO_HOME;
   process.env.MINGDAO_HOME = homeT;
@@ -506,6 +506,12 @@ const ctx = { cwd: tmp };
   assert.equal(ts.artifacts[0], '/tmp/a.js', '应读回交付物');
   const prompt = resumePrompt(ts);
   assert.ok(prompt.includes('重构 config') && prompt.includes('/tmp/a.js') && prompt.includes('勿重复重做'), '续跑提示应含目标/交付物/勿重做');
+  // v0.3.1 P2-3：合并落盘保留原 goal、union artifacts
+  saveTaskStateMerge('s1.jsonl', { goal: '继续', progress: '第二轮', artifacts: ['/tmp/b.js'], status: 'cap', updatedAt: 'y' });
+  const merged = loadTaskState('s1.jsonl');
+  assert.equal(merged.goal, '重构 config', '合并应保留原始 goal');
+  assert.deepEqual([...merged.artifacts].sort(), ['/tmp/a.js', '/tmp/b.js'], '合并应 union artifacts');
+  assert.equal(merged.progress, '第二轮', '合并应更新 progress');
   clearTaskState('s1.jsonl');
   assert.equal(loadTaskState('s1.jsonl'), null, '清除后应读不到');
   // 正常完成（非 capHit）不产生 capHit 标记：两轮写工具后文本收尾
@@ -1851,6 +1857,12 @@ const ctx = { cwd: tmp };
   // 脱敏：sk- 系 Key 掩码
   assert.ok(!redactSecrets('curl -H "Authorization: Bearer sk-abcdef1234567890"').includes('sk-abcdef'), 'sk- 密钥应被掩码');
   assert.ok(redactSecrets('sk-abcdef1234567890').includes('sk-***'), '掩码后应保留 sk-*** 标记');
+  // v0.3.1 P1-1：统一脱敏——ghp_/Bearer/URL 内嵌凭据也掩码
+  const { redactSensitive } = await import(pathToFileURL(path.join(srcDir, 'redact.js')).href);
+  assert.ok(!redactSecrets('ghp_1234567890abcdefghij').includes('ghp_1234'), 'ghp_ token 应被掩码');
+  assert.ok(!redactSecrets('curl -H "Authorization: Bearer abc"').includes('abc'), 'Bearer token 应被掩码');
+  assert.ok(!redactSecrets('curl "https://x.com?token=secret123"').includes('secret123'), 'URL query token 应被掩码');
+  assert.ok(!redactSensitive('http://192.168.1.1').includes('192.168.1.1'), '私网 IP 应被掩码');
   // cfg.audit=false 关闭
   const before = rows.length;
   const agentOff = createAgent({
