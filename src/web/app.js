@@ -258,7 +258,7 @@ function renderTodos(todos,msg){
   for(const t of todos){ const li=document.createElement('li'); li.className=t.status==='completed'?'done':t.status==='in_progress'?'doing':''; li.innerHTML=(t.status==='completed'?'✓ ':'○ ')+esc(t.content); ul.appendChild(li); }
   msg.appendChild(ul);
 }
-function renderBanner(ev){ const d=document.createElement('div'); d.className='banner'; d.textContent=ev.text||ev.title||''; insertBeforeActiveMsg(d); scrollBottom(); }
+function renderBanner(ev){ const d=document.createElement('div'); d.className='banner'+(ev.warn?' banner-warn':''); d.textContent=ev.text||ev.title||''; insertBeforeActiveMsg(d); scrollBottom(); }
 // 工具卡/横幅/代码块统一插到「本轮 AI 消息」之前：结论与交付物永远位于消息最底部
 function insertBeforeActiveMsg(el){ if(activeAiMsg && activeAiMsg.parentNode){ chatEl.insertBefore(el, activeAiMsg); } else { chatEl.appendChild(el); } }
 
@@ -1054,7 +1054,7 @@ function finalizeCurrentSession(){
   if(!currentSession) return;
   fetch('/api/session-finalize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:currentSession})}).catch(()=>{});
 }
-async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。'}); } scrollBottom(); }
+async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); }
 
 sendBtn.onclick=()=>{ if(generating){ abort(); } else { send(); } };
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });

@@ -30,8 +30,8 @@ function loadFile(/** @type {any} */ p, /** @type {any} */ cap) {
   }
 }
 
-/** @param {{ workingDir: any, withJournal?: boolean, [key: string]: any }} opts */
-export function buildSystemPrompt({ workingDir, withJournal = false }) {
+/** @param {{ workingDir: any, withJournal?: boolean, projectMemory?: string, [key: string]: any }} opts */
+export function buildSystemPrompt({ workingDir, withJournal = false, projectMemory }) {
   // 前缀字节稳定性（评估 P1-1/P1-2，四份评估一致的最高价值项）：
   // 系统提示不含「当前模型」「当前日期」等易变字段——DeepSeek 上下文缓存按前缀字节匹配，
   // 路由 pro⇄flash 翻转或跨天会改变前缀 → 整段历史按未命中价重计（命中价的 30 倍）。
@@ -46,7 +46,8 @@ export function buildSystemPrompt({ workingDir, withJournal = false }) {
 
   // 项目级自动记忆（v0.3.0 P0-3）：<工作空间>/.mingdao/memory.md 自动沉淀的决定/事实/教训。
   // 与 AGENTS.md（手动约定）区分；默认截 4K 保持系统提示前缀稳定，超长可 read 工具按需读。
-  const projMem = loadProjectMemory(workingDir);
+  // projectMemory 传入则用「会话内快照」（WebUI 保证同一会话内前缀稳定），否则读文件（CLI/REPL）。
+  const projMem = projectMemory !== undefined ? projectMemory : loadProjectMemory(workingDir);
   if (projMem) prompt += `\n\n<project_memory>\n${projMem.length > 4000 ? projMem.slice(0, 4000) + '\n…[过长已截断]' : projMem}\n</project_memory>`;
 
   // 最近会话日志（跨会话连续性）：默认不注入——新会话应当全新开始，避免串到

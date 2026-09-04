@@ -359,8 +359,10 @@ export async function finalizeSession(/** @type {any} */ { cfg, provider, model,
       if (lines.length) appendMemory(lines);
     } catch {}
   }
-  // v0.3.0 P0-3：项目级自动记忆（有实际工具工作才提取，避免空话污染项目记忆）
-  if (workingDir && turns >= 2) {
+  // v0.3.0 P0-3：项目级自动记忆（有实际工具工作才提取，避免空话污染项目记忆；
+  // 单轮重型任务也会执行工具，故按「是否有 tool 消息」判定而非 turn 数）
+  const hadToolWork = messages.some((/** @type {any} */ m) => m.role === 'tool');
+  if (workingDir && (hadToolWork || turns >= 2)) {
     await extractAndAppendProjectMemory({ cfg, provider, model, messages, workingDir });
   }
 }

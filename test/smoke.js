@@ -1088,6 +1088,9 @@ const ctx = { cwd: tmp };
   const sp = buildSystemPrompt({ workingDir: wsA });
   assert.ok(sp.includes('<project_memory>') && sp.includes('config 拆成多文件'), '系统提示应注入项目记忆');
   assert.ok(!sp.includes('src 下分 core/web'), '未追加到文件的项目记忆不应注入');
+  // projectMemory 快照参数应覆盖文件读取（会话内前缀稳定）
+  const spSnap = buildSystemPrompt({ workingDir: wsA, projectMemory: '- 快照条目' });
+  assert.ok(spSnap.includes('快照条目') && !spSnap.includes('config 拆成多文件'), 'projectMemory 快照参数应覆盖文件读取');
   process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(homeP, { recursive: true, force: true });
   ok('memory：项目级自动记忆按工作空间沉淀/去重/注入不串');

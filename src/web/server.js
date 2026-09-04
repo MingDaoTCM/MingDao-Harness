@@ -29,6 +29,7 @@ import { MAX_CONCURRENT } from './constants.js';
 import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
 import { buildSystemPrompt } from '../prompts.js';
+import { loadProjectMemory, extractAndAppendProjectMemory } from '../memory.js';
 import { saveTaskState, clearTaskState, loadTaskState, resumePrompt } from '../task-state.js';
 import { createWebIO } from './web-io.js';
 import { startMcpServers } from '../mcp.js';
@@ -232,6 +233,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     return next;
   }
   const draftTexts = new Map(); // 质检 A5：草稿按会话维度存储（此前单槽多客户端互相覆盖）
+  const sessionMemoryCache = new Map(); // v0.3.0 P0-3：项目记忆「会话内快照」——同一会话系统提示恒定（保前缀缓存）
 
   // —— 服务端诊断日志（第二问无反应排查 + 长期运维）：<mingdao-home>/logs/web-server.log ——
   // 记录每次对话的关键阶段与耗时；2MB 滚动。桌面版与 WebUI 共用同一日志。
@@ -391,7 +393,18 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     if (!sessionWsDir) {
       setSessionWorkspace(sessionName, taskDir, currentWorkspace(workingDir)?.name || null);
     }
-    const systemPrompt = buildSystemPrompt({ workingDir: taskDir, withJournal: body.withJournal === true });
+    // v0.3.0 P0-3：项目记忆会话内快照——本会话全程用同一份快照（前缀稳定），
+    // 每轮结束提取的新条目只写文件、不回灌当前会话。
+    let projectMemorySnapshot = sessionMemoryCache.get(sessionName);
+    if (projectMemorySnapshot === undefined) {
+      projectMemorySnapshot = loadProjectMemory(taskDir);
+      sessionMemoryCache.set(sessionName, projectMemorySnapshot);
+      if (sessionMemoryCache.size > 200) {
+        const oldest = sessionMemoryCache.keys().next().value;
+        sessionMemoryCache.delete(oldest);
+      }
+    }
+    const systemPrompt = buildSystemPrompt({ workingDir: taskDir, withJournal: body.withJournal === true, projectMemory: projectMemorySnapshot });
     let messages =
       session.messages?.length && session.messages[0]?.role === 'system'
         ? session.messages
@@ -491,6 +504,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       await withSessionLock(session.file, () => appendMessages(session.file, messages.slice(persistedBefore)));
       io.printUsageLine({ modelName: runModel, usage: r.usage, durationMs: r.durationMs });
       recordUsage(r.perf?.usedModel || runModel, r.usage, /** @type {any} */ (r.perf));
+      // v0.3.0 P0-3：轮末提取项目记忆（有工具工作才提，fire-and-forget）。写文件供「未来会话」用，
+      // 当前会话用快照（上文已注入），故不会中途改系统提示、不破坏前缀缓存。
+      if (io.stats().toolCount > 0) {
+        extractAndAppendProjectMemory({ cfg, provider: providerNow, model: titleModel(cfg, runModel), messages, workingDir: taskDir }).catch(() => {});
+      }
       maybeAutoSync().catch(() => {});
       // 新会话自动标题（可配置关闭）
       srvlog('chat 标题生成前 ' + taskId);
@@ -565,7 +583,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     providerCache, getProviderFor, tasks,
     MAX_CONCURRENT, pruneTasks, handleChat,
     mcpFacade, provider, validateRemoteUrl, isPrivateHost,
-    authEnabled, tokenMatches, requestToken, trustedHost, INDEX_HTML, draftTexts, startupCwd,
+    authEnabled, tokenMatches, requestToken, trustedHost, INDEX_HTML, draftTexts, startupCwd, sessionMemoryCache,
     state: { get modelName() { return modelName; }, set modelName(v) { modelName = v; },
              get workingDir() { return workingDir; }, set workingDir(v) { workingDir = v; } },
     refs: { get inflight() { return inflight; }, set inflight(v) { inflight = v; } },

@@ -110,6 +110,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
           lastText: lastAsst?.content || '',
         });
       }
+      // 清掉该会话的项目记忆快照：下次重新打开会用最新记忆重建系统提示
+      if (deps.sessionMemoryCache) deps.sessionMemoryCache.delete(file);
       json(res, 200, { ok: true });
     } catch (/** @type {any} */ e) {
       json(res, 500, { error: String(e?.message || e) });
