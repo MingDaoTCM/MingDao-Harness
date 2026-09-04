@@ -444,7 +444,7 @@ const ctx = { cwd: tmp };
     io: io2,
     modelName: 'deepseek-v4-flash',
     workingDir: tmp,
-    cfg: { permission: 'auto' },
+    cfg: { permission: 'auto', maxRounds: 1 },
     maxSteps: 3,
   });
   const m = [{ role: 'system', content: '系统' }, { role: 'user', content: '做任务' }];
@@ -481,7 +481,7 @@ const ctx = { cwd: tmp };
     io: io2,
     modelName: 'deepseek-v4-flash',
     workingDir: tmp,
-    cfg: { permission: 'auto' },
+    cfg: { permission: 'auto', maxRounds: 1 },
     maxSteps: 3,
   });
   const m = [{ role: 'system', content: '系统' }, { role: 'user', content: '做任务' }];
@@ -541,7 +541,7 @@ const ctx = { cwd: tmp };
       return { text: '', toolCalls: [{ id: 'r' + call, type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: 'a.txt', content: 'x' }) } }], usage: { prompt_tokens: 3, completion_tokens: 2 }, finish: 'tool_calls' };
     },
   };
-  const agentCap = createAgent({ provider: fakeCap, permission: { async check() { return true; } }, io: createIO({ quiet: true }), modelName: 'deepseek-v4-flash', workingDir: homeR, cfg: { permission: 'auto' }, maxSteps: 2 });
+  const agentCap = createAgent({ provider: fakeCap, permission: { async check() { return true; } }, io: createIO({ quiet: true }), modelName: 'deepseek-v4-flash', workingDir: homeR, cfg: { permission: 'auto', maxRounds: 1 }, maxSteps: 2 });
   const m1 = [{ role: 'system', content: '系统' }, { role: 'user', content: '写 a.txt' }];
   const r1 = await agentCap.runTurn(m1);
   assert.equal(r1.capHit, true, '第一轮应跑满步数');
@@ -563,6 +563,27 @@ const ctx = { cwd: tmp };
   process.env.MINGDAO_HOME = prevHomeR;
   fs.rmSync(homeR, { recursive: true, force: true });
   ok('agent：续跑闭环（跑满→检查点→注入→完成且不重做）');
+}
+
+// ---------- 5g. 自动续跑（v0.3.1 长程执行）：跑满步数自动续下一轮，任务不中断 ----------
+{
+  let calls = 0;
+  const fake = {
+    async chat() {
+      calls += 1;
+      if (calls <= 4) {
+        return { text: '', toolCalls: [{ id: 'ar' + calls, type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: 'x' + calls + '.txt' }) } }], usage: { prompt_tokens: 3, completion_tokens: 2 }, finish: 'tool_calls' };
+      }
+      return { text: '审计完成', toolCalls: null, usage: { prompt_tokens: 3, completion_tokens: 2 }, finish: 'stop' };
+    },
+  };
+  const agent = createAgent({ provider: fake, permission: { async check() { return true; } }, io: createIO({ quiet: true }), modelName: 'deepseek-v4-flash', workingDir: tmp, cfg: { permission: 'auto', maxRounds: 2 }, maxSteps: 3 });
+  const m = [{ role: 'system', content: '系统' }, { role: 'user', content: '审计代码' }];
+  const r = await agent.runTurn(m);
+  assert.equal(calls, 5, '应跨轮自动续跑（3+2 次调用，共 5 次）');
+  assert.equal(r.text, '审计完成', '自动续跑后应正常完成');
+  assert.ok(!r.capHit, '完成后不应再标记 capHit');
+  ok('agent：自动续跑（跑满步数自动续下一轮，任务不中断）');
 }
 
 // ---------- 5c. 只读工具并行（P2-8）：auto 模式连续只读 Promise.all，事件/结果顺序不变 ----------

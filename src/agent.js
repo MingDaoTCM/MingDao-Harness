@@ -125,6 +125,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   async function runTurn(/** @type {any} */ messages) {
     let steps = 0;
     let finish = null;
+    // v0.3.1 自动续跑（长程执行）：跑满 stepLimit 步后不再直接中断，而是注入进度摘要再续跑，
+    // 最多 maxRounds 轮（默认 3，可用 cfg.maxRounds 调）；审计/重构等大任务不再「一步中断」。
+    const maxRounds = Math.max(1, Number(cfg.maxRounds) || 3);
+    let round = 0;
     const usage = /** @type {{ prompt_tokens: number, completion_tokens: number, prompt_cache_hit_tokens?: number, prompt_cache_miss_tokens?: number }} */ ({ prompt_tokens: 0, completion_tokens: 0 });
     const startedAt = Date.now();
     // 回合性能指标（状态栏：LLM 时长 / 工具时长 / 首 token 延迟 / 步数）
@@ -180,7 +184,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       }
     };
     try {
-    while (steps < stepLimit) {
+    for (round = 0; round < maxRounds; round++) {
+      steps = 0;
+      while (steps < stepLimit) {
       steps += 1;
       // 同回合只读工具去重（Hermes C4）：相同 name+args 的只读调用只执行一次，结果复用回填
       const turnToolCache = new Map();
@@ -653,6 +659,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         };
       }
     }
+    // v0.3.1 自动续跑（长程执行）：还有剩余轮次且未中断 → 注入进度摘要直接续跑，不落收尾总结
+    if (round < maxRounds - 1 && !aborted) {
+      const art = deliverables.length ? '已交付文件：' + deliverables.join('、') + '。' : '';
+      messages.push({
+        role: 'user',
+        content: `（系统提示）已连续执行 ${stepLimit} 步工具操作，任务尚未完成，请继续完成剩余工作。${art}先核对已完成部分（勿重复），再做未完成的部分。`,
+      });
+      io.print(style(`♻ 步数上限，自动续跑第 ${round + 2} 轮…`, C.dim));
+      continue;
+    }
     io.endTurn();
     // 步数上限：清掉未执行的 tool_calls，避免下一轮/恢复后 API 400
     stripOrphanCalls();
@@ -689,6 +705,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         return { text: wrapRes.text || null, reasoning: wrapRes.reasoning || '', usage, steps, finish, truncated: false, aborted: false, capHit: true, durationMs: Date.now() - startedAt, perf: perf() };
       } catch {}
     }
+    return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, capHit: true, durationMs: Date.now() - startedAt, perf: perf() };
+    }
+    // 理论不可达（for 循环末轮必 return）；给 tsc 一个兜底，保证 runTurn 恒有返回值
     return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, capHit: true, durationMs: Date.now() - startedAt, perf: perf() };
     } finally {
       currentAc = null;
