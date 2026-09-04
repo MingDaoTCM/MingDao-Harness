@@ -8,6 +8,7 @@ import { createIO, style, C } from '../ui.js';
 import { mingdaoHome, ensureHome, loadConfig } from '../config.js';
 import { credentialsPath } from '../credentials.js';
 import { listAudit, redactSecrets } from '../audit.js';
+import { projectMemoryFile, loadProjectMemory } from '../memory.js';
 import { listWorkspaces } from '../workspace.js';
 import { detectSandbox } from '../tools/bash.js';
 
@@ -79,12 +80,18 @@ export async function handleDiagnose(/** @type {any} */ _cmd, /** @type {any} */
     }
 
     push('');
-    push('## 工作空间');
+    push('## 工作空间与项目记忆');
     const wss = listWorkspaces();
     if (!wss.length) push('（未登记工作空间）');
     for (const w of wss) {
       push(`- ${w.name} → ${redactSensitive(w.dir || '')}`);
+      const mem = loadProjectMemory(w.dir);
+      const memPath = redactSensitive(projectMemoryFile(w.dir));
+      push(`    项目记忆：${memPath}（${mem ? mem.split('\n').filter(Boolean).length + ' 条' : '无'}）`);
     }
+    // 当前目录的项目记忆（即使未登记为工作空间也能定位，便于排查「记忆写哪了」）
+    const cwdMem = projectMemoryFile(process.cwd());
+    push(`当前目录项目记忆：${redactSensitive(cwdMem)}（${fs.existsSync(cwdMem) ? '存在' : '无'}）`);
 
     fs.writeFileSync(outFile, L.join('\n') + '\n');
     io.print(style(`✓ 诊断报告已生成：${outFile}`, C.green));
