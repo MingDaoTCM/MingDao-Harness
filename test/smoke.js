@@ -163,6 +163,29 @@ const ctx = { cwd: tmp };
   ok('tools：read / write / edit / glob / grep / ls 全部通过（含大小上限）');
 }
 
+// ---------- 5g. git 只读工具 + HTTP 只读抓取（v0.3.1） ----------
+{
+  const { dispatch } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
+  const tmpGit = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-git-'));
+  const ctx = { workingDir: tmpGit };
+  // git 只读：status 正常
+  const gs = await dispatch('git', { command: 'status' }, ctx);
+  assert.equal(gs.ok, true, 'git status 应成功（空仓库或非仓库均可返回）');
+  // git 非只读子命令应拒绝
+  const gp = await dispatch('git', { command: 'push --force' }, ctx);
+  assert.equal(gp.ok, false, 'git push（非只读）应拒绝');
+  assert.ok(String(gp.error).includes('不是只读'), '应说明非只读子命令');
+  // fetch：本机地址应被 SSRF 拒绝
+  const fLocal = await dispatch('fetch', { url: 'http://127.0.0.1/' }, ctx);
+  assert.equal(fLocal.ok, false, 'fetch 本机地址应拒绝');
+  assert.ok(String(fLocal.error).includes('内网'), '应说明 SSRF 拒绝');
+  // fetch：非 http 协议应拒绝
+  const fFile = await dispatch('fetch', { url: 'file:///etc/passwd' }, ctx);
+  assert.equal(fFile.ok, false, 'fetch file:// 应拒绝');
+  fs.rmSync(tmpGit, { recursive: true, force: true });
+  ok('tools：git 只读 + fetch SSRF 防护');
+}
+
 // ---------- 3. bash 工具（跨平台：Windows 走 cmd.exe） ----------
 {
   const isWin = process.platform === 'win32';
@@ -317,10 +340,10 @@ const ctx = { cwd: tmp };
   });
   await agent.runTurn([{ role: 'user', content: '帮我诊断一下这个报错的原因' }]);
   assert.equal(round, 2, '应跑两轮（第二轮是注入后的续轮）');
-  const tier = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo']);
+  const tier = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch']);
   assert.ok(seen[0].every((n) => tier.has(n)), `只读阶段应只发只读工具，实际 ${seen[0]}`);
   assert.ok(seen[0].includes('read') && seen[0].includes('grep'), '只读阶段含核心只读工具');
-  assert.equal(seen[1].length, 11, '模型表达写意图后应注入全量 11 个工具');
+  assert.equal(seen[1].length, 13, '模型表达写意图后应注入全量 13 个工具');
   assert.ok(seen[1].includes('write') && seen[1].includes('bash'), '注入后含写类工具');
   ok('省钱 B1：只读阶段工具集收缩 / 写意图后注入全量');
 }
@@ -348,9 +371,9 @@ const ctx = { cwd: tmp };
     return first;
   };
   const full = await runOnce('帮我新建一个配置文件');
-  assert.equal(full.length, 11, '写意图提示首轮即全量工具');
+  assert.equal(full.length, 13, '写意图提示首轮即全量工具');
   const ro = await runOnce('帮我看看这个项目里有哪些文件');
-  assert.ok(ro.length < 8 && ro.every((n) => ['read', 'ls', 'glob', 'grep', 'skill', 'todo'].includes(n)), `纯查询首轮应只读收缩，实际 ${ro}`);
+  assert.ok(ro.length < 10 && ro.every((n) => ['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch'].includes(n)), `纯查询首轮应只读收缩，实际 ${ro}`);
   ok('省钱 B1：写意图首轮全量 / 纯查询首轮只读');
 }
 
@@ -2404,11 +2427,11 @@ const ctx = { cwd: tmp };
   // 全部用过时 schema token 至少降 40%（基准 1051）；结构（name/parameters/required）不受影响。
   const full = toolSchemas();
   const fullTokens = approxTokens(JSON.stringify(full));
-  assert.equal(full.length, 11, '内置工具应为 11 个');
+  assert.equal(full.length, 13, '内置工具应为 13 个');
   assert.ok(full[0].function.description.length > 0, 'toolSchemas() 应保留完整描述');
   const usedAll = new Set(full.map((t) => t.function.name));
   const stripped = buildToolSchemas(usedAll);
-  assert.equal(stripped.length, 11, '数量不变');
+  assert.equal(stripped.length, 13, '数量不变');
   assert.equal(stripped[0].function.description, '', '已用工具 description 应清空');
   assert.ok(!('description' in stripped[0].function.parameters.properties.path), '已用工具参数 description 应清除');
   assert.equal(JSON.stringify(stripped[0].function.parameters.properties.path.type), '"string"', '参数 type 保留');

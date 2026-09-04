@@ -27,8 +27,8 @@ const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.error('  �
   const strippedTokens = approxTokens(JSON.stringify(stripped));
   ok(fullTokens > 900, `全量 schema 应 >900 tokens（实际 ${fullTokens}）`);
   ok(strippedTokens <= fullTokens * 0.6, `全剥后应 ≤60%（实际 ${((strippedTokens / fullTokens) * 100).toFixed(1)}%）`);
-  // 只读档（B1 分层）：6 个只读工具
-  const READONLY_TIER_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo']);
+  // 只读档（B1 分层）：8 个只读工具（含 git/fetch）
+  const READONLY_TIER_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch']);
   const tier = full.filter((t) => READONLY_TIER_SET.has(t.function.name));
   const tierTokens = approxTokens(JSON.stringify(tier));
   ok(tierTokens <= fullTokens * 0.55, `只读档应 ≤55% 全量（实际 ${((tierTokens / fullTokens) * 100).toFixed(1)}%）`);

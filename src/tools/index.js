@@ -3,10 +3,12 @@
 
 import { read, write, edit, ls, glob, grep, undo } from './fs-tools.js';
 import { runBash } from './bash.js';
+import { runGit } from './git.js';
+import { runFetch } from './fetch.js';
 import { listSkills, loadSkill } from '../skills.js';
 
 // 只读工具集合的单一来源：permissions.js 引用此导出，新增只读工具时只需改这里
-export const READONLY_TOOLS = new Set(['read', 'glob', 'grep', 'ls', 'skill']);
+export const READONLY_TOOLS = new Set(['read', 'glob', 'grep', 'ls', 'skill', 'git', 'fetch']);
 
 const READ_SCHEMA = {
   type: 'object',
@@ -116,6 +118,22 @@ const UNDO_SCHEMA = {
   },
 };
 
+const GIT_SCHEMA = {
+  type: 'object',
+  properties: {
+    command: { type: 'string', description: '只读 git 子命令与参数，如 log --oneline -10、diff HEAD、status、show。' },
+  },
+  required: ['command'],
+};
+
+const FETCH_SCHEMA = {
+  type: 'object',
+  properties: {
+    url: { type: 'string', description: '公网 http(s) 地址。' },
+  },
+  required: ['url'],
+};
+
 const TOOLS = [
   {
     type: 'function',
@@ -203,6 +221,22 @@ const TOOLS = [
       name: 'undo',
       description: '撤销最近一次 write/edit 修改；指定 path 撤销该文件。',
       parameters: UNDO_SCHEMA,
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'git',
+      description: '只读 git 查询（status/log/diff/show/blame 等）。写操作请用 bash。',
+      parameters: GIT_SCHEMA,
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'fetch',
+      description: '抓取公网 URL 文本（≤512KB，SSRF 防护拒绝内网）。',
+      parameters: FETCH_SCHEMA,
     },
   },
 ];
@@ -322,6 +356,10 @@ export async function dispatch(/** @type {any} */ name, /** @type {any} */ args,
       return runTodo(args, ctx);
     case 'undo':
       return undo(args, ctx);
+    case 'git':
+      return runGit(args, ctx);
+    case 'fetch':
+      return runFetch(args, ctx);
     default:
       return { ok: false, error: `未知工具：${name}` };
   }
