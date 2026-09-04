@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { beijingParts } from './pricing.js';
+import { tokenize } from './session-index.js';
 
 export function memoryFile() {
   return path.join(mingdaoHome(), 'AGENTS.md');
@@ -229,6 +230,32 @@ export function loadProjectMemory(/** @type {any} */ workingDir) {
   } catch {
     return '';
   }
+}
+
+// 项目记忆按条目读取（供语义检索）
+export function loadProjectMemoryEntries(/** @type {any} */ workingDir) {
+  return loadProjectMemory(workingDir)
+    .split('\n')
+    .map((/** @type {any} */ l) => l.trim())
+    .filter(Boolean);
+}
+
+// 零依赖语义检索：与 query 分词（ASCII 词 + 中文 bigram）的 Jaccard 相似度取 TopN 相关条目。
+// 用于「记忆/日志从最近 N 条 → 相关 N 条」（v0.3.1），换会话/换任务只注入相关记忆、省 token。
+export function retrieveRelevant(/** @type {any[]} */ entries, /** @type {any} */ query, /** @type {number} */ topN = 5) {
+  const qTerms = new Set([...tokenize(String(query || '')).keys()]);
+  if (!qTerms.size) return entries.slice(0, topN);
+  const scored = entries.map((/** @type {any} */ e) => {
+    const text = typeof e === 'string' ? e : String(e.text || e.outcome || e.firstUser || e.content || '');
+    const terms = tokenize(text);
+    if (!terms.size) return { e, score: 0 };
+    let overlap = 0;
+    for (const t of terms.keys()) if (qTerms.has(t)) overlap += 1;
+    const union = new Set([...qTerms, ...terms.keys()]).size || 1;
+    return { e, score: overlap / union };
+  });
+  scored.sort((/** @type {any} */ a, /** @type {any} */ b) => b.score - a.score);
+  return scored.filter((/** @type {any} */ s) => s.score > 0).slice(0, topN).map((/** @type {any} */ s) => s.e);
 }
 
 export function appendProjectMemory(/** @type {any} */ workingDir, /** @type {any} */ lines) {

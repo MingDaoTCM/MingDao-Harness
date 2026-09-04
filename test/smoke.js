@@ -1114,9 +1114,13 @@ const ctx = { cwd: tmp };
   // projectMemory 快照参数应覆盖文件读取（会话内前缀稳定）
   const spSnap = buildSystemPrompt({ workingDir: wsA, projectMemory: '- 快照条目' });
   assert.ok(spSnap.includes('快照条目') && !spSnap.includes('config 拆成多文件'), 'projectMemory 快照参数应覆盖文件读取');
+  // 语义检索：query 相关条目优先
+  const { retrieveRelevant } = await import(pathToFileURL(path.join(srcDir, 'memory.js')).href);
+  const rel = retrieveRelevant(['- 决定：config 拆成多文件', '- 游戏位于 moba 目录', '- 坑：Node 18 不支持某 API'], '重构 config 配置', 2);
+  assert.ok(rel.length >= 1 && rel[0].includes('config'), '语义检索应把 config 相关条目排在前面');
   process.env.MINGDAO_HOME = smokeHome;
   fs.rmSync(homeP, { recursive: true, force: true });
-  ok('memory：项目级自动记忆按工作空间沉淀/去重/注入不串');
+  ok('memory：项目级自动记忆按工作空间沉淀/去重/注入不串 + 语义检索');
 }
 
 // ---------- 23. 缓存感知计价 ----------

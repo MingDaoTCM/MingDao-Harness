@@ -29,7 +29,7 @@ import { MAX_CONCURRENT } from './constants.js';
 import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
 import { buildSystemPrompt } from '../prompts.js';
-import { loadProjectMemory, extractAndAppendProjectMemory } from '../memory.js';
+import { loadProjectMemory, loadProjectMemoryEntries, retrieveRelevant, extractAndAppendProjectMemory } from '../memory.js';
 import { saveTaskState, clearTaskState, loadTaskState, resumePrompt } from '../task-state.js';
 import { createWebIO } from './web-io.js';
 import { startMcpServers } from '../mcp.js';
@@ -397,7 +397,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     // 每轮结束提取的新条目只写文件、不回灌当前会话。
     let projectMemorySnapshot = sessionMemoryCache.get(sessionName);
     if (projectMemorySnapshot === undefined) {
-      projectMemorySnapshot = loadProjectMemory(taskDir);
+      // v0.3.1 语义检索：用本轮任务（新会话即首条消息）取「相关记忆条目」，而非全量截 4K——
+      // 换任务只注入相关记忆、省 token；快照保证同一会话前缀稳定。
+      const allEntries = loadProjectMemoryEntries(taskDir);
+      const query = String(built.persistText || '');
+      projectMemorySnapshot = query ? retrieveRelevant(allEntries, query, 6).join('\n') : loadProjectMemory(taskDir);
       sessionMemoryCache.set(sessionName, projectMemorySnapshot);
       if (sessionMemoryCache.size > 200) {
         const oldest = sessionMemoryCache.keys().next().value;
