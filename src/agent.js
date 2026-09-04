@@ -580,9 +580,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             }
           }
         }
-        // v0.2.8 步数预留收尾（对齐 DSH）：仅剩最后一轮时，工具结果回填后追加收尾指令，
-        // 让模型在末轮输出「总结文字 + 交付物清单」，而非跑满步数后静默结束。
-        if (steps === stepLimit - 1) {
+        // v0.2.8 步数预留收尾（对齐 DSH）：仅「最后一轮」的末步追加收尾指令，
+        // 让模型在末轮输出总结；中间轮不注入（交给自动续跑继续干活，而非提前收尾中断）。
+        if (steps === stepLimit - 1 && round === maxRounds - 1) {
           messages.push({
             role: 'user',
             content:
