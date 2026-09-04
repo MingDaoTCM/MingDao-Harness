@@ -42,7 +42,7 @@ const post = async (p, body, opts) => {
   const html = await (await fetch(base + '/')).text();
   assert.ok(html.includes('MingDao'), '首页 HTML 应可加载');
   const appjs = await (await fetch(base + '/app.js')).text();
-  assert.ok(appjs.includes('refreshCache') && appjs.includes('pkList'), 'SPA JS 应完整');
+  assert.ok(appjs.includes('renderDashboard') && appjs.includes('pkList'), 'SPA JS 应完整');
   // v0.2.8 C2：ES Modules 拆分后，工具/常量模块应可独立加载
   const utiljs = await (await fetch(base + '/util.js')).text();
   assert.ok(utiljs.includes('renderMarkdown') && utiljs.includes('esc'), 'util.js 应伺服 Markdown/转义工具');

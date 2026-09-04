@@ -483,6 +483,7 @@ function syncPanelLayout(){
   document.body.classList.toggle('traj-open', open('trajPanel'));
   document.body.classList.toggle('sub-open', open('subPanel'));
   document.body.classList.toggle('tasks-open', open('tasksPanel'));
+  document.body.classList.toggle('dash-open', open('dashPanel'));
 }
 $('#tjClose').onclick=()=>{ $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); syncPanelLayout(); };
 $('#trajRailBtn').onclick=()=>{
@@ -568,17 +569,20 @@ async function updateTasksPanel(){
   }
 }
 setInterval(updateTasksPanel, 2000);
-// 费用徽标：今日费用 / 缓存命中率 / 护栏（15s 刷新）
+// 费用徽标：今日费用 / 缓存命中率 / 护栏（15s 刷新）；点击展开省钱仪表盘
 async function refreshCostBadge(){
   const r=await fetch('/api/cache-stats',{cache:'no-store'}).catch(()=>null); if(!r) return;
   const j=await r.json().catch(()=>null); if(!j) return;
   const bd=j.breakdown||{}; const gd=j.guard||null;
-  let t='今日 ≈¥'+(bd.today||0).toFixed(4);
+  let t='📊 今日 ≈¥'+(bd.today||0).toFixed(4);
   if(bd.rate!=null) t+=' · 命中 '+(bd.rate*100).toFixed(0)+'%';
   if(gd&&gd.limit>0&&gd.cost!=null) t+=' · 护栏 '+(gd.cost/gd.limit*100).toFixed(0)+'%';
   $('#costBadge').textContent=t;
+  if($('#dashPanel').style.display==='flex') renderDashboard(j);
 }
 refreshCostBadge(); setInterval(refreshCostBadge, 15000);
+$('#costBadge').onclick=()=>{ const p=$('#dashPanel'); const show=p.style.display==='none'; p.style.display=show?'flex':'none'; if(show){ $('#subPanel').style.display='none'; $('#trajPanel').style.display='none'; $('#tasksPanel').style.display='none'; $('#subRailBtn').classList.remove('on'); $('#trajRailBtn').classList.remove('on'); refreshCostBadge(); } syncPanelLayout(); };
+$('#dashClose').onclick=()=>{ $('#dashPanel').style.display='none'; syncPanelLayout(); };
 // 底部状态栏：轮次/步数/LLM 与工具时长/首 token 平均/吞吐/缓存命中/输入输出 tokens
 async function refreshStatusBar(){
   const r=await fetch('/api/cache-stats',{cache:'no-store'}).catch(()=>null); if(!r) return;
@@ -699,7 +703,7 @@ $('#wsSel').addEventListener('change', async e=>{
     refreshWsSel(); reloadModels();
   }
 });
-$('#cfgBtn').addEventListener('click', ()=>{ refreshModelsCfg(); refreshSyncUI(); refreshSyncShares(); refreshSyncConflicts(); refreshSchList(); refreshWorkspaces(); loadMemoryUI(); refreshCache(); refreshMcpPresets(); refreshSkillLib(''); });
+$('#cfgBtn').addEventListener('click', ()=>{ refreshModelsCfg(); refreshSyncUI(); refreshSyncShares(); refreshSyncConflicts(); refreshSchList(); refreshWorkspaces(); loadMemoryUI(); refreshMcpPresets(); refreshSkillLib(''); });
 $('#schWhen').onchange=e=>{ const v=e.target.value; $('#schAtRow').style.display=v==='at'?'':'none'; $('#schEveryRow').style.display=v==='every'?'':'none'; $('#schAfterRow').style.display=v==='after'?'':'none'; $('#schChainRow').style.display=v==='chain'?'':'none'; };
 async function refreshSchList(){
   const r=await fetch('/api/schedule',{cache:'no-store'}).catch(()=>null); if(!r) return;
@@ -767,70 +771,61 @@ $('#memDedupe').onclick=async ()=>{
   const j=await r.json().catch(()=>({error:'请求失败'}));
   if(j.ok){ memFlash('✓ 去重完成，移除 '+j.removed+' 行', true); loadMemoryUI(); } else memFlash('✖ '+(j.error||'去重失败'), false);
 };
-// —— 缓存命中率仪表盘 ——
-// 省钱 B3：费用二级分账面板（模型/工具 Top5 + 近 14 天折线，零依赖 SVG）
-function renderCostBreakdown(bd){
-  const models=$('#costTopModels'); models.innerHTML='';
-  for(const m of ((bd.byModel||[]).slice(0,5))){
-    const bar=document.createElement('div'); bar.style.cssText='height:3px;border-radius:2px;background:var(--bg3);margin:1px 0;overflow:hidden';
-    const max=bd.byModel&&bd.byModel[0]?bd.byModel[0].cost:1;
-    bar.innerHTML='<div style="height:100%;width:'+Math.max(2,Math.round((m.cost||0)/Math.max(max,1e-9)*100))+'%;background:var(--accent2)"></div>';
-    const row=document.createElement('div'); row.style.cssText='display:flex;justify-content:space-between;font-size:11.5px;padding:1px 0';
-    row.innerHTML='<span>'+esc(m.model||'—')+'</span><span>¥'+(m.cost||0).toFixed(4)+' · '+m.turns+' 轮</span>';
-    const w=document.createElement('div'); w.appendChild(row); w.appendChild(bar); models.appendChild(w);
-  }
-  if(!(bd.byModel||[]).length) models.innerHTML='<div style="color:var(--faint);font-size:11.5px">暂无记录</div>';
-  const tools=$('#costTopTools'); tools.innerHTML='';
-  for(const t of ((bd.byTool||[]).slice(0,5))){
-    const bar=document.createElement('div'); bar.style.cssText='height:3px;border-radius:2px;background:var(--bg3);margin:1px 0;overflow:hidden';
-    const max=bd.byTool&&bd.byTool[0]?bd.byTool[0].ms:1;
-    bar.innerHTML='<div style="height:100%;width:'+Math.max(2,Math.round((t.ms||0)/Math.max(max,1e-9)*100))+'%;background:var(--cyan)"></div>';
-    const row=document.createElement('div'); row.style.cssText='display:flex;justify-content:space-between;font-size:11.5px;padding:1px 0';
-    row.innerHTML='<span>'+esc(t.tool||'—')+'</span><span>'+t.calls+' 次 · '+fmtDur(t.ms)+'</span>';
-    const w=document.createElement('div'); w.appendChild(row); w.appendChild(bar); tools.appendChild(w);
-  }
-  if(!(bd.byTool||[]).length) tools.innerHTML='<div style="color:var(--faint);font-size:11.5px">暂无记录</div>';
-  const line=$('#costLine');
-  const days=(bd.byDay||[]).slice(-14);
-  if(!days.length){ line.innerHTML=''; return; }
-  const W=320, H=56, P=4;
-  const maxC=Math.max(...days.map(d=>d.cost), 1e-9);
-  const pts=days.map((d,i)=>{
+// —— 省钱仪表盘（v0.3.1：从设置移出，顶部费用徽标点击展开，真·仪表盘） ——
+function renderRateGauge(rate){
+  const r=48, cx=60, cy=60, circ=2*Math.PI*r;
+  const p=Math.max(0,Math.min(1,Number(rate)||0));
+  const color = p>=0.8 ? 'var(--accent)' : p>=0.5 ? 'var(--accent2)' : 'var(--warn)';
+  $('#rateGauge').innerHTML =
+    '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="var(--bg3)" stroke-width="13"/>'+
+    '<circle cx="'+cx+'" cy="'+cy+'" r="'+r+'" fill="none" stroke="'+color+'" stroke-width="13" stroke-linecap="round" stroke-dasharray="'+(circ*p).toFixed(1)+' '+(circ*(1-p)).toFixed(1)+'" transform="rotate(-90 '+cx+' '+cy+')"/>';
+  $('#rateGaugeNum').textContent=(p*100).toFixed(1)+'%';
+}
+function trendChart(days){
+  if(!days||!days.length) return '<div style="color:var(--faint);font-size:11.5px;padding:6px">暂无费用记录</div>';
+  const W=360, H=88, P=8;
+  const max=Math.max(...days.map((/** @type {any} */ d)=>Number(d.cost)||0), 1e-9);
+  const pts=days.map((/** @type {any} */ d, /** @type {number} */ i)=>{
     const x=P+i*(W-2*P)/Math.max(days.length-1,1);
-    const y=H-4-(d.cost/maxC)*(H-10);
-    return [x.toFixed(1), y.toFixed(1)];
+    const y=H-P-(Number(d.cost)||0)/max*(H-2*P);
+    return [x,y];
   });
-  const poly=pts.map(p=>p.join(',')).join(' ');
+  const line=pts.map((/** @type {any} */ p)=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' ');
+  const area='M'+pts[0][0].toFixed(1)+','+(H-P)+' L'+pts.map((/** @type {any} */ p)=>p[0].toFixed(1)+','+p[1].toFixed(1)).join(' L')+' L'+pts[pts.length-1][0].toFixed(1)+','+(H-P)+' Z';
   const last=pts[pts.length-1];
-  line.innerHTML='<div style="font-size:11.5px;color:var(--faint);margin-bottom:2px">近 14 天费用折线（¥，最高 ¥'+maxC.toFixed(4)+'）</div>'
-    +'<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto;background:var(--bg3);border-radius:8px">'
-    +'<polyline points="'+poly+'" fill="none" style="stroke:var(--accent2);stroke-width:1.6;stroke-linejoin:round;stroke-linecap:round"/>'
-    +'<circle cx="'+last[0]+'" cy="'+last[1]+'" r="2.6" style="fill:var(--accent)"/>'
-    +'<text x="4" y="10" font-size="8" style="fill:var(--faint)">'+days[0].day+'</text>'
-    +'<text x="'+(W-52)+'" y="10" font-size="8" style="fill:var(--faint)">'+days[days.length-1].day+'</text>'
+  return '<div style="font-size:10.5px;color:var(--faint);margin-bottom:4px">最高 ¥'+max.toFixed(4)+' · '+days[0].day+' → '+days[days.length-1].day+'</div>'
+    +'<svg viewBox="0 0 '+W+' '+H+'" style="width:100%;height:auto">'
+    +'<defs><linearGradient id="dg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:var(--accent2);stop-opacity:.35"/><stop offset="1" style="stop-color:var(--accent2);stop-opacity:0"/></linearGradient></defs>'
+    +'<path d="'+area+'" fill="url(#dg)"/>'
+    +'<polyline points="'+line+'" fill="none" stroke="var(--accent2)" stroke-width="1.8" stroke-linejoin="round" stroke-linecap="round"/>'
+    +'<circle cx="'+last[0].toFixed(1)+'" cy="'+last[1].toFixed(1)+'" r="3" fill="var(--accent)"/>'
     +'</svg>';
 }
-async function refreshCache(){
-  const r=await fetch('/api/cache-stats',{cache:'no-store'}).catch(()=>null); if(!r) return;
-  const j=await r.json(); if(!j.ok) return;
-  const s=j.summary||{};
-  const rate=s.rate!=null?(s.rate*100).toFixed(0)+'%':'暂无缓存数据';
-  $('#cacheSummary').innerHTML='轮次 '+s.turns+' · ↑'+fmtT(s.prompt)+' ↓'+fmtT(s.completion)+' tokens · 命中率 <b style="color:var(--accent)">'+rate+'</b> · 累计 ≈¥'+Number(s.cost||0).toFixed(5)+'（比全未命中省 ≈¥'+Number(s.saved||0).toFixed(5)+'）';
-  renderCostBreakdown(j.breakdown||{});
-  const list=$('#cacheRecent'); list.innerHTML='';
-  if(!(j.recent||[]).length){ list.innerHTML='<div style="color:var(--faint);font-size:12px;padding:6px 2px">暂无记录（每次对话后自动统计）</div>'; return; }
-  for(const e of j.recent){
+function barList(items, isCost){
+  if(!items||!items.length) return '<div style="color:var(--faint);font-size:11.5px;padding:4px">暂无记录</div>';
+  const max=Math.max(...items.map((/** @type {any} */ i)=>Number(i.val)||0), 1e-9);
+  return items.map((/** @type {any} */ i)=>{
+    const pct=Math.max(3,Math.round((Number(i.val)||0)/max*100));
+    const v=isCost ? '¥'+(Number(i.val)||0).toFixed(4) : fmtDur(i.val);
+    return '<div class="dbar"><div class="t"><span class="n" title="'+esc(i.name)+'">'+esc(String(i.name||'—').slice(0,26))+'</span><span class="v">'+v+(i.sub?' · '+i.sub:'')+'</span></div><div class="track"><div class="fill" style="width:'+pct+'%"></div></div></div>';
+  }).join('');
+}
+function renderDashboard(j){
+  const s=j.summary||{}; const bd=j.breakdown||{};
+  const rate=bd.rate!=null?bd.rate:(s.rate!=null?s.rate:0);
+  const saved=Number(s.saved||0);
+  $('#kpiToday').textContent='¥'+Number(bd.today||0).toFixed(4);
+  $('#kpiRate').textContent=(rate*100).toFixed(1)+'%';
+  $('#kpiSaved').textContent='¥'+saved.toFixed(4);
+  $('#kpiTurns').textContent=(s.turns||0)+' / '+(s.steps||0);
+  renderRateGauge(rate);
+  $('#trendChart').innerHTML=trendChart((bd.byDay||[]).slice(-14));
+  $('#dashModels').innerHTML=barList((bd.byModel||[]).slice(0,5).map((/** @type {any} */ m)=>({name:m.model, val:m.cost, sub:m.turns+' 轮'})), true);
+  $('#dashTools').innerHTML=barList((bd.byTool||[]).slice(0,5).map((/** @type {any} */ t)=>({name:t.tool, val:t.ms, sub:t.calls+' 次'})), false);
+  $('#dashRecent').innerHTML=(j.recent||[]).slice(0,6).map((/** @type {any} */ e)=>{
     const hit=e.hit!=null&&e.miss!=null&&(e.hit+e.miss)>0?e.hit/(e.hit+e.miss):null;
-    const pct=hit==null?'—':(hit*100).toFixed(0)+'%';
-    const bar=document.createElement('div'); bar.style.cssText='height:4px;border-radius:2px;background:var(--bg3);margin:2px 0;overflow:hidden';
-    bar.innerHTML='<div style="height:100%;width:'+(hit==null?0:Math.round(hit*100))+'%;background:var(--accent)"></div>';
-    const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);font-size:11.5px;color:var(--dim)';
-    const left=document.createElement('div'); left.style.cssText='flex:1';
-    left.innerHTML='<div style="display:flex;justify-content:space-between"><span>'+esc(e.model||'')+'</span><span>'+pct+' · ¥'+Number(e.cost||0).toFixed(5)+'</span></div>';
-    left.appendChild(bar);
-    const when=document.createElement('span'); when.style.cssText='white-space:nowrap;color:var(--faint)'; when.textContent=new Date(e.at).toLocaleTimeString();
-    div.appendChild(left); div.appendChild(when); list.appendChild(div);
-  }
+    return '<div class="dr"><span class="m">'+esc(e.model||'')+'</span><span class="p">'+(hit==null?'—':(hit*100).toFixed(0)+'%')+'</span><span class="c">¥'+Number(e.cost||0).toFixed(4)+'</span></div>';
+  }).join('') || '<div style="color:var(--faint);font-size:11.5px">暂无记录</div>';
 }
 // —— MCP 生态预设 ——
 let mcpPresetData=[];

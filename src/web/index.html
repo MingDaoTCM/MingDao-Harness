@@ -31,20 +31,23 @@ body{margin:0;background:var(--bg);color:var(--text);font:15px/1.65 -apple-syste
 body.traj-open{padding-left:294px}
 body.sub-open{padding-right:320px}
 body.tasks-open{padding-right:280px}
+body.dash-open{padding-right:400px}
 @media (max-width:1200px){
   #trajPanel{width:210px}body.traj-open{padding-left:252px}
   #subPanel{width:270px}body.sub-open{padding-right:270px}
   #tasksPanel{width:230px}body.tasks-open{padding-right:230px}
+  #dashPanel{width:360px}body.dash-open{padding-right:360px}
 }
 @media (max-width:860px){
   #trajPanel{width:160px}body.traj-open{padding-left:202px}
   #subPanel{width:190px}body.sub-open{padding-right:190px}
   #tasksPanel{width:190px}body.tasks-open{padding-right:190px}
+  #dashPanel{width:min(340px,94vw)}body.dash-open{padding-right:min(340px,94vw)}
 }
 @media (max-width:560px){
-  body.traj-open,body.sub-open,body.tasks-open{padding:0}
+  body.traj-open,body.sub-open,body.tasks-open,body.dash-open{padding:0}
   #trajPanel{width:calc(100vw - 42px);left:42px}
-  #subPanel,#tasksPanel{width:100vw}
+  #subPanel,#tasksPanel,#dashPanel{width:100vw}
 }
 header{min-height:52px;display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--bg2);flex:none;flex-wrap:nowrap;white-space:nowrap;overflow-x:auto}
 header .logo{font-weight:700;font-size:16px;color:var(--accent);letter-spacing:.5px;flex:none}
@@ -229,6 +232,36 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 @keyframes spin{to{transform:rotate(360deg)}}
 /* 自绘悬浮气泡 tooltip（替换原生 title）：暗色悬浮层 + 阴影，跟随锚点居中，越界自动回弹 */
 .mdtip{position:fixed;z-index:1000;max-width:320px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.6;box-shadow:0 8px 24px rgba(0,0,0,.55);pointer-events:none;white-space:pre-line;word-break:break-word;display:none}
+/* —— 省钱仪表盘（v0.3.1 顶部入口，真·仪表盘） —— */
+#dashPanel{position:fixed;right:0;top:52px;bottom:0;width:400px;max-width:94vw;background:var(--bg2);border-left:1px solid var(--border);z-index:45;display:flex;flex-direction:column;box-shadow:-8px 0 32px rgba(0,0,0,.4)}
+.dash-head{padding:12px 14px;font-size:14px;font-weight:700;color:var(--accent);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
+.dash-head .dash-sub{font-size:11.5px;color:var(--faint);font-weight:400}
+.dash-head button{margin-left:auto;padding:2px 8px;font-size:12px}
+.dash-body{flex:1;overflow-y:auto;padding:14px}
+.dash-kpi{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px}
+.kpi{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:2px}
+.kpi-l{font-size:11px;color:var(--faint)}
+.kpi-v{font-size:17px;font-weight:700;font-variant-numeric:tabular-nums}
+.dash-gauge-wrap{position:relative;width:120px;margin:4px auto 14px;text-align:center}
+.gauge-label{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0}
+.gauge-label b{font-size:20px;color:var(--accent2)}
+.gauge-label span{font-size:10.5px;color:var(--faint)}
+.dash-sec{font-size:11.5px;color:var(--faint);margin:12px 0 6px;border-top:1px dashed var(--border);padding-top:10px}
+.dash-sec:first-of-type{border-top:none;padding-top:0}
+.dash-chart{background:var(--bg3);border:1px solid var(--border);border-radius:10px;padding:8px}
+.dash-bars{display:flex;flex-direction:column;gap:6px}
+.dbar{background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:6px 10px}
+.dbar .t{display:flex;justify-content:space-between;font-size:11.5px;margin-bottom:4px}
+.dbar .t .n{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:60%}
+.dbar .t .v{color:var(--dim);font-variant-numeric:tabular-nums}
+.dbar .track{height:5px;border-radius:3px;background:var(--bg2);overflow:hidden}
+.dbar .fill{height:100%;border-radius:3px;background:linear-gradient(90deg,var(--accent2),var(--accent))}
+.dash-recent{display:flex;flex-direction:column;gap:5px;font-size:11.5px}
+.dr{display:flex;justify-content:space-between;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:5px 10px}
+.dr .m{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:50%}
+.dr .p{color:var(--accent2);font-variant-numeric:tabular-nums}
+.dr .c{color:var(--faint);font-variant-numeric:tabular-nums}
+.badge-btn:hover{border-color:var(--accent2);color:var(--accent2)}
 </style>
 </head>
 <body>
@@ -237,7 +270,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
   <span id="cfgMsg" class="badge" style="display:none"></span>
   <button id="cfgBtn" title="设置">⚙</button>
   <select id="wsSel" title="工作空间（切换 / 新建，目录自动创建）"></select>
-  <span class="badge" id="envBadge"></span><span class="badge" id="costBadge" title="今日费用 / 缓存命中率（每 15s 刷新）"></span>
+  <span class="badge" id="envBadge"></span><span class="badge badge-btn" id="costBadge" title="省钱仪表盘（点击展开）" style="cursor:pointer">📊 —</span>
   <div class="spacer"></div>
   <input id="sessionSearch" placeholder="搜索会话…" title="关键词检索历史会话">
   <select id="sessions" title="历史会话"><option value="">历史会话</option></select>
@@ -259,6 +292,29 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 <aside id="tasksPanel" style="display:none">
   <div class="tp-head">任务面板 <span id="tpCount"></span><button id="tpClose" style="float:right">✕</button></div>
   <div id="tpList"></div>
+</aside>
+<aside id="dashPanel" style="display:none">
+  <div class="dash-head">📊 省钱仪表盘 <span class="dash-sub">费用 · 命中 · 节省</span><button id="dashClose">✕</button></div>
+  <div class="dash-body">
+    <div class="dash-kpi">
+      <div class="kpi"><span class="kpi-l">今日费用</span><span class="kpi-v" id="kpiToday">—</span></div>
+      <div class="kpi"><span class="kpi-l">缓存命中</span><span class="kpi-v" id="kpiRate">—</span></div>
+      <div class="kpi"><span class="kpi-l">已节省</span><span class="kpi-v" style="color:var(--accent)" id="kpiSaved">—</span></div>
+      <div class="kpi"><span class="kpi-l">轮次/步数</span><span class="kpi-v" id="kpiTurns">—</span></div>
+    </div>
+    <div class="dash-gauge-wrap">
+      <svg id="rateGauge" viewBox="0 0 120 120" width="120" height="120"></svg>
+      <div class="gauge-label"><b id="rateGaugeNum">—</b><span>命中率</span></div>
+    </div>
+    <div class="dash-sec">近 14 天费用趋势（¥）</div>
+    <div id="trendChart" class="dash-chart"></div>
+    <div class="dash-sec">模型费用 Top</div>
+    <div id="dashModels" class="dash-bars"></div>
+    <div class="dash-sec">工具耗时 Top</div>
+    <div id="dashTools" class="dash-bars"></div>
+    <div class="dash-sec">最近缓存命中</div>
+    <div id="dashRecent" class="dash-recent"></div>
+  </div>
 </aside>
 <main><div id="chat"></div></main>
 <footer>
@@ -304,7 +360,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
       <button class="cfg-nav-btn" data-panel="schedule">⏰ 调度队列</button>
       <button class="cfg-nav-btn" data-panel="workspace">📁 工作空间</button>
       <button class="cfg-nav-btn" data-panel="memory">🧠 长期记忆</button>
-      <button class="cfg-nav-btn" data-panel="cache">📊 缓存仪表盘</button>
+
       <button class="cfg-nav-btn" data-panel="mcp">🔌 MCP 生态</button>
       <button class="cfg-nav-btn" data-panel="skills">🧩 技能库</button>
     </nav>
@@ -402,24 +458,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <textarea id="memArea" rows="5" placeholder="例如：所有文档用中文；提交信息用约定式提交…" style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;resize:vertical"></textarea>
     <div class="row" style="justify-content:flex-start"><button id="memSave">保存记忆</button><button id="memDedupe">去重合并</button><span id="memMsg" style="font-size:12px;color:var(--faint)"></span></div>
       </section>
-    <section class="cfg-panel" data-panel="cache">
-    <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
-    <h4 style="margin:4px 0;color:var(--accent2)">缓存命中率仪表盘（最近 10 次）</h4>
-    <div id="cacheSummary" style="font-size:12.5px;color:var(--dim);padding:2px"></div>
-    <div id="cacheRecent" style="max-height:130px;overflow-y:auto"></div>
-    <h4 style="margin:10px 0 4px;color:var(--accent2)">费用二级分账（模型 / 工具 Top5 · 近 14 天）</h4>
-    <div style="display:flex;gap:10px;flex-wrap:wrap">
-      <div style="flex:1;min-width:170px">
-        <div style="font-size:11.5px;color:var(--faint)">模型 Top5（费用）</div>
-        <div id="costTopModels" style="font-size:12px;color:var(--dim)"></div>
-      </div>
-      <div style="flex:1;min-width:170px">
-        <div style="font-size:11.5px;color:var(--faint)">工具 Top5（耗时）</div>
-        <div id="costTopTools" style="font-size:12px;color:var(--dim)"></div>
-      </div>
-    </div>
-    <div id="costLine" style="margin-top:8px"></div>
-      </section>
+
     <section class="cfg-panel" data-panel="mcp">
     <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
     <h4 style="margin:4px 0;color:var(--accent2)">MCP 生态预设（一键接入，重启生效）</h4>
