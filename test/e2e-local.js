@@ -40,6 +40,7 @@ let sawToolCall = false;
 let mockMode = 'write';
 let mockSummary = '计划文本';
 let lastPayload = null;
+let lastToolsPayload = null; // v0.4.0：仅记录带工具的请求（标题/记忆等无工具请求会覆盖 lastPayload）
 
 function sse(res, payload) {
   res.writeHead(200, { 'Content-Type': 'text/event-stream' });
@@ -64,7 +65,10 @@ const server = http.createServer((req, res) => {
     }
 
     requestCount += 1;
-    assert.ok(parsed.tools.length >= 6, '请求应携带工具 Schema');
+    lastToolsPayload = parsed; // v0.4.0：带工具的请求单独记录（预设白名单断言用）
+    // 携带工具 Schema 即可（≥1）；完整工具面由 smoke「省钱 B1」断言。预设白名单测试只发 2 个工具，
+    // 若此处卡 ≥6 会误伤白名单过滤的正确行为。
+    assert.ok(parsed.tools.length >= 1, '请求应携带工具 Schema');
 
     if (mockMode === 'plain') {
       sse(res, {
@@ -441,7 +445,7 @@ function ok(name) {
 {
   resetMock('plain');
   const w15 = newWorkDir();
-  const cmds = ['/help', '/status', '/usage', '/cost', '/cache', '/sessions', '/skills', '/memory', '/model', '/mode', '/compact', '/audit', '/mcp', '/exit'];
+  const cmds = ['/help', '/status', '/usage', '/cost', '/cache', '/sessions', '/skills', '/memory', '/model', '/mode', '/compact', '/audit', '/mcp', '/preset', '/exit'];
   const r = await runCli([], { cwd: w15, stdin: cmds.join('\n') + '\n' });
   assert.equal(r.code, 0, 'REPL 应以 /exit 正常退出，stderr: ' + r.err);
   assert.ok(!r.out.includes('is not defined'), '斜杠命令不得出现 ReferenceError（历史 P1-1 回归）');
@@ -493,6 +497,36 @@ function ok(name) {
   serverB.close();
   writeConfig('auto'); // 恢复默认配置供后续（本文件结尾无后续用例，保险起见）
   ok('单次提问：跨服务商路由命中 executor 端点（provider 重建生效）');
+}
+
+// ---------- v0.4.0：CLI --preset 端到端（白名单真实生效 + 系统提示注入 + cfg 不污染） ----------
+{
+  writeConfig('auto');
+  resetMock('plain');
+  const w17 = newWorkDir();
+  // 项目级预设：白名单仅 read/grep + 权限 auto + 系统提示段
+  fs.mkdirSync(path.join(w17, '.mingdao', 'presets'), { recursive: true });
+  fs.writeFileSync(
+    path.join(w17, '.mingdao', 'presets', 'mini.json'),
+    JSON.stringify({ name: 'mini', label: '迷你', systemPrompt: 'E2E_PRESET_MARKER', tools: ['read', 'grep'], permission: 'auto' })
+  );
+  const r = await runCli(['--preset', 'mini', '查一下'], { cwd: w17 });
+  assert.equal(r.code, 0, 'stderr: ' + r.err);
+  assert.ok(r.out.includes('已应用智能体预设'), '应打印预设应用横幅');
+  // mock 服务器记录的最后一个带工具请求：白名单外工具（write 等）不得出现
+  const toolsSent = (lastToolsPayload?.tools || []).map((/** @type {any} */ t) => t.function.name);
+  assert.ok(toolsSent.length > 0, '应发出带工具的请求');
+  assert.ok(toolsSent.includes('read') && toolsSent.includes('grep'), '白名单工具应可见');
+  assert.ok(!toolsSent.includes('write') && !toolsSent.includes('bash'), '白名单外工具不得下发（write/bash 应被过滤）');
+  // 系统提示定制段应到达服务端（真实注入，非仅本地变量）
+  const sysContent = String(lastToolsPayload?.messages?.[0]?.content || '');
+  assert.ok(sysContent.includes('E2E_PRESET_MARKER'), '预设定制段应注入系统提示并到达服务端');
+  // cfg 不被预设污染：config.json 文件里不得出现 presetTools/permission 改写
+  const cfgAfter = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+  assert.equal(cfgAfter.permission, 'auto', '预设不应改写 config.json 的 permission（会话级 overlay）');
+  assert.ok(!('presetTools' in cfgAfter), 'presetTools 不应落盘进 config.json');
+  safeRm(w17, { recursive: true, force: true });
+  ok('CLI --preset：白名单真实生效 / 系统提示注入 / cfg 不污染');
 }
 
 server.close();
