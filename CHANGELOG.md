@@ -2,6 +2,14 @@
 
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
+## v0.4.0（2026-09-05）— 开放内核（Agent Preset · 第三方工具 · 公共 API）
+
+- Agent Preset：声明式智能体预设 JSON（系统提示+工具白名单+权限+模型+参数），项目/用户/内置三级遮蔽 + schema 严格校验 + 会话级 overlay（不污染 config.json）+ 白名单硬拦截；CLI `--preset` / REPL `/preset` / WebUI 预设下拉三入口；内置「本地模型审计」示例
+- 第三方工具：`registerTool` 程序化注册（进权限/审计/省钱 schema 链路，mcp__ 前缀护栏、坏条目不崩启动）+ `config.tools` 声明式 shell 命令包装（参数经 MINGDAO_TOOL_ARGS 环境变量防注入，幂等）
+- 公共 API 冻结：`src/index.js` 按 @stable/@experimental 分组，24 个 stable 导出有契约测试锁定（minor 内向后兼容）；新增 `docs/DEVELOPER.md`（预设格式/工具注册/库嵌入/API 速查）
+- 战略定调（STRATEGY-NEXT）：垂直产品 × 开放内核；本地/私有化第一公民与 DeepSeek 省钱并列双主攻；不引入插件内核、不做云平台
+- 测试：smoke 72 / e2e-local 17 / e2e-web 22（CLI+WebUI 预设真实进程端到端：白名单真实下发/系统提示到达服务端/cfg 不污染）
+
 ## v0.3.2（2026-09-05）— 本地模型自适应（资源受限部署长任务不再中断）
 
 - 本地模型自适应：本机/内网推理框架自动按「资源有限」对待——上下文窗口/预算/超时/工具输出截断按模型能力自动收紧，小模型低内存部署不撑爆、不误杀
