@@ -316,7 +316,7 @@ export async function runRepl(ctx) {
         io.print('已清空上下文（会话文件已同步重置）。');
       } else if (cmd === '/preset') {
         // v0.4.0 Agent Preset：列出/切换声明式智能体预设（工具白名单/权限/参数 + 系统提示定制段）
-        const { listPresets, loadPreset, presetConfigOverrides, presetSystemBlock } = await import('../presets.js');
+        const { listPresets, loadPreset, presetConfigOverrides, presetSystemBlock, presetPermissionOverride } = await import('../presets.js');
         if (!arg) {
           const ps = listPresets(workingDir);
           if (!ps.length) io.print(style('（无可用预设。目录：<项目>/.mingdao/presets/、~/.mingdao/presets/、内置 presets/）', C.dim));
@@ -332,6 +332,14 @@ export async function runRepl(ctx) {
         const over = presetConfigOverrides(p);
         // 应用覆盖：权限/参数/工具白名单/模型建议——只进 agentCfg（会话级 overlay），
         // 绝不改写 cfg：否则后续 /model、/think 的 saveConfig 会把预设字段持久化进 config.json。
+        // P0（v0.4.1）：预设 permission 提权防护——不得把 ask/readonly 静默改成 auto
+        const permOv = presetPermissionOverride(p, cfg.permission ?? 'ask');
+        if (permOv.escalated) {
+          delete over.permission;
+          io.print(style(`⚠ 预设 "${p.name}" 声明 permission=${p.permission} 属提权（当前 ${cfg.permission ?? 'ask'}），已忽略并保持 ${permOv.permission}。`, C.yellow));
+        } else if (p.permission !== undefined) {
+          over.permission = permOv.permission;
+        }
         agentCfg = { ...cfg, ...over, presetName: p.name };
         if (over.model) await switchToModel(over.model, { silent: true, persist: false });
         presetBlock = presetSystemBlock(p);

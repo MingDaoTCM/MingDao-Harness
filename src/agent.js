@@ -209,12 +209,14 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       }
     };
     try {
+    // 同回合只读工具去重（Hermes C4）：相同 name+args 的只读调用只执行一次，结果复用回填。
+    // v0.4.1 P1 修复：turnToolCache 必须声明在 while 之外、for 轮内——此前在 while 体内每步重建，
+    // 去重只在本步的多个工具调用间生效，跨步（如先 grep 定位再 read 确认同一文件）完全失效。
+    const turnToolCache = new Map();
     for (round = 0; round < maxRounds; round++) {
       steps = 0;
       while (steps < stepLimit) {
       steps += 1;
-      // 同回合只读工具去重（Hermes C4）：相同 name+args 的只读调用只执行一次，结果复用回填
-      const turnToolCache = new Map();
       // 自动压缩（P3-1）：预算不足、静默裁剪即将丢弃早期段落时，先用 executor 模型
       // 把被裁段落压成摘要注入，替代「失忆」；失败/不值得时回退普通裁剪。
       if (cfg.autoCompact !== false) {
@@ -240,6 +242,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
                 C.dim
               )
             );
+            // v0.4.1 P1 修复：压缩成功后复位 windowPressure——此前永不复位，后续每轮都 force 压缩，
+            // 叠加 compact.js force 分支跳过 2000 token 最小阈值，增量段极短也发真实模型调用持续烧钱。
+            if (windowPressure) {
+              windowPressure = false;
+              pressureWarned = false;
+            }
             try {
               onCompact?.(messages);
             } catch {}
@@ -251,14 +259,25 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       // reasoning 回填防护（Kimi P0 修正）：带 tool_calls 的 assistant 消息必须「完整」回传
       // reasoning_content（DeepSeek thinking_mode 官方要求：后续请求含 tools 时缺/截断即 400，
       // 多轮工具会话必崩）；仅纯文本回复的 reasoning 可裁剪（不回传也不影响）。
+      // v0.4.1 P2 修复：单次遍历构建新数组（O(n)），此前循环内每次替换都 sanitized.map 全量重建（O(n²)）。
       let sanitized = trimmed;
-      for (const m of sanitized) {
+      let dirty = false;
+      for (let i = 0; i < sanitized.length; i++) {
+        const m = sanitized[i];
         const rc = m.reasoning_content;
         if (typeof rc !== 'string' || (Array.isArray(m.tool_calls) && m.tool_calls.length)) continue;
+        let replacement = null;
         if (rc.length > 4000) {
-          sanitized = sanitized.map((/** @type {any} */ x) => (x === m ? { ...x, reasoning_content: `[思考过程已省略（原 ${rc.length} 字）]` } : x));
+          replacement = `[思考过程已省略（原 ${rc.length} 字）]`;
         } else if (rc.length > 1000) {
-          sanitized = sanitized.map((/** @type {any} */ x) => (x === m ? { ...x, reasoning_content: rc.slice(-500) + ' …[思考过程已截断]' } : x));
+          replacement = rc.slice(-500) + ' …[思考过程已截断]';
+        }
+        if (replacement !== null) {
+          if (!dirty) {
+            sanitized = sanitized.slice();
+            dirty = true;
+          }
+          sanitized[i] = { ...m, reasoning_content: replacement };
         }
       }
 

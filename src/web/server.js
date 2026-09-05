@@ -257,7 +257,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     if (h.includes(':')) {
       // IPv6：回环 ::1、链路本地 fe80::/10、唯一本地 fc00::/7、IPv4 映射 ::ffff:私网
       if (/^::ffff:/.test(h)) return isPrivateHost(h.slice(7));
-      return /^fe[89ab]/.test(h) || /^f[c d]/.test(h) || h === '::' || h === '::1';
+      return /^fe[89ab]/.test(h) || /^f[cd]/.test(h) || h === '::' || h === '::1';
     }
     const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
     if (!m) return false; // 域名：由 validateRemoteUrl 的 DNS 解析复检
@@ -421,10 +421,18 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     let presetBlock = '';
     let chatCfg = cfg;
     if (typeof body.preset === 'string' && body.preset) {
-      const { loadPreset, presetConfigOverrides, presetSystemBlock } = await import('../presets.js');
+      const { loadPreset, presetConfigOverrides, presetSystemBlock, presetPermissionOverride } = await import('../presets.js');
       chatPreset = loadPreset(taskDir, body.preset);
       if (chatPreset) {
         const over = presetConfigOverrides(chatPreset);
+        // P0（v0.4.1）：预设 permission 提权防护——不得把 ask/readonly 静默改成 auto
+        const permOv = presetPermissionOverride(chatPreset, cfg.permission ?? 'ask');
+        if (permOv.escalated) {
+          delete over.permission;
+          send({ type: 'banner', text: `⚠ 预设 "${chatPreset.name}" 声明 permission=${chatPreset.permission} 属提权（当前 ${cfg.permission ?? 'ask'}），已忽略并保持 ${permOv.permission}。` });
+        } else if (chatPreset.permission !== undefined) {
+          over.permission = permOv.permission;
+        }
         chatCfg = { ...cfg, ...over, presetName: chatPreset.name };
         presetBlock = presetSystemBlock(chatPreset);
       } else {

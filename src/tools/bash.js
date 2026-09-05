@@ -34,8 +34,16 @@ export function detectSandbox() {
   sandboxSupport = 'none';
   if (process.platform === 'linux') {
     try {
-      const r = spawnSync('bwrap', ['--version'], { stdio: 'ignore', timeout: 3000 });
-      sandboxSupport = r.error ? 'none' : 'bwrap';
+      // v0.4.1 P1 修复：实际能力探测而非仅 --version——bwrap 存在但 /proc 挂载受限（Docker/devcontainer/
+      // CI 流水线等容器环境）时 --version 能跑、真正建沙箱却失败。用最小真实沙箱命令验证：
+      // --ro-bind / / --tmpfs /tmp true 能成功退出 0 才算可用，否则降级 none（runBash 会注明降级）。
+      const v = spawnSync('bwrap', ['--version'], { stdio: 'ignore', timeout: 3000 });
+      if (v.error) {
+        sandboxSupport = 'none';
+      } else {
+        const probe = spawnSync('bwrap', ['--die-with-parent', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', 'true'], { stdio: 'ignore', timeout: 5000 });
+        sandboxSupport = probe.error || probe.status !== 0 ? 'none' : 'bwrap';
+      }
     } catch {
       sandboxSupport = 'none';
     }

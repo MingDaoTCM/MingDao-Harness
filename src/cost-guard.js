@@ -17,6 +17,9 @@ export function costGuardConfig() {
 // 质检 M10：按 cache-stats 文件 mtime 缓存统计结果——文件未变直接复用，
 // 避免 Agent 每步对整文件（可能数千行）重复解析与累加。
 let todayCache = { mtime: -1, size: -1, start: 0, sum: 0 };
+// v0.4.1 P2 修复（TDZ）：todayCostWarned 提到 todayCost 使用点之前声明——
+// 此前在第 44 行才 let 声明、第 36 行已使用（模块加载顺序碰巧掩盖了风险，循环依赖场景会抛 ReferenceError）。
+let todayCostWarned = false;
 export function todayCost() {
   const start = beijingDayStart().getTime();
   try {
@@ -40,7 +43,6 @@ export function todayCost() {
     return null;
   }
 }
-let todayCostWarned = false;
 
 export function costGuardStatus() {
   const g = costGuardConfig();

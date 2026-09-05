@@ -13,7 +13,6 @@ import { resolveProviderConfig } from './providers/index.js';
 import { estimateBatchCost, BATCH_DISCOUNT } from './pricing.js';
 import { recordCacheStats } from './cachestats.js';
 import { approxTokens } from './context.js';
-import { modelPreset } from './models.js';
 
 const DEFAULT_WINDOW = '24h';
 const DEFAULT_ENDPOINT = '/v1/chat/completions';
@@ -120,8 +119,10 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
   if (deduped > 0) onStatus?.(`去重：${deduped} 条重复问题合并（${list.length} → ${unique.length} 条实际提交）`);
 
   // —— 省钱 B2：单问超窗口预检（估算输入 + max_tokens 超过模型窗口 95% 即报错，绝不提交烧钱）——
-  const preset = modelPreset(model) || {};
-  const windowTokens = Number(preset.budgetTokens) || 128000;
+  // v0.4.1 P1 修复：接入 resolveModelCaps 取真实 contextWindow（此前用 preset.budgetTokens 当窗口，
+  // 本地小模型 32k 窗口会套 128000 默认 → 超窗口预检完全失效，提交后烧钱且失败）。
+  const { resolveModelCaps } = await import('./model-caps.js');
+  const windowTokens = resolveModelCaps(cfg, model).contextWindow;
   const sysTokens = approxTokens(systemPrompt);
   for (let i = 0; i < unique.length; i++) {
     const est = sysTokens + approxTokens(unique[i]);

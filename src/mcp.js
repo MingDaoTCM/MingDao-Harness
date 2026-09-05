@@ -25,11 +25,12 @@ const HANDSHAKE_TIMEOUT_MS = 20000;
 let nextId = 1;
 
 export class McpClient {
-  constructor(/** @type {any} */ name, /** @type {any} */ { command, args = [], env = {} }, /** @type {any} */ workingDir) {
+  constructor(/** @type {any} */ name, /** @type {any} */ { command, args = [], env = {}, trusted = false }, /** @type {any} */ workingDir) {
     this.name = name;
     this.command = command;
     this.args = args;
     this.env = env;
+    this.trusted = trusted === true; // v0.4.1 P0：仅 trusted 服务器的 readOnlyHint 才被信任自动放行
     this.workingDir = workingDir;
     this.tools = /** @type {any[]} */ ([]);
     this.child = null;
@@ -262,7 +263,11 @@ export async function startMcpServers(/** @type {any} */ mcpCfg, /** @type {any}
     },
     isReadonly(/** @type {any} */ prefixedName) {
       const found = this.lookup(prefixedName);
-      return found ? found.client.isReadonly(found.toolName) : false;
+      if (!found) return false;
+      // v0.4.1 P0：未授信服务器（未设 mcpServers.<name>.trusted）即使工具标注 readOnlyHint 也不自动放行——
+      // 服务器可谎称只读绕过权限确认；只有显式 trusted 才信任其标注。
+      if (!found.client.trusted) return false;
+      return found.client.isReadonly(found.toolName);
     },
     status() {
       const rows = [];

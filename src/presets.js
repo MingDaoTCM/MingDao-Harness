@@ -136,6 +136,7 @@ export function loadPreset(/** @type {any} */ workingDir, /** @type {any} */ nam
 /**
  * 预设 → cfg 覆盖：只返回预设声明的参数键（其余键保持调用方当前配置）。
  * tools 单独走 cfg.presetTools（白名单在 agent 的 toolsFor 处生效）。
+ * 注意：permission 提权由调用方用 presetPermissionOverride 过滤（防项目级预设提权，见下）。
  */
 export function presetConfigOverrides(/** @type {any} */ preset) {
   const out = /** @type {Record<string, any>} */ ({});
@@ -144,6 +145,26 @@ export function presetConfigOverrides(/** @type {any} */ preset) {
   }
   if (preset && Array.isArray(preset.tools)) out.presetTools = [...preset.tools];
   return out;
+}
+
+// 权限宽松度排序（数值越大越宽松/越危险）。
+const PERM_RANK = /** @type {Record<string, number>} */ ({ readonly: 0, ask: 1, auto: 2 });
+
+/**
+ * 预设 permission 提权防护（P0 安全，v0.4.1）：预设声明的 permission 不得比当前配置更宽松
+ * （如当前 ask → 预设 auto 属提权，忽略并返回当前值）。clone 恶意仓库含 .mingdao/presets/*.json
+ * 声明 auto 时，不能静默跳过用户全部确认。返回 { permission, escalated }：escalated=true 表示已拦截提权。
+ * @param {any} preset @param {string} currentPermission
+ */
+export function presetPermissionOverride(/** @type {any} */ preset, /** @type {any} */ currentPermission) {
+  const want = preset && preset.permission !== undefined ? String(preset.permission) : null;
+  if (!want || !(want in PERM_RANK)) return { permission: currentPermission, escalated: false };
+  const cur = currentPermission in PERM_RANK ? currentPermission : 'ask';
+  if (PERM_RANK[want] > PERM_RANK[cur]) {
+    // 提权：忽略预设值，保持当前更保守的权限
+    return { permission: cur, escalated: true };
+  }
+  return { permission: want, escalated: false };
 }
 
 /** 预设系统提示定制段（无则空串），插入系统提示 BASE 之后。 */

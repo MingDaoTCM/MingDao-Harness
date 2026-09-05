@@ -19,6 +19,53 @@ function resolvePath(cwd, p) {
   return path.resolve(cwd, p);
 }
 
+// —— 路径穿越防护（P0 安全，v0.4.1）——
+// 文件工具限定在「工作目录 + config.fsAllowDirs 白名单」内；realpath 逐级校验防软链接逃逸。
+// auto 模式下模型（或被提示注入诱导）也无法 read ~/.ssh、~/.mingdao/credentials.json 等越界文件。
+// 白名单：config.json 的 fsAllowDirs 数组（绝对目录），需要访问工作目录外时显式添加。
+function normCmp(/** @type {any} */ p) {
+  return process.platform === 'win32' ? String(p).toLowerCase() : String(p);
+}
+function realPathOrNull(/** @type {any} */ p) {
+  try {
+    return normCmp(fs.realpathSync(p));
+  } catch {
+    return null;
+  }
+}
+// 判断 target 是否在 root 内：对 target 逐级向上找最近的已存在祖先 realpath，再与 root realpath 比较。
+// （write 新文件时父目录可能尚不存在，逐级向上即可正确处理；软链接已被 realpath 展开。）
+function withinRoot(/** @type {any} */ root, /** @type {any} */ target) {
+  const rr = realPathOrNull(root);
+  if (!rr) return false;
+  let cur = target;
+  for (let i = 0; i < 64; i++) {
+    const rp = realPathOrNull(cur);
+    if (rp) return rp === rr || rp.startsWith(rr + path.sep);
+    const parent = path.dirname(cur);
+    if (parent === cur) return false;
+    cur = parent;
+  }
+  return false;
+}
+/**
+ * 解析路径并做工作目录边界检查。
+ * @param {any} ctx
+ * @param {any} p
+ * @returns {{ ok: true, path: string } | { ok: false, error: string }}
+ */
+function boundedPath(/** @type {any} */ ctx, /** @type {any} */ p) {
+  const cwd = ctx?.cwd || ctx?.workingDir || process.cwd();
+  const raw = resolvePath(cwd, p ?? '');
+  if (!raw) return { ok: false, error: '缺少 path 参数。' };
+  const allowDirs = Array.isArray(ctx?.cfg?.fsAllowDirs) ? ctx.cfg.fsAllowDirs : [];
+  const roots = [cwd, ...allowDirs.map((/** @type {any} */ d) => path.resolve(String(d)))];
+  for (const r of roots) {
+    if (withinRoot(r, raw)) return { ok: true, path: raw };
+  }
+  return { ok: false, error: `路径越界（工作目录外）：${raw}。如需访问请将目录加入 config.fsAllowDirs 白名单。` };
+}
+
 /**
  * @param {any} buf
  */
@@ -76,7 +123,7 @@ function backup(ctx, p) {
 export function undo(args, ctx) {
   const store = ctx?.undoStore?.backups;
   if (!(store instanceof Map) || !store.size) return { ok: false, error: '没有可撤销的修改。' };
-  const p = args.path ? resolvePath(ctx.cwd, args.path) : null;
+  const p = args.path ? (() => { const bb = boundedPath(ctx, args.path); return bb.ok ? bb.path : null; })() : null;
   if (p) {
     const list = store.get(p);
     if (!list?.length) return { ok: false, error: `${p} 没有可撤销的修改记录。` };
@@ -124,8 +171,9 @@ export function invalidateReadCache(p) {
  */
 export function read(args, ctx) {
   try {
-    const p = resolvePath(ctx.cwd, args.path ?? '');
-    if (!p) return { ok: false, error: '缺少 path 参数。' };
+    const b = boundedPath(ctx, args.path ?? '');
+    if (!b.ok) return b;
+    const p = b.path;
     const st = fs.statSync(p);
     if (st.isDirectory()) return { ok: false, error: `"${p}" 是目录，请使用 ls 查看。` };
     if (st.size > MAX_FILE_BYTES) {
@@ -181,8 +229,9 @@ const MAX_WRITE_BYTES = 2 * 1024 * 1024; // write 单次内容上限（防模型
  */
 export function write(args, ctx) {
   try {
-    const p = resolvePath(ctx.cwd, args.path ?? '');
-    if (!p) return { ok: false, error: '缺少 path 参数。' };
+    const b = boundedPath(ctx, args.path ?? '');
+    if (!b.ok) return b;
+    const p = b.path;
     const content = String(args.content ?? '');
     if (Buffer.byteLength(content) > MAX_WRITE_BYTES) {
       return { ok: false, error: `内容超过 ${MAX_WRITE_BYTES / 1024 / 1024}MB 上限，请分多次写入。` };
@@ -222,11 +271,12 @@ function regionAround(text, lineStart, lineCount, context = 2) {
  */
 export function edit(args, ctx) {
   try {
-    const p = resolvePath(ctx.cwd, args.path ?? '');
+    const b = boundedPath(ctx, args.path ?? '');
+    if (!b.ok) return b;
+    const p = b.path;
     const oldString = String(args.old_string ?? '');
     const newString = String(args.new_string ?? '');
     const replaceAll = Boolean(args.replace_all);
-    if (!p) return { ok: false, error: '缺少 path 参数。' };
     if (!oldString) return { ok: false, error: '缺少 old_string 参数。' };
     try {
       if (fs.statSync(p).size > MAX_FILE_BYTES) {
@@ -265,7 +315,9 @@ export function edit(args, ctx) {
  */
 export function ls(args, ctx) {
   try {
-    const p = resolvePath(ctx.cwd, args.path || '.');
+    const b = boundedPath(ctx, args.path || '.');
+    if (!b.ok) return b;
+    const p = b.path;
     const entries = fs.readdirSync(p, { withFileTypes: true });
     const rows = entries
       .map((e) => {
@@ -354,7 +406,9 @@ function walkFiles(root, visitor) {
 export function glob(args, ctx) {
   try {
     const pattern = String(args.pattern ?? '*');
-    const root = resolvePath(ctx.cwd, args.path || '.');
+    const b = boundedPath(ctx, args.path || '.');
+    if (!b.ok) return b;
+    const root = b.path;
     if (!fs.existsSync(root)) return { ok: false, error: `目录不存在：${root}` };
     const re = globToRegExp(pattern);
     const matchRel = pattern.includes('/');
@@ -401,7 +455,9 @@ export function grep(args, ctx) {
     const MAX_LINE = 20 * 1024;
     /** @type {(line: any) => any} */
     const testLine = (line) => (line.length > MAX_LINE ? re.test(line.slice(0, MAX_LINE)) : re.test(line));
-    const root = resolvePath(ctx.cwd, args.path || '.');
+    const root0 = boundedPath(ctx, args.path || '.');
+    if (!root0.ok) return root0;
+    const root = root0.path;
     const include = args.include ? globToRegExp(String(args.include)) : null;
     /** @type {any[]} */
     const matches = [];

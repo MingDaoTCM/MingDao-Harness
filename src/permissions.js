@@ -31,8 +31,10 @@ function ruleMatches(rule, name, args) {
     if (ruleName !== name) return false;
     const want = rule.slice(idx + 1).trim();
     const have = summarize(name, args).trim();
-    // bash 前缀规则防链式命令绕过：含 && / ; / | / ` / $( 的复合命令不匹配前缀规则，回落权限确认
-    if (name === 'bash' && /&&|\|\||[;|`]|\$\(|\n/.test(have)) return false;
+    // bash 前缀规则防链式命令绕过（P0 安全，v0.4.1）：白名单字符法——前缀规则仅匹配
+    // 单条简单命令（字母数字/空格/下划线/./-/），任何 shell 元字符（&&/||/;|&<>`$()\n\r）都不匹配，
+    // 回落权限确认。黑名单枚举永远追不上绕过手法（单 & 后台串联、重定向、\r 等），白名单才可靠。
+    if (name === 'bash' && !/^[A-Za-z0-9_ ./\\:-]+$/.test(have)) return false;
     if (want.endsWith('*')) return have.startsWith(want.slice(0, -1));
     return have === want;
   }

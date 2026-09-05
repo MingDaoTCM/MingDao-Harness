@@ -255,7 +255,11 @@ export function retrieveRelevant(/** @type {any[]} */ entries, /** @type {any} *
     return { e, score: overlap / union };
   });
   scored.sort((/** @type {any} */ a, /** @type {any} */ b) => b.score - a.score);
-  return scored.filter((/** @type {any} */ s) => s.score > 0).slice(0, topN).map((/** @type {any} */ s) => s.e);
+  const hits = scored.filter((/** @type {any} */ s) => s.score > 0).slice(0, topN).map((/** @type {any} */ s) => s.e);
+  // v0.4.1 P1 修复：无匹配时回退最近 N 条（entries 按「旧→新」追加，尾部即最新）——此前 filter(score>0)
+  // 在 query 与记忆无共同词时返回空数组，项目记忆完全消失（相关性判断失败 ≠ 记忆不存在）。
+  if (hits.length) return hits;
+  return entries.slice(-topN);
 }
 
 export function appendProjectMemory(/** @type {any} */ workingDir, /** @type {any} */ lines) {

@@ -362,13 +362,21 @@ async function main() {
   let presetBlock = '';
   let presetOverlay = /** @type {Record<string, any>} */ ({});
   if (opts.preset) {
-    const { loadPreset, presetConfigOverrides, presetSystemBlock, listPresets } = await import('./presets.js');
+    const { loadPreset, presetConfigOverrides, presetSystemBlock, presetPermissionOverride, listPresets } = await import('./presets.js');
     activePreset = loadPreset(workingDir, opts.preset);
     if (!activePreset) {
       const names = listPresets(workingDir).map((/** @type {any} */ p) => p.name).join(', ') || '（无可用预设）';
       io.print(style(`⚠ 预设 "${opts.preset}" 不存在。可用：${names}`, C.yellow));
     } else {
       presetOverlay = { ...presetConfigOverrides(activePreset), presetName: activePreset.name };
+      // P0（v0.4.1）：预设 permission 提权防护——预设不得把 ask/readonly 静默改成 auto
+      const permOv = presetPermissionOverride(activePreset, cfg.permission ?? 'ask');
+      if (permOv.escalated) {
+        delete presetOverlay.permission;
+        io.print(style(`⚠ 预设 "${activePreset.name}" 声明 permission=${activePreset.permission} 属提权（当前 ${cfg.permission ?? 'ask'}），已忽略并保持 ${permOv.permission}。`, C.yellow));
+      } else if (activePreset.permission !== undefined) {
+        presetOverlay.permission = permOv.permission;
+      }
       if (!opts.model && presetOverlay.model) modelName = presetOverlay.model;
       presetBlock = presetSystemBlock(activePreset);
       io.print(style(`▣ 已应用智能体预设：${activePreset.name}${activePreset.label ? '（' + activePreset.label + '）' : ''}`, C.cyan));

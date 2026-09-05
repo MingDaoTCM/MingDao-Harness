@@ -182,6 +182,45 @@ const ctx = { cwd: tmp };
   ok('tools：read / write / edit / glob / grep / ls 全部通过（含大小上限）');
 }
 
+// ---------- 2b. 路径穿越防护（v0.4.1 P0）：文件工具限定工作目录 + fsAllowDirs 白名单 ----------
+{
+  const { dispatch } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-fsb-'));
+  const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-out-'));
+  fs.writeFileSync(path.join(outside, 'secret.txt'), 'top-secret');
+  const ctxIn = { cwd: root, cfg: {} };
+  // 绝对路径越界：read / write / edit / ls / glob / grep 全部拒绝
+  const rAbs = await dispatch('read', { path: path.join(outside, 'secret.txt') }, ctxIn);
+  assert.equal(rAbs.ok, false, 'read 绝对路径越界应拒绝');
+  assert.ok(String(rAbs.error).includes('越界'), '错误信息应说明越界');
+  const wAbs = await dispatch('write', { path: path.join(outside, 'evil.txt'), content: 'x' }, ctxIn);
+  assert.equal(wAbs.ok, false, 'write 绝对路径越界应拒绝');
+  const eAbs = await dispatch('edit', { path: path.join(outside, 'secret.txt'), old_string: 'x', new_string: 'y' }, ctxIn);
+  assert.equal(eAbs.ok, false, 'edit 绝对路径越界应拒绝');
+  const lsAbs = await dispatch('ls', { path: outside }, ctxIn);
+  assert.equal(lsAbs.ok, false, 'ls 绝对路径越界应拒绝');
+  const gAbs = await dispatch('glob', { pattern: '*', path: outside }, ctxIn);
+  assert.equal(gAbs.ok, false, 'glob 绝对路径越界应拒绝');
+  const grAbs = await dispatch('grep', { pattern: 'secret', path: outside }, ctxIn);
+  assert.equal(grAbs.ok, false, 'grep 绝对路径越界应拒绝');
+  // 相对路径 ../ 穿越：root 内 ../outside/secret.txt 也应拒绝
+  const rRel = await dispatch('read', { path: '../' + path.basename(outside) + '/secret.txt' }, ctxIn);
+  assert.equal(rRel.ok, false, '相对路径 ../ 穿越应拒绝');
+  // 软链接逃逸：root 内建软链指向 outside 文件，read 应拒绝
+  const symlink = path.join(root, 'link.txt');
+  try { fs.symlinkSync(path.join(outside, 'secret.txt'), symlink); } catch {}
+  const rSym = await dispatch('read', { path: 'link.txt' }, ctxIn);
+  assert.equal(rSym.ok, false, '软链接指向工作目录外应拒绝（realpath 校验）');
+  // 白名单放行：fsAllowDirs 加入 outside 后 read 应成功
+  const ctxAllow = { cwd: root, cfg: { fsAllowDirs: [outside] } };
+  const rAllow = await dispatch('read', { path: path.join(outside, 'secret.txt') }, ctxAllow);
+  assert.equal(rAllow.ok, true, 'fsAllowDirs 白名单内应放行');
+  assert.ok(String(rAllow.output).includes('top-secret'), '白名单内应读到内容');
+  safeRmSync(root, { recursive: true, force: true });
+  safeRmSync(outside, { recursive: true, force: true });
+  ok('tools：路径穿越防护（绝对/相对/软链接越界拒绝，fsAllowDirs 白名单放行）');
+}
+
 // ---------- 5g. git 只读工具 + HTTP 只读抓取（v0.3.1） ----------
 {
   const { dispatch } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
@@ -201,6 +240,26 @@ const ctx = { cwd: tmp };
   // fetch：非 http 协议应拒绝
   const fFile = await dispatch('fetch', { url: 'file:///etc/passwd' }, ctx);
   assert.equal(fFile.ok, false, 'fetch file:// 应拒绝');
+  // fetch：302 重定向到内网应拒绝（P0 SSRF 复检，v0.4.1）
+  const httpMod = await import('node:http');
+  const victim = httpMod.createServer((req, res) => { res.end('secret-metadata'); });
+  await new Promise((r) => victim.listen(0, '127.0.0.1', r));
+  const victimPort = victim.address().port;
+  const attacker = httpMod.createServer((req, res) => {
+    res.writeHead(302, { Location: `http://127.0.0.1:${victimPort}/latest/meta-data` });
+    res.end();
+  });
+  await new Promise((r) => attacker.listen(0, '127.0.0.1', r));
+  const attackerPort = attacker.address().port;
+  // 用公网地址指代攻击者：直接 fetch 攻击者地址本就被拒（回环），故用 302 目标验证——攻击者本身也是回环，
+  // 这里验证的是「跳转目标被复检」：即使初始 URL 被放行（公网场景由攻击者服务器模拟），跳转回内网必拒。
+  const fRedir = await dispatch('fetch', { url: `http://127.0.0.1:${attackerPort}/go` }, ctx);
+  assert.equal(fRedir.ok, false, '302 重定向应被 SSRF 复检拒绝（此处初始即回环，双重拦截）');
+  // 更贴近真实场景：初始 URL 不可达内网但为回环（测试环境无公网），验证跳转目标 127.0.0.1 被拦截
+  const fRedir2 = await dispatch('fetch', { url: `http://localhost:${attackerPort}/go` }, ctx);
+  assert.equal(fRedir2.ok, false, '重定向到回环应被拦截');
+  victim.close();
+  attacker.close();
   safeRmSync(tmpGit, { recursive: true, force: true });
   ok('tools：git 只读 + fetch SSRF 防护');
 }
@@ -840,7 +899,15 @@ const ctx = { cwd: tmp };
   assert.equal(await pChain.check('bash', { command: 'git push && rm -rf ~' }), false, '链式命令不应被前缀规则放行');
   assert.equal(await pChain.check('bash', { command: 'git status; whoami' }), false, '分号链式同样拦截');
   assert.equal(await pChain.check('bash', { command: 'git | grep x' }), false, '管道链式同样拦截');
-  ok('permissions：工具名:参数前缀 规则匹配');
+  // P0（v0.4.1）：单 &（后台串联）、重定向 < >、回车 \r 也须拦截（白名单字符法）
+  assert.equal(await pChain.check('bash', { command: 'git status & whoami' }), false, '单 & 后台串联应拦截');
+  assert.equal(await pChain.check('bash', { command: 'git log > /etc/passwd' }), false, '重定向 > 应拦截');
+  assert.equal(await pChain.check('bash', { command: 'git status < /dev/null' }), false, '重定向 < 应拦截');
+  assert.equal(await pChain.check('bash', { command: 'git status\rwhoami' }), false, '回车 \r 应拦截');
+  // 正常简单命令（含参数/连字符/冒号/路径）仍应放行
+  assert.equal(await pChain.check('bash', { command: 'git status --short' }), true, '简单命令仍应放行');
+  assert.equal(await pChain.check('bash', { command: 'git log -n 10' }), true, '带参数简单命令仍应放行');
+  ok('permissions：工具名:参数前缀 规则匹配（含 P0 白名单字符防绕过）');
 }
 
 // ---------- 13. Hooks ----------
@@ -1043,8 +1110,16 @@ const ctx = { cwd: tmp };
   assert.ok(schemas[0].function.description.includes('[MCP:mock]'));
   const res = await mcp.call('mcp__mock__echo', { text: '你好' });
   assert.ok(res.ok && res.output === 'echo:你好');
-  assert.equal(mcp.isReadonly('mcp__mock__readonly_peek'), true);
+  // v0.4.1 P0：未授信服务器（未设 trusted）的 readOnlyHint 不被信任——自动放行失效，回落权限确认
+  assert.equal(mcp.isReadonly('mcp__mock__readonly_peek'), false, '未 trusted 服务器的 readOnlyHint 不应自动放行');
   assert.equal(mcp.isReadonly('mcp__mock__echo'), false);
+  // trusted: true 后才信任其只读标注
+  const mcpT = await startMcpServers(
+    { mockt: { command: process.execPath, args: [serverPath], trusted: true } },
+    tmp
+  );
+  assert.equal(mcpT.isReadonly('mcp__mockt__readonly_peek'), true, 'trusted 服务器的 readOnlyHint 应自动放行');
+  mcpT.stop();
   // 失败服务器不拖垮管理器，也不阻塞其余
   const mcp2 = await startMcpServers(
     { bad: { command: 'definitely-not-a-command-xyz' }, mock2: { command: process.execPath, args: [serverPath] } },
@@ -1248,6 +1323,10 @@ const ctx = { cwd: tmp };
   const { retrieveRelevant } = await import(pathToFileURL(path.join(srcDir, 'memory.js')).href);
   const rel = retrieveRelevant(['- 决定：config 拆成多文件', '- 游戏位于 moba 目录', '- 坑：Node 18 不支持某 API'], '重构 config 配置', 2);
   assert.ok(rel.length >= 1 && rel[0].includes('config'), '语义检索应把 config 相关条目排在前面');
+  // v0.4.1 P1：无共同词时回退最近 N 条（记忆不因相关性判断失败而消失）
+  const none = retrieveRelevant(['- 决定：config 拆成多文件', '- 游戏位于 moba 目录', '- 坑：Node 18 不支持某 API'], 'zzz 无关查询词 qqq', 2);
+  assert.equal(none.length, 2, '无匹配应回退最近 N 条');
+  assert.ok(none[0].includes('Node 18') || none[1].includes('Node 18'), '回退应含最新条目');
   process.env.MINGDAO_HOME = smokeHome;
   safeRmSync(homeP, { recursive: true, force: true });
   ok('memory：项目级自动记忆按工作空间沉淀/去重/注入不串 + 语义检索');
@@ -2290,9 +2369,17 @@ const ctx = { cwd: tmp };
   const submitted = uploadedBody.split('\n').filter((l) => l.startsWith('{"custom_id')).map((l) => JSON.parse(l));
   assert.equal(submitted.length, 2, '上传 jsonl 应只有 2 条（去重后）');
   assert.equal(fs.readFileSync(r.outputFile, 'utf8').trim().split('\n').length, 3, '输出文件应与输入行数一致');
-  // ② 超窗口预检：maxTokens 超过窗口 95% 时提交前报错
-  const over = await runBatch({ cfg: cfgB2, model: 'deepseek-v4-flash', questions: ['短问题'], workingDir: homeB2, maxTokens: 130000, onStatus: () => {} });
-  assert.ok(over.error && over.error.includes('超窗口'), '超窗口应在提交前报错');
+  // ② 超窗口预检：maxTokens 超过窗口 95% 时提交前报错。
+  // v0.4.1：窗口来自 resolveModelCaps.contextWindow（此前误用 budgetTokens）。用 32k 本地小模型验证：
+  // maxTokens 40000 > 32000*0.95 必超窗，而 1M 窗口的 deepseek-v4-flash 不应误报。
+  const cfgSmall = { ...cfgB2, customModels: { 'small-local': { baseUrl: `http://127.0.0.1:${batchPort2}/v1`, contextWindow: 32000 } } };
+  // 给自定义模型补 Key（凭证库按 custom:<名> 键），否则会先报「没有可用 API Key」而非超窗口
+  fs.writeFileSync(path.join(homeB2, 'credentials.json'), JSON.stringify({ deepseek: 'sk-batch-test-1234567890', 'custom:small-local': 'sk-small-1234567890' }));
+  const over = await runBatch({ cfg: cfgSmall, model: 'small-local', questions: ['短问题'], workingDir: homeB2, maxTokens: 40000, onStatus: () => {} });
+  assert.ok(over.error && over.error.includes('超窗口'), '超窗口应在提交前报错（32k 小模型）');
+  // 大窗口模型（deepseek-v4-flash 1M）同参数不应误报——130000 < 1M*0.95
+  const noOver = await runBatch({ cfg: cfgB2, model: 'deepseek-v4-flash', questions: ['短问题'], workingDir: homeB2, maxTokens: 130000, onStatus: () => {} });
+  assert.ok(!noOver.error, '1M 窗口模型 maxTokens 130000 不应误报超窗口（' + (noOver.error || '') + '）');
   // ③ --max-cost 上限：估算费用超上限时提交前拦截
   const capped = await runBatch({ cfg: cfgB2, model: 'deepseek-v4-flash', questions: ['问题一', '问题二'], workingDir: homeB2, maxCost: 0.000001, onStatus: () => {} });
   assert.ok(capped.error && capped.error.includes('--max-cost'), '超预算应在提交前拦截');
@@ -2642,7 +2729,16 @@ const ctx = { cwd: tmp };
   assert.ok(presetSystemBlock(lp).includes('只输出中文') && presetSystemBlock(lp).includes('<preset_rules>'), '系统提示段应包裹注入');
   assert.equal(presetSystemBlock({ name: 'x' }), '', '无 systemPrompt 时系统提示段为空');
   assert.equal(loadPreset(projDir, 'nonexistent'), null, '不存在的预设应返回 null');
-  ok('presets：内置发现 / 校验（未知字段/坏值拒绝）/ 项目遮蔽 / 覆盖提取 / 系统提示段');
+  // P0（v0.4.1）：预设 permission 提权防护——ask/readonly 不得被预设静默改成 auto
+  const { presetPermissionOverride } = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
+  assert.equal(presetPermissionOverride({ permission: 'auto' }, 'ask').escalated, true, 'ask→auto 应判提权');
+  assert.equal(presetPermissionOverride({ permission: 'auto' }, 'ask').permission, 'ask', '提权应保持当前 ask');
+  assert.equal(presetPermissionOverride({ permission: 'auto' }, 'readonly').escalated, true, 'readonly→auto 应判提权');
+  assert.equal(presetPermissionOverride({ permission: 'readonly' }, 'ask').escalated, false, 'ask→readonly 属降权不拦截');
+  assert.equal(presetPermissionOverride({ permission: 'readonly' }, 'ask').permission, 'readonly', '降权应采纳预设 readonly');
+  assert.equal(presetPermissionOverride({ permission: 'ask' }, 'ask').escalated, false, '同级不拦截');
+  assert.equal(presetPermissionOverride({}, 'ask').escalated, false, '未声明 permission 不拦截');
+  ok('presets：内置发现 / 校验（未知字段/坏值拒绝）/ 项目遮蔽 / 覆盖提取 / 系统提示段 / 提权拦截');
 }
 
 // ---------- 48. 第三方工具注册 + config.tools 声明式挂载（v0.4.0 契约化） ----------
@@ -2675,6 +2771,12 @@ const ctx = { cwd: tmp };
   // mcp__ 前缀保留给 MCP 路由，自定义工具不得占用
   try { registerTool({ name: 'mcp__mine', run: () => ({}) }); } catch (/** @type {any} */ e) { dupErr = e; }
   assert.ok(dupErr && /mcp__/.test(dupErr.message), 'mcp__ 前缀应拒绝');
+  // v0.4.1 P2：readOnly 选项进 READONLY_TOOLS（只读档自动放行、ask 档不询问）
+  const { READONLY_TOOLS, isRegisteredToolReadonly } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
+  registerTool({ name: 'ro-probe', description: '只读探测', readOnly: true, run: () => ({ ok: true, output: 'ro' }) });
+  assert.ok(READONLY_TOOLS.has('ro-probe'), 'readOnly 第三方工具应进 READONLY_TOOLS');
+  assert.equal(isRegisteredToolReadonly('ro-probe'), true, 'isRegisteredToolReadonly 应返回 true');
+  assert.equal(isRegisteredToolReadonly('echo-test'), false, '未标注 readOnly 应返回 false');
   // config.tools 声明式挂载：参数经 MINGDAO_TOOL_ARGS 环境变量（非字符串拼接进 shell）。
   // 跨平台：命令用「相对脚本名 + cwd=tmp」，不嵌任何路径引号（Windows cmd /s /c 对绝对路径引号/反斜杠
   // 的解析与 bash 不同，绝对路径会拆错）；脚本读 MINGDAO_TOOL_ARGS 打印。

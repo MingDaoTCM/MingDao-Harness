@@ -16,3 +16,6 @@ desktop/node_modules/
 # 根锁文件入库（CI npm ci 确定性安装 devDeps）；桌面端锁文件仍本地化
 desktop/package-lock.json
 .coverage/
+
+# 项目级自动记忆（本地私有，不入库）
+.mingdao/

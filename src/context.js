@@ -88,9 +88,9 @@ export function trimMessages(/** @type {any} */ messages, /** @type {any} */ bud
       if (total <= budget) break;
       const m = out[i];
       const c = typeof m.content === 'string' ? m.content : JSON.stringify(m?.content ?? '');
-      // 幂等守卫（A4）：已回收过的内容跳过——否则「截断标记」把长度再次顶过阈值，逐轮嵌套重截，
-      // 被保留消息字节逐轮漂移（前缀缓存连尾部都失配）
-      if (c.includes('已回收')) continue;
+      // 注：无幂等守卫——回收结果只写在投影副本 out 上、从不回写原 messages（trimMessages 是投影，
+      // 每次调用从原 messages 重新拷贝），故「已回收」标记不会进入下一次调用的输入，无需守卫。
+      // 截断逻辑确定（同输入同输出），字节稳定，不会逐轮嵌套重截（审计 v0.4.1 确认的死代码已移除）。
       let next = null;
       if (m.role === 'tool' && c.length > 40) {
         next = { ...m, content: `[工具 ${m.tool_call_id || ''} 结果摘要：${c.slice(0, 40).replace(/\n/g, ' ')}…（已回收，原 ${c.length} 字）]` };

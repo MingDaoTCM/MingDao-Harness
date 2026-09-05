@@ -111,8 +111,21 @@ WebUI 中每个会话记住自己的工作目录：新会话记录创建时的�
 }
 ```
 
-格式与 Claude Code 相同；工具以 `mcp__<服务器>__<工具>` 并入 Agent 循环，带 `readOnlyHint`
-标注的工具自动放行。会话内 `/mcp` 查看状态；`mingdao mcp preset list/add` 一键接入常用服务器。
+格式与 Claude Code 相同；工具以 `mcp__<服务器>__<工具>` 并入 Agent 循环。
+
+- **只读自动放行需显式授信（v0.4.1 P0）**：带 `readOnlyHint` 的工具默认**不再**自动放行——
+  服务器可谎称只读绕过权限确认。只有加了 `"trusted": true` 的服务器，其 `readOnlyHint` 才被
+  信任（只读档自动放行、ask 档不询问）；未授信服务器的全部工具（含标注只读的）都走权限确认。
+
+```json
+{
+  "mcpServers": {
+    "filesystem": { "command": "npx", "args": ["-y", "@modelcontextprotocol/server-filesystem", "/你的/目录"], "trusted": true }
+  }
+}
+```
+
+会话内 `/mcp` 查看状态；`mingdao mcp preset list/add` 一键接入常用服务器。
 
 ## WebUI 服务器
 
@@ -252,6 +265,18 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
 ```json
 { "timeout": { "firstTokenMs": 600000, "streamIdleMs": 120000, "totalMs": 1800000 } }
 ```
+
+### 文件访问边界（v0.4.1 P0 路径穿越防护）
+
+read/write/edit/ls/glob/grep/undo 默认限定在**工作目录**内——auto 权限模式下，模型（或被提示注入
+诱导）也无法读 `~/.ssh`、`~/.mingdao/credentials.json`（API Key 明文）等越界文件；`realpath` 逐级
+校验防软链接逃逸。需要访问工作目录外时，显式加白名单：
+
+```json
+{ "fsAllowDirs": ["/home/you/projects/shared", "/tmp/build-output"] }
+```
+
+白名单目录同样受 `realpath` 校验（目录内的软链接指向白名单外仍拒绝）。
 
 ## 自定义 Provider 模块（非 OpenAI 兼容协议）
 

@@ -9,7 +9,7 @@ function isPrivateHost(/** @type {string} */ hostname) {
   if (h === 'localhost' || h.endsWith('.localhost') || h === '::1') return true;
   if (h.includes(':')) {
     if (/^::ffff:/.test(h)) return isPrivateHost(h.slice(7));
-    return /^fe[89ab]/.test(h) || /^f[c d]/.test(h) || h === '::' || h === '::1';
+    return /^fe[89ab]/.test(h) || /^f[cd]/.test(h) || h === '::' || h === '::1';
   }
   const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (!m) return false;
@@ -39,10 +39,42 @@ export async function runFetch(/** @type {any} */ args, /** @type {any} */ _ctx)
     }
   }
   if (blocked) return { ok: false, error: `拒绝访问内网/本机地址（${host}）——SSRF 防护。` };
+  // 302 重定向复检（P0 安全，v0.4.1）：redirect:'follow' 只检查初始 URL，攻击者可用公网 302 跳回内网。
+  // 改 redirect:'manual' 手动跟随，每一跳重新 isPrivateHost + DNS 复检，跳数上限 5。
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 15000);
   try {
-    const res = await fetch(u, { signal: ac.signal, redirect: 'follow' });
+    let cur = u;
+    let res = /** @type {any} */ (null);
+    for (let hop = 0; hop <= 5; hop++) {
+      if (hop > 5) return { ok: false, error: '重定向次数超过上限（5 跳）。' };
+      const ch = String(cur.hostname || '').toLowerCase();
+      let hopBlocked = isPrivateHost(ch);
+      if (!hopBlocked && ch && ch !== 'localhost' && !/^\d{1,3}(\.\d{1,3}){3}$/.test(ch)) {
+        try {
+          const addrs = await lookup(ch, { all: true, verbatim: true });
+          hopBlocked = addrs.some((/** @type {any} */ a) => isPrivateHost(a.address));
+        } catch {
+          // DNS 解析失败：放行，连接阶段会报错
+        }
+      }
+      if (hopBlocked) return { ok: false, error: `拒绝访问内网/本机地址（${ch}）——SSRF 重定向防护。` };
+      res = await fetch(cur, { signal: ac.signal, redirect: 'manual' });
+      if (res.status >= 300 && res.status < 400) {
+        const loc = res.headers.get('location');
+        if (!loc) break; // 无 Location：按最终响应处理
+        try {
+          cur = new URL(loc, cur);
+        } catch {
+          return { ok: false, error: `非法重定向地址：${loc}` };
+        }
+        if (cur.protocol !== 'http:' && cur.protocol !== 'https:') {
+          return { ok: false, error: '重定向到非 http(s) 地址，已拒绝。' };
+        }
+        continue;
+      }
+      break;
+    }
     const buf = await res.arrayBuffer();
     clearTimeout(timer);
     if (buf.byteLength > 512 * 1024) return { ok: false, error: `响应超过 512KB 上限（实际 ${buf.byteLength} 字节）。` };

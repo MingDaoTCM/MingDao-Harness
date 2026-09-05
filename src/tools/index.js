@@ -6,7 +6,7 @@ import { runBash } from './bash.js';
 import { runGit } from './git.js';
 import { runFetch } from './fetch.js';
 import { listSkills, loadSkill } from '../skills.js';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 
 // 只读工具集合的单一来源：permissions.js 引用此导出，新增只读工具时只需改这里
 export const READONLY_TOOLS = new Set(['read', 'glob', 'grep', 'ls', 'skill', 'git', 'fetch']);
@@ -254,7 +254,9 @@ const CUSTOM_TOOL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 
 /**
  * 注册第三方工具（进程级，重复注册同名会报错——避免静默覆盖）。
- * @param {{ name: string, description?: string, parameters?: any, run: (args: any, ctx: any) => any | Promise<any> }} tool
+ * readOnly（v0.4.1 P2 新增）：标注后进 READONLY_TOOLS 集合——只读档自动放行、ask 档不询问、
+ * 只读子代理可用。默认 false（写类/副作用工具仍走权限询问）。
+ * @param {{ name: string, description?: string, parameters?: any, readOnly?: boolean, run: (args: any, ctx: any) => any | Promise<any> }} tool
  */
 export function registerTool(/** @type {any} */ tool) {
   const name = String(tool?.name ?? '').trim();
@@ -279,9 +281,16 @@ export function registerTool(/** @type {any} */ tool) {
       function: { name, description: String(tool.description || ''), parameters },
     },
     run: tool.run,
+    readOnly: tool.readOnly === true,
   };
   customTools.set(name, entry);
+  if (tool.readOnly === true) READONLY_TOOLS.add(name);
   return entry.schema;
+}
+
+/** 判断第三方工具是否标注只读。 */
+export function isRegisteredToolReadonly(/** @type {any} */ name) {
+  return customTools.get(name)?.readOnly === true;
 }
 
 /** 已注册的第三方工具名列表。 */
@@ -318,26 +327,49 @@ export function mountConfigTools(/** @type {any} */ cfg) {
         name,
         description: String(e.description || ''),
         parameters: e.parameters,
-        run: (/** @type {any} */ args, /** @type {any} */ ctx) => {
-          const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/bash';
-          const shellArgs = process.platform === 'win32' ? ['/d', '/s', '/c', e.command] : ['-lc', e.command];
-          const r = spawnSync(shell, shellArgs, {
-            cwd: ctx.cwd,
-            env: { ...process.env, MINGDAO_TOOL_ARGS: JSON.stringify(args ?? {}) },
-            timeout: Math.min(Number(e.timeout) > 0 ? Number(e.timeout) : 120, 600) * 1000,
-            maxBuffer: 2 * 1024 * 1024,
-          });
-          const out = String(r.stdout || '');
-          const err = String(r.stderr || '');
-          const capped = out.length > 20000 ? out.slice(0, 20000) + `\n…[输出过长已截断，共 ${out.length} 字]` : out;
-          return {
-            ok: r.error ? false : (r.status ?? 0) === 0,
-            exitCode: r.error ? null : (r.status ?? null),
-            output: (capped || '（无输出）').trim(),
-            ...(err.trim() ? { stderr: err.trim().slice(0, 4000) } : {}),
-            ...(r.error ? { error: `命令执行失败：${String(r.error?.message || r.error)}` } : {}),
-          };
-        },
+        // v0.4.1 P1 修复：异步 spawn 而非 spawnSync——spawnSync 最长阻塞 600s，WebUI 下单个请求
+        // 即冻结整个 Node 进程（所有并发会话/权限确认/SSE 流全无响应）。异步执行不阻塞事件循环。
+        run: (/** @type {any} */ args, /** @type {any} */ ctx) =>
+          new Promise((resolve) => {
+            const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/bash';
+            const shellArgs = process.platform === 'win32' ? ['/d', '/s', '/c', e.command] : ['-lc', e.command];
+            const timeoutMs = Math.min(Number(e.timeout) > 0 ? Number(e.timeout) : 120, 600) * 1000;
+            const child = spawn(shell, shellArgs, {
+              cwd: ctx.cwd,
+              env: { ...process.env, MINGDAO_TOOL_ARGS: JSON.stringify(args ?? {}) },
+            });
+            let out = '';
+            let err = '';
+            let done = false;
+            let timedOut = false;
+            const cap = (/** @type {any} */ s, /** @type {any} */ d) => {
+              const t = s + d;
+              return t.length > 20000 * 2 ? t.slice(-20000 * 2) : t;
+            };
+            const finish = (/** @type {any} */ result) => {
+              if (done) return;
+              done = true;
+              clearTimeout(timer);
+              resolve(result);
+            };
+            const timer = setTimeout(() => {
+              timedOut = true;
+              try { child.kill('SIGKILL'); } catch {}
+            }, timeoutMs);
+            child.stdout.on('data', (d) => { out = cap(out, d); });
+            child.stderr.on('data', (d) => { err = cap(err, d); });
+            child.on('error', (er) => finish({ ok: false, error: `命令执行失败：${String(er?.message || er)}` }));
+            child.on('close', (code) => {
+              const capped = out.length > 20000 ? out.slice(0, 20000) + `\n…[输出过长已截断，共 ${out.length} 字]` : out;
+              finish({
+                ok: timedOut ? false : (code ?? 0) === 0,
+                exitCode: timedOut ? null : (code ?? null),
+                output: (capped || '（无输出）').trim(),
+                ...(err.trim() ? { stderr: err.trim().slice(0, 4000) } : {}),
+                ...(timedOut ? { error: `命令执行超时（${Math.round(timeoutMs / 1000)}s），已终止` } : {}),
+              });
+            });
+          }),
       });
       mountedConfigTools.add(name);
       mounted.push(name);
