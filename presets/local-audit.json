@@ -1,0 +1,10 @@
+{
+  "name": "local-audit",
+  "label": "本地模型审计",
+  "description": "面向本地/资源受限模型（如 131k 窗口 q8 量化）的只读审计预设：只读工具集 + auto 权限 + 保守参数，配合 v0.3.2 本地自适应长任务不中断",
+  "systemPrompt": "你是一名代码审计员。任务是对给定代码库做只读审计：先 ls/glob 摸清结构，再 read/grep 逐文件审查，可用 git 查看历史与 diff、fetch 抓取相关文档。输出审计报告：发现的缺陷按严重度分级，每条给出文件:行号证据；不做任何修改。若上下文紧张，先审查最关键的部分并明示未覆盖区域。",
+  "tools": ["read", "ls", "glob", "grep", "skill", "git", "fetch", "todo"],
+  "permission": "auto",
+  "maxRounds": 4,
+  "maxOutputTokens": 4096
+}

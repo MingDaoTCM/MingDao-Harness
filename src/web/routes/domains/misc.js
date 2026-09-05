@@ -3,6 +3,7 @@
 import { loadMemory, writeMemory, dedupeMemory } from '../../../memory.js';
 import { recordUsage, listCacheStats, summarizeCacheStats, costBreakdown } from '../../../cachestats.js';
 import { costGuardStatus } from '../../../cost-guard.js';
+import { listPresets } from '../../../presets.js';
 
 /**
  * 杂项域路由。命中返回 true，未命中返回 false。
@@ -97,6 +98,13 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
 
   if (method === 'GET' && p === '/api/memory') {
     json(res, 200, { ok: true, content: loadMemory() });
+    return true;
+  }
+
+  // v0.4.0 Agent Preset：列出可用预设（项目 → 用户 → 内置，同名遮蔽）
+  if (method === 'GET' && p === '/api/presets') {
+    const workingDir = deps.state?.workingDir || process.cwd();
+    json(res, 200, { ok: true, presets: listPresets(workingDir) });
     return true;
   }
 

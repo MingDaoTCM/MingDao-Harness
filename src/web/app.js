@@ -345,6 +345,9 @@ async function send(){
   arm();
   input.value=''; input.style.height='44px';
   const payload={message:text,file:currentSession};
+  // v0.4.0 Agent Preset：选择器选中的预设随本轮发送（服务端按会话应用一次）
+  const presetVal=$('#presetSel')?.value;
+  if(presetVal) payload.preset=presetVal;
   // 带上文开关：勾选后系统提示注入最近会话日志（默认不注入——新会话全新开始，避免串到历史会话上下文）
   if($('#journalChk')?.checked) payload.withJournal=true;
   if(attachments.length) payload.attachments=attachments;
@@ -647,6 +650,11 @@ async function init(){
   }
   refreshSessions();
   refreshWsSel();
+  try{
+    // v0.4.0 Agent Preset：加载预设列表进下拉（项目 → 用户 → 内置）
+    const pr=await fetch('/api/presets',{cache:'no-store'}).catch(()=>null); const pj=pr?await pr.json():{presets:[]};
+    const psel=$('#presetSel'); if(psel&&pj.presets){ for(const p of pj.presets){ const o=document.createElement('option'); o.value=p.name; o.textContent=p.label+'（'+(p.source==='project'?'项目':p.source==='user'?'用户':'内置')+'）'; o.title=p.description||p.name; psel.appendChild(o); } }
+  }catch(e){}
   try{
     const dr=await fetch('/api/draft?file='+encodeURIComponent(currentSession||''),{cache:'no-store'}); const dj=await dr.json();
     if(dj.text){ input.value=dj.text; input.style.height=Math.min(input.scrollHeight,200)+'px'; input.focus(); }

@@ -140,6 +140,7 @@ async function generatePlan(provider, modelName, task) {
  */
 export async function runRepl(ctx) {
   const { io, cfg, home, pc0, opts, permission, workingDir, sessionUndoStore, mcpFacade, sessionRef, preset, withJournal, tuiState } = ctx;
+  const presetBlock = ctx.presetBlock || ''; // v0.4.0 Agent Preset 系统提示定制段
   let mcpManager = ctx.mcpManager;
   let modelName = ctx.modelName;
   let provider = ctx.provider;
@@ -216,7 +217,7 @@ export async function runRepl(ctx) {
   sessionRef.name = path.basename(session.file);
   io.print(style(`会话  ${path.basename(session.file)}`, C.dim));
 
-  const systemPrompt = buildSystemPrompt({ modelName, workingDir, withJournal });
+  const systemPrompt = buildSystemPrompt({ modelName, workingDir, withJournal, presetBlock });
   // 恢复会话时刷新 system prompt（用户记忆 / AGENTS.md / 技能清单 / 时间戳以当前为准），
   // 旧 system 消息保留在会话文件中，不影响追加历史。
   const loadedMsgs = session.messages || [];
@@ -271,7 +272,7 @@ export async function runRepl(ctx) {
           tuiState.persisted = msgs.length;
         },
       });
-      messages[0] = { role: 'system', content: buildSystemPrompt({ workingDir, withJournal }) };
+      messages[0] = { role: 'system', content: buildSystemPrompt({ workingDir, withJournal, presetBlock }) };
       if (!silent) {
         const p2 = modelPreset(modelName);
         io.print(style(`✓ 已切换到 ${C.bold}${modelName}${C.reset}${p2 ? `（${p2.label}）` : ''}`, C.green));

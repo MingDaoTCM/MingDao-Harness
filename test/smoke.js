@@ -2585,6 +2585,100 @@ const ctx = { cwd: tmp };
   ok('diagnose：一键脱敏诊断报告生成');
 }
 
+// ---------- 47. Agent Preset（v0.4.0 契约化）：发现/校验/遮蔽/覆盖/系统提示段 ----------
+{
+  const { listPresets, loadPreset, validatePreset, presetConfigOverrides, presetSystemBlock, presetDirs } = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
+  const { builtinPresetDir } = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
+  // 内置预设（随包分发）
+  assert.ok(fs.existsSync(path.join(builtinPresetDir(), 'local-audit.json')), '内置示例预设应随包分发');
+  const builtin = listPresets(null);
+  assert.ok(builtin.some((/** @type {any} */ p) => p.name === 'local-audit' && p.source === 'builtin'), '内置 local-audit 应被发现');
+  // 校验：合法/非法字段/坏 permission
+  assert.equal(validatePreset({ name: 'ok', systemPrompt: 'x' }).ok, true, '最小合法预设应通过');
+  assert.equal(validatePreset({}).ok, false, '缺 name 应拒绝');
+  assert.equal(validatePreset({ name: 'bad name!' }).ok, false, '非法 name 应拒绝');
+  assert.equal(validatePreset({ name: 'x', unknownField: 1 }).ok, false, '未知字段应拒绝');
+  assert.equal(validatePreset({ name: 'x', permission: 'nope' }).ok, false, '非法权限应拒绝');
+  assert.equal(validatePreset({ name: 'x', tools: ['read', 1] }).ok, false, '非字符串工具名应拒绝');
+  // 项目级遮蔽用户级/内置
+  const projDir = path.join(tmp, 'proj-presets');
+  fs.mkdirSync(path.join(projDir, '.mingdao', 'presets'), { recursive: true });
+  fs.writeFileSync(path.join(projDir, '.mingdao', 'presets', 'my-agent.json'), JSON.stringify({ name: 'my-agent', label: '我的智能体', systemPrompt: '只输出中文。', tools: ['read', 'grep'], permission: 'readonly', maxRounds: 2 }));
+  const listed = listPresets(projDir);
+  const mine = listed.find((/** @type {any} */ p) => p.name === 'my-agent');
+  assert.ok(mine && mine.source === 'project', '项目级预设应被发现且标 project');
+  // 项目级同名遮蔽内置
+  fs.writeFileSync(path.join(projDir, '.mingdao', 'presets', 'local-audit.json'), JSON.stringify({ name: 'local-audit', label: '项目级覆盖', systemPrompt: 'override' }));
+  const overridden = listPresets(projDir).filter((/** @type {any} */ p) => p.name === 'local-audit');
+  assert.equal(overridden.length, 1, '同名预设应只留一个（遮蔽）');
+  assert.equal(overridden[0].source, 'project', '项目级应遮蔽内置');
+  // loadPreset + 覆盖 + 系统提示段
+  const lp = loadPreset(projDir, 'my-agent');
+  assert.ok(lp && lp.name === 'my-agent', 'loadPreset 应按名加载');
+  const over = presetConfigOverrides(lp);
+  assert.equal(over.permission, 'readonly', 'permission 覆盖应生效');
+  assert.equal(over.maxRounds, 2, 'maxRounds 覆盖应生效');
+  assert.deepEqual(over.presetTools, ['read', 'grep'], 'tools 白名单应生效');
+  assert.equal(Object.prototype.hasOwnProperty.call(over, 'temperature'), false, '未声明字段不应出现在覆盖里');
+  assert.ok(presetSystemBlock(lp).includes('只输出中文') && presetSystemBlock(lp).includes('<preset_rules>'), '系统提示段应包裹注入');
+  assert.equal(presetSystemBlock({ name: 'x' }), '', '无 systemPrompt 时系统提示段为空');
+  assert.equal(loadPreset(projDir, 'nonexistent'), null, '不存在的预设应返回 null');
+  ok('presets：内置发现 / 校验（未知字段/坏值拒绝）/ 项目遮蔽 / 覆盖提取 / 系统提示段');
+}
+
+// ---------- 48. 第三方工具注册 + config.tools 声明式挂载（v0.4.0 契约化） ----------
+{
+  const { registerTool, listRegisteredTools, dispatch, buildToolSchemas, mountConfigTools } = await import(pathToFileURL(path.join(srcDir, 'tools/index.js')).href);
+  // 程序化注册：schema 进构建链、dispatch 可执行、返回对象透传
+  registerTool({
+    name: 'echo-test',
+    description: '回显参数',
+    parameters: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'] },
+    run: (/** @type {any} */ args) => ({ ok: true, output: 'echo:' + args.text }),
+  });
+  assert.ok(listRegisteredTools().includes('echo-test'), '注册后应出现在列表');
+  const schemas = buildToolSchemas(new Set());
+  const echoSchema = schemas.find((/** @type {any} */ t) => t.function.name === 'echo-test');
+  assert.ok(echoSchema && echoSchema.function.description === '回显参数', '自定义工具 schema 应进构建链');
+  const echoRes = await dispatch('echo-test', { text: 'hi' }, {});
+  assert.equal(echoRes.output, 'echo:hi', 'dispatch 应执行自定义工具');
+  // 异常 → 结构化错误，不抛出
+  registerTool({ name: 'boom-test', description: 'x', run: () => { throw new Error('炸了'); } });
+  const boomRes = await dispatch('boom-test', {}, {});
+  assert.equal(boomRes.ok, false, '自定义工具异常应转结构化错误');
+  assert.ok(String(boomRes.error).includes('炸了'), '错误信息应保留');
+  // 与内置同名 → 拒绝；重复注册 → 拒绝
+  let dupErr = null;
+  try { registerTool({ name: 'read', run: () => ({}) }); } catch (/** @type {any} */ e) { dupErr = e; }
+  assert.ok(dupErr && /已存在/.test(dupErr.message), '与内置同名应拒绝');
+  try { registerTool({ name: 'echo-test', run: () => ({}) }); } catch (/** @type {any} */ e) { dupErr = e; }
+  assert.ok(dupErr && /已存在/.test(dupErr.message), '重复注册应拒绝');
+  // config.tools 声明式挂载：参数经 MINGDAO_TOOL_ARGS 环境变量（非字符串拼接进 shell）
+  const cfg = {
+    tools: [
+      { name: 'env-echo', description: '读环境变量回显', command: 'node -e "const a=JSON.parse(process.env.MINGDAO_TOOL_ARGS||\'{}\'); console.log(\'got:\'+a.text)"' },
+    ],
+  };
+  const mounted = mountConfigTools(cfg);
+  assert.deepEqual(mounted, ['env-echo'], 'config.tools 应挂载');
+  const again = mountConfigTools(cfg);
+  assert.deepEqual(again, [], '重复挂载应幂等（跳过）');
+  const envRes = await dispatch('env-echo', { text: 'env-hi' }, { cwd: process.cwd() });
+  assert.equal(envRes.ok, true, '声明式工具应执行成功');
+  assert.ok(String(envRes.output).includes('got:env-hi'), '参数应经环境变量传递');
+  ok('tools 契约化：registerTool 注册/调度/异常结构化/重名拒绝 + config.tools 声明式挂载（幂等/环境变量传参）');
+}
+
+// ---------- 49. 公共 API 导出面（v0.4.0 契约化：stable 面稳定断言） ----------
+{
+  const api = await import(pathToFileURL(path.join(srcDir, 'index.js')).href);
+  const stableFns = ['createAgent', 'createProvider', 'resolveProviderConfig', 'createPermission', 'createIO', 'registerTool', 'listRegisteredTools', 'mountConfigTools', 'buildToolSchemas', 'listPresets', 'loadPreset', 'validatePreset', 'presetConfigOverrides', 'presetSystemBlock', 'trimMessages', 'approxTokens', 'clampText', 'compactConversation', 'estimateCost', 'countTokens', 'makeTokenCounter', 'resolveModelCaps', 'safeBudget', 'isLocalBaseUrl'];
+  for (const f of stableFns) {
+    assert.equal(typeof api[f], 'function', `公共 API ${f} 应导出且为函数`);
+  }
+  ok(`公共 API 导出面：${stableFns.length} 个 stable 导出全部可用（v0.4.0 契约化）`);
+}
+
 fs.rmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 fs.rmSync(smokeHome, { recursive: true, force: true });

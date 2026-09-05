@@ -67,8 +67,18 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   const hasWriteIntent = (/** @type {any} */ text) => WRITE_INTENT_RE.test(String(text || ''));
   // A1（前缀稳定）：剥描述集合按「回合冻结快照」——回合内恒定（至多两态：只读档/全量档），
   // 新使用的工具只在下一回合才进入剥描述集合；回合边界本身就有新 user 消息，schema 变化免费。
+  // v0.4.0 Agent Preset：cfg.presetTools 白名单恒生效（在只读档过滤之后收紧——预设只减不增）。
+  const presetToolSet = Array.isArray(cfg.presetTools) ? new Set(cfg.presetTools.map(String)) : null;
+  const activePresetName = String(cfg.presetName || ''); // 白名单拦截提示用
   const toolsFor = (/** @type {boolean} */ readOnlyPhase, /** @type {Set<string>} */ strippedSet) => {
-    const schemas = buildToolSchemas(strippedSet, mcpSchemas());
+    let schemas = buildToolSchemas(strippedSet, mcpSchemas());
+    if (presetToolSet) {
+      schemas = schemas.filter((/** @type {any} */ t) => {
+        const n = t?.function?.name;
+        if (!n) return true;
+        return presetToolSet.has(n) || (n.startsWith('mcp__') && presetToolSet.has(n.slice(5)));
+      });
+    }
     if (!readOnlyPhase) return schemas;
     return schemas.filter((/** @type {any} */ t) => {
       const n = t?.function?.name;
@@ -467,6 +477,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           }
 
           const isMcp = name.startsWith('mcp__');
+          // v0.4.0 Agent Preset：白名单强制（模型可能调用白名单外工具——schema 已不发，此处兜底硬拦）
+          if (presetToolSet && !presetToolSet.has(isMcp ? name.slice(5) : name)) {
+            io.renderToolDenied(name, args, `不在预设工具白名单内（${activePresetName || 'preset'}）`);
+            if (auditOn) auditEntry({ denied: true, reason: '预设工具白名单拦截' });
+            messages.push({ role: 'tool', tool_call_id: tc.id, content: `工具 ${name} 不在当前预设的工具白名单内，已拒绝执行。` });
+            return null;
+          }
           let allowed = false;
           if (isMcp && mcp?.isReadonly(name)) {
             allowed = true; // MCP 工具的只读标注自动放行

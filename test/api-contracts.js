@@ -95,7 +95,13 @@ const post = async (p, body, opts) => {
   await post('/api/config', { timeout: { firstTokenMs: null, streamIdleMs: null, totalMs: null } });
   const toCleared = await get('/api/state');
   assert.ok(!(toCleared.j.timeout && Object.keys(toCleared.j.timeout).length), '超时覆盖删除后回退自适应');
-  ok('config：state/config/models-config 契约（含 v0.3.2 分层超时 round-trip）');
+  // v0.4.0：Agent Preset 列表契约（内置 local-audit 应恒在）
+  const presets = await get('/api/presets');
+  assert.equal(presets.status, 200, '/api/presets 应 200');
+  assert.ok(presets.j.ok && Array.isArray(presets.j.presets) && presets.j.presets.length >= 1, '/api/presets 结构');
+  assert.ok(presets.j.presets.every((/** @type {any} */ p) => p.name && p.label && p.source), '预设条目字段完整');
+  assert.ok(presets.j.presets.some((/** @type {any} */ p) => p.name === 'local-audit'), '内置 local-audit 应列出');
+  ok('config：state/config/models-config/presets 契约（含 v0.3.2 分层超时 + v0.4.0 预设）');
 }
 
 // —— sessions 域 ——

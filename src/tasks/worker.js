@@ -53,6 +53,9 @@ export async function runWorkerTask(id, question, { permission, model, offpeak }
     }
     const provider = await createProvider(cfg, modelName);
     const io = createIO({ quiet: true });
+    // v0.4.0 契约化：后台任务同样挂载 config.tools 声明式工具（幂等）
+    const { mountConfigTools } = await import('../tools/index.js');
+    mountConfigTools(cfg);
     const permissionObj = createPermission(perm, io);
     /** @type {any} */
     let mcpManager = null;

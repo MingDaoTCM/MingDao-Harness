@@ -194,6 +194,13 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   const provider = await getProviderFor(modelName);
   const undoStore = { backups: new Map() };
 
+  // v0.4.0 契约化：挂载 config.tools 声明式第三方工具（幂等，重启生效）
+  {
+    const { mountConfigTools } = await import('../tools/index.js');
+    const mounted = mountConfigTools(cfg);
+    if (mounted.length) console.error(`[MingDao] 🔧 已挂载声明式工具（config.tools）：${mounted.join(', ')}`);
+  }
+
   // MCP：A2 预热——await 连接（6s 超时）；超时本会话冻结工具集（不再中途注入，保护前缀缓存）
   /** @type {any} */
   let mcpManager = null;
@@ -408,7 +415,21 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         sessionMemoryCache.delete(oldest);
       }
     }
-    const systemPrompt = buildSystemPrompt({ workingDir: taskDir, withJournal: body.withJournal === true, projectMemory: projectMemorySnapshot });
+    // v0.4.0 Agent Preset：body.preset 按会话一次选定（新会话或显式传值）；应用工具白名单/参数覆盖，
+    // 系统提示注入预设定制段。预设覆盖优先级：CLI/WebUI 显式 > 预设 > config.json。
+    let chatPreset = /** @type {any} */ (null);
+    let presetBlock = '';
+    let chatCfg = cfg;
+    if (typeof body.preset === 'string' && body.preset) {
+      const { loadPreset, presetConfigOverrides, presetSystemBlock } = await import('../presets.js');
+      chatPreset = loadPreset(taskDir, body.preset);
+      if (chatPreset) {
+        const over = presetConfigOverrides(chatPreset);
+        chatCfg = { ...cfg, ...over, presetName: chatPreset.name };
+        presetBlock = presetSystemBlock(chatPreset);
+      }
+    }
+    const systemPrompt = buildSystemPrompt({ workingDir: taskDir, withJournal: body.withJournal === true, projectMemory: projectMemorySnapshot, presetBlock });
     let messages =
       session.messages?.length && session.messages[0]?.role === 'system'
         ? session.messages
@@ -448,7 +469,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         entry.abortHandler = fn;
       },
     }));
-    const permission = createPermission(cfg.permission ?? 'ask', io);
+    const permission = createPermission(chatCfg.permission ?? 'ask', io);
     let providerNow;
     try {
       // 首次使用引导：未配置密钥时给明确指引，而不是晦涩的 401 原始报错
@@ -471,7 +492,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       io,
       modelName: runModel,
       workingDir: taskDir,
-      cfg,
+      cfg: chatCfg, // v0.4.0：预设覆盖后的配置（工具白名单 presetTools/参数/权限）
       undoStore,
       mcp: mcpFacade,
       // 自动压缩后重写会话文件（否则每次加载历史都会重新触发压缩），并同步落盘游标

@@ -125,6 +125,8 @@ function parseArgs(/** @type {any} */ argv) {
     else if (a === '-v' || a === '--version') opts.version = true;
     else if (a === '-c' || a === '--continue') opts.continueSession = true;
     else if (a === '--journal') opts.journal = true;
+    else if (a === '-p' || a === '--preset') opts.preset = argv[++i];
+    else if (a.startsWith('--preset=')) opts.preset = a.slice(9);
     else if (a === '-r' || a === '--resume') opts.resume = true;
     else if (a === '--init' || a === 'init') opts.init = true;
     else if (a === '-m' || a === '--model') opts.model = argv[++i];
@@ -350,6 +352,30 @@ async function main() {
   // 模型回退链（向导允许跳过模型选择 → cfg.model 可缺省）：参数 > config > 该服务商首个预设模型 > flash
   let modelName = opts.model || cfg.model || /** @type {any} */ (PROVIDERS)[cfg.provider]?.models?.[0] || 'deepseek-v4-flash';
   const io = createIO();
+  const workingDir = process.cwd();
+
+  // v0.4.0 Agent Preset：--preset <名> 应用声明式预设（工具白名单/权限/模型/参数 + 系统提示定制段）。
+  // 预设覆盖优先级：CLI 显式参数 > 预设 > config.json。
+  let activePreset = /** @type {any} */ (null);
+  let presetBlock = '';
+  if (opts.preset) {
+    const { loadPreset, presetConfigOverrides, presetSystemBlock, listPresets } = await import('./presets.js');
+    activePreset = loadPreset(workingDir, opts.preset);
+    if (!activePreset) {
+      const names = listPresets(workingDir).map((/** @type {any} */ p) => p.name).join(', ') || '（无可用预设）';
+      io.print(style(`⚠ 预设 "${opts.preset}" 不存在。可用：${names}`, C.yellow));
+    } else {
+      const over = presetConfigOverrides(activePreset);
+      if (!opts.model && over.model) modelName = over.model;
+      if (over.permission) cfg.permission = over.permission;
+      for (const k of ['temperature', 'maxOutputTokens', 'maxRounds', 'contextBudget', 'presetTools']) {
+        if (over[k] !== undefined) cfg[k] = over[k];
+      }
+      cfg.presetName = activePreset.name;
+      presetBlock = presetSystemBlock(activePreset);
+      io.print(style(`▣ 已应用智能体预设：${activePreset.name}${activePreset.label ? '（' + activePreset.label + '）' : ''}`, C.cyan));
+    }
+  }
 
   const pc0 = resolveProviderConfig(cfg, modelName);
   if (!pc0.apiKey) {
@@ -368,7 +394,12 @@ async function main() {
 
   let provider = await createProvider(cfg, modelName);
   const permission = createPermission(cfg.permission ?? 'ask', io);
-  const workingDir = process.cwd();
+  // v0.4.0 契约化：挂载 config.tools 声明式第三方工具（幂等，重启生效）
+  {
+    const { mountConfigTools } = await import('./tools/index.js');
+    const mounted = mountConfigTools(cfg);
+    if (mounted.length) io.print(style(`🔧 已挂载声明式工具（config.tools）：${mounted.join(', ')}`, C.dim));
+  }
   // 会话级 undo 备份仓：模型切换、子代理均共享，撤销记录不丢失
   const sessionUndoStore = { backups: new Map() };
   // MCP 服务器：后台启动（不阻塞交互），就绪后工具自动出现在后续轮次
@@ -440,7 +471,7 @@ async function main() {
     const turnIo = jsonMode ? createIO({ quiet: true }) : io;
     const session = createSession(home);
     const messages = [
-      { role: 'system', content: buildSystemPrompt({ modelName, workingDir, withJournal }) },
+      { role: 'system', content: buildSystemPrompt({ modelName, workingDir, withJournal, presetBlock }) },
       { role: 'user', content: question },
     ];
     let oneShotPersisted = messages.length;
@@ -528,7 +559,7 @@ async function main() {
 
   // —— 交互式 TUI（Phase C C2：已抽取至 commands/repl.js） ——
   const { runRepl } = await import('./commands/repl.js');
-  await runRepl({ io, cfg, home, pc0, opts, modelName, provider, permission, workingDir, sessionUndoStore, mcpFacade, mcpManager, sessionRef, agent, preset, withJournal, tuiState });
+  await runRepl({ io, cfg, home, pc0, opts, modelName, provider, permission, workingDir, sessionUndoStore, mcpFacade, mcpManager, sessionRef, agent, preset, withJournal, presetBlock, tuiState });
   return;
 
 }

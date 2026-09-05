@@ -57,6 +57,7 @@ header button{white-space:nowrap;flex:none}
 header select{flex:none}
 #sessionSearch{flex:1 1 auto;min-width:70px;max-width:220px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 12px;font-size:13px}
 #modelSel{max-width:170px;min-width:0}
+#presetSel{max-width:140px;min-width:0}
 #permSel{max-width:150px;min-width:0}
 #sessions{max-width:150px;min-width:0}
 #wsSel{max-width:130px;min-width:64px}
@@ -330,6 +331,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
       <option value="readonly">只读</option>
     </select>
     <select id="modelSel" title="切换模型"></select>
+    <select id="presetSel" title="智能体预设：一键切换工具白名单/权限/参数组合（v0.4.0 契约化）"><option value="">预设…</option></select>
     <select id="reasoningSel" title="思考模式（推理等级）：关＝不推理省 token · 低 · 高（默认）· 最高＝最强推理" style="display:none">
       <option value="off">关</option>
       <option value="low">低</option>

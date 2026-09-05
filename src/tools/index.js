@@ -6,6 +6,7 @@ import { runBash } from './bash.js';
 import { runGit } from './git.js';
 import { runFetch } from './fetch.js';
 import { listSkills, loadSkill } from '../skills.js';
+import { spawnSync } from 'node:child_process';
 
 // 只读工具集合的单一来源：permissions.js 引用此导出，新增只读工具时只需改这里
 export const READONLY_TOOLS = new Set(['read', 'glob', 'grep', 'ls', 'skill', 'git', 'fetch']);
@@ -245,6 +246,99 @@ export function toolSchemas() {
   return TOOLS;
 }
 
+// —— 第三方工具注册表（v0.4.0 契约化）：程序化 registerTool 注册的自定义工具 ——
+// 与内置工具同一链路：schema 进 buildToolSchemas（省钱剥描述/只读档/预设白名单全适用）、
+// dispatch 执行、审计/权限由 agent 外层统一处理。注册名不得与内置工具同名。
+const customTools = new Map(); // name -> { schema, run }
+const CUSTOM_TOOL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+
+/**
+ * 注册第三方工具（进程级，重复注册同名会报错——避免静默覆盖）。
+ * @param {{ name: string, description?: string, parameters?: any, run: (args: any, ctx: any) => any | Promise<any> }} tool
+ */
+export function registerTool(/** @type {any} */ tool) {
+  const name = String(tool?.name ?? '').trim();
+  if (!CUSTOM_TOOL_NAME_RE.test(name)) {
+    throw new Error(`自定义工具名非法（${CUSTOM_TOOL_NAME_RE}）：${name}`);
+  }
+  if (TOOLS.some((/** @type {any} */ t) => t.function.name === name) || customTools.has(name)) {
+    throw new Error(`工具 ${name} 已存在（内置或已注册），不能重复注册`);
+  }
+  if (typeof tool?.run !== 'function') {
+    throw new Error(`自定义工具 ${name} 必须提供 run(args, ctx) 函数`);
+  }
+  const parameters =
+    tool.parameters && typeof tool.parameters === 'object' ? tool.parameters : { type: 'object', properties: {} };
+  const entry = {
+    schema: {
+      type: 'function',
+      function: { name, description: String(tool.description || ''), parameters },
+    },
+    run: tool.run,
+  };
+  customTools.set(name, entry);
+  return entry.schema;
+}
+
+/** 已注册的第三方工具名列表。 */
+export function listRegisteredTools() {
+  return [...customTools.keys()];
+}
+
+/** 第三方工具 schema 列表（与内置 TOOLS 合并进 buildToolSchemas）。 */
+function customToolSchemas() {
+  return [...customTools.values()].map((/** @type {any} */ t) => t.schema);
+}
+
+// —— config.tools 声明式工具挂载（v0.4.0 契约化）——
+// config.json: { "tools": [ { "name": "ping", "description": "...", "parameters": {...}, "command": "..." } ] }
+// command 经 /bin/bash -lc 执行；参数以 MINGDAO_TOOL_ARGS（JSON）环境变量传入——参数不经字符串拼接进
+// shell（防注入），由命令自行解析；执行受 agent 权限引擎门控（与 bash 同权重，权限提示含参数）。
+// 进程级挂载（幂等：同名已挂载则跳过），改 config.tools 需重启生效（与 MCP 预设一致）。
+const mountedConfigTools = new Set();
+
+/**
+ * 把 config.tools 声明式工具挂载进注册表（幂等，可在启动路径重复调用）。
+ * 返回本次新挂载的工具名数组。
+ */
+export function mountConfigTools(/** @type {any} */ cfg) {
+  const entries = Array.isArray(cfg?.tools) ? cfg.tools : [];
+  const mounted = [];
+  for (const e of entries) {
+    const name = String(e?.name ?? '').trim();
+    if (!name || mountedConfigTools.has(name)) continue;
+    if (typeof e?.command !== 'string' || !e.command.trim()) continue; // 缺 command 的条目跳过
+    registerTool({
+      name,
+      description: String(e.description || ''),
+      parameters: e.parameters,
+      run: (/** @type {any} */ args, /** @type {any} */ ctx) => {
+        const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/bash';
+        const shellArgs = process.platform === 'win32' ? ['/d', '/s', '/c', e.command] : ['-lc', e.command];
+        const r = spawnSync(shell, shellArgs, {
+          cwd: ctx.cwd,
+          env: { ...process.env, MINGDAO_TOOL_ARGS: JSON.stringify(args ?? {}) },
+          timeout: Math.min(Number(e.timeout) > 0 ? Number(e.timeout) : 120, 600) * 1000,
+          maxBuffer: 2 * 1024 * 1024,
+        });
+        const out = String(r.stdout || '');
+        const err = String(r.stderr || '');
+        const capped = out.length > 20000 ? out.slice(0, 20000) + `\n…[输出过长已截断，共 ${out.length} 字]` : out;
+        return {
+          ok: r.error ? false : (r.status ?? 0) === 0,
+          exitCode: r.error ? null : (r.status ?? null),
+          output: (capped || '（无输出）').trim(),
+          ...(err.trim() ? { stderr: err.trim().slice(0, 4000) } : {}),
+          ...(r.error ? { error: `命令执行失败：${String(r.error?.message || r.error)}` } : {}),
+        };
+      },
+    });
+    mountedConfigTools.add(name);
+    mounted.push(name);
+  }
+  return mounted;
+}
+
 /**
  * 递归去除对象中的全部 description 键（保留类型/required/enum 等结构性字段）。
  * @param {any} obj
@@ -283,7 +377,7 @@ export function buildToolSchemas(usedNames, extra = []) {
       }
       return t;
     });
-  return [...strip(TOOLS), ...strip(extra)];
+  return [...strip(TOOLS), ...strip(customToolSchemas()), ...strip(extra)];
 }
 
 function runSkill(/** @type {any} */ args, /** @type {any} */ ctx) {
@@ -333,6 +427,15 @@ function runTodo(/** @type {any} */ args, /** @type {any} */ ctx) {
 }
 
 export async function dispatch(/** @type {any} */ name, /** @type {any} */ args, /** @type {any} */ ctx) {
+  const custom = customTools.get(name);
+  if (custom) {
+    try {
+      const r = await custom.run(args, ctx);
+      return r && typeof r === 'object' ? r : { ok: true, output: String(r ?? '') };
+    } catch (/** @type {any} */ err) {
+      return { ok: false, error: `自定义工具 ${name} 执行失败：${String(err?.message || err)}` };
+    }
+  }
   switch (name) {
     case 'read':
       return read(args, ctx);

@@ -30,8 +30,8 @@ function loadFile(/** @type {any} */ p, /** @type {any} */ cap) {
   }
 }
 
-/** @param {{ workingDir: any, withJournal?: boolean, projectMemory?: string, [key: string]: any }} opts */
-export function buildSystemPrompt({ workingDir, withJournal = false, projectMemory }) {
+/** @param {{ workingDir: any, withJournal?: boolean, projectMemory?: string, presetBlock?: string, [key: string]: any }} opts */
+export function buildSystemPrompt({ workingDir, withJournal = false, projectMemory, presetBlock }) {
   // 前缀字节稳定性（评估 P1-1/P1-2，四份评估一致的最高价值项）：
   // 系统提示不含「当前模型」「当前日期」等易变字段——DeepSeek 上下文缓存按前缀字节匹配，
   // 路由 pro⇄flash 翻转或跨天会改变前缀 → 整段历史按未命中价重计（命中价的 30 倍）。
@@ -39,6 +39,9 @@ export function buildSystemPrompt({ workingDir, withJournal = false, projectMemo
   let prompt = `${BASE}
 
 当前工作目录：${workingDir}`;
+
+  // v0.4.0 Agent Preset：预设定制的角色/规则段（会话内恒定，前缀稳定）
+  if (presetBlock) prompt += presetBlock;
 
   // 用户级记忆（~/.mingdao/AGENTS.md，/memory add 手动追加 + 会话结束自动提炼）
   const memory = loadFile(path.join(mingdaoHome(), 'AGENTS.md'), 8000);
