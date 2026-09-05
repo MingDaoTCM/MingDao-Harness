@@ -629,6 +629,10 @@ async function init(){
     $('#sbxHint').textContent=j.sandboxSupported?'':'当前环境未检测到 bubblewrap，readonly/safe 将自动降级为 off';
     $('#routeChk').checked=Boolean(j.routing);
     $('#budgetInput').value=j.contextBudget||128000;
+    const to=j.timeout||{};
+    $('#toFirstToken').value=to.firstTokenMs?Math.round(to.firstTokenMs/1000):'';
+    $('#toStreamIdle').value=to.streamIdleMs?Math.round(to.streamIdleMs/1000):'';
+    $('#toTotal').value=to.totalMs?Math.round(to.totalMs/1000):'';
     $('#autoStartChk').checked=Boolean(j.autostart);
     $('#notifyChk').checked=j.notify!==false;
     applyReasoningUI(j.reasoning);
@@ -928,9 +932,9 @@ $('#cmAdd').onclick=async ()=>{
   const name=$('#cmName').value.trim();
   const url=$('#cmUrl').value.trim();
   if(!name||!url){ uiAlert('模型名与 API 地址必填'); return; }
-  const r=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'addCustom',name,label:$('#cmLabel').value.trim(),baseUrl:url,key:$('#cmKey').value})});
+  const r=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'addCustom',name,label:$('#cmLabel').value.trim(),baseUrl:url,key:$('#cmKey').value,contextWindow:Number($('#cmCtx').value)||undefined,maxOutputTokens:Number($('#cmMaxOut').value)||undefined})});
   const j=await r.json().catch(()=>({error:'请求失败'}));
-  if(j.ok){ $('#cmName').value=''; $('#cmLabel').value=''; $('#cmUrl').value=''; $('#cmKey').value=''; refreshModelsCfg(); reloadModels(); } else uiAlert(j.error||'添加失败');
+  if(j.ok){ $('#cmName').value=''; $('#cmLabel').value=''; $('#cmUrl').value=''; $('#cmKey').value=''; $('#cmCtx').value=''; $('#cmMaxOut').value=''; refreshModelsCfg(); reloadModels(); } else uiAlert(j.error||'添加失败');
 };
 $('#baseUrlSave').onclick=async ()=>{
   const r=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setBaseUrl',baseUrl:$('#baseUrlOverride').value.trim()})});
@@ -1021,7 +1025,7 @@ async function refreshSyncConflicts(){
     list.appendChild(div);
   }
 }
-$('#cfgSave').onclick=()=>{ applyConfig({sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}); $('#cfgModal').style.display='none'; };
+$('#cfgSave').onclick=()=>{ const to={}; const ft=Number($('#toFirstToken').value), si=Number($('#toStreamIdle').value), tt=Number($('#toTotal').value); if(ft>0) to.firstTokenMs=Math.round(ft*1000); if(si>0) to.streamIdleMs=Math.round(si*1000); if(tt>0) to.totalMs=Math.round(tt*1000); const payload={sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}; if(Object.keys(to).length) payload.timeout=to; applyConfig(payload); $('#cfgModal').style.display='none'; };
 async function applyConfig(payload, revertTarget){
   const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const j=await r.json().catch(()=>({error:'请求失败'}));

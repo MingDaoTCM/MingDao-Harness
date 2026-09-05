@@ -65,7 +65,9 @@ export async function compactConversation(/** @type {any} */ { messages, budget,
     total += t;
   }
   const trigger = Number.isFinite(Number(triggerRatio)) ? Number(triggerRatio) : DEFAULT_TRIGGER_RATIO;
-  if (total <= budget * trigger) return null;
+  // force（v0.3.2 边缘检测）：逼近窗口时即便启发式计数低估（total 未达触发线）也强制压缩——
+  // 非 DeepSeek 模型启发式计数误差可达 ±2 倍，等它越过触发线时真实 prompt 可能已到窗口边缘。
+  if (total <= budget * trigger && !force) return null;
   // 保留边界：保留段（boundary..end）≤ budget×TARGET_RATIO（system 恒保留）
   let keepTokens = sizes[0] ?? 0;
   let boundary = messages.length;

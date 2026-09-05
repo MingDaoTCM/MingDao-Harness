@@ -551,7 +551,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         const { messageTokens } = await import('../context.js');
         const counter = makeTokenCounter(runModel);
         const used = messages.reduce((/** @type {any} */ sum, /** @type {any} */ m) => sum + messageTokens(m, counter), 0);
-        budgetInfo = { used, total: cfg.contextBudget || modelPreset(runModel)?.budgetTokens || 128000 };
+        // v0.3.2：展示用 total 与 Agent 实际预算同源（safeBudget 按窗口推导），避免「显示 128k 实际 98k」的误导
+        const { resolveModelCaps, safeBudget } = await import('../model-caps.js');
+        budgetInfo = { used, total: safeBudget(cfg, resolveModelCaps(cfg, runModel)) };
       } catch {}
       send({
         type: 'done',

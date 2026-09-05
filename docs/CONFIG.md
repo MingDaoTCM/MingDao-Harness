@@ -23,7 +23,7 @@
 | `baseUrl` | OpenAI 兼容 API 地址（可覆盖内置服务商默认值） |
 | `permission` | `ask`（默认）/ `auto` / `readonly`，或规则对象（见下） |
 | `sandbox` | `off` / `readonly` / `safe`（Linux + bubblewrap；其余平台自动降级） |
-| `contextBudget` | 上下文预算 tokens（模型预设默认值：flash 128k / pro 200k） |
+| `contextBudget` | 期望的上下文预算 tokens；实际预算按模型窗口自动收紧（见「本地模型自适应」） |
 
 可选字段：`temperature`、`maxOutputTokens`、`includeUsage`（流式请求 usage 统计，个别网关不支持
 `stream_options` 时设 `false`）、`autoTitle`（自动生成会话标题，默认开）、`notify`（任务桌面通知，默认开）、
@@ -221,7 +221,8 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
 {
   "customModels": {
     "my-gpt4": { "label": "我的 GPT-4 网关", "baseUrl": "https://gateway.example.com/v1" },
-    "my-ds": { "label": "自建 DeepSeek 网关", "baseUrl": "https://gw.example.com/v1", "tokenizer": "deepseek" }
+    "my-ds": { "label": "自建 DeepSeek 网关", "baseUrl": "https://gw.example.com/v1", "tokenizer": "deepseek" },
+    "local-qwen": { "label": "本机 Qwen", "baseUrl": "http://127.0.0.1:8081/v1", "contextWindow": 131072, "maxOutputTokens": 8192 }
   }
 }
 ```
@@ -230,6 +231,27 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
 
 自定义端点若跑的是 DeepSeek 系模型（模型名不以 `deepseek` 开头时默认走启发式估算、预算误差
 可达 ±2 倍），加 `"tokenizer": "deepseek"` 即按官方词表精确计数：
+
+### 本地模型自适应（v0.3.2）
+
+本机/内网部署的推理框架（baseUrl 为 `127.0.0.1`/`localhost`/私网 IP）自动按「资源有限」对待，
+避免长任务把上下文撑到窗口边缘后 prefill 指数恶化、被客户端超时掐断（典型：127k 上下文首 token
+需 200s+，客户端 3 分钟无响应断开 → network error）。机制：
+
+- **上下文窗口感知**：`customModels.<name>.contextWindow` 显式声明模型真实窗口；未声明时本地
+  模型兜底 **32k**、远程兜底 **128k**。
+- **安全预算**：`contextBudget` 会被自动收紧到 `min(contextBudget, 窗口×75%, 窗口−maxOutput−余量)`，
+  prompt 永不逼近窗口边缘（75% 舒适区以上 prefill 时间陡增）。
+- **边缘检测**：模型每轮上报真实 `prompt_tokens`，≥ 窗口 85% 时下一轮强制压缩历史（即使启发式
+  计数低估也强制触发）。
+- **工具输出截断**：单条工具结果按 `窗口/16` 封顶（最少 2000 字），小窗口不再整条回灌大段代码。
+- **分层超时**：`timeout.firstTokenMs`（首 token 等待，本地默认 600s / 远程 300s）、
+  `timeout.streamIdleMs`（流式空闲，默认 120s）、`timeout.totalMs`（总量，本地 30min / 远程 10min），
+  留空则自适应；本地慢 prefill 不再被一刀切超时误杀。
+
+```json
+{ "timeout": { "firstTokenMs": 600000, "streamIdleMs": 120000, "totalMs": 1800000 } }
+```
 
 ## 自定义 Provider 模块（非 OpenAI 兼容协议）
 

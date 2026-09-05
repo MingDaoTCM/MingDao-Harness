@@ -50,6 +50,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       routing: cfg.routing?.enabled ? cfg.routing : null,
       reasoning,
       contextBudget: cfg.contextBudget || 128000,
+      timeout: cfg.timeout || null, // v0.3.2：分层超时（firstTokenMs/streamIdleMs/totalMs）
       pricingAsOf: PRICE_DATA_AS_OF,
       autostart: autostartStatus(),
       notify: cfg.notify !== false,
@@ -112,6 +113,15 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       next.contextBudget = n;
       cfg.contextBudget = n;
     }
+    // v0.3.2 超时分层：firstTokenMs（首 token 等待）/ streamIdleMs（流式空闲）/ totalMs（总量）
+    if (body.timeout !== undefined && body.timeout && typeof body.timeout === 'object') {
+      cfg.timeout = cfg.timeout || {};
+      for (const k of ['firstTokenMs', 'streamIdleMs', 'totalMs']) {
+        const v = Number(body.timeout[k]);
+        if (Number.isFinite(v) && v > 0) cfg.timeout[k] = Math.round(v);
+        else if (body.timeout[k] === null || body.timeout[k] === '') delete cfg.timeout[k];
+      }
+    }
     if (body.reasoningEffort !== undefined) {
       const re = String(body.reasoningEffort);
       if (!['off', 'low', 'high', 'max'].includes(re)) {
@@ -165,6 +175,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         baseUrl: cm.baseUrl || '',
         envKey: cm.envKey || null,
         vision: Boolean(cm.vision),
+        contextWindow: Number(cm.contextWindow) > 0 ? Number(cm.contextWindow) : null,
+        maxOutputTokens: Number(cm.maxOutputTokens) > 0 ? Number(cm.maxOutputTokens) : null,
         keyState: stored ? 'stored' : 'none',
         keyMasked: stored ? maskKey(stored) : null,
       };
@@ -232,11 +244,18 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         return json(res, 400, { error: `自定义模型 ${name} 已存在（可修改）` });
       }
       cfg.customModels = cfg.customModels || {};
+      // 修改时保留未提交字段（tokenizer/contextWindow/maxOutputTokens/vision）——
+      // 前端「修改」只发 baseUrl+label，整体替换会丢这些声明，导致本地模型窗口回退兜底
+      const prev = action === 'updateCustom' ? (cfg.customModels[name] || {}) : {};
       cfg.customModels[name] = {
         label,
         baseUrl,
-        envKey: String(body.envKey || '').trim() || undefined,
-        vision: body.vision === true || body.vision === 'on' ? true : undefined,
+        envKey: String(body.envKey || '').trim() || prev.envKey || undefined,
+        vision: body.vision === true || body.vision === 'on' ? true : prev.vision === true ? true : undefined,
+        ...(prev.tokenizer ? { tokenizer: prev.tokenizer } : {}),
+        // v0.3.2 本地模型自适应：显式声明上下文窗口/最大输出，预算据此推导（不撑爆窗口）
+        ...(Number(body.contextWindow) > 0 ? { contextWindow: Math.round(Number(body.contextWindow)) } : (prev.contextWindow ? { contextWindow: prev.contextWindow } : {})),
+        ...(Number(body.maxOutputTokens) > 0 ? { maxOutputTokens: Math.round(Number(body.maxOutputTokens)) } : (prev.maxOutputTokens ? { maxOutputTokens: prev.maxOutputTokens } : {})),
       };
       if (String(body.key || '').trim()) setStoredKey(`custom:${name}`, String(body.key).trim());
       saveConfig(cfg);

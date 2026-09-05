@@ -6,6 +6,7 @@ import { trimMessages, clampText, messageTokens, approxTokens } from './context.
 import { compactConversation } from './compact.js';
 import { buildToolSchemas, dispatch } from './tools/index.js';
 import { modelPreset } from './models.js';
+import { resolveModelCaps, safeBudget, EDGE_RATIO } from './model-caps.js';
 import { makeTokenCounter } from './tokenizer.js';
 import { createHooks } from './hooks.js';
 import { createIO, style, C } from './ui.js';
@@ -29,8 +30,17 @@ const SUBAGENT_MAX_STEPS = 24;
  */
 export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact, sessionRef }) {
   const preset = modelPreset(modelName) || {};
-  const budget = cfg.contextBudget || preset.budgetTokens || 128000;
-  const maxOutput = cfg.maxOutputTokens || preset.maxOutputTokens || 8192;
+  // v0.3.2 模型自适应：预算按模型上下文窗口推导（留输出余量 + 75% 舒适区），
+  // 自定义/本地小模型不再套 128000 默认撑爆窗口；prompt 永不逼近窗口边缘（prefill 不爆炸）。
+  const caps = resolveModelCaps(cfg, modelName);
+  // safeBudget 恒用：即使用户显式 contextBudget 也套「窗口−输出−余量」上限与 75% 舒适区，
+  // 防显式值撑爆窗口（本地模型窗口可能只有 32k/131k，用户却留了默认 128000）。
+  const budget = safeBudget(cfg, caps);
+  const maxOutput = cfg.maxOutputTokens || caps.maxOutputTokens;
+  // v0.3.2 工具输出截断自适应：窗口越小截得越狠（单条工具结果按窗口 1/16 封顶，最少 2000 字），
+  // 但绝不超过旧默认 20000（大窗口模型如 1M 不因公式放大回灌、不推高成本）。
+  // 本地小模型（32k 窗口 → 2k 字）不再把大段代码/日志整条回灌，省 prompt 且不撑爆窗口。
+  const toolResultCap = Math.min(20000, Math.max(2000, Math.floor(caps.contextWindow / 16)));
   const temperature = cfg.temperature ?? preset.temperature ?? 0.6;
   const reasoningEffort = cfg.reasoningByModel?.[modelName] ?? cfg.reasoningEffort ?? preset.reasoningEffort?.default ?? undefined;
   const hooks = createHooks(cfg.hooks, workingDir);
@@ -152,6 +162,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     let aborted = false;
     let emptyRounds = 0; // 连续空/截断输出计数（防止无限续写）
     let currentAc = /** @type {any} */ (null);
+    // v0.3.2 边缘检测状态：模型上报 prompt_tokens 逼近窗口 → 下一轮强制压缩（见下方 compactConversation force）
+    let windowPressure = false;
+    let pressureWarned = false;
     // 省钱 B4（护栏降级）：action='downgrade' 超限后本回合切换到便宜模型继续执行；
     // activeModel 是本回合实际使用的模型（分账/记录归属它），downgraded 保证只提示一次。
     let activeModel = modelName;
@@ -201,6 +214,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             provider,
             executorModel: subagentModel(cfg, modelName),
             triggerRatio: cfg.compactTrigger, // 可配置触发线（默认 80%）
+            force: windowPressure, // v0.3.2：逼近窗口时强制压缩（忽略最小阈值门槛）
           });
           if (compacted) {
             messages.splice(0, messages.length, ...compacted.messages);
@@ -368,6 +382,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         if (Number.isFinite(res.usage.prompt_cache_miss_tokens)) {
           usage.prompt_cache_miss_tokens = (usage.prompt_cache_miss_tokens || 0) + res.usage.prompt_cache_miss_tokens;
         }
+        // v0.3.2 边缘检测：模型上报的真实 prompt_tokens（含缓存命中）逼近窗口 85% 即标记——
+        // 下一轮强制激进压缩（force），不让 prompt 逼近窗口边缘导致 prefill 指数恶化。
+        const realPrompt = Number(res.usage.prompt_tokens);
+        if (Number.isFinite(realPrompt) && realPrompt > 0 && realPrompt >= caps.contextWindow * EDGE_RATIO) {
+          windowPressure = true;
+          if (!pressureWarned) {
+            pressureWarned = true;
+            io.print(style(`⚠ 上下文已逼近模型窗口（${realPrompt}/${caps.contextWindow}，≥${Math.round(EDGE_RATIO * 100)}%），下轮将强制压缩历史防 prefill 恶化`, C.yellow));
+          }
+        }
       }
 
       if (res.toolCalls?.length) {
@@ -529,7 +553,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           }
           const text = typeof result === 'string' ? result : JSON.stringify(result); // 紧凑 JSON（评估 B3）：嵌套结果省 10-20% 回填 token，且下轮按 prompt 重复计费
           const prefix = prep.cached ? '（与同回合相同调用结果一致，已复用）\n' : '';
-          messages.push({ role: 'tool', tool_call_id: prep.tc.id, content: prefix + clampText(text) });
+          messages.push({ role: 'tool', tool_call_id: prep.tc.id, content: prefix + clampText(text, toolResultCap) });
         }
 
         let i = 0;

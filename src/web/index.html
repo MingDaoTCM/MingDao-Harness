@@ -378,6 +378,11 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
       <input id="cmUrl" placeholder="API 地址 https://…/v1" style="flex:1.4;min-width:170px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
       <input id="cmKey" type="password" placeholder="API Key（可选）" style="flex:1;min-width:120px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
     </div>
+    <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap">
+      <input id="cmCtx" type="number" placeholder="上下文窗口 tokens（本地模型建议填，如 131072）" style="flex:1.6;min-width:180px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+      <input id="cmMaxOut" type="number" placeholder="最大输出 tokens（可选，如 8192）" style="flex:1;min-width:120px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+    </div>
+    <div class="cfg-hint">本地部署模型（127.0.0.1/localhost）：填「上下文窗口」后预算自动收紧到窗口 75% 以内并留输出余量，长任务不再撑爆窗口。</div>
     <div class="row" style="justify-content:flex-start"><button id="cmAdd">＋ 添加自定义模型</button></div>
     <div class="cfg-row" style="display:flex;gap:6px"><input id="baseUrlOverride" placeholder="API 地址覆盖（可选，覆盖当前服务商地址）" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"><button id="baseUrlSave">保存</button></div>
       </section>
@@ -418,6 +423,12 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     </div>
     <div class="cfg-row"><label><input type="checkbox" id="routeChk"> 自动模型路由（规划→pro / 执行→flash）</label></div>
     <div class="cfg-row"><label>上下文预算 tokens <input type="number" id="budgetInput" min="1000" step="1000"></label></div>
+    <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end">
+      <label style="font-size:12px">首 token 等待（秒）<input type="number" id="toFirstToken" min="0" step="10" placeholder="自动"></label>
+      <label style="font-size:12px">流式空闲（秒）<input type="number" id="toStreamIdle" min="0" step="10" placeholder="自动"></label>
+      <label style="font-size:12px">总量（秒）<input type="number" id="toTotal" min="0" step="10" placeholder="自动"></label>
+    </div>
+    <div class="cfg-hint">留空 = 自适应：本地模型自动给更长首 token 等待（慢 prefill 不被误杀）。仅在默认值仍不够/过松时手填。</div>
     <div class="cfg-row"><label><input type="checkbox" id="autoStartChk"> 开机自启（登录后自动启动服务器）</label></div>
     <div class="cfg-row"><label><input type="checkbox" id="notifyChk"> 后台任务完成/失败时桌面通知</label></div>
       </section>

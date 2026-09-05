@@ -6,7 +6,7 @@
  * @typedef {Error & { status?: number, headers?: Headers }} ApiError
  */
 
-export async function chat(/** @type {any} */ { baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta, includeUsage = true, responseFormat, reasoningEffort }) {
+export async function chat(/** @type {any} */ { baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta, onActivity, includeUsage = true, responseFormat, reasoningEffort }) {
   const url = String(baseUrl).replace(/\/+$/, '') + '/chat/completions';
   const payload = /** @type {Record<string, any>} */ ({ model, messages });
   if (temperature != null) payload.temperature = temperature;
@@ -62,7 +62,7 @@ export async function chat(/** @type {any} */ { baseUrl, apiKey, model, messages
     if (!json) throw new Error(`[${model}] 响应解析失败。`);
     return parseNonStream(json, onDelta);
   }
-  return parseStream(res.body, onDelta);
+  return parseStream(res.body, onDelta, onActivity);
 }
 
 export function parseNonStream(/** @type {any} */ json, /** @type {any} */ onDelta) {
@@ -81,7 +81,9 @@ export function parseNonStream(/** @type {any} */ json, /** @type {any} */ onDel
 }
 
 // 解析 SSE 流：处理跨 chunk 断行、增量 content / reasoning_content / tool_calls。
-export async function parseStream(/** @type {any} */ body, /** @type {any} */ onDelta) {
+// onActivity：每收到一个有效 SSE 数据帧即回调（含 usage-only 帧），供上层做「首 token 等待/流式空闲」超时仲裁——
+// 长上下文 prefill 时服务端可能 200s+ 无正文，靠「有帧到达」而非「有正文」判定存活，避免误杀慢 prefill。
+export async function parseStream(/** @type {any} */ body, /** @type {any} */ onDelta, /** @type {any} */ onActivity) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
   let buf = '';
@@ -151,6 +153,9 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
     while ((nl = buf.indexOf('\n')) >= 0) {
       const line = buf.slice(0, nl);
       buf = buf.slice(nl + 1);
+      // 有帧到达即视为「活着」：prefill 阶段服务端可能先发 usage-only/空帧，正文迟迟不来，
+      // 靠帧到达刷新上层流式空闲计时器（首 token 等待则仍由「无任何帧」触发）
+      if (line.trim()) onActivity?.();
       if (handleLine(line)) break;
     }
   }

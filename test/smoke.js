@@ -873,6 +873,46 @@ const ctx = { cwd: tmp };
   ok('provider：外部 signal（Ctrl+C）可中断挂起的请求');
 }
 
+// ---------- 14a. Provider 分层超时（v0.3.2 本地模型自适应） ----------
+{
+  const http = await import('node:http');
+  const { createProvider } = await import(pathToFileURL(path.join(srcDir, 'providers/index.js')).href);
+  // 场景 1：服务端先挂起（无任何帧）→ 触发「首 token 等待」而非总量超时
+  const srv1 = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    // 不写任何数据，挂起（模拟慢 prefill）
+    req.on('data', () => {});
+  });
+  await new Promise((r) => srv1.listen(0, '127.0.0.1', r));
+  const p1 = await createProvider(
+    { provider: 'custom', model: 'm', baseUrl: `http://127.0.0.1:${srv1.address().port}/v1`, timeout: { firstTokenMs: 600, streamIdleMs: 100000, totalMs: 100000 } },
+    'm',
+    { retries: 0 }
+  );
+  const e1 = await p1.chat({ model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [], onDelta() {} }).then(() => assert.fail('不应成功'), (e) => e);
+  assert.ok(/首 token 等待超限/.test(e1?.message || ''), `挂起无帧应报首 token 超时（实际：${e1?.message}）`);
+  srv1.close();
+
+  // 场景 2：首帧到达后停止 → 触发「流式空闲」而非首 token
+  const srv2 = http.createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    res.write('data: {}\n\n');
+    // 首帧后不再写，挂起
+    req.on('data', () => {});
+  });
+  await new Promise((r) => srv2.listen(0, '127.0.0.1', r));
+  const p2 = await createProvider(
+    { provider: 'custom', model: 'm', baseUrl: `http://127.0.0.1:${srv2.address().port}/v1`, timeout: { firstTokenMs: 100000, streamIdleMs: 600, totalMs: 100000 } },
+    'm',
+    { retries: 0 }
+  );
+  const e2 = await p2.chat({ model: 'm', messages: [{ role: 'user', content: 'hi' }], tools: [], onDelta() {} }).then(() => assert.fail('不应成功'), (e) => e);
+  assert.ok(/流式响应空闲超限/.test(e2?.message || ''), `首帧后停应报流式空闲超时（实际：${e2?.message}）`);
+  srv2.close();
+
+  ok('provider：分层超时（首 token 等待 vs 流式空闲，本地慢 prefill 不被误杀）');
+}
+
 // ---------- 14. 精确 tokenizer ----------
 {
   const { countTokens, heuristicTokens } = await import(pathToFileURL(path.join(srcDir, 'tokenizer.js')).href);
@@ -921,6 +961,50 @@ const ctx = { cwd: tmp };
   if (prevCfg === null) fs.rmSync(cfgFile, { force: true });
   else fs.writeFileSync(cfgFile, prevCfg);
   ok('tokenizer：官方黄金值 12 组 / 长文本 / 回退启发式 / 特殊 token / CJK 校准 / 缓存 / 自定义端点映射');
+}
+
+// ---------- 14b. 模型能力解析与安全预算（v0.3.2 本地模型自适应） ----------
+{
+  const { resolveModelCaps, safeBudget, isLocalBaseUrl, COMFORT_RATIO, OUTPUT_HEADROOM } = await import(pathToFileURL(path.join(srcDir, 'model-caps.js')).href);
+
+  // 本地端点判定
+  assert.equal(isLocalBaseUrl('http://127.0.0.1:8081/v1'), true, '127.0.0.1 应判本地');
+  assert.equal(isLocalBaseUrl('http://localhost:11434'), true, 'localhost 应判本地');
+  assert.equal(isLocalBaseUrl('http://192.168.1.5:8081'), true, '192.168 内网应判本地');
+  assert.equal(isLocalBaseUrl('http://10.0.0.3:8081'), true, '10.x 内网应判本地');
+  assert.equal(isLocalBaseUrl('https://api.deepseek.com/v1'), false, '公网域名应判远程');
+  assert.equal(isLocalBaseUrl('not-a-url'), false, '非法 URL 应判远程（容错）');
+
+  // 内置预设：pro 1M 窗口，预算用 preset.budgetTokens（200k），不被舒适区误伤
+  const capsPro = resolveModelCaps({}, 'deepseek-v4-pro');
+  assert.equal(capsPro.contextWindow, 1000000, 'deepseek-v4-pro 窗口 1M');
+  assert.equal(capsPro.isLocal, false, 'deepseek 远程');
+  assert.equal(safeBudget({}, capsPro), 200000, 'pro 用 preset 预算 200k');
+
+  // 自定义本地模型（诊断场景：mtplx 131k 窗口，未显式声明 contextWindow → 兜底 32k）
+  const cfgLocal = { customModels: { 'local-qwen': { label: 'x', baseUrl: 'http://127.0.0.1:8081/v1' } } };
+  const capsLocal = resolveModelCaps(cfgLocal, 'local-qwen');
+  assert.equal(capsLocal.isLocal, true, '本地模型应判本地');
+  assert.equal(capsLocal.contextWindow, 32768, '未知本地模型兜底 32k 窗口');
+  // 默认 contextBudget=128000 被舒适区/窗口上限压到 75% 以内
+  const budgetLocal = safeBudget({ contextBudget: 128000 }, capsLocal);
+  assert.ok(budgetLocal <= 32768 * COMFORT_RATIO, '本地小窗口预算不越舒适区');
+  assert.ok(budgetLocal <= 32768 - capsLocal.maxOutputTokens - OUTPUT_HEADROOM, '预算给输出留余量');
+
+  // 自定义本地模型显式声明 131072 窗口（诊断真实值）
+  const cfg131 = { customModels: { 'local-qwen': { label: 'x', baseUrl: 'http://127.0.0.1:8081/v1', contextWindow: 131072, maxOutputTokens: 8192 } } };
+  const caps131 = resolveModelCaps(cfg131, 'local-qwen');
+  assert.equal(caps131.contextWindow, 131072, '显式声明窗口生效');
+  const budget131 = safeBudget({ contextBudget: 128000 }, caps131);
+  assert.ok(budget131 <= 131072 * COMFORT_RATIO, '131k 窗口预算 ≤ 75% 舒适区（prefill 不爆炸）');
+  assert.ok(budget131 <= 131072 - 8192 - OUTPUT_HEADROOM, '131k 预算给 8192 输出 + 余量');
+
+  // 自定义远程模型（未声明窗口 → 兜底 128k）
+  const capsRemote = resolveModelCaps({ customModels: { 'gw': { label: 'x', baseUrl: 'https://gateway.example.com/v1' } } }, 'gw');
+  assert.equal(capsRemote.isLocal, false, '公网自定义模型应判远程');
+  assert.equal(capsRemote.contextWindow, 128000, '未知远程模型兜底 128k');
+
+  ok('model-caps：本地/远程判定 / 窗口兜底与显式声明 / 舒适区+输出余量预算推导');
 }
 
 // ---------- 15. MCP 客户端 ----------
