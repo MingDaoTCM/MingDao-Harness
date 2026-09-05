@@ -86,7 +86,16 @@ const post = async (p, body, opts) => {
   assert.equal(badCustom.status, 400, '非法自定义模型名应 400');
   const badAction = await post('/api/models-config', { action: 'nope' });
   assert.equal(badAction.status, 400, '未知操作应 400');
-  ok('config：state/config/models-config 契约');
+  // v0.3.2：分层超时 round-trip（firstTokenMs/streamIdleMs/totalMs 秒→毫秒落盘，GET 回读）
+  const setTo = await post('/api/config', { timeout: { firstTokenMs: 900000, streamIdleMs: 60000, totalMs: 3600000 } });
+  assert.equal(setTo.status, 200, '设置分层超时应 200');
+  const toState = await get('/api/state');
+  assert.ok(toState.j.timeout && toState.j.timeout.firstTokenMs === 900000 && toState.j.timeout.streamIdleMs === 60000 && toState.j.timeout.totalMs === 3600000, '分层超时应落盘并回读');
+  // 清理：删除超时覆盖，恢复自适应默认
+  await post('/api/config', { timeout: { firstTokenMs: null, streamIdleMs: null, totalMs: null } });
+  const toCleared = await get('/api/state');
+  assert.ok(!(toCleared.j.timeout && Object.keys(toCleared.j.timeout).length), '超时覆盖删除后回退自适应');
+  ok('config：state/config/models-config 契约（含 v0.3.2 分层超时 round-trip）');
 }
 
 // —— sessions 域 ——

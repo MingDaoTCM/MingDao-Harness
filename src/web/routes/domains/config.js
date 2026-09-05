@@ -121,6 +121,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         if (Number.isFinite(v) && v > 0) cfg.timeout[k] = Math.round(v);
         else if (body.timeout[k] === null || body.timeout[k] === '') delete cfg.timeout[k];
       }
+      // 超时在 createProvider 时按 cfg 固化进实例，改后清缓存让新值即时生效（否则要重启）
+      providerCache.clear();
     }
     if (body.reasoningEffort !== undefined) {
       const re = String(body.reasoningEffort);
@@ -259,6 +261,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       };
       if (String(body.key || '').trim()) setStoredKey(`custom:${name}`, String(body.key).trim());
       saveConfig(cfg);
+      // baseUrl 改动影响 isLocal 判定 → 超时档位变化；清缓存让新超时/新端点即时生效
+      providerCache.clear();
       return json(res, 200, { ok: true, name });
     }
     if (action === 'removeCustom') {
@@ -271,6 +275,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         cfg.model = state.modelName;
       }
       saveConfig(cfg);
+      providerCache.clear();
       return json(res, 200, { ok: true, name, model: state.modelName });
     }
     // 质检（自定义模型连通性）：发起一次最小对话验证 baseUrl+Key 可用
