@@ -602,6 +602,29 @@ let base = await startWeb(work1);
   ok('带上文开关：默认全新上下文 / withJournal 显式注入');
 }
 
+// ---------- 15b. v0.4.0 Agent Preset：body.preset 应用白名单 + 系统提示段（真实 HTTP 路径） ----------
+{
+  // 项目级预设放 work1 的 .mingdao/presets/（startWeb 用 work1 作 cwd）
+  fs.mkdirSync(path.join(work1, '.mingdao', 'presets'), { recursive: true });
+  fs.writeFileSync(
+    path.join(work1, '.mingdao', 'presets', 'web-mini.json'),
+    JSON.stringify({ name: 'web-mini', label: '网页迷你', systemPrompt: 'WEB_PRESET_MARKER_032', tools: ['read', 'grep'], permission: 'auto' })
+  );
+  requestCount = 0;
+  const mark = payloadLog.length;
+  await chatOnce(base, { message: '带预设提问', preset: 'web-mini' });
+  const sys = payloadLog.slice(mark).find((pl) => String(pl.messages?.[0]?.content).includes('WEB_PRESET_MARKER_032'));
+  assert.ok(sys, '预设系统提示段应注入（到达服务端）');
+  const toolsSent = (sys.tools || []).map((/** @type {any} */ t) => t.function.name);
+  assert.ok(toolsSent.includes('read') && toolsSent.includes('grep'), '白名单工具应可见');
+  assert.ok(!toolsSent.includes('write') && !toolsSent.includes('bash'), '白名单外工具不得下发');
+  // 不存在的预设 → banner 提示且不崩溃
+  requestCount = 0;
+  const evs = await chatOnce(base, { message: '坏预设提问', preset: 'no-such-preset' });
+  assert.ok(evs.some((e) => e.type === 'banner' && String(e.text || '').includes('预设')), '不存在预设应发 banner');
+  ok('WebUI 预设：白名单真实生效 / 系统提示段到达服务端 / 缺失预设 banner');
+}
+
 // ---------- 16. 自动压缩端到端（P3-1）：超预算会话 → 摘要注入 + 会话文件重写 ----------
 {
   requestCount = 0;
