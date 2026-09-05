@@ -2676,19 +2676,19 @@ const ctx = { cwd: tmp };
   try { registerTool({ name: 'mcp__mine', run: () => ({}) }); } catch (/** @type {any} */ e) { dupErr = e; }
   assert.ok(dupErr && /mcp__/.test(dupErr.message), 'mcp__ 前缀应拒绝');
   // config.tools 声明式挂载：参数经 MINGDAO_TOOL_ARGS 环境变量（非字符串拼接进 shell）。
-  // 跨平台：command 不嵌引号嵌套（Windows cmd 不认 bash 的 \' 转义），改用临时脚本文件 + node 执行。
-  const envScript = path.join(tmp, 'env-echo.js');
-  fs.writeFileSync(envScript, 'const a=JSON.parse(process.env.MINGDAO_TOOL_ARGS||"{}"); console.log("got:"+a.text);\n');
+  // 跨平台：命令用「相对脚本名 + cwd=tmp」，不嵌任何路径引号（Windows cmd /s /c 对绝对路径引号/反斜杠
+  // 的解析与 bash 不同，绝对路径会拆错）；脚本读 MINGDAO_TOOL_ARGS 打印。
+  fs.writeFileSync(path.join(tmp, 'env-echo.js'), 'const a=JSON.parse(process.env.MINGDAO_TOOL_ARGS||"{}"); console.log("got:"+a.text);\n');
   const cfg = {
     tools: [
-      { name: 'env-echo', description: '读环境变量回显', command: `node ${JSON.stringify(envScript)}` },
+      { name: 'env-echo', description: '读环境变量回显', command: 'node env-echo.js' },
     ],
   };
   const mounted = mountConfigTools(cfg);
   assert.deepEqual(mounted, ['env-echo'], 'config.tools 应挂载');
   const again = mountConfigTools(cfg);
   assert.deepEqual(again, [], '重复挂载应幂等（跳过）');
-  const envRes = await dispatch('env-echo', { text: 'env-hi' }, { cwd: process.cwd() });
+  const envRes = await dispatch('env-echo', { text: 'env-hi' }, { cwd: tmp });
   assert.equal(envRes.ok, true, '声明式工具应执行成功');
   assert.ok(String(envRes.output).includes('got:env-hi'), '参数应经环境变量传递');
   // 坏条目（与内置 read 同名 / 非法名）应跳过挂载，绝不抛出（启动路径安全）
