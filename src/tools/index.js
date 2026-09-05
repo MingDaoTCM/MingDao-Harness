@@ -261,6 +261,10 @@ export function registerTool(/** @type {any} */ tool) {
   if (!CUSTOM_TOOL_NAME_RE.test(name)) {
     throw new Error(`自定义工具名非法（${CUSTOM_TOOL_NAME_RE}）：${name}`);
   }
+  // mcp__ 前缀保留给 MCP 工具（agent 按前缀路由到 mcp.call），自定义工具占用会静默错路由
+  if (name.startsWith('mcp__')) {
+    throw new Error(`自定义工具名不能以 mcp__ 开头（该前缀保留给 MCP 工具）：${name}`);
+  }
   if (TOOLS.some((/** @type {any} */ t) => t.function.name === name) || customTools.has(name)) {
     throw new Error(`工具 ${name} 已存在（内置或已注册），不能重复注册`);
   }

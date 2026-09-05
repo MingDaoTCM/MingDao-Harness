@@ -2653,6 +2653,9 @@ const ctx = { cwd: tmp };
   assert.ok(dupErr && /已存在/.test(dupErr.message), '与内置同名应拒绝');
   try { registerTool({ name: 'echo-test', run: () => ({}) }); } catch (/** @type {any} */ e) { dupErr = e; }
   assert.ok(dupErr && /已存在/.test(dupErr.message), '重复注册应拒绝');
+  // mcp__ 前缀保留给 MCP 路由，自定义工具不得占用
+  try { registerTool({ name: 'mcp__mine', run: () => ({}) }); } catch (/** @type {any} */ e) { dupErr = e; }
+  assert.ok(dupErr && /mcp__/.test(dupErr.message), 'mcp__ 前缀应拒绝');
   // config.tools 声明式挂载：参数经 MINGDAO_TOOL_ARGS 环境变量（非字符串拼接进 shell）
   const cfg = {
     tools: [
