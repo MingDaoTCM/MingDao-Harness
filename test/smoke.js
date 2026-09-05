@@ -2666,7 +2666,11 @@ const ctx = { cwd: tmp };
   const envRes = await dispatch('env-echo', { text: 'env-hi' }, { cwd: process.cwd() });
   assert.equal(envRes.ok, true, '声明式工具应执行成功');
   assert.ok(String(envRes.output).includes('got:env-hi'), '参数应经环境变量传递');
-  ok('tools 契约化：registerTool 注册/调度/异常结构化/重名拒绝 + config.tools 声明式挂载（幂等/环境变量传参）');
+  // 坏条目（与内置 read 同名 / 非法名）应跳过挂载，绝不抛出（启动路径安全）
+  const badCfg = { tools: [{ name: 'read', command: 'echo x' }, { name: 'bad name!', command: 'echo y' }, { name: 'ok-tool', command: 'echo z' }] };
+  const badMounted = mountConfigTools(badCfg);
+  assert.deepEqual(badMounted, ['ok-tool'], '坏条目应跳过、好条目照常挂载');
+  ok('tools 契约化：registerTool 注册/调度/异常结构化/重名拒绝 + config.tools 声明式挂载（幂等/环境变量传参/坏条目跳过不崩）');
 }
 
 // ---------- 49. 公共 API 导出面（v0.4.0 契约化：stable 面稳定断言） ----------

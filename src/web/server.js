@@ -427,6 +427,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         const over = presetConfigOverrides(chatPreset);
         chatCfg = { ...cfg, ...over, presetName: chatPreset.name };
         presetBlock = presetSystemBlock(chatPreset);
+      } else {
+        // 预设不存在：不静默——banner 告知（前端下拉与磁盘不同步/项目级预设未带入时可见）
+        send({ type: 'banner', text: `⚠ 预设 "${String(body.preset)}" 不存在，已按当前配置继续。` });
       }
     }
     const systemPrompt = buildSystemPrompt({ workingDir: taskDir, withJournal: body.withJournal === true, projectMemory: projectMemorySnapshot, presetBlock });

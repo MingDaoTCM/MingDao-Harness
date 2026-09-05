@@ -299,7 +299,8 @@ const mountedConfigTools = new Set();
 
 /**
  * 把 config.tools 声明式工具挂载进注册表（幂等，可在启动路径重复调用）。
- * 返回本次新挂载的工具名数组。
+ * 返回本次新挂载的工具名数组。非法条目（坏名/与内置冲突）跳过不挂载——
+ * 用户配置错误绝不能让 CLI/WebUI 启动崩溃，用 console.error 提示即可。
  */
 export function mountConfigTools(/** @type {any} */ cfg) {
   const entries = Array.isArray(cfg?.tools) ? cfg.tools : [];
@@ -308,33 +309,37 @@ export function mountConfigTools(/** @type {any} */ cfg) {
     const name = String(e?.name ?? '').trim();
     if (!name || mountedConfigTools.has(name)) continue;
     if (typeof e?.command !== 'string' || !e.command.trim()) continue; // 缺 command 的条目跳过
-    registerTool({
-      name,
-      description: String(e.description || ''),
-      parameters: e.parameters,
-      run: (/** @type {any} */ args, /** @type {any} */ ctx) => {
-        const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/bash';
-        const shellArgs = process.platform === 'win32' ? ['/d', '/s', '/c', e.command] : ['-lc', e.command];
-        const r = spawnSync(shell, shellArgs, {
-          cwd: ctx.cwd,
-          env: { ...process.env, MINGDAO_TOOL_ARGS: JSON.stringify(args ?? {}) },
-          timeout: Math.min(Number(e.timeout) > 0 ? Number(e.timeout) : 120, 600) * 1000,
-          maxBuffer: 2 * 1024 * 1024,
-        });
-        const out = String(r.stdout || '');
-        const err = String(r.stderr || '');
-        const capped = out.length > 20000 ? out.slice(0, 20000) + `\n…[输出过长已截断，共 ${out.length} 字]` : out;
-        return {
-          ok: r.error ? false : (r.status ?? 0) === 0,
-          exitCode: r.error ? null : (r.status ?? null),
-          output: (capped || '（无输出）').trim(),
-          ...(err.trim() ? { stderr: err.trim().slice(0, 4000) } : {}),
-          ...(r.error ? { error: `命令执行失败：${String(r.error?.message || r.error)}` } : {}),
-        };
-      },
-    });
-    mountedConfigTools.add(name);
-    mounted.push(name);
+    try {
+      registerTool({
+        name,
+        description: String(e.description || ''),
+        parameters: e.parameters,
+        run: (/** @type {any} */ args, /** @type {any} */ ctx) => {
+          const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/bash';
+          const shellArgs = process.platform === 'win32' ? ['/d', '/s', '/c', e.command] : ['-lc', e.command];
+          const r = spawnSync(shell, shellArgs, {
+            cwd: ctx.cwd,
+            env: { ...process.env, MINGDAO_TOOL_ARGS: JSON.stringify(args ?? {}) },
+            timeout: Math.min(Number(e.timeout) > 0 ? Number(e.timeout) : 120, 600) * 1000,
+            maxBuffer: 2 * 1024 * 1024,
+          });
+          const out = String(r.stdout || '');
+          const err = String(r.stderr || '');
+          const capped = out.length > 20000 ? out.slice(0, 20000) + `\n…[输出过长已截断，共 ${out.length} 字]` : out;
+          return {
+            ok: r.error ? false : (r.status ?? 0) === 0,
+            exitCode: r.error ? null : (r.status ?? null),
+            output: (capped || '（无输出）').trim(),
+            ...(err.trim() ? { stderr: err.trim().slice(0, 4000) } : {}),
+            ...(r.error ? { error: `命令执行失败：${String(r.error?.message || r.error)}` } : {}),
+          };
+        },
+      });
+      mountedConfigTools.add(name);
+      mounted.push(name);
+    } catch (/** @type {any} */ err) {
+      console.error(`[MingDao] ⚠ config.tools 条目 "${name}" 挂载失败（已跳过）：${String(err?.message || err)}`);
+    }
   }
   return mounted;
 }

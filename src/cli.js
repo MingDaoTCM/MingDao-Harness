@@ -79,6 +79,7 @@ const HELP_LINES = [
   ['  mingdao --journal          新会话带上最近会话日志（默认不注入，新会话全新开始）', null],
   ['  mingdao --resume           从会话列表选择恢复', null],
   ['  mingdao --model <模型名>   指定模型，例如 deepseek-v4-pro', null],
+  ['  mingdao --preset <名>      应用智能体预设（工具白名单/权限/参数，v0.4.0 契约化）', null],
   ['  mingdao init               初始化配置向导', null],
   ['  mingdao update [--check]   一键自更新（git 安装形态；--check 只对比版本）', null],
   ['  mingdao rollback           回滚到上次 update 之前的提交', null],
