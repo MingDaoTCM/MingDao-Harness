@@ -36,7 +36,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // safeBudget 恒用：即使用户显式 contextBudget 也套「窗口−输出−余量」上限与 75% 舒适区，
   // 防显式值撑爆窗口（本地模型窗口可能只有 32k/131k，用户却留了默认 128000）。
   const budget = safeBudget(cfg, caps);
-  const maxOutput = cfg.maxOutputTokens || caps.maxOutputTokens;
+  // maxOutput 也按窗口封顶：显式配超大 maxOutputTokens 时，prompt(预算)+output 仍不得越过窗口
+  // （预算已按 caps.maxOutputTokens 留余量，但显式值可能更大——此处兜底，防服务端截断/拒绝）
+  const maxOutput = Math.min(cfg.maxOutputTokens || caps.maxOutputTokens, Math.max(1024, caps.contextWindow - budget));
   // v0.3.2 工具输出截断自适应：窗口越小截得越狠（单条工具结果按窗口 1/16 封顶，最少 2000 字），
   // 但绝不超过旧默认 20000（大窗口模型如 1M 不因公式放大回灌、不推高成本）。
   // 本地小模型（32k 窗口 → 2k 字）不再把大段代码/日志整条回灌，省 prompt 且不撑爆窗口。
