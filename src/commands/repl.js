@@ -98,6 +98,7 @@ const HELP_LINES = [
   ['会话内命令', C.bold + C.yellow],
   ['  /help        显示帮助          /clear   清空上下文', null],
   ['  /model <名>  切换模型          /mode    pro/flash 快捷切换', null],
+  ['  /preset      列出/切换智能体预设（v0.4.0 契约化）', null],
   ['  /compact     压缩上下文        /plan    计划模式（先计划后执行）', null],
   ['  /init        生成 AGENTS.md    /memory add <内容> 追加用户记忆', null],
   ['  /skills      列出技能          /status  会话状态 · /cost 累计费用', null],
@@ -140,7 +141,10 @@ async function generatePlan(provider, modelName, task) {
  */
 export async function runRepl(ctx) {
   const { io, cfg, home, pc0, opts, permission, workingDir, sessionUndoStore, mcpFacade, sessionRef, preset, withJournal, tuiState } = ctx;
-  const presetBlock = ctx.presetBlock || ''; // v0.4.0 Agent Preset 系统提示定制段
+  let presetBlock = ctx.presetBlock || ''; // v0.4.0 Agent Preset 系统提示定制段（/preset 可切换）
+  let permissionNow = permission; // /preset 可换权限模式
+  // v0.4.0 Agent Preset：agent 用 agentCfg（预设 overlay 会话级生效）；cfg 保持干净供 saveConfig 持久化
+  let agentCfg = ctx.agentCfg || cfg;
   let mcpManager = ctx.mcpManager;
   let modelName = ctx.modelName;
   let provider = ctx.provider;
@@ -259,11 +263,11 @@ export async function runRepl(ctx) {
       }
       agent = createAgent({
         provider,
-        permission,
+        permission: permissionNow,
         io,
         modelName,
         workingDir,
-        cfg,
+        cfg: agentCfg, // v0.4.0：预设 overlay 恒生效（/model 后白名单不丢）
         undoStore: sessionUndoStore,
         mcp: mcpFacade,
         sessionRef,
@@ -310,6 +314,38 @@ export async function runRepl(ctx) {
         } catch {}
         tuiState.persisted = messages.length;
         io.print('已清空上下文（会话文件已同步重置）。');
+      } else if (cmd === '/preset') {
+        // v0.4.0 Agent Preset：列出/切换声明式智能体预设（工具白名单/权限/参数 + 系统提示定制段）
+        const { listPresets, loadPreset, presetConfigOverrides, presetSystemBlock } = await import('../presets.js');
+        if (!arg) {
+          const ps = listPresets(workingDir);
+          if (!ps.length) io.print(style('（无可用预设。目录：<项目>/.mingdao/presets/、~/.mingdao/presets/、内置 presets/）', C.dim));
+          else for (const p of ps) io.print(`  - ${p.name}（${p.label || '无标签'}，${p.source === 'project' ? '项目' : p.source === 'user' ? '用户' : '内置'}）${p.description ? '：' + p.description : ''}`);
+          continue;
+        }
+        const pname = arg.split(/\s+/)[0];
+        const p = loadPreset(workingDir, pname);
+        if (!p) {
+          io.print(style(`预设 "${pname}" 不存在（/preset 列出全部）。`, C.yellow));
+          continue;
+        }
+        const over = presetConfigOverrides(p);
+        // 应用覆盖：权限/参数/工具白名单/模型建议——只进 agentCfg（会话级 overlay），
+        // 绝不改写 cfg：否则后续 /model、/think 的 saveConfig 会把预设字段持久化进 config.json。
+        agentCfg = { ...cfg, ...over, presetName: p.name };
+        if (over.model) await switchToModel(over.model, { silent: true, persist: false });
+        presetBlock = presetSystemBlock(p);
+        permissionNow = createPermission(agentCfg.permission ?? 'ask', io);
+        agent = createAgent({
+          provider, permission: permissionNow, io, modelName, workingDir, cfg: agentCfg,
+          undoStore: sessionUndoStore, mcp: mcpFacade, sessionRef,
+          onCompact: (/** @type {any} */ msgs) => {
+            rewriteSession(session.file, msgs);
+            tuiState.persisted = msgs.length;
+          },
+        });
+        messages[0] = { role: 'system', content: buildSystemPrompt({ workingDir, withJournal, presetBlock }) };
+        io.print(style(`▣ 已应用智能体预设：${p.name}${p.label ? '（' + p.label + '）' : ''}${over.presetTools ? `，工具白名单 ${over.presetTools.length} 个` : ''}`, C.green));
       } else if (cmd === '/model') {
         if (!arg) {
           io.print(`当前模型：${modelName}`);
@@ -337,7 +373,7 @@ export async function runRepl(ctx) {
           saveConfig(cfg);
         } else { io.print(style('无效取值：low|high|max|off', C.red)); continue; }
         agent = createAgent({
-          provider, permission, io, modelName, workingDir, cfg,
+          provider, permission: permissionNow, io, modelName, workingDir, cfg: agentCfg,
           undoStore: sessionUndoStore, mcp: mcpFacade, sessionRef,
           onCompact: (/** @type {any} */ msgs) => {
             rewriteSession(session.file, msgs);

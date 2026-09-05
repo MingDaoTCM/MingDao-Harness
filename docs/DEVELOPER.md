@@ -49,6 +49,7 @@
 ### 1.3 使用
 
 - CLI：`mingdao --preset code-reviewer "审查 src/ 目录"`；交互模式 `mingdao --preset code-reviewer`。
+- REPL：`/preset` 列出全部；`/preset code-reviewer` 会话内切换（工具白名单/权限/参数即时生效）。
 - WebUI：输入框旁「预设…」下拉选择（随本次发送生效，服务端按会话应用）。
 - 程序化：`import { loadPreset, presetConfigOverrides, presetSystemBlock } from 'mingdao-harness'`。
 

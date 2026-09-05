@@ -356,8 +356,10 @@ async function main() {
 
   // v0.4.0 Agent Preset：--preset <名> 应用声明式预设（工具白名单/权限/模型/参数 + 系统提示定制段）。
   // 预设覆盖优先级：CLI 显式参数 > 预设 > config.json。
+  // 会话级 overlay：不改写 cfg（否则 REPL /model、/think 的 saveConfig 会把预设字段持久化进 config.json）。
   let activePreset = /** @type {any} */ (null);
   let presetBlock = '';
+  let presetOverlay = /** @type {Record<string, any>} */ ({});
   if (opts.preset) {
     const { loadPreset, presetConfigOverrides, presetSystemBlock, listPresets } = await import('./presets.js');
     activePreset = loadPreset(workingDir, opts.preset);
@@ -365,17 +367,14 @@ async function main() {
       const names = listPresets(workingDir).map((/** @type {any} */ p) => p.name).join(', ') || '（无可用预设）';
       io.print(style(`⚠ 预设 "${opts.preset}" 不存在。可用：${names}`, C.yellow));
     } else {
-      const over = presetConfigOverrides(activePreset);
-      if (!opts.model && over.model) modelName = over.model;
-      if (over.permission) cfg.permission = over.permission;
-      for (const k of ['temperature', 'maxOutputTokens', 'maxRounds', 'contextBudget', 'presetTools']) {
-        if (over[k] !== undefined) cfg[k] = over[k];
-      }
-      cfg.presetName = activePreset.name;
+      presetOverlay = { ...presetConfigOverrides(activePreset), presetName: activePreset.name };
+      if (!opts.model && presetOverlay.model) modelName = presetOverlay.model;
       presetBlock = presetSystemBlock(activePreset);
       io.print(style(`▣ 已应用智能体预设：${activePreset.name}${activePreset.label ? '（' + activePreset.label + '）' : ''}`, C.cyan));
     }
   }
+  // agent 使用的配置 = cfg + 预设 overlay（presetTools/permission/参数按预设生效，cfg 本体保持干净）
+  const agentCfg = Object.keys(presetOverlay).length ? { ...cfg, ...presetOverlay } : cfg;
 
   const pc0 = resolveProviderConfig(cfg, modelName);
   if (!pc0.apiKey) {
@@ -393,7 +392,7 @@ async function main() {
   }
 
   let provider = await createProvider(cfg, modelName);
-  const permission = createPermission(cfg.permission ?? 'ask', io);
+  const permission = createPermission(agentCfg.permission ?? 'ask', io);
   // v0.4.0 契约化：挂载 config.tools 声明式第三方工具（幂等，重启生效）
   {
     const { mountConfigTools } = await import('./tools/index.js');
@@ -441,7 +440,7 @@ async function main() {
     io,
     modelName,
     workingDir,
-    cfg,
+    cfg: agentCfg,
     undoStore: sessionUndoStore,
     mcp: mcpFacade,
     sessionRef,
@@ -482,7 +481,7 @@ async function main() {
       io: turnIo,
       modelName,
       workingDir,
-      cfg,
+      cfg: agentCfg,
       undoStore: sessionUndoStore,
       mcp: mcpFacade,
       sessionRef: oneShotRef,
@@ -559,7 +558,7 @@ async function main() {
 
   // —— 交互式 TUI（Phase C C2：已抽取至 commands/repl.js） ——
   const { runRepl } = await import('./commands/repl.js');
-  await runRepl({ io, cfg, home, pc0, opts, modelName, provider, permission, workingDir, sessionUndoStore, mcpFacade, mcpManager, sessionRef, agent, preset, withJournal, presetBlock, tuiState });
+  await runRepl({ io, cfg, agentCfg, home, pc0, opts, modelName, provider, permission, workingDir, sessionUndoStore, mcpFacade, mcpManager, sessionRef, agent, preset, withJournal, presetBlock, tuiState });
   return;
 
 }
