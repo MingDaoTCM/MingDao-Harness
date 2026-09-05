@@ -2675,10 +2675,13 @@ const ctx = { cwd: tmp };
   // mcp__ 前缀保留给 MCP 路由，自定义工具不得占用
   try { registerTool({ name: 'mcp__mine', run: () => ({}) }); } catch (/** @type {any} */ e) { dupErr = e; }
   assert.ok(dupErr && /mcp__/.test(dupErr.message), 'mcp__ 前缀应拒绝');
-  // config.tools 声明式挂载：参数经 MINGDAO_TOOL_ARGS 环境变量（非字符串拼接进 shell）
+  // config.tools 声明式挂载：参数经 MINGDAO_TOOL_ARGS 环境变量（非字符串拼接进 shell）。
+  // 跨平台：command 不嵌引号嵌套（Windows cmd 不认 bash 的 \' 转义），改用临时脚本文件 + node 执行。
+  const envScript = path.join(tmp, 'env-echo.js');
+  fs.writeFileSync(envScript, 'const a=JSON.parse(process.env.MINGDAO_TOOL_ARGS||"{}"); console.log("got:"+a.text);\n');
   const cfg = {
     tools: [
-      { name: 'env-echo', description: '读环境变量回显', command: 'node -e "const a=JSON.parse(process.env.MINGDAO_TOOL_ARGS||\'{}\'); console.log(\'got:\'+a.text)"' },
+      { name: 'env-echo', description: '读环境变量回显', command: `node ${JSON.stringify(envScript)}` },
     ],
   };
   const mounted = mountConfigTools(cfg);
