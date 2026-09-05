@@ -28,6 +28,25 @@ function ok(name) {
   console.log(`  ✓ ${name}`);
 }
 
+// Windows EBUSY 容错清理（审计 D5）：git/子进程退出后目录句柄短暂未释放或 Defender 扫描竞态，
+// 立即 rmSync 会报 EBUSY 使 smoke 在 Windows CI 腿失败。重试 + 短暂同步等待（Atomics.wait），
+// 与 e2e-web.js 的 safeRm 同款先例；最终仍失败则放弃（测试的临时目录残留不影响断言结果）。
+const rmSyncRaw = fs.rmSync;
+const rmSleepBuf = new Int32Array(new SharedArrayBuffer(4));
+function safeRmSync(p, opts) {
+  for (let i = 0; i < 5; i++) {
+    try {
+      rmSyncRaw(p, opts);
+      return;
+    } catch {
+      Atomics.wait(rmSleepBuf, 0, 0, 120);
+    }
+  }
+  try {
+    rmSyncRaw(p, opts);
+  } catch {}
+}
+
 // ---------- 1. token 估算与上下文裁剪 ----------
 {
   const en = approxTokens('hello world hello world');
@@ -182,7 +201,7 @@ const ctx = { cwd: tmp };
   // fetch：非 http 协议应拒绝
   const fFile = await dispatch('fetch', { url: 'file:///etc/passwd' }, ctx);
   assert.equal(fFile.ok, false, 'fetch file:// 应拒绝');
-  fs.rmSync(tmpGit, { recursive: true, force: true });
+  safeRmSync(tmpGit, { recursive: true, force: true });
   ok('tools：git 只读 + fetch SSRF 防护');
 }
 
@@ -522,7 +541,7 @@ const ctx = { cwd: tmp };
   assert.equal(r2.text, '完成', '正常收尾应产出文本');
   assert.ok(!r2.capHit, '正常完成不应标记 capHit');
   process.env.MINGDAO_HOME = prevHomeT;
-  fs.rmSync(homeT, { recursive: true, force: true });
+  safeRmSync(homeT, { recursive: true, force: true });
   ok('agent：任务检查点 save/load/clear/resumePrompt + 正常完成不标记 capHit');
 }
 
@@ -561,7 +580,7 @@ const ctx = { cwd: tmp };
   assert.ok(sawResume, '续跑提示应注入到第二轮模型上下文（含勿重复重做）');
   assert.equal(writes, 1, '续跑不应重复写已交付的 a.txt（写次数仍为 1）');
   process.env.MINGDAO_HOME = prevHomeR;
-  fs.rmSync(homeR, { recursive: true, force: true });
+  safeRmSync(homeR, { recursive: true, force: true });
   ok('agent：续跑闭环（跑满→检查点→注入→完成且不重做）');
 }
 
@@ -689,7 +708,7 @@ const ctx = { cwd: tmp };
     assert.equal('apiKey' in c1, false, '自动初始化不应写入任何密钥');
     const c2 = ensureMinimalConfig();
     assert.deepEqual(c2, c1, '已有配置时 ensureMinimalConfig 应原样返回（幂等，不改写用户配置）');
-    fs.rmSync(path.join(home2, 'config.json'), { force: true });
+    safeRmSync(path.join(home2, 'config.json'), { force: true });
   }
 
   // config.json 不含任何密钥（可安全分享/提交）
@@ -775,7 +794,7 @@ const ctx = { cwd: tmp };
   assert.equal(pdf2.source, 'user', '用户级技能应覆盖项目级');
   assert.equal(pdf2.description, '用户级覆盖');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(proj, { recursive: true, force: true });
+  safeRmSync(proj, { recursive: true, force: true });
   ok('skills：项目/内置发现、frontmatter 描述、用户级覆盖优先级');
 }
 
@@ -803,7 +822,7 @@ const ctx = { cwd: tmp };
   assert.equal(fs.readFileSync(path.join(d, 'f.txt'), 'utf8'), 'v1\n');
   const r2 = await dispatch('undo', {}, c);
   assert.equal(r2.ok, false, '无剩余备份时应报错');
-  fs.rmSync(d, { recursive: true, force: true });
+  safeRmSync(d, { recursive: true, force: true });
   ok('undo：撤销 write/edit 的最近修改');
 }
 
@@ -958,7 +977,7 @@ const ctx = { cwd: tmp };
   fs.writeFileSync(cfgFile, JSON.stringify({ customModels: { 'my-ds': { label: 'x', baseUrl: 'http://x', tokenizer: 'deepseek' } } }));
   assert.equal(countTokens('的', 'my-ds'), 1, '自定义端点声明 deepseek tokenizer 后应精确计数');
   assert.ok(countTokens('的', 'my-ds2') > 0, '未声明时回退启发式仍可用');
-  if (prevCfg === null) fs.rmSync(cfgFile, { force: true });
+  if (prevCfg === null) safeRmSync(cfgFile, { force: true });
   else fs.writeFileSync(cfgFile, prevCfg);
   ok('tokenizer：官方黄金值 12 组 / 长文本 / 回退启发式 / 特殊 token / CJK 校准 / 缓存 / 自定义端点映射');
 }
@@ -1057,7 +1076,7 @@ const ctx = { cwd: tmp };
     const ctxRo = { cwd: d16, cfg: { sandbox: 'readonly' } };
     const r4 = await dispatch('bash', { command: 'echo x > ./probe-ro.txt 2>&1; echo code=$?' }, ctxRo);
     assert.ok(!r4.stdout.includes('code=0'), 'readonly 模式不应允许写工作目录');
-    fs.rmSync(d16, { recursive: true, force: true });
+    safeRmSync(d16, { recursive: true, force: true });
     ok('sandbox：safe 断网只读 / readonly 工作目录只读（bwrap）');
   } else {
     const r = await dispatch('bash', { command: 'echo plain' }, { cwd: tmp, cfg: { sandbox: 'safe' } });
@@ -1109,7 +1128,7 @@ const ctx = { cwd: tmp };
   assert.equal(miss.length, 0);
   const all = searchSessions(home18, '');
   assert.equal(all.length, 2);
-  fs.rmSync(home18, { recursive: true, force: true });
+  safeRmSync(home18, { recursive: true, force: true });
   ok('sessions：全文检索 / 片段 / 空关键词');
 }
 
@@ -1132,8 +1151,8 @@ const ctx = { cwd: tmp };
   assert.equal(removeWorkspace('项目A'), true);
   assert.equal(workspacePath('项目A'), null);
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeW, { recursive: true, force: true });
-  fs.rmSync(projA, { recursive: true, force: true });
+  safeRmSync(homeW, { recursive: true, force: true });
+  safeRmSync(projA, { recursive: true, force: true });
   ok('workspace：登记 / 校验 / 列表 / 识别当前 / 移除');
 }
 
@@ -1154,7 +1173,7 @@ const ctx = { cwd: tmp };
   assert.equal(autostartStatus(), false, '关闭后应为关');
   if (process.platform === 'win32') process.env.APPDATA = oldAppData;
   process.env.HOME = oldHome;
-  fs.rmSync(fakeHome, { recursive: true, force: true });
+  safeRmSync(fakeHome, { recursive: true, force: true });
   ok('autostart：开 / 关 / 状态（隔离 HOME + APPDATA）');
 }
 
@@ -1192,7 +1211,7 @@ const ctx = { cwd: tmp };
   assert.equal(recentJournal(homeM, 3).length, 2);
   assert.ok(recentJournalBlock(homeM).includes('测试会话二'));
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeM, { recursive: true, force: true });
+  safeRmSync(homeM, { recursive: true, force: true });
   ok('memory：提取 / 追加 / 无新增 / 日志 / 最近块');
 }
 
@@ -1230,7 +1249,7 @@ const ctx = { cwd: tmp };
   const rel = retrieveRelevant(['- 决定：config 拆成多文件', '- 游戏位于 moba 目录', '- 坑：Node 18 不支持某 API'], '重构 config 配置', 2);
   assert.ok(rel.length >= 1 && rel[0].includes('config'), '语义检索应把 config 相关条目排在前面');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeP, { recursive: true, force: true });
+  safeRmSync(homeP, { recursive: true, force: true });
   ok('memory：项目级自动记忆按工作空间沉淀/去重/注入不串 + 语义检索');
 }
 
@@ -1286,7 +1305,7 @@ const ctx = { cwd: tmp };
   fs.writeFileSync(path.join(dirSrc, 'SKILL.md'), '---\nname: my-custom\ndescription: 自定义技能\n---\n\n# 我的技能\n内容');
   const r2 = installFromDir(dirSrc);
   assert.ok(r2.name === 'my-custom', '目录安装应用 frontmatter 名称');
-  fs.rmSync(dirSrc, { recursive: true, force: true });
+  safeRmSync(dirSrc, { recursive: true, force: true });
 
   // 远程 URL 安装（本地 http 服务器，无外部网络）
   const http = await import('node:http');
@@ -1331,14 +1350,14 @@ const ctx = { cwd: tmp };
   const bad3 = installFromDir(badDir);
   assert.ok(bad3.error && bad3.error.includes('description'), '缺 description 应拒绝');
   assert.ok(!fs.existsSync(path.join(userSkillsDir(), 'good-name')), '校验失败不应写入技能目录');
-  fs.rmSync(badDir, { recursive: true, force: true });
+  safeRmSync(badDir, { recursive: true, force: true });
 
   // git 安装：本地裸仓库演练（完全离线、确定性——example.com 在受限网络会挂起 120s 超时）
   const bareGit = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-bare-'));
   spawnSync('git', ['init', '--bare', '--quiet', bareGit], { encoding: 'utf8' });
   const gitR = installFromGit(bareGit);
   assert.ok(gitR.names || gitR.error, 'git 安装应返回结果或错误而非抛出');
-  fs.rmSync(bareGit, { recursive: true, force: true });
+  safeRmSync(bareGit, { recursive: true, force: true });
 
   // 卸载：只卸载用户级；未安装报错；路径穿越拒绝
   const rm1 = uninstallSkill('sql');
@@ -1353,7 +1372,7 @@ const ctx = { cwd: tmp };
   // 清理
   for (const n of ['my-custom', 'remote-skill', 'regex']) uninstallSkill(n);
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeSk, { recursive: true, force: true });
+  safeRmSync(homeSk, { recursive: true, force: true });
   ok('skill-lib：内置库 / 搜索 / 库名·目录·URL 安装 / 卸载 / 元数据更新');
 }
 
@@ -1408,8 +1427,8 @@ const ctx = { cwd: tmp };
   srv.close();
   delete process.env.MINGDAO_REGISTRY_URL;
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeRg, { recursive: true, force: true });
-  fs.rmSync(regRoot, { recursive: true, force: true });
+  safeRmSync(homeRg, { recursive: true, force: true });
+  safeRmSync(regRoot, { recursive: true, force: true });
   ok('skill-registry：远端搜索 / 安装 / 缓存与强制刷新 / 未知技能');
 }
 
@@ -1476,9 +1495,9 @@ const ctx = { cwd: tmp };
 
   srv.close();
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeA, { recursive: true, force: true });
-  fs.rmSync(homeB, { recursive: true, force: true });
-  fs.rmSync(dataDir, { recursive: true, force: true });
+  safeRmSync(homeA, { recursive: true, force: true });
+  safeRmSync(homeB, { recursive: true, force: true });
+  safeRmSync(dataDir, { recursive: true, force: true });
   ok('sync：注册登录 / 推送拉取 / 双端冲突备份 / 退出 / 错误路径');
 }
 
@@ -1520,7 +1539,7 @@ const ctx = { cwd: tmp };
   assert.equal((await register(closed.base, { inviteCode: 'code-a' })).status, 403, 'closed 模式应一律拒绝');
   closed.child.kill('SIGTERM');
   await new Promise((r) => closed.child.once('close', r));
-  fs.rmSync(regDir, { recursive: true, force: true });
+  safeRmSync(regDir, { recursive: true, force: true });
   ok('sync-server：注册开关 invite（邀请码）/ closed');
 }
 
@@ -1604,9 +1623,9 @@ const ctx = { cwd: tmp };
 
   srv.close();
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeA, { recursive: true, force: true });
-  fs.rmSync(homeB, { recursive: true, force: true });
-  fs.rmSync(dataDir, { recursive: true, force: true });
+  safeRmSync(homeA, { recursive: true, force: true });
+  safeRmSync(homeB, { recursive: true, force: true });
+  safeRmSync(dataDir, { recursive: true, force: true });
   ok('sync-collab：密码修改 / 分享创建·接受·刷新·撤销 / 冲突三选一解决');
 }
 
@@ -1663,7 +1682,7 @@ const ctx = { cwd: tmp };
   assert.ok(list3.some((m) => m.name === 'gpt-5'), '拉取失败应回退预设名单');
   srv.close();
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeM, { recursive: true, force: true });
+  safeRmSync(homeM, { recursive: true, force: true });
   ok('model-discovery：只列有 Key 服务商 / 线上名单优先 / 缓存与强制刷新 / 回退预设');
 }
 
@@ -1707,7 +1726,7 @@ const ctx = { cwd: tmp };
   assert.ok(!fresh.includes('当前模型') && !fresh.includes('当前日期'), '系统提示不应含易变字段');
   assert.equal(fresh, buildSystemPrompt({ workingDir: tmp }), '同一工作空间下系统提示应恒定（前缀稳定）');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(jhome, { recursive: true, force: true });
+  safeRmSync(jhome, { recursive: true, force: true });
   ok('prompts：最近会话日志默认不注入 / 系统提示前缀字节稳定（易变字段已移除）');
 }
 
@@ -1753,7 +1772,7 @@ const ctx = { cwd: tmp };
   const rb2 = mingdaoRollback({ repo: localDir });
   assert.equal(rb2.ok, false, '回滚记录已消耗，再回滚应失败');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(base, { recursive: true, force: true });
+  safeRmSync(base, { recursive: true, force: true });
   ok('update：版本对比 / 脏工作区拒绝 / 升级+冒烟 / 回滚');
 }
 
@@ -1901,7 +1920,7 @@ const ctx = { cwd: tmp };
   assert.ok(listSkills(process.cwd()).some((s) => s.name === 'demo-int'), 'trust 后应重新可见');
   // 4) 索引哈希错误 → 拒绝安装（供应链防护）；先清缓存确保拿到更新后的索引
   currentIndex = { version: 1, skills: [{ name: 'demo-bad', description: 'x', files: [{ path: 'SKILL.md', size: skillMd.length, sha256: hashOf('完全不同') }] }] };
-  fs.rmSync(path.join(homeS, 'skill-registry-cache.json'), { force: true });
+  safeRmSync(path.join(homeS, 'skill-registry-cache.json'), { force: true });
   const bad = await installFromRegistry('demo-bad');
   assert.ok(bad.error && bad.error.includes('完整性校验失败'), '哈希不符应拒绝安装');
   // 5) 目录哈希稳定（排除元数据文件）
@@ -1909,7 +1928,7 @@ const ctx = { cwd: tmp };
   regServer.close();
   delete process.env.MINGDAO_REGISTRY_URL;
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeS, { recursive: true, force: true });
+  safeRmSync(homeS, { recursive: true, force: true });
   ok('skill 完整性：registry sha256 校验 / 篡改拒绝加载 / trust / 哈希稳定');
 }
 
@@ -1981,7 +2000,7 @@ const ctx = { cwd: tmp };
   await agentOff.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: 'x' }]);
   assert.equal(listAudit(50).length, before, 'audit:false 时不应新增记录');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeA, { recursive: true, force: true });
+  safeRmSync(homeA, { recursive: true, force: true });
   ok('audit：执行/拒绝记录 / 会话归因 / 参数与原因 / sk- 脱敏 / audit:false 关闭');
 }
 
@@ -2029,7 +2048,7 @@ const ctx = { cwd: tmp };
   const tk = tokenize('你好世界 hello');
   assert.ok(tk.has('你好') && tk.has('好世') && tk.has('世界') && tk.has('hello') && tk.has('你'), 'bigram/单字/单词分词');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeI, { recursive: true, force: true });
+  safeRmSync(homeI, { recursive: true, force: true });
   ok('session-index：中文 bigram / 英文词 / AND / 增量重索引 / 删除清理');
 }
 
@@ -2052,7 +2071,7 @@ const ctx = { cwd: tmp };
   assert.equal(getSessionWorkspace('sess1-renamed.jsonl'), null, '删除后清空');
   assert.equal(workspaceForDir(d2), null, '未登记目录反查为 null');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeW, { recursive: true, force: true });
+  safeRmSync(homeW, { recursive: true, force: true });
   ok('workspace：会话级工作空间映射 set/get/move/remove');
 }
 
@@ -2152,7 +2171,7 @@ const ctx = { cwd: tmp };
   const chk2 = checkCostGuard();
   assert.ok(chk2 && chk2.blocked === false && chk2.message.includes('护栏'), 'warn 模式应仅提醒');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeC, { recursive: true, force: true });
+  safeRmSync(homeC, { recursive: true, force: true });
   ok('costGuard：按自然日累计 / 预警线 / block 阻断 / warn 提醒');
 }
 
@@ -2214,7 +2233,7 @@ const ctx = { cwd: tmp };
   mockBatch.close();
   delete process.env.MINGDAO_BATCH_POLL_MS;
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeB, { recursive: true, force: true });
+  safeRmSync(homeB, { recursive: true, force: true });
   ok('batch：上传/轮询/取回/半价计费/结果落盘/分账标记/端点不可用报错');
 }
 
@@ -2281,7 +2300,7 @@ const ctx = { cwd: tmp };
   mockB2.close();
   delete process.env.MINGDAO_BATCH_POLL_MS;
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeB2, { recursive: true, force: true });
+  safeRmSync(homeB2, { recursive: true, force: true });
   ok('省钱 B2：批量去重回填 / 超窗口预检 / --max-cost 提交前拦截');
 }
 
@@ -2308,7 +2327,7 @@ const ctx = { cwd: tmp };
   const line = fs.readFileSync(path.join(homeC, 'cache-stats.jsonl'), 'utf8');
   assert.ok(line.includes('"reasoning":50') && line.includes('"byTool":[{"tool":"read"'), 'jsonl 应落盘 reasoning/byTool');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeC, { recursive: true, force: true });
+  safeRmSync(homeC, { recursive: true, force: true });
   ok('省钱 B3：分账维度（reasoning / byTool 累加 / byDay 14 天折线）');
 }
 
@@ -2340,7 +2359,7 @@ const ctx = { cwd: tmp };
   assert.equal(res2.text, null, 'block 模式应暂停');
   assert.ok((res2.note || '').includes('拦截') || (res2.note || '').includes('暂停'), 'block 模式应给出拦截/暂停说明');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeD, { recursive: true, force: true });
+  safeRmSync(homeD, { recursive: true, force: true });
   ok('省钱 B4：护栏降级（downgrade 切 flash 继续跑 / block 仍拦截）');
 }
 
@@ -2369,7 +2388,7 @@ const ctx = { cwd: tmp };
   assert.ok(Math.abs(aug[0].cost - 0.7) < 1e-9);
   assert.ok(costMonthlyReport('2025-01').length === 0, '无记录月份返回空');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeR, { recursive: true, force: true });
+  safeRmSync(homeR, { recursive: true, force: true });
   ok('cost 月度报告：按月/按天分组 / 指定月份过滤 / 空月份');
 }
 
@@ -2475,7 +2494,7 @@ const ctx = { cwd: tmp };
   assert.equal(sum2.turns, 3, '旧格式条目应计入轮次且不影响 perf 累计');
   assert.equal(sum2.llmMs, 8000, '旧条目 llmMs 缺省为 0');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeP, { recursive: true, force: true });
+  safeRmSync(homeP, { recursive: true, force: true });
   ok('状态栏指标：perf 记录 / 汇总（时长/首 token/tok-s/步数）/ 旧数据兼容');
 }
 
@@ -2502,7 +2521,7 @@ const ctx = { cwd: tmp };
   const { listSyncConflicts } = await import(pathToFileURL(path.join(srcDir, 'sync.js')).href);
   assert.equal(listSyncConflicts().length, 0, '无状态记录时不应产生虚假冲突');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeQ, { recursive: true, force: true });
+  safeRmSync(homeQ, { recursive: true, force: true });
   ok('质检回归：坏时区兜底 / 索引子词 / 首推冲突语义');
 }
 
@@ -2522,7 +2541,7 @@ const ctx = { cwd: tmp };
   assert.ok(Array.isArray(st.models), '无密钥时模型列表应为数组（含当前模型占位）');
   await new Promise((r) => srv.close(r));
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(jhome, { recursive: true, force: true });
+  safeRmSync(jhome, { recursive: true, force: true });
   ok('web 无密钥启动：服务正常 / keyReady=false / 模型占位（黑屏回归护栏）');
 }
 
@@ -2581,7 +2600,7 @@ const ctx = { cwd: tmp };
   assert.ok(content.includes('MingDao Harness 诊断报告') && content.includes('## 环境') && content.includes('## 审计'), '报告应含环境/审计等分区');
   assert.ok(!/(sk-[A-Za-z0-9]{6,}|ghp_[A-Za-z0-9]{20,})/.test(content), '报告不应泄漏明文密钥');
   process.env.MINGDAO_HOME = smokeHome;
-  fs.rmSync(homeD, { recursive: true, force: true });
+  safeRmSync(homeD, { recursive: true, force: true });
   ok('diagnose：一键脱敏诊断报告生成');
 }
 
@@ -2686,7 +2705,7 @@ const ctx = { cwd: tmp };
   ok(`公共 API 导出面：${stableFns.length} 个 stable 导出全部可用（v0.4.0 契约化）`);
 }
 
-fs.rmSync(tmp, { recursive: true, force: true });
+safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
-fs.rmSync(smokeHome, { recursive: true, force: true });
+safeRmSync(smokeHome, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);
