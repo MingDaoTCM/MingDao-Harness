@@ -49,8 +49,10 @@ export async function chat(/** @type {any} */ { baseUrl, apiKey, model, messages
       const j = JSON.parse(raw);
       if (j?.error?.message) detail = j.error.message;
     } catch {}
+    // 本地模型内存不足（507 memory_refusal）：给可操作降级提示而非裸状态码（v0.4.2 本地模型 507 修复）
+    const hint = res.status === 507 ? '（本地模型内存不足：请压缩上下文、减少并发子任务，或重启模型服务释放内存）' : '';
     /** @type {ApiError} */
-    const e = new Error(`[${model}] API 错误 ${res.status}: ${detail}`);
+    const e = new Error(`[${model}] API 错误 ${res.status}: ${detail}${hint}`);
     e.status = res.status;
     e.headers = res.headers; // 重试退避读取 Retry-After 用
     throw e;

@@ -232,7 +232,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             count,
             provider,
             executorModel: subagentModel(cfg, modelName),
-            triggerRatio: cfg.compactTrigger, // 可配置触发线（默认 80%）
+            // 可配置触发线：默认远程 80%；本地模型默认 60% 提前压缩——本地推理内存预算有限，
+            // 等到 80% 再压时上下文已累积过多、prefill 与内存双高（v0.4.2 本地模型 507 修复）
+            triggerRatio: Number(cfg.compactTrigger) > 0 ? cfg.compactTrigger : (caps.isLocal ? 0.6 : undefined),
             force: windowPressure, // v0.3.2：逼近窗口时强制压缩（忽略最小阈值门槛）
           });
           if (compacted) {
@@ -456,6 +458,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 其余模式/工具保持串行，避免多个权限对话框交错。事件顺序（start/render/post/回填）不变。
         const READONLY_BATCH = new Set(['read', 'ls', 'glob', 'grep']);
         const canBatch = permission.mode === 'auto';
+        // v0.4.2（本地模型 507 memory_refusal 修复）：子代理目标为本地模型时，只读子代理不并行——
+        // 多路大 prefill 同时冲进本地推理服务会击穿其单进程内存预算（507 memory_refusal），
+        // 串行化只读子代理避免并发峰值（只读 read/ls/glob/grep 仍并行，它们不额外触发大 prefill）。
+        const subagentIsLocal = resolveModelCaps(cfg, subagentModel(cfg, modelName)).isLocal;
 
         // 预检：解析参数 → PreToolUse 钩子 → 权限检查；拒绝/失败只回填不执行（返回 null）
         // task 工具标记 readOnly 时也可并行（评估 A4：只读子代理 Promise.all）
@@ -608,7 +614,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             const prep = /** @type {any} */ (await prepTool(tc));
             const name = tc.function?.name || '';
             let batchable = canBatch && Boolean(prep) && !prep.isMcp && READONLY_BATCH.has(name);
-            if (!batchable && canBatch && Boolean(prep) && name === 'task' && prep.args?.readOnly === true) batchable = true;
+            if (!batchable && canBatch && Boolean(prep) && name === 'task' && prep.args?.readOnly === true && !subagentIsLocal) batchable = true;
             batch.push({ prep, batchable });
             i += 1;
             if (!batchable) break;
