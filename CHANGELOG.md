@@ -2,6 +2,15 @@
 
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
+## v0.4.1（2026-09-06）— 安全版本（偿还 v0.4.0 审计安全债 + macOS 本地模型修复）
+
+- P0 安全 ×5：路径穿越防护（fs-tools 全工具限定工作目录 + `config.fsAllowDirs` 白名单 + `realpath` 逐级校验防软链接逃逸）；SSRF 302 重定向绕过（`redirect:'manual'` 手动跟随每跳复检、上限 5 跳）；权限前缀规则黑名单改白名单字符 `[A-Za-z0-9_ ./\\:-]`；预设 permission 提权拦截（`presetPermissionOverride` 三入口统一）；MCP 只读自动放行收紧为「仅 `trusted:true`」
+- P1 正确性 ×6：turnToolCache 去重跨步生效（声明提到 for 轮内）；windowPressure 压缩成功后复位；mountConfigTools spawnSync→异步 spawn；batch.js 超窗口预检跟进 model-caps；语义检索无匹配回退最近 N 条；detectSandbox 改最小真实沙箱探测（bwrap 不可用降级 none）
+- P2 质量 ×6：正则笔误 `/^f[c d]/`→`/^f[cd]/`；git log/diff 限量实现；cost-guard TDZ 前置；registerTool 增 `readOnly` 选项；context.js 死代码移除；reasoning 清洗 O(n²)→O(n)
+- macOS 本地模型双根因：routing 开启时 `subagentModel` 恒返回 executor 致本地/自定义模型子代理 400 全灭 → 池外跟随当前模型；兜底总结全量历史（≈98k prefill 逼近 600s 超时被静默吞）→ 轻量输入 + 失败不再静默
+- 子代理空输出透出 note 原因；`diagnose` 新增「当前模型能力」报告（本地模型未声明 contextWindow 时提示兜底 32k 后果）
+- 桌面版 WebUI 自定义模型「修改」可直接改 API 地址/标签/上下文窗口/最大输出（留空不变）
+
 ## v0.4.0（2026-09-05）— 开放内核（Agent Preset · 第三方工具 · 公共 API）
 
 - Agent Preset：声明式智能体预设 JSON（系统提示+工具白名单+权限+模型+参数），项目/用户/内置三级遮蔽 + schema 严格校验 + 会话级 overlay（不污染 config.json）+ 白名单硬拦截；CLI `--preset` / REPL `/preset` / WebUI 预设下拉三入口；内置「本地模型审计」示例
