@@ -173,8 +173,12 @@ export async function runRepl(ctx) {
   if (cfg.web?.autoStart && !process.env.MINGDAO_NO_WEB_AUTOSTART) {
     try {
       const { spawn } = await import('node:child_process');
+      const path = await import('node:path');
       const { fileURLToPath } = await import('node:url');
-      const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'web'], {
+      // 审计 P1-1（v0.4.2）：此前 spawn 的是 repl.js 自身（纯模块无 main 入口），web 参数被静默
+      // 丢弃、进程即退——自启 100% 失效还误报「后台启动中」。改为 spawn cli.js web（命令分发入口）。
+      const cliEntry = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'cli.js');
+      const child = spawn(process.execPath, [cliEntry, 'web'], {
         detached: true,
         stdio: 'ignore',
         env: process.env,

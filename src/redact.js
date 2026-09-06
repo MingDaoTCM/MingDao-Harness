@@ -21,6 +21,10 @@ export function redactSensitive(/** @type {any} */ text) {
   s = s.replace(/\b(?:10|127)(?:\.\d{1,3}){3}\b|\b192\.168(?:\.\d{1,3}){2}\b|\b169\.254(?:\.\d{1,3}){2}\b|\b172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}\b|\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])(?:\.\d{1,3}){2}\b/g, '[私网IP]');
   s = s.replace(/(?:fe80:[\da-f:]+|::1|::)/gi, '[链路本地/回环IPv6]');
   const home = os.homedir();
-  if (home && home.length > 1) s = s.split(home).join('~');
+  // 审计 P3-1（v0.4.2）：split().join() 无边界——/home/user2/xxx 会被误脱敏为 ~2/xxx。
+  // 正则要求家目录后跟路径分隔符或字符串结尾（如 /home/user2 的 2 紧跟目录名不匹配）。
+  if (home && home.length > 1) {
+    s = s.replace(new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?=/|$)', 'g'), '~');
+  }
   return s;
 }

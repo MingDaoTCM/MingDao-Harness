@@ -1,6 +1,8 @@
 # MingDao Harness
 
 > 开源智能体框架（Agent Harness）：**零运行时依赖、开箱即用**，针对 DeepSeek-V4 首发深度优化，开放主流模型接入。一条命令安装，终端与浏览器双界面，命令：`mingdao`（简写 `mdh`）。
+>
+> 项目简称 **MDH**（MingDao Harness），自 v0.4.3 起文档/日志/发布说明统一使用。
 
 轻量的「模型循环 + 工具 + 权限」内核，能力以 ESM 库导出、接口全部开放。架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 

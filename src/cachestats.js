@@ -6,6 +6,7 @@ import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { estimateCost, cacheSplit, beijingDayStart, beijingParts } from './pricing.js';
 import { modelPreset } from './models.js';
+import { withFileLockSync, atomicWriteFileSync } from './atomic-write.js';
 
 export function cacheStatsFile() {
   return path.join(mingdaoHome(), 'cache-stats.jsonl');
@@ -41,12 +42,16 @@ export function recordCacheStats(/** @type {any} */ entry) {
   } catch {}
   if (cacheStatsCount > MAX_LINES && cacheStatsCount % 200 === 0) {
     try {
-      const raw = fs.readFileSync(cacheStatsFile(), 'utf8');
-      const lines = raw.split('\n').filter(Boolean);
-      if (lines.length > MAX_LINES) {
-        fs.writeFileSync(cacheStatsFile(), lines.slice(-KEEP_LINES).join('\n') + '\n');
-        cacheStatsCount = KEEP_LINES;
-      }
+      // 审计 P2-3（v0.4.2）：轮转 read-modify-write 加跨进程锁——web/CLI/worker 多进程并发轮转时，
+      // 读与写之间他人追加的行会被覆写丢失；锁内重读再瘦身，写用原子替换。
+      withFileLockSync(cacheStatsFile() + '.lock', () => {
+        const raw = fs.readFileSync(cacheStatsFile(), 'utf8');
+        const lines = raw.split('\n').filter(Boolean);
+        if (lines.length > MAX_LINES) {
+          atomicWriteFileSync(cacheStatsFile(), lines.slice(-KEEP_LINES).join('\n') + '\n');
+          cacheStatsCount = KEEP_LINES;
+        }
+      });
     } catch {}
   }
 }

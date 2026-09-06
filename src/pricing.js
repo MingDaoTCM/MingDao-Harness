@@ -16,20 +16,23 @@ export const PRICE_DATA_AS_OF = '2026-08';
 // cfg.pricing.source 拉取（TTL 默认 7 天，cfg.pricing.ttlDays 可调）；TTL 内覆盖内置表，
 // 过期自动回退内置并置 stale 标记（/cost 与费用标签会提示）。
 function pricingFilePath() { return path.join(mingdaoHome(), 'pricing.json'); }
-/** @type {{ mtime: number, data: any, stale: boolean }} */
-let extCache = { mtime: -1, data: null, stale: false };
+/** @type {{ mtime: number, ttlDays: number, data: any, stale: boolean }} */
+let extCache = { mtime: -1, ttlDays: 7, data: null, stale: false };
 function externalPricing() {
   try {
+    // 审计 P2-2（v0.4.2）：此前直接读 tzCache.ttlDays——首次调用若早于 peakCfg()（isPeakHour），
+    // tzCache 还是初值（无 ttlDays），用户配的 pricing.ttlDays 被忽略按 7 天判过期且缓存整个进程寿命。
+    // 改走 peakCfg()（mtime 缓存，代价极低）；ttlDays 变化也触发重算（不依赖 pricing.json mtime 变化）。
+    const ttlDays = Number(peakCfg().ttlDays || 7);
     const f = pricingFilePath();
     const st = fs.statSync(f);
-    if (st.mtimeMs !== extCache.mtime) {
+    if (st.mtimeMs !== extCache.mtime || ttlDays !== extCache.ttlDays) {
       const d = JSON.parse(fs.readFileSync(f, 'utf8'));
-      const ttlDays = Number(tzCache.ttlDays ?? 7);
       const age = Date.now() - Number(d?.fetchedAt || 0);
-      extCache = { mtime: st.mtimeMs, data: d, stale: !Number.isFinite(age) || age > ttlDays * 86400000 };
+      extCache = { mtime: st.mtimeMs, ttlDays, data: d, stale: !Number.isFinite(age) || age > ttlDays * 86400000 };
     }
   } catch {
-    extCache = { mtime: -1, data: null, stale: false };
+    extCache = { mtime: -1, ttlDays: 7, data: null, stale: false };
   }
   return extCache;
 }
@@ -61,7 +64,7 @@ export async function refreshPricingFromSource(cfg) {
   const file = pricingFilePath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
   fs.writeFileSync(file, JSON.stringify({ fetchedAt: Date.now(), source: src, models }, null, 2));
-  extCache = { mtime: -1, data: null, stale: false };
+  extCache = { mtime: -1, ttlDays: 7, data: null, stale: false };
   const names = Object.keys(models).join('、');
   return { ok: true, lines: ['✓ 价格表已刷新（' + names + '），TTL 内费用估算/护栏/避峰自动跟随'] };
 }

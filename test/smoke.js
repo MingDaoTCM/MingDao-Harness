@@ -1110,6 +1110,11 @@ const ctx = { cwd: tmp };
   assert.equal(isLocalBaseUrl('http://10.0.0.3:8081'), true, '10.x 内网应判本地');
   assert.equal(isLocalBaseUrl('https://api.deepseek.com/v1'), false, '公网域名应判远程');
   assert.equal(isLocalBaseUrl('not-a-url'), false, '非法 URL 应判远程（容错）');
+  // 审计 P3-3（v0.4.2）：IPv6 私网/链路本地判定（此前只查 IPv4 与 ::1，fc00::/7、fe80::/10 被误判远程）
+  assert.equal(isLocalBaseUrl('http://[::1]:8081/v1'), true, '::1 回环应判本地');
+  assert.equal(isLocalBaseUrl('http://[fe80::1]:8081/v1'), true, 'fe80::/10 链路本地应判本地');
+  assert.equal(isLocalBaseUrl('http://[fc00::1]:8081/v1'), true, 'fc00::/7 私网 ULA 应判本地');
+  assert.equal(isLocalBaseUrl('http://[2001:db8::1]:8081/v1'), false, '公网 IPv6 应判远程');
 
   // 内置预设：pro 1M 窗口，预算用 preset.budgetTokens（200k），不被舒适区误伤
   const capsPro = resolveModelCaps({}, 'deepseek-v4-pro');
@@ -1451,9 +1456,12 @@ const ctx = { cwd: tmp };
   });
   await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
   const urlPort = srv.address().port;
-  const r3 = await installFromUrl(`http://127.0.0.1:${urlPort}/SKILL.md`);
-  assert.ok(r3.name === 'remote-skill', 'URL 安装应成功');
-  const badUrl = await installFromUrl(`http://127.0.0.1:${urlPort}/nope.md`);
+  const r3 = await installFromUrl(`http://127.0.0.1:${urlPort}/SKILL.md`, { allowPrivate: true });
+  assert.ok(r3.name === 'remote-skill', 'URL 安装应成功（CLI 显式 URL 放行内网）');
+  // 审计 P2-1 回归：默认（WebUI 路径）拦截内网/回环地址（SSRF 防护）
+  const ssrf = await installFromUrl(`http://127.0.0.1:${urlPort}/SKILL.md`);
+  assert.ok(ssrf.error && ssrf.error.includes('SSRF'), '默认应拦截内网地址（SSRF 防护）');
+  const badUrl = await installFromUrl(`http://127.0.0.1:${urlPort}/nope.md`, { allowPrivate: true });
   assert.ok(badUrl.error && badUrl.error.includes('HTTP'), '非 200 应报错');
   const badProto = await installFromUrl('file:///etc/passwd');
   assert.ok(badProto.error && badProto.error.includes('http'), '非 http 协议应拒绝');
@@ -1486,7 +1494,7 @@ const ctx = { cwd: tmp };
   // git 安装：本地裸仓库演练（完全离线、确定性——example.com 在受限网络会挂起 120s 超时）
   const bareGit = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-bare-'));
   spawnSync('git', ['init', '--bare', '--quiet', bareGit], { encoding: 'utf8' });
-  const gitR = installFromGit(bareGit);
+  const gitR = await installFromGit(bareGit); // v0.4.2 P1-3：installFromGit 已改异步 spawn
   assert.ok(gitR.names || gitR.error, 'git 安装应返回结果或错误而非抛出');
   safeRmSync(bareGit, { recursive: true, force: true });
 
@@ -2118,6 +2126,12 @@ const ctx = { cwd: tmp };
   assert.ok(!redactSecrets('curl -H "Authorization: Bearer abc"').includes('abc'), 'Bearer token 应被掩码');
   assert.ok(!redactSecrets('curl "https://x.com?token=secret123"').includes('secret123'), 'URL query token 应被掩码');
   assert.ok(!redactSensitive('http://192.168.1.1').includes('192.168.1.1'), '私网 IP 应被掩码');
+  // 审计 P3-1（v0.4.2）：家目录掩码带路径边界——/home/user2/xxx 不得被误脱敏为 ~2/xxx
+  const homeTest = os.homedir();
+  if (homeTest && homeTest.length > 1) {
+    assert.ok(!redactSensitive(homeTest + '/a').includes(homeTest), '家目录路径应被掩码为 ~');
+    assert.ok(redactSensitive(homeTest + '2/x').includes(homeTest + '2'), '家目录前缀相似的他人路径不应被误脱敏');
+  }
   // cfg.audit=false 关闭
   const before = rows.length;
   const agentOff = createAgent({
@@ -2790,7 +2804,11 @@ const ctx = { cwd: tmp };
   assert.equal(presetPermissionOverride({ permission: 'readonly' }, 'ask').permission, 'readonly', '降权应采纳预设 readonly');
   assert.equal(presetPermissionOverride({ permission: 'ask' }, 'ask').escalated, false, '同级不拦截');
   assert.equal(presetPermissionOverride({}, 'ask').escalated, false, '未声明 permission 不拦截');
-  ok('presets：内置发现 / 校验（未知字段/坏值拒绝）/ 项目遮蔽 / 覆盖提取 / 系统提示段 / 提权拦截');
+  // 审计 P3-2（v0.4.2）：遮蔽 key 按 name 字段而非文件名——不同文件名声明同名预设只留一个
+  fs.writeFileSync(path.join(projDir, '.mingdao', 'presets', 'alias-file.json'), JSON.stringify({ name: 'my-agent', label: '同名覆盖' }));
+  const dup = listPresets(projDir).filter((/** @type {any} */ p) => p.name === 'my-agent');
+  assert.equal(dup.length, 1, '不同文件名声明同名预设应只留一个（name 字段遮蔽）');
+  ok('presets：内置发现 / 校验（未知字段/坏值拒绝）/ 项目遮蔽 / name 字段遮蔽 / 覆盖提取 / 系统提示段 / 提权拦截');
 }
 
 // ---------- 48. 第三方工具注册 + config.tools 声明式挂载（v0.4.0 契约化） ----------

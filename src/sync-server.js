@@ -347,10 +347,10 @@ function doPush(username, body) {
   const dir = sessionsDir(username);
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, name);
-  const tmp = file + '.tmp';
-  fs.writeFileSync(tmp, content, { mode: 0o600 });
-  fs.renameSync(tmp, file);
+  // 审计 P1-2（v0.4.2）：内容落盘必须在锁内且原子——此前固定 .tmp 名 + 锁外写，
+  // 并发同名 push 互相覆盖 tmp、rename 竞态，内容与 meta size 可能错位。
   return withWriteLock(() => {
+    atomicWriteFileSync(file, content, { mode: 0o600 });
     const meta = readJson(metaFile(username), {});
     meta[name] = { mtime: Date.now(), size: Buffer.byteLength(content) };
     writeJson(metaFile(username), meta);

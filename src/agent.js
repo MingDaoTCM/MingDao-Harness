@@ -45,7 +45,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   const toolResultCap = Math.min(20000, Math.max(2000, Math.floor(caps.contextWindow / 16)));
   const temperature = cfg.temperature ?? preset.temperature ?? 0.6;
   const reasoningEffort = cfg.reasoningByModel?.[modelName] ?? cfg.reasoningEffort ?? preset.reasoningEffort?.default ?? undefined;
-  const hooks = createHooks(cfg.hooks, workingDir);
+  const hooks = createHooks(cfg.hooks, workingDir, cfg);
   const todos = /** @type {any[]} */ ([]);
   // 会话级共享：调用方传入则复用（/model 切换、子代理均共享，undo 不丢失）
   const undo = undoStore || { backups: new Map() };
@@ -789,6 +789,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     }
     // 理论不可达（for 循环末轮必 return）；给 tsc 一个兜底，保证 runTurn 恒有返回值
     return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, capHit: true, durationMs: Date.now() - startedAt, perf: perf() };
+    } catch (/** @type {any} */ err) {
+      // 审计 P2-6（v0.4.2）：工具管线异常（hooks.pre / permission.check / prepTool 等）沿大 try 上抛时，
+      // assistant tool_calls 已 push 进 messages 却无对应 tool 回填——会话恢复后 API 因孤儿 tool_call_id 400。
+      // 清理孤儿调用后再抛（stripOrphanCalls 此前只在中断/收尾路径调用）。
+      stripOrphanCalls();
+      throw err;
     } finally {
       currentAc = null;
       offSigint();

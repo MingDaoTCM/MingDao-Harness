@@ -15,7 +15,8 @@ const MAX_TIMEOUT_SECONDS = 600;
 // 整体关闭（回到完全透传）。
 const SENSITIVE_ENV_PAIR = /(api[_-]?key|access[_-]?key|client[_-]?secret|private[_-]?key)/i;
 const SENSITIVE_ENV_SEGMENT = /(^|_)(token|secret|password|passwd|credential|authorization|auth)(_|$)/i;
-const isSensitiveEnv = (/** @type {any} */ k) => SENSITIVE_ENV_PAIR.test(k) || SENSITIVE_ENV_SEGMENT.test(k);
+// 审计 P3-6（v0.4.2）：导出供 hooks.js 复用——hook 子进程 env 与 bash 工具同口径过滤敏感变量。
+export const isSensitiveEnv = (/** @type {any} */ k) => SENSITIVE_ENV_PAIR.test(k) || SENSITIVE_ENV_SEGMENT.test(k);
 
 function buildChildEnv(/** @type {any} */ ctx, /** @type {any} */ filterSensitive) {
   if (!filterSensitive) return process.env;
@@ -87,7 +88,9 @@ export function runBash(/** @type {any} */ args, /** @type {any} */ ctx) {
   if (!command.trim()) return { ok: false, error: 'command 参数为空。' };
   const timeoutSec = Math.min(Number(args.timeout) || 120, MAX_TIMEOUT_SECONDS);
   // 配置优先：模型不能通过传 sandbox:'off' 自行降级（配置里选了 safe/readonly 就必须沙箱）
-  const mode = String(ctx?.cfg?.sandbox ?? args.sandbox ?? 'off');
+  // 审计 P3-9（v0.4.2）：cfg.sandbox=''（空串）时 ?? 不触发，mode 为空串落入 readonly 沙箱分支——
+  // || 'off' 归一化空串回默认 off。
+  const mode = String(ctx?.cfg?.sandbox ?? args.sandbox ?? 'off') || 'off';
   const shell = process.platform === 'win32' ? 'cmd.exe' : '/bin/bash';
   const shellArgs = process.platform === 'win32' ? ['/d', '/s', '/c', command] : ['-lc', command];
 

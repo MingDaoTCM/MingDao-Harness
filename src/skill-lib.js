@@ -13,9 +13,11 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { spawnSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
+import { lookup } from 'node:dns/promises';
 import { fileURLToPath } from 'node:url';
 import { mingdaoHome, ensureHome } from './config.js';
+import { isPrivateHost } from './tools/fetch.js';
 
 const LIB_DIR = fileURLToPath(new URL('../skills-lib', import.meta.url));
 
@@ -250,7 +252,7 @@ export function installFromDir(dir) {
 /**
  * @param {any} url
  */
-export async function installFromUrl(url) {
+export async function installFromUrl(url, { allowPrivate = false } = {}) {
   let u;
   try {
     u = new URL(url);
@@ -264,7 +266,41 @@ export async function installFromUrl(url) {
   const timer = setTimeout(() => ctrl.abort(), 30000);
   let text;
   try {
-    const res = await fetch(u, { signal: ctrl.signal, redirect: 'follow' });
+    // 审计 P2-1（v0.4.2）：SSRF 防护——与 fetch 工具/validateRemoteUrl 同口径：
+    // 初始与每一跳重定向都做私网/回环字面量判定 + DNS 复检（防域名重绑定），跳数上限 5。
+    // allowPrivate（CLI 显式输入 URL 时开启）：本地用户自担意图，内网地址可安装；WebUI 默认拦截。
+    let cur = u;
+    let res = /** @type {any} */ (null);
+    for (let hop = 0; hop <= 5; hop++) {
+      const ch = String(cur.hostname || '').toLowerCase();
+      let blocked = !allowPrivate && isPrivateHost(ch);
+      if (!blocked && ch && ch !== 'localhost' && !/^\d{1,3}(\.\d{1,3}){3}$/.test(ch)) {
+        try {
+          const addrs = await lookup(ch, { all: true, verbatim: true });
+          blocked = !allowPrivate && addrs.some((/** @type {any} */ a) => isPrivateHost(a.address));
+        } catch {
+          // DNS 解析失败：放行，连接阶段会报错
+        }
+      }
+      if (blocked) return { error: `拒绝访问内网/本机地址（${ch}）——SSRF 防护。` };
+      res = await fetch(cur, { signal: ctrl.signal, redirect: 'manual' });
+      if (res.status >= 300 && res.status < 400) {
+        if (hop >= 5) return { error: '重定向次数超过上限（5 跳）。' };
+        const loc = res.headers.get('location');
+        if (!loc) break;
+        try {
+          cur = new URL(loc, cur);
+        } catch {
+          return { error: `非法重定向地址：${loc}` };
+        }
+        if (cur.protocol !== 'http:' && cur.protocol !== 'https:') {
+          return { error: '重定向到非 http(s) 地址，已拒绝。' };
+        }
+        continue;
+      }
+      break;
+    }
+    if (!res) return { error: '下载失败：无响应' };
     if (!res.ok) return { error: `下载失败：HTTP ${res.status}` };
     text = await res.text();
     if (text.length > 512 * 1024) return { error: 'SKILL.md 超过 512KB 上限' };
@@ -290,23 +326,34 @@ export async function installFromUrl(url) {
   return r;
 }
 
+/** 异步 spawn（审计 P1-3）：child_process.spawn + Promise，返回 { error?, code, signal }。 */
+function runSpawn(/** @type {string} */ cmd, /** @type {string[]} */ args, /** @type {{ timeoutMs?: number }} */ { timeoutMs } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, { stdio: 'ignore', timeout: timeoutMs });
+    child.on('error', (/** @type {any} */ err) => resolve({ error: err }));
+    child.on('close', (code, signal) => resolve({ code, signal }));
+  });
+}
+
 /**
  * @param {any} gitUrl
  */
-export function installFromGit(gitUrl) {
+export async function installFromGit(gitUrl) {
   if (typeof gitUrl !== 'string' || gitUrl.trim().startsWith('-')) {
     return { error: 'git 地址不能以 - 开头（防选项注入）' };
   }
-  const check = spawnSync('git', ['--version'], { stdio: 'ignore' });
-  if (check.error || check.status !== 0) {
+  // 审计 P1-3（v0.4.2）：spawnSync 最长阻塞 120s 冻结整个 Node 事件循环（WebUI 全部并发会话/
+  // 权限确认/SSE 流无响应）。改异步 spawn，与 v0.4.1 mountConfigTools 修复同口径。
+  const check = await runSpawn('git', ['--version']);
+  if (check.error || check.code !== 0) {
     return { error: '未找到 git（git 仓库安装需要系统 git，可用 URL 安装单文件技能）' };
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-git-'));
   // -- 分隔符：gitUrl 即使形似选项也只按路径处理
-  const r = spawnSync('git', ['clone', '--depth', '1', '--', gitUrl, tmp], { stdio: 'ignore', timeout: 120000 });
-  if (r.error || r.status !== 0) {
+  const r = await runSpawn('git', ['clone', '--depth', '1', '--', gitUrl, tmp], { timeoutMs: 120000 });
+  if (r.error || r.code !== 0) {
     fs.rmSync(tmp, { recursive: true, force: true });
-    return { error: `git clone 失败：${r.error?.message || `退出码 ${r.status}`}` };
+    return { error: `git clone 失败：${r.error?.message || (r.signal ? `超时/被终止（${r.signal}）` : `退出码 ${r.code}`)}` };
   }
   const found = [];
   const stack = [tmp];
@@ -388,15 +435,16 @@ export async function reinstallSkill(name) {
 // 统一入口：自动识别 库名 | 本地目录 | SKILL.md URL | git 仓库
 /**
  * @param {any} arg
+ * @param {{ allowPrivateUrl?: boolean }} [opts] allowPrivateUrl=true 时 URL 安装放行内网地址（CLI 显式输入场景）
  */
-export async function installSkill(arg) {
+export async function installSkill(arg, opts = {}) {
   const a = String(arg || '').trim();
   if (!a) return { error: '缺少参数：mingdao skill install <库名|目录|SKILL.md URL|git 仓库地址>' };
   const libHit = libraryList().find((s) => s.name === a);
   if (libHit) return installFromLibrary(a);
   if (fs.existsSync(path.resolve(a))) return installFromDir(a);
   if (/^https?:\/\//i.test(a)) {
-    if (/\.md(#.*)?$/i.test(a.split('?')[0])) return installFromUrl(a);
+    if (/\.md(#.*)?$/i.test(a.split('?')[0])) return installFromUrl(a, { allowPrivate: opts.allowPrivateUrl === true });
     return installFromGit(a);
   }
   if (/^git@/.test(a)) return installFromGit(a);

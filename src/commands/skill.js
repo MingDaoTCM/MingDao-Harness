@@ -39,7 +39,8 @@ export async function handleSkill(/** @type {any} */ cmd, /** @type {any} */ arg
     return true;
   }
   if (sub === 'install') {
-    const r = await installSkill(arg);
+    // CLI 显式输入 URL 属用户自担意图：放行内网地址（与 curl 等价）；WebUI 路径默认拦截（SSRF 防护）
+    const r = await installSkill(arg, { allowPrivateUrl: true });
     if (r.error) {
       console.log('[错误] ' + (/** @type {any} */ (r)).error);
       process.exitCode = 1;

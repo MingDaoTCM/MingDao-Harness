@@ -516,6 +516,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     });
 
     res.on('close', () => {
+      // 诊断（v0.4.2 network error 排查）：区分「服务端正常收尾」与「客户端中途断开」——
+      // writableEnded=false 且任务仍在跑 = 浏览器/渲染层静默断连（此前无任何日志，根因不可见）。
+      if (!res.writableEnded && entry.status === 'running') {
+        srvlog('chat 客户端断连 ' + taskId + ' 已跑=' + Math.round((Date.now() - entry.startedAt) / 1000) + 's status=' + entry.status + ' writableEnded=' + res.writableEnded);
+      }
       // 浏览器断开：中止正在跑的生成（否则白白烧 token），挂起的权限确认按拒绝处理
       if (entry.pendingAsk) {
         entry.pendingAsk.resolve('');

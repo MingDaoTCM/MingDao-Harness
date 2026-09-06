@@ -78,8 +78,9 @@ export function validatePreset(/** @type {any} */ obj) {
  */
 export function listPresets(/** @type {any} */ workingDir) {
   ensureHome();
+  // 审计 P3-2（v0.4.2）：遮蔽 key 用预设的 name 字段而非文件名——此前两个不同文件名声明同名
+  // 预设会都被列出（违背「同名遮蔽」契约），且非法 JSON 在遮蔽判定时不可见。
   const seen = new Map();
-  const order = /** @type {string[]} */ ([]);
   for (const { dir, source } of presetLocations(workingDir)) {
     let files = [];
     try {
@@ -88,34 +89,31 @@ export function listPresets(/** @type {any} */ workingDir) {
       continue;
     }
     for (const f of files) {
-      if (seen.has(f)) continue;
-      seen.set(f, { dir, source });
-      order.push(f);
-    }
-  }
-  const out = [];
-  for (const f of order) {
-    const { dir, source } = seen.get(f);
-    try {
-      const obj = JSON.parse(fs.readFileSync(path.join(dir, f), 'utf8'));
+      const file = path.join(dir, f);
+      let obj;
+      try {
+        obj = JSON.parse(fs.readFileSync(file, 'utf8'));
+      } catch {
+        continue; // JSON 解析失败：跳过
+      }
       const v = validatePreset(obj);
       if (!v.ok) continue; // 非法预设跳过并静默（不阻塞会话）；diagnose 可查
-      out.push({
-        name: String(obj.name),
-        label: String(obj.label || obj.name),
-        description: String(obj.description || ''),
-        source,
-        file: path.join(dir, f),
-        ...(obj.systemPrompt ? { systemPrompt: obj.systemPrompt } : {}),
-        ...(Array.isArray(obj.tools) ? { tools: obj.tools } : {}),
-        ...(obj.permission ? { permission: String(obj.permission) } : {}),
-        ...(obj.model ? { model: String(obj.model) } : {}),
-      });
-    } catch {
-      // JSON 解析失败：跳过
+      const key = String(obj.name);
+      if (seen.has(key)) continue; // 同名遮蔽：项目 → 用户 → 内置（先发现者胜）
+      seen.set(key, { obj, source, file });
     }
   }
-  return out;
+  return [...seen.values()].map(({ obj, source, file }) => ({
+    name: String(obj.name),
+    label: String(obj.label || obj.name),
+    description: String(obj.description || ''),
+    source,
+    file,
+    ...(obj.systemPrompt ? { systemPrompt: obj.systemPrompt } : {}),
+    ...(Array.isArray(obj.tools) ? { tools: obj.tools } : {}),
+    ...(obj.permission ? { permission: String(obj.permission) } : {}),
+    ...(obj.model ? { model: String(obj.model) } : {}),
+  }));
 }
 
 /**

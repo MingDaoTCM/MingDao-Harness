@@ -3,6 +3,10 @@
 // 供预算推导、超时、工具截断统一引用——避免各层各自猜一份 128000 默认，
 // 本地小模型（窗口小/内存少）自动收紧预算与超时，不撑爆、不误杀。
 import { modelPreset } from './models.js';
+// 审计 P3-3（v0.4.2）：本地判定复用 fetch.js 的 isPrivateHost（IPv4 私网/回环/CGNAT/多播 + IPv6
+// fc00::/7、fe80::/10、::、::1、IPv4-mapped）——此前只查 IPv4 与 ::1，IPv6 本地模型被误判远程
+// （超时档位错），且与 fetch 工具/SSRF 判定各维护一份、口径漂移。
+import { isPrivateHost } from './tools/fetch.js';
 
 // 兜底：未知模型默认上下文窗口。本地小模型宁可保守（不撑爆）也不乐观。
 export const UNKNOWN_LOCAL_WINDOW = 32768;
@@ -20,14 +24,8 @@ export const EDGE_RATIO = 0.85;
 export function isLocalBaseUrl(/** @type {any} */ baseUrl) {
   try {
     const u = new URL(String(baseUrl || ''));
-    const h = u.hostname.toLowerCase();
-    if (!h) return false;
-    if (h === 'localhost' || h === '::1') return true;
-    const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (!m) return false;
-    const a = Number(m[1]);
-    const b = Number(m[2]);
-    return a === 10 || a === 127 || a === 0 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+    if (!u.hostname) return false;
+    return isPrivateHost(u.hostname);
   } catch {
     return false;
   }

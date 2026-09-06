@@ -2,7 +2,9 @@
 // SSRF 防护：字面量私网/回环拒绝 + DNS 解析复检（防域名重绑定），口径与 server.js validateRemoteUrl 一致。
 import { lookup } from 'node:dns/promises';
 
-function isPrivateHost(/** @type {string} */ hostname) {
+// 审计 4.1（v0.4.2）：isPrivateHost 导出复用——skill-lib.installFromUrl 等外联入口共用同一判定，
+// 避免「漏一处」的 SSRF 防护缺口（此前 fetch 工具与 server.validateRemoteUrl 各自维护一份）。
+export function isPrivateHost(/** @type {string} */ hostname) {
   let h = String(hostname || '').toLowerCase();
   if (!h) return true;
   h = h.replace(/^\[|\]$/g, '');

@@ -9,6 +9,7 @@
 //  - matcher 支持精确工具名、逗号分隔多个名、'*' 通配。
 
 import { spawn } from 'node:child_process';
+import { isSensitiveEnv } from './tools/bash.js';
 
 function normalize(/** @type {any} */ list) {
   if (!Array.isArray(list)) return [];
@@ -25,16 +26,27 @@ function match(/** @type {any} */ hook, /** @type {any} */ toolName) {
   });
 }
 
-export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir) {
+export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @type {any} */ cfg = {}) {
   const pre = normalize((/** @type {any} */ (hooksCfg))?.PreToolUse);
   const post = normalize((/** @type {any} */ (hooksCfg))?.PostToolUse);
+  // 审计 P3-6（v0.4.2）：hook 子进程不再全量透传 process.env（含 API Key）——与 bash 工具同口径
+  // 默认过滤敏感变量；config.bashEnvKeep 按名放行、bashEnvFilter=false 整体关闭。
+  const keepEnv = new Set((cfg?.bashEnvKeep || []).map(String));
+  let childEnv = process.env;
+  if (cfg?.bashEnvFilter !== false) {
+    const filtered = /** @type {any} */ ({});
+    for (const [k, v] of Object.entries(process.env)) {
+      if (!isSensitiveEnv(k) || keepEnv.has(k)) filtered[k] = v;
+    }
+    childEnv = filtered;
+  }
 
   function run(/** @type {any} */ hook, /** @type {any} */ payload) {
     return new Promise((resolve) => {
       const child = spawn(hook.cmd, {
         shell: true,
         cwd: workingDir,
-        env: process.env,
+        env: childEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
       let out = '';

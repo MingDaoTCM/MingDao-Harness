@@ -172,6 +172,9 @@ async function main() {
   }
   // 最近会话日志默认不注入（新会话全新开始）；--journal 显式带上
   const withJournal = Boolean(opts.journal);
+  // 审计 P2-5（v0.4.2）：jsonMode 提前到 opts 解析后判定——此前在单次提问分支内才判定，
+  // 预设/tools/MCP 等提示在判定前已打到 stdout，污染 --format json 的单行 JSON 输出。
+  const jsonMode = opts.format === 'json';
 
   // —— 命令分发（已拆至 src/commands/，评估 P0-1 拆 cli.js）——
   // 各 handler 返回 true = 已处理；false = 按普通提问继续（保留词劫持防护）。
@@ -366,20 +369,20 @@ async function main() {
     activePreset = loadPreset(workingDir, opts.preset);
     if (!activePreset) {
       const names = listPresets(workingDir).map((/** @type {any} */ p) => p.name).join(', ') || '（无可用预设）';
-      io.print(style(`⚠ 预设 "${opts.preset}" 不存在。可用：${names}`, C.yellow));
+      if (!jsonMode) io.print(style(`⚠ 预设 "${opts.preset}" 不存在。可用：${names}`, C.yellow));
     } else {
       presetOverlay = { ...presetConfigOverrides(activePreset), presetName: activePreset.name };
       // P0（v0.4.1）：预设 permission 提权防护——预设不得把 ask/readonly 静默改成 auto
       const permOv = presetPermissionOverride(activePreset, cfg.permission ?? 'ask');
       if (permOv.escalated) {
         delete presetOverlay.permission;
-        io.print(style(`⚠ 预设 "${activePreset.name}" 声明 permission=${activePreset.permission} 属提权（当前 ${cfg.permission ?? 'ask'}），已忽略并保持 ${permOv.permission}。`, C.yellow));
+        if (!jsonMode) io.print(style(`⚠ 预设 "${activePreset.name}" 声明 permission=${activePreset.permission} 属提权（当前 ${cfg.permission ?? 'ask'}），已忽略并保持 ${permOv.permission}。`, C.yellow));
       } else if (activePreset.permission !== undefined) {
         presetOverlay.permission = permOv.permission;
       }
       if (!opts.model && presetOverlay.model) modelName = presetOverlay.model;
       presetBlock = presetSystemBlock(activePreset);
-      io.print(style(`▣ 已应用智能体预设：${activePreset.name}${activePreset.label ? '（' + activePreset.label + '）' : ''}`, C.cyan));
+      if (!jsonMode) io.print(style(`▣ 已应用智能体预设：${activePreset.name}${activePreset.label ? '（' + activePreset.label + '）' : ''}`, C.cyan));
     }
   }
   // agent 使用的配置 = cfg + 预设 overlay（presetTools/permission/参数按预设生效，cfg 本体保持干净）
@@ -406,7 +409,7 @@ async function main() {
   {
     const { mountConfigTools } = await import('./tools/index.js');
     const mounted = mountConfigTools(cfg);
-    if (mounted.length) io.print(style(`🔧 已挂载声明式工具（config.tools）：${mounted.join(', ')}`, C.dim));
+    if (mounted.length && !jsonMode) io.print(style(`🔧 已挂载声明式工具（config.tools）：${mounted.join(', ')}`, C.dim));
   }
   // 会话级 undo 备份仓：模型切换、子代理均共享，撤销记录不丢失
   const sessionUndoStore = { backups: new Map() };
@@ -432,10 +435,10 @@ async function main() {
     if (!mcpManager) mcpStartP.then((/** @type {any} */ m) => { if (m) m.stop(); });
     if (mcpManager) {
       const ready = mcpManager.status().filter((/** @type {any} */ s) => s.ok).length;
-      if (io && !opts.prompt.length) {
+      if (io && !opts.prompt.length && !jsonMode) {
         io.print(style(`✓ MCP 就绪：${ready}/${mcpManager.status().length} 个服务器，共 ${mcpManager.toolSchemas().length} 个工具`, C.dim));
       }
-    } else if (io && !opts.prompt.length) {
+    } else if (io && !opts.prompt.length && !jsonMode) {
       io.print(style('⚠ MCP 连接超时（6s）：本会话不注入 MCP 工具（重启 mingdao 可重试）', C.dim));
     }
   }
@@ -463,7 +466,6 @@ async function main() {
 
   // —— 单次提问模式 ——
   if (opts.prompt.length > 0) {
-    const jsonMode = opts.format === 'json';
     const question = opts.prompt.join(' ');
     // 自动路由：规划类任务切 planner，执行类走 executor（JSON 模式静默）
     const route = await routeTask({ cfg, provider, currentModel: modelName, text: question });
@@ -504,12 +506,16 @@ async function main() {
       const res = await turnAgent.runTurn(messages);
       appendMessages(session.file, messages.slice(oneShotPersisted));
       if (!jsonMode && cfg.autoTitle !== false && res.text) {
-        const tModel = titleModel(cfg, modelName);
-        const title = await generateTitle(await helperProvider(cfg, tModel, provider), tModel, question);
-        if (title) {
-          const renamed = renameSessionFile(fs, path, home, session, title);
-          if (renamed) io.print(style(`✓ 会话标题：${path.basename(renamed)}`, C.dim));
-        }
+        // 审计 P2-4（v0.4.2）：autoTitle 独立 try/catch——此前 titleModel 目标服务商无 Key 时
+        // helperProvider 抛错落入外层 catch，成功回答已输出却被误报失败（exitCode=2）。
+        try {
+          const tModel = titleModel(cfg, modelName);
+          const title = await generateTitle(await helperProvider(cfg, tModel, provider), tModel, question);
+          if (title) {
+            const renamed = renameSessionFile(fs, path, home, session, title);
+            if (renamed) io.print(style(`✓ 会话标题：${path.basename(renamed)}`, C.dim));
+          }
+        } catch {}
       }
       // v0.3.0 P0-2：单次提问跑满步数/中断落检查点（--continue 可续跑），正常完成清除
       if (res.capHit || res.aborted) {
