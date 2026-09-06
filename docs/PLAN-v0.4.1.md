@@ -35,6 +35,21 @@
 16. context.js 幂等守卫死代码移除（回收结果从不回写原 messages，守卫恒 false）。
 17. agent.js reasoning 清洗 O(n²) → 单次遍历 O(n)。
 
+### macOS 本地模型「输出截断 / 子代理无反馈」（追加修复，2026-09-05）
+
+用户 MacBook 用 mtplx-qwen38-27b（routing.enabled=true）复现，日志 `text=0` 且 `status=done`。两个根因：
+
+18. **子代理无反馈**（routing.js）：`subagentModel` 在 routing 开启时恒返回 executor
+    （deepseek-v4-flash），无 routeTask 的「池外不干预」检查——本地/自定义模型派子代理时，把
+    executor 模型名发到本地 baseUrl（8081）→ 服务端不认识 → 400 → 子代理全灭。修复：池外跟随当前模型。
+19. **输出截断/text=0**（agent.js）：兜底总结请求此前用 `trimMessages(messages, budget)` 全量历史，
+    本地 q8 模型 ≈98k token 的 prefill 逼近/超过 600s 首 token 超时 → 总结请求失败被 `catch {}` 静默吞 →
+    返回 text:null。修复：兜底总结改用轻量输入（system + 交付物清单 + 提示，几 k token），慢 prefill
+    也能秒出总结；失败不再静默（io.print 提示原因）。
+20. 子代理空输出透出 note 原因（agent.js）：不再笼统「（子任务无输出）」，主线程可据此决策。
+21. diagnose 报告新增「当前模型能力」段：本地模型未声明 contextWindow 时显式提示兜底 32k 及其后果
+    （输出/预算被压缩），帮用户自诊。
+
 ## 顺延（明确记录，不强行塞入本批次）
 
 - **WebUI 速率限制**：本地优先工具默认回环绑定 + token 认证已挡远程；已有 `MAX_CONCURRENT=8`

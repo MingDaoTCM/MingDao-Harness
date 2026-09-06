@@ -123,7 +123,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const t0 = Date.now();
     const res = await subAgent.runTurn(messages);
     const ms = Date.now() - t0;
-    const text = res.text || (res.truncated ? '（子任务达到步骤上限，未完成）' : '（子任务无输出）');
+    // v0.4.1：子代理空输出给主线程可用的失败信号（含 note 原因），而非笼统「无输出」——
+    // 主智能体据此决定是否重试/换法，而非把子代理静默当作「已完成但没说话」。
+    const text =
+      res.text ||
+      (res.truncated ? '（子任务达到步骤上限，未完成' : '（子任务无输出') +
+      (res.note ? '：' + res.note : '') + ')';
     io.print(style(`  ↳ 子任务完成（${ms}ms）`, C.magenta));
     return text;
   }
@@ -736,13 +741,17 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     stripOrphanCalls();
     // v0.2.8 兜底总结（对齐 DSH）：跑满步数/末轮无正文且未中断时，补一次 no-tool 小输出请求，
     // 让任务以「总结文字 + 交付物清单」收尾，而非静默结束；失败则回退旧行为（text:null）。
+    // v0.4.1 修复：输入轻量化——此前用 trimMessages(messages, budget) 全量历史，本地 q8 量化模型
+    // （prefill ~165 tok/s）≈98k token 的 prefill 逼近/超过 600s 首 token 超时 → 总结请求失败被吞 →
+    // 表现为「输出截断/子代理无反馈」。改用 system + 交付物清单 + 提示（几 k token），慢 prefill 也能秒出总结。
     if (!aborted && messages.length) {
       try {
-        // stripOrphanCalls 残留的空 assistant（无 tool_calls 且 content 为空）回传会触发 API 400，先清掉
-        const lastMsg = messages[messages.length - 1];
-        if (lastMsg.role === 'assistant' && !lastMsg.content && !Array.isArray(lastMsg.tool_calls)) messages.pop();
+        const sys = messages.find((/** @type {any} */ m) => m.role === 'system');
         const wrapReq = [
-          ...trimMessages(messages, budget, count),
+          ...(sys ? [sys] : []),
+          ...(deliverables.length
+            ? [{ role: 'user', content: '已交付文件：\n' + deliverables.map((/** @type {string} */ f) => `- ${f}`).join('\n') }]
+            : []),
           { role: 'user', content: '（系统提示）任务已执行完毕。请用一段话总结刚才完成的工作，列出交付物（文件路径），并说明遗留问题与后续建议。' },
         ];
         currentAc = new AbortController();
@@ -765,7 +774,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         if (wrapRes.text) messages.push({ role: 'assistant', content: wrapRes.text });
         // capHit：本轮因步数上限被迫收尾（任务可能未真正完成）→ 供上层落检查点续跑
         return { text: wrapRes.text || null, reasoning: wrapRes.reasoning || '', usage, steps, finish, truncated: false, aborted: false, capHit: true, durationMs: Date.now() - startedAt, perf: perf() };
-      } catch {}
+      } catch (/** @type {any} */ err) {
+        // v0.4.1：不再静默吞异常——总结失败原因透出，便于定位（此前用户只见「输出截断/无反馈」）
+        try { io.print(style(`⚠ 兜底总结失败：${String(err?.message || err)}`, C.yellow)); } catch {}
+      }
     }
     return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, capHit: true, durationMs: Date.now() - startedAt, perf: perf() };
     }

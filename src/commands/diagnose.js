@@ -52,6 +52,21 @@ export async function handleDiagnose(/** @type {any} */ _cmd, /** @type {any} */
     const cfg = loadConfig();
     push(cfg ? redactSensitive(JSON.stringify(cfg, null, 2)) : '（不存在或读取失败）');
 
+    // v0.4.1：模型能力定位——本地模型未声明 contextWindow 会兜底 32k → maxOutput/budget 偏小，
+    // 表现为「输出截断/频繁压缩」。此处显式提示，帮用户自诊。
+    if (cfg?.model) {
+      push('');
+      push('## 当前模型能力');
+      try {
+        const { resolveModelCaps, safeBudget } = await import('../model-caps.js');
+        const caps = resolveModelCaps(cfg, cfg.model);
+        push(`- 模型：${cfg.model}（${caps.isLocal ? '本地部署' : '远程'}）`);
+        push(`- 上下文窗口：${caps.contextWindow}${caps.isLocal && !((cfg.customModels || {})[cfg.model]?.contextWindow) ? '（未在 customModels 声明 contextWindow，按本地兜底 32k——建议声明真实窗口，如 131072，否则输出/预算被压缩）' : ''}`);
+        push(`- 最大输出：${caps.maxOutputTokens} · 预算：${safeBudget(cfg, caps)}`);
+        push(`- 自动路由：${cfg.routing?.enabled ? '开（planner=' + cfg.routing.planner + ' executor=' + cfg.routing.executor + '）' : '关'}`);
+      } catch {}
+    }
+
     push('');
     push('## 凭证库');
     push(`${redactSensitive(credentialsPath())}：${fs.existsSync(credentialsPath()) ? '已存在（内容不打包）' : '无'}`);

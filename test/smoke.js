@@ -571,6 +571,56 @@ const ctx = { cwd: tmp };
   ok('agent：跑满步数仍无正文时补一次兜底总结');
 }
 
+// ---------- 5d2. 兜底总结输入轻量化（v0.4.1：本地慢 prefill 不再让总结请求超时失败） ----------
+{
+  const io2 = createIO({ quiet: true });
+  let t = 0;
+  let wrapMsgCount = 0;
+  const longHistory = [
+    { role: 'system', content: '系统' },
+    { role: 'user', content: '做任务' },
+    ...Array.from({ length: 30 }, (_, i) => [
+      { role: 'assistant', content: '长'.repeat(500) + '回答' + i },
+      { role: 'tool', tool_call_id: 'c' + i, content: '长'.repeat(500) + '结果' + i },
+    ]).flat(),
+  ];
+  const fake = {
+    async chat(opts) {
+      t += 1;
+      if (t <= 2) {
+        // 前 maxSteps 次：返回 write 工具调用（落交付物，跑满步数后进入兜底总结）
+        return {
+          text: '',
+          toolCalls: [{ id: 'call_w' + t, type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: `out${t}.txt`, content: 'ok' }) } }],
+          usage: { prompt_tokens: 5, completion_tokens: 2 },
+          finish: 'tool_calls',
+        };
+      }
+      // 第 3 次起（兜底总结）：tools 空，且 messages 必须轻量（不得回灌 30 轮长历史）
+      assert.equal((opts.tools || []).length, 0, '兜底总结应 no-tool');
+      wrapMsgCount = (opts.messages || []).length;
+      const totalChars = (opts.messages || []).reduce((/** @type {any} */ s, /** @type {any} */ m) => s + String(m.content || '').length, 0);
+      assert.ok(totalChars < 2000, `兜底总结输入应轻量（实际 ${totalChars} 字，不得回灌全量历史）`);
+      assert.ok(String((opts.messages || []).some((/** @type {any} */ m) => String(m.content || '').includes('已交付文件'))), '兜底总结应含交付物清单');
+      return { text: '轻量总结完成。', toolCalls: null, usage: { prompt_tokens: 6, completion_tokens: 8 }, finish: 'stop' };
+    },
+  };
+  const agent = createAgent({
+    provider: fake,
+    permission: { async check() { return true; } },
+    io: io2,
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmp,
+    cfg: { permission: 'auto', maxRounds: 1 },
+    maxSteps: 2, // 2 步：第 1 步 write，第 2 步再触发一次工具调用后兜底
+  });
+  // 预置长历史到 messages：通过 runTurn 传入，agent 首轮会 append 工具结果
+  const r = await agent.runTurn(longHistory);
+  assert.ok(r.text && r.text.includes('轻量总结'), '兜底总结应产出文本');
+  assert.ok(wrapMsgCount <= 3, `兜底总结消息数应 ≤3（system+交付物+提示），实际 ${wrapMsgCount}`);
+  ok('agent：兜底总结输入轻量化（不回灌全量历史，慢 prefill 也能产出总结）');
+}
+
 // ---------- 5e. 任务检查点（v0.3.0 P0-2）：save/load/clear/resumePrompt + 正常完成不清 capHit ----------
 {
   const { saveTaskState, loadTaskState, clearTaskState, resumePrompt, saveTaskStateMerge } = await import(pathToFileURL(path.join(srcDir, 'task-state.js')).href);
@@ -1184,7 +1234,9 @@ const ctx = { cwd: tmp };
   const r3 = await routeTask({ cfg: { routing: { enabled: true } }, provider: fake, currentModel: 'qwen-max', text: '设计一个系统' });
   assert.equal(r3.model, 'qwen-max');
   assert.equal(subagentModel({ routing: { enabled: true } }, 'deepseek-v4-pro'), 'deepseek-v4-flash');
-  ok('routing：启发式 / 分类器 / 池外不干预 / 子代理 executor');
+  // v0.4.1 修复：池外模型（本地/自定义）子代理应跟随当前模型，而非被切到 executor（发错 baseUrl）
+  assert.equal(subagentModel({ routing: { enabled: true, planner: 'deepseek-v4-pro', executor: 'deepseek-v4-flash' } }, 'mtplx-qwen38-27b-optimized-quality'), 'mtplx-qwen38-27b-optimized-quality', '池外模型子代理应跟随当前模型');
+  ok('routing：启发式 / 分类器 / 池外不干预 / 子代理 executor（池外跟随）');
 }
 
 // ---------- 18. 会话检索 ----------

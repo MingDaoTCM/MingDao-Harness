@@ -139,9 +139,13 @@ export async function routeTask(/** @type {any} */ { cfg, provider, currentModel
   return rc.executor === currentModel ? { model: currentModel, reason: null } : { model: rc.executor, reason: '回退执行模型' };
 }
 
-// 子代理模型选择：路由开启时固定 executor
+// 子代理模型选择：路由开启时固定 executor——但当前模型不在路由池（如本地/自定义模型）时
+// 必须跟随当前模型，否则子代理会把 executor 模型名（deepseek-v4-flash）发到当前模型的 baseUrl
+// （本地 8081），服务端不认识 → 400 → 子代理全灭，表现为主线程「子代理无反馈」。
 export function subagentModel(/** @type {any} */ cfg, /** @type {any} */ currentModel) {
   const rc = routingConfig(cfg);
   if (!rc) return currentModel;
+  // v0.4.1 修复：与 routeTask 的池外检查一致——当前模型不在 planner/executor 池内时不干预
+  if (currentModel !== rc.planner && currentModel !== rc.executor) return currentModel;
   return modelPreset(rc.executor) ? rc.executor : currentModel;
 }
