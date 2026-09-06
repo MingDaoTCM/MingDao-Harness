@@ -149,6 +149,7 @@ $('#dirPickOk').onclick = () => { const cb = pickerCb; pickerCb = null; $('#dirM
 $('#dirPickNone').onclick = () => { const cb = pickerCb; pickerCb = null; $('#dirModal').style.display = 'none'; if (cb) cb(null); };
 $('#dirPickCancel').onclick = () => { pickerCb = null; $('#dirModal').style.display = 'none'; };
 const chatEl = $('#chat'), input = $('#input'), sendBtn = $('#sendBtn');
+let presetData = []; // v0.4.0 Agent Preset：预设列表缓存（含 description/tools/permission，供下拉提示与选中反馈）
 let activeAiMsg=null, bgRunning=0, curSteps=0, curWorkT0=0, curTools=0, curTasks=0; // 本轮进度（活动条/状态条/轨迹共用）
 let bgTasks=[]; // 后台任务列表快照（chip tooltip 详情用，updateTasksPanel 每 2s 刷新）
 let curPhase='模型推理中'; // 阶段语义（服务端 progress 事件下发）
@@ -616,6 +617,23 @@ function applyReasoningUI(reasoning){
   sel.value = ['off','low','high','max'].includes(effort) ? effort : 'high';
 }
 $('#reasoningSel').onchange=()=>{ applyConfig({reasoningEffort:$('#reasoningSel').value}); };
+// v0.4.0 Agent Preset：选中预设时给出「这是什么 / 覆盖了什么」的即时反馈（否则用户不知道各选项作用）
+$('#presetSel').onchange=()=>{ presetPicked(); };
+function presetPicked(){
+  const val=$('#presetSel')?.value||'';
+  const p=presetData.find((x)=>x.name===val);
+  if(!p){ return; } // 占位符「预设…」或未命中：无反馈
+  const over=[];
+  if(Array.isArray(p.tools)) over.push('工具白名单 '+p.tools.length+' 个');
+  if(p.permission) over.push('权限 '+p.permission);
+  if(p.model) over.push('模型 '+p.model);
+  if(p.maxRounds) over.push('maxRounds '+p.maxRounds);
+  if(p.maxOutputTokens) over.push('maxOutput '+p.maxOutputTokens);
+  if(p.temperature!==undefined) over.push('温度 '+p.temperature);
+  if(p.contextBudget) over.push('预算 '+p.contextBudget);
+  const summary=over.length?'（覆盖：'+over.join(' · ')+'）':'';
+  renderBanner({ text: '🧩 已选预设「'+(p.label||p.name)+'」：'+(p.description||'（无描述）')+summary+'。随本次发送生效，其余设置保持不变。' });
+}
 async function init(){
   try{
     const r=await fetch('/api/state',{cache:'no-store'}); const j=await r.json();
@@ -654,7 +672,8 @@ async function init(){
   try{
     // v0.4.0 Agent Preset：加载预设列表进下拉（项目 → 用户 → 内置）
     const pr=await fetch('/api/presets',{cache:'no-store'}).catch(()=>null); const pj=pr?await pr.json():{presets:[]};
-    const psel=$('#presetSel'); if(psel&&pj.presets){ for(const p of pj.presets){ const o=document.createElement('option'); o.value=p.name; o.textContent=p.label+'（'+(p.source==='project'?'项目':p.source==='user'?'用户':'内置')+'）'; o.title=p.description||p.name; psel.appendChild(o); } }
+    presetData = Array.isArray(pj.presets) ? pj.presets : [];
+    const psel=$('#presetSel'); if(psel&&presetData.length){ for(const p of presetData){ const o=document.createElement('option'); o.value=p.name; o.textContent=p.label+'（'+(p.source==='project'?'项目':p.source==='user'?'用户':'内置')+'）'; o.title=p.description||p.name; psel.appendChild(o); } }
   }catch(e){}
   try{
     const dr=await fetch('/api/draft?file='+encodeURIComponent(currentSession||''),{cache:'no-store'}); const dj=await dr.json();
