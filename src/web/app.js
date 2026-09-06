@@ -64,6 +64,7 @@ function initTips() {
   const perm = $('#permSel'); if (perm) attachTip(perm, perm.getAttribute('title'));
   const reas = $('#reasoningSel'); if (reas) attachTip(reas, reas.getAttribute('title'));
   const model = $('#modelSel'); if (model) attachTip(model, () => { const o = model.options[model.selectedIndex]; return (o && o.title) ? o.title : '切换模型'; });
+  const preset = $('#presetSel'); if (preset) attachTip(preset, () => { const o = preset.options[preset.selectedIndex]; return (o && o.title) ? o.title : '智能体预设：一键切换工具白名单/权限/参数组合（v0.4.0 契约化）'; });
   const at = $('#attachBtn'); if (at) attachTip(at, at.getAttribute('title'));
 }
 initTips();

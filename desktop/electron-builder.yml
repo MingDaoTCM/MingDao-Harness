@@ -24,6 +24,10 @@ extraResources:
     to: assets
   - from: ../skills
     to: skills
+  # v0.4.0 Agent Preset：内置预设目录（builtinPresetDir() 解析到 resources/presets/）——
+  # 漏打包会导致桌面版「预设…」下拉恒为空（无内置参考预设）
+  - from: ../presets
+    to: presets
 
 asar: true
 npmRebuild: false
