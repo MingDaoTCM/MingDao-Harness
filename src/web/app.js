@@ -64,7 +64,7 @@ function initTips() {
   const perm = $('#permSel'); if (perm) attachTip(perm, perm.getAttribute('title'));
   const reas = $('#reasoningSel'); if (reas) attachTip(reas, reas.getAttribute('title'));
   const model = $('#modelSel'); if (model) attachTip(model, () => { const o = model.options[model.selectedIndex]; return (o && o.title) ? o.title : '切换模型'; });
-  const preset = $('#presetSel'); if (preset) attachTip(preset, () => { const o = preset.options[preset.selectedIndex]; return (o && o.title) ? o.title : '智能体预设：一键切换工具白名单/权限/参数组合（v0.4.0 契约化）'; });
+  const preset = $('#presetSel'); if (preset) attachTip(preset, () => { const o = preset.options[preset.selectedIndex]; return (o && o.title) ? o.title : '智能体预设：一键切换工具白名单/权限/参数组合（选「无预设」恢复默认）'; });
   const at = $('#attachBtn'); if (at) attachTip(at, at.getAttribute('title'));
 }
 initTips();
@@ -622,7 +622,7 @@ $('#presetSel').onchange=()=>{ presetPicked(); };
 function presetPicked(){
   const val=$('#presetSel')?.value||'';
   const p=presetData.find((x)=>x.name===val);
-  if(!p){ return; } // 占位符「预设…」或未命中：无反馈
+  if(!p){ renderBanner({ text: '已取消预设，恢复默认配置（不注入预设定制段/白名单/权限覆盖）。' }); return; } // 选回「无预设」= 退出预设模式
   const over=[];
   if(Array.isArray(p.tools)) over.push('工具白名单 '+p.tools.length+' 个');
   if(p.permission) over.push('权限 '+p.permission);
