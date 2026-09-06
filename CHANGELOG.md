@@ -2,6 +2,14 @@
 
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
+## v0.4.3（2026-09-06）— 正确性收尾（审计修复 + network error 诊断）
+
+- network error 诊断闭环：渲染层 SSE 异常补全量诊断日志（此前静默中断零日志）；服务端断连日志区分「正常收尾 vs 客户端中途断开」；「网络错误」兜底改为可操作提示（检查点已保存，发「继续」续跑）
+- 审计 P1×3：WebUI 自启 100% 失效（spawn 目标改 cli.js web）；sync-server 内容落盘锁内原子写；skill 安装 spawnSync→异步 spawn（不再冻结事件循环）
+- 审计 P2×6：installFromUrl SSRF 防护（CLI 显式 URL 放行内网）；pricing ttlDays 初值 bug；cachestats 轮转加文件锁；autoTitle 独立 try/catch；--format json 输出纯净；孤儿 tool_calls 清理
+- 低成本 P3×5：家目录脱敏边界、预设 name 字段遮蔽、IPv6 本地判定、hook 环境变量过滤、sandbox 空串归一化
+- 项目简称 MDH 写入 README（自 v0.4.3 起统一使用）
+
 ## v0.4.2（2026-09-06）— 预设下拉体验修复 + 本地模型长任务 507 截断缓解
 
 - Agent Preset 下拉：桌面版打包补 `presets/` 目录（此前漏打包致内置预设恒空、下拉无可选）；预设下拉接入自绘 tooltip（悬停秒现，不再等原生 title）；选中即时弹出「这是什么 + 覆盖字段」反馈；占位符改「无预设」显式退出；内置 local-audit 预设 permission auto→readonly（语义更准且避免 ask 用户被提权拦截静默忽略）
