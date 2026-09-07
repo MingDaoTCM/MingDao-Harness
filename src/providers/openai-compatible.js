@@ -6,6 +6,20 @@
  * @typedef {Error & { status?: number, headers?: Headers }} ApiError
  */
 
+// 部分网关/本地推理框架在拒绝请求（如 507 memory_refusal）时不回非 2xx，而是回
+// 200 + {"error":{"code":507,"message":"memory_refusal"}}，或 SSE 首帧夹带 error 对象。
+// 若不识别，会被当作「空输出」吞掉，误报成「模型本轮没有输出正文。」（MacBook 本地 mtplx 507 根因）。
+function extractStreamError(/** @type {any} */ json) {
+  const err = json?.error;
+  if (!err) return null;
+  const code = Number(err?.code || err?.status_code || err?.status || 0);
+  const msg = String(err?.message || err?.type || '模型返回错误');
+  /** @type {ApiError} */
+  const e = new Error(`[流式响应错误${code ? ' ' + code : ''}] ${msg}`);
+  if (code) e.status = code;
+  return e;
+}
+
 export async function chat(/** @type {any} */ { baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta, onActivity, includeUsage = true, responseFormat, reasoningEffort }) {
   const url = String(baseUrl).replace(/\/+$/, '') + '/chat/completions';
   const payload = /** @type {Record<string, any>} */ ({ model, messages });
@@ -68,6 +82,8 @@ export async function chat(/** @type {any} */ { baseUrl, apiKey, model, messages
 }
 
 export function parseNonStream(/** @type {any} */ json, /** @type {any} */ onDelta) {
+  const se = extractStreamError(json);
+  if (se) throw se;
   const choice = json?.choices?.[0];
   const msg = choice?.message ?? {};
   if (msg.content) onDelta?.({ text: msg.content });
@@ -113,6 +129,9 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
     } catch {
       return;
     }
+    // 200 流里夹带 error 帧（本地内存拒绝等）：立即上抛，不当作空输出吞掉
+    const se = extractStreamError(json);
+    if (se) throw se;
     // 注意：DeepSeek/OpenAI 流式最后一块常是 usage-only（choices 为空），必须先取 usage 再判 choices
     if (json.usage) usage = json.usage;
     const choice = json?.choices?.[0];

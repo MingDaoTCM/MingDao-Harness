@@ -11,7 +11,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const srcDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
 
 const { createAgent } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
-const { parseStream } = await import(pathToFileURL(path.join(srcDir, 'providers/openai-compatible.js')).href);
+const { parseStream, parseNonStream } = await import(pathToFileURL(path.join(srcDir, 'providers/openai-compatible.js')).href);
 const { approxTokens, trimMessages, clampText } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
 const { dispatch } = await import(pathToFileURL(path.join(srcDir, 'tools/index.js')).href);
 const { toolSchemas, buildToolSchemas } = await import(pathToFileURL(path.join(srcDir, 'tools/index.js')).href);
@@ -336,7 +336,21 @@ const ctx = { cwd: tmp };
   const r2 = await parseStream(stream2, null);
   assert.equal(r2.text, '尾', '无换行残行内容应被处理');
   assert.equal(r2.usage.prompt_tokens, 7, 'usage-only 终包应被捕获');
-  ok('provider：SSE 流解析（断行/分片/usage）');
+  // MacBook 本地 507 根因（v0.4.5）：200 响应夹带 error 对象 / SSE error 帧不得被当「空输出」吞掉
+  let nse = null;
+  try { parseNonStream({ error: { code: 507, message: 'memory_refusal' }, choices: [] }, null); } catch (e) { nse = /** @type {any} */ (e); }
+  assert.ok(nse && nse.status === 507, 'parseNonStream 应上抛 200 里的 error（status 507）');
+  const errChunks = ['data: {"error":{"code":507,"message":"memory_refusal"}}\n\n'];
+  const errStream = new ReadableStream({
+    start(c) {
+      for (const ch of errChunks) c.enqueue(new TextEncoder().encode(ch));
+      c.close();
+    },
+  });
+  let pse = null;
+  try { await parseStream(errStream, null); } catch (e) { pse = /** @type {any} */ (e); }
+  assert.ok(pse && pse.status === 507, 'parseStream 应上抛 SSE error 帧（status 507）');
+  ok('provider：SSE 流解析（断行/分片/usage/error 帧上抛）');
 }
 
 // ---------- 5. Agent 循环（Stub Provider） ----------
@@ -1152,6 +1166,12 @@ const ctx = { cwd: tmp };
   const capsRemote = resolveModelCaps({ customModels: { 'gw': { label: 'x', baseUrl: 'https://gateway.example.com/v1' } } }, 'gw');
   assert.equal(capsRemote.isLocal, false, '公网自定义模型应判远程');
   assert.equal(capsRemote.contextWindow, 128000, '未知远程模型兜底 128k');
+
+  // MacBook 本地 507 根因（v0.4.5）：显式 local/isLocal 覆盖判定（特殊主机名/公网反代回本机）
+  const capsForceLocal = resolveModelCaps({ customModels: { 'mtplx': { label: 'x', baseUrl: 'http://mtplx.server.openai:8081/v1', local: true } } }, 'mtplx');
+  assert.equal(capsForceLocal.isLocal, true, 'customModels.local=true 应强制判本地');
+  const capsForceLocal2 = resolveModelCaps({ customModels: { 'mtplx': { label: 'x', baseUrl: 'http://mtplx.server.openai:8081/v1', isLocal: true } } }, 'mtplx');
+  assert.equal(capsForceLocal2.isLocal, true, 'customModels.isLocal=true 应强制判本地');
 
   ok('model-caps：本地/远程判定 / 窗口兜底与显式声明 / 舒适区+输出余量预算推导');
 }

@@ -415,6 +415,24 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           stripOrphanCalls();
           return { text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: true, durationMs: Date.now() - startedAt, perf: perf() };
         }
+        // MacBook 本地 507 memory_refusal 根因（v0.4.5）：服务端内存拒绝不是「空输出」——
+        // 直接终结合合并透出降级提示，不计入空轮、不注入续写重试（内存未释放必再 507，空烧请求）。
+        const e = /** @type {any} */ (err);
+        if (e?.status === 507 || /memory_refusal|内存不足|内存拒绝/i.test(String(e?.message || ''))) {
+          stripOrphanCalls();
+          return {
+            text: null,
+            reasoning: '',
+            usage,
+            steps,
+            finish,
+            truncated: false,
+            aborted: false,
+            note: '本地模型内存不足（507 memory_refusal）——请压缩上下文（减小 config.contextBudget 或 /compact）、减少并发子任务，或重启模型服务释放内存后再继续。',
+            durationMs: Date.now() - startedAt,
+            perf: perf(),
+          };
+        }
         throw err;
       }
 

@@ -7,6 +7,8 @@ import { modelPreset } from './models.js';
 // fc00::/7、fe80::/10、::、::1、IPv4-mapped）——此前只查 IPv4 与 ::1，IPv6 本地模型被误判远程
 // （超时档位错），且与 fetch 工具/SSRF 判定各维护一份、口径漂移。
 import { isPrivateHost } from './tools/fetch.js';
+import fs from 'node:fs';
+import path from 'node:path';
 
 // 兜底：未知模型默认上下文窗口。本地小模型宁可保守（不撑爆）也不乐观。
 export const UNKNOWN_LOCAL_WINDOW = 32768;
@@ -21,11 +23,45 @@ export const COMFORT_RATIO = 0.75;
 export const EDGE_RATIO = 0.85;
 
 /** 判断 baseUrl 是否指向本机/内网（本地推理框架部署）。 */
+// MacBook 本地 507 根因（v0.4.5）：自定义主机名（如 mtplx.server.openai 经 /etc/hosts 指向 127.0.0.1）
+// 的字面量判定抓不到——isPrivateHost(hostname) 对非 IP/非 localhost 恒 false，导致本地模型被误判远程：
+// 只读子代理不串行（9 路大 prefill 并发击穿内存）、压缩触发线用远程档（0.8 而非 0.6）、超时档位错。
+// 同步查 /etc/hosts（含 Windows）复检「主机名 → 私网/回环 IP」的映射，命中即视为本地。
+const hostsCache = /** @type {Map<string, boolean>} */ (new Map()); // hostname → 是否 /etc/hosts 映射私网
+function hostsMapsToPrivate(/** @type {string} */ hostname) {
+  if (hostsCache.has(hostname)) return Boolean(hostsCache.get(hostname));
+  let mapped = false;
+  try {
+    const file = process.platform === 'win32'
+      ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts')
+      : '/etc/hosts';
+    const text = fs.readFileSync(file, 'utf8');
+    for (const line of text.split(/\r?\n/)) {
+      const clean = line.replace(/#.*/, '').trim();
+      if (!clean) continue;
+      const parts = clean.split(/\s+/);
+      const ip = parts[0];
+      if (!ip || !isPrivateHost(ip)) continue;
+      if (parts.slice(1).some((h) => h.toLowerCase() === hostname)) {
+        mapped = true;
+        break;
+      }
+    }
+  } catch {
+    mapped = false; // 无 /etc/hosts 或不可读：维持字面量判定
+  }
+  hostsCache.set(hostname, mapped);
+  return mapped;
+}
+
 export function isLocalBaseUrl(/** @type {any} */ baseUrl) {
   try {
     const u = new URL(String(baseUrl || ''));
     if (!u.hostname) return false;
-    return isPrivateHost(u.hostname);
+    const host = u.hostname.toLowerCase();
+    if (isPrivateHost(host)) return true;
+    // 自定义主机名（经 /etc/hosts 指向 127.0.0.1 等私网地址）复检；否则维持「远程」
+    return hostsMapsToPrivate(host);
   } catch {
     return false;
   }
@@ -41,7 +77,10 @@ export function resolveModelCaps(/** @type {any} */ cfg, /** @type {any} */ mode
   const preset = modelPreset(modelName);
   const cm = (cfg?.customModels || {})[modelName] || {};
   const baseUrl = cm.baseUrl || cfg?.baseUrl || '';
-  const isLocal = isLocalBaseUrl(baseUrl);
+  // 显式声明优先：customModels.<name>.local=true/isLocal=true 强制按本地模型处理（压缩/串行/超时走本地档），
+  // 覆盖 baseUrl 字面量/hosts 判定不到的场景（如经公网反代回本机、特殊主机名）。
+  const explicitLocal = cm.local === true || cm.isLocal === true;
+  const isLocal = explicitLocal || isLocalBaseUrl(baseUrl);
   const contextWindow =
     Number(cm.contextWindow) > 0
       ? Number(cm.contextWindow)
