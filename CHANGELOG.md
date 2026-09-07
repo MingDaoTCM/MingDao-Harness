@@ -2,6 +2,18 @@
 
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
+## v0.4.5（2026-09-07）— 费用护栏根因修复 + 本地模型 507 中断根治 + 调度/CLI/安全收尾
+
+- P0 费用护栏：`estimateCost` 无价返 null（0 与「未知」语义分离）+ `costGuard` 显式 `noPricing` 告警，不再静默当「没花钱」；`recordUsage` 记录 null 成本（覆盖内置/外部/overrides 三来源）
+- P0 任务锁与 kill：`withFileLockSync` 可重入（killTask 持锁二次抢锁自死锁 5s）；schedule pause/remove 的 killTask 包 try/catch；非 Linux（无 /proc）kill 降级为按 pid 存活即杀
+- 调度器 pause 语义：标记 running / once-after 终态 / skipped / offpeak note / runOnce 元数据五处状态写全部「加锁 + 复查 paused」，执行期间 pause 不再被覆盖（every 已有防护，once/after 补齐）
+- MacBook 本地 507 根治：parseStream/parseNonStream 识别 200 里夹带的 error 对象（memory_refusal）并上抛；agent 507 直结合回合透出降级提示（不计空轮、不空烧续写）；isLocalBaseUrl 补 /etc/hosts 复检 + customModels.local/isLocal 显式本地档（mtplx 自定义主机名不再误判远程）
+- SSE [DONE] 后有界排空（捕获尾帧 usage 又不挂网关）；readBody close→499 释放 inflight 槽
+- CLI `--model` 贪婪解析修复（后台/定时指定模型不再被顶层剥除、文本含 init 不误触发向导）
+- worker 判 capHit（跑满步数上限判 failed）；every 崩溃恢复经 postRunStatus 重排回 pending
+- git 只读工具拒绝 `--no-index`/`--output`/`-D`/`-f`/`-m` 等越界/破坏性参数；技能目录拒绝符号链接（lstat + containsSymlink）
+- memory/pricing 整写改原子写；子代理 onUsage 透传；task(readOnly) 自动放行；fetch 重定向死代码；onUsage 带模型名归属
+
 ## v0.4.4（2026-09-07）— macOS 熄屏断连根治 + 审计可用性 + 技术评估修复
 
 - macOS 长任务 network error 根治：生成期 `powerSaveBlocker('prevent-display-sleep')` 防熄屏（熄屏/Idle Sleep 中断 Chromium 网络栈是最终根因）；SSE 异常日志 JSON 化（此前 Electron 落 [object Object]）；统一中断续跑提示
