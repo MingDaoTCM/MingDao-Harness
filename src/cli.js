@@ -427,7 +427,7 @@ async function main() {
   if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) {
     // A2：预热——await 连接（6s 超时）；超时本会话冻结工具集（不再中途注入，保护前缀缓存）。
     // 超时后输家 promise 仍在跑：迟到就绪的 manager 立即 stop，防 detached 子进程成孤儿（自查 #2）
-    const mcpStartP = startMcpServers(cfg.mcpServers, workingDir).catch(() => null);
+    const mcpStartP = startMcpServers(cfg.mcpServers, workingDir, cfg).catch(() => null);
     mcpManager = await Promise.race([
       mcpStartP,
       new Promise((/** @type {any} */ r) => setTimeout(() => r(null), 6000)),

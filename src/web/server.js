@@ -119,8 +119,8 @@ function readBody(req, limit = 40 * 1024 * 1024) {
   });
 }
 
-/** @param {{ host?: string, port?: number, authToken?: string|null, [key: string]: any }} [opts] */
-export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken } = {}) {
+/** @param {{ host?: string, port?: number, authToken?: string|null, onBusy?: (busy: boolean) => void, [key: string]: any }} [opts] */
+export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken, onBusy } = {}) {
   const home = ensureHome();
   const cfg = loadConfig();
   if (!cfg) {
@@ -206,7 +206,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   let mcpManager = null;
   if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) {
     // 超时后输家 promise 仍在跑：迟到就绪的 manager 立即 stop，防 detached 子进程成孤儿（自查 #2）
-    const mcpStartP = startMcpServers(cfg.mcpServers, workingDir).catch(() => null);
+    const mcpStartP = startMcpServers(cfg.mcpServers, workingDir, cfg).catch(() => null);
     mcpManager = await Promise.race([
       mcpStartP,
       new Promise((/** @type {any} */ r) => setTimeout(() => r(null), 6000)),
@@ -230,6 +230,18 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
   let inflight = 0; // 质检 S2：在途聊天请求计数（与请求生命周期绑定，防 readBody 期间并发超限）
   const tasks = new Map(); // taskId -> { res, send, abortHandler, pendingAsk, session, startedAt, status, message, durationMs }
   let taskSeq = 0;
+  // 忙状态通知（v0.4.3 network error 修复）：有 running 任务即「忙」——桌面版据此在生成期
+  // 防睡眠/防熄屏（macOS 熄屏会中断 Chromium 网络栈导致 SSE 断连）。onBusy 由调用方注入。
+  let lastBusy = false;
+  function notifyBusy() {
+    const busy = [...tasks.values()].some((/** @type {any} */ t) => t.status === 'running');
+    if (busy !== lastBusy) {
+      lastBusy = busy;
+      try {
+        onBusy?.(busy);
+      } catch {}
+    }
+  }
   // 会话文件互斥（质检 C1/M3）：同一 session 文件的 append 与 compact 整文件重写必须串行
   const sessionLocks = new Map();
   /** @param {any} file @param {any} fn */
@@ -321,6 +333,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     const entry = /** @type {any} */ ({ res, send: null, abortHandler: null, pendingAsk: null, session: null, startedAt: Date.now(), status: 'running', message: '', durationMs: 0 });
     srvlog('chat 开始 ' + taskId + ' session=' + (body.file || '新会话') + ' 消息长度=' + String(body.message || '').length);
     tasks.set(taskId, entry);
+    notifyBusy(); // 进入 running → 忙
     /** @param {any} obj */
     const send = (obj) => {
       try {
@@ -350,6 +363,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
     const built = buildUserContent(userMessage, body.attachments, visionSupported);
     if (built.error) {
       entry.status = 'failed';
+      notifyBusy();
       send({ type: 'error', message: built.error });
       clearInterval(progressTimer);
       res.end();
@@ -490,6 +504,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       providerNow = await getProviderFor(runModel); // 审计 P1-1：失败时清理任务占位，避免僵尸 running 耗尽并发
     } catch (/** @type {any} */ err) {
       entry.status = 'failed';
+      notifyBusy();
       entry.durationMs = Date.now() - entry.startedAt;
       send({ type: 'error', message: `模型 ${runModel} 不可用：${String(err?.message || err)}` });
       clearInterval(progressTimer);
@@ -531,6 +546,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
           entry.abortHandler?.();
         } catch {}
         entry.status = 'failed';
+        notifyBusy();
         entry.durationMs = Date.now() - entry.startedAt;
         pruneTasks();
       }
@@ -579,6 +595,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
         clearTaskState(finalSessionName);
       }
       entry.status = r.aborted ? 'aborted' : 'done';
+      notifyBusy();
       entry.durationMs = Date.now() - entry.startedAt;
       srvlog('chat 发送 done ' + taskId + ' status=' + entry.status + ' 总耗时=' + entry.durationMs + 'ms');
       // 预算可视化（评估 A5）：会话当前 token 占用 / 预算
@@ -607,6 +624,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken 
       });
     } catch (/** @type {any} */ err) {
       entry.status = 'failed';
+      notifyBusy();
       entry.durationMs = Date.now() - entry.startedAt;
       srvlog('chat 错误 ' + taskId + ' ' + String(err?.message || err));
       send({ type: 'error', message: String(err?.message || err) });

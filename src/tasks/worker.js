@@ -68,7 +68,7 @@ export async function runWorkerTask(id, question, { permission, model, offpeak }
           if (mcpManager) mcpManager.stop();
         },
       };
-      startMcpServers(cfg.mcpServers, workingDir).then((m) => (mcpManager = m)).catch(() => {});
+      startMcpServers(cfg.mcpServers, workingDir, cfg).then((m) => (mcpManager = m)).catch(() => {});
     }
     const sessionRef = /** @type {{name: any}} */ ({ name: null });
     let persistedCount = 0;

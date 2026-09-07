@@ -8,6 +8,17 @@
 
 import fs from 'node:fs';
 import { spawn } from 'node:child_process';
+import { isSensitiveEnv } from './tools/bash.js';
+
+// 评估 6.2（v0.4.3）：MCP 子进程不再继承完整 process.env（含 API Key）——与 bash/hooks 同口径
+// 默认过滤敏感变量；config.mcpEnvKeep 按名放行、config.mcpEnvFilter=false 整体关闭。
+function filteredProcessEnv(/** @type {Set<string>} */ keepSet) {
+  const out = /** @type {any} */ ({});
+  for (const [k, v] of Object.entries(process.env)) {
+    if (!isSensitiveEnv(k) || keepSet.has(k)) out[k] = v;
+  }
+  return out;
+}
 
 // 客户端版本读 package.json（评估 P3-9：此前硬编码 '0.6.0' 与真实版本脱节）
 const CLIENT_VERSION = (() => {
@@ -25,11 +36,12 @@ const HANDSHAKE_TIMEOUT_MS = 20000;
 let nextId = 1;
 
 export class McpClient {
-  constructor(/** @type {any} */ name, /** @type {any} */ { command, args = [], env = {}, trusted = false }, /** @type {any} */ workingDir) {
+  constructor(/** @type {any} */ name, /** @type {any} */ { command, args = [], env = {}, trusted = false }, /** @type {any} */ workingDir, /** @type {any} */ baseEnv = process.env) {
     this.name = name;
     this.command = command;
     this.args = args;
     this.env = env;
+    this.baseEnv = baseEnv; // 过滤敏感变量后的基础环境（startMcpServers 注入）
     this.trusted = trusted === true; // v0.4.1 P0：仅 trusted 服务器的 readOnlyHint 才被信任自动放行
     this.workingDir = workingDir;
     this.tools = /** @type {any[]} */ ([]);
@@ -45,7 +57,7 @@ export class McpClient {
     if (this.child) return this;
     this.child = spawn(this.command, this.args, {
       cwd: this.workingDir,
-      env: { ...process.env, ...this.env },
+      env: { ...this.baseEnv, ...this.env }, // 敏感变量已过滤（this.baseEnv），this.env 为用户显式覆盖
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: true, // 自成进程组：stop 时整组清理（npx 孙进程不成孤儿）
     });
@@ -215,13 +227,16 @@ export class McpClient {
 }
 
 // 多服务器管理器：部分服务器启动失败不影响其余
-export async function startMcpServers(/** @type {any} */ mcpCfg, /** @type {any} */ workingDir) {
+// topCfg 为顶层 config.json（提供 mcpEnvKeep/mcpEnvFilter 环境过滤口径，与 bash/hooks 一致）
+export async function startMcpServers(/** @type {any} */ mcpCfg, /** @type {any} */ workingDir, /** @type {any} */ topCfg = {}) {
+  const keep = new Set((topCfg?.mcpEnvKeep || []).map(String));
+  const baseEnv = topCfg?.mcpEnvFilter === false ? process.env : filteredProcessEnv(keep);
   const clients = new Map();
   const entries = Object.entries(mcpCfg || {});
   await Promise.all(
     entries.map(async ([name, cfg]) => {
       if (!cfg || typeof cfg.command !== 'string' || !cfg.command.trim()) return;
-      const client = new McpClient(name, cfg, workingDir);
+      const client = new McpClient(name, cfg, workingDir, baseEnv);
       clients.set(name, client);
       try {
         await client.start();

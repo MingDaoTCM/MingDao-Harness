@@ -4,7 +4,7 @@
 //  - 系统托盘（关闭最小化到托盘）、应用菜单、窗口大小/位置记忆、单实例锁
 //  - 权限收紧（摄像头/通知/插件等一律拒绝）、外链交系统浏览器
 //  - 打包版自动检查更新（electron-updater，GitHub Releases）
-import { app, BrowserWindow, shell, dialog, Tray, Menu, nativeImage } from 'electron';
+import { app, BrowserWindow, shell, dialog, Tray, Menu, nativeImage, powerSaveBlocker } from 'electron';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -72,7 +72,25 @@ async function startServer() {
   for (let attempt = 0; attempt < 6; attempt++) {
     const port = 40000 + Math.floor(Math.random() * 20000);
     try {
-      await mod.runWebServer({ host: '127.0.0.1', port, authToken });
+      // v0.4.3 network error 修复：生成期防睡眠/防熄屏——macOS 熄屏（Idle Sleep）会中断
+      // Chromium 网络栈导致 SSE 断连（长任务「network error」根因）。有 running 任务即持 blocker，
+      // 任务结束释放；prevent-display-sleep 比 prevent-app-suspension 更对症（熄屏通知本身即断连）。
+      let blockerId = /** @type {number | null} */ (null);
+      const onBusy = (/** @type {boolean} */ busy) => {
+        try {
+          if (busy && blockerId === null) {
+            blockerId = powerSaveBlocker.start('prevent-display-sleep');
+            appLog('生成中：防睡眠已开启（prevent-display-sleep）');
+          } else if (!busy && blockerId !== null) {
+            if (powerSaveBlocker.isStarted(blockerId)) powerSaveBlocker.stop(blockerId);
+            blockerId = null;
+            appLog('生成结束：防睡眠已释放');
+          }
+        } catch (e) {
+          appLog('防睡眠切换失败：' + String((/** @type {any} */ (e))?.message || e));
+        }
+      };
+      await mod.runWebServer({ host: '127.0.0.1', port, authToken, onBusy });
       return { port, token: authToken };
     } catch (err) {
       const code = /** @type {Error & { code?: string }} */ (err).code;

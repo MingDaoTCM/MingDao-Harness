@@ -85,6 +85,9 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
   if (method === 'GET' && p === '/api/fs-browse') {
     let dir = String(url.searchParams.get('dir') || '').trim();
     if (!path.isAbsolute(dir)) return json(res, 400, { error: '需要绝对路径' });
+    // 评估 6.1（v0.4.3）：先 path.resolve 消解 .. 段，再做前缀比较与 stat/readdir——此前字符串
+    // 前缀比较用未规范化的 dir，`/home/u/../../etc` 能通过 startsWith('/home/u/') 但 stat 解析到 /etc。
+    dir = path.resolve(dir);
     // 质检 A3：目录浏览限定基目录，拒绝越界。Windows（CodeArts 报告）：家目录覆盖整个用户配置树
     // （AppData 等）——收紧为 桌面/文档/下载 三常用目录 + 启动目录 + 工作目录 + web.browseRoots 显式授权；
     // 路径比较在 win32 下大小写归一（D:\\ vs d:\\ 不再误拒）。

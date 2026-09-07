@@ -199,19 +199,22 @@ export function pauseSchedule(/** @type {any} */ home, /** @type {any} */ id) {
 }
 
 export function resumeSchedule(/** @type {any} */ home, /** @type {any} */ id) {
-  const job = readSchedule(home, id);
-  if (!job || job.status !== 'paused') return false;
-  let next = job.nextRunAt;
-  if (job.kind === 'every') {
-    next = job.anchor ? nextAnchorAfter(job.anchor, job.interval) || Date.now() + job.interval : Date.now() + job.interval;
-  } else if (job.kind === 'once') {
-    if (next && next <= Date.now()) next = Date.now() + 30000; // 已过期的一次性任务恢复后 30s 执行
-  } else next = Date.now();
-  const nextJob = { ...job, status: 'pending', nextRunAt: next };
-  writeSchedule(home, nextJob);
-  // 审计修复：守护进程在时只更新状态交给 daemon 接管；否则旧式 sleeper 兜底（避免双跑）
-  if (process.env.MINGDAO_NO_DAEMON === '1' || !daemonAlive(home)) spawnSleeper(home, nextJob);
-  return true;
+  // 评估 6.3（v0.4.3）：读-改-写序列加锁，与 remove/pause 及 sleeper 状态写互斥（防丢更新）
+  return withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+    const job = readSchedule(home, id);
+    if (!job || job.status !== 'paused') return false;
+    let next = job.nextRunAt;
+    if (job.kind === 'every') {
+      next = job.anchor ? nextAnchorAfter(job.anchor, job.interval) || Date.now() + job.interval : Date.now() + job.interval;
+    } else if (job.kind === 'once') {
+      if (next && next <= Date.now()) next = Date.now() + 30000; // 已过期的一次性任务恢复后 30s 执行
+    } else next = Date.now();
+    const nextJob = { ...job, status: 'pending', nextRunAt: next };
+    writeSchedule(home, nextJob);
+    // 审计修复：守护进程在时只更新状态交给 daemon 接管；否则旧式 sleeper 兜底（避免双跑）
+    if (process.env.MINGDAO_NO_DAEMON === '1' || !daemonAlive(home)) spawnSleeper(home, nextJob);
+    return true;
+  });
 }
 
 // 每日锚点：锚点时刻（HH:MM）对齐到 now 之后的最近一次
@@ -455,8 +458,11 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
       }
       writeSchedule(home, { ...cur, status: 'running' });
       const result = await runOnce();
-      const cur2 = readSchedule(home, id);
-      if (cur2) writeSchedule(home, { ...cur2, status: result });
+      // 评估 6.4（v0.4.3）：once 最终状态读-改-写加锁（与 pause/remove 互斥，防 pause 被 done 覆盖）
+      withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+        const cur2 = readSchedule(home, id);
+        if (cur2) writeSchedule(home, { ...cur2, status: result });
+      });
       return;
     } else {
       // after：轮询依赖，满足即执行一次后结束；任一依赖失败则跳过
@@ -471,8 +477,11 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
       }
       writeSchedule(home, { ...cur, status: 'running' });
       const result = await runOnce();
-      const cur2 = readSchedule(home, id);
-      if (cur2) writeSchedule(home, { ...cur2, status: result });
+      // 评估 6.4（v0.4.3）：after 最终状态读-改-写加锁（同上）
+      withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+        const cur2 = readSchedule(home, id);
+        if (cur2) writeSchedule(home, { ...cur2, status: result });
+      });
       return;
     }
   }

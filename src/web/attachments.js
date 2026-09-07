@@ -30,7 +30,8 @@ export function buildUserContent(/** @type {any} */ message, /** @type {any} */ 
     } else if (a.type === 'text') {
       const content = String(a.content ?? '');
       if (!content.trim()) continue;
-      if (content.length > MAX_TEXT_BYTES) {
+      // 评估 6.7（v0.4.3）：上限按字节数而非字符数（中文每字 3 字节，字符数口径会放大到声明值 3 倍）
+      if (Buffer.byteLength(content, 'utf8') > MAX_TEXT_BYTES) {
         return { error: `文本文件过大：${a.name || '未命名'}（≤200KB）` };
       }
       finalText += `${finalText ? '\n\n' : ''}[文件 ${a.name || '未命名'}]\n${content}`;

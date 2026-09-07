@@ -399,10 +399,14 @@ async function send(){
       else if(ev.type==='done'){ console.log('[MingDao] done 事件：session=' + ev.session); onActivity(); if(ev.budget){ const b=ev.budget; if(hintTextEl) hintTextEl.textContent='预算 '+Math.round(b.used/1000)+'K/'+Math.round(b.total/1000)+'K（'+Math.round(b.used/b.total*100)+'%）· 本轮完成 · 提示栏右侧为今日费用与命中率'; } refreshStatusBar(); if(ev.stats&&ev.stats.deliverables&&ev.stats.deliverables.length){ const card=document.createElement('div'); card.className='deliver'; card.innerHTML='<div class="t">📦 交付物（'+ev.stats.deliverables.length+' 个文件）</div>'+ev.stats.deliverables.map(f=>'<div class="i">'+esc(f)+(f.toLowerCase().endsWith('.html')?' <span style="color:var(--accent2)">— 浏览器打开即可运行</span>':'')+'</div>').join(''); msg.appendChild(card); } if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); } currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
     });
   }catch(e){ onActivity(); // 诊断（v0.4.2 network error 排查）：静默中断此前无任何日志，无法区分
-    // 「手点停止 / 看门狗 / fetch 流静默断裂」。补记完整错误形态 + 回合状态，下次失败可定位。
-    console.error('[MingDao] chat 流异常', { name: e && e.name, message: e && e.message, err: String(e), taskId, rawLen: raw.length, steps: stepsCount, elapsedS: Math.round((Date.now() - workT0) / 1000) });
+    // 「手点停止 / 看门狗 / fetch 流静默断裂」。v0.4.3 修：第二参改 JSON 字符串——Electron 日志
+    // 对对象只会落 [object Object]，异常细节丢失。
+    const diag = { name: e && e.name, message: e && e.message, err: String(e), taskId, rawLen: raw.length, steps: stepsCount, elapsedS: Math.round((Date.now() - workT0) / 1000) };
+    console.error('[MingDao] chat 流异常 ' + JSON.stringify(diag));
     const d=document.createElement('div'); d.className='errline';
-    d.textContent=(e&&e.name==='AbortError')?(killedByWatchdog?'响应超时已中断（120 秒无任何响应），请重试':'已中断'):((e&&e.message)||('连接中断，本轮未完成。已执行的工作已保存检查点——直接发送「继续」即可从断点续跑（' + Math.round((Date.now() - workT0) / 1000) + 's · ' + stepsCount + ' 步）。'));
+    // 统一 catch 文案（v0.4.3）：非用户中断/看门狗时，无论有无 e.message 都优先给「可续跑」的友好提示，
+    // 具体错误形态已进日志（fetch failed 等不再绕开续跑提示）。
+    d.textContent=(e&&e.name==='AbortError')?(killedByWatchdog?'响应超时已中断（120 秒无任何响应），请重试':'已中断'):('连接中断，本轮未完成。已执行的工作已保存检查点——直接发送「继续」即可从断点续跑（' + Math.round((Date.now() - workT0) / 1000) + 's · ' + stepsCount + ' 步）。');
     msg.appendChild(d); scroll(); }
   finally{ clearInterval(hintTimer); disarm(); generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); activeAiMsg=null; curWorkT0=0; renderWorkStatus(); scroll(); updateTasksPanel(); }
 }
@@ -583,10 +587,17 @@ setInterval(updateTasksPanel, 2000);
 async function refreshCostBadge(){
   const r=await fetch('/api/cache-stats',{cache:'no-store'}).catch(()=>null); if(!r) return;
   const j=await r.json().catch(()=>null); if(!j) return;
-  const bd=j.breakdown||{}; const gd=j.guard||null;
-  let t='📊 今日 ≈¥'+(bd.today||0).toFixed(4);
-  if(bd.rate!=null) t+=' · 命中 '+(bd.rate*100).toFixed(0)+'%';
-  if(gd&&gd.limit>0&&gd.cost!=null) t+=' · 护栏 '+(gd.cost/gd.limit*100).toFixed(0)+'%';
+  const bd=j.breakdown||{}; const gd=j.guard||null; const sm=j.summary||{};
+  // v0.4.3：本地/自定义模型无定价时费用恒 0——此前显示「¥0.0000」被误读为「无统计」。
+  // 有用量但累计费用为 0 即判定为无计价模型，明确标注而非含糊 ¥0。
+  let t;
+  if ((sm.turns||0) > 0 && (bd.totalCost||0) === 0) {
+    t='📊 本地模型不计费 · 累计 ↑'+(sm.prompt||0)+' ↓'+(sm.completion||0)+' tokens';
+  } else {
+    t='📊 今日 ≈¥'+(bd.today||0).toFixed(4);
+    if(bd.rate!=null) t+=' · 命中 '+(bd.rate*100).toFixed(0)+'%';
+    if(gd&&gd.limit>0&&gd.cost!=null) t+=' · 护栏 '+(gd.cost/gd.limit*100).toFixed(0)+'%';
+  }
   $('#costBadge').textContent=t;
   if($('#dashPanel').style.display==='flex') renderDashboard(j);
 }

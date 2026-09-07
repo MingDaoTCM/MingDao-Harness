@@ -48,6 +48,7 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
         cwd: workingDir,
         env: childEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
+        detached: true, // 评估 6.5：自成进程组，超时 process.kill(-pid) 整组清理（否则只杀 shell，孙进程孤儿）
       });
       let out = '';
       let err = '';

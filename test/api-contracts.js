@@ -187,6 +187,10 @@ const post = async (p, body, opts) => {
   assert.equal(rel.status, 400, '相对路径应 400');
   const outside = await get('/api/fs-browse?dir=/etc');
   assert.equal(outside.status, 403, '越界目录应 403');
+  // 评估 6.1 回归（v0.4.3）：.. 段穿越——未规范化前 /home/u/../../etc 能通过 startsWith 前缀比较、
+  // stat 却解析到 /etc；修复后先 path.resolve 再比较，应 403。
+  const traversal = await get('/api/fs-browse?dir=' + encodeURIComponent(path.join(os.homedir(), '..', '..', 'etc')));
+  assert.equal(traversal.status, 403, '.. 段穿越应 403（先 resolve 后比较）');
   // 浏览根各平台不同（Windows 收紧为 桌面/文档/下载，家目录本身不在根内）——
   // 用服务器工作目录（恒为合法根）做正向用例
   const wsRoot = (await get('/api/workspaces')).j.cwd;

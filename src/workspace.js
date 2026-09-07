@@ -6,6 +6,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
+import { atomicWriteFileSync } from './atomic-write.js';
 
 export function workspacesFile() {
   return path.join(mingdaoHome(), 'workspaces.json');
@@ -23,11 +24,8 @@ export function loadWorkspaces() {
 export function saveWorkspaces(/** @type {any} */ ws) {
   try {
     ensureHome();
-    // 原子写：临时文件 + rename，避免崩溃后注册表被冲空
-    const target = workspacesFile();
-    const tmp = target + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(ws, null, 2) + '\n');
-    fs.renameSync(tmp, target);
+    // 原子写（评估 6.6）：随机 tmp 名 + rename，避免崩溃冲空与跨进程共名 tmp 串扰
+    atomicWriteFileSync(workspacesFile(), JSON.stringify(ws, null, 2) + '\n');
   } catch {}
 }
 
@@ -121,10 +119,8 @@ export function loadSessionWorkspaces() {
 export function saveSessionWorkspaces(/** @type {any} */ map) {
   try {
     ensureHome();
-    const target = sessionWorkspacesFile();
-    const tmp = target + '.tmp';
-    fs.writeFileSync(tmp, JSON.stringify(map, null, 2) + '\n', { mode: 0o600 });
-    fs.renameSync(tmp, target);
+    // 原子写（评估 6.6）：随机 tmp 名 + rename
+    atomicWriteFileSync(sessionWorkspacesFile(), JSON.stringify(map, null, 2) + '\n', { mode: 0o600 });
   } catch {}
 }
 
