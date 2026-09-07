@@ -617,13 +617,14 @@ export async function runRepl(ctx) {
           );
         } else io.print('尚无用量记录。');
       } else if (cmd === '/status') {
+        const sc = estimateCost(modelName, stats.promptTokens, stats.completionTokens);
         io.box('会话状态', [
           `模型  ${modelName} · 权限 ${permission.mode}`,
           `沙箱  ${cfg.sandbox || 'off'}${routing ? ` · 自动路由  ${routingEnabled ? '开' : '关'}（${routing.planner}⇄${routing.executor}）` : ''}`,
           `会话  ${path.basename(session.file)}`,
           `轮次  ${stats.turns} · 消息 ${messages.length} 条`,
           `Tokens  ↑${stats.promptTokens} ↓${stats.completionTokens}`,
-          `费用  ≈¥${estimateCost(modelName, stats.promptTokens, stats.completionTokens).toFixed(5)}（累计·按当前模型计价）`,
+          `费用  ${sc == null ? '≈¥—（无价格数据）' : '≈¥' + sc.toFixed(5)}（累计·按当前模型计价）`,
           `计划模式  ${planMode ? '开' : '关'} · 思考显示  ${io.showReasoning ? '开' : '关'} · 任务 ${agent.getTodos().length} 项`,
         ]);
       } else if (cmd === '/cost') {
@@ -643,7 +644,8 @@ export async function runRepl(ctx) {
             )
           );
         }
-        io.print(style('会话内累计（本次）≈¥' + estimateCost(modelName, stats.promptTokens, stats.completionTokens).toFixed(5), C.dim));
+        const sc2 = estimateCost(modelName, stats.promptTokens, stats.completionTokens);
+        io.print(style('会话内累计（本次）' + (sc2 == null ? '≈¥—（无价格数据）' : '≈¥' + sc2.toFixed(5)), C.dim));
       } else if (cmd === '/cache') {
         const entries = listCacheStats();
         if (!entries.length) {

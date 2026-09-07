@@ -195,7 +195,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const inFlightCost = () => estimateCost(activeModel, usage.prompt_tokens, usage.completion_tokens, null, new Date());
     const usedTodayWithInflight = () => {
       const today = todayCost();
-      return today == null ? null : today + inFlightCost();
+      if (today == null) return null;
+      const inflight = inFlightCost();
+      // P0-4（v0.4.5）：无价模型在途费用为 null（未知）——整体视为「无法判断」而非 +null→today 的静默忽略
+      return inflight == null ? null : today + inflight;
     };
     // 省钱 B1：本回合只读阶段判定——最新用户消息无写意图则先只发只读工具，
     // 模型明确表达写意图后（下一轮）注入全量。cfg.schemaTier=false 可关。
@@ -306,8 +309,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           for (const m of sanitized) promptTokens += messageTokens(m, count);
           const worst = estimateCost(activeModel, promptTokens, maxOutput, null, new Date());
           const used = usedTodayWithInflight(); // 含本回合在途费用（防长回合烧穿）
-          if (used == null) {
-            // todayCost 读取失败：无法判断，跳过前置拦截（护栏主检查同样跳过并告警）
+          if (used == null || worst == null) {
+            // P0-4（v0.4.5）：统计不可读 或 无价格数据（最坏成本未知）→ 无法判断，跳过前置拦截
+            // （护栏主检查 checkCostGuard 会显式告警「无价格数据」，此处不重复误拦也不静默放行）
           } else if (used + worst >= Number(g.dailyLimitYuan)) {
             stripOrphanCalls();
             return {

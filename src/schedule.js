@@ -360,6 +360,15 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
 
   const wait = (/** @type {any} */ ms) => new Promise((r) => setTimeout(r, ms));
 
+  // P1-15（v0.4.5）：标记 running 前加锁并复查 paused——此前锁外 writeSchedule({...cur,'running'})
+  // 与 pauseSchedule 锁内写 paused 交错时，running 会覆盖 pause（任务继续触发，pause 语义失效）。
+  const markRunning = () => withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+    const c = readSchedule(home, id);
+    if (!c || c.status === 'paused') return false; // 已删除或已暂停：不覆盖、不再触发
+    writeSchedule(home, { ...c, status: 'running' });
+    return true;
+  });
+
   // 依赖检查：支持两种依赖——调度任务 id（chain 编排）或后台任务 id（mingdao run 输出）
   async function depsSatisfied(/** @type {any} */ deps) {
     for (const dep of deps) {
@@ -382,8 +391,11 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
     // 顺延到最近闲时起点（12:00 / 18:00）执行，输入价省 50%
     if (job.offpeak && isPeakHour(new Date())) {
       const defer = deferToOffpeak(new Date());
-      const curN = readSchedule(home, id);
-      if (curN) writeSchedule(home, { ...curN, note: `避峰等待至北京时间 ${defer.toISOString().slice(11, 16)}（闲时起执行）` });
+      // P2-4（v0.4.5）：note 更新同样加锁 + 复查 paused（避免「读 curN 到写回之间 pause」被覆盖）
+      withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+        const curN = readSchedule(home, id);
+        if (curN && curN.status !== 'paused') writeSchedule(home, { ...curN, note: `避峰等待至北京时间 ${defer.toISOString().slice(11, 16)}（闲时起执行）` });
+      });
       await wait(defer.getTime() - Date.now() + 2000);
     }
     if (job.after?.length) {
@@ -412,26 +424,32 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
       killTask(home, task.id);
       t = { ...t, status: 'timedout' };
     }
-    const cur0 = readSchedule(home, id);
-    if (!cur0) return 'failed'; // 任务已被删除：停止后续写入
-    const history = [...(cur0?.history || [])];
-    history.push({
-      taskId: task.id,
-      status: t?.status || 'unknown',
-      at: Date.now(),
-      durationMs: t?.durationMs ?? null,
-      text: (t?.text || t?.error || '').slice(0, 200),
-    });
-    if (history.length > 50) history.shift();
     const result = t?.status === 'done' ? 'done' : t?.status === 'timedout' ? 'timedout' : 'failed';
-    writeSchedule(home, {
-      ...cur0,
-      lastRunAt: Date.now(),
-      lastTaskId: task.id,
-      runs: (cur0?.runs || 0) + 1,
-      history,
-      consecutiveFailures: result === 'done' ? 0 : prevFails + 1,
+    // 审计（H3 + 自检 P2）：runOnce 收尾元数据读-改-写加锁——与 pause/remove（锁内写）跨进程互斥，
+    // 杜绝「读 cur0 到写回之间用户 pause」被覆盖（毫秒级窗口，彻底起见与终态写同锁、同复查）。
+    const wrote = withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+      const curL = readSchedule(home, id);
+      if (!curL) return false; // 已删除：停止后续写入
+      const historyL = [...(curL?.history || [])];
+      historyL.push({
+        taskId: task.id,
+        status: t?.status || 'unknown',
+        at: Date.now(),
+        durationMs: t?.durationMs ?? null,
+        text: (t?.text || t?.error || '').slice(0, 200),
+      });
+      if (historyL.length > 50) historyL.shift();
+      writeSchedule(home, {
+        ...curL,
+        lastRunAt: Date.now(),
+        lastTaskId: task.id,
+        runs: (curL?.runs || 0) + 1,
+        history: historyL,
+        consecutiveFailures: result === 'done' ? 0 : prevFails + 1,
+      });
+      return true;
     });
+    if (!wrote) return 'failed'; // 任务已被删除
     return result;
   };
 
@@ -444,7 +462,7 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
         await wait(Math.min(Math.max((cur.nextRunAt || now) - now, 1000), 60000));
         continue;
       }
-      writeSchedule(home, { ...cur, status: 'running' });
+      if (!markRunning()) return; // P1-15：标记 running 前复查 paused（被暂停则直接退出）
       const result = await runOnce();
       // 质检 H3：状态读-改-写加锁（与 pause/remove 互斥，防丢更新）
       const nextState = withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
@@ -462,12 +480,14 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
         await wait(Math.min(cur.nextRunAt - now, 60000));
         continue;
       }
-      writeSchedule(home, { ...cur, status: 'running' });
+      if (!markRunning()) return; // P1-15：标记 running 前复查 paused
       const result = await runOnce();
-      // 评估 6.4（v0.4.3）：once 最终状态读-改-写加锁（与 pause/remove 互斥，防 pause 被 done 覆盖）
+      // 评估 6.4（v0.4.3）+ P2-4（v0.4.5）：once 最终状态读-改-写加锁，且 paused 不覆盖——
+      // 用户执行期间 pause（cur2.status==='paused'）绝不被 done/failed 覆盖（every 经 postRunStatus 有防护，此处补齐）
       withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
         const cur2 = readSchedule(home, id);
-        if (cur2) writeSchedule(home, { ...cur2, status: result });
+        if (!cur2 || cur2.status === 'paused') return;
+        writeSchedule(home, { ...cur2, status: result });
       });
       return;
     } else {
@@ -478,15 +498,21 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
         continue;
       }
       if (st === 'failed') {
-        writeSchedule(home, { ...cur, status: 'skipped' });
+        // P2-4（v0.4.5）：终态写加锁 + 复查 paused（依赖失败判 skipped 也不得覆盖 pause）
+        withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+          const c2 = readSchedule(home, id);
+          if (!c2 || c2.status === 'paused') return;
+          writeSchedule(home, { ...c2, status: 'skipped' });
+        });
         return;
       }
-      writeSchedule(home, { ...cur, status: 'running' });
+      if (!markRunning()) return; // P1-15：标记 running 前复查 paused
       const result = await runOnce();
-      // 评估 6.4（v0.4.3）：after 最终状态读-改-写加锁（同上）
+      // 评估 6.4（v0.4.3）+ P2-4（v0.4.5）：after 最终状态读-改-写加锁，且 paused 不覆盖
       withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
         const cur2 = readSchedule(home, id);
-        if (cur2) writeSchedule(home, { ...cur2, status: result });
+        if (!cur2 || cur2.status === 'paused') return;
+        writeSchedule(home, { ...cur2, status: result });
       });
       return;
     }

@@ -1414,7 +1414,10 @@ const ctx = { cwd: tmp };
   assert.deepEqual(vision.pricing, modelPreset('deepseek-v4-flash').pricing, '视觉模型价格应与 V4-Flash 一致');
   const visionCost = estimateCost('deepseek-v4-flash-vision-exp', 1000, 100, null, new Date('2026-08-21T03:00:00'));
   assert.ok(visionCost > 0, '视觉模型应可计价');
-  ok('pricing：缓存拆分 / 命中价 / 命中率标签');
+  // P0-4（v0.4.5）：无价模型 estimateCost 返 null（未知）而非 0（免费）——0 与「未知」不得混同
+  assert.equal(estimateCost('gpt-5', 1000, 100, null, new Date('2026-08-21T03:00:00')), null, '无价模型 estimateCost 应返 null');
+  assert.equal(estimateCostLabel('gpt-5', 1000, 100, null), '', '无价模型 estimateCostLabel 应空（不显示 ¥0）');
+  ok('pricing：缓存拆分 / 命中价 / 命中率标签 / 无价返 null');
 }
 
 // ---------- 24. 技能库与自定义安装 ----------

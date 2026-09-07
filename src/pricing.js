@@ -258,7 +258,9 @@ function effectivePricing(modelName) {
  */
 export function estimateCost(modelName, promptTokens, completionTokens, cache = null, date = new Date()) {
   const pricing = effectivePricing(modelName);
-  if (!pricing) return 0;
+  // P0-4（v0.4.5）：无价返 null 而非 0——0 与「未知」语义完全混淆（0 被当作「免费/没花钱」），
+  // 下游护栏/分账/仪表盘据此静默失真。返回 null 强制调用方显式区分「未知」与「免费（0）」（技术评估 P0-4）。
+  if (!pricing) return null;
   const price = isPeakHour(date) ? pricing.peak : pricing.offpeak;
   if (cache && Number.isFinite(cache.hit) && Number.isFinite(cache.miss)) {
     const hitPrice = price.cacheHit ?? 0;
@@ -276,10 +278,11 @@ export function estimateCost(modelName, promptTokens, completionTokens, cache = 
  * @param {any} [usage]
  */
 export function estimateCostLabel(modelName, promptTokens, completionTokens, usage = null) {
-  const pricing = effectivePricing(modelName);
-  if (!pricing) return '';
   const cache = cacheSplit(usage);
-  const yuan = estimateCost(modelName, promptTokens, completionTokens, cache).toFixed(5);
+  const c = estimateCost(modelName, promptTokens, completionTokens, cache);
+  // P0-4（v0.4.5）：无价返 null → 标签置空（不显示「≈¥0.0000」冒充免费）
+  if (c == null) return '';
+  const yuan = c.toFixed(5);
   const hitPart =
     cache && cache.hit + cache.miss > 0 ? ` · 缓存命中 ${(cache.rate * 100).toFixed(0)}%` : ' · 未计缓存折扣';
   return ` ≈¥${yuan}（${isPeakHour() ? '高峰' : '闲时'}${hitPart}）${pricingDataStale() ? ' · ⚠ 价格表过期，运行 mingdao update --pricing 刷新' : ''}`;

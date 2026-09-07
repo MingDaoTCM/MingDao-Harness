@@ -5,7 +5,6 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { estimateCost, cacheSplit, beijingDayStart, beijingParts } from './pricing.js';
-import { modelPreset } from './models.js';
 import { withFileLockSync, atomicWriteFileSync } from './atomic-write.js';
 
 export function cacheStatsFile() {
@@ -114,10 +113,12 @@ export function recordUsage(/** @type {any} */ modelName, /** @type {any} */ usa
   let cost = null;
   let saved = null;
   if (split) {
+    const base = estimateCost(modelName, prompt, completion, null);
     cost = estimateCost(modelName, prompt, completion, split);
-    saved = estimateCost(modelName, prompt, completion, null) - cost;
-  } else if (modelPreset(modelName)?.pricing) {
-    // 审计 B10：无缓存字段时按全未命中估算（不再计 0 元，费用护栏口径更真实）
+    if (base != null && cost != null) saved = base - cost;
+  } else {
+    // P0-4（v0.4.5）：estimateCost 无价返 null，直接记录 null（未知）而非 0（免费）——
+    // 覆盖内置定价 + 外部定价 + config.pricing.overrides 三条来源，不再依赖 modelPreset 单一判断。
     cost = estimateCost(modelName, prompt, completion, null);
   }
   recordCacheStats({
