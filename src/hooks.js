@@ -43,12 +43,18 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
 
   function run(/** @type {any} */ hook, /** @type {any} */ payload) {
     return new Promise((resolve) => {
+      // 评估 6.5（v0.4.4）+ Windows 回归修复（v0.4.5）：POSIX 上 detached 自成进程组，
+      // 超时 process.kill(-pid) 整组清理（否则只杀 shell，孙进程孤儿）；但 Windows 无进程组语义，
+      // detached 反而新建控制台、打断 stdio 管道——hook 子进程收不到 stdin EOF 卡 10s 超时，
+      // 使 Windows CI 自 v0.4.4 起冒烟测试恒红。改为 Windows 用 windowsHide（不闪窗）且直接 kill child。
+      const isWin = process.platform === 'win32';
       const child = spawn(hook.cmd, {
         shell: true,
         cwd: workingDir,
         env: childEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
-        detached: true, // 评估 6.5：自成进程组，超时 process.kill(-pid) 整组清理（否则只杀 shell，孙进程孤儿）
+        detached: !isWin,
+        windowsHide: isWin,
       });
       let out = '';
       let err = '';
@@ -64,9 +70,10 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
         resolve(result);
       };
       const timer = setTimeout(() => {
-        // 审计质量项：超时杀整组（shell:true 的孙进程不成孤儿）
+        // 审计质量项：超时杀整组（shell:true 的孙进程不成孤儿）；Windows 无进程组，直接 kill child
         try {
-          process.kill(-(/** @type {any} */ (child)).pid, 'SIGKILL');
+          if (!isWin) process.kill(-(/** @type {any} */ (child)).pid, 'SIGKILL');
+          else child.kill('SIGKILL');
         } catch {
           child.kill('SIGKILL');
         }
