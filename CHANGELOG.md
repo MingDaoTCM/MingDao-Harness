@@ -2,6 +2,12 @@
 
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
+## v0.4.4（2026-09-07）— macOS 熄屏断连根治 + 审计可用性 + 技术评估修复
+
+- macOS 长任务 network error 根治：生成期 `powerSaveBlocker('prevent-display-sleep')` 防熄屏（熄屏/Idle Sleep 中断 Chromium 网络栈是最终根因）；SSE 异常日志 JSON 化（此前 Electron 落 [object Object]）；统一中断续跑提示
+- 审计可用性：`task` 工具加入只读档（审计/调研只读长任务可派 readOnly 子代理）；`recordUsage` 改逐轮入账（长任务期间「今日费用」实时累计、中断不丢）
+- 技术评估 6.x：fs-browse 先 path.resolve 消解 `..` 段（中危）；MCP 子进程环境变量过滤（中危）；调度器 resume/once/after 状态写加锁；hooks spawn detached 整组清理；工作空间注册表原子写；附件文本上限按字节数
+
 ## v0.4.3（2026-09-06）— 正确性收尾（审计修复 + network error 诊断）
 
 - network error 诊断闭环：渲染层 SSE 异常补全量诊断日志（此前静默中断零日志）；服务端断连日志区分「正常收尾 vs 客户端中途断开」；「网络错误」兜底改为可操作提示（检查点已保存，发「继续」续跑）
