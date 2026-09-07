@@ -512,6 +512,17 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       pruneTasks();
       return;
     }
+    // v0.4.4：长任务费用逐轮入账——记录已按轮入账的累计 usage，最终补记最后一轮 + 兜底总结的剩余。
+    const recorded = { prompt_tokens: 0, completion_tokens: 0, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0 };
+    const onUsage = (/** @type {any} */ delta) => {
+      recorded.prompt_tokens += delta?.prompt_tokens || 0;
+      recorded.completion_tokens += delta?.completion_tokens || 0;
+      recorded.prompt_cache_hit_tokens += delta?.prompt_cache_hit_tokens || 0;
+      recorded.prompt_cache_miss_tokens += delta?.prompt_cache_miss_tokens || 0;
+      try {
+        recordUsage(runModel, delta, null);
+      } catch {}
+    };
     const agent = createAgent({
       provider: providerNow,
       permission,
@@ -526,6 +537,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         withSessionLock(session.file, () => rewriteSession(session.file, msgs)).catch(() => {}); // onCompact 为同步回调：入队串行即可
         persistedBefore = msgs.length;
       },
+      // 每轮结束回调本轮增量 usage → 逐轮入账（长任务期间「今日费用」实时累计）
+      onUsage,
       // 审计记录归入当前会话（P3-5）
       sessionRef: { name: path.basename(session.file) },
     });
@@ -560,7 +573,14 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       session.routeStats = { steps: st.steps + (io.stats().toolCount || 0), truncated: st.truncated + (r.truncated ? 1 : 0) };
       await withSessionLock(session.file, () => appendMessages(session.file, messages.slice(persistedBefore)));
       io.printUsageLine({ modelName: runModel, usage: r.usage, durationMs: r.durationMs });
-      recordUsage(r.perf?.usedModel || runModel, r.usage, /** @type {any} */ (r.perf));
+      // v0.4.4：补记最后一轮 + 兜底总结的剩余 usage（自动续跑轮已在 onUsage 逐轮入账，避免重复计）
+      const remaining = {
+        prompt_tokens: Math.max(0, (r.usage?.prompt_tokens || 0) - recorded.prompt_tokens),
+        completion_tokens: Math.max(0, (r.usage?.completion_tokens || 0) - recorded.completion_tokens),
+        prompt_cache_hit_tokens: Math.max(0, (r.usage?.prompt_cache_hit_tokens || 0) - recorded.prompt_cache_hit_tokens),
+        prompt_cache_miss_tokens: Math.max(0, (r.usage?.prompt_cache_miss_tokens || 0) - recorded.prompt_cache_miss_tokens),
+      };
+      recordUsage(r.perf?.usedModel || runModel, remaining, /** @type {any} */ (r.perf));
       // v0.3.0 P0-3：轮末提取项目记忆（有工具工作才提，fire-and-forget）。写文件供「未来会话」用，
       // 当前会话用快照（上文已注入），故不会中途改系统提示、不破坏前缀缓存。
       if (io.stats().toolCount > 0) {

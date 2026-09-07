@@ -418,7 +418,8 @@ const ctx = { cwd: tmp };
   });
   await agent.runTurn([{ role: 'user', content: '帮我诊断一下这个报错的原因' }]);
   assert.equal(round, 2, '应跑两轮（第二轮是注入后的续轮）');
-  const tier = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch']);
+  // v0.4.4：task 加入只读档——审计/调研长任务需要能派只读子代理（readOnly 子代理只读，权限引擎仍门控写）
+  const tier = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch', 'task']);
   assert.ok(seen[0].every((n) => tier.has(n)), `只读阶段应只发只读工具，实际 ${seen[0]}`);
   assert.ok(seen[0].includes('read') && seen[0].includes('grep'), '只读阶段含核心只读工具');
   assert.equal(seen[1].length, 13, '模型表达写意图后应注入全量 13 个工具');
@@ -451,7 +452,8 @@ const ctx = { cwd: tmp };
   const full = await runOnce('帮我新建一个配置文件');
   assert.equal(full.length, 13, '写意图提示首轮即全量工具');
   const ro = await runOnce('帮我看看这个项目里有哪些文件');
-  assert.ok(ro.length < 10 && ro.every((n) => ['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch'].includes(n)), `纯查询首轮应只读收缩，实际 ${ro}`);
+  // v0.4.4：只读档含 task（可派只读子代理）
+  assert.ok(ro.length <= 10 && ro.every((n) => ['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch', 'task'].includes(n)), `纯查询首轮应只读收缩，实际 ${ro}`);
   ok('省钱 B1：写意图首轮全量 / 纯查询首轮只读');
 }
 

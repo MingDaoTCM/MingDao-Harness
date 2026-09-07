@@ -26,9 +26,10 @@ const SUBAGENT_MAX_STEPS = 24;
 /**
  * 创建 Agent 循环（调用方只需传 provider/permission/io/modelName/workingDir，其余可选）
  * @param {{ provider: any, permission: any, io: any, modelName: any, workingDir: any,
- *   cfg?: any, undoStore?: any, maxSteps?: number, mcp?: any, onCompact?: any, sessionRef?: any }} params
+ *   cfg?: any, undoStore?: any, maxSteps?: number, mcp?: any, onCompact?: any, sessionRef?: any,
+ *   onUsage?: (usage: any) => void }} params
  */
-export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact, sessionRef }) {
+export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact, sessionRef, onUsage }) {
   const preset = modelPreset(modelName) || {};
   // v0.3.2 模型自适应：预算按模型上下文窗口推导（留输出余量 + 75% 舒适区），
   // 自定义/本地小模型不再套 128000 默认撑爆窗口；prompt 永不逼近窗口边缘（prefill 不爆炸）。
@@ -61,7 +62,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   const usedToolNames = new Set();
   // 省钱 B1（按需挂载）：回合起始为「只读阶段」时只发只读工具（read/ls/glob/grep/skill/todo）
   // + 已用过的工具；检测到写意图（用户消息或模型明说需要写/改/建）后注入全量工具。
-  const READONLY_TIER_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch']);
+  // v0.4.4：加 task——审计/调研等只读长任务此前因 task 不在只读档而看不到「派只读子代理」能力
+  // （readOnly 子代理只读，权限引擎仍门控写操作，无越权）。
+  const READONLY_TIER_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch', 'task']);
   // 中英双语写意图（CodeArts 报告：纯中文正则让英文会话整回合只读死锁）
   const WRITE_INTENT_RE = /写|建|创|改|修|删|装|加|添|增|补|换|移|部署|执行|运行|实现|重构|生成|迁移|安装|更新|升级|发布|调整|优化|修复|提交|推送|打包|编译|测试|implement|fix|create|modify|update|delete|deploy|build|make|generate|install|write|refactor|migrate|test|run|commit|push|remove|add|change|patch/i;
   const hasWriteIntent = (/** @type {any} */ text) => WRITE_INTENT_RE.test(String(text || ''));
@@ -220,6 +223,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const turnToolCache = new Map();
     for (round = 0; round < maxRounds; round++) {
       steps = 0;
+      // v0.4.4：每轮结束回调本轮增量 usage（长任务费用逐轮入账——此前只在 runTurn 全结束后才
+      // recordUsage，长任务期间「今日费用」恒为 0 被误读为「无统计」；中断时已完成轮次费用也保留）。
+      const roundUsageStart = { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens || 0, prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens || 0 };
       while (steps < stepLimit) {
       steps += 1;
       // 自动压缩（P3-1）：预算不足、静默裁剪即将丢弃早期段落时，先用 executor 模型
@@ -734,6 +740,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     }
     // v0.3.1 自动续跑（长程执行）：还有剩余轮次且未中断 → 注入进度摘要直接续跑，不落收尾总结
     if (round < maxRounds - 1 && !aborted) {
+      // 每轮结束：回调本轮增量 usage（含缓存命中拆分），供调用方逐轮入账
+      try {
+        onUsage?.({
+          prompt_tokens: usage.prompt_tokens - roundUsageStart.prompt_tokens,
+          completion_tokens: usage.completion_tokens - roundUsageStart.completion_tokens,
+          prompt_cache_hit_tokens: (usage.prompt_cache_hit_tokens || 0) - roundUsageStart.prompt_cache_hit_tokens,
+          prompt_cache_miss_tokens: (usage.prompt_cache_miss_tokens || 0) - roundUsageStart.prompt_cache_miss_tokens,
+        });
+      } catch {}
       const art = deliverables.length ? '已交付文件：' + deliverables.join('、') + '。' : '';
       messages.push({
         role: 'user',
