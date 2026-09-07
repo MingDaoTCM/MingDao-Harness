@@ -104,7 +104,10 @@ export async function runWorkerTask(id, question, { permission, model, offpeak }
         if (title) renameSessionFile(fs, path, home, session, title);
       } catch {}
     }
-    const finalStatus = res.truncated ? 'failed' : res.aborted ? 'killed' : 'done';
+    // P1-3（v0.4.5）：capHit（跑满步数上限后收尾）语义是「未真正完成、可续跑」——此前 worker 不判
+    // capHit 直接判 done，后台任务/链式编排把未完成任务当成功（假完成）。
+    const finalStatus = res.capHit ? 'failed' : res.truncated ? 'failed' : res.aborted ? 'killed' : 'done';
+    if (res.capHit && !note) note = '达到步数上限，任务未完成（可续跑）。';
     recordUsage(res.perf?.usedModel || modelName, res.usage, /** @type {any} */ (res.perf));
     finish({
       status: finalStatus,

@@ -32,6 +32,7 @@ import {
   reconcileSchedules,
   runSleeper,
   formatScheduleRow,
+  postRunStatus,
 } from './schedule.js';
 import { createAgent } from './agent.js';
 import { saveTaskStateMerge, clearTaskState } from './task-state.js';
@@ -120,21 +121,28 @@ function printHelpLines(/** @type {any} */ out) {
 
 function parseArgs(/** @type {any} */ argv) {
   const opts = /** @type {Record<string, any>} */ ({ prompt: [], model: null, continueSession: false, resume: false, format: 'text' });
+  // P1-2 / P2-24（v0.4.5）：遇第一个位置参数后停止解析全局 flag——此前贪婪匹配任意位置的 --model/init，
+  // 导致 `mingdao run "任务" --model X` 的 --model 被顶层剥除（后台/定时指定模型静默失效），
+  // 且提问文本含「init」即误触发初始化向导。此后子命令 flag 原样收入 prompt 交子命令解析。
+  let seenArg = false;
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
-    if (a === '-h' || a === '--help') opts.help = true;
-    else if (a === '-v' || a === '--version') opts.version = true;
-    else if (a === '-c' || a === '--continue') opts.continueSession = true;
-    else if (a === '--journal') opts.journal = true;
-    else if (a === '-p' || a === '--preset') opts.preset = argv[++i];
-    else if (a.startsWith('--preset=')) opts.preset = a.slice(9);
-    else if (a === '-r' || a === '--resume') opts.resume = true;
-    else if (a === '--init' || a === 'init') opts.init = true;
-    else if (a === '-m' || a === '--model') opts.model = argv[++i];
-    else if (a.startsWith('--model=')) opts.model = a.slice(8);
-    else if (a === '-f' || a === '--format') opts.format = argv[++i] || 'text';
-    else if (a.startsWith('--format=')) opts.format = a.slice(9);
-    else opts.prompt.push(a);
+    if (!seenArg) {
+      if (a === '-h' || a === '--help') { opts.help = true; continue; }
+      else if (a === '-v' || a === '--version') { opts.version = true; continue; }
+      else if (a === '-c' || a === '--continue') { opts.continueSession = true; continue; }
+      else if (a === '--journal') { opts.journal = true; continue; }
+      else if (a === '-p' || a === '--preset') { opts.preset = argv[++i]; continue; }
+      else if (a.startsWith('--preset=')) { opts.preset = a.slice(9); continue; }
+      else if (a === '-r' || a === '--resume') { opts.resume = true; continue; }
+      else if (a === '--init' || a === 'init') { opts.init = true; continue; }
+      else if (a === '-m' || a === '--model') { opts.model = argv[++i]; continue; }
+      else if (a.startsWith('--model=')) { opts.model = a.slice(8); continue; }
+      else if (a === '-f' || a === '--format') { opts.format = argv[++i] || 'text'; continue; }
+      else if (a.startsWith('--format=')) { opts.format = a.slice(9); continue; }
+    }
+    seenArg = true;
+    opts.prompt.push(a);
   }
   if (!['text', 'json'].includes(opts.format)) opts.format = 'text';
   return opts;
@@ -289,7 +297,14 @@ async function main() {
             }
             if (t.status !== 'running') {
               const result = t.status === 'done' ? 'done' : t.status === 'timedout' ? 'timedout' : 'failed';
-              await writeSchedule(home0, { ...j, status: result, lastRunAt: t.startedAt || j.lastRunAt, runs: (j.runs || 0) + 1 });
+              // P1-4（v0.4.5）：every 周期任务崩溃恢复不能终态化——复用 postRunStatus 重排下一期回 pending，
+              // 否则周期任务静默永停（此前与 once/after 一视同仁写成 done/failed，reconcile 永远跳过）。
+              if (j.kind === 'every') {
+                const ns = postRunStatus(j, result);
+                await writeSchedule(home0, { ...j, ...(ns || { status: result }), lastRunAt: t.startedAt || j.lastRunAt, runs: (j.runs || 0) + 1 });
+              } else {
+                await writeSchedule(home0, { ...j, status: result, lastRunAt: t.startedAt || j.lastRunAt, runs: (j.runs || 0) + 1 });
+              }
               continue;
             }
             continue; // worker 仍在跑：等它（外层 2s 轮询）

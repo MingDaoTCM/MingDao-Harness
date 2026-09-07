@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { modelPreset } from './models.js';
+import { atomicWriteFileSync } from './atomic-write.js';
 import { mingdaoHome } from './config.js';
 
 // 内置价格表的数据时点（定价可能调整，配置覆盖可随时更新）
@@ -63,7 +64,7 @@ export async function refreshPricingFromSource(cfg) {
   }
   const file = pricingFilePath();
   fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify({ fetchedAt: Date.now(), source: src, models }, null, 2));
+  atomicWriteFileSync(file, JSON.stringify({ fetchedAt: Date.now(), source: src, models }, null, 2));
   extCache = { mtime: -1, ttlDays: 7, data: null, stale: false };
   const names = Object.keys(models).join('、');
   return { ok: true, lines: ['✓ 价格表已刷新（' + names + '），TTL 内费用估算/护栏/避峰自动跟随'] };
@@ -214,6 +215,13 @@ function pricingOverrides() {
 /**
  * @param {any} modelName
  */
+// P0-4（v0.4.5）：判断模型是否有价格数据（内置定价或外部定价或 overrides）——
+// 无价模型 estimateCost 恒 0，费用护栏/仪表盘/分账静默失真，必须显式暴露给调用方告警。
+export function hasPricing(/** @type {any} */ modelName) {
+  return Boolean(modelName && effectivePricing(modelName));
+}
+
+/** @param {any} modelName */
 function effectivePricing(modelName) {
   const preset = modelPreset(modelName);
   const ext = externalPricing().data?.models?.[modelName] || null;

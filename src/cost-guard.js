@@ -6,7 +6,7 @@
 
 import fs from 'node:fs';
 import { listCacheStats, cacheStatsFile } from './cachestats.js';
-import { beijingDayStart } from './pricing.js';
+import { beijingDayStart, hasPricing } from './pricing.js';
 import { loadConfig } from './config.js';
 
 export function costGuardConfig() {
@@ -44,13 +44,22 @@ export function todayCost() {
   }
 }
 
-export function costGuardStatus() {
+/**
+ * @param {any} [modelName] 实际使用模型；缺省回退 config.model（仪表盘/无会话上下文）
+ */
+export function costGuardStatus(modelName) {
   const g = costGuardConfig();
   if (!g) return null;
   const cost = todayCost();
   const limit = Number(g.dailyLimitYuan) || 0;
   const warnAt = Number(g.warnAtYuan) || (limit > 0 ? limit * 0.8 : 0);
   const action = g.action === 'block' || g.action === 'downgrade' ? g.action : 'warn';
+  // P0-4（v0.4.5）：当前模型无价格数据时费用护栏静默失效（estimateCost 恒 0、overLimit 恒 false）。
+  // 显式标记 noPricing，调用方据此告警而非静默放行。modelName 优先取「实际使用模型」（agent 传 activeModel），
+  // 缺省回退 config.model（仪表盘/无会话上下文）；两者都无则无法判断，不误标 noPricing。
+  const cfg = loadConfig();
+  const model = modelName ?? cfg?.model ?? null;
+  const noPricing = limit > 0 && model != null && !hasPricing(model);
   return {
     cost,
     limit,
@@ -58,16 +67,27 @@ export function costGuardStatus() {
     action,
     downgradeModel: String(g.downgradeModel || 'deepseek-v4-flash'),
     degraded: cost === null, // 统计不可读：护栏降级为「无法判断」
-    overWarn: cost !== null && limit > 0 && cost >= warnAt,
-    overLimit: cost !== null && limit > 0 && cost >= limit,
+    noPricing, // 无价格数据：费用护栏无法累计，需显式告警
+    overWarn: cost !== null && !noPricing && limit > 0 && cost >= warnAt,
+    overLimit: cost !== null && !noPricing && limit > 0 && cost >= limit,
   };
 }
 
 // Agent 每轮开始前调用：返回 null 放行；blocked=true 应暂停本轮；downgrade=true 应切换便宜模型
-export function checkCostGuard() {
-  const st = costGuardStatus();
+/**
+ * @param {any} [modelName] 实际使用模型；缺省回退 config.model
+ */
+export function checkCostGuard(modelName) {
+  const st = costGuardStatus(modelName);
   if (!st) return null;
   if (st.degraded) return null; // 统计不可读：不误拦也不放水（已告警），按无法判断处理
+  if (st.noPricing) {
+    // P0-4（v0.4.5）：无价格数据时护栏无法累计——显式告警而非静默放行（绝不当「没花钱」）
+    return {
+      blocked: false,
+      message: '⚠ 费用护栏：当前模型无价格数据，今日费用无法累计、dailyLimitYuan 不生效——请在 config.pricing.overrides 为模型补充定价，或改用有价的 DeepSeek 模型（deepseek-v4-pro/flash）。',
+    };
+  }
   if (st.overLimit && st.action === 'block') {
     return {
       blocked: true,

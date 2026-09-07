@@ -63,7 +63,7 @@ export function tamperedSkillNames(/** @type {any} */ workingDir) {
     if (!e.isDirectory()) continue;
     const skillDir = path.join(dir, e.name);
     try {
-      if (!fs.statSync(path.join(skillDir, 'SKILL.md')).isFile()) continue;
+      if (!fs.lstatSync(path.join(skillDir, 'SKILL.md')).isFile()) continue;
     } catch {
       continue;
     }
@@ -89,7 +89,7 @@ export function listSkills(/** @type {any} */ workingDir) {
       if (!e.isDirectory() || seen.has(e.name)) continue;
       const skillMd = path.join(dir, e.name, 'SKILL.md');
       try {
-        if (!fs.statSync(skillMd).isFile()) continue;
+        if (!fs.lstatSync(skillMd).isFile()) continue;
       } catch {
         continue;
       }

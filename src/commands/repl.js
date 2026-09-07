@@ -634,7 +634,7 @@ export async function runRepl(ctx) {
           `缓存命中率  ${bd.rate != null ? (bd.rate * 100).toFixed(0) + '%' : '暂无缓存数据'}${bd.batchCost > 0 ? ` · Batch 半价任务 ≈¥${bd.batchCost.toFixed(5)}` : ''}`,
           ...bd.byModel.slice(0, 8).map((m) => `  ${m.model}：${m.turns} 轮（${m.batchTurns ? m.batchTurns + ' 批' : ''}）· ↑${m.prompt} ↓${m.completion} · ≈¥${m.cost.toFixed(5)}${m.saved > 0 ? ` · 省 ¥${m.saved.toFixed(5)}` : ''}`),
         ]);
-        const guard = costGuardStatus();
+        const guard = costGuardStatus(modelName);
         if (guard) {
           io.print(
             style(

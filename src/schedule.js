@@ -171,7 +171,10 @@ export function removeSchedule(/** @type {any} */ home, /** @type {any} */ id) {
       }
     }
     // 正在跑的 worker 同步停止，避免成孤儿继续执行
-    if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
+    // P0-2（v0.4.5）：killTask 失败不应阻断「删除」这一更强用户意图——包 try/catch 保证删除照常
+    try {
+      if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
+    } catch {}
     try {
       fs.unlinkSync(path.join(scheduleDir(home), id + '.json'));
     } catch {}
@@ -192,7 +195,10 @@ export function pauseSchedule(/** @type {any} */ home, /** @type {any} */ id) {
         } catch {}
       }
     }
-    if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
+    // P0-2（v0.4.5）：killTask 失败不应阻断「暂停」的状态写
+    try {
+      if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
+    } catch {}
     writeSchedule(home, { ...job, status: 'paused', pid: null, lastTaskId: null });
     return true;
   });

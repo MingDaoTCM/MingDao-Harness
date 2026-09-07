@@ -188,10 +188,26 @@ export function validateSkillMarkdown(text, hint) {
   return { ok: true, name, description: desc };
 }
 
-/**
- * @param {any} dir
- * @param {any} hint
- */
+// P1-5（v0.4.5）：检测目录树内是否含符号链接——symlink 可越权读任意本机文件并架空 sha256 指纹检测。
+function containsSymlink(/** @type {string} */ dir) {
+  const stack = [dir];
+  while (stack.length) {
+    const d = /** @type {string} */ (stack.pop());
+    let entries;
+    try {
+      entries = fs.readdirSync(d, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const e of entries) {
+      if (e.isSymbolicLink()) return true;
+      if (e.isDirectory()) stack.push(path.join(d, e.name));
+    }
+  }
+  return false;
+}
+
+/** @param {any} dir @param {any} hint */
 export function validateSkillDir(dir, hint) {
   const skillMd = path.join(dir, 'SKILL.md');
   let text;
@@ -199,6 +215,9 @@ export function validateSkillDir(dir, hint) {
     text = fs.readFileSync(skillMd, 'utf8');
   } catch {
     return { error: `未找到 SKILL.md：${skillMd}` };
+  }
+  if (containsSymlink(dir)) {
+    return { error: '技能目录含符号链接，已拒绝（防越权读取本机文件/绕过篡改检测）' };
   }
   return validateSkillMarkdown(text, hint);
 }

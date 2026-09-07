@@ -31,10 +31,17 @@ export function atomicWriteJsonSync(/** @type {string} */ target, /** @type {any
 
 // 极简互斥锁：O_EXCL 创建 lockfile；持锁期间执行 fn（同步）；异常/完成释放。
 // 进程崩溃遗留的陈旧锁（> staleMs 未更新）自动回收，避免永久卡死。
+// 可重入（P0-1 修复，v0.4.5）：本进程已持该锁时直接执行 fn——O_EXCL 锁不可重入，此前
+// killTask 持锁内调 patchTask 二次抢同一把锁自死锁 5s（tasks kill/pause/remove 全失效）。
 const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
 const sleepMs = (/** @type {number} */ ms) => Atomics.wait(sleepBuf, 0, 0, ms);
+const heldLocks = new Set(); // 本进程当前持有的锁路径（可重入判定）
 
 export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() => any} */ fn, { timeoutMs = 5000, staleMs = 15000 } = {}) {
+  // 可重入：同一调用栈内已持该锁 → 直接执行，不再二次抢锁
+  if (heldLocks.has(lockPath)) {
+    return fn();
+  }
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   const t0 = Date.now();
   for (;;) {
@@ -45,9 +52,11 @@ export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() =
       } finally {
         fs.closeSync(fd);
       }
+      heldLocks.add(lockPath);
       try {
         return fn();
       } finally {
+        heldLocks.delete(lockPath);
         try {
           fs.unlinkSync(lockPath);
         } catch {}

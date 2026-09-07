@@ -27,7 +27,7 @@ const SUBAGENT_MAX_STEPS = 24;
  * 创建 Agent 循环（调用方只需传 provider/permission/io/modelName/workingDir，其余可选）
  * @param {{ provider: any, permission: any, io: any, modelName: any, workingDir: any,
  *   cfg?: any, undoStore?: any, maxSteps?: number, mcp?: any, onCompact?: any, sessionRef?: any,
- *   onUsage?: (usage: any) => void }} params
+ *   onUsage?: (modelName: string, usage: any) => void }} params
  */
 export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact, sessionRef, onUsage }) {
   const preset = modelPreset(modelName) || {};
@@ -112,6 +112,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       maxSteps: SUBAGENT_MAX_STEPS,
       mcp,
       sessionRef, // 子代理的审计记录归入主会话
+      onUsage, // P1-5（v0.4.5）：透传逐轮入账回调——子代理消耗计入今日费用（子代理内部 activeModel=subModel 正确归属）
     });
     const sys =
       `你是主智能体 MingDao 派出的子代理，独立完成一项子任务。` +
@@ -321,7 +322,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       // 费用护栏（A2/B4）：每轮开始前按今日实际费用检查；block 暂停本轮；
       // downgrade 自动切换便宜模型继续执行（每回合只切一次，切换即粘滞）
       if (cfg.costGuard) {
-        const guard = checkCostGuard();
+        const guard = checkCostGuard(activeModel);
         if (guard) {
           if (guard.blocked) {
             stripOrphanCalls();
@@ -523,6 +524,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           let allowed = false;
           if (isMcp && mcp?.isReadonly(name)) {
             allowed = true; // MCP 工具的只读标注自动放行
+          } else if (name === 'task' && args.readOnly === true) {
+            allowed = true; // P2-2（v0.4.5）：只读子代理自动放行——它本身只读（readOnly 子代理只能读），
+            // 与 release note「可派 readOnly 子代理」意图一致；非 readOnly 的 task 仍走权限询问
           } else {
             try {
               allowed = await permission.check(name, args);
@@ -740,9 +744,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     }
     // v0.3.1 自动续跑（长程执行）：还有剩余轮次且未中断 → 注入进度摘要直接续跑，不落收尾总结
     if (round < maxRounds - 1 && !aborted) {
-      // 每轮结束：回调本轮增量 usage（含缓存命中拆分），供调用方逐轮入账
+      // 每轮结束：回调本轮增量 usage（含缓存命中拆分），供调用方逐轮入账。activeModel 为本轮实际模型
+      // （护栏降级/子代理都据此正确归属——P2-5 模型名一致性 + P1-5 子代理费用入账）。
       try {
-        onUsage?.({
+        onUsage?.(activeModel, {
           prompt_tokens: usage.prompt_tokens - roundUsageStart.prompt_tokens,
           completion_tokens: usage.completion_tokens - roundUsageStart.completion_tokens,
           prompt_cache_hit_tokens: (usage.prompt_cache_hit_tokens || 0) - roundUsageStart.prompt_cache_hit_tokens,

@@ -85,15 +85,30 @@ function readBody(req, limit = 40 * 1024 * 1024) {
     /** @type {any[]} */
     const chunks = [];
     let size = 0;
+    let settled = false;
+    const settle = (/** @type {any} */ fn, /** @type {any} */ v) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(slowTimer);
+      fn(v);
+    };
     // 审计 P2-6：慢速连接防护——60s 未传完请求体即断开，防占满 socket
     const slowTimer = setTimeout(() => {
       const err = /** @type {Error & { status?: number }} */ (new Error('请求体上传超时（60s）'));
       err.status = 408;
       req.destroy();
-      reject(err);
+      settle(reject, err);
     }, 60000);
-    req.on('end', () => clearTimeout(slowTimer));
-    req.on('close', () => clearTimeout(slowTimer));
+    // P1-6（v0.4.5）：body 上传中断（客户端刷新/abort）时 Node 通常只触发 close 不发 error/end——
+    // 此前 close 仅 clearTimeout 不 reject → Promise 永久 pending → /api/chat 的 inflight 槽永久泄漏，
+    // 重复 N 次后服务对所有会话 429。close 且未 settle 时 reject（status 499）。
+    req.on('close', () => {
+      if (!settled) {
+        const err = /** @type {Error & { status?: number }} */ (new Error('请求体上传中断（客户端断开）'));
+        err.status = 499;
+        settle(reject, err);
+      }
+    });
     req.on('data', (/** @type {any} */ d) => {
       size += d.length;
       if (size > MAX_BODY) {
@@ -102,7 +117,7 @@ function readBody(req, limit = 40 * 1024 * 1024) {
         // 排空残余数据但保留连接：让上层 catch 返回真 413（此前 destroy 导致客户端只收到连接重置）
         req.pause();
         req.resume();
-        reject(err);
+        settle(reject, err);
         return;
       }
       chunks.push(d);
@@ -110,12 +125,12 @@ function readBody(req, limit = 40 * 1024 * 1024) {
     req.on('end', () => {
       const raw = Buffer.concat(chunks).toString('utf8');
       try {
-        resolve(raw ? JSON.parse(raw) : {});
+        settle(resolve, raw ? JSON.parse(raw) : {});
       } catch {
-        resolve({});
+        settle(resolve, {});
       }
     });
-    req.on('error', reject);
+    req.on('error', (/** @type {any} */ e) => settle(reject, e));
   });
 }
 
@@ -513,14 +528,15 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       return;
     }
     // v0.4.4：长任务费用逐轮入账——记录已按轮入账的累计 usage，最终补记最后一轮 + 兜底总结的剩余。
+    // v0.4.5：onUsage 收 (modelName, delta)——主/子代理各自按实际模型归属（子代理经 spawnTask 透传，费用不漏计）。
     const recorded = { prompt_tokens: 0, completion_tokens: 0, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0 };
-    const onUsage = (/** @type {any} */ delta) => {
+    const onUsage = (/** @type {string} */ modelName, /** @type {any} */ delta) => {
       recorded.prompt_tokens += delta?.prompt_tokens || 0;
       recorded.completion_tokens += delta?.completion_tokens || 0;
       recorded.prompt_cache_hit_tokens += delta?.prompt_cache_hit_tokens || 0;
       recorded.prompt_cache_miss_tokens += delta?.prompt_cache_miss_tokens || 0;
       try {
-        recordUsage(runModel, delta, null);
+        recordUsage(modelName, delta, null);
       } catch {}
     };
     const agent = createAgent({

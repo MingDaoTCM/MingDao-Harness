@@ -104,13 +104,11 @@ function safeRmSync(p, opts) {
   assert.equal(fs.readdirSync(tmpA).filter((n) => n.includes('.tmp')).length, 0, '不应残留临时文件');
   atomicWriteJsonSync(f, { a: 2 });
   assert.equal(JSON.parse(fs.readFileSync(f, 'utf8')).a, 2, 'JSON 原子写应可读');
-  // 文件锁：互斥语义（不可重入，嵌套获取应超时）+ 陈旧锁回收
+  // 文件锁：可重入（P0-1 v0.4.5，嵌套获取同一路径不再自死锁）+ 跨进程互斥 + 陈旧锁回收
   const lock = path.join(tmpA, 'x.lock');
-  let threw = false;
-  try {
-    withFileLockSync(lock, () => { withFileLockSync(lock, () => {}, { timeoutMs: 300 }); });
-  } catch { threw = true; }
-  assert.equal(threw, true, '锁不可重入（跨进程互斥语义），嵌套获取应超时');
+  let nestedOk = false;
+  withFileLockSync(lock, () => { withFileLockSync(lock, () => { nestedOk = true; }); });
+  assert.equal(nestedOk, true, '锁可重入（同一进程嵌套获取同路径不再自死锁）');
   // 陈旧锁回收：伪造 20 秒前的锁文件，应能自动回收获取
   fs.writeFileSync(lock, JSON.stringify({ pid: 999999, at: Date.now() - 20000 }));
   fs.utimesSync(lock, new Date(Date.now() - 20000), new Date(Date.now() - 20000));
@@ -233,6 +231,14 @@ const ctx = { cwd: tmp };
   const gp = await dispatch('git', { command: 'push --force' }, ctx);
   assert.equal(gp.ok, false, 'git push（非只读）应拒绝');
   assert.ok(String(gp.error).includes('不是只读'), '应说明非只读子命令');
+  // P1-8（v0.4.5）：参数级过滤——只读子命令 + 破坏性/越界 flag 同样拒绝
+  const gNoIndex = await dispatch('git', { command: 'diff --no-index a.txt b.txt' }, ctx);
+  assert.equal(gNoIndex.ok, false, 'git diff --no-index（越界读）应拒绝');
+  assert.ok(String(gNoIndex.error).includes('被禁止的参数'), '应说明被禁止的参数');
+  const gBranchD = await dispatch('git', { command: 'branch -D foo' }, ctx);
+  assert.equal(gBranchD.ok, false, 'git branch -D（破坏元数据）应拒绝');
+  const gOutput = await dispatch('git', { command: 'log --output=/tmp/x.txt' }, ctx);
+  assert.equal(gOutput.ok, false, 'git log --output（写文件）应拒绝');
   // fetch：本机地址应被 SSRF 拒绝
   const fLocal = await dispatch('fetch', { url: 'http://127.0.0.1/' }, ctx);
   assert.equal(fLocal.ok, false, 'fetch 本机地址应拒绝');
@@ -1492,6 +1498,18 @@ const ctx = { cwd: tmp };
   assert.ok(bad3.error && bad3.error.includes('description'), '缺 description 应拒绝');
   assert.ok(!fs.existsSync(path.join(userSkillsDir(), 'good-name')), '校验失败不应写入技能目录');
   safeRmSync(badDir, { recursive: true, force: true });
+  // P1-5（v0.4.5）：目录树内含符号链接应拒绝（防越权读本机文件/绕过 sha256 篡改检测）
+  const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-link-'));
+  const outsideMd = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-out-'));
+  fs.writeFileSync(path.join(outsideMd, 'SKILL.md'), '---\nname: evil-skill\ndescription: x\n---\n\n# 越界');
+  let linkMade = true;
+  try { fs.symlinkSync(path.join(outsideMd, 'SKILL.md'), path.join(linkDir, 'SKILL.md')); } catch { linkMade = false; }
+  if (linkMade) {
+    const linkR = installFromDir(linkDir);
+    assert.ok(linkR.error && linkR.error.includes('符号链接'), 'SKILL.md 为符号链接应拒绝');
+  }
+  safeRmSync(linkDir, { recursive: true, force: true });
+  safeRmSync(outsideMd, { recursive: true, force: true });
 
   // git 安装：本地裸仓库演练（完全离线、确定性——example.com 在受限网络会挂起 120s 超时）
   const bareGit = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-bare-'));
@@ -2317,6 +2335,20 @@ const ctx = { cwd: tmp };
   fs.writeFileSync(cfgFile, JSON.stringify({ costGuard: { dailyLimitYuan: 1, action: 'warn' } }));
   const chk2 = checkCostGuard();
   assert.ok(chk2 && chk2.blocked === false && chk2.message.includes('护栏'), 'warn 模式应仅提醒');
+  // P0-4（v0.4.5）：无价格模型不得让护栏静默放行——显式 noPricing + checkCostGuard 告警
+  fs.writeFileSync(cfgFile, JSON.stringify({ model: 'my-unpriced-model', costGuard: { dailyLimitYuan: 1, action: 'block' } }));
+  const st3 = costGuardStatus();
+  assert.equal(st3.noPricing, true, '无价格模型应标记 noPricing');
+  assert.equal(st3.overLimit, false, 'noPricing 时不应误判超限');
+  const chk3 = checkCostGuard('my-unpriced-model');
+  assert.ok(chk3 && chk3.blocked === false && String(chk3.message).includes('无价格数据'), '无价格模型应显式告警而非静默放行');
+  // 缺省回退 config.model 识别（不传 modelName）
+  const chk4 = checkCostGuard();
+  assert.ok(chk4 && String(chk4.message).includes('无价格数据'), '缺省应回退 config.model 识别无价模型');
+  // 未知模型（无 model 字段、无参数）不得误标 noPricing——费用累计仍按成本计
+  fs.writeFileSync(cfgFile, JSON.stringify({ costGuard: { dailyLimitYuan: 1, warnAtYuan: 0.5, action: 'block' } }));
+  const st4 = costGuardStatus();
+  assert.equal(st4.noPricing, false, '无 model 信息时不应误标 noPricing');
   process.env.MINGDAO_HOME = smokeHome;
   safeRmSync(homeC, { recursive: true, force: true });
   ok('costGuard：按自然日累计 / 预警线 / block 阻断 / warn 提醒');

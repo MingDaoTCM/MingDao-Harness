@@ -92,14 +92,20 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
     config: pc,
     async chat(/** @type {any} */ opts) {
       let attempt = 0;
+      // P1-7（v0.4.5）：总量护栏提到重试循环外层——此前每 attempt 重建 totalTimer，重试序列最坏
+      // 放大 retries+1 倍（本地 3×30min=90min）。总时长覆盖整个重试序列，单次首 token/流式空闲仍按 attempt 计。
+      let totalExpired = false;
+      let currentAc = /** @type {AbortController | null} */ (null);
+      const totalTimer = setTimeout(() => {
+        totalExpired = true;
+        try {
+          currentAc?.abort(new Error(`请求总时长超限（${Math.round(totalMs / 1000)}s），已中断`));
+        } catch {}
+      }, totalMs);
       for (;;) {
         const ac = new AbortController();
-        let timedOut = false; // 审计 P2-6：用标志而非 name/字符串匹配识别内部超时
-        // 总量护栏：整次请求（prefill+生成）的绝对上限
-        const totalTimer = setTimeout(() => {
-          timedOut = true;
-          ac.abort(new Error(`请求总时长超限（${Math.round(totalMs / 1000)}s），已中断`));
-        }, totalMs);
+        currentAc = ac;
+        let timedOut = false; // 审计 P2-6：用标志而非 name/字符串匹配识别内部超时（首 token/流式空闲）
         // 首 token 等待：prefill 阶段无任何帧到达即断（覆盖长上下文慢 prefill）
         let firstTokenTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (setTimeout(() => {
           timedOut = true;
@@ -125,6 +131,7 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
         const onUserAbort = () => ac.abort(opts.signal?.reason);
         if (opts.signal?.aborted) onUserAbort();
         else opts.signal?.addEventListener('abort', onUserAbort, { once: true });
+        let leaving = true; // 本次 attempt 是否退出（成功/不再重试）；将重试则置 false，总量计时器保留覆盖下一 attempt
         try {
           return await openaiChat({
             ...opts,
@@ -135,9 +142,11 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
             onActivity,
           });
         } catch (err) {
-          // 内部超时经 abort 抛出，用标志识别（审计 P2-6）；用户 Ctrl+C 的中断不算超时、不重试
-          const transient = (timedOut && !opts.signal?.aborted) || isTransient(err);
+          // 内部超时经 abort 抛出，用标志识别（审计 P2-6）；用户 Ctrl+C 的中断不算超时、不重试。
+          // 总量超时（totalExpired）覆盖整个序列，超了直接抛不再重试。
+          const transient = !totalExpired && ((timedOut && !opts.signal?.aborted) || isTransient(err));
           if (!transient || attempt >= retries) throw err;
+          leaving = false; // 将重试：本次不退出，总量计时器继续覆盖下一 attempt
           attempt += 1;
           // 首 token 等待超时通常不是偶发网络抖动（是模型/上下文慢），重试价值低但保留一次机会；
           // 其余瞬态错误指数退避 + 尊重 Retry-After（评估 P3-1）：基础 1s/2s，封顶 30s
@@ -147,7 +156,7 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
           backoff = Math.min(backoff, 30000);
           await sleep(backoff);
         } finally {
-          clearTimeout(totalTimer);
+          if (leaving) clearTimeout(totalTimer); // 成功/最终失败即清——避免悬挂 totalMs 计时器（每请求一个）
           if (firstTokenTimer) clearTimeout(firstTokenTimer);
           if (idleTimer) clearTimeout(idleTimer);
           opts.signal?.removeEventListener('abort', onUserAbort);

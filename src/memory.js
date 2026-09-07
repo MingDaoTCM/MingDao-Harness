@@ -9,6 +9,7 @@ import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { beijingParts } from './pricing.js';
 import { tokenize } from './session-index.js';
+import { atomicWriteFileSync } from './atomic-write.js';
 
 export function memoryFile() {
   return path.join(mingdaoHome(), 'AGENTS.md');
@@ -47,7 +48,7 @@ function backupMemory() {
 export function writeMemory(/** @type {any} */ content) {
   backupMemory();
   ensureHome();
-  fs.writeFileSync(memoryFile(), String(content ?? ''));
+  atomicWriteFileSync(memoryFile(), String(content ?? ''));
 }
 
 // 去重：忽略日期前缀后内容相同的条目只保留第一条
@@ -70,7 +71,7 @@ export function dedupeMemory() {
   }
   if (removed > 0) {
     backupMemory();
-    fs.writeFileSync(memoryFile(), kept.join('\n') + '\n');
+    atomicWriteFileSync(memoryFile(), kept.join('\n') + '\n');
   }
   return removed;
 }
@@ -91,7 +92,7 @@ export function removeMemoryLines(/** @type {any} */ keyword) {
   }
   if (removed > 0) {
     backupMemory();
-    fs.writeFileSync(memoryFile(), kept.join('\n'));
+    atomicWriteFileSync(memoryFile(), kept.join('\n'));
   }
   return removed;
 }
@@ -117,7 +118,7 @@ export function appendJournal(/** @type {any} */ home, /** @type {any} */ entry)
       const raw = fs.readFileSync(journalFile(), 'utf8');
       const lines = raw.split('\n').filter(Boolean);
       if (lines.length > 600) {
-        fs.writeFileSync(journalFile(), lines.slice(-500).join('\n') + '\n');
+        atomicWriteFileSync(journalFile(), lines.slice(-500).join('\n') + '\n');
         journalCount = 500;
       }
     } catch {}
@@ -294,7 +295,7 @@ export function dedupeProjectMemory(/** @type {any} */ workingDir) {
     kept.push(t);
   }
   if (removed > 0) {
-    try { fs.writeFileSync(projectMemoryFile(workingDir), kept.join('\n') + '\n'); } catch {}
+    try { atomicWriteFileSync(projectMemoryFile(workingDir), kept.join('\n') + '\n'); } catch {}
   }
   return removed;
 }

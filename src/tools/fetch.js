@@ -49,7 +49,6 @@ export async function runFetch(/** @type {any} */ args, /** @type {any} */ _ctx)
     let cur = u;
     let res = /** @type {any} */ (null);
     for (let hop = 0; hop <= 5; hop++) {
-      if (hop > 5) return { ok: false, error: '重定向次数超过上限（5 跳）。' };
       const ch = String(cur.hostname || '').toLowerCase();
       let hopBlocked = isPrivateHost(ch);
       if (!hopBlocked && ch && ch !== 'localhost' && !/^\d{1,3}(\.\d{1,3}){3}$/.test(ch)) {
@@ -63,6 +62,8 @@ export async function runFetch(/** @type {any} */ args, /** @type {any} */ _ctx)
       if (hopBlocked) return { ok: false, error: `拒绝访问内网/本机地址（${ch}）——SSRF 重定向防护。` };
       res = await fetch(cur, { signal: ac.signal, redirect: 'manual' });
       if (res.status >= 300 && res.status < 400) {
+        // P2-3（v0.4.5）：原 `if(hop>5)` 死代码（hop 最大 5 永不触发）——超限应在 3xx 分支内判定
+        if (hop >= 5) return { ok: false, error: '重定向次数超过上限（5 跳）。' };
         const loc = res.headers.get('location');
         if (!loc) break; // 无 Location：按最终响应处理
         try {

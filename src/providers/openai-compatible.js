@@ -147,9 +147,31 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
     if (choice.finish_reason) finish = choice.finish_reason;
   };
 
+  // P1-6（v0.4.5）：[DONE] 后不再无限等待网关关流——此前外层 for 继续 read 至流关闭，
+  // 部分网关/代理在 [DONE] 后不主动断开会挂到 streamIdleMs(120s)。但部分网关在 [DONE] 之后
+  // 才发 usage-only 终包（且末帧常不带换行），直接退出会丢 usage。因此进入「有界排空」：
+  // 继续读残余帧，每次 read 用短超时兜底，超时或流关闭即停止——usage 尾帧仍被捕获，
+  // 正常流在 [DONE] 后立即关流，Promise.race 随即以 done 返回，不增加延迟。
+  const DRAIN_TIMEOUT_MS = 500;
+  const readDrain = async () => {
+    let t;
+    const timer = new Promise((resolve) => {
+      t = setTimeout(() => resolve({ done: false, value: null, timedOut: true }), DRAIN_TIMEOUT_MS);
+    });
+    try {
+      return await Promise.race([reader.read(), timer]);
+    } finally {
+      clearTimeout(t);
+    }
+  };
   for (;;) {
-    const { done, value } = await reader.read();
+    const { done, value } = await (doneFlag ? readDrain() : reader.read());
     if (done) break;
+    if (value == null) {
+      // 排空超时：不再等，取消 reader 释放连接（防火墙/网关持流不关的场景）
+      reader.cancel().catch(() => {});
+      break;
+    }
     buf += decoder.decode(value, { stream: true });
     let nl;
     while ((nl = buf.indexOf('\n')) >= 0) {

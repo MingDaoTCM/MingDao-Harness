@@ -115,7 +115,10 @@ function killTaskInner(/** @type {any} */ home, /** @type {any} */ id) {
     try {
       owned = fs.readFileSync(`/proc/${t.pid}/cmdline`, 'utf8').includes(id);
     } catch {}
-    if (owned === true) { // 非 Linux/无法校验（null）不盲杀（CodeBuddy 报告：PID 复用误杀风险）
+    // P0-3（v0.4.5）：owned===null（非 Linux 无 /proc，或无法读取）时降级为「按 pid 存活即杀」——
+    // 此前 null 直接跳过，导致 macOS/Windows 上 kill 只改状态不杀进程、worker 继续跑完覆盖状态。
+    // 任务 id 含随机 + 启动时 pid，PID 复用误杀概率极低，且任务 id 本就是用户显式指定的目标。
+    if (owned === true || owned === null) {
       try {
         // worker 是 detached 进程（自成进程组）：优先杀整组，避免工具子进程成孤儿
         process.kill(-t.pid, 'SIGTERM');
