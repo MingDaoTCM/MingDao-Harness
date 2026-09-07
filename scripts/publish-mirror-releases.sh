@@ -47,7 +47,7 @@ FILES="mingdao-setup-$V-x64.exe mingdao-$V-amd64.deb mingdao-$V-arm64.dmg mingda
 echo "== gitee release =="
 GID=$(curl -s -X POST "https://gitee.com/api/v5/repos/MingDaoTCM/MingDao-harness/releases?access_token=$GITEE_TOKEN" \
   -H "Content-Type: application/json" \
-  -d "$(python3 -c 'import json,sys;print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[1]+" 修复版重建","body":open(sys.argv[2]).read(),"target_commitish":"main"}))' "$TAG" "$BODY")" \
+  -d "$(python3 -c 'import json,sys;print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[1],"body":open(sys.argv[2]).read(),"target_commitish":"main"}))' "$TAG" "$BODY")" \
   | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))')
 echo "gitee release id=$GID"
 [ -n "$GID" ] || { echo "gitee 创建失败"; exit 1; }
@@ -55,7 +55,7 @@ echo "gitee release id=$GID"
 echo "== gitcode release =="
 curl -s -X POST "https://api.gitcode.com/api/v5/repos/MingDaoTCM/MingDao-Harness/releases" \
   -H "Content-Type: application/json" -H "private-token: $GITCODE_TOKEN" \
-  -d "$(python3 -c 'import json,sys;print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[1]+" 修复版重建","body":open(sys.argv[2]).read(),"target_commitish":"main"}))' "$TAG" "$BODY")" \
+  -d "$(python3 -c 'import json,sys;print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[1],"body":open(sys.argv[2]).read(),"target_commitish":"main"}))' "$TAG" "$BODY")" \
   -o /tmp/gc-rel.json -w "gitcode http=%{http_code}\n"
 grep -q tag_name /tmp/gc-rel.json || { echo "gitcode 创建失败"; head -c 300 /tmp/gc-rel.json; exit 1; }
 
@@ -78,10 +78,10 @@ done
 # gitcode 附件（upload_url + OBS PUT）
 for f in $FILES; do
   echo "== gitcode attach $f"
-  python3 - "$f" "$GITCODE_TOKEN" "$DL" <<'PY'
+  python3 - "$f" "$GITCODE_TOKEN" "$DL" "$TAG" <<'PY'
 import json, os, sys, urllib.request
-name, token, dl = sys.argv[1], sys.argv[2], sys.argv[3]
-api = "https://api.gitcode.com/api/v5/repos/MingDaoTCM/MingDao-Harness/releases/v0.1.65/upload_url"
+name, token, dl, tag = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+api = f"https://api.gitcode.com/api/v5/repos/MingDaoTCM/MingDao-Harness/releases/{tag}/upload_url"
 rq = urllib.request.Request(f"{api}?file_name={name}", headers={"private-token": token})
 with urllib.request.urlopen(rq, timeout=60) as r:
     meta = json.loads(r.read().decode())
