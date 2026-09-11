@@ -1,5 +1,12 @@
 # Deyi-TCM-Harness 回迁指南（v0.5.0 → Pack API v1）
 
+> **已按下游真实代码核对**（核对对象：`Deyi-TCM-Harness@c6b4397`，文件
+> `layer/providers/dify.mjs`、`docs/ARCHITECTURE.md`、`README.md`）。
+> 核对后更正了两处会误导回迁的地方：§3.1.1 补上「同名多命中」这条**模型之前的安全闸门**
+> （初版只举了 `随访` 命令，把安全关键的那条漏了）；§6 更正「执行账本不可用」的过期说法
+> （v0.6.0 已交付）。指南里凡是标注「按真实代码核对」的结论，都来自读代码而不是推测。
+
+
 > 面向：下游 Line B（中医垂域层，Linux 原机开发）
 > 上游契约：`PACK-API.md`（v1 已冻结）· 变更史 `CHANGELOG-PACK.md`
 > 触发：**v0.5.0 发布即回迁**（决策已确认）。目标：把 3 个域工具从 `providers/dify.mjs` 的 `chat()` 里搬出来。
@@ -72,6 +79,35 @@ export function createPack(ctx) {
 ```
 
 注册后内核自动加前缀：`pack__tcm__intake_collect` 等，与内置工具走**同一条**权限 / 审计 / schema 瘦身 / 费用链路。
+
+#### 3.1.1 ⚠ 两条「模型之前」的短路，不能当成普通工具直接搬
+
+> 本节是按**下游真实代码**核对后补写的（核对对象：`Deyi-TCM-Harness@c6b4397`，
+> 文件 `layer/providers/dify.mjs` 的 `chat()`）。初版指南只举了 `随访` 一条，
+> 漏掉了下面第 2 条——而它才是安全关键的那条。
+
+下游的 `chat()` 里有**两处**在调用模型**之前**就返回的短路分支：
+
+| # | 触发 | 现状行为 | 直接改成工具会怎样 |
+| --- | --- | --- | --- |
+| 1 | `^(回访\|随访)\s*(.*)$` | 不调用 Dify、不走问诊，直接产出看板/随访话术（`usage: {0,0}`） | 多一次模型往返（延迟与 token 开销）。**若在意这点**：保留在下游 Provider 里是允许的——`<home>/providers/` 本就是下游的自留地（见 §6） |
+| 2 | **同名多命中** `match.ambiguous` | **直接返回候选列表、请医师确认，不落盘、不问诊**（`dify.mjs` 中 `if (match.ambiguous)` 分支） | ⚠ **这是安全降级**：现在的语义是「**Provider 在模型之前就拒绝继续**」，改成普通工具后变成「模型自行决定要不要先问一句」。对「同名多命中不静默合并、避免混病历」这条医疗安全属性，**把决定权从内核交给模型是不可接受的** |
+
+第 2 条的正确迁移方式不是「做成工具」，而是**用约束引擎把它升级为内核强制**（这正是 v0.5.0 约束确定性存在的意义）：
+
+```js
+// packs/tcm/pack.mjs 的 constraints —— 让「没有确认病历号就不得写入」由内核强制，
+// 且对**所有**写类工具生效，不依赖模型自觉、可审计、可被测试阻断。
+constraints: [
+  { id: 'must-have-patient', kind: 'tool-arg-require', tool: 'intake_collect', requireArg: 'patientId' },
+  { id: 'must-have-patient', kind: 'tool-arg-require', tool: 'visit_compare',  requireArg: 'patientId' },
+  // 采集缺项照样由 completeness 兜住（见 §3.2）
+]
+```
+
+这样得到的性质**比现状更强**：现状只在「同名多命中」这一种情况下拒绝，而 `tool-arg-require` 是
+「**任何**没有确认病历号的写入都拒绝」——把「避免混病历」从一条 if 分支变成一条内核不变量，
+并且进审计、可回放（§6 的账本已可用）。
 
 ### 3.2 三条红线 → 约束引擎（从提示词升级为内核强制）
 
@@ -165,11 +201,30 @@ async function deepseekJson(system, user, maxTokens = 2000) {
 
 ---
 
-## 六、上游仍需补齐（下游可先按本节设计，勿依赖）
+## 六、上游能力现状（回迁时按此判断能依赖什么）
+
+> 本节已按 **v0.6.0** 实际交付情况更正。初版把「执行账本导出/回放」也列进了缺口，
+> 但它在 v0.6.0 已经落地——照旧文办事会让下游白做一套替代方案。
+
+**已可用（可以依赖）**
+
+- **执行账本与决策回放（v0.6.0 确定性③）**：`mingdao ledger list/show/export/verify/replay`。
+  对下游的意义：域内模型调用（经 `ctx.llm()`）与约束触发都会进账本，
+  「这次结论是怎么来的」可离线回答；`ledger export` 脱敏后可交第三方复核。
+  回放还能当**下游 CI 门禁**：`now-blocked > 0` 时退出码为 1。
+- `permissions.fs` 显式路径 + `completeness` / `tool-deny` / `tool-arg-require` / `arg-forbid` /
+  `output-forbid` / `result-forbid`（后两者见 `PACK-API.md §4`，`result-forbid` 于 v0.6.0 补齐实现）。
+- 出网白名单 `config.net` + `mingdao net report`（**注意边界**：只覆盖内核经 HTTP 出口与自更新
+  联系的目标，不覆盖 MCP 服务器、以及工具自己起的子进程——见 `CONFIG.md` 出网白名单一节）。
+
+**仍缺（请勿依赖）**
 
 - `ctx.storage`：Pack 私有持久化命名空间（当前用 `permissions.fs` 显式路径替代）；
 - `ctx.provider`：由 Pack 贡献非 OpenAI 兼容 Provider（当前 Dify 适配仍放 `<home>/providers/`）；
-- Pack 私有存储加密（医疗 PII）→ v0.6.0「合规与确定性」；
-- 执行账本导出 / 可回放（确定性③）→ v0.6.0。
+- **Pack 私有存储加密（医疗 PII）**：**不在 v0.6.0**（初版写「→ v0.6.0」是不准确的，特此更正）。
+  下游若有 PII 落盘加密要求，请在上层自行处理（如加密文件系统 / 应用层加密）；
+- 账本的**可选签名**（`--sign-key`）未实现：当前只有哈希链完整性校验，
+  **不含可信时间戳**，不要当成审计级不可否认。
 
-以上四项在 v0.5.0 **不可用**，请勿在回迁中依赖。
+**能力缺口登记（契约里列了但没实现，别照文档写）**：`require-citation` 约束 kind、
+`mingdao constraint test <pack>` —— 见 `PACK-API.md §4.1`。
