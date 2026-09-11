@@ -262,7 +262,6 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   // （A/B 互相看不到对方的 user 消息、回答归属错乱）；若其中一路触发自动压缩，
   // onCompact 的整文件重写会直接丢掉另一路刚追加的消息。不同会话仍可并行（多任务招牌不变）。
   const busySessions = new Set();
-  let taskSeq = 0;
   // 忙状态通知（v0.4.3 network error 修复）：有 running 任务即「忙」——桌面版据此在生成期
   // 防睡眠/防熄屏（macOS 熄屏会中断 Chromium 网络栈导致 SSE 断连）。onBusy 由调用方注入。
   let lastBusy = false;
@@ -351,7 +350,12 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
 
   /** @param {any} res @param {any} body */
   async function handleChat(res, body) {
-    const taskId = `t${++taskSeq}`; // 服务端生成：客户端自选 taskId 可能覆盖他人任务
+    // v0.4.7（T2）：taskId 改为不可枚举的随机值。此前是 t1/t2/… 的顺序号，配合
+    // GET /api/tasks 的全量列举，任何持有同一 token 的一方都能枚举并中断他人任务。
+    // 顺序号虽不是漏洞根因（根因见下），但把它改成随机值可消除「盲猜」这一层。
+    // 说明：共享 token 场景下**没有**每客户端隔离——`/api/tasks` 仍会列出同一 token 下的全部任务。
+    // 完整的每客户端作用域需要引入客户端 cookie 作用域语义（产品决策，见 docs/AUDIT-v0.4.6.md T2）。
+    const taskId = `t${crypto.randomBytes(8).toString('hex')}`;
     const entry = /** @type {any} */ ({ res, send: null, abortHandler: null, pendingAsk: null, session: null, startedAt: Date.now(), status: 'running', message: '', durationMs: 0 });
     srvlog('chat 开始 ' + taskId + ' session=' + (body.file || '新会话') + ' 消息长度=' + String(body.message || '').length);
     tasks.set(taskId, entry);

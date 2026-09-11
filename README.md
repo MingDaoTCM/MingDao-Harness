@@ -242,6 +242,9 @@ mingdao cost --by pack          # 垂域费用分账
 - **权限三档**：`ask`（默认，写文件/命令逐次确认）/ `auto` / `readonly`；工具级规则 `{"mode":"ask","allow":["bash:git *"],"deny":["write"]}`
 - **沙箱三档**（Linux + bubblewrap）：`off` / `readonly` 全盘只读 / `safe` 只读+断网；非 Linux 自动降级并明示
 - **密钥分离**：Key 存 `~/.mingdao/credentials.json`（600 权限，`mingdao key` 管理），`config.json` 无密钥可分享可提交
+- **共享令牌 = 同一用户**（v0.4.7 明确边界）：WebUI 的访问令牌是**部署级**的，不区分使用者。
+  局域网内多人共用同一令牌时，任务面板/中断/会话彼此可见——这是当前设计的边界，不是缺陷修复
+  范围内的遗漏。需要多用户隔离时请一人一实例（不同端口 + 不同 `MINGDAO_HOME`）
 
 ## 配置与扩展
 

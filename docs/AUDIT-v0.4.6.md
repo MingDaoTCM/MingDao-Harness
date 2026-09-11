@@ -113,7 +113,7 @@
 | # | 级别 | 问题 | 位置 |
 | --- | --- | --- | --- |
 | ~~T1~~ | ✅ 已修 | ~~`/api/workspaces` 对任意绝对路径 `mkdirSync(recursive)`；登记 `/` 后 `fs-browse` 围栏自我解除~~ 现 `add`/`set` 均设**登记闸门**（仅允许 家目录 / 系统临时目录 / 启动目录 / 当前工作目录 / `web.browseRoots`，可用 `web.allowAnyWorkspaceDir: true` 显式放开）；`add` 的自动建目录同样受限；浏览基目录与登记闸门**共用同一份 `allowedRoots`**（此前两处各写一份） | `web/routes/domains/workspace.js:28-52,86-110,120-135` |
-| T2 | P2 | `/api/abort`、`/api/tasks` 无归属校验：任意客户端可中断他人任务、读取他人任务消息与会话名（taskId 可枚举）。根因是共享 token 下缺少「每客户端作用域」，需引入客户端 cookie 作用域后统一收口 | `web/routes/domains/misc.js:76-97`、`schedule.js:27-34` |
+| T2 | P2 | `/api/abort`、`/api/tasks` 无归属校验：同一 token 下可中断他人任务、读取他人任务消息与会话名。**部分收敛**：taskId 由顺序号改为不可枚举随机值（消除盲猜）；**完整隔离未做**——共享 token 语义下没有「每客户端作用域」，引入客户端 cookie 作用域属产品决策（会影响无 cookie 的脚本客户端）。已在 README「安全」一节明确写下「共享令牌 = 同一用户，多人需一人一实例」这一边界 | `web/server.js:349`、`README.md` |
 | ~~T3~~ | ✅ 已修 | ~~项目级技能 sha256「防仓库投毒」可自签/可缺失，属过度承诺~~ 按「诚实」修：注释改为准确描述（只能发现**安装后本地被改动**，对投毒零收益）；项目级技能在系统提示里标注「（项目级·来源不可验证）」；加载时给一次性 stderr 提示；新增 `config.disableProjectSkills` 可整层关断（受监管场景） | `src/skills.js:50-60,104-115,135-170` |
 
 ### 正确性 / 健壮性
