@@ -132,8 +132,22 @@
 > 第七轮 T21/T22/T23 收尾（WebUI/CLI 边角 + 技能名校验）+ T10（同一会话回合串行化）；
 > **第八轮 T22 终项（`box()` 终端宽度收敛 + 隐藏输入保留提示语）；
 > 第九轮 T20（进程归属跨平台 / 僵尸任务回收 / 终态写不复活 killed）+ T19（`sync-state` 末尾合并）
-> + T22 收尾（`key set` 改走 stdin、帮助正文合并为单一来源）。**
+> + T22 收尾（`key set` 改走 stdin、帮助正文合并为单一来源）；
+> 第十轮 T25–T29（v0.6.0 实现决策回放时发现的约束引擎 fail-open 与契约缺口）。**
 > 下表为**剩余**项。
+
+### 第十轮（v0.6.0 实现 C2 时发现，均已修）
+
+> 这一轮的共同形态值得单独记住：**合规特性静默失效比直接报错危险得多**。
+> 报错会被人看见；「看起来在保护你、其实没有」不会。四项里有三项属于此类。
+
+| # | 级别 | 缺陷 | 位置 |
+| --- | --- | --- | --- |
+| T25 | **P1** | `arg-forbid` 的 `pattern` 非法正则时求值失败 → `re` 为 null → **红线永不命中**，且不进 `invalid`。作者以为有约束、实际没有；与本模块自述的「fail-closed」原则直接矛盾（✅ 已修：`isValidPattern` 单一来源 + 运行期 fail-closed + 装载即拒绝） | `src/constraints.js` |
+| T26 | P2 | `arg-forbid` 缺失 `pattern` 退化成 `new RegExp('')`（匹配一切），「忘了写」变成「该参数任何取值都拦」，理由印出 `/undefined/`（✅ 已修：缺失即判不可用并在装载时拒绝） | `src/constraints.js`、`src/packs.js` |
+| T27 | **P1** | `result-forbid` 在 `PACK-API.md` v1 契约表格与引擎头注释中列出，但 kind 集合与实现**都没有它**——下游按冻结契约写会被判「kind 非法」而整包装载失败。成因是 `packs.js` 另存了一份 kind 集合副本并已漂移（✅ 已修：实现补齐 + kind 集合单一来源） | `src/constraints.js`、`src/packs.js`、`docs/PACK-API.md` |
+| T28 | P2 | `arg-forbid` 只校验 `tool` 不校验 `arg`：漏写 `arg` 时引擎读 `args[undefined]` 并与字符串 `"undefined"` 做匹配——看起来在跑、其实判错对象（✅ 已修：装载时要求 `arg` 必填） | `src/packs.js` |
+| T29 | P2 | 契约缺口未登记：`require-citation`（输出前 kind）与 `mingdao constraint test <pack>` 在 `PACK-API.md` 中列出但从未实现，文档等于在做空头承诺（✅ 已修：新增 `PACK-API.md §4.1` 明确标注「请勿依赖」，并说明 `require-citation` 需先与下游定规格） | `docs/PACK-API.md` |
 
 ### 安全 / 隔离
 
