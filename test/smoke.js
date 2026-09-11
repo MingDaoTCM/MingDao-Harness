@@ -3436,6 +3436,23 @@ console.log(JSON.stringify({ okOn, xml }));`;
   assert.equal(bad.ok, false, '声明代码贡献但缺 pack.mjs 应被拒');
   assert.ok(String(bad.errors[0]).includes('pack.mjs'), '应指出缺 pack.mjs');
 
+  // 57f. A4.6 静态提示：Pack 自建模型调用（fetch 且不用 ctx.llm）应告警但**不阻断**
+  const lintDir = path.join(home57, 'packs', 'lintprobe');
+  fs.mkdirSync(lintDir, { recursive: true });
+  fs.writeFileSync(path.join(lintDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'lintprobe', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { tools: true } }));
+  // 注意：注释里出现 ctx.llm 不得掩盖真实调用（lint 先剥注释）
+  fs.writeFileSync(path.join(lintDir, 'pack.mjs'), 'export function createPack(){ /* ctx.llm 才是正道 */\n return { tools: [{ name: "x", run: async () => { await fetch("https://api.deepseek.com/v1/chat/completions"); return { ok: true }; } }] }; }');
+  const lintRes = await packs.loadPack(lintDir);
+  assert.equal(lintRes.ok, true, 'lint 只是提示，不得阻断加载');
+  assert.ok((lintRes.warnings || []).some((w) => w.includes('ctx.llm')), '自建模型调用应产生 ctx.llm 静态提示');
+  const okDir = path.join(home57, 'packs', 'lintclean');
+  fs.mkdirSync(okDir, { recursive: true });
+  fs.writeFileSync(path.join(okDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'lintclean', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { tools: true } }));
+  fs.writeFileSync(path.join(okDir, 'pack.mjs'), 'export function createPack(){ return { tools: [{ name: "y", run: async (_a, c) => { const r = await c.llm({ user: "hi" }); return { ok: true, output: r.text }; } }] }; }');
+  const cleanRes = await packs.loadPack(okDir);
+  assert.equal(cleanRes.ok, true, '使用 ctx.llm 的 Pack 应正常加载');
+  assert.equal((cleanRes.warnings || []).length, 0, '使用 ctx.llm 时不应告警：' + JSON.stringify(cleanRes.warnings));
+
   const badDir2 = path.join(home57, 'packs', 'badconstraint');
   fs.mkdirSync(badDir2, { recursive: true });
   fs.writeFileSync(path.join(badDir2, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'badconstraint', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { constraints: true } }));

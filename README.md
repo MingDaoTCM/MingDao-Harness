@@ -203,6 +203,29 @@ mingdao sync conflicts                                 # 跨设备冲突三选�
 
 多设备自动同步（会话结束静默推送）；冲突绝不丢数据（自动 `.server-*` / `.remote-*` 备份 + 图形化选择）；WebUI 设置面板含完整同步/分享/冲突区块。
 
+### 垂域 Pack（v0.5.0 · Pack API v1）
+
+把**某个行业的智能体**打包成一个可安装、可校验、可版本化的单元——不改内核源码：
+
+```bash
+mingdao pack new tcm            # 生成脚手架（manifest + 入口 + 领域提示词）
+mingdao pack verify ./packs/tcm # 静态校验 + 运行时契约校验（CI 门禁，非 0 退出即失败）
+mingdao pack list / info tcm    # 查看已加载 Pack 与贡献面
+mingdao cost --by pack          # 垂域费用分账
+```
+
+一个 Pack 可以贡献四类东西：
+
+| 贡献 | 作用 |
+| --- | --- |
+| **工具** | 领域工具，注册为 `pack__<pack>__<tool>`，与内置工具同走权限 / 审计 / schema 瘦身链路 |
+| **约束（领域红线）** | `tool-deny` / `tool-arg-require` / `arg-forbid` / `output-forbid` / `completeness` / `confirm`，在内核三个时机**强制**（不是提示词里的一句话），命中写审计 |
+| **领域提示词段** | 注入系统提示（确定性排序、字节稳定，不破坏前缀缓存） |
+| **费用归因** | Pack 内模型调用走 `ctx.llm()`，自动入账 + 四维归因（`pack`/`tool`/`purpose`/`model`） |
+
+三级遮蔽：`<项目>/.mingdao/packs/` > `~/.mingdao/packs/` > 内置 `packs/`；坏 Pack 只告警、不阻塞启动。
+契约与示例见 [docs/PACK-API.md](docs/PACK-API.md)、内置中立示例 `packs/example-hello/`。
+
 ### 模型与 Key
 
 - 内置：DeepSeek（v4-pro / v4-flash / v4-flash-vision-exp）、OpenAI（GPT-5 系列）、Qwen（qwen3.7-max）、GLM（GLM-5）、Kimi（kimi-latest）

@@ -90,6 +90,7 @@ export async function handlePack(cmd, args) {
     const c = res.contributions;
     console.log(`[通过] ${manifest.name} v${manifest.version}（apiVersion ${manifest.apiVersion}，内核窗口 ${manifest.engines?.mingdao}）`);
     console.log(`  工具 ${Array.isArray(c.tools) ? c.tools.length : 0} 个 · 约束 ${Array.isArray(c.constraints) ? c.constraints.length : 0} 条 · 提示词段 ${Array.isArray(c.promptSections) ? c.promptSections.length : 0} 段`);
+    for (const w of Array.isArray(res.warnings) ? res.warnings : []) console.log(`  ⚠ ${w}`);
     return true;
   }
 

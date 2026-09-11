@@ -83,6 +83,52 @@ registerTool({
 不做字符串拼接（防注入），由命令自行解析；执行受权限引擎门控（与 bash 同权重）。
 改 config.tools 需重启生效（与 MCP 预设一致）。
 
+## 二之补、垂域 Pack（v0.5.0，Pack API v1）
+
+Preset 定制的是「提示词 + 工具白名单 + 权限」；**Pack 定制的是「一个行业的智能体」**——
+领域工具、领域红线、领域提示词、领域费用归因，全部作为可安装单元打包，且**不改内核源码**。
+
+```bash
+mingdao pack new tcm             # 脚手架：pack.json + pack.mjs + prompts/domain.md
+mingdao pack verify ./packs/tcm  # 契约校验（下游 CI 门禁：非 0 退出即失败）
+```
+
+最小 `pack.mjs`：
+
+```js
+export const apiVersion = 1;
+export function createPack(ctx) {
+  return {
+    tools: [{
+      name: 'intake_collect',
+      description: '采集并落盘；缺项必须继续追问',
+      parameters: { type: 'object', properties: { patientId: { type: 'string' } }, required: ['patientId'] },
+      readOnly: false,
+      async run(args, toolCtx) {
+        // 统一模型出口：usage 自动入账 + 受日费用护栏约束 + Pack 归因
+        const r = await toolCtx.llm({ model: 'deepseek-v4-flash', system: '…', user: '…', purpose: 'patient-extract' });
+        return { ok: true, output: r.text, data: { /* 供 completeness 约束校验的字段 */ } };
+      },
+    }],
+    constraints: [
+      { id: 'no-cross-patient', kind: 'tool-arg-require', tool: 'intake_collect', requireArg: 'patientId' },
+      { id: 'ten-questions', kind: 'completeness', tool: 'intake_collect', fields: ['zhushu', 'zhendan'] },
+      { id: 'no-conclusion', kind: 'output-forbid', pattern: '好转|治愈|确诊为', action: 'block-and-rewrite' },
+    ],
+    promptSections: [{ id: 'domain', order: 100, content: '…' }],
+  };
+}
+```
+
+三条要点：
+
+1. **领域红线由内核强制**，不是提示词建议。三个时机：调用工具前（工具/参数）、工具返回后（缺项则拒绝该结果）、正文输出前（回填会话历史**之前**改写/拦截）。命中写审计事件。
+2. **Pack 内模型调用必须走 `ctx.llm()`**。自己 `fetch` 模型接口会让费用隐身、日费用护栏失效、`--by pack` 看不到——`pack verify` 会对此给出静态告警。
+3. **只收紧、不放松**：约束不授予任何权限，也不改变 `permissions.js` 的判定。
+
+完整契约（manifest 字段、约束 kind、`ctx.llm` 语义、版本兼容窗口）见 [PACK-API.md](PACK-API.md)；
+Pack API 变更史见 [CHANGELOG-PACK.md](CHANGELOG-PACK.md)。
+
 ## 三、库嵌入：最小示例
 
 ```js

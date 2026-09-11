@@ -15,9 +15,9 @@
 | A1 Pack 加载器 | ✅ 完成 | `src/packs.js`：三级遮蔽发现 / manifest 严格校验 / 极简 semver（npm 语义）/ 工具注册 / 坏 Pack 只告警 / 幂等挂载 |
 | A2 CLI | ✅ 完成 | `src/commands/pack.js`：`list / verify / new / info`；`verify` 即下游 CI 门禁 |
 | A3 约束引擎 | ✅ 完成（含接线） | `src/constraints.js` 三时机 + 6 kind + fail-closed；**已接入 agent**：PreToolUse（工具/参数）、PostToolUse（缺项拒绝结果）、输出前（回填历史之前改写/拦截）；约束事件写审计；CLI/WebUI/worker 启动各挂载一次 |
-| A4 成本确定性 | 🟡 核心完成 | `ctx.llm()` 统一模型出口（usage 并入当前回合 → 今日费用/缓存/峰谷/护栏全部生效）；**Pack 归因记录**（cost=null 标记，不与回合级重复计费）；`mingdao cost --by pack`。**待补**：Pack 级预算（A4.5）、`pack verify` 对直连模型端点的静态告警（A4.6） |
+| A4 成本确定性 | ✅ 完成（A4.5 除外） | `ctx.llm()` 统一模型出口（usage 并入当前回合 → 今日费用/缓存/峰谷/护栏全部生效）；**Pack 归因记录**（cost=null 标记，不与回合级重复计费）；`mingdao cost --by pack`；`pack verify` 对「自建模型调用」的静态告警（A4.6）。**待补**：Pack 级预算（A4.5） |
 | A5 提示词段 | ✅ 完成 | `buildSystemPrompt` 注入 `<pack_rules>`（按 order + pack/id 确定性排序，字节稳定不破坏前缀缓存） |
-| A6 文档 | 🟡 部分 | `packs/example-hello/` 示例 + `PACK-API.md` + `CHANGELOG-PACK.md`；README / DEVELOPER 的 Pack 章节待补 |
+| A6 文档 | ✅ 完成 | `packs/example-hello/` 示例 + `PACK-API.md` + `CHANGELOG-PACK.md`；README「垂域 Pack」小节 + `DEVELOPER.md` Pack 章节（含最小 pack.mjs 与三条要点） |
 | A7 发布 + Deyi 回迁 | ⬜ 未开始 | 版本仍 0.4.6（v0.5.0 发布时统一 bump） |
 
 **已验证的端到端行为**（均有回归断言）：
@@ -29,10 +29,10 @@
 
 断言规模：smoke 83 → **86 组**；6/6 套测试全绿；tsc 0 错误；strict 0/0。
 
-**下一步（A4 收尾 → A6 → A7）**：
-1. A4.5 Pack 级预算（日/任务）与护栏 action 联动；A4.6 `pack verify` 对「直连模型端点」的 fetch 静态告警；
-2. A6 补 README「垂域 Pack」段与 `DEVELOPER.md` Pack 章节；
-3. A7 bump 到 0.5.0 → 自检 → 发布 → 触发 Deyi 回迁（3 个域工具从 Provider 搬进 `pack-tcm`）。
+**下一步（A4.5 → A7）**：
+1. A4.5 Pack 级预算（日/任务）与护栏 action 联动（唯一剩余的 A4 项）；
+2. A7 bump 到 0.5.0 → 发布前自检 → 发布 → 触发 Deyi 回迁（3 个域工具从 Provider 搬进 `pack-tcm`，
+   并让 `pack verify` 进下游 CI）。
 
 ---
 

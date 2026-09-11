@@ -276,11 +276,27 @@ export async function loadPack(dir, opts = {}) {
   }
   if (errors.length) return { ok: false, errors };
 
+  /** @type {string[]} */
+  const warnings = [];
   let contributions = /** @type {any} */ ({});
   const hasCode = contributes.tools === true || contributes.constraints !== undefined || contributes.promptSections !== undefined || contributes.memorySchema !== undefined;
   const entry = path.join(dir, 'pack.mjs');
   if (hasCode) {
     if (!fs.existsSync(entry)) return { ok: false, errors: [`manifest 声明了代码贡献，但缺少 pack.mjs（${dir}）`] };
+    // A4.6 静态提示（不阻断）：Pack 若自己 fetch 模型接口，费用将隐身、护栏失效、无法归因。
+    // 判定刻意保守：出现 fetch( 且全文未提到 ctx.llm 时才提示（避免对「直连业务系统」误报）。
+    try {
+      const rawSrc = fs.readFileSync(entry, 'utf8');
+      // 先去注释再判定：脚手架模板里就有一句「toolCtx.llm(...) 可调用模型」的注释，
+      // 不剥注释会让 lint 对「照抄脚手架但自己 fetch」的 Pack 静默漏报。
+      const src = rawSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      if (/\bfetch\s*\(/.test(src) && !/ctx\.llm|toolCtx\.llm/.test(src)) {
+        warnings.push(
+          '检测到 fetch( 调用且未使用 ctx.llm——若这是**模型调用**，其费用不会进入账本与日费用护栏（见 PACK-API §5）。' +
+            '若这是直连业务系统（HIS/ERP 等），请在 permissions.net 声明白名单。'
+        );
+      }
+    } catch {}
     let mod;
     try {
       mod = await import(pathToFileURL(entry).href);
@@ -306,7 +322,7 @@ export async function loadPack(dir, opts = {}) {
   });
   if (errors.length) return { ok: false, errors };
 
-  return { ok: true, manifest, contributions: { ...contributions, constraints }, dir };
+  return { ok: true, manifest, contributions: { ...contributions, constraints }, dir, warnings };
 }
 
 /**
@@ -356,6 +372,7 @@ export async function mountPacks(cfg, opts = {}) {
       warnings.push(`Pack "${info.name}" 加载失败（已跳过）：${res.errors.join('；')}`);
       continue;
     }
+    for (const w of Array.isArray(res.warnings) ? res.warnings : []) warnings.push(`Pack "${info.name}"：${w}`);
     // 注册工具
     for (const t of Array.isArray(res.contributions.tools) ? res.contributions.tools : []) {
       const bare = String(t?.name || '').trim();
