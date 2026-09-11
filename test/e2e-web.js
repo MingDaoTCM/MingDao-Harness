@@ -703,8 +703,31 @@ let base = await startWeb(work1);
   const outSide = process.platform === 'win32' ? path.join(path.parse(os.homedir()).root, 'Windows') : '/etc';
   const outsideR = await (await fetch(base + '/api/fs-browse?dir=' + encodeURIComponent(outSide))).json();
   assert.ok(outsideR.error && String(outsideR.error).includes('可浏览范围'), '越界目录应被拒绝');
+
+  // v0.4.7（T1）：围栏不得被「登记工作空间」一步自行解除。
+  // 修复前：POST /api/workspaces {action:add,dir:'/'} → 再 set → state.workingDir='/' 成为浏览根 → 全盘可枚举；
+  // 且 add 会对任意绝对路径 mkdirSync(recursive)（任意位置建目录的写原语）。
+  const post = (body) =>
+    fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json());
+  const rootDir = process.platform === 'win32' ? path.parse(os.homedir()).root : '/';
+  const regRoot = await post({ action: 'add', name: 'evil-root', dir: rootDir, create: false });
+  assert.ok(regRoot.error && String(regRoot.error).includes('不在允许范围'), '登记系统根目录应被拒绝（否则浏览围栏可自行解除）');
+  const regOutside = await post({ action: 'add', name: 'evil-outside', dir: outSide, create: false });
+  assert.ok(regOutside.error, '登记允许范围之外的目录应被拒绝');
+  // 登记合法目录仍应成功，且 set 到越界目录同样被拒
+  const okDir = path.join(wsInfo.cwd, 'ok-子目录');
+  fs.mkdirSync(okDir, { recursive: true });
+  const regOk = await post({ action: 'add', name: 'ok-ws', dir: okDir });
+  assert.equal(regOk.ok, true, '允许范围内登记应成功：' + JSON.stringify(regOk));
+  const setBad = await post({ action: 'set', name: 'ok-ws', dir: rootDir });
+  assert.ok(setBad.error && String(setBad.error).includes('不在允许范围'), 'set 到越界目录应被拒绝（防绕过）');
+  const outsideAfter = await (await fetch(base + '/api/fs-browse?dir=' + encodeURIComponent(outSide))).json();
+  assert.ok(outsideAfter.error, '越界浏览仍应被拒绝（围栏未被解除）');
+  await post({ action: 'remove', name: 'ok-ws' });
+  safeRm(okDir, { recursive: true, force: true });
+
   safeRm(dir, { recursive: true, force: true });
-  ok('fs-browse：目录树浏览 / 隐藏目录过滤 / 相对路径与非法路径拒绝 / 越界拒绝');
+  ok('fs-browse：目录树浏览 / 隐藏目录过滤 / 相对路径与非法路径拒绝 / 越界拒绝 / 登记闸门（T1）');
 }
 
 // ---------- 19. /api/state 首次使用引导字段（桌面版自动初始化配套） ----------

@@ -25,6 +25,29 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
   const { json, readBody, MAX_API_BODY } = shared;
   const { cfg, state, startupCwd } = deps;
 
+  // v0.4.7（T1）：允许的目录根集中一处，登记闸门与浏览围栏共用同一份判定，避免两处漂移。
+  // Windows 收紧为桌面/文档/下载（家目录覆盖整个用户配置树）；其余平台为家目录。
+  const baseRoots = [
+    ...(process.platform === 'win32' && process.env.USERPROFILE
+      ? [path.join(process.env.USERPROFILE, 'Desktop'), path.join(process.env.USERPROFILE, 'Documents'), path.join(process.env.USERPROFILE, 'Downloads')]
+      : [os.homedir()]),
+    // 系统临时目录也是常见的工作空间位置（CI、一次性任务、沙箱），纳入允许根；
+    // 它不会让「登记 / 或 /etc」变得可行，围栏依然成立。
+    os.tmpdir(),
+  ];
+  const normPath = (/** @type {string} */ x) => (process.platform === 'win32' ? x.toLowerCase() : x);
+  const allowedRoots = () =>
+    [...baseRoots, startupCwd, state.workingDir, ...(Array.isArray(cfg?.web?.browseRoots) ? cfg.web.browseRoots : [])]
+      .filter(Boolean)
+      .map((r) => normPath(path.resolve(String(r))));
+  /** 目标目录是否落在允许根内（含根自身） */
+  const withinAllowed = (/** @type {string} */ dir) => {
+    const d = normPath(dir);
+    return allowedRoots().some((r) => d === r || d.startsWith(r + path.sep));
+  };
+  // 显式放开（默认 false）：确需登记家目录之外的位置（外置卷/网络盘）时由用户显式开启
+  const allowAnyDir = cfg?.web?.allowAnyWorkspaceDir === true;
+
   if (method === 'GET' && p === '/api/workspaces') {
     json(res, 200, { ok: true, workspaces: listWorkspaces(), current: currentWorkspace(state.workingDir)?.name || null, cwd: state.workingDir });
     return true;
@@ -35,8 +58,17 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     const name = String(body.name || '').trim();
     if (body.action === 'add') {
       if (!name) return json(res, 400, { error: '名称不能为空' });
-      // 目录为空/不存在时自动新建（默认开，create:false 关闭）
       const target = path.resolve(body.dir || state.workingDir);
+      // v0.4.7（T1）：登记工作空间 == 授权它可被目录浏览（fs-browse 的基目录含 state.workingDir）。
+      // 若允许登记任意绝对路径，围栏就能被「先 add 再 set」一步自行解除（登记 / 即可枚举全盘）。
+      // 因此登记与自动建目录都限定在允许根内；需要家目录之外的位置请显式配置
+      // web.allowAnyWorkspaceDir: true（或把该目录加入 web.browseRoots）。
+      if (!allowAnyDir && !withinAllowed(target)) {
+        return json(res, 400, {
+          error: `目录 ${target} 不在允许范围内（家目录 / 启动目录 / 当前工作目录 / web.browseRoots）。确需登记该位置请配置 web.allowAnyWorkspaceDir: true。`,
+        });
+      }
+      // 目录为空/不存在时自动新建（默认开，create:false 关闭）——仅在允许根内创建
       if (body.create !== false) {
         try {
           fs.mkdirSync(target, { recursive: true });
@@ -57,6 +89,13 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       // 切换全局工作空间（新会话默认目录；可带 dir 修改目录）；目录缺失自动重建。
       // 携带 file 时同时把当前会话的工作空间切过去（P3-4：会话跟随显式切换）。
       if (body.dir) {
+        // v0.4.7（T1）：改目录同样受允许根约束——否则「先登记一个合法目录，再 set 到 /」即可绕过上面的闸门
+        const t2 = path.resolve(String(body.dir));
+        if (!allowAnyDir && !withinAllowed(t2)) {
+          return json(res, 400, {
+            error: `目录 ${t2} 不在允许范围内（家目录 / 启动目录 / 当前工作目录 / web.browseRoots）。确需切换请配置 web.allowAnyWorkspaceDir: true。`,
+          });
+        }
         const r = setWorkspaceDir(name, body.dir);
         if (r.error) return json(res, 400, { error: r.error });
       }
@@ -91,11 +130,10 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     // 质检 A3：目录浏览限定基目录，拒绝越界。Windows（CodeArts 报告）：家目录覆盖整个用户配置树
     // （AppData 等）——收紧为 桌面/文档/下载 三常用目录 + 启动目录 + 工作目录 + web.browseRoots 显式授权；
     // 路径比较在 win32 下大小写归一（D:\\ vs d:\\ 不再误拒）。
-    const base = process.platform === 'win32' && process.env.USERPROFILE
-      ? [path.join(process.env.USERPROFILE, 'Desktop'), path.join(process.env.USERPROFILE, 'Documents'), path.join(process.env.USERPROFILE, 'Downloads')]
-      : [os.homedir()];
-    const norm = (/** @type {string} */ x) => (process.platform === 'win32' ? x.toLowerCase() : x);
-    const browseRoots = [...base, startupCwd, state.workingDir, ...(Array.isArray(cfg.web?.browseRoots) ? cfg.web.browseRoots : [])].map((r) => norm(path.resolve(String(r))));
+    // v0.4.7（T1）：基目录判定与工作空间登记闸门共用同一份 allowedRoots/normPath（此前两处各写一份，
+    // 且登记侧不设闸门 → 围栏可被一次 API 调用自行解除）
+    const browseRoots = allowedRoots();
+    const norm = normPath;
     const ndir = norm(dir);
     const inRoot = browseRoots.some((r) => ndir === r || ndir.startsWith(r + path.sep));
     if (!inRoot) return json(res, 403, { error: '目录不在可浏览范围内（授权目录或 web.browseRoots 显式添加）' });
