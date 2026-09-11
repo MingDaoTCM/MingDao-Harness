@@ -120,25 +120,70 @@ export function installEgressGate(/** @type {any} */ rawNet) {
   if (!installed) {
     originalFetch = globalThis.fetch;
     const base = originalFetch;
-    globalThis.fetch = (/** @type {any} */ input, /** @type {any} */ init) => {
+    const blockedError = (/** @type {any} */ d, /** @type {string} */ tag = '') =>
+      new Error(
+        `出网被拦截${tag}：${d.host}${d.port ? ':' + d.port : ''} 不在 config.net.allow 白名单内（mode=block）。` +
+          `若这是必要的外部依赖，请把该主机显式加入白名单；若只是想让数据不出门，请保持拦截并改用内网端点。`
+      );
+    globalThis.fetch = async (/** @type {any} */ input, /** @type {any} */ init) => {
       const url = typeof input === 'string' ? input : input && typeof input === 'object' && 'url' in input ? input.url : String(input);
       const d = decideEgress(url);
-      if (!d.allowed && activePolicy?.mode === 'block') {
-        // 阻断要给出可操作的错误：说清是谁被拦、怎么放行，而不是一个光秃秃的 network error
-        return Promise.reject(
-          new Error(
-            `出网被拦截：${d.host}${d.port ? ':' + d.port : ''} 不在 config.net.allow 白名单内（mode=block）。` +
-              `若这是必要的外部依赖，请把该主机显式加入白名单；若只是想让数据不出门，请保持拦截并改用内网端点。`
-          )
-        );
-      }
+      if (!d.allowed && activePolicy?.mode === 'block') throw blockedError(d);
       if (!d.allowed && activePolicy?.mode === 'warn' && !warnedOnce) {
         warnedOnce = true;
         try {
           process.stderr.write(`[MingDao] ⚠ 出网告警：${d.host} 不在白名单内（mode=warn，已放行并记账）。运行 mingdao net report 查看明细。\n`);
         } catch {}
       }
-      return base(input, init);
+      // 重定向必须**逐跳**判定（v0.6.0 自查发现的绕过）：
+      // 调用方不指定 redirect 时 undici 默认自己跟随 3xx，闸门只看得到**首个** URL——
+      // 于是「允许 api.deepseek.com」会被利用成：该主机返回 302 指向任意地址，内核照样跟过去，
+      // 而且会把 Authorization 头一起带过去。这不是理论风险：模型端点是可被配置/接管的。
+      // 这里改成自行跟随并逐跳过闸；调用方显式指定 redirect（如 fetch 工具的 'manual'，
+      // 它本来就自己逐跳处理）时不介入，避免改变既有语义。
+      const follow = !init || init.redirect === undefined || init.redirect === 'follow';
+      if (!follow) return base(input, init);
+      let current = url;
+      /** @type {any} */
+      let curInit = init ? { ...init, redirect: 'manual' } : { redirect: 'manual' };
+      for (let hop = 0; ; hop++) {
+        const res = await base(current, curInit);
+        if (![301, 302, 303, 307, 308].includes(res.status)) return res;
+        const loc = res.headers?.get?.('location');
+        if (!loc) return res;
+        if (hop >= 20) {
+          try {
+            await res.body?.cancel();
+          } catch {}
+          throw new Error('重定向次数超过上限（20 跳），已中止');
+        }
+        let next = '';
+        try {
+          next = new URL(loc, current).toString();
+        } catch {
+          try {
+            await res.body?.cancel();
+          } catch {}
+          throw new Error(`非法重定向地址：${loc}`);
+        }
+        const nd = decideEgress(next);
+        if (!nd.allowed && activePolicy?.mode === 'block') {
+          try {
+            await res.body?.cancel();
+          } catch {}
+          throw blockedError(nd, '（重定向目标）');
+        }
+        // 方法语义按 fetch 规范：303 一律转 GET；301/302 对 POST 转 GET；307/308 保持方法与正文
+        const method = String(curInit?.method || 'GET').toUpperCase();
+        if (res.status === 303 || ((res.status === 301 || res.status === 302) && method === 'POST')) {
+          const { body, ...rest } = curInit || {};
+          curInit = { ...rest, method: 'GET' };
+        }
+        try {
+          await res.body?.cancel(); // 释放上一跳的连接，避免重定向链堆积
+        } catch {}
+        current = next;
+      }
     };
     installed = true;
   }

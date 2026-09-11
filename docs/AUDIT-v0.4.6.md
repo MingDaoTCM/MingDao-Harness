@@ -133,7 +133,8 @@
 > **第八轮 T22 终项（`box()` 终端宽度收敛 + 隐藏输入保留提示语）；
 > 第九轮 T20（进程归属跨平台 / 僵尸任务回收 / 终态写不复活 killed）+ T19（`sync-state` 末尾合并）
 > + T22 收尾（`key set` 改走 stdin、帮助正文合并为单一来源）；
-> 第十轮 T25–T29（v0.6.0 实现决策回放时发现的约束引擎 fail-open 与契约缺口）。**
+> 第十轮 T25–T29（实现决策回放时发现的约束引擎 fail-open 与契约缺口）；
+> 第十一轮 T30（实现出网白名单当天自查发现的重定向绕过）。**
 > 下表为**剩余**项。
 
 ### 第十轮（v0.6.0 实现 C2 时发现，均已修）
@@ -147,6 +148,7 @@
 | T26 | P2 | `arg-forbid` 缺失 `pattern` 退化成 `new RegExp('')`（匹配一切），「忘了写」变成「该参数任何取值都拦」，理由印出 `/undefined/`（✅ 已修：缺失即判不可用并在装载时拒绝） | `src/constraints.js`、`src/packs.js` |
 | T27 | **P1** | `result-forbid` 在 `PACK-API.md` v1 契约表格与引擎头注释中列出，但 kind 集合与实现**都没有它**——下游按冻结契约写会被判「kind 非法」而整包装载失败。成因是 `packs.js` 另存了一份 kind 集合副本并已漂移（✅ 已修：实现补齐 + kind 集合单一来源） | `src/constraints.js`、`src/packs.js`、`docs/PACK-API.md` |
 | T28 | P2 | `arg-forbid` 只校验 `tool` 不校验 `arg`：漏写 `arg` 时引擎读 `args[undefined]` 并与字符串 `"undefined"` 做匹配——看起来在跑、其实判错对象（✅ 已修：装载时要求 `arg` 必填） | `src/packs.js` |
+| T30 | **P1** | **出网白名单可被重定向绕过**（v0.6.0 C3 自查发现，实现当天即修）：调用方不指定 `redirect` 时 undici 默认自行跟随 3xx，而闸门只看得到**首个** URL——于是「允许 api.deepseek.com」可被利用成「该主机返回 302 指向任意地址，内核照样跟过去」，并且会把 `Authorization` 头一起带过去。模型端点可被配置/接管，这不是理论风险。✅ 已修：闸门自行逐跳跟随并逐跳判定，非白名单跳转**在发出请求前**即中止（有断言钉住「绝不向白名单外的目标发请求」）；调用方显式 `redirect:'manual'`（如 fetch 工具自己逐跳处理）时不介入，避免改变既有语义 | `src/net-guard.js` |
 | T29 | P2 | 契约缺口未登记：`require-citation`（输出前 kind）与 `mingdao constraint test <pack>` 在 `PACK-API.md` 中列出但从未实现，文档等于在做空头承诺（✅ 已修：新增 `PACK-API.md §4.1` 明确标注「请勿依赖」，并说明 `require-citation` 需先与下游定规格） | `docs/PACK-API.md` |
 
 ### 安全 / 隔离

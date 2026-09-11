@@ -4684,9 +4684,61 @@ console.log(JSON.stringify({ okOn, xml }));`;
     delete globalThis.__sinkHit;
   }
 
+  // 74e. 重定向必须**逐跳**判定（自查发现的绕过：默认 redirect:'follow' 时 undici 自己跟随 3xx，
+  //      闸门只看得到首个 URL——「允许 api.deepseek.com」会被利用成「该主机 302 到任意地址，
+  //      内核照样跟过去」，而且会把 Authorization 头一起带过去）。用桩 fetch 精确验证。
+  {
+    process.env.MINGDAO_HOME = home74;
+    const realFetch74 = globalThis.fetch;
+    let calls74 = [];
+    const mkRes74 = (status, headers = {}) => ({
+      status,
+      headers: { get: (/** @type {any} */ k) => headers[k.toLowerCase()] ?? null },
+      body: { cancel: async () => {} },
+      ok: status < 400,
+      json: async () => ({}),
+      text: async () => 'ok',
+    });
+    globalThis.fetch = async (/** @type {any} */ input, /** @type {any} */ init) => {
+      const u = typeof input === 'string' ? input : input.url;
+      calls74.push({ url: u, redirect: init?.redirect ?? '(默认)' });
+      if (u.startsWith('https://allowed.example/start')) return mkRes74(302, { location: 'https://evil.example/steal' });
+      if (u.startsWith('https://allowed.example/ok')) return mkRes74(302, { location: 'https://allowed.example/final' });
+      return mkRes74(200);
+    };
+    try {
+      ng.installEgressGate({ allow: ['allowed.example'], mode: 'block' });
+      // 跨主机重定向到非白名单：必须拦，且**不得**发出第二跳
+      calls74 = [];
+      let err74 = null;
+      try {
+        await fetch('https://allowed.example/start');
+      } catch (e) {
+        err74 = String(e?.message || e);
+      }
+      assert.ok(err74 && err74.includes('重定向目标'), `跨主机重定向到白名单外必须被拦，实际：${err74}`);
+      assert.equal(calls74.some((c) => c.url.includes('evil.example')), false,
+        '绝不能向白名单外的重定向目标发出请求（那才是真正的泄露）');
+      assert.ok(ng.readEgressLog().some((e) => e.host === 'evil.example' && !e.allowed), '被拦的重定向目标应入账');
+      // 白名单内的重定向：正常跟随（不能因为加固就把合法跳转也拦了）
+      calls74 = [];
+      const ok74 = await fetch('https://allowed.example/ok');
+      assert.equal(ok74.status, 200, '白名单内重定向应正常跟随到最终响应');
+      assert.equal(calls74.length, 2, `应逐跳发出两次请求，实际 ${calls74.length}`);
+      assert.ok(calls74.every((c) => c.redirect === 'manual'), '自行跟随时应使用 manual 逐跳判定');
+      // 调用方显式 redirect:manual → 闸门不介入，保持既有语义
+      calls74 = [];
+      await fetch('https://allowed.example/start', { redirect: 'manual' });
+      assert.equal(calls74.length, 1, '显式 manual 时闸门不得自行跟随（否则改变调用方语义）');
+    } finally {
+      ng.uninstallEgressGate();
+      globalThis.fetch = realFetch74;
+    }
+  }
+
   process.env.MINGDAO_HOME = prevHome74;
   safeRmSync(home74, { recursive: true, force: true });
-  ok('v0.6.0 C3：出网白名单（匹配含后缀伪装/CIDR/回环豁免 + 记账不记请求体 + block 真拦 + 未配置零影响 + sink）');
+  ok('v0.6.0 C3：出网白名单（匹配含后缀伪装/CIDR/回环豁免 + 记账不记请求体 + block 真拦 + 未配置零影响 + sink + 重定向逐跳判定）');
 }
 
 
