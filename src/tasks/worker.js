@@ -26,7 +26,8 @@ import { generateTitle, renameSessionFile, titleModel } from '../titles.js';
  */
 export async function runWorkerTask(id, question, { permission, model, offpeak }) {
   const home = ensureHome();
-  const finish = (/** @type {any} */ patch) => patchTask(home, id, patch);
+  // v0.4.7（P3 T20）：终态写与「普通补丁」区分——终态写不得复活用户已 kill 的任务
+  const finish = (/** @type {any} */ patch, /** @type {any} */ opts = undefined) => patchTask(home, id, patch, opts);
   let mcpFacade = null;
   let cfg = null; // 提到 try 外：catch 分支也要读 cfg.notify
   try {
@@ -115,22 +116,27 @@ export async function runWorkerTask(id, question, { permission, model, offpeak }
     const finalStatus = res.capHit ? 'failed' : res.truncated ? 'failed' : res.aborted ? 'killed' : 'done';
     if (res.capHit && !note) note = '达到步数上限，任务未完成（可续跑）。';
     recordUsage(res.perf?.usedModel || modelName, res.usage, /** @type {any} */ (res.perf));
-    finish({
+    const wrote = finish({
       status: finalStatus,
       text: (res.text || '').slice(0, 2000),
       usage: res.usage,
       durationMs: Date.now() - t0,
       session: path.basename(session.file),
       note,
-    });
-    if (cfg.notify !== false && !process.env.MINGDAO_TASK_QUIET_NOTIFY) notifyTaskDone(question, finalStatus === 'killed' ? 'failed' : finalStatus);
+    }, { terminal: true });
+    // v0.4.7（P3 T20）：用户在收尾前 kill 过 → 锁内终态写保留 killed，此处必须按**真实生效**
+    // 的状态决定通知，否则会向用户推送一条「任务完成」——与他刚做的停止动作直接矛盾。
+    const effective = wrote?.status || finalStatus;
+    if (effective !== 'killed' && cfg.notify !== false && !process.env.MINGDAO_TASK_QUIET_NOTIFY) {
+      notifyTaskDone(question, effective === 'killed' ? 'failed' : effective);
+    }
     try {
       await maybeAutoSync();
     } catch {}
     process.exitCode = res.truncated ? 1 : 0;
   } catch (/** @type {any} */ err) {
-    finish({ status: 'failed', error: String(err?.message || err) });
-    if (cfg?.notify !== false && !process.env.MINGDAO_TASK_QUIET_NOTIFY) notifyTaskDone(question, 'failed');
+    const wroteErr = finish({ status: 'failed', error: String(err?.message || err) }, { terminal: true });
+    if (wroteErr?.status !== 'killed' && cfg?.notify !== false && !process.env.MINGDAO_TASK_QUIET_NOTIFY) notifyTaskDone(question, 'failed');
     process.exitCode = 2;
   } finally {
     if (mcpFacade) mcpFacade.stop();

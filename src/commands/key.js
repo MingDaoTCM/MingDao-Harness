@@ -1,4 +1,5 @@
 // 命令族：mingdao key（自 cli.js 拆出，评估 P0-1 拆包）
+import fs from 'node:fs';
 import { createIO, style, C } from '../ui.js';
 import { ensureHome } from '../config.js';
 import { setStoredKey, removeStoredKey, credentialsPath, loadCredentials, maskKey } from '../credentials.js';
@@ -32,17 +33,36 @@ export async function handleKey(/** @type {any} */ cmd, /** @type {any} */ args)
         io.print('用法：mingdao key set <服务商名> [key]');
         return true;
       }
+      // v0.4.7（P3 T22）：密钥优先从**标准输入**读，而不是命令行参数。
+      // argv 会出现在 `ps aux` / 进程会计 / CI 日志里，本机任何用户都能直接读到明文密钥
+      // ——这不是理论风险：本项目自己校验进程归属（src/proc.js）与回收强杀 worker 时，
+      // 用的正是「读命令行」这条路径。
       let key = args[2] || '';
+      const fromArgv = Boolean(key);
       if (!key) {
-        if (!io.isTTY) {
-          io.print('非交互环境请直接传参：mingdao key set <服务商名> <key>');
-          return true;
+        if (process.stdin.isTTY) {
+          key = await io.ask(`输入 ${target} 的 API Key（隐藏输入）：`, { hidden: true });
+        } else {
+          // 管道/重定向（脚本与 CI 的常规用法）：echo "<key>" | mingdao key set <服务商名>
+          try {
+            key = String(fs.readFileSync(0, 'utf8') || '');
+          } catch {
+            key = '';
+          }
+          key = key.trim(); // echo 会带上结尾换行
+          if (!key) {
+            io.print('用法：echo "<API Key>" | mingdao key set <服务商名>');
+            io.print('（也可交互输入：mingdao key set <服务商名>）');
+            return true;
+          }
         }
-        key = await io.ask(`输入 ${target} 的 API Key（隐藏输入）：`, { hidden: true });
       }
       if (!key) {
         io.print('未输入，已取消。');
         return true;
+      }
+      if (fromArgv) {
+        io.print(style('⚠ 命令行参数中的密钥会出现在进程列表里（ps aux 可见），建议改用：echo "<key>" | mingdao key set ' + target, C.yellow));
       }
       setStoredKey(target, key);
       io.print(`已保存 ${target} → ${maskKey(key)}（${credentialsPath()}，权限 600）。`);

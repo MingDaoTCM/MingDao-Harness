@@ -254,7 +254,7 @@ mingdao cost --by pack          # 垂域费用分账
 
 | 问题 | 解决 |
 | --- | --- |
-| 提示「没有可用 API Key」 | `mingdao key set <服务商>`（或 WebUI 设置面板设 Key）；Key 从对应平台获取 |
+| 提示「没有可用 API Key」 | `mingdao key set <服务商>`（或 WebUI 设置面板设 Key）；Key 从对应平台获取。脚本里用 `echo "$KEY" \| mingdao key set <服务商>`，避免密钥落到 argv（`ps` 可见） |
 | 模型下拉框是空的 | 说明没有任何服务商设置了 Key——设 Key 后自动拉取线上模型列表（可点「刷新模型」） |
 | 沙箱提示降级 | 需要 Linux 且安装 bubblewrap（`apt install bubblewrap` / `dnf install bubblewrap`） |
 | Windows 颜色异常 | 使用 Windows Terminal 或 PowerShell 7 |

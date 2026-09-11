@@ -282,6 +282,56 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   ok('周期任务熔断：连续 3 次失败自动停止，不再无限重试/无限弹失败通知');
 }
 
+// ---------- 6.6 worker 被强杀后的回收（v0.4.7 P3 T20） ----------
+// 复现审计报告的场景：worker 被 SIGKILL / OOM / 系统休眠杀死，来不及写终态 →
+//   ① 任务永久停在 running，面板一直转圈；
+//   ② 调度器为它**空转到 2 小时上限**才判超时——用户看到「跑了两个小时」，实际早没进程了。
+// 用 mock 的 SCHEDSLOW 标记制造 6s 的模型响应窗口，在这个窗口内 SIGKILL 掉 worker。
+{
+  const { spawnDaemon, daemonPidFile } = await import(pathToFileURL(path.join(root, 'src', 'schedule.js')).href);
+  const { spawn } = await import('node:child_process');
+  // every 的首次执行 = 创建时刻 + 间隔，故用 2s 让 worker 尽快进入在途状态
+  const r = await runCli(['schedule', 'add', 'SCHEDSLOW 慢任务', '--every', '2s']);
+  assert.equal(r.code, 0, r.err);
+  const id = (r.out.match(/已创建\s+(\S+)/) || [])[1];
+  assert.ok(id, '应创建出调度任务');
+  // 确保有守护在监督（该步之后的所有断言都依赖「有宿主在轮询」）
+  spawnDaemon(home);
+  await waitFor(() => (fs.existsSync(daemonPidFile(home)) ? true : null), 10000);
+
+  // 等 worker 真正进入在途状态
+  const running = await waitFor(() => {
+    const j = readJson(jobFile(id));
+    if (!j || !j.lastTaskId) return null;
+    const t = readJson(path.join(home, 'tasks', j.lastTaskId + '.json'));
+    return t && t.status === 'running' && t.pid ? { job: j, task: t } : null;
+  }, 30000);
+  assert.ok(running, '应观察到 worker 在途运行（含 pid）');
+
+  // 强杀：worker 没有任何机会写终态
+  const t0 = Date.now();
+  try {
+    process.kill(running.task.pid, 'SIGKILL');
+  } catch {}
+  // 关键断言：必须在数十秒内被判失败，而不是等满 2 小时上限
+  const settled = await waitFor(() => {
+    const j = readJson(jobFile(id));
+    return j && j.history && j.history.length >= 1 ? j : null;
+  }, 60000);
+  assert.ok(settled, '被强杀的 worker 应在 60s 内被回收并记账（修复前会空转到 2h 上限）');
+  const elapsed = Date.now() - t0;
+  assert.ok(elapsed < 55000, `回收应远快于 2h 上限，实际 ${elapsed}ms`);
+  // 首次执行即被强杀的那一轮
+  assert.equal(settled.history[0].status, 'failed', '被强杀应记为 failed');
+  assert.notEqual(settled.history[0].status, 'timedout', '不得退化成「等到 2h 上限才判超时」');
+  // 任务文件本身也要落到 failed 并写明原因（面板不再永久转圈）
+  const tAfter = readJson(path.join(home, 'tasks', running.task.id + '.json'));
+  assert.equal(tAfter.status, 'failed', '任务状态应被回收为 failed');
+  assert.ok(String(tAfter.error).includes('进程已消失'), `回收原因应可读，实际：${tAfter.error}`);
+  await runCli(['schedule', 'remove', id]);
+  ok('worker 强杀回收：状态不再卡 running，调度器不再空转到 2h 上限');
+}
+
 // ---------- 7. 守护进程租约：spawn/stopDaemon 真正终止 + 孤儿自退（双 daemon 回归） ----------
 {
   const { spawnDaemon, stopDaemon, daemonAlive, daemonPidFile } = await import(pathToFileURL(path.join(root, 'src', 'schedule.js')).href);
@@ -304,18 +354,14 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   const selfExited = await waitFor(() => (aliveCheck(pidLine.pid) ? null : true), 20000);
   assert.ok(selfExited, '租约被改写后 daemon 应自退（防双 daemon 重复执行）');
   // 3a) 归属匹配：受害进程 cmdline 带上 nonce（模拟真 daemon）→ stopDaemon 应真正终止它
-  //     （v0.4.7 起 stopDaemon 会先校验 PID 归属；ndoe 的 argv 尾部带上 nonce 即视为「是我们的人」）
+  //     （v0.4.7 起 stopDaemon 会先校验 PID 归属；node 的 argv 尾部带上 nonce 即视为「是我们的人」）
+  const { pidOwnedBy } = await import(pathToFileURL(path.join(root, 'src', 'proc.js')).href);
   const nonce7 = 'abcdefg';
   const victim = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', nonce7]);
-  // Linux 上 stopDaemon 会读 /proc/<pid>/cmdline 校验归属——刚 spawn 时可能尚未 exec，
-  // 等 cmdline 出现再写 pidfile，避免时序抖动导致「归属校验失败 → 不杀」的假失败。
-  await waitFor(() => {
-    try {
-      return fs.readFileSync(`/proc/${victim.pid}/cmdline`, 'utf8').includes(nonce7) ? true : null;
-    } catch {
-      return process.platform === 'linux' ? null : true; // 非 Linux 无 /proc：直接放行
-    }
-  }, 5000);
+  // 刚 spawn 时可能尚未 exec（命令行还读不到），等**跨平台**归属校验确认为 true 再写 pidfile，
+  // 避免时序抖动导致「归属校验失败 → 不杀」的假失败。此处用 pidOwnedBy 而不是直接读 /proc：
+  // 后者在 macOS 上恒抛错，旧版本正是因此把这一步写成「非 Linux 直接放行」，从而漏掉了整条校验。
+  await waitFor(() => (pidOwnedBy(victim.pid, nonce7) === true ? true : null), 8000);
   fs.writeFileSync(daemonPidFile(home), `${victim.pid} ${nonce7}`);
   let victimExited = false;
   victim.on('exit', () => { victimExited = true; });
@@ -326,11 +372,13 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   victim.kill('SIGKILL');
 
   // 3b) 归属不匹配：pidfile 陈旧、PID 被无关进程复用时**绝不误杀**。
-  //     仅 Linux 能校验（读 /proc/<pid>/cmdline）；macOS 读不到 → best-effort 放行，跳过该断言。
-  if (process.platform === 'linux') {
+  //     v0.4.7（P3 T20）：本条原先只在 Linux 上跑——因为校验实现只读 /proc，macOS/Windows 上
+  //     恒返回 null（best-effort 放行），等于「归属校验」在这两个平台根本不存在。
+  //     改用 src/proc.js 后 ps 兜底生效，故**取消平台限制**，三平台都必须通过。
+  {
     const stranger = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)']);
-    // 同理：等 cmdline 就绪，确保「归属不匹配」是因为 nonce 不同，而不是读不到
-    await waitFor(() => (fs.existsSync(`/proc/${stranger.pid}/cmdline`) ? true : null), 5000);
+    // 等命令行可读（跨平台），确保「归属不匹配」是因为 nonce 不同，而不是读不到
+    await waitFor(() => (pidOwnedBy(stranger.pid, 'not-my-nonce') === false ? true : null), 8000);
     fs.writeFileSync(daemonPidFile(home), `${stranger.pid} not-my-nonce`);
     stopDaemon(home);
     await sleep(800);
@@ -344,7 +392,7 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
     stranger.kill('SIGKILL');
   }
   if (sid) await runCli(['schedule', 'remove', sid]);
-  ok('守护进程租约：spawn 存活 / 租约自退 / stopDaemon 真正终止');
+  ok('守护进程租约：spawn 存活 / 租约自退 / stopDaemon 真正终止 / 归属不匹配不误杀（跨平台）');
 }
 
 // ---------- 8. 双 daemon 重复执行回归（v0.4.7 T15） ----------

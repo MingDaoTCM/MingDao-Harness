@@ -8,6 +8,9 @@ MingDao 支持三种接入方式，从易到难：
 
 - 默认位置：`~/.mingdao/credentials.json`（权限 600，仅本机可读）；
 - 管理命令：`mingdao key`（status 脱敏显示）/ `key set <服务商>` / `key remove` / `key import`；
+  - 脚本与 CI 里请用管道传入，**不要把密钥写成命令行参数**——argv 会出现在 `ps aux` 的进程列表里：
+    `echo "$DEEPSEEK_API_KEY" | mingdao key set deepseek`
+    （写成参数仍可用，但会提示其可见性；无论哪种方式，明文都不会被回显。）
 - 解析优先级：**环境变量 > 本地凭证库 > config.json 显式字段**；
 - `mingdao init` 向导中输入的 Key 自动存入凭证库。
 

@@ -15,7 +15,7 @@ import https from 'node:https';
 import { loadConfig, saveConfig, mingdaoHome, ensureHome } from './config.js';
 import { loadCredentials, saveCredentials } from './credentials.js';
 import { listSessions, CONFLICT_BACKUP_RE } from './session.js';
-import { atomicWriteFileSync } from './atomic-write.js';
+import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
 
 const TIMEOUT_MS = 20000;
 // 自签证书（--insecure）只影响同步请求本身，不再改写进程级 NODE_TLS_REJECT_UNAUTHORIZED
@@ -241,6 +241,32 @@ function writeState(state) {
   atomicWriteFileSync(target, JSON.stringify(state, null, 2) + '\n', { mode: 0o600 }); // 质检 H4
 }
 
+/**
+ * 提交本次同步产生的状态**增量**（v0.4.7 P3 T19：末尾合并式加锁）。
+ *
+ * 为什么不整段加锁：同步的状态变更散落在多次网络往返之间（每个会话一次 pull + 一次 push），
+ * 整段持锁会把跨网络的秒级耗时关进临界区——锁超时 5s，必然大面积抢锁失败，
+ * 那是拿「并发正确」换「功能不可用」。
+ * 为什么不能读-改-写：syncPush / syncPull / syncShareAccept 都持有**自己那份**快照
+ * （读取发生在网络调用之前），收尾时整份覆写。两个进程并发（例如 CLI 手动 sync 与后台
+ * worker 的 maybeAutoSync）就会互相覆盖对方刚记下的 remoteMtime —— 丢更新之后，
+ * 本已同步的会话会被判为「没同步过」而反复全量传输、甚至误判冲突覆盖远端。
+ *
+ * 合并式：临界区里只做「重读磁盘 → 并入本次改动的那几个键 → 写回」，临界区只有文件 I/O，
+ * 毫秒级完成，且并发双方各自贡献的键都不会丢（本模块只增不删，故无需处理删除语义）。
+ * @param {any} delta 本次要落盘的状态增量（键 = 会话名）
+ */
+function commitState(delta) {
+  const keys = Object.keys(delta || {});
+  if (!keys.length) return;
+  ensureHome();
+  withFileLockSync(path.join(mingdaoHome(), '.sync-state.lock'), () => {
+    const cur = readState();
+    for (const k of keys) cur[k] = delta[k];
+    writeState(cur);
+  });
+}
+
 // 推送单个/全部会话。仅当远端被其他设备改过（mtime 与本地记录不一致且内容不同）才视为冲突并备份远端。
 /** @param {any} [name] */
 export async function syncPush(name) {
@@ -249,7 +275,9 @@ export async function syncPush(name) {
   const home = mingdaoHome();
   const locals = listSessions(home).filter((s) => !name || s.name === name);
   if (!locals.length) return { error: name ? `本地没有会话 ${name}` : '本地没有会话可推送' };
-  const state = readState();
+  const state = readState(); // 只用于「是否已同步过」的判断，不再整份回写
+  /** @type {Record<string, any>} */
+  const delta = {}; // 本次真正变更的状态键（T19：末尾按增量合并）
   const pushed = [];
   const conflicts = [];
   const skipped = [];
@@ -294,13 +322,13 @@ export async function syncPush(name) {
       const r = await apiCall(g.url, '/api/sessions/push', { name: s.name, content }, g.token, TIMEOUT_MS, insecureOn());
       if (r.ok) {
         pushed.push(s.name);
-        state[s.name] = { remoteMtime: r.mtime, localMtime: localStat.mtimeMs };
+        delta[s.name] = { remoteMtime: r.mtime, localMtime: localStat.mtimeMs };
       }
     } catch (e) {
       return { error: `推送 ${s.name} 失败：${/** @type {any} */ (e).message}` };
     }
   }
-  writeState(state);
+  commitState(delta);
   return { ok: true, pushed, conflicts, skipped };
 }
 
@@ -318,7 +346,9 @@ export async function syncPull(name) {
     return { error: `获取远端清单失败：${/** @type {any} */ (e).message}` };
   }
   if (!sessions.length) return { error: name ? `远端没有会话 ${name}` : '远端没有会话' };
-  const state = readState();
+  const state = readState(); // 只用于增量判断（T19：不再整份回写）
+  /** @type {Record<string, any>} */
+  const delta = {};
   const pulled = [];
   const conflicts = [];
   for (const s of sessions) {
@@ -336,19 +366,19 @@ export async function syncPull(name) {
       const copy = path.join(home, 'sessions', conflictCopyName(s.name, 'remote'));
       atomicWriteFileSync(copy, r.content, { mode: 0o600 }); // 质检 H4
       conflicts.push(s.name);
-      state[s.name] = { remoteMtime: r.mtime };
+      delta[s.name] = { remoteMtime: r.mtime };
       continue;
     }
     if (local === r.content) {
-      state[s.name] = { remoteMtime: r.mtime };
+      delta[s.name] = { remoteMtime: r.mtime }; // 内容一致：只需记下远端版本，避免下轮重复下载
       continue;
     }
     fs.mkdirSync(path.join(home, 'sessions'), { recursive: true });
     atomicWriteFileSync(target, r.content, { mode: 0o600 }); // 质检 H4
     pulled.push(s.name);
-    state[s.name] = { remoteMtime: r.mtime };
+    delta[s.name] = { remoteMtime: r.mtime };
   }
-  writeState(state);
+  commitState(delta);
   return { ok: true, pulled, conflicts };
 }
 
@@ -405,9 +435,8 @@ export async function syncShareAccept(shareId) {
     const home = mingdaoHome();
     fs.mkdirSync(path.join(home, 'sessions'), { recursive: true });
     atomicWriteFileSync(path.join(home, 'sessions', r.savedAs), r.content, { mode: 0o600 }); // 质检 H4
-    const state = readState();
-    state[r.savedAs] = { remoteMtime: r.mtime };
-    writeState(state);
+    // T19：单键同样走末尾合并（与 syncPush/syncPull 抢同一把锁），避免覆盖并发同步的记账
+    commitState({ [r.savedAs]: { remoteMtime: r.mtime } });
     return { ok: true, shareId, savedAs: r.savedAs, conflict: r.conflict || false };
   } catch (e) {
     return { error: `接受分享失败：${/** @type {any} */ (e).status === 404 ? '分享不存在（可能已撤销）' : /** @type {any} */ (e).message}` };

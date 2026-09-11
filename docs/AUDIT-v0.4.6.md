@@ -7,6 +7,30 @@
 >
 > 本轮最重要的一条不是某个 bug，而是**一次口径自纠**：省钱基准「综合省 64%」实为虚高（详见 §2.3）。
 
+### 后续轮次进展（README 式索引，正文保持 v0.4.6 发布时的快照不改写）
+
+本报告的「登记待办」清单此后又消化了七轮，**仓库内可修的条目已全部收口**：
+
+| 轮次 | 消化条目 | 主题 |
+| --- | --- | --- |
+| 第二轮 | T4–T9、T11–T13、T16 | 权限/工具/同步边角 |
+| 第三轮 | T18、T21（两项）、T22（转义）、T23（描述上限） | WebUI/CLI 边角 |
+| 第四轮 | T15、T14 | 调度生命周期（并发重跑 / 暂停后仍执行） |
+| 第五轮 | T17、F7、T19（工作空间部分） | 同步与注册表 |
+| 第六轮 | T1、T3 | 工作空间闸门 / 技能完整性诚实边界 |
+| 第七轮 | T21/T22/T23 收尾、T10 | 同一会话回合串行化 |
+| 第八轮 | T22 终项 | `box()` 宽度收敛、隐藏输入保留提示语 |
+| 第九轮 | T20（三项）、T19（`sync-state`）、T22 收尾 | 进程归属跨平台 / 僵尸任务回收 / 终态写语义 / 密钥不经 argv / 帮助单一来源 |
+
+**仅剩 2 项，均非「写代码就能修」**：
+1. **T2 完整客户端隔离**——共享令牌语义下引入「每客户端作用域」会改变既有脚本客户端的行为，属**产品决策**；
+   现状已在 README「安全」一节明写「共享令牌 = 同一用户，多人需一人一实例」，属诚实边界而非隐瞒。
+2. **T24 openresty 对不存在路径返回 200+首页**——需服务器侧 `try_files` 配置，**不在本仓库内**，
+   已在官网仓库说明。
+
+> 提示：下方 §2 的「50 处」与「smoke 81 组」等数字是 **v0.4.6 发布当时**的快照，后续轮次未回填改写，
+> 以免把历史结论改成事后更漂亮的样子。当前基线见 `RELEASE-NOTES-0.5.0.md` 与测试输出。
+
 ---
 
 ## 一、环境与基线（迁移后首次验证）
@@ -106,7 +130,9 @@
 > **第四轮 T15 + T14（调度生命周期）**——这两条是本清单里影响面最大的（同一任务被并发执行两次 / 暂停删除后仍执行）；
 > **第五轮 T17 + F7 + T19；第六轮 T1（工作空间登记闸门）+ T3（技能完整性诚实边界）；
 > 第七轮 T21/T22/T23 收尾（WebUI/CLI 边角 + 技能名校验）+ T10（同一会话回合串行化）；
-> **第八轮 T22 终项（`box()` 终端宽度收敛 + 隐藏输入保留提示语）。**
+> **第八轮 T22 终项（`box()` 终端宽度收敛 + 隐藏输入保留提示语）；
+> 第九轮 T20（进程归属跨平台 / 僵尸任务回收 / 终态写不复活 killed）+ T19（`sync-state` 末尾合并）
+> + T22 收尾（`key set` 改走 stdin、帮助正文合并为单一来源）。**
 > 下表为**剩余**项。
 
 ### 安全 / 隔离
@@ -126,10 +152,10 @@
 | ~~T15~~ | ✅ 已修 | ~~重复 daemon → 同一调度任务被并发执行两次~~ 四处协同修复：① `spawnDaemon` 的「查活→spawn→写 pidfile」移入跨进程锁（消除并发双 spawn）；② `markRunning` 即写 `runnerPid`、`runOnce` 启动瞬间写 `lastTaskId`（关闭恢复分支的误判窗口）；③ 恢复分支先看 `procAlive(runnerPid)`，「宿主还活着就等它」；④ 租约丢失时通知在途 `runSleeper` 退出（`shouldStop`）并在收尾后 `process.exit(0)`（此前 every 型常驻协程会把旧 daemon 永远撑住）。新增端到端回归：接管后任务 `runs` 必须为 1（修复前实测为 2） | `src/cli.js:289-345`、`schedule.js:319-350,401,455-470` |
 | ~~T17~~ | ✅ 已修 | ~~辅助模型调用从不入账~~ 新增 `cachestats.recordAuxUsage`（带 `aux`/`auxReason` 标记，独立入账不与回合级重复计费），接入路由分类器 / 自动标题（两处）/ 记忆提炼（两处） | `src/cachestats.js`、`routing.js:111`、`titles.js:45,60`、`memory.js:185,324` |
 | ~~T18~~ | ✅ 已修 | ~~`withFileLockSync` 把 `fn` 的 `EEXIST` 误判为「锁被占」→ 同步死循环~~ 已用 acquiring 标志分离「抢锁」与「执行 fn」两个阶段 | `src/atomic-write.js:47-70` |
-| T19 | P3 | ~~`workspaces.json` / `session-workspaces.json` 的 read-modify-write 未加锁~~（✅ 已修：add/remove/rename/touch 与三个会话级映射全部移入跨进程锁）；`sync-state.json` 的 RMW 仍未加锁（P3，留待后续——其临界区跨网络调用，需要「末尾合并」式加锁而非整段加锁） | `src/workspace.js`、`src/sync.js:227-242` |
-| T20 | P3 | 调度/任务的生命周期边角：僵尸任务不回收（守护可能空转到 2h）、`killed` 被 worker 的终态写覆盖、无 `/proc` 平台（macOS）无法校验 PID 归属 → 存在 PID 复用误杀风险 | `src/tasks.js:18-43,95-101`、`src/schedule.js:286-318` |
+| T19 | P3 | ~~`workspaces.json` / `session-workspaces.json` 的 read-modify-write 未加锁~~（✅ 已修：add/remove/rename/touch 与三个会话级映射全部移入跨进程锁）；~~`sync-state.json` 的 RMW 未加锁~~（✅ 已修：改为 `commitState(delta)` **末尾合并**——临界区内只做「重读磁盘 → 并入本次变更的键 → 写回」，毫秒级完成，不把跨网络的秒级耗时关进锁里；`syncPush`/`syncPull`/`syncShareAccept` 三处写点全部改造） | `src/workspace.js`、`src/sync.js` |
+| T20 | P3 | 调度/任务的生命周期边角（**三项全部已修**）：~~僵尸任务不回收~~（✅ `reapTasks` + 调度轮询内即时回收，2h 空转 → 数秒）；~~`killed` 被 worker 的终态写覆盖~~（✅ `patchTask(..., {terminal:true})` 锁内复查，`killed` 是用户显式意图不可被复活，诊断字段仍吸收）；~~无 `/proc` 平台无法校验 PID 归属~~（✅ 新增 `src/proc.js`：Linux 走 `/proc`、其余平台回退 `ps -ww -o command=`，三值语义 true/false/null 严格区分「是我们的人 / 明确不是 / 无从判断」） | `src/proc.js`（新增）、`src/tasks.js`、`src/schedule.js`、`src/tasks/worker.js` |
 | ~~T21~~ | ✅ 已修 | WebUI 边角全部收敛：草稿槽 LRU 64 槽；`/api/config` 校验模型名（保留 `provider:"custom"` 任意端点形态）；`updateCustom` 不再 upsert（不存在即 400）；非法 JSON body → 400（不再静默当 `{}` 并落盘）；`/api/session-finalize` 缺文件 → 404 且不回显服务端绝对路径；`HEAD` 与 `GET` 同等对待（不再 415） | `web/routes/domains/{sessions,config}.js`、`web/server.js:125`、`routes/api.js:44` |
-| T22 | P3 | TUI/CLI 边角：~~ANSI/OSC 转义直通终端~~（✅ `sanitizeTerminal`）、~~`batch` 清空全进程 SIGINT 监听~~（✅ 只摘自己那一个）、~~`box()` 不看终端宽度~~（✅ 总宽统一 + 按 `process.stdout.columns` 收敛，边框行与内容行此前必然错位一列）、~~隐藏输入把提示语一起隐藏~~（✅ 先写提示语再抑制回显，已修）、`key set` 经 argv 传密钥、HELP_LINES 两份已分叉（**仍未修**） | `src/ui.js`、`src/commands/{key,update}.js`、`src/cli.js` |
+| T22 | P3 | TUI/CLI 边角：~~ANSI/OSC 转义直通终端~~（✅ `sanitizeTerminal`）、~~`batch` 清空全进程 SIGINT 监听~~（✅ 只摘自己那一个）、~~`box()` 不看终端宽度~~（✅ 总宽统一 + 按 `process.stdout.columns` 收敛，边框行与内容行此前必然错位一列）、~~隐藏输入把提示语一起隐藏~~（✅ 先写提示语再抑制回显，已修）、~~`key set` 经 argv 传密钥~~（✅ 改走 stdin，argv 路径保留但警告其在 `ps` 中可见，明文始终不回显）、~~HELP_LINES 两份已分叉~~（✅ 合并为 `src/help.js` 单一来源，variant 差异显式声明；CLI 与会话内帮助输出经逐字节比对与重构前完全一致）（**本项全部收口**） | `src/ui.js`、`src/help.js`（新增）、`src/commands/{key,repl}.js`、`src/cli.js` |
 | T23 | P3 | 技能/安装链边角：~~技能 `description` 无长度上限~~（✅ 200 字符上限）、~~技能「安装/信任/重装」三入口不校验名称~~（✅ 统一到 `assertSafeSkillName`：拒绝 `.`/`..`/含 `..`/含分隔符/超长）、`install.sh` 的 Node 门槛已改为完整版本比较（≥18.17，此前 18.0–18.16 被误判合格）+ 临时文件改用 `mktemp`；一行安装改为「先下载再执行」（README 与官网同步） | `src/skill-lib.js:85`、`install.sh:71,84` |
 | T24 | P3 | 官网/IDE 边角：~~VS Code「发送选中代码」不生效~~（✅ 已修：窗口重新获得焦点时兜底读全局草稿槽）、~~JetBrains 文档要 `./gradlew` 但仓库无 wrapper + 产物版本写死 0.5.0~~（✅ 已修文档）；openresty 对不存在路径返回 200+首页（**需服务器侧 `try_files`，不在仓库内**，已在官网仓库说明） | 官网 nginx 配置、`ide/vscode/README.md`、`ide/jetbrains/README.md` |
 

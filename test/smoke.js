@@ -3954,6 +3954,290 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.4.7 回归：box 宽度收敛（各行等宽 / 不超终端 / 极窄不崩 / 非 TTY 退化）');
 }
 
+
+// ---------- 67. v0.4.7 回归（T20）：进程归属校验跨平台 / 僵尸任务回收 / 终态写不复活 killed ----------
+{
+  const tasksMod = await import(pathToFileURL(path.join(srcDir, 'tasks.js')).href);
+  const procMod = await import(pathToFileURL(path.join(srcDir, 'proc.js')).href);
+  const home67 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-t20-'));
+  const tick67 = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  const waitFor67 = (fn, timeout = 5000) => {
+    const end = Date.now() + timeout;
+    for (;;) {
+      try {
+        const v = fn();
+        if (v) return v;
+      } catch {}
+      if (Date.now() > end) return null;
+      tick67(50);
+    }
+  };
+  const mkTask = (id, over) => tasksMod.writeTask(home67, {
+    id, status: 'running', question: 'q', startedAt: Date.now(), pid: null,
+    session: null, text: '', usage: null, durationMs: null, error: '', note: '', ...over,
+  });
+
+  // 67a. proc：归属校验必须三值分明，且在非 Linux 上不再恒为 null
+  //      （这是 T20 的核心：旧实现只读 /proc，macOS/Windows 上恒 null → 「归属校验」静默失效，
+  //       退化成「pid 活着就杀」，PID 复用即误杀无关进程）
+  {
+    const marker = 'mdh-own-' + Math.random().toString(36).slice(2, 10);
+    const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)', marker]);
+    try {
+      const seen = waitFor67(() => procMod.pidOwnedBy(child.pid, marker) === true, 8000);
+      assert.ok(seen, `归属校验应能通过命令行确认自己的进程（平台 ${process.platform}）`);
+      assert.equal(procMod.pidOwnedBy(child.pid, 'not-mine-' + marker), false,
+        '命令行读到了但不含标记 → 必须返回 false（明确不是自己的进程，绝不能杀）');
+      assert.equal(procMod.procAlive(child.pid), true, '存活进程 procAlive 应为 true');
+    } finally {
+      child.kill('SIGKILL');
+    }
+    const gone = waitFor67(() => procMod.pidOwnedBy(child.pid, marker) === false, 8000);
+    assert.ok(gone, '进程死后归属校验应为 false（死 pid 无可归属）');
+    // 注意：SIGKILL 后子进程先进入僵尸态（父进程尚未回收，pid 仍可收信号），
+    // 因此这里只断言「归属」而非「存活」——僵尸态命令行已空，归属校验即刻为 false，
+    // 这正是回收逻辑要用的判据（比 procAlive 更早、更准）。
+    assert.equal(procMod.procAlive(99999999), false, '不存在的 pid 不得视为存活');
+    assert.equal(procMod.procAlive(0), false, '非法 pid 不得视为存活');
+    assert.equal(procMod.pidOwnedBy(99999999, 'x'), false, '不存在的 pid 归属校验应为 false');
+  }
+
+  // 67b. 僵尸任务回收：worker 被 SIGKILL / OOM 杀死后来不及写终态，状态永久停在 running
+  {
+    const deadPid = 99999999;
+    mkTask('reapdead01', { pid: deadPid, startedAt: Date.now() - 60000 });
+    // 真活 worker：argv 里带任务 id（与 startTask 的启动方式一致），实例化后不得被回收
+    const liveWorker = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)', 'run-worker', 'reaplive01']);
+    const liveReady = waitFor67(() => procMod.pidOwnedBy(liveWorker.pid, 'reaplive01') === true, 8000);
+    assert.ok(liveReady, '测试用 worker 的命令行应可被归属校验识别');
+    mkTask('reaplive01', { pid: liveWorker.pid, startedAt: Date.now() - 60000 });
+    mkTask('reapyoung1', { pid: deadPid, startedAt: Date.now() });             // 宽限期内
+    // PID 复用：任务记录的 pid 指向一个**确实活着**、但不是我们 worker 的进程。
+    // 这是「按存活判活」与「按归属判活」唯一可确定区分的场景——前者会永远认为任务在跑，
+    // 任务卡死在 running；后者能立刻识别出「我的 worker 早没了」并回收。
+    mkTask('reapreused1', { pid: liveWorker.pid, startedAt: Date.now() - 60000 });
+    mkTask('reapnopid1', { pid: null, startedAt: Date.now() - 120000 });       // 从未补上 pid
+    mkTask('reapdone01', { pid: deadPid, startedAt: Date.now() - 60000, status: 'done' });
+
+    const reapedIds = tasksMod.reapTasks(home67);
+    assert.ok(reapedIds.includes('reapdead01'), '进程已消失的 running 任务应被回收');
+    assert.ok(reapedIds.includes('reapnopid1'), '超过 1 分钟仍无 pid 的 running 任务应被回收');
+    assert.ok(!reapedIds.includes('reaplive01'), '进程仍活着的任务绝不能被回收');
+    assert.ok(reapedIds.includes('reapreused1'),
+      'pid 被无关活进程复用时应回收（「按存活判活」会永远认为它还在跑）');
+    assert.ok(!reapedIds.includes('reapyoung1'), '宽限期内不得误回收（spawn→补 pid 窗口）');
+    assert.ok(!reapedIds.includes('reapdone01'), '已终态的任务不需回收');
+
+    assert.equal(tasksMod.readTask(home67, 'reapdead01').status, 'failed', '回收后状态应为 failed');
+    assert.ok(String(tasksMod.readTask(home67, 'reapdead01').error).includes('进程已消失'), '回收应写明原因');
+    assert.equal(tasksMod.readTask(home67, 'reaplive01').status, 'running', '活进程任务状态必须保持 running');
+    assert.equal(tasksMod.readTask(home67, 'reapyoung1').status, 'running', '宽限期内状态不变');
+
+    liveWorker.kill('SIGKILL');
+
+    // listTasks 自带自愈：面板不再永久转圈
+    mkTask('reapdead02', { pid: deadPid, startedAt: Date.now() - 60000 });
+    const listed = tasksMod.listTasks(home67);
+    assert.equal(tasksMod.readTask(home67, 'reapdead02').status, 'failed', 'listTasks 读路径应顺带回收僵尸任务');
+    assert.ok(listed.some((x) => x.id === 'reapdead02' && x.status === 'failed'), '列表里应呈现回收后的状态');
+    // reap:false 时保持纯读语义（不做任何写入）
+    mkTask('reapdead03', { pid: deadPid, startedAt: Date.now() - 60000 });
+    tasksMod.listTasks(home67, { reap: false });
+    assert.equal(tasksMod.readTask(home67, 'reapdead03').status, 'running', 'reap:false 必须是纯读，不得改动状态');
+  }
+
+  // 67c. 终态写不得复活用户已 kill 的任务
+  //      （竞态：kill 落在 worker 收尾之前 → worker 迟到写 status=done，面板显示「已完成」，
+  //       用户的停止动作静默失效）
+  {
+    mkTask('racekill01', { pid: 99999999, startedAt: Date.now() - 1000 });
+    assert.equal(tasksMod.killTask(home67, 'racekill01'), true, 'killTask 应成功');
+    assert.equal(tasksMod.readTask(home67, 'racekill01').status, 'killed', 'kill 后状态应为 killed');
+
+    const after = tasksMod.patchTask(home67, 'racekill01',
+      { status: 'done', text: '迟到的产出', usage: { prompt_tokens: 3 }, session: 's.json' },
+      { terminal: true });
+    assert.equal(after.status, 'killed', '终态写不得把 killed 覆盖成 done');
+    assert.equal(tasksMod.readTask(home67, 'racekill01').status, 'killed', '落盘状态也必须是 killed');
+    // 诊断字段仍应被吸收（用户能看到「被停止时实际产出了什么」）
+    const disk = tasksMod.readTask(home67, 'racekill01');
+    assert.equal(disk.text, '迟到的产出', 'killed 不应吞掉 worker 的实际产出');
+    assert.equal(disk.session, 's.json', 'killed 不应吞掉会话归属');
+    assert.ok(disk.usage, 'killed 不应吞掉用量记录（否则这次调用彻底不入账）');
+
+    // 非终态补丁不受该保护约束（例如 worker 写避峰说明）
+    mkTask('racekill02', { pid: 99999999, startedAt: Date.now() - 1000 });
+    tasksMod.killTask(home67, 'racekill02');
+    const plain = tasksMod.patchTask(home67, 'racekill02', { status: 'done' });
+    assert.equal(plain.status, 'done', '非终态写不应套用 killed 保护（保护只针对迟到的终态）');
+
+    // 任务已被删除 → patchTask 返回 null（调用方据此判断是否被移除，而非静默成功）
+    assert.equal(tasksMod.patchTask(home67, 'nosuchtask1', { status: 'done' }), null, '任务不存在应返回 null');
+    // 非法 id 不得穿越到目录外
+    assert.equal(tasksMod.killTask(home67, '../../etc/passwd'), false, '非法任务 id 必须拒绝');
+  }
+
+  safeRmSync(home67, { recursive: true, force: true });
+  ok('v0.4.7 回归（T20）：归属校验跨平台三值分明 / 僵尸任务回收 / 终态写不复活 killed');
+}
+
+
+// ---------- 68. v0.4.7 回归（T19）：sync-state 末尾合并（并发不丢记账） ----------
+// 失去同步记账的后果不是「慢」，而是错：本已同步的会话被判为「没同步过」→ 反复全量传输，
+// 甚至因 remoteMtime 缺失而误判冲突、用本地版本覆盖远端。
+// 服务端单独起子进程：①与 26/26b 一致，避免同进程内限流表被前面的登录用例打满；
+// ②更贴近真实部署（客户端进程 ↔ 独立服务端进程）。
+{
+  const prevHome68 = process.env.MINGDAO_HOME;
+  const home68 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-t19-'));
+  const dataDir68 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-t19data-'));
+  const srvChild68 = spawn(
+    process.execPath,
+    ['--input-type=module', '-e', `import { pathToFileURL } from 'node:url'; const { runSyncServer } = await import(pathToFileURL(${JSON.stringify(path.join(srcDir, 'sync-server.js'))}).href); const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: ${JSON.stringify(dataDir68)} }); srv.on('listening', () => console.log('PORT ' + srv.address().port));`],
+    { env: { ...process.env }, stdio: ['ignore', 'pipe', 'pipe'] }
+  );
+  let out68 = '';
+  srvChild68.stdout.on('data', (d) => (out68 += d));
+  let port68 = null;
+  for (let i = 0; i < 50 && !port68; i++) {
+    const m = out68.match(/PORT (\d+)/);
+    if (m) port68 = Number(m[1]);
+    else await new Promise((r) => setTimeout(r, 200));
+  }
+  assert.ok(port68, 'T19 测试服务应在 10s 内就绪');
+  const sync68 = await import(pathToFileURL(path.join(srcDir, 'sync.js')).href);
+
+  try {
+    process.env.MINGDAO_HOME = home68;
+    const login68 = await sync68.syncLogin({
+      url: `http://127.0.0.1:${port68}`, username: 't19user', password: 'password123', deviceName: '设备T19',
+    });
+    assert.equal(login68.ok, true, login68.error);
+    fs.mkdirSync(path.join(home68, 'sessions'), { recursive: true });
+    for (const n of ['t19a.jsonl', 't19b.jsonl']) {
+      fs.writeFileSync(path.join(home68, 'sessions', n), `{"role":"user","content":"${n}"}\n`);
+    }
+    const statePath68 = path.join(home68, 'sync-state.json');
+
+    // 并发推送：两个 syncPush 都在**任何网络往返之前**读完各自那份状态快照，
+    // 因此这是确定性竞态（不依赖时序抖动）。收尾若整份覆写，后写者必然抹掉先写者的键。
+    const [p1, p2] = await Promise.all([sync68.syncPush('t19a.jsonl'), sync68.syncPush('t19b.jsonl')]);
+    assert.ok(p1.ok && p1.pushed.includes('t19a.jsonl'), '并发推送 A 应成功：' + JSON.stringify(p1));
+    assert.ok(p2.ok && p2.pushed.includes('t19b.jsonl'), '并发推送 B 应成功：' + JSON.stringify(p2));
+    const st68 = JSON.parse(fs.readFileSync(statePath68, 'utf8'));
+    assert.ok(st68['t19a.jsonl'] && st68['t19a.jsonl'].remoteMtime, '并发推送后 A 的远端版本记账不得丢失');
+    assert.ok(st68['t19b.jsonl'] && st68['t19b.jsonl'].remoteMtime, '并发推送后 B 的远端版本记账不得丢失');
+
+    // 跨操作合并：推送与拉取各自贡献不同键，也必须都保留
+    fs.writeFileSync(path.join(home68, 'sessions', 't19c.jsonl'), '{"role":"user","content":"c"}\n');
+    const [, pull68] = await Promise.all([sync68.syncPush('t19c.jsonl'), sync68.syncPull('t19a.jsonl')]);
+    assert.ok(!pull68.error, '并发拉取不应报错：' + JSON.stringify(pull68));
+    const st68b = JSON.parse(fs.readFileSync(statePath68, 'utf8'));
+    assert.ok(st68b['t19c.jsonl'] && st68b['t19c.jsonl'].remoteMtime, '推送侧新增的记账不得被并发拉取覆盖');
+    assert.ok(st68b['t19b.jsonl'] && st68b['t19b.jsonl'].remoteMtime, '既有记账也不得被覆盖');
+
+    // 记账真的生效（没被抹掉）才会走增量跳过——这是「丢更新」的可观测后果
+    const again = await sync68.syncPush();
+    assert.ok(again.ok, '重复推送应成功：' + JSON.stringify(again));
+    for (const n of ['t19a.jsonl', 't19b.jsonl', 't19c.jsonl']) {
+      assert.ok(again.skipped.includes(n), `${n} 应因记账完好而走增量跳过，实际 skipped=${JSON.stringify(again.skipped)}`);
+    }
+  } finally {
+    srvChild68.kill('SIGKILL');
+    process.env.MINGDAO_HOME = prevHome68;
+    safeRmSync(home68, { recursive: true, force: true });
+    safeRmSync(dataDir68, { recursive: true, force: true });
+  }
+  ok('v0.4.7 回归（T19）：sync-state 末尾合并（并发推送/拉取不丢记账 + 增量判断仍生效）');
+}
+
+
+// ---------- 69. v0.4.7 回归（T22）：帮助文本单一来源（CLI 与会话内不再各存一份） ----------
+// 缺陷形态不是「显示错了」，而是「两份副本必然漂移」：此前 CLI 与会话内各有一份 ~50 行
+// HELP_LINES，已经真实分叉出三行差异，新增命令时只改一处，另一处永远缺一行。
+{
+  const { helpLines } = await import(pathToFileURL(path.join(srcDir, 'help.js')).href);
+  const cli = helpLines({ variant: 'cli', home: '/tmp/h' }).map((x) => x[0]);
+  const repl = helpLines({ variant: 'repl', home: '/tmp/h' }).map((x) => x[0]);
+
+  // 1) 正文必须来自同一份：共享行两边都在
+  const shared = [
+    '  mingdao web [端口]        启动 WebUI（默认 http://127.0.0.1:3820）',
+    '  mingdao key set <服务商>   交互式保存 API Key（隐藏输入）',
+    '  mingdao sync-server [端口] 自建云同步服务器（数据目录 /var/lib/mingdao-sync）',
+    '  /help        显示帮助          /clear   清空上下文',
+    '  /exit        退出              Tab 补全命令 · Ctrl+C 中断生成',
+  ];
+  for (const row of shared) {
+    assert.ok(cli.includes(row), `CLI 帮助缺少共享行：${row}`);
+    assert.ok(repl.includes(row), `会话内帮助缺少共享行：${row}`);
+  }
+  assert.equal(cli[cli.length - 1], '配置目录: /tmp/h', 'CLI 帮助结尾应显示配置目录');
+  assert.equal(repl[repl.length - 1], '配置目录: /tmp/h', '会话内帮助结尾应显示配置目录');
+
+  // 2) 两个变体的差异必须**恰好**是那三行——差异是显式声明的，不是漂移出来的
+  const onlyCli = cli.filter((x) => !repl.includes(x));
+  const onlyRepl = repl.filter((x) => !cli.includes(x));
+  assert.deepEqual(onlyCli, [
+    '  mingdao --preset <名>      应用智能体预设（工具白名单/权限/参数，v0.4.0 契约化）',
+    '  mingdao diagnose           一键生成诊断报告（脱敏打包日志/审计/配置，便于反馈排查）',
+  ], `CLI 独有行应恰好是 --preset 与 diagnose，实际 ${JSON.stringify(onlyCli)}`);
+  assert.deepEqual(onlyRepl, ['  /preset      列出/切换智能体预设（v0.4.0 契约化）'],
+    `会话内独有行应恰好是 /preset，实际 ${JSON.stringify(onlyRepl)}`);
+
+  // 3) 结构守护：两个入口不得再各自复制一份列表
+  const root69 = path.join(srcDir, '..');
+  for (const rel of [path.join('src', 'cli.js'), path.join('src', 'commands', 'repl.js')]) {
+    const src = fs.readFileSync(path.join(root69, rel), 'utf8');
+    assert.ok(!src.includes('HELP_LINES'), `${rel} 不应再自带一份 HELP_LINES（帮助正文统一在 src/help.js）`);
+    assert.ok(src.includes("from './help.js'") || src.includes("from '../help.js'"), `${rel} 应从 help.js 取帮助正文`);
+  }
+  ok('v0.4.7 回归（T22）：帮助文本单一来源（共享行一致 / 差异恰好三行 / 不再各存副本）');
+}
+
+
+// ---------- 70. v0.4.7 回归（T22）：API Key 走标准输入而非命令行参数 ----------
+// argv 会出现在 ps 的进程列表里，本机任何用户都能直接读到明文密钥
+// （本项目 src/proc.js 校验进程归属时读的正是命令行，说明这条路径确实存在）。
+{
+  const home70 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-key70-'));
+  const cliPath = path.join(srcDir, 'cli.js');
+  const runKey = (argv, input) =>
+    spawnSync(process.execPath, [cliPath, 'key', ...argv], {
+      input, encoding: 'utf8', env: { ...process.env, MINGDAO_HOME: home70 },
+    });
+  const secret = 'sk-stdin-secret-abcdef0123456789';
+  const credFile = path.join(home70, 'credentials.json');
+
+  // 1) 管道输入（脚本/CI 的推荐用法）
+  const r1 = runKey(['set', 'deepseek'], secret + '\n');
+  assert.equal(r1.status, 0, r1.stderr);
+  assert.equal(JSON.parse(fs.readFileSync(credFile, 'utf8')).deepseek, secret, '应保存 stdin 中的密钥');
+  assert.ok(!r1.stdout.includes(secret), '明文密钥绝不能被回显到输出（stdout 可能被重定向进日志）');
+  assert.ok(!r1.stderr.includes(secret), '明文密钥绝不能被回显到 stderr');
+  assert.ok(r1.stdout.includes('sk-s') && r1.stdout.includes('6789'), '应显示脱敏后的前后缀便于核对');
+
+  // 2) argv 路径：仍然可用（不破坏既有脚本），但必须警告密钥在进程列表中可见
+  const r2 = runKey(['set', 'openai'], 'sk-argv-secret-9999\n');
+  assert.equal(r2.status, 0, r2.stderr);
+  const r2b = spawnSync(process.execPath, [cliPath, 'key', 'set', 'openai', 'sk-argv-secret-9999'], {
+    encoding: 'utf8', env: { ...process.env, MINGDAO_HOME: home70 },
+  });
+  assert.equal(r2b.status, 0, r2b.stderr);
+  assert.ok(r2b.stdout.includes('ps'), '经 argv 传入密钥时应提示其会出现在进程列表中');
+  assert.ok(!r2b.stdout.includes('sk-argv-secret-9999'), '经 argv 传入时同样不得回显明文');
+
+  // 3) 空输入：给出用法而不是静默保存空密钥
+  const before = fs.readFileSync(credFile, 'utf8');
+  const r3 = runKey(['set', 'glm'], '');
+  assert.equal(r3.status, 0, r3.stderr);
+  assert.ok(r3.stdout.includes('用法'), '空输入应给出用法提示');
+  assert.equal(fs.readFileSync(credFile, 'utf8'), before, '空输入不得改动凭证库');
+
+  safeRmSync(home70, { recursive: true, force: true });
+  ok('v0.4.7 回归（T22）：API Key 走 stdin（argv 路径保留但告警，明文始终不回显）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

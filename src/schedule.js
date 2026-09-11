@@ -9,7 +9,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { startTask, readTask, killTask } from './tasks.js';
+import { startTask, readTask, killTask, patchTask, taskWorkerAlive } from './tasks.js';
+import { procAlive, pidOwnedBy } from './proc.js';
 
 function isRunningTask(/** @type {any} */ home, /** @type {any} */ taskId) {
   const t = readTask(home, taskId);
@@ -273,48 +274,25 @@ export function daemonPidFile(/** @type {any} */ home) {
   return path.join(scheduleDir(home), 'daemon.pid');
 }
 // pid 文件内容 "pid nonce"：校验进程存在 + 命令行含同一 nonce，防止陈旧 PID 被无关进程复用而误判（审计 P2-7）
-// 质检 M11：kill 前校验 PID 归属（/proc/<pid>/cmdline 含 needle 才动手，防 PID 复用误杀）
-function pidOwnedBy(/** @type {any} */ pid, /** @type {any} */ needle) {
-  try {
-    const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
-    return cmdline.includes(needle);
-  } catch {
-    return null; // 非 Linux 读不到 /proc：调用方按 best-effort 处理
-  }
-}
+// 质检 M11：kill 前校验 PID 归属（命令行含 needle 才动手，防 PID 复用误杀）
+// v0.4.7（P3 T20）：实现移入 src/proc.js——原实现只认 /proc，macOS/Windows 上恒返回 null，
+// 「归属校验」在这些平台静默失效。现在 Linux 走 /proc、其余平台回退 ps，语义不变（含 null）。
+export { pidOwnedBy, procAlive };
 
 export function daemonAlive(/** @type {any} */ home) {
   try {
     const [pidStr, nonce] = fs.readFileSync(daemonPidFile(home), 'utf8').trim().split(/\s+/);
     const pid = Number(pidStr);
     if (!pid || !nonce) return false;
-    process.kill(pid, 0);
-    try {
-      const cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
-      if (!cmdline.includes(nonce)) return false;
-    } catch {
-      // 非 Linux 读不到 /proc：仅校验进程存活（尽力而为）
-    }
+    if (!procAlive(pid)) return false;
+    // v0.4.7（P3 T20）：改用 proc.js 的跨平台归属校验——此前 macOS 上读不到 /proc，
+    // 陈旧的 daemon.pid 只要 pid 被复用就会被判成「守护还活着」，新守护永不启动。
+    if (pidOwnedBy(pid, nonce) === false) return false;
     return true;
   } catch {
     return false;
   }
 }
-/**
- * 进程是否存活（best-effort）。EPERM 说明进程存在但无权限发信号 → 视为存活。
- * @param {any} pid
- */
-export function procAlive(pid) {
-  const n = Number(pid);
-  if (!Number.isFinite(n) || n <= 0) return false;
-  try {
-    process.kill(n, 0);
-    return true;
-  } catch (/** @type {any} */ e) {
-    return e?.code === 'EPERM';
-  }
-}
-
 export function stopDaemon(/** @type {any} */ home) {
   try {
     // pidfile 格式 "<pid> <nonce>"——必须取首段（此前整串 Number()=NaN，SIGTERM 永远不发，
@@ -475,6 +453,19 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
     while (t && t.status === 'running' && Date.now() < deadline) {
       await wait(3000);
       t = readTask(home, task.id);
+      // v0.4.7（P3 T20）：worker 进程已消失、状态却仍停在 running（被 SIGKILL / OOM / 系统休眠
+      // 杀死，来不及写终态）。此前这里只会傻等到 2 小时上限——期间该调度任务占着 ->>running，
+      // 用户看到的是「跑了两个小时」，实际早已没有进程在工作。改为立刻回收并跳出。
+      if (t && t.status === 'running' && t.pid && !taskWorkerAlive(t)) {
+        const age = Date.now() - (Number(t.startedAt) || Date.now());
+        patchTask(home, task.id, {
+          status: 'failed',
+          error: 'worker 进程已消失（可能被系统终止）',
+          durationMs: age,
+        }, { terminal: true });
+        t = readTask(home, task.id);
+        break;
+      }
     }
     if (t && t.status === 'running') {
       killTask(home, task.id);
