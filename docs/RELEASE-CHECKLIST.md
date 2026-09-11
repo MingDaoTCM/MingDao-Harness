@@ -76,6 +76,37 @@ curl -s "https://api.github.com/repos/.../check-runs/<check_run_id>/annotations"
 > 而不是「能不能启动解释器」。GitHub 的 windows runner **自带 Git Bash**，
 > 所以「有 bash」根本不等于「POSIX 安装器适用」。
 
+### 1.2 发布前凭据泄露核查（每版都做，尤其涉及密钥的操作之后）
+
+发布流程本身会经手 token（gitee/gitcode/npm），因此每版都要核查一次**它们没有进入任何产物或历史**。
+
+```bash
+cd MingDao-Harness && set -a && . ./.env && set +a
+
+# ① 工作树（含被忽略文件）里除 .env 自身外不得出现
+for n in MINGDAO_GITEE_TOKEN MINGDAO_GITCODE_TOKEN NPM_TOKEN; do
+  v=$(eval echo \$$n); [ -n "$v" ] || continue
+  grep -rl -F "$v" . 2>/dev/null | grep -v '^\./\.env$' | head
+done
+
+# ② git 历史里不得出现
+for n in MINGDAO_GITEE_TOKEN MINGDAO_GITCODE_TOKEN NPM_TOKEN; do
+  v=$(eval echo \$$n); [ -n "$v" ] || continue
+  git grep -F "$v" $(git rev-list --all | head -200) 2>/dev/null | head
+done
+
+# ③ 不被跟踪、也不进 npm 包
+git ls-files --error-unmatch .env >/dev/null 2>&1 && echo "✗ 被跟踪" || echo "✓ 未被跟踪"
+npm pack --dry-run 2>&1 | grep -c '\.env'      # 期望 0
+
+# ④ 诊断包脱敏（用户最可能外发的产物）：把密钥放进环境后生成报告，报告里不得出现
+export DEEPSEEK_API_KEY="$NPM_TOKEN" MINGDAO_API_KEY="$MINGDAO_GITEE_TOKEN"
+node src/cli.js diagnose    # 然后 grep 报告：三个 token 都不得出现
+```
+
+**v0.6.0 发布前实测结果**：① 三项均未出现；② 最近 200 个提交的历史中均未出现；
+③ `.env` 未被跟踪、`npm pack` 中 `.env` 条目数 0；④ 诊断报告中三个 token 均未出现。
+
 ## 二、本机人工验收（必做，未确认不得进入 §三）
 
 ```bash
