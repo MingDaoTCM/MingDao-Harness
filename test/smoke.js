@@ -4767,6 +4767,8 @@ console.log(JSON.stringify({ okOn, xml }));`;
 {
   const models75 = await import(pathToFileURL(path.join(srcDir, 'models.js')).href);
   const caps75 = await import(pathToFileURL(path.join(srcDir, 'model-caps.js')).href);
+  // 能否跑 POSIX shell 断言（Windows 无 bash）。按能力判断，而不是猜平台名。
+  const hasBash75 = spawnSync('bash', ['-c', 'exit 0'], { encoding: 'utf8' }).status === 0;
 
   // 75a. 国产推理栈 / 内网端点预设存在且指向本机端口（不是公网占位）
   for (const [key, port] of [['vllm', '8000'], ['ollama', '11434'], ['oneapi', '3000']]) {
@@ -4802,33 +4804,55 @@ console.log(JSON.stringify({ okOn, xml }));`;
     // 脚本按当前目录判断，拿不到本地源码就必须**明确拒绝**，而不是偷偷联网去下载。
     // （注意：用绝对路径调用 `bash <repo>/install.sh` 能定位到仓库，因此不会拒绝——
     //   那是正确行为，我第一版测试把它误当成了失败。）
-    const notRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-notrepo-'));
-    const instSrc = fs.readFileSync(path.join(srcDir, '..', 'install.sh'), 'utf8');
-    const r75 = spawnSync('bash', ['-s', '--', '--offline'], {
-      cwd: notRepo, input: instSrc, encoding: 'utf8', timeout: 30000,
-      env: { ...process.env, HOME: home75 },
-    });
-    const out75 = String(r75.stdout || '') + String(r75.stderr || '');
-    assert.ok(out75.includes('离线安装需要在本仓库目录内运行'),
-      `离线 + 无本地源码时必须明确拒绝，实际：${out75.slice(0, 200)}`);
-    assert.ok(out75.includes('解压') || out75.includes('仓库目录'), '拒绝理由应告诉用户怎么做（解压离线包后进入目录）');
-    assert.ok(!fs.existsSync(path.join(home75, '.local', 'bin', 'mingdao')), '被拒绝时不得留下半成品安装');
-
-    safeRmSync(notRepo, { recursive: true, force: true });
+    //
+    // Windows 上没有 bash：以下是 POSIX shell 断言，必须按**能力**跳过，否则 windows 腿必红
+    // （v0.6.0 C4 首次提交正是这么把 CI 弄挂的）。Windows 侧的等价能力见 75d。
+    if (hasBash75) {
+      const notRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-notrepo-'));
+      const instSrc = fs.readFileSync(path.join(srcDir, '..', 'install.sh'), 'utf8');
+      const r75 = spawnSync('bash', ['-s', '--', '--offline'], {
+        cwd: notRepo, input: instSrc, encoding: 'utf8', timeout: 30000,
+        env: { ...process.env, HOME: home75 },
+      });
+      const out75 = String(r75.stdout || '') + String(r75.stderr || '');
+      assert.ok(out75.includes('离线安装需要在本仓库目录内运行'),
+        `离线 + 无本地源码时必须明确拒绝，实际：${out75.slice(0, 200)}`);
+      assert.ok(out75.includes('解压') || out75.includes('仓库目录'), '拒绝理由应告诉用户怎么做（解压离线包后进入目录）');
+      assert.ok(!fs.existsSync(path.join(home75, '.local', 'bin', 'mingdao')), '被拒绝时不得留下半成品安装');
+      safeRmSync(notRepo, { recursive: true, force: true });
+    }
     safeRmSync(home75, { recursive: true, force: true });
   }
 
-  // 75d. 离线打包脚本存在且可解析（真正的断网安装已在提交说明中记录了人工验证）
+  // 75d. 两侧离线安装能力必须**同时存在**（POSIX 的 install.sh 与 Windows 的 install.ps1）。
+  //      此前只做了 POSIX，Windows 用户拿到的是「内网装不上」，而文档却宣称支持内网部署——
+  //      这类「宣称与实现不一致」比缺功能本身更糟。断言用纯文本，跨平台可跑。
   {
-    const bundle = path.join(srcDir, '..', 'scripts', 'build-offline-bundle.sh');
+    const root75 = path.join(srcDir, '..');
+    const instSh = fs.readFileSync(path.join(root75, 'install.sh'), 'utf8');
+    const instPs = fs.readFileSync(path.join(root75, 'install.ps1'), 'utf8');
+    assert.ok(instSh.includes('--offline'), 'install.sh 应支持 --offline');
+    assert.ok(instSh.includes('离线安装不下载 Node.js'), 'install.sh 离线模式必须明确不下载 Node');
+    assert.ok(instPs.includes('[switch]$Offline'), 'install.ps1 应支持 -Offline（Windows 侧必须与 POSIX 对齐）');
+    assert.ok(instPs.includes('离线安装不下载 Node.js'), 'install.ps1 离线模式必须明确不下载 Node');
+    assert.ok(instPs.includes('跳过 npm'), 'install.ps1 离线模式必须跳过 npm（npm install -g . 可能访问 registry）');
+    // 断言必须覆盖**全部**版本比较，而不是「文件里出现过 18.17」：
+    //  · 太松的写法（/18\.17/.test(...)）会被注释里的「18.17」蒙混过关；
+    //  · 只匹配一次也不够——install.ps1 有**两处**比较（winget 安装前/后各一次），
+    //    改掉其中一处仍会通过。两个漏洞都是我自己的变异校验抓出来的，故改为「逐个字面量都必须是 18.17」。
+    const psVers = [...instPs.matchAll(/\[version\]'([\d.]+)'/g)].map((m) => m[1]);
+    assert.ok(psVers.length >= 2, `install.ps1 应有两处版本比较（winget 前后各一），实际 ${psVers.length}`);
+    assert.ok(psVers.every((v) => v === '18.17.0' || v === '18.17'),
+      `install.ps1 每一处版本比较都必须基于 18.17（只看 major 会让 18.0–18.16 误判合格），实际：${psVers.join(', ')}`);
+    const bundle = path.join(root75, 'scripts', 'build-offline-bundle.sh');
     assert.ok(fs.existsSync(bundle), '离线打包脚本应存在');
-    const chk = spawnSync('bash', ['-n', bundle], { encoding: 'utf8' });
-    assert.equal(chk.status, 0, `离线打包脚本语法应正确：${chk.stderr}`);
-    const inst = fs.readFileSync(path.join(srcDir, '..', 'install.sh'), 'utf8');
-    assert.ok(inst.includes('--offline'), 'install.sh 应支持 --offline');
-    assert.ok(inst.includes('离线安装不下载 Node.js'), '离线模式必须明确不下载 Node（否则 air-gap 会卡住）');
+    if (hasBash75) {
+      const chk = spawnSync('bash', ['-n', bundle], { encoding: 'utf8' });
+      assert.equal(chk.status, 0, `离线打包脚本语法应正确：${chk.stderr}`);
+      const chk2 = spawnSync('bash', ['-n', path.join(root75, 'install.sh')], { encoding: 'utf8' });
+      assert.equal(chk2.status, 0, `install.sh 语法应正确：${chk2.stderr}`);
+    }
   }
-
   ok('v0.6.0 C4：内网/信创适配（国产栈预设 + 本地端点免 Key 而公网不放松 + 离线安装明确拒绝联网 + 打包脚本）');
 }
 

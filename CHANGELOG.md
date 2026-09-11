@@ -7,12 +7,15 @@
 > 落地计划与滚动进度见 `docs/PLAN-v0.6.0.md`。目标：给定一次历史执行，能离线回答并证明
 > 「每一步做了什么、触发了哪条规则、花了多少钱、数据有没有出网」，且结论可脱敏导出供第三方复核。
 
-- **内网 / 信创部署（C4）**：`install.sh --offline` 支持**完全断网**安装（不下载 Node、不走 npm、
+- **内网 / 信创部署（C4）**：`install.sh --offline`（Linux/macOS）与 **`install.ps1 -Offline`（Windows）**
+  两侧对齐，均支持**完全断网**安装（不下载 Node、不走 npm、
   直接软链；本项目运行时零依赖），已用「屏蔽 curl/wget/git/npm + 代理指向黑洞」实测通过；
   `scripts/build-offline-bundle.sh` 产出带内网操作说明与校验值的离线包。新增 `vllm` / `ollama` /
   `oneapi` 预设覆盖国产推理栈（昇腾 MindIE、海光 DCU、寒武纪等以 vLLM 为后端的栈）与内网聚合网关。
   **本机/内网端点免除「必须有 API Key」的硬校验**（这类端点通常不校验也不发密钥，此前会把私有化部署
   挡在门外），公网端点仍必须有 Key；无 Key 时不再发空的 `Authorization` 头（部分网关会因此 401）。
+  顺带修掉 `install.ps1` 的同类版本判断缺陷：此前只看 major（`-lt 18`），于是 18.0–18.16 被判合格，
+  而内核 `engines` 要求 ≥18.17——用户会拿到「装得上、跑不起来」的安装（POSIX 侧修过同类问题 T23，Windows 侧漏了）。
   诚实登记：离线模式不支持 `mingdao update` 自更新，离线包不含 Node 运行时。
 - **出网白名单 + 出网自证（C3）**：新增 `config.net`（`allow` 支持精确主机 / `*.子域` / IPv4 CIDR，
   `mode: warn|block`）与 `mingdao net report|policy`。出口只在一处收口——包 `globalThis.fetch`，

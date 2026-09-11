@@ -55,8 +55,9 @@ bash install.sh --offline
 
 ## Windows
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Offline
 ```
+（Windows 侧同样是离线路径：不通过 winget 装 Node、不走 npm，改用用户目录下的 .cmd 包装。）
 
 ## 内网模型（信创 / 国产推理栈）
 内网通常没有公网模型 API。用 OpenAI 兼容端点（vLLM / Ollama / OneAPI / TGI / 国产推理栈）：
