@@ -411,7 +411,7 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
 //  ② 旧 daemon 只 break 监督循环、不退出进程（在途协程撑住事件循环）→ 与新 daemon 并跑。
 // 断言：任务只被执行一次；且 runOnce 在启动瞬间就把 lastTaskId/runnerPid 落进 job 文件。
 {
-  const { spawnDaemon, daemonPidFile } = await import(pathToFileURL(path.join(root, 'src', 'schedule.js')).href);
+  const { spawnDaemon, stopDaemon, daemonPidFile } = await import(pathToFileURL(path.join(root, 'src', 'schedule.js')).href);
   const jobFile = (id) => path.join(home, 'schedule', id + '.json');
   const aliveCheck = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
   const readPid = () => {
@@ -433,6 +433,14 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   // 一次性任务只应执行一次 —— runs 必须是 1。
   // 先用一个远期时间把任务建出来，再把 nextRunAt 直接改到 1 秒后：
   // 本用例测的是 **daemon 接管行为**，不依赖 CLI 的分钟级时间解析（避免测试受整分边界影响）。
+  //
+  // ⚠ 必须先停掉可能已在监督本 home 的 daemon（v0.6.0 修 flake）：`schedule add` 会 reconcile，
+  // 可能已经拉起一个 daemon；若它先读到**远期** nextRunAt，runSleeper 的等待被 clamp 到
+  // **60 秒上限**（`Math.min(delta, 60000)`），而本用例的在途等待只有 25 秒 —— 于是 ubuntu-22
+  // 上偶发失败（实测同一提交时红时绿）。这是**测试自身的竞态**，不是产品 flake。
+  // 停掉之后再改 nextRunAt，保证「读到远期值」这件事不可能发生。
+  stopDaemon(home);
+  await new Promise((r) => setTimeout(r, 800)); // 给旧 daemon 一点退出时间，避免它带着旧视图醒来
   const r2 = await runCli(['schedule', 'add', '慢任务 SCHEDSLOW', '--at', fmt(new Date(Date.now() + 3600 * 1000))]);
   assert.equal(r2.code, 0, r2.err);
   const sid2 = (r2.out.match(/已创建\s+(\S+)/) || [])[1];
