@@ -79,3 +79,23 @@ export function pidOwnedBy(pid, needle) {
   if (cmdline === null) return null;
   return cmdline.includes(key);
 }
+
+/**
+ * 本平台能否校验「命令行归属」（v0.4.7）。
+ * Linux 有 /proc、macOS/BSD 有 ps；**Windows 两者皆无**——不为了这个判定去依赖
+ * PowerShell/WMI（每次调用数百毫秒，且在受限环境里未必可用），因此 Windows 上
+ * 归属校验诚实返回 null，由调用方退回「进程存活」判定（best-effort）。
+ *
+ * 这条边界是**已知且写明**的，不是「在 Windows 上碰巧不生效」：
+ *   - Linux / macOS：kill 前可确认「这确实是我的进程」，PID 复用不会误杀；
+ *   - Windows：无法确认，kill 为 best-effort（与 v0.4.5 行为一致，未退化也未夸大）。
+ * 探测方式是用自身进程做一次实测，而不是硬编码平台名——这样新增平台时无需改代码。
+ * @returns {boolean}
+ */
+let verifiableCache = /** @type {boolean|null} */ (null);
+export function ownershipVerifiable() {
+  if (verifiableCache !== null) return verifiableCache;
+  const marker = process.argv[1] || process.execPath;
+  verifiableCache = pidOwnedBy(process.pid, marker) !== null;
+  return verifiableCache;
+}

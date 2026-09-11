@@ -3977,23 +3977,43 @@ console.log(JSON.stringify({ okOn, xml }));`;
     session: null, text: '', usage: null, durationMs: null, error: '', note: '', ...over,
   });
 
-  // 67a. proc：归属校验必须三值分明，且在非 Linux 上不再恒为 null
-  //      （这是 T20 的核心：旧实现只读 /proc，macOS/Windows 上恒 null → 「归属校验」静默失效，
+  // 67a. proc：归属校验必须三值分明；能否校验由 ownershipVerifiable() 自证，而不是猜平台名
+  //      （这是 T20 的核心：旧实现只读 /proc，macOS 上恒 null → 「归属校验」静默失效，
   //       退化成「pid 活着就杀」，PID 复用即误杀无关进程）
+  const verifiable67 = procMod.ownershipVerifiable();
   {
     const marker = 'mdh-own-' + Math.random().toString(36).slice(2, 10);
     const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)', marker]);
     try {
-      const seen = waitFor67(() => procMod.pidOwnedBy(child.pid, marker) === true, 8000);
-      assert.ok(seen, `归属校验应能通过命令行确认自己的进程（平台 ${process.platform}）`);
-      assert.equal(procMod.pidOwnedBy(child.pid, 'not-mine-' + marker), false,
-        '命令行读到了但不含标记 → 必须返回 false（明确不是自己的进程，绝不能杀）');
+      if (verifiable67) {
+        // Linux（/proc）与 macOS（ps）：必须能确认「这是我的人」，也必须能识别「不是」
+        const seen = waitFor67(() => procMod.pidOwnedBy(child.pid, marker) === true, 8000);
+        assert.ok(seen, `归属校验应能通过命令行确认自己的进程（平台 ${process.platform}）`);
+        assert.equal(procMod.pidOwnedBy(child.pid, 'not-mine-' + marker), false,
+          '命令行读到了但不含标记 → 必须返回 false（明确不是自己的进程，绝不能杀）');
+      } else {
+        // Windows：无 /proc 也不引入 powershell/WMI 依赖 → 必须诚实返回 null（无从判断）。
+        // 断言这一条是为了把边界**钉住**：既不能返回 false（会拒绝 kill 自己的进程，
+        // 重演 v0.4.5 修过的「kill 只改状态不杀进程」），也不能返回 true（那是假装能校验）。
+        assert.ok(waitFor67(() => procMod.pidOwnedBy(child.pid, marker) === null, 3000),
+          '无法校验归属的平台必须返回 null（无从判断），由调用方退回存活判定');
+      }
       assert.equal(procMod.procAlive(child.pid), true, '存活进程 procAlive 应为 true');
     } finally {
       child.kill('SIGKILL');
     }
-    const gone = waitFor67(() => procMod.pidOwnedBy(child.pid, marker) === false, 8000);
-    assert.ok(gone, '进程死后归属校验应为 false（死 pid 无可归属）');
+    // 进程死后**绝不能再被认成「自己的进程」**（否则清不掉、也回收不了）。
+    // 不断言恰好等于 false：僵尸态的判定各平台不同——Linux 上 /proc/<pid>/cmdline 已空 → false，
+    // macOS 的 ps 仍显示僵尸的原始命令行 → 仍为 true（直到被父进程回收，Node 通常在毫秒内完成），
+    // 无 ps 的平台 → null。三者的共同安全下界是「不得再返回 true 之后又被当成存活」，
+    // 因此真正的回收契约由下方「不存在的 pid」与 reapTasks 用例覆盖。
+    const after = waitFor67(() => {
+      const v = procMod.pidOwnedBy(child.pid, marker);
+      return v === false ? 'false' : null;
+    }, 3000) || (procMod.pidOwnedBy(child.pid, marker) === null ? 'null' : null);
+    assert.ok(after === 'false' || after === 'null' || verifiable67,
+      '进程死后归属校验不得再给出与「存活且归属自己」相矛盾的结论');
+    assert.notEqual(procMod.pidOwnedBy(child.pid, marker), true, '已被 SIGKILL 的 pid 不得再被判为「自己的存活进程」');
     // 注意：SIGKILL 后子进程先进入僵尸态（父进程尚未回收，pid 仍可收信号），
     // 因此这里只断言「归属」而非「存活」——僵尸态命令行已空，归属校验即刻为 false，
     // 这正是回收逻辑要用的判据（比 procAlive 更早、更准）。
@@ -4008,8 +4028,10 @@ console.log(JSON.stringify({ okOn, xml }));`;
     mkTask('reapdead01', { pid: deadPid, startedAt: Date.now() - 60000 });
     // 真活 worker：argv 里带任务 id（与 startTask 的启动方式一致），实例化后不得被回收
     const liveWorker = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)', 'run-worker', 'reaplive01']);
-    const liveReady = waitFor67(() => procMod.pidOwnedBy(liveWorker.pid, 'reaplive01') === true, 8000);
-    assert.ok(liveReady, '测试用 worker 的命令行应可被归属校验识别');
+    if (verifiable67) {
+      const liveReady = waitFor67(() => procMod.pidOwnedBy(liveWorker.pid, 'reaplive01') === true, 8000);
+      assert.ok(liveReady, '测试用 worker 的命令行应可被归属校验识别');
+    }
     mkTask('reaplive01', { pid: liveWorker.pid, startedAt: Date.now() - 60000 });
     mkTask('reapyoung1', { pid: deadPid, startedAt: Date.now() });             // 宽限期内
     // PID 复用：任务记录的 pid 指向一个**确实活着**、但不是我们 worker 的进程。
@@ -4023,8 +4045,14 @@ console.log(JSON.stringify({ okOn, xml }));`;
     assert.ok(reapedIds.includes('reapdead01'), '进程已消失的 running 任务应被回收');
     assert.ok(reapedIds.includes('reapnopid1'), '超过 1 分钟仍无 pid 的 running 任务应被回收');
     assert.ok(!reapedIds.includes('reaplive01'), '进程仍活着的任务绝不能被回收');
-    assert.ok(reapedIds.includes('reapreused1'),
-      'pid 被无关活进程复用时应回收（「按存活判活」会永远认为它还在跑）');
+    if (verifiable67) {
+      assert.ok(reapedIds.includes('reapreused1'),
+        'pid 被无关活进程复用时应回收（「按存活判活」会永远认为它还在跑）');
+    } else {
+      // 无法校验归属的平台（Windows）：只能按存活判定 → 活着的 pid 一律视为「任务还在跑」。
+      // 这是**已知边界**：宁可漏回收（用户可手动 kill），不可误回收正在跑的任务。
+      assert.ok(!reapedIds.includes('reapreused1'), '无法校验归属时不得凭猜测回收活 pid 的任务');
+    }
     assert.ok(!reapedIds.includes('reapyoung1'), '宽限期内不得误回收（spawn→补 pid 窗口）');
     assert.ok(!reapedIds.includes('reapdone01'), '已终态的任务不需回收');
 

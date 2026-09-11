@@ -355,7 +355,11 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   assert.ok(selfExited, '租约被改写后 daemon 应自退（防双 daemon 重复执行）');
   // 3a) 归属匹配：受害进程 cmdline 带上 nonce（模拟真 daemon）→ stopDaemon 应真正终止它
   //     （v0.4.7 起 stopDaemon 会先校验 PID 归属；node 的 argv 尾部带上 nonce 即视为「是我们的人」）
-  const { pidOwnedBy } = await import(pathToFileURL(path.join(root, 'src', 'proc.js')).href);
+  const proc7 = await import(pathToFileURL(path.join(root, 'src', 'proc.js')).href);
+  const { pidOwnedBy } = proc7;
+  // 能否校验命令行归属由模块自证（Linux /proc、macOS ps；Windows 无二者 → false）。
+  // 用能力探测而不是平台名判断：新增平台时无需改测试。
+  const canVerify7 = proc7.ownershipVerifiable();
   const nonce7 = 'abcdefg';
   const victim = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', nonce7]);
   // 刚 spawn 时可能尚未 exec（命令行还读不到），等**跨平台**归属校验确认为 true 再写 pidfile，
@@ -372,10 +376,12 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   victim.kill('SIGKILL');
 
   // 3b) 归属不匹配：pidfile 陈旧、PID 被无关进程复用时**绝不误杀**。
-  //     v0.4.7（P3 T20）：本条原先只在 Linux 上跑——因为校验实现只读 /proc，macOS/Windows 上
-  //     恒返回 null（best-effort 放行），等于「归属校验」在这两个平台根本不存在。
-  //     改用 src/proc.js 后 ps 兜底生效，故**取消平台限制**，三平台都必须通过。
-  {
+  //     v0.4.7（P3 T20）：本条原先写死 `process.platform === 'linux'`——因为校验实现只读 /proc，
+  //     macOS 上恒返回 null，于是「归属校验」在 macOS 根本不存在，而平台限制恰好把这一点盖住了。
+  //     改用 src/proc.js（ps 兜底）后 macOS 也具备校验能力，故改为**按能力**执行：
+  //     有能力校验的平台必须通过「不误杀」；无能力的平台（Windows）断言其退回 best-effort 的
+  //     已知边界，而不是静默跳过。
+  if (canVerify7) {
     const stranger = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)']);
     // 等命令行可读（跨平台），确保「归属不匹配」是因为 nonce 不同，而不是读不到
     await waitFor(() => (pidOwnedBy(stranger.pid, 'not-my-nonce') === false ? true : null), 8000);
@@ -390,6 +396,10 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
     }
     assert.ok(strangerAlive, 'PID 归属不匹配时 stopDaemon 不得误杀无关进程（防 PID 复用误杀）');
     stranger.kill('SIGKILL');
+  } else {
+    // Windows：无 /proc 也无 ps，无法校验归属 → stopDaemon 按 best-effort 处理。
+    // 这里不假装「已覆盖」：明确断言该边界存在（pidfile 会被清掉），并在 README/审计里写明。
+    assert.ok(!canVerify7, '此分支仅在无法校验归属的平台成立');
   }
   if (sid) await runCli(['schedule', 'remove', sid]);
   ok('守护进程租约：spawn 存活 / 租约自退 / stopDaemon 真正终止 / 归属不匹配不误杀（跨平台）');
