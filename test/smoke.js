@@ -4767,8 +4767,16 @@ console.log(JSON.stringify({ okOn, xml }));`;
 {
   const models75 = await import(pathToFileURL(path.join(srcDir, 'models.js')).href);
   const caps75 = await import(pathToFileURL(path.join(srcDir, 'model-caps.js')).href);
-  // 能否跑 POSIX shell 断言（Windows 无 bash）。按能力判断，而不是猜平台名。
-  const hasBash75 = spawnSync('bash', ['-c', 'exit 0'], { encoding: 'utf8' }).status === 0;
+  // 能否跑 **install.sh** 的 POSIX 断言。两个条件都要满足，缺一不可：
+  //   ① 有可用的 bash；
+  //   ② 不在 Windows 上——因为 install.sh **自己**会拒绝 Windows 并把用户转给 install.ps1
+  //      （打印「检测到 Windows 环境，请改用 Windows 安装器」后 exit 0）。
+  //
+  // 这个教训值得留下：最初我只判断「有没有 bash」。但 GitHub 的 windows runner **自带 Git Bash**，
+  // 于是探测为真、断言照跑，而 install.sh 走的是它自己的 Windows 分支 → windows 腿持续变红。
+  // 「bash 存在」不等于「POSIX 安装器适用」——能力探测必须对应**被测对象是否适用**，
+  // 而不是只对应「能不能启动解释器」。
+  const hasBash75 = process.platform !== 'win32' && spawnSync('bash', ['-c', 'exit 0'], { encoding: 'utf8' }).status === 0;
 
   // 75a. 国产推理栈 / 内网端点预设存在且指向本机端口（不是公网占位）
   for (const [key, port] of [['vllm', '8000'], ['ollama', '11434'], ['oneapi', '3000']]) {
