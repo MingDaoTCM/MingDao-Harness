@@ -3831,6 +3831,42 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.4.7 回归：辅助模型调用入账（分类器/标题/记忆提炼进账本与护栏）');
 }
 
+
+// ---------- 64. v0.4.7 回归：工作空间注册表读-改-写加锁（并发不丢更新） ----------
+{
+  const prevHome64 = process.env.MINGDAO_HOME;
+  const home64 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ws-'));
+  process.env.MINGDAO_HOME = home64;
+  const w = await import(pathToFileURL(path.join(srcDir, 'workspace.js')).href);
+  const dir64 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-wsdir-'));
+
+  // 基本行为不回归
+  const a = w.addWorkspace('a', dir64);
+  assert.equal(a.ok, true, '登记工作空间应成功');
+  assert.equal(w.removeWorkspace('a'), true, '删除应成功');
+  assert.equal(w.removeWorkspace('a'), false, '重复删除应为 false');
+  assert.ok(w.renameWorkspace('nope', 'x').error, '改名不存在的条目应报错');
+  w.addWorkspace('b', dir64);
+  assert.equal(w.renameWorkspace('b', 'c').ok, true, '改名应成功');
+
+  // 并发登记不得丢更新（v0.4.7 T19：读-改-写移入跨进程锁）
+  await Promise.all(Array.from({ length: 20 }, (_, i) => Promise.resolve().then(() => w.addWorkspace('k' + i, dir64))));
+  const names = Object.keys(w.loadWorkspaces()).filter((n) => n.startsWith('k'));
+  assert.equal(names.length, 20, `并发登记的 20 个条目必须全部保留（实际 ${names.length}）`);
+
+  // 会话级映射同样受锁保护
+  w.setSessionWorkspace('s1', dir64, 'c');
+  assert.equal(w.getSessionWorkspace('s1'), path.resolve(dir64), '会话级工作空间应记录');
+  assert.equal(w.moveSessionWorkspace('s1', 's2'), true, '改名迁移应成功');
+  assert.equal(w.getSessionWorkspace('s2'), path.resolve(dir64), '迁移后按新名可查');
+  assert.equal(w.removeSessionWorkspace('s2'), true, '删除会话映射应成功');
+
+  safeRmSync(dir64, { recursive: true, force: true });
+  process.env.MINGDAO_HOME = prevHome64;
+  safeRmSync(home64, { recursive: true, force: true });
+  ok('v0.4.7 回归：工作空间注册表加锁（基本行为 + 并发登记不丢更新 + 会话级映射）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

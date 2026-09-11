@@ -104,7 +104,7 @@
 > 均已定位到 `file:line` 并有可复现路径；按优先级排列，建议 v0.4.7 / v0.5.0 消化。
 > 消化进度：第二轮 T4–T9、T11–T13、T16；第三轮 T18 / T21（两项）/ T22（转义）/ T23（描述上限）；
 > **第四轮 T15 + T14（调度生命周期）**——这两条是本清单里影响面最大的（同一任务被并发执行两次 / 暂停删除后仍执行）；
-> **第五轮 T17（辅助调用入账）+ F7（首回合护栏误报 degraded）**。
+> **第五轮 T17（辅助调用入账）+ F7（首回合护栏误报 degraded）+ T19（工作空间注册表加锁）**。
 > 下表为**剩余**项。
 
 ### 安全 / 隔离
@@ -124,7 +124,7 @@
 | ~~T15~~ | ✅ 已修 | ~~重复 daemon → 同一调度任务被并发执行两次~~ 四处协同修复：① `spawnDaemon` 的「查活→spawn→写 pidfile」移入跨进程锁（消除并发双 spawn）；② `markRunning` 即写 `runnerPid`、`runOnce` 启动瞬间写 `lastTaskId`（关闭恢复分支的误判窗口）；③ 恢复分支先看 `procAlive(runnerPid)`，「宿主还活着就等它」；④ 租约丢失时通知在途 `runSleeper` 退出（`shouldStop`）并在收尾后 `process.exit(0)`（此前 every 型常驻协程会把旧 daemon 永远撑住）。新增端到端回归：接管后任务 `runs` 必须为 1（修复前实测为 2） | `src/cli.js:289-345`、`schedule.js:319-350,401,455-470` |
 | ~~T17~~ | ✅ 已修 | ~~辅助模型调用从不入账~~ 新增 `cachestats.recordAuxUsage`（带 `aux`/`auxReason` 标记，独立入账不与回合级重复计费），接入路由分类器 / 自动标题（两处）/ 记忆提炼（两处） | `src/cachestats.js`、`routing.js:111`、`titles.js:45,60`、`memory.js:185,324` |
 | ~~T18~~ | ✅ 已修 | ~~`withFileLockSync` 把 `fn` 的 `EEXIST` 误判为「锁被占」→ 同步死循环~~ 已用 acquiring 标志分离「抢锁」与「执行 fn」两个阶段 | `src/atomic-write.js:47-70` |
-| T19 | P3 | `workspaces.json` / `session-workspaces.json` / `sync-state.json` 的 read-modify-write 未加锁（WebUI 每次建会话都会 touch 工作空间） | `src/workspace.js:32-81`、`src/sync.js:227-242` |
+| T19 | P3 | ~~`workspaces.json` / `session-workspaces.json` 的 read-modify-write 未加锁~~（✅ 已修：add/remove/rename/touch 与三个会话级映射全部移入跨进程锁）；`sync-state.json` 的 RMW 仍未加锁（P3，留待后续——其临界区跨网络调用，需要「末尾合并」式加锁而非整段加锁） | `src/workspace.js`、`src/sync.js:227-242` |
 | T20 | P3 | 调度/任务的生命周期边角：僵尸任务不回收（守护可能空转到 2h）、`killed` 被 worker 的终态写覆盖、无 `/proc` 平台（macOS）无法校验 PID 归属 → 存在 PID 复用误杀风险 | `src/tasks.js:18-43,95-101`、`src/schedule.js:286-318` |
 | T21 | P3 | WebUI 边角：~~草稿槽 `draftTexts` 无上限~~（✅ 已修：LRU 64 槽）、~~`/api/config` 不校验模型名~~（✅ 已修，并保留 `provider:"custom"` 任意端点形态）、`updateCustom` 实为 upsert、非法 JSON body 被当 `{}` 并落盘、`/api/session-finalize` 缺文件返回 500 并回显绝对路径、`HEAD` 被当写方法返回 415 | `web/routes/domains/{sessions,config,misc}.js`、`web/server.js:125`、`routes/api.js:43` |
 | T22 | P3 | TUI/CLI 边角：~~ANSI/OSC 转义直通终端~~（✅ 已修：新增 `sanitizeTerminal`，模型/工具输出统一白名单过滤，保留 `\t`/`\n`）、`box()` 不看终端宽度、隐藏输入把提示语一起隐藏、`key set` 经 argv 传密钥、`batch` 清空全进程 SIGINT 监听、HELP_LINES 两份已分叉 | `src/ui.js`、`src/notify.js`、`src/commands/{key,update}.js`、`src/cli.js` |
