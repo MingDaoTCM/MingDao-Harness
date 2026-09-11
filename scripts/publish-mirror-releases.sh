@@ -3,9 +3,15 @@
 # 用法：
 #   MINGDAO_GITEE_TOKEN=xxx MINGDAO_GITCODE_TOKEN=yyy bash scripts/publish-mirror-releases.sh 0.1.65 [备注文件.md]
 #
-# 发行政策（2026-08-28）：桌面版安装包统一由官网分发——默认只创建 Release（正文指向官网），
-# 不再上传安装包附件（gitee/gitcode 上传耗时数小时且 gitee 有 1GB 配额）。
-# 如需恢复附件上传：MIRROR_WITH_ATTACH=1 环境变量开启。
+# 发行政策（2026-09-11 修订）：**三大平台同步发行**——gitee / gitcode 的 Release 与 GitHub 一样
+# 提供同一批安装包附件，用户可就近下载。
+#   旧政策（2026-08-28）：只创建 Release（正文指向官网）、不上传附件（当时顾虑上传耗时与 gitee 配额）。
+#   已废止：单一入口会劝退用户，且「附件会消失」让第三方镜像无法稳定引用。
+# 如需临时跳过附件（例如只想先占位 tag）：MIRROR_WITH_ATTACH=0。
+#
+# ⚠ 已知平台限制：gitee 附件单文件上限 100MB，而 AppImage 通常 >100MB 会被拒。
+#   本脚本**逐个文件**判断大小，超限的跳过并在日志与结尾清单里写明（不再让整轮上传失败），
+#   正文里已带官网直连兜底，因此 AppImage 在 gitee 上以官网下载为准。
 #
 # 前置条件：
 #   1. 官网服务器 /opt/1panel/www/sites/mingdao-site/downloads/ 已有该版本的 7 个安装包（收割流程产出）
@@ -59,24 +65,35 @@ curl -s -X POST "https://api.gitcode.com/api/v5/repos/MingDaoTCM/MingDao-Harness
   -o /tmp/gc-rel.json -w "gitcode http=%{http_code}\n"
 grep -q tag_name /tmp/gc-rel.json || { echo "gitcode 创建失败"; head -c 300 /tmp/gc-rel.json; exit 1; }
 
-# 附件上传：默认关闭（发行政策：安装包统一官网分发）
-if [ "${MIRROR_WITH_ATTACH:-}" != "1" ]; then
-  echo "已跳过附件上传（发行政策：安装包统一由官网分发；MIRROR_WITH_ATTACH=1 可恢复）"
+# 附件上传：默认开启（发行政策 2026-09-11：三大平台同步发行）
+if [ "${MIRROR_WITH_ATTACH:-1}" = "0" ]; then
+  echo "已跳过附件上传（MIRROR_WITH_ATTACH=0，仅占位 Release）"
   echo "MIRROR_RELEASE_DONE $TAG"
   exit 0
 fi
 
-# gitee 附件（curl 逐个上传）
+# gitee 单文件上限 100MB：超限的跳过（否则整轮上传会中断），并把跳过原因记进结尾清单
+GITEE_MAX=$((100 * 1024 * 1024))
+SKIPPED_GITEE=""
 for f in $FILES; do
-  echo "== gitee attach $f"
+  [ -f "$DL/$f" ] || { echo "== gitee 跳过 $f（文件不存在）"; SKIPPED_GITEE="$SKIPPED_GITEE $f(缺失)"; continue; }
+  sz=$(stat -c%s "$DL/$f" 2>/dev/null || stat -f%z "$DL/$f")
+  if [ "$sz" -gt "$GITEE_MAX" ]; then
+    echo "== gitee 跳过 $f（$((sz/1024/1024))MB 超过 gitee 100MB 附件上限）"
+    SKIPPED_GITEE="$SKIPPED_GITEE $f(超限)"
+    continue
+  fi
+  echo "== gitee attach $f ($((sz/1024/1024))MB)"
   curl -s --connect-timeout 30 --max-time 3600 -X POST \
     "https://gitee.com/api/v5/repos/MingDaoTCM/MingDao-harness/releases/$GID/attach_files?access_token=$GITEE_TOKEN" \
     -F "file=@$DL/$f" -o /tmp/up.json -w "http=%{http_code} bytes=%{size_upload} time=%{time_total}s\n"
   head -c 150 /tmp/up.json; echo
 done
+[ -n "$SKIPPED_GITEE" ] && echo "gitee 未上传（请以官网为准）：$SKIPPED_GITEE"
 
 # gitcode 附件（upload_url + OBS PUT）
 for f in $FILES; do
+  [ -f "$DL/$f" ] || { echo "== gitcode 跳过 $f（文件不存在）"; continue; }
   echo "== gitcode attach $f"
   python3 - "$f" "$GITCODE_TOKEN" "$DL" "$TAG" <<'PY'
 import json, os, sys, urllib.request

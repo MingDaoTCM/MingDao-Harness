@@ -44,10 +44,10 @@
 1. **跨平台沙箱补位**：Windows Job Object + 降权 token（零依赖原生 API）、macOS seatbelt 规则；敏感命令平台无关拦截清单兜底
 2. **记忆语义检索**：零依赖实现（内存向量 + 余弦/哈希相似度；Node 22 可用 node:sqlite 持久化，Node 18 回退 JSONL 索引），记忆注入从「最近 3 条」升级为「相关 3 条」
 3. **WebUI 看板扩展**：预算燃尽预测、费用导出 CSV
-4. GitHub Release 附件自动清理 + 发布清单文档化
+4. ~~GitHub Release 附件自动清理~~（**已废止**，见下）+ 发布清单文档化
 
 ## 已落地（本轮 Phase D 部分项提前完成）
-- **GitHub Release 附件自动清理（PAT 已接入）**：新增 `scripts/github-release-cleanup.mjs`——官网同步（收割 + sha512 MATCH 校验）后删除 Release 上的全部构建转运附件，只留指向官网的正文。用法：`MINGDAO_GITHUB_TOKEN=<PAT> node scripts/github-release-cleanup.mjs <版本号> [--dry-run]`。token 存本地 gitignored `.env`（`MINGDAO_GITHUB_TOKEN`，模式 600），不入库。验证：v0.2.2 官网同步后已清理 9 个附件，官网下载不受影响。
+- **~~GitHub Release 附件自动清理~~（已废止 2026-09-11）**：曾用 `scripts/github-release-cleanup.mjs` 在官网同步后删除 Release 全部附件，只留指向官网的正文。**政策已改为「安装包长期保留」**——用户应能直接从 GitHub / gitee / gitcode 任一平台下载，且「附件会消失」会让第三方镜像与包管理器无法稳定引用。脚本保留但**默认拒绝删除**，必须显式 `--force-delete-assets` 才动手；`MINGDAO_GITHUB_TOKEN` 仍只从环境变量或本地 gitignored `.env` 读取，不入库。
 
 ## 需要你拍板的事
 
