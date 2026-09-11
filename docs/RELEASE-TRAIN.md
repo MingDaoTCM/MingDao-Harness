@@ -11,9 +11,9 @@
 | 渠道 | 当前状态 | 缺口 |
 | --- | --- | --- |
 | **GitHub Release** | v0.4.5 / v0.4.6 / v0.5.0 均有 9 个附件 | 正文含已废止的承诺（负责人决定**不改历史正文**，只保证以后正确） |
-| **Gitee / GitCode** | 未确认（本机无 API token） | v0.4.6 及以后未确认补齐 |
-| **npm** | latest = **0.4.5**，已发布到 0.4.5 为止 | **漏发 v0.4.6、v0.5.0** |
-| **官网** | 下载区此前停在 **v0.4.5** | v0.4.6 内容已改好并提交（`cd5057c`），**待部署** |
+| **Gitee / GitCode** | ✅ v0.4.6 已补齐（tag + Release，**不附安装包**）；此前停在 v0.4.5 | v0.5.0 及以后待补 |
+| **npm** | ✅ v0.4.6 已补发（`latest` 由 0.4.5 **升到 0.4.6**）；`npx mingdao-harness@0.4.6 --version` 实测通过 | **仍漏发 v0.5.0** |
+| **官网** | 下载区仍停在 **v0.4.5** | v0.4.6 内容已改好并提交（`cd5057c`），**待部署**（卡在服务器私钥与地址） |
 
 ---
 
@@ -27,9 +27,11 @@
       （**没有就先收割**：从 GitHub Release v0.4.6 的附件取；否则官网链接会 404）
 - [ ] 1b. 部署官网：`cd MingDao-Harness-Site && bash deploy.sh`（已提交的 `cd5057c`）
 - [ ] 1c. 线上抽验：下载页 5 个链接 200，且 `sha256` 与 GitHub Release v0.4.6 一致
-- [ ] 1d. Gitee / GitCode 创建 v0.4.6 Release 并**上传附件**
-      （`bash scripts/publish-mirror-releases.sh 0.4.6 RELEASE-NOTES-0.4.6.md`）
-- [ ] 1e. 核对三处附件 sha256 同批
+- [x] 1d. Gitee / GitCode 创建 v0.4.6 Release —— **按负责人 2026-09-11 修正：不附安装包附件**
+      （`gitee` Release id 1138385；`gitcode` Release 同 tag。两处正文均为「官网直连 + 附件只在 GitHub」，
+      已回读校验：正文 7146 字节、含官网链接与「不附安装包附件」声明。gitee 侧另有的 2 个附件是
+      平台自动生成的**源码包** `v0.4.6.zip/.tar.gz`，非安装包）
+- [x] 1e. 核对三处：GitHub 保留 9 个安装包附件；gitee/gitcode 无安装包附件（符合修正后政策）
 
 ### 第 2 步：npm 补齐漏发版本
 
@@ -39,18 +41,13 @@
 
 - [ ] 2a. **从 tag 发布，不要从 main 发布**——npm 包内容必须与 tag 对应的源码树一致：
       `git worktree add /tmp/pub-046 v0.4.6` → 在该目录 `npm publish`
-- [ ] 2b. **先发旧版再发新版会短暂把 `latest` 指到旧版**，因此旧版用非 latest 标签发，
-      最后显式修正 latest：
-      ```bash
-      npm publish --tag backfill        # 在 v0.4.6 worktree 里
-      npm publish --tag backfill        # 在 v0.5.0 worktree 里
-      npm dist-tag add mingdao-harness@0.5.0 latest
-      ```
-- [ ] 2c. 验证：`npm view mingdao-harness versions` 含 0.4.6 与 0.5.0；
-      `npm view mingdao-harness dist-tags.latest` = 0.5.0
-- [ ] 2d. 从 npm 装一次实测：`npx -y mingdao-harness@0.5.0 --version`
-- [ ] 2e. 确认 `skills-lib/` 在 tarball 内（v0.4.6 修过「36 技能只剩 14」，别再退回去）：
-      `npm pack --dry-run` 里应有 `skills-lib/`
+- [x] 2b. **实际执行修正**：原先计划用 `--tag backfill` 避免 `latest` 回退——但那适用于「补发的版本比
+      当前 latest **更旧**」的情况。v0.4.6 **比 latest(0.4.5) 更新**，所以直接用默认 tag 发布是**升级**
+      而非回退，不需要 backfill。已按默认发布，`latest` 正确升到 0.4.6。
+      （v0.5.0 补发时同理：它比 0.4.6 新，直接默认发布即可。）
+- [x] 2c. 已验证：`versions` 含 0.4.6；`dist-tags.latest` = 0.4.6（v0.5.0 待补发后再升）
+- [x] 2d. 从 npm 实测：`npx -y mingdao-harness@0.4.6 --version` → `mingdao 0.4.6` ✓
+- [x] 2e. 已确认 `skills-lib/` 在 tarball 内（143 个文件、1.2MB packed）——v0.4.6 的「36 技能只剩 14」修复没有被退回
 
 ### 第 3 步：v0.5.0 与 v0.5.1 在四平台有序发布
 
@@ -125,9 +122,10 @@
 | GitHub Release 正文改写 | ⚠️ 无本地 PAT（`gh` 未安装） | 改历史正文 | 已加 CI 作业；负责人决定**不改历史** |
 | Gitee ssh | ✅ 已授权（首次需信任主机密钥） | 推 tag | — |
 | GitCode ssh | ✅ 已授权（首次需信任主机密钥） | 推 tag | — |
-| **Gitee / GitCode Release API** | ❌ 无 token | 建 Release + 传附件 | `MINGDAO_GITEE_TOKEN` / `MINGDAO_GITCODE_TOKEN` |
-| **npm 发布** | ❌ 未登录（ENEEDAUTH） | 发 0.4.6 / 0.5.0 / 0.5.1 | `NPM_TOKEN` 或 `npm login` |
-| **官网部署 + 镜像脚本** | ❌ `mingdao-server` 别名在本机不存在 | `deploy.sh`（scp）/ 镜像脚本读取服务器 `/opt/.../downloads` | `mingdao-server` 的 ssh 配置（主机/密钥） |
+| **Gitee / GitCode Release API** | ✅ 已配置并验证（登录名 MingDaoTCM） | 建 Release | 已写入 gitignored `.env`（600） |
+| **npm 发布** | ✅ 已配置（`~/.npmrc` 600，**不用 argv** 以免 token 进进程列表） | 发 0.5.0 / 0.6.0 | 已就绪 |
+| **官网部署** | ❌ **仍缺两样** | `deploy.sh`（scp 到服务器） | ①你给的 `ssh-rsa AAAAB3…Vvjv` 是**公钥**，本机没有对应**私钥**（`~/.ssh/mingdao_git` 是 ed25519；`~/Downloads/Macbook.pem` 是另一把 RSA，都不匹配）；②`mingdao-server` 的主机地址（IP/域名）本机任何配置里都没有 |
+| 镜像脚本（服务器侧） | ⏸️ 本轮不需要 | 附件已改为只留 GitHub，Release 直接从本机 API 建 | — |
 
 > 凭据一律**只从环境变量或本地 gitignored `.env` 读取，绝不入库**（与既有约定一致）。
 
@@ -148,9 +146,10 @@
 
 | 步骤 | 状态 |
 | --- | --- |
-| 1 官网 v0.4.6 | 🚧 内容已改好并提交（`cd5057c`），待服务器访问后部署 |
-| 1 Gitee/GitCode v0.4.6 | ⏳ 待 token |
-| 2 npm 补齐 0.4.6 / 0.5.0 | ⏳ 待 token（已确认漏发，方案已定：从 tag 发 + `--tag backfill` + 修正 latest） |
+| 1 官网 v0.4.6 | 🚧 内容已改好并提交（`cd5057c`）；**卡在服务器私钥与地址**（见阻塞项） |
+| 1 Gitee/GitCode v0.4.6 | ✅ 完成（tag + Release，不附附件） |
+| 2 npm 补齐 0.4.6 | ✅ 完成（从 tag `v0.4.6` 发布，`latest` 升到 0.4.6） |
+| 2 npm 补齐 0.5.0 | ⏳ 待确认 |
 | 3 v0.5.0 四平台 | ⏳ |
-| 3 v0.5.1 | ⏳ 待确认「补丁版是否可含新功能」 |
-| 4 v0.6.0（C1–C4） | 🚧 C1/C2 已完成，C3/C4 待开发 |
+| 3 v0.5.1 | ❌ **已取消**（负责人 2026-09-11：不发 v0.5.1，确认后直接发完整 v0.6.0） |
+| 4 v0.6.0（C1–C4） | 🚧 C1–C4 均已开发完成；待负责人验收后发布 |

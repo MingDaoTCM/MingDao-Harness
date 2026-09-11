@@ -3,15 +3,14 @@
 # 用法：
 #   MINGDAO_GITEE_TOKEN=xxx MINGDAO_GITCODE_TOKEN=yyy bash scripts/publish-mirror-releases.sh 0.1.65 [备注文件.md]
 #
-# 发行政策（2026-09-11 修订）：**三大平台同步发行**——gitee / gitcode 的 Release 与 GitHub 一样
-# 提供同一批安装包附件，用户可就近下载。
-#   旧政策（2026-08-28）：只创建 Release（正文指向官网）、不上传附件（当时顾虑上传耗时与 gitee 配额）。
-#   已废止：单一入口会劝退用户，且「附件会消失」让第三方镜像无法稳定引用。
-# 如需临时跳过附件（例如只想先占位 tag）：MIRROR_WITH_ATTACH=0。
+# 发行政策（2026-09-11，负责人确认）：**三平台都建 Release，但附件只留在 GitHub**。
+#   · GitHub Release：保留全部安装包附件（长期保留，不再清理）；
+#   · gitee / gitcode：只创建 Release（正文指向官网 https://harness.mingdao.ai/#downloads），
+#     **不上传附件**——国内用户走官网直连，避免 gitee 配额与数小时的上传耗时。
+# 如需恢复附件上传：MIRROR_WITH_ATTACH=1。
 #
-# ⚠ 已知平台限制：gitee 附件单文件上限 100MB，而 AppImage 通常 >100MB 会被拒。
-#   本脚本**逐个文件**判断大小，超限的跳过并在日志与结尾清单里写明（不再让整轮上传失败），
-#   正文里已带官网直连兜底，因此 AppImage 在 gitee 上以官网下载为准。
+# ⚠ 若启用附件上传需知道：gitee 附件单文件上限 100MB，而 AppImage 通常 >100MB 会被拒。
+#   本脚本对附件**逐个文件**判断大小，超限的跳过并在结尾清单里写明（不让整轮上传失败）。
 #
 # 前置条件：
 #   1. 官网服务器 /opt/1panel/www/sites/mingdao-site/downloads/ 已有该版本的 7 个安装包（收割流程产出）
@@ -65,9 +64,9 @@ curl -s -X POST "https://api.gitcode.com/api/v5/repos/MingDaoTCM/MingDao-Harness
   -o /tmp/gc-rel.json -w "gitcode http=%{http_code}\n"
 grep -q tag_name /tmp/gc-rel.json || { echo "gitcode 创建失败"; head -c 300 /tmp/gc-rel.json; exit 1; }
 
-# 附件上传：默认开启（发行政策 2026-09-11：三大平台同步发行）
-if [ "${MIRROR_WITH_ATTACH:-1}" = "0" ]; then
-  echo "已跳过附件上传（MIRROR_WITH_ATTACH=0，仅占位 Release）"
+# 附件上传：默认**关闭**（发行政策 2026-09-11：附件只留在 GitHub，gitee/gitcode 只建 Release）
+if [ "${MIRROR_WITH_ATTACH:-0}" != "1" ]; then
+  echo "已跳过附件上传（政策：附件只留在 GitHub Release；官网直连分发。MIRROR_WITH_ATTACH=1 可恢复）"
   echo "MIRROR_RELEASE_DONE $TAG"
   exit 0
 fi
