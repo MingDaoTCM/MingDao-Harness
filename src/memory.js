@@ -269,7 +269,16 @@ export function appendProjectMemory(/** @type {any} */ workingDir, /** @type {an
   const add = lines.map((/** @type {any} */ l) => l.trim()).filter(Boolean);
   if (!add.length || !workingDir) return 0;
   try {
-    fs.mkdirSync(path.dirname(projectMemoryFile(workingDir)), { recursive: true, mode: 0o700 });
+    const dir = path.dirname(projectMemoryFile(workingDir));
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    // v0.6.0：项目记忆写在**用户的项目目录**里，且由会话收尾**自动**产生（autoProjectMemory 默认开）
+    // ——却没有任何东西阻止它被提交：一次 `git add -A` 就会把这份「关于你和你的工作」的笔记
+    // 提交并推到远端。对一个主打私有化/合规的版本，这种「静默往用户的仓库树里放文件」不可接受。
+    // 用一个自忽略目录（.gitignore 内容为 `*`）兜住；想跟团队共享项目记忆的人删掉它即可（已写进文档）。
+    const gi = path.join(dir, '.gitignore');
+    try {
+      if (!fs.existsSync(gi)) fs.writeFileSync(gi, '*\n', { mode: 0o600 });
+    } catch {}
     const bp = beijingParts(new Date());
     const date = `${bp.year}-${String(bp.month).padStart(2, '0')}-${String(bp.day).padStart(2, '0')}`;
     fs.appendFileSync(

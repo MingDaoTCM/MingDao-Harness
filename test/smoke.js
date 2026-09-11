@@ -1428,6 +1428,17 @@ const ctx = { cwd: tmp };
   const after = loadProjectMemory(wsA).split('\n').filter(Boolean).length;
   assert.ok(removed >= 1 && after === before - removed, '项目记忆去重应删重复');
   assert.equal(loadProjectMemory(wsB), '', '工作空间 B 不应读到 A 的项目记忆');
+  // v0.6.0：项目记忆是**自动**写进用户项目目录的（autoProjectMemory 默认开），
+  // 必须保证它不会被 `git add -A` 顺手提交出去——否则「关于你和你的工作」的笔记会随仓库外传。
+  {
+    const gi = path.join(wsA, '.mingdao', '.gitignore');
+    assert.ok(fs.existsSync(gi), '项目记忆目录必须自带 .gitignore');
+    assert.equal(fs.readFileSync(gi, 'utf8').trim(), '*', '自忽略目录的 .gitignore 内容应为 *');
+    // 幂等：重复写入不得覆盖用户可能改过的 .gitignore
+    fs.writeFileSync(gi, '!keep-me\n');
+    appendProjectMemory(wsA, ['再来一条']);
+    assert.equal(fs.readFileSync(gi, 'utf8').trim(), '!keep-me', '已存在的 .gitignore 不得被覆盖（尊重用户改动）');
+  }
   // 提取（json 路径）
   const fake = { async chat() { return { text: '{"items": ["结构：src 下分 core/web"]}' }; } };
   const lines = await extractProjectMemory(fake, 'deepseek-v4-flash', [{ role: 'user', content: '重构项目结构' }], '');

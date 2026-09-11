@@ -136,7 +136,8 @@
 > 第十轮 T25–T29（实现决策回放时发现的约束引擎 fail-open 与契约缺口）；
 > 第十一轮 T30（出网白名单的重定向绕过）；
 > 第十二轮 T31（Batch 中止不落到服务端——「停了」只是本地幻觉，账单照涨）；
-> 第十三轮 T32/T33（windows CI 连续变红的根因 + install.ps1 的版本判断缺陷）。**
+> 第十三轮 T32/T33（windows CI 连续变红的根因 + install.ps1 的版本判断缺陷）；
+> 第十四轮 T34（项目记忆静默写进用户仓库树，且可被 git add -A 提交）。**
 > 下表为**剩余**项。
 
 ### 第十轮（v0.6.0 实现 C2 时发现，均已修）
@@ -150,6 +151,7 @@
 | T26 | P2 | `arg-forbid` 缺失 `pattern` 退化成 `new RegExp('')`（匹配一切），「忘了写」变成「该参数任何取值都拦」，理由印出 `/undefined/`（✅ 已修：缺失即判不可用并在装载时拒绝） | `src/constraints.js`、`src/packs.js` |
 | T27 | **P1** | `result-forbid` 在 `PACK-API.md` v1 契约表格与引擎头注释中列出，但 kind 集合与实现**都没有它**——下游按冻结契约写会被判「kind 非法」而整包装载失败。成因是 `packs.js` 另存了一份 kind 集合副本并已漂移（✅ 已修：实现补齐 + kind 集合单一来源） | `src/constraints.js`、`src/packs.js`、`docs/PACK-API.md` |
 | T28 | P2 | `arg-forbid` 只校验 `tool` 不校验 `arg`：漏写 `arg` 时引擎读 `args[undefined]` 并与字符串 `"undefined"` 做匹配——看起来在跑、其实判错对象（✅ 已修：装载时要求 `arg` 必填） | `src/packs.js` |
+| T34 | P2 | **项目记忆静默写进用户仓库树、且可被 `git add -A` 提交**（v0.6.0 审计发现）：`appendProjectMemory` 由会话收尾**自动**触发（`autoProjectMemory` 默认开），把「关于你和你的工作」的笔记写进 `<项目>/.mingdao/memory.md`，既不创建 `.gitignore` 也不提示——一次 `git add -A` 就会提交并推到远端。对主打私有化/合规的版本，这种静默副作用不可接受。✅ 已修：创建目录时一并写入 `.gitignore`（内容 `*`）使其自忽略；已存在的 `.gitignore` 不覆盖（尊重用户改动，想共享记忆就删掉它）；已写进 `docs/CONFIG.md` | `src/memory.js`、`docs/CONFIG.md` |
 | T32 | **P1（工程纪律）** | **windows CI 腿连续 5 个提交变红而未被发现**（v0.6.0 C4 引入）：C4 的冒烟断言用 `spawnSync('bash', …)` 验证 **install.sh** 的离线行为，但 install.sh **自己**会拒绝 Windows 并转给 install.ps1 → 断言必然失败。首次修复只判断「有没有 bash」，而 GitHub 的 windows runner **自带 Git Bash**，探测为真、断言照跑 → 仍然红。✅ 已修：能力探测改为「有 bash **且**不在 Windows」——判据是**被测对象是否适用**，不是「能否启动解释器」。更深一层的教训：我连推 5 个提交都没查 CI 结果，已在发版清单加「推送后必须查 CI」的硬规则 | `test/smoke.js`、`.github/workflows/ci.yml`、`docs/RELEASE-CHECKLIST.md` |
 | T33 | P2 | `install.ps1` 的 Node 版本判断只看 major（`-lt 18`）→ **18.0–18.16 被判合格**，而内核 `engines` 要求 ≥18.17，用户会拿到「装得上、跑不起来」的安装。这正是审计 T23 在 POSIX 侧修过、Windows 侧漏掉的同类缺陷（✅ 已修：`[version]'18.17.0'` 完整比较，两处都比较） | `install.ps1` |
 | T31 | **P1** | **Batch 中止不落到服务端 = 用户以为停了、钱照扣**（v0.6.0 审计发现）：`src/batch.js` 只处理服务端**报告** `cancelled` 状态，从不调用取消端点。用户按 Ctrl+C 后本地轮询停止、进程退出，但服务端批次照跑照结算（Batch 0.5× 但全量 token）。对一个主打「成本确定性」的项目，这是最不该有的缺口。✅ 已修：中止与 24h 超时都先 `POST /batches/{id}/cancel`，并按结果如实上报（服务端不支持取消时明确提示「可能仍在计费」，不假装已停） | `src/batch.js` |
