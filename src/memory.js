@@ -10,6 +10,7 @@ import { mingdaoHome, ensureHome } from './config.js';
 import { beijingParts } from './pricing.js';
 import { tokenize } from './session-index.js';
 import { atomicWriteFileSync } from './atomic-write.js';
+import { recordAuxUsage } from './cachestats.js';
 
 export function memoryFile() {
   return path.join(mingdaoHome(), 'AGENTS.md');
@@ -181,6 +182,7 @@ export async function extractMemory(/** @type {any} */ provider, /** @type {any}
     // 结构化输出（评估 4.2-4）：json_object，maxTokens 300→200，解析零失败；网关不支持时回退纯文本
     try {
       const res = await provider.chat({ model, messages: msgs, tools: [], temperature: 0.2, maxTokens: 200, reasoningEffort: 'low', responseFormat: { type: 'json_object' } });
+      recordAuxUsage(model, res?.usage, 'memory-extract'); // v0.4.7：记忆提炼消耗入账
       const j = JSON.parse(String(res.text || '').trim());
       const items = Array.isArray(j?.items) ? j.items : [];
       const clean = items
@@ -319,6 +321,7 @@ export async function extractProjectMemory(/** @type {any} */ provider, /** @typ
     ];
     try {
       const res = await provider.chat({ model, messages: msgs, tools: [], temperature: 0.2, maxTokens: 250, reasoningEffort: 'low', responseFormat: { type: 'json_object' } });
+      recordAuxUsage(model, res?.usage, 'project-memory-extract'); // v0.4.7
       const j = JSON.parse(String(res.text || '').trim());
       const items = Array.isArray(j?.items) ? j.items : [];
       const clean = items

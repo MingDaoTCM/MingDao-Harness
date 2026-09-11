@@ -3798,6 +3798,39 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.4.7 回归：终端转义净化 / 技能描述上限 / 文件锁 fn-EEXIST 不再死循环');
 }
 
+
+// ---------- 63. v0.4.7 回归：辅助模型调用入账（路由分类器 / 标题 / 记忆提炼） ----------
+{
+  const prevHome63 = process.env.MINGDAO_HOME;
+  const home63 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-aux-'));
+  process.env.MINGDAO_HOME = home63;
+  const { recordAuxUsage, listCacheStats, costBreakdown } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+  const { todayCost } = await import(pathToFileURL(path.join(srcDir, 'cost-guard.js')).href);
+
+  // v0.4.7：全新 home 尚无 cache-stats.jsonl → todayCost() 必须是 **0**（今天还没花钱），
+  // 不是 null（「无法判断」）。此前会把首回合护栏判成 degraded 并打印「修复 cache-stats.jsonl」
+  // 的误导告警——让人去修一个不存在的文件。
+  assert.equal(todayCost(), 0, '新建 home 今日费用应为 0（文件不存在 ≠ 统计损坏）');
+  recordAuxUsage('deepseek-v4-flash', { prompt_tokens: 1200, completion_tokens: 20 }, 'route-classify');
+  recordAuxUsage('deepseek-v4-flash', { prompt_tokens: 800, completion_tokens: 60 }, 'auto-title');
+  // 空 usage / null 不得写入任何记录（避免污染账本）
+  recordAuxUsage('deepseek-v4-flash', null, 'noop');
+  recordAuxUsage('deepseek-v4-flash', { prompt_tokens: 0, completion_tokens: 0 }, 'noop2');
+
+  const aux = listCacheStats(50).filter((e) => e.aux === true);
+  assert.equal(aux.length, 2, '应恰好记录 2 条辅助调用（空 usage 被跳过）');
+  assert.ok(aux.some((e) => e.auxReason === 'route-classify'), '应带分类器归因标签');
+  assert.ok(aux.some((e) => e.auxReason === 'auto-title'), '应带标题归因标签');
+  assert.ok(aux.every((e) => Number.isFinite(e.cost) && e.cost > 0), '辅助调用必须有正的估算费用');
+  // 关键：辅助消耗进入今日费用 —— 此前从不入账，「自动路由省钱」无法自证，护栏也少计
+  assert.ok(todayCost() > 0, `辅助调用应计入今日费用（实际 ${todayCost()}）`);
+  assert.ok((costBreakdown().byModel || []).some((m) => m.cost > 0), '分账应包含该模型费用');
+
+  process.env.MINGDAO_HOME = prevHome63;
+  safeRmSync(home63, { recursive: true, force: true });
+  ok('v0.4.7 回归：辅助模型调用入账（分类器/标题/记忆提炼进账本与护栏）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

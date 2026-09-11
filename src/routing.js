@@ -7,6 +7,7 @@
 // 子代理（task）固定走 executor（子任务以执行/调研为主，便宜又够用）。
 
 import crypto from 'node:crypto';
+import { recordAuxUsage } from './cachestats.js';
 import { modelPreset } from './models.js';
 
 export function routingConfig(/** @type {any} */ cfg) {
@@ -108,6 +109,7 @@ export async function routeTask(/** @type {any} */ { cfg, provider, currentModel
       reasoningEffort: 'low',
       responseFormat: { type: 'json_object' },
     });
+    recordAuxUsage(rc.executor, res?.usage, 'route-classify'); // v0.4.7：分类器消耗入账（此前从不记录）
     let verdict = null;
     try {
       const j = JSON.parse(String(res.text || '').trim());

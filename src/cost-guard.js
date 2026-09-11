@@ -34,8 +34,16 @@ export function todayCost() {
     }
     todayCache = { mtime: st.mtimeMs, size: st.size, start, sum };
     return sum;
-  } catch {
-    // MiniMax P0：统计文件损坏/不可读时返回 null（护栏全部失效）而不是静默 0——并一次性告警
+  } catch (/** @type {any} */ err) {
+    // v0.4.7 修复：区分「文件还不存在」与「真的读不了」。
+    // 全新安装的第一个回合必然没有 cache-stats.jsonl —— 那是「今天还没花钱」（0），
+    // 不是「统计损坏」。此前一律返回 null 并打印「修复 cache-stats.jsonl」的告警：
+    // 既误导用户（让人去修一个不存在的文件），又让首回合护栏静默失效。
+    if (err?.code === 'ENOENT') {
+      todayCache = { mtime: 0, size: 0, start, sum: 0 };
+      return 0;
+    }
+    // 真正的读失败：返回 null（护栏无法判断）并一次性告警——绝不静默当 0
     if (!todayCostWarned) {
       todayCostWarned = true;
       console.warn('[MingDao] 费用统计读取失败：今日费用护栏暂时无法判断（修复 cache-stats.jsonl 或重启后恢复）。');

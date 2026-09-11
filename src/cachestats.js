@@ -40,6 +40,10 @@ export function recordCacheStats(/** @type {any} */ entry) {
       pack: entry.pack ? String(entry.pack) : undefined,
       purpose: entry.purpose ? String(entry.purpose) : undefined,
       packCost: Number.isFinite(Number(entry.packCost)) ? Number(entry.packCost) : undefined,
+      // v0.4.7（T17）：辅助模型调用（路由分类器 / 自动标题 / 记忆提炼）标记——
+      // 这些调用不在 agent 回合 usage 里，单独入账，不与回合级重复计费。
+      aux: entry.aux === true ? true : undefined,
+      auxReason: entry.auxReason ? String(entry.auxReason) : undefined,
     });
     fs.appendFileSync(cacheStatsFile(), line + '\n');
     cacheStatsCount += 1;
@@ -177,6 +181,34 @@ export function formatCacheSummary(/** @type {any} */ sum) {
 }
 
 // 分账统计（评估 /cost 升级）：按模型分账、今日费用、batch 半价任务、节省归因
+/**
+ * 记录一次**辅助模型调用**（路由分类器 / 自动标题 / 记忆提炼）的用量（v0.4.7 T17）。
+ * 这些调用各自独立 `provider.chat`，不在 agent 回合的 usage 里，因此单独入账不会重复计费。
+ * 此前它们从不入账：「自动路由省钱」在本框架自己的账本里无法验证，日费用护栏也少计这部分消费。
+ * @param {any} modelName @param {any} usage @param {string} [reason]
+ */
+export function recordAuxUsage(modelName, usage, reason = 'aux') {
+  if (!usage) return;
+  try {
+    const prompt = usage.prompt_tokens || 0;
+    const completion = usage.completion_tokens || 0;
+    if (!prompt && !completion) return;
+    const split = cacheSplit(usage);
+    const cost = split ? estimateCost(modelName, prompt, completion, split) : estimateCost(modelName, prompt, completion, null);
+    recordCacheStats({
+      model: modelName,
+      prompt,
+      completion,
+      hit: split?.hit ?? null,
+      miss: split?.miss ?? null,
+      cost,
+      saved: null,
+      aux: true,
+      auxReason: reason,
+    });
+  } catch {}
+}
+
 /**
  * v0.5.0 A4.5：某垂域 Pack 的「今日」费用（北京自然日）。
  * 来源是 ctx.llm 写的归因标记记录（packCost 字段）——标记记录本身 cost=null 不计入总额，
