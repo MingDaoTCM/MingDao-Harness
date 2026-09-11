@@ -95,6 +95,11 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     const body = await readBody(req, MAX_API_BODY);
     const file = path.basename(String(body.file || ''));
     if (!file) return json(res, 400, { error: '缺少 file 参数' });
+    // v0.4.7（T21）：会话文件不存在应 404；且**不回传底层错误信息**——此前会把
+    // 「ENOENT: ... open '/Users/xxx/.mingdao/sessions/42'」这类绝对路径直接吐给调用方。
+    if (!fs.existsSync(path.join(home, 'sessions', file))) {
+      return json(res, 404, { error: `会话不存在：${file}` });
+    }
     try {
       const loaded = loadSession(path.join(home, 'sessions', file));
       if (loaded.messages.length) {
@@ -116,7 +121,10 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (deps.sessionMemoryCache) deps.sessionMemoryCache.delete(file);
       json(res, 200, { ok: true });
     } catch (/** @type {any} */ e) {
-      json(res, 500, { error: String(e?.message || e) });
+      json(res, 500, { error: '会话收尾失败（详见服务端日志）' });
+      try {
+        console.error('[MingDao] session-finalize 失败：' + String(e?.message || e));
+      } catch {}
     }
     return true;
   }

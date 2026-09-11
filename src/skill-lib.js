@@ -77,8 +77,23 @@ export function writeSourceMeta(dir, meta) {
 /**
  * @param {any} name
  */
-export function trustSkill(name) {
-  const target = path.join(userSkillsDir(), name);
+// v0.4.7（T23）：技能名统一校验（纵深防御）。此前只有 uninstallSkill 校验名字，
+// trustSkill / reinstallSkill / 库安装入口都直接用入参拼路径——一条名为 ".." 的远端索引条目
+// 就足以让 path.join(userSkillsDir(), '..') 指向上级目录（配合 rmSync 后果严重）。
+// 单一来源，所有入口共用。
+/** @param {any} name @returns {string|null} 合法则返回规范化后的名字，否则 null */
+export function assertSafeSkillName(name) {
+  const key = String(name ?? '').trim();
+  if (!key || key === '.' || key === '..') return null;
+  if (!/^[A-Za-z0-9_.-]{1,64}$/.test(key)) return null;
+  if (key.includes('..')) return null;
+  return key;
+}
+
+export function trustSkill(/** @type {any} */ name) {
+  const safe = assertSafeSkillName(name);
+  if (!safe) return { error: `技能名非法：${String(name)}` };
+  const target = path.join(userSkillsDir(), safe);
   const meta = readSourceMeta(target);
   if (!meta) return { error: `技能 ${name} 没有来源记录（无需 trust）` };
   meta.sha256 = skillDirHash(target);
@@ -416,12 +431,11 @@ export async function installFromGit(gitUrl) {
 /**
  * @param {any} name
  */
-export function uninstallSkill(name) {
-  const key = String(name).trim();
-  // '.'/'..' 会拼出上级目录，必须硬拒绝（正则 [A-Za-z0-9_.-]+ 会放行纯点号名）
-  if (key === '.' || key === '..') return { error: `技能名非法：${key}` };
+export function uninstallSkill(/** @type {any} */ name) {
+  const key = assertSafeSkillName(name); // v0.4.7：与 trust/reinstall 共用同一校验
+  if (!key) return { error: `技能名非法：${String(name)}` };
   const target = path.join(userSkillsDir(), key);
-  if (!/^[A-Za-z0-9_.-]+$/.test(key) || !fs.existsSync(path.join(target, 'SKILL.md'))) {
+  if (!fs.existsSync(path.join(target, 'SKILL.md'))) {
     return { error: `用户级未安装技能 ${name}（内置技能不可卸载，可同名覆盖）` };
   }
   fs.rmSync(target, { recursive: true, force: true });
@@ -432,8 +446,10 @@ export function uninstallSkill(name) {
 /**
  * @param {any} name
  */
-export async function reinstallSkill(name) {
-  const target = path.join(userSkillsDir(), name);
+export async function reinstallSkill(/** @type {any} */ name) {
+  const safe = assertSafeSkillName(name);
+  if (!safe) return { error: `技能名非法：${String(name)}` };
+  const target = path.join(userSkillsDir(), safe);
   let meta = /** @type {any} */ ({});
   try {
     meta = JSON.parse(fs.readFileSync(path.join(target, '.mingdao-source.json'), 'utf8'));

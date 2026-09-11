@@ -40,8 +40,10 @@ export function createApiDispatch(deps) {
       return json(res, 403, { error: 'Host 校验失败：请通过绑定地址访问（DNS rebinding 防护）' });
     }
 
-    // CSRF 防护：跨源请求一律拒绝；POST 仅接受 JSON（拦截表单/纯文本跨站盲提交）
-    if (method !== 'GET' && method !== 'OPTIONS') {
+    // CSRF 防护：跨源请求一律拒绝；POST 仅接受 JSON（拦截表单/纯文本跨站盲提交）。
+    // v0.4.7（T21）：HEAD 是安全方法（无请求体），此前落入「必须带 JSON Content-Type」分支 →
+    // 对 /api/state 等做 HEAD 探活会拿到 415，破坏监控/反代脚本。与 GET 同等对待。
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
       const origin = req.headers.origin;
       if (origin) {
         try {

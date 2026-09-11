@@ -259,6 +259,11 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (action === 'addCustom' && (cfg.customModels || {})[name]) {
         return json(res, 400, { error: `自定义模型 ${name} 已存在（可修改）` });
       }
+      // v0.4.7（T21）：updateCustom 此前等同 upsert——名字打错会静默创建一个新模型（垃圾条目）。
+      // 「修改」的语义必须是「必须已存在」。
+      if (action === 'updateCustom' && !(cfg.customModels || {})[name]) {
+        return json(res, 400, { error: `自定义模型 ${name} 不存在（如需新增请用「添加」）` });
+      }
       cfg.customModels = cfg.customModels || {};
       // 修改时保留未提交字段（tokenizer/contextWindow/maxOutputTokens/vision）——
       // 前端「修改」只发 baseUrl+label，整体替换会丢这些声明，导致本地模型窗口回退兜底

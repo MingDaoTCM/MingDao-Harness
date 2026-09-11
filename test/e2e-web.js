@@ -730,6 +730,37 @@ let base = await startWeb(work1);
   ok('fs-browse：目录树浏览 / 隐藏目录过滤 / 相对路径与非法路径拒绝 / 越界拒绝 / 登记闸门（T1）');
 }
 
+// ---------- 18b. v0.4.7 回归：WebUI 边角（非法 JSON / HEAD / updateCustom / session-finalize） ----------
+{
+  const jpost = (path_, body, raw) =>
+    fetch(base + path_, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: raw !== undefined ? raw : JSON.stringify(body),
+    });
+
+  // 非法 JSON 必须 400（此前被静默当 {} → 200，且 /api/config 这类会顺手重写配置）
+  const badJson = await jpost('/api/config', null, 'not json at all');
+  assert.equal(badJson.status, 400, '非法 JSON 请求体应返回 400');
+  const badJsonBody = await badJson.json();
+  assert.ok(String(badJsonBody.error).includes('JSON'), '错误信息应说明是 JSON 解析问题');
+
+  // HEAD 是安全方法：不得因缺少 Content-Type 被判 415
+  const headR = await fetch(base + '/api/state', { method: 'HEAD' });
+  assert.notEqual(headR.status, 415, 'HEAD 不应被当作写方法拒绝（此前 415）');
+
+  // updateCustom 不得 upsert（名字打错不该静默创建新模型）
+  const upd = await (await jpost('/api/models-config', { action: 'updateCustom', name: 'no-such-model-xyz', baseUrl: 'https://example.com/v1' })).json();
+  assert.ok(upd.error && String(upd.error).includes('不存在'), 'updateCustom 对不存在的模型应报错而非创建');
+
+  // session-finalize 缺文件应 404，且不得回显服务端绝对路径
+  const sfR = await jpost('/api/session-finalize', { file: 'no-such-session-xyz.jsonl' });
+  assert.equal(sfR.status, 404, '会话文件不存在应返回 404（此前 500）');
+  const sfBody = await sfR.json();
+  assert.ok(!String(sfBody.error).includes(os.homedir()), '错误信息不得回显服务端绝对路径');
+  ok('WebUI 边角：非法 JSON 400 / HEAD 放行 / updateCustom 不 upsert / session-finalize 404 且不泄露路径');
+}
+
 // ---------- 19. /api/state 首次使用引导字段（桌面版自动初始化配套） ----------
 {
   const st = await (await fetch(base + '/api/state')).json();

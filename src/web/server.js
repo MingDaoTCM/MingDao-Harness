@@ -127,8 +127,12 @@ function readBody(req, limit = 40 * 1024 * 1024) {
       const raw = Buffer.concat(chunks).toString('utf8');
       try {
         settle(resolve, raw ? JSON.parse(raw) : {});
-      } catch {
-        settle(resolve, {});
+      } catch (/** @type {any} */ e) {
+        // v0.4.7（T21）：非法 JSON 此前被静默当成 {} → 200，且 /api/config 这类会「空 body 也落盘」
+        // 的接口会把配置重写一遍；客户端序列化 bug 被完全隐藏。现显式 400。
+        e.status = 400;
+        e.message = `请求体不是合法 JSON：${String(e.message || '').slice(0, 120)}`;
+        settle(reject, e);
       }
     });
     req.on('error', (/** @type {any} */ e) => settle(reject, e));

@@ -126,9 +126,9 @@
 | ~~T18~~ | ✅ 已修 | ~~`withFileLockSync` 把 `fn` 的 `EEXIST` 误判为「锁被占」→ 同步死循环~~ 已用 acquiring 标志分离「抢锁」与「执行 fn」两个阶段 | `src/atomic-write.js:47-70` |
 | T19 | P3 | ~~`workspaces.json` / `session-workspaces.json` 的 read-modify-write 未加锁~~（✅ 已修：add/remove/rename/touch 与三个会话级映射全部移入跨进程锁）；`sync-state.json` 的 RMW 仍未加锁（P3，留待后续——其临界区跨网络调用，需要「末尾合并」式加锁而非整段加锁） | `src/workspace.js`、`src/sync.js:227-242` |
 | T20 | P3 | 调度/任务的生命周期边角：僵尸任务不回收（守护可能空转到 2h）、`killed` 被 worker 的终态写覆盖、无 `/proc` 平台（macOS）无法校验 PID 归属 → 存在 PID 复用误杀风险 | `src/tasks.js:18-43,95-101`、`src/schedule.js:286-318` |
-| T21 | P3 | WebUI 边角：~~草稿槽 `draftTexts` 无上限~~（✅ 已修：LRU 64 槽）、~~`/api/config` 不校验模型名~~（✅ 已修，并保留 `provider:"custom"` 任意端点形态）、`updateCustom` 实为 upsert、非法 JSON body 被当 `{}` 并落盘、`/api/session-finalize` 缺文件返回 500 并回显绝对路径、`HEAD` 被当写方法返回 415 | `web/routes/domains/{sessions,config,misc}.js`、`web/server.js:125`、`routes/api.js:43` |
-| T22 | P3 | TUI/CLI 边角：~~ANSI/OSC 转义直通终端~~（✅ 已修：新增 `sanitizeTerminal`，模型/工具输出统一白名单过滤，保留 `\t`/`\n`）、`box()` 不看终端宽度、隐藏输入把提示语一起隐藏、`key set` 经 argv 传密钥、`batch` 清空全进程 SIGINT 监听、HELP_LINES 两份已分叉 | `src/ui.js`、`src/notify.js`、`src/commands/{key,update}.js`、`src/cli.js` |
-| T23 | P3 | 技能/安装链边角：~~技能 `description` 无长度上限~~（✅ 已修：200 字符上限 + 空白归一）、技能「安装/信任/重装」三入口不校验名称（纵深防御缺口）、`install.sh` 的 `curl \| bash` 失败静默成功且 Node 门槛查 ≥18.0（文档写 ≥18.17） | `src/skills.js:26-39`、`src/skill-lib.js:80`、`install.sh:71,84` |
+| ~~T21~~ | ✅ 已修 | WebUI 边角全部收敛：草稿槽 LRU 64 槽；`/api/config` 校验模型名（保留 `provider:"custom"` 任意端点形态）；`updateCustom` 不再 upsert（不存在即 400）；非法 JSON body → 400（不再静默当 `{}` 并落盘）；`/api/session-finalize` 缺文件 → 404 且不回显服务端绝对路径；`HEAD` 与 `GET` 同等对待（不再 415） | `web/routes/domains/{sessions,config}.js`、`web/server.js:125`、`routes/api.js:44` |
+| T22 | P3 | TUI/CLI 边角：~~ANSI/OSC 转义直通终端~~（✅ `sanitizeTerminal`）、~~`batch` 清空全进程 SIGINT 监听~~（✅ 只摘自己那一个）、`box()` 不看终端宽度、隐藏输入把提示语一起隐藏、`key set` 经 argv 传密钥、HELP_LINES 两份已分叉（**仍未修**） | `src/ui.js`、`src/commands/{key,update}.js`、`src/cli.js` |
+| T23 | P3 | 技能/安装链边角：~~技能 `description` 无长度上限~~（✅ 200 字符上限）、~~技能「安装/信任/重装」三入口不校验名称~~（✅ 统一到 `assertSafeSkillName`：拒绝 `.`/`..`/含 `..`/含分隔符/超长）、`install.sh` 的 `curl \| bash` 失败静默成功且 Node 门槛查 ≥18.0（**仍未修**） | `src/skill-lib.js:85`、`install.sh:71,84` |
 | T24 | P3 | 官网/IDE 边角：openresty 对不存在路径返回 200+首页（死链接不可发现、污染下载计数，需服务器侧 `try_files`）、VS Code「发送选中代码」写全局槽而 WebUI 只读会话槽（功能不生效）、JetBrains 文档要 `./gradlew` 但仓库无 wrapper | 官网 nginx 配置、`ide/vscode/extension.js:65-78`、`src/web/app.js:695`、`ide/jetbrains` |
 
 ## 四、已确认无问题（避免过度修复）

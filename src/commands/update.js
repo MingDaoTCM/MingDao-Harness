@@ -75,7 +75,10 @@ export async function handleUpdateFamily(/** @type {any} */ cmd, /** @type {any}
     }
     console.log(`Batch 半价批处理：${questions.length} 个问题 · 模型 ${model}（价格 ×${0.5}，结果异步返回，最长 24h）`);
     const ac = new AbortController();
-    process.on('SIGINT', () => ac.abort());
+    // v0.4.7（T22）：保存引用，收尾时只摘掉自己这一个监听——removeAllListeners('SIGINT')
+    // 会把同进程其他关闭钩子（如 WebUI 的 SIGINT/SIGTERM 处理）一并拆掉，一旦 batch 被库/服务复用即成隐患。
+    const onSigint = () => ac.abort();
+    process.on('SIGINT', onSigint);
     const r = await runBatch({
       cfg: cfgB,
       model,
@@ -86,7 +89,7 @@ export async function handleUpdateFamily(/** @type {any} */ cmd, /** @type {any}
       signal: ac.signal,
       onStatus: (/** @type {any} */ st) => console.log('  ' + st),
     });
-    process.removeAllListeners('SIGINT');
+    process.removeListener('SIGINT', onSigint);
     if (r.error) {
       console.log('[错误] ' + r.error);
       process.exitCode = 1;
