@@ -3,6 +3,11 @@ name: Desktop
 
 on:
   workflow_dispatch:
+    inputs:
+      normalize_tag:
+        description: '仅改写该 tag 的 Release 正文（如 v0.5.0）；留空则执行签名/公证验证构建'
+        required: false
+        default: ''
   push:
     tags: ['v*']
 
@@ -11,6 +16,8 @@ permissions:
 
 jobs:
   build:
+    # 正文规范化（normalize_tag 非空）时不必再跑三平台构建——那是几十分钟的纯浪费。
+    if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.normalize_tag != '') }}
     strategy:
       fail-fast: false
       matrix:
@@ -147,3 +154,32 @@ jobs:
           # scripts/github-release-cleanup.mjs 删除；该做法已废止——用户应能直接从任一平台下载。
           # 官网 https://harness.mingdao.ai/#downloads 与 gitee/gitcode 的 Release 同步提供同一批包。
           gh release edit "$TAG" -R "$REPO" --notes '桌面版安装包（Windows / macOS / Linux）直接在本页下方附件下载；国内直连极速镜像与校验值见官网：https://harness.mingdao.ai/#downloads —— 本 Release 附件长期保留，不再清理。' >/dev/null 2>&1 || true
+
+  # Release 正文规范化（2026-09-11 发行政策修订的配套）
+  #
+  # 背景：政策从「附件只作构建转运、同步后自动移除」改为「安装包长期保留」后，**历史 Release**
+  # 的正文仍写着「官网同步后即由发布流程自动移除」——正文是用户下单前唯一会读的东西，
+  # 政策变了而正文没变，等于在错误的承诺上继续引导用户。
+  #
+  # 为什么单独做成 workflow_dispatch 作业：改写已有 Release 需要 contents:write，而本地没有 PAT；
+  # 复用工作流自带的 GITHUB_TOKEN，既不需要新密钥，改动也留在 CI 审计里可追溯。
+  # 用法：Actions → Desktop → Run workflow → normalize_tag 填 v0.5.0（只改正文，不构建、不动附件）。
+  normalize-release-notes:
+    if: github.event_name == 'workflow_dispatch' && inputs.normalize_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: 改写指定 tag 的 Release 正文
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.normalize_tag }}
+        run: |
+          set -euo pipefail
+          REPO="${{ github.repository }}"
+          # 确认 Release 存在，避免把拼错的 tag 静默当成成功
+          gh release view "$TAG" -R "$REPO" >/dev/null
+          gh release edit "$TAG" -R "$REPO" --notes '桌面版安装包（Windows / macOS / Linux）直接在本页下方附件下载；国内直连极速镜像与校验值见官网：https://harness.mingdao.ai/#downloads —— 本 Release 附件长期保留，不再清理。'
+          echo "已改写 $TAG 的正文："
+          gh release view "$TAG" -R "$REPO" --json body -q .body
+
