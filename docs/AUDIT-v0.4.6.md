@@ -104,7 +104,8 @@
 > 均已定位到 `file:line` 并有可复现路径；按优先级排列，建议 v0.4.7 / v0.5.0 消化。
 > 消化进度：第二轮 T4–T9、T11–T13、T16；第三轮 T18 / T21（两项）/ T22（转义）/ T23（描述上限）；
 > **第四轮 T15 + T14（调度生命周期）**——这两条是本清单里影响面最大的（同一任务被并发执行两次 / 暂停删除后仍执行）；
-> **第五轮 T17 + F7 + T19；第六轮 T1（工作空间登记闸门）+ T3（技能完整性诚实边界）。**
+> **第五轮 T17 + F7 + T19；第六轮 T1（工作空间登记闸门）+ T3（技能完整性诚实边界）；
+> 第七轮 T21/T22/T23 收尾（WebUI/CLI 边角 + 技能名校验）+ T10（同一会话回合串行化）。**
 > 下表为**剩余**项。
 
 ### 安全 / 隔离
@@ -119,7 +120,7 @@
 
 | # | 级别 | 问题 | 位置 |
 | --- | --- | --- | --- |
-| T10 | P2 | 同一会话并发回合未串行化（`withSessionLock` 只锁单次写，不覆盖 load→推理→写回整段）→ 会话记录交错；若触发自动压缩会整文件覆盖丢另一路消息 | `src/web/server.js:391,487,590,552` |
+| ~~T10~~ | ✅ 已修 | ~~同一会话并发回合未串行化~~ 新增进程级 `busySessions`：同一会话文件同一时刻只允许一个回合，第二个请求收到明确引导（不同会话仍可并行——多任务招牌不变）；用 `res` 的 `close` 兜底释放，避免漏放导致会话永久「忙」 | `src/web/server.js:259-264,405-425` |
 | ~~T14~~ | ✅ 已修 | ~~daemon 模式 `lastTaskId` 仅在跑完后写 → pause/remove 无法停止在途运行；`--offpeak` 等待期间 pause/remove 后仍会启动~~ 现 `markRunning` 与 `runOnce` 启动瞬间即落 `runnerPid`/`lastTaskId`；避峰等待醒来后复查 paused/已删除 | `src/schedule.js:401,455-470` |
 | ~~T15~~ | ✅ 已修 | ~~重复 daemon → 同一调度任务被并发执行两次~~ 四处协同修复：① `spawnDaemon` 的「查活→spawn→写 pidfile」移入跨进程锁（消除并发双 spawn）；② `markRunning` 即写 `runnerPid`、`runOnce` 启动瞬间写 `lastTaskId`（关闭恢复分支的误判窗口）；③ 恢复分支先看 `procAlive(runnerPid)`，「宿主还活着就等它」；④ 租约丢失时通知在途 `runSleeper` 退出（`shouldStop`）并在收尾后 `process.exit(0)`（此前 every 型常驻协程会把旧 daemon 永远撑住）。新增端到端回归：接管后任务 `runs` 必须为 1（修复前实测为 2） | `src/cli.js:289-345`、`schedule.js:319-350,401,455-470` |
 | ~~T17~~ | ✅ 已修 | ~~辅助模型调用从不入账~~ 新增 `cachestats.recordAuxUsage`（带 `aux`/`auxReason` 标记，独立入账不与回合级重复计费），接入路由分类器 / 自动标题（两处）/ 记忆提炼（两处） | `src/cachestats.js`、`routing.js:111`、`titles.js:45,60`、`memory.js:185,324` |

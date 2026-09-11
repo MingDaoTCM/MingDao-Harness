@@ -257,6 +257,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   // 任务注册表：支持多会话并行——每个任务独立的 SSE 流、权限确认、中断控制
   let inflight = 0; // 质检 S2：在途聊天请求计数（与请求生命周期绑定，防 readBody 期间并发超限）
   const tasks = new Map(); // taskId -> { res, send, abortHandler, pendingAsk, session, startedAt, status, message, durationMs }
+  // v0.4.7（T10）：正在跑回合的会话文件集合——同一会话同一时刻只允许一个回合。
+  // 此前 /api/chat 各自 loadSession → 各自推理 → 按完成顺序追加：会话记录会交错
+  // （A/B 互相看不到对方的 user 消息、回答归属错乱）；若其中一路触发自动压缩，
+  // onCompact 的整文件重写会直接丢掉另一路刚追加的消息。不同会话仍可并行（多任务招牌不变）。
+  const busySessions = new Set();
   let taskSeq = 0;
   // 忙状态通知（v0.4.3 network error 修复）：有 running 任务即「忙」——桌面版据此在生成期
   // 防睡眠/防熄屏（macOS 熄屏会中断 Chromium 网络栈导致 SSE 断连）。onBusy 由调用方注入。
@@ -399,6 +404,27 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     }
     if (!session) session = createSession(home);
     entry.session = session;
+
+    // v0.4.7（T10）：同一会话串行化——已有回合在跑就直接拒绝并给出引导（不同会话可并行）
+    const sessKey = session.file;
+    if (busySessions.has(sessKey)) {
+      entry.status = 'failed';
+      notifyBusy();
+      send({ type: 'error', message: '该会话已有任务在运行：请等待它完成，或新建会话后再并行（不同会话之间仍可并行）。' });
+      clearInterval(progressTimer);
+      res.end();
+      pruneTasks();
+      return;
+    }
+    busySessions.add(sessKey);
+    let sessionClaimReleased = false;
+    const releaseSessionClaim = () => {
+      if (sessionClaimReleased) return;
+      sessionClaimReleased = true;
+      busySessions.delete(sessKey);
+    };
+    // 用 res 的 close 兜底释放（正常结束与客户端断开都会触发），避免漏放导致该会话永久「忙」
+    res.on('close', releaseSessionClaim);
 
     // 自动路由（与 CLI 一致）：规划/生成类任务 → planner（大输出），执行类 → executor；
     // 会话粘滞 + 分类缓存（评估 P2-1），路由结果挂在会话对象上（进程内，不落盘）

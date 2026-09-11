@@ -52,6 +52,11 @@ const mock = http.createServer((req, res) => {
       res.write(`data: ${JSON.stringify(payload)}\n\n`);
       res.end('data: [DONE]\n\n');
     };
+    // v0.4.7（T10）：SLOWCHAT 标记 → 延迟 3 秒再回，用于「同一会话并发回合」的回归
+    if (JSON.stringify(parsed?.messages || []).includes('SLOWCHAT')) {
+      setTimeout(() => sse({ choices: [{ delta: { content: '慢回复完成' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } }), 3000);
+      return;
+    }
     if (!parsed.tools || !parsed.tools.length) {
       return sse({ choices: [{ delta: { content: '摘要' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } });
     }
@@ -289,6 +294,47 @@ let base = await startWeb(work1);
   const abortResp = await fetch(base + '/api/abort', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
   assert.equal(abortResp.status, 200, '中断路由应可用');
   ok('多会话并行：并发完成 + taskId 独立 + 任务面板 + 中断路由');
+}
+
+// ---------- 3b. v0.4.7 回归：同一会话并发回合必须串行化（T10） ----------
+{
+  writeConfig('auto');
+  const workS = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-websess-'));
+  base = await startWeb(workS);
+  requestCount = 0;
+  // 先跑一轮拿到会话文件名
+  const first = await chatOnce(base, '第一个问题');
+  const doneEv = first.find((e) => e.type === 'done');
+  assert.ok(doneEv && doneEv.session, '应返回会话文件名');
+  const sessFile = doneEv.session;
+
+  // 同一会话并发两个回合：一个必须被拒（此前两者各自 loadSession → 记录交错）
+  const [a, b] = await Promise.all([
+    chatOnce(base, { message: '慢的 SLOWCHAT', file: sessFile }),
+    chatOnce(base, { message: '并发的', file: sessFile }),
+  ]);
+  const busy = [a, b].filter((evs) => evs.some((e) => e.type === 'error' && String(e.message).includes('已有任务在运行')));
+  assert.equal(busy.length, 1, `同一会话并发时恰好一个应被拒（实际 ${busy.length} 个）`);
+
+  // 会话文件里不得出现「两条连续 user 消息」这种交错特征
+  const rawLines = fs
+    .readFileSync(path.join(home, 'sessions', sessFile), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => {
+      try {
+        return JSON.parse(l);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean);
+  const roles = rawLines.map((m) => m.role);
+  let consecutiveUser = false;
+  for (let i = 1; i < roles.length; i++) if (roles[i] === 'user' && roles[i - 1] === 'user') consecutiveUser = true;
+  assert.ok(!consecutiveUser, '会话记录不得出现连续 user 消息（并发交错特征）：' + JSON.stringify(roles));
+  safeRm(workS, { recursive: true, force: true });
+  ok('会话串行化：同一会话并发回合被拒 + 会话记录无交错（T10）');
 }
 
 // ---------- 6. 会话列表路由 ----------
