@@ -118,6 +118,14 @@
 | C1.7 | ~~可选 Ed25519 签名~~（C0.4） | ⏳ **未实现**——`--sign-key` 尚未落地；当前只有哈希链完整性校验。写在这里以免被误当作已完成 |
 | C1.6 | 脱敏回归 | ✅ 已做：喂入含 `sk-` / Bearer / **嵌套**私网 IP / 家目录的参数，导出物与落盘文件中都搜不到明文（**这是本步最重要的断言**） |
 
+**C2 实施记录**：
+- 四类差异已实现并各有断言：`now-blocked`（当时放行、今天被红线拦住 —— 合规复检最关心的一类）、
+  `now-denied`、`still-blocked`、`relaxed`；`now-blocked > 0` 时 CLI 退出码为 1，可直接当门禁。
+- **`ask` 不等于 `deny`**：回放如实报 `ask`，不替用户回答（有专门断言钉住）。
+- 局限如实写进输出而非留给用户自己踩：无生效约束时必须明说「本次只能证明这一点」（否则
+  「0 条被拦」会被误读成「历史操作都合规」）、回放基于**脱敏后**参数、不重放模型输出。
+- 权限档位与记录不同时给出提示，避免把「档位变化」误读成「规则变化」。
+
 **C1 实施记录（已完成部分）**：
 - 八类事件全部接线，实测一次真实回合（fake provider + 工具调用）产出
   `run.start → model.round → tool.call → tool.result → model.round → cost → run.end`，哈希链完整；
@@ -145,6 +153,8 @@
 | C2.1 | `mingdao ledger replay <runId>`：按当前权限/约束栈重评工具序列 | 构造「账本里放行、今天会被 tool-deny 拦住」的用例，输出 `now-denied` |
 | C2.2 | 差异报告（json / 人读表格），含「同一摘要」与「参数已变」两类 | 断言两类差异都能被区分 |
 | C2.3 | 可选 `--live`：带 provider 一起跑 | 无 provider 时明确报错，不静默降级 |
+| C2.4 | 抽出 `evaluatePermission` 纯判定（回放需要无副作用的判定；`check()` 会弹交互询问） | ✅ 已做：与旧 `check()` 在 **162 组用例**（3 档位 × 3 allow × 3 deny × 6 工具/参数）上逐一对比，**行为零漂移**；判定只此一份，避免「同一规则两份实现」漂移 |
+| C2.5 | ~~可选 `--live`（带 provider 一起跑）~~ | ⏳ **未实现**——当前只做决策回放；`--live` 未落地，写在此处以免被误当作已完成 |
 
 ### C3. 出网白名单与自证（约 3–4 天）
 
@@ -197,8 +207,8 @@ README 增「合规与确定性」小节（含 C0.4/C3.4 两处诚实边界）�
 | --- | --- | --- |
 | C0 设计拍板 | ✅ 完成 | 本文件 §二（五条决策 + 两条诚实边界） |
 | C1 账本 + 导出 | ✅ 完成（可选签名未做） | `src/ledger.js`（写入器/哈希链/两级脱敏/配额轮转/导出）+ `src/commands/ledger.js`（list/show/export/verify）+ agent 接线（run.start / model.round / tool.call / tool.result / constraint / permission / cost / run.end 八类全部落地）|
-| C2 决策回放 | ⏳ 下一步 | — |
-| C3 出网白名单 | ⏳ 待开始 | — |
+| C2 决策回放 | ✅ 完成 | `src/replay.js`（四类差异 now-blocked/now-denied/still-blocked/relaxed）+ `mingdao ledger replay [--json]`（now-blocked 时退出码 1，可当 CI 门禁）+ 抽出 `evaluatePermission` 纯判定 |
+| C3 出网白名单 | ⏳ 下一步 | — |
 | C4 离线安装 + 信创预设 | ⏳ 待开始 | — |
 | C5 发布 | ⏳ 待开始 | — |
 

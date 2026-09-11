@@ -15,6 +15,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 import { mingdaoHome } from './config.js';
+import { isValidPattern, PATTERN_KINDS, KINDS } from './constraints.js';
 import { registerTool } from './tools/index.js';
 
 /** 本内核支持的 Pack API 主版本 */
@@ -27,7 +28,11 @@ const RESERVED_PACK_NAMES = new Set(['core', 'mcp', 'mingdao', 'pack', 'builtin'
 /** 工具名白名单（与 registerTool 同一正则） */
 const TOOL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 /** 约束 kind 合法集合（v1） */
-export const CONSTRAINT_KINDS = new Set(['tool-deny', 'tool-arg-require', 'arg-forbid', 'output-forbid', 'completeness', 'confirm']);
+// v0.6.0：约束 kind 的**唯一来源**是引擎（constraints.js 的 KINDS）。
+// 此前这里有一份独立副本，已经真实漂移：契约文档承诺的 result-forbid 只加进了文档、
+// 两边集合都没有它，于是下游照契约写的 result-forbid 被判「kind 非法」而整包装载失败。
+// 保留 CONSTRAINT_KINDS 这个名字只为兼容既有导出，语义上就是 KINDS 本身。
+export const CONSTRAINT_KINDS = KINDS;
 /** manifest 允许的顶层字段（未知字段拒绝，防拼写错误被静默忽略） */
 const KNOWN_MANIFEST_FIELDS = new Set(['apiVersion', 'name', 'displayName', 'version', 'engines', 'description', 'author', 'license', 'permissions', 'contributes', 'budget']);
 const KNOWN_CONTRIBUTES = new Set(['tools', 'provider', 'presets', 'promptSections', 'constraints', 'skills', 'commands', 'memorySchema']);
@@ -240,7 +245,20 @@ function validateConstraint(c, i) {
   if (c.kind === 'completeness' && (!Array.isArray(c.fields) || !c.fields.length)) {
     return `${tag}（completeness）需要非空 fields 数组`;
   }
-  if (c.kind === 'output-forbid' && typeof c.pattern !== 'string') return `${tag}（output-forbid）需要 pattern 字段`;
+  if (c.kind === 'arg-forbid' && (typeof c.arg !== 'string' || !c.arg.trim())) {
+    return `${tag}（arg-forbid）需要 arg 字段（要禁止的参数名）`;
+  }
+  if (c.kind === 'result-forbid' && (typeof c.tool !== 'string' || !c.tool.trim())) {
+    return `${tag}（result-forbid）需要 tool 字段`;
+  }
+  // v0.6.0：pattern 类约束必须在**装载时**就拒绝坏正则，而不是等运行时。
+  // 修复前只检查 output-forbid 且只检查「是不是字符串」——`pattern: "["` 能通过装载校验，
+  // 然后在运行时被 engine 静默丢弃或永不命中，于是作者以为有红线、实际没有。
+  // 这里与 engine 共用 isValidPattern（单一口径），并顺带拒掉「忘了写 pattern」——
+  // 后者在运行时会变成 `new RegExp('')` 匹配一切，比作者本意严得多。
+  if (PATTERN_KINDS.has(c.kind) && !isValidPattern(c.pattern)) {
+    return `${tag}（${c.kind}）需要 pattern 字段且必须是合法正则（当前：${JSON.stringify(c.pattern)}）`;
+  }
   return null;
 }
 

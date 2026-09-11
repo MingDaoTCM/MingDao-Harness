@@ -4372,6 +4372,205 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.6.0 C1：执行账本（事件流/哈希链篡改可发现/两级脱敏含嵌套/无价显式/配额轮转）');
 }
 
+
+// ---------- 72. v0.6.0 回归：约束引擎的 fail-open 缺陷 + 契约补实现（result-forbid） ----------
+// 缺陷形态是**红线静默消失**：作者以为有约束、实际永不命中。对合规特性来说这比报错严重得多——
+// 报错会被人看见，「看起来在保护你、其实没有」不会。
+{
+  const cs = await import(pathToFileURL(path.join(srcDir, 'constraints.js')).href);
+  const packsMod = await import(pathToFileURL(path.join(srcDir, 'packs.js')).href);
+
+  // 72a. pattern 合法性判定的单一口径
+  assert.equal(cs.isValidPattern('头痛'), true, '合法正则应通过');
+  assert.equal(cs.isValidPattern('a.*b'), true, '合法正则应通过');
+  assert.equal(cs.isValidPattern('['), false, '非法正则必须判为不可用');
+  assert.equal(cs.isValidPattern(''), false, '空串是合法正则但匹配一切——必须判为不可用（这正是「忘了写」的形态）');
+  assert.equal(cs.isValidPattern(undefined), false, '缺失 pattern 必须判为不可用');
+
+  // 72b. arg-forbid 的 pattern 坏掉时必须 fail-closed（修复前：静默永不命中）
+  {
+    const bad = cs.compileConstraints([{ id: 'r1', kind: 'arg-forbid', tool: 'tcm_dosage', arg: 'zhushu', pattern: '[' }]);
+    const v = cs.checkPreTool(bad, 'tcm_dosage', { zhushu: '头痛' });
+    assert.ok(v?.blocked, '非法 pattern 的 arg-forbid 必须阻断（此前 fail-open：永不命中且不进 invalid）');
+    assert.ok(v.reason.includes('pattern'), '阻断理由必须指向配置错误本身，而不是让人猜');
+    assert.ok(!v.reason.includes('/undefined/'), '理由中不得出现 /undefined/ 这类未处理字段的痕迹');
+  }
+  // 缺失 pattern 不再退化成「匹配一切」且理由可读
+  {
+    const miss = cs.compileConstraints([{ id: 'r2', kind: 'arg-forbid', tool: 'tcm_dosage', arg: 'zhushu' }]);
+    const v = cs.checkPreTool(miss, 'tcm_dosage', { zhushu: '任何取值' });
+    assert.ok(v?.blocked, '缺失 pattern 必须阻断');
+    assert.ok(v.reason.includes('pattern'), '理由应指出 pattern 缺失');
+  }
+  // 正常 pattern 的行为不受影响（不能因为加固就把红线变成「见谁都拦」）
+  {
+    const ok = cs.compileConstraints([{ id: 'r3', kind: 'arg-forbid', tool: 'tcm_dosage', arg: 'zhushu', pattern: '头痛' }]);
+    assert.ok(cs.checkPreTool(ok, 'tcm_dosage', { zhushu: '头痛' })?.blocked, '命中时仍应阻断');
+    assert.equal(cs.checkPreTool(ok, 'tcm_dosage', { zhushu: '咳嗽' }), null, '不命中时不得阻断');
+    assert.equal(cs.checkPreTool(ok, 'other_tool', { zhushu: '头痛' }), null, '工具不匹配时不得阻断');
+  }
+  // output-forbid 的坏 pattern 不进生效集合（避免「一个正则写错 = 整个会话无法输出」），但必须可见
+  {
+    const out = cs.compileConstraints([{ id: 'r4', kind: 'output-forbid', pattern: '[', action: 'block' }]);
+    assert.equal(out.all.length, 0, '坏 pattern 的 output-forbid 不得进入生效集合');
+    assert.ok(out.invalid.some((x) => String(x).includes('r4')), '必须计入 invalid 以便装载/校验时报告');
+  }
+
+  // 72c. result-forbid：PACK-API v1 契约已列出、实现却缺席（下游照契约写会被判 kind 非法而整包装载失败）
+  {
+    assert.ok(cs.KINDS.has('result-forbid'), 'result-forbid 必须被识别为合法 kind（契约已承诺）');
+    const rf = cs.compileConstraints([{ id: 'shield', kind: 'result-forbid', tool: 'intake', pattern: '秘方' }]);
+    assert.equal(rf.invalid.length, 0, 'result-forbid 不得被判为非法条目');
+    const hit = cs.checkPostTool(rf, 'intake', { ok: true, output: '这是秘方内容' });
+    assert.ok(hit?.rejected, '结果命中 pattern 时必须拒绝该结果');
+    assert.ok(hit.reason.includes('整改') || hit.reason.includes('合规') || hit.reason.includes('拒绝'), '拒绝理由应可读且可操作');
+    assert.equal(cs.checkPostTool(rf, 'intake', { ok: true, output: '合规表述' }), null, '不命中时不得拒绝');
+    assert.equal(cs.checkPostTool(rf, 'other', { ok: true, output: '秘方' }), null, '工具不匹配时不得拒绝');
+    // 坏 pattern 同样 fail-closed（作用域限于该工具）
+    const rfBad = cs.compileConstraints([{ id: 'shield2', kind: 'result-forbid', tool: 'intake', pattern: '[' }]);
+    assert.ok(cs.checkPostTool(rfBad, 'intake', { ok: true, output: '任意' })?.rejected, 'result-forbid 的坏 pattern 必须 fail-closed');
+    assert.equal(cs.checkPostTool(rfBad, 'other', { ok: true, output: '任意' }), null, 'fail-closed 只作用于它声明的工具');
+  }
+
+  // 72d. kind 集合单一来源：packs.js 与引擎不得再各存一份（此前已真实漂移）
+  {
+    assert.deepEqual([...packsMod.CONSTRAINT_KINDS].sort(), [...cs.KINDS].sort(), 'packs.js 的 kind 集合必须就是引擎的那一个');
+  }
+
+  // 72e. 装载即拒绝坏 pattern：让拼写错误在下游 CI（pack verify）就被拦下，而不是运行时静默降级
+  {
+    const root72 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-pack72-'));
+    const mk = (name, constraints) => {
+      const d = path.join(root72, name);
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(path.join(d, 'pack.json'), JSON.stringify({ apiVersion: 1, name, version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { constraints: true } }));
+      fs.writeFileSync(path.join(d, 'pack.mjs'), `export function createPack() { return { constraints: ${JSON.stringify(constraints)} } }`);
+      return d;
+    };
+    const cases72 = [
+      ['bad-regex', [{ id: 'a', kind: 'arg-forbid', tool: 't', arg: 'x', pattern: '[' }], false],
+      ['no-pattern', [{ id: 'a', kind: 'arg-forbid', tool: 't', arg: 'x' }], false],
+      ['no-arg', [{ id: 'a', kind: 'arg-forbid', tool: 't', pattern: '头痛' }], false],
+      ['bad-output', [{ id: 'a', kind: 'output-forbid', pattern: '[', action: 'block' }], false],
+      ['empty-pattern', [{ id: 'a', kind: 'output-forbid', pattern: '', action: 'block' }], false],
+      ['ok-argforbid', [{ id: 'a', kind: 'arg-forbid', tool: 't', arg: 'x', pattern: '头痛' }], true],
+      ['ok-resultforbid', [{ id: 'a', kind: 'result-forbid', tool: 't', pattern: '秘方' }], true],
+      ['ok-output', [{ id: 'a', kind: 'output-forbid', pattern: '好转', action: 'block' }], true],
+      ['ok-deny', [{ id: 'a', kind: 'tool-deny', tool: 't' }], true],
+    ];
+    for (const [name, cons, shouldLoad] of cases72) {
+      const r = await packsMod.loadPack(mk(name, cons));
+      assert.equal(Boolean(r.ok), shouldLoad, `${name} 装载结果应为 ${shouldLoad ? '成功' : '被拒'}，实际：${JSON.stringify(r.errors || [])}`);
+    }
+    safeRmSync(root72, { recursive: true, force: true });
+  }
+
+  ok('v0.6.0 回归：约束引擎 fail-closed（坏 pattern 不再静默放行）+ result-forbid 补实现 + kind 单一来源 + 装载即拒绝');
+}
+
+
+// ---------- 73. v0.6.0 C2：决策回放（按当前规则重判历史调用） ----------
+// 承诺「决策回放」而非「模型级回放」——后者要求模型确定性 + 离线同一权重，做不到就不承诺。
+{
+  const prevHome73 = process.env.MINGDAO_HOME;
+  const home73 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-replay-'));
+  process.env.MINGDAO_HOME = home73;
+  const L73 = await import(pathToFileURL(path.join(srcDir, 'ledger.js')).href);
+  const R73 = await import(pathToFileURL(path.join(srcDir, 'replay.js')).href);
+
+  // 造一份历史账本：当时无约束、权限 auto，两步调用都被放行
+  const id73 = L73.newRunId();
+  const led73 = L73.createLedger(id73);
+  led73.runStart({ model: 'deepseek-v4-flash', permission: 'auto' });
+  led73.toolCall({ callId: 'c1', name: 'tcm_dosage', rawArgs: { zhushu: '头痛' }, args: { zhushu: '头痛' }, permission: { decision: 'allow' } });
+  led73.toolResult({ callId: 'c1', name: 'tcm_dosage', ok: true, ms: 10, result: { ok: true } });
+  led73.toolCall({ callId: 'c2', name: 'read', rawArgs: { path: 'a.txt' }, args: { path: 'a.txt' }, permission: { decision: 'allow' } });
+  led73.toolResult({ callId: 'c2', name: 'read', ok: true, ms: 5, result: { ok: true } });
+  led73.runEnd({ status: 'done', priced: false });
+
+  // 73a. 今天没有约束 → 全部无变化，且**必须明说**「今天没有生效约束」
+  {
+    const r = R73.replayRun(id73, { constraints: [], permission: 'auto' });
+    assert.equal(r.ok, true, '回放应成功');
+    assert.equal(r.summary.total, 2, '应回放出 2 步工具调用');
+    assert.equal(r.summary.nowBlocked, 0, '没有约束时不应出现「被红线拦住」');
+    assert.equal(r.summary.unchanged, 2, '没有约束时两步都应判为无变化');
+    assert.ok(r.notes.some((n) => n.includes('没有任何生效的领域约束')),
+      '没有约束时必须显式说明，否则「0 条被拦」会被误读成「历史操作都合规」');
+    assert.ok(r.notes.some((n) => n.includes('脱敏')), '必须提示回放基于脱敏参数这一局限');
+    assert.ok(r.notes.some((n) => n.includes('模型')), '必须说明不重放模型输出（不承诺做不到的事）');
+  }
+
+  // 73b. 新增一条红线 → 对应步骤判为 now-blocked（这正是合规复检要的结论）
+  {
+    const r = R73.replayRun(id73, {
+      constraints: [{ id: 'no-zhushu', kind: 'arg-forbid', tool: 'tcm_dosage', arg: 'zhushu', pattern: '头痛' }],
+      permission: 'auto',
+    });
+    assert.equal(r.summary.nowBlocked, 1, '新红线应拦住历史的那一步');
+    assert.equal(r.summary.unchanged, 1, '不相关的另一步不应受影响');
+    const hit = r.steps.find((x) => x.kind === R73.KIND.NOW_BLOCKED);
+    assert.equal(hit.name, 'tcm_dosage', '被拦的应是 tcm_dosage');
+    assert.equal(hit.then.blocked, false, '当时并未被拦');
+    assert.equal(hit.now.blocked, true, '今天会被拦');
+    assert.ok(String(hit.now.constraintReason).includes('no-zhushu'), '结论应指出是哪条红线');
+  }
+
+  // 73c. 当时被拦、今天仍被拦 → still-blocked（不能与 now-blocked 混为一谈）
+  {
+    const id73b = L73.newRunId();
+    const l2 = L73.createLedger(id73b);
+    l2.runStart({ model: 'm', permission: 'auto' });
+    l2.toolCall({ callId: 'x', name: 'tcm_dosage', rawArgs: { zhushu: '头痛' }, args: { zhushu: '头痛' }, permission: { decision: 'allow' }, constraint: { blocked: true, id: 'no-zhushu', kind: 'arg-forbid' } });
+    const r = R73.replayRun(id73b, {
+      constraints: [{ id: 'no-zhushu', kind: 'arg-forbid', tool: 'tcm_dosage', arg: 'zhushu', pattern: '头痛' }],
+      permission: 'auto',
+    });
+    assert.equal(r.summary.stillBlocked, 1, '当时与今天都被拦应记为 still-blocked');
+    assert.equal(r.summary.nowBlocked, 0, '不应把「一直都被拦」算成新发现');
+  }
+
+  // 73d. 规则放宽 → relaxed（同样值得复核：红线是不是被误删了）
+  {
+    const id73c = L73.newRunId();
+    const l3 = L73.createLedger(id73c);
+    l3.runStart({ model: 'm', permission: 'auto' });
+    l3.toolCall({ callId: 'y', name: 'tcm_dosage', rawArgs: {}, args: {}, permission: { decision: 'allow' }, constraint: { blocked: true, id: 'old-rule', kind: 'tool-deny' } });
+    const r = R73.replayRun(id73c, { constraints: [], permission: 'auto' });
+    assert.equal(r.summary.relaxed, 1, '当时被拦、今天放行应记为 relaxed');
+  }
+
+  // 73e. 权限档位变化 → now-denied，并在权限档位不同时给出提示
+  {
+    const id73d = L73.newRunId();
+    const l4 = L73.createLedger(id73d);
+    l4.runStart({ model: 'm', permission: 'auto' });
+    l4.toolCall({ callId: 'z', name: 'write', rawArgs: { path: 'a' }, args: { path: 'a' }, permission: { decision: 'allow' } });
+    const r = R73.replayRun(id73d, { constraints: [], permission: { mode: 'ask', deny: ['write'] } });
+    assert.equal(r.summary.nowDenied, 1, '今天的 deny 规则应判为 now-denied');
+    assert.ok(r.notes.some((n) => n.includes('档权限') || n.includes('权限档位')), '权限档位与记录不同时必须提示，避免把差异误读成规则变化');
+    // 权限「ask」不是拒绝：如实报成 ask，而不是替用户回答
+    const r2 = R73.replayRun(id73d, { constraints: [], permission: 'ask' });
+    assert.equal(r2.summary.nowDenied, 0, 'ask 不等于 deny——回放不得替用户回答');
+    assert.equal(r2.steps[0].now.permission, 'ask', 'ask 应如实呈现为 ask');
+  }
+
+  // 73f. 报告可读性与错误路径
+  {
+    const r = R73.replayRun(id73, { constraints: [{ id: 'no-zhushu', kind: 'arg-forbid', tool: 'tcm_dosage', arg: 'zhushu', pattern: '头痛' }], permission: 'auto' });
+    const md = R73.renderReplay(r);
+    assert.ok(md.includes('决策回放'), '报告应有标题');
+    assert.ok(md.includes('今天会被红线拦住'), '报告应给出分类结论');
+    assert.ok(md.includes('不含可信时间戳') || md.includes('脱敏'), '报告应带上局限说明');
+    assert.ok(R73.replayRun('nosuch-000000', {}).error, '回放不存在的账本应报错');
+    assert.equal(R73.replayRun('../../etc/passwd', {}).error !== undefined, true, '非法 runId 应是错误而不是穿越读文件');
+  }
+
+  process.env.MINGDAO_HOME = prevHome73;
+  safeRmSync(home73, { recursive: true, force: true });
+  ok('v0.6.0 C2：决策回放（now-blocked/still-blocked/relaxed/now-denied 四类差异 + ask≠deny + 局限如实声明）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

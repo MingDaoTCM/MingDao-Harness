@@ -47,8 +47,12 @@ function ruleMatches(rule, name, args, forDeny = false) {
   return rule === name;
 }
 
-/** @param {any} rawMode @param {any} io */
-export function createPermission(rawMode, io) {
+/**
+ * 归一化权限配置（v0.6.0 C2：从 check() 中抽出，供**纯函数**判定复用）。
+ * @param {any} rawMode
+ * @returns {{mode: string, allow: any[], deny: any[]}}
+ */
+export function normalizePermission(/** @type {any} */ rawMode) {
   let mode = 'ask';
   let allow = [];
   let deny = [];
@@ -60,6 +64,39 @@ export function createPermission(rawMode, io) {
     deny = rawMode.deny ?? [];
   }
   if (!['ask', 'auto', 'readonly'].includes(mode)) mode = 'ask';
+  return { mode, allow, deny };
+}
+
+/**
+ * **不产生任何副作用**的权限判定（v0.6.0 C2）。
+ *
+ * 为什么必须抽出来：账本回放要在**离线、无人值守**的前提下回答「这条调用今天会不会被拒」，
+ * 而 `check()` 在 deny/写操作档位上会弹交互询问。若回放自己复制一份规则匹配逻辑，
+ * 两处长到不一致只是时间问题——本项目已经因为「同一规则两份实现」栽过（T20 的 PID 归属校验）。
+ * 因此判定只此一份：`check()` 调它拿到决定，再决定要不要问用户。
+ *
+ * 语义与 `check()` 完全一致：deny → allow → auto 全放 → 只读工具放行 →
+ * 只读档的写操作要问 / ask 档要问。区别只在于把「要问」如实报成 `ask`，而不是替用户回答。
+ * @param {any} rawMode
+ * @param {any} name
+ * @param {any} args
+ * @returns {{decision: 'allow'|'deny'|'ask', reason: string, rule: string|null}}
+ */
+export function evaluatePermission(/** @type {any} */ rawMode, /** @type {any} */ name, /** @type {any} */ args = {}) {
+  const { mode, allow, deny } = normalizePermission(rawMode);
+  const hitDeny = deny.find((/** @type {any} */ r) => ruleMatches(r, name, args, true));
+  if (hitDeny) return { decision: 'deny', reason: 'rule-deny', rule: hitDeny };
+  const hitAllow = allow.find((/** @type {any} */ r) => ruleMatches(r, name, args));
+  if (hitAllow) return { decision: 'allow', reason: 'rule-allow', rule: hitAllow };
+  if (mode === 'auto') return { decision: 'allow', reason: 'mode-auto', rule: null };
+  if (READONLY_TOOLS.has(name)) return { decision: 'allow', reason: 'readonly-tool', rule: null };
+  if (mode === 'readonly') return { decision: 'ask', reason: 'readonly-write', rule: null };
+  return { decision: 'ask', reason: 'interactive', rule: null };
+}
+
+/** @param {any} rawMode @param {any} io */
+export function createPermission(rawMode, io) {
+  const { mode, allow, deny } = normalizePermission(rawMode);
 
   return {
     mode,
@@ -73,19 +110,17 @@ export function createPermission(rawMode, io) {
           return false; // 交互通道不可用（管道 EOF/静默 worker）：按拒绝处理
         }
       };
-      // 需要特殊授权时弹出对话框与用户交互，而不是静默拒绝：
-      // 1) 被 deny 规则拦截 → 询问是否本次强制放行
-      if (deny.some((/** @type {any} */ r) => ruleMatches(r, name, args, true))) {
+      // 判定只此一份（evaluatePermission）；这里只负责「需要用户点头时怎么问」。
+      const v = evaluatePermission(rawMode, name, args);
+      if (v.decision === 'allow') return true;
+      // 1) 被 deny 规则拦截 → 询问是否本次强制放行，而不是静默拒绝
+      if (v.decision === 'deny') {
         return askOverride(`规则拦截了 ${name}${summarize(name, args)}，是否本次强制放行？[y/N] `);
       }
-      if (allow.some((/** @type {any} */ r) => ruleMatches(r, name, args))) return true;
-      if (mode === 'auto') return true;
-      if (mode === 'readonly') {
-        // 2) 只读模式下的写操作 → 询问是否本次放行
-        if (READONLY_TOOLS.has(name)) return true;
+      // 2) 只读模式下的写操作 → 询问是否本次放行
+      if (v.reason === 'readonly-write') {
         return askOverride(`只读模式将拦截 ${name}${summarize(name, args)}，是否本次放行？[y/N] `);
       }
-      if (READONLY_TOOLS.has(name)) return true;
       const answer = await io.ask(
         style(`是否允许执行 ${label}${C.bold}${name}${C.reset}${summarize(name, args)} ？[y/N] `, C.yellow)
       );

@@ -12,6 +12,9 @@
 import fs from 'node:fs';
 import { createIO, style, C } from '../ui.js';
 import { listRuns, readRun, verifyRun, exportRun, isValidRunId, ledgerDir } from '../ledger.js';
+import { replayRun, renderReplay, KIND } from '../replay.js';
+import { loadConfig } from '../config.js';
+import { getActivePackContext } from '../packs.js';
 
 /** @param {any} cmd @param {any} args */
 export async function handleLedger(cmd, args) {
@@ -81,6 +84,31 @@ export async function handleLedger(cmd, args) {
     return true;
   }
 
+  if (sub === 'replay') {
+    // 当前规则栈：显式配置的 constraints 优先，否则取进程级已挂载的 Pack 约束；
+    // 权限取 config.permission（缺省 ask）。回放**不联网、无副作用**。
+    const cfg = loadConfig() || {};
+    const currentConstraints = Array.isArray(cfg.constraints) ? cfg.constraints : getActivePackContext()?.constraints ?? [];
+    const r = replayRun(runId, { constraints: currentConstraints, permission: cfg.permission ?? 'ask' });
+    if (r.error || !r.summary) {
+      io.print(String(r.error ?? '回放失败'));
+      process.exitCode = 1;
+      return true;
+    }
+    const summary = r.summary;
+    if (flag('--json')) {
+      io.print(JSON.stringify({ runId: r.runId, summary, steps: r.steps, notes: r.notes }, null, 2));
+    } else {
+      io.print(renderReplay(r).trimEnd());
+    }
+    // 非零退出码让它能当门禁用：CI 里「新红线必须能拦住历史上那批操作」就是这个断言
+    if (summary.nowBlocked > 0) {
+      process.exitCode = 1;
+      if (!flag('--json')) io.print(style(`\n↑ 有 ${summary.nowBlocked} 步今天会被红线拦住：若这正是新红线的目的，回放通过；否则说明规则收得过紧。`, C.yellow));
+    }
+    return true;
+  }
+
   if (sub === 'export') {
     const format = String(flag('--format', 'json'));
     if (format !== 'json' && format !== 'md') {
@@ -108,6 +136,6 @@ export async function handleLedger(cmd, args) {
     return true;
   }
 
-  io.print('用法：mingdao ledger list [数量] | show <runId> | export <runId> [--format json|md] [--out 文件] | verify <runId>');
+  io.print('用法：mingdao ledger list [数量] | show <runId> | export <runId> [--format json|md] [--out 文件] | verify <runId> | replay <runId> [--json]');
   return true;
 }

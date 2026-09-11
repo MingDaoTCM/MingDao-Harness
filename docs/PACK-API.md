@@ -174,11 +174,44 @@ export function createPack(ctx) {
   "matched": "好转", "session": "…", "model": "deepseek-v4-flash" }
 ```
 
+**字段要求（v0.6.0 起在装载时强制校验，写错不会静默失效）**
+
+| kind | 必填 | 说明 |
+| --- | --- | --- |
+| `tool-deny` | `tool` | |
+| `tool-arg-require` | `tool`、`requireArg` | |
+| `arg-forbid` | `tool`、`arg`、`pattern` | `pattern` 必须是**合法且非空**的正则 |
+| `output-forbid` | `pattern`、`action` | 同上 |
+| `result-forbid` | `tool`、`pattern` | 同上 |
+| `completeness` | `tool`、`fields[]` | |
+
+**pattern 写错会怎样（这一条值得单独读）**：v0.5.0 的行为是**静默放行**——
+`arg-forbid` 给一个非法正则时求值失败、`re` 为 null，红线**永不命中**且不进 `invalid` 列表，
+作者以为自己有红线、实际没有；给一个缺失的 pattern 则退化成 `new RegExp('')`（匹配一切），
+比本意严得多。这与「fail-closed」的原则直接矛盾。v0.6.0 起：
+
+1. **装载即拒绝**：`pack.json`/`pack.mjs` 里 pattern 类约束的 pattern 缺失或非法 → Pack 装载失败
+   并给出可操作的错误（`pack verify` 是下游 CI 门禁，因此拼写错误在 CI 就会被拦下）；
+2. **运行期 fail-closed**：作用域限于某工具的 `arg-forbid` / `result-forbid` 若 pattern 仍然坏掉
+   （例如绕过装载校验直接传约束），只阻断**那个工具**并明说「配置有误」，而不是放行、也不是拦下全部；
+3. `output-forbid` 的 pattern 坏掉时不进生效集合（否则「一个正则写错」会变成「整个会话无法输出」），
+   但会被计入 `invalid` 并在装载/校验时报告。
+
 **设计原则**
 - 约束**只能收紧、不能放松**权限（约束不授予任何权限）；
 - 约束失败**默认 fail-closed**（拿不准就阻断并提示），与 hooks 同口径；
 - 每条约束必须有 `id`，便于审计与测试；
-- 提供 `mingdao constraint test <pack>`：对每条约束跑一遍内置反例样本（下游 CI 用）。
+- 约束 kind 的**唯一来源**是引擎（`src/constraints.js` 的 `KINDS`）。此前 `packs.js` 另有一份副本，
+  已经真实漂移并导致下游照契约写的 `result-forbid` 被判「kind 非法」而整包装载失败。
+
+**§4.1 已知缺口（v1 契约中列出、但尚未实现——请勿依赖）**
+
+| 项 | 状态 |
+| --- | --- |
+| `require-citation`（输出前 kind） | ❌ **未实现**。当前 `KINDS` 中没有它，写进 Pack 会被判 kind 非法。需要先定「什么算引用来源」的规格（与下游一起定），故不在此处擅自实现 |
+| `mingdao constraint test <pack>` | ❌ **未实现**。目前请用 `pack verify`（静态校验）+ 自己写的反例测试 |
+
+> 把缺口写在契约里而不是留在文档里当承诺：下游按本文档迁移时，能一眼看到哪些不能依赖。
 
 ---
 
