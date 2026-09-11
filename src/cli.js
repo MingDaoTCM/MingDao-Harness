@@ -158,6 +158,7 @@ async function main() {
       diagnose: { module: 'diagnose', handler: 'handleDiagnose' },
       pack: { module: 'pack', handler: 'handlePack' }, // v0.5.0：垂域 Pack 查看/校验/脚手架
       ledger: { module: 'ledger', handler: 'handleLedger' }, // v0.6.0 C1：执行账本（导出/校验）
+      net: { module: 'net', handler: 'handleNet' }, // v0.6.0 C3：出网白名单与出网自证
     });
     const hit = dispatchTable[opts.prompt[0]];
     if (hit) {
@@ -408,6 +409,14 @@ async function main() {
     for (const w of packCtx.warnings) console.error(`[MingDao] ⚠ ${w}`);
     if (packCtx.mounted.length && !jsonMode) {
       io.print(style(`📦 已加载垂域 Pack：${packCtx.mounted.map((p) => `${p.name} v${p.version}`).join(', ')}`, C.dim));
+    }
+  }
+  // v0.6.0 阶段 C3：出网闸门（未配置 config.net 时不安装，既有行为零影响）
+  {
+    const { installEgressGate } = await import('./net-guard.js');
+    if (installEgressGate(cfg.net) && !jsonMode) {
+      const pol = cfg.net || {};
+      io.print(style(`🌐 出网白名单已启用（mode=${pol.mode === 'block' ? 'block' : 'warn'}，${Array.isArray(pol.allow) ? pol.allow.length : 0} 条规则）：mingdao net report 查看明细`, C.dim));
     }
   }
   // 会话级 undo 备份仓：模型切换、子代理均共享，撤销记录不丢失

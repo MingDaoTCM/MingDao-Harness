@@ -225,6 +225,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   {
     const { mountPacks } = await import('../packs.js');
     const packCtx = await mountPacks(cfg, { cwd: process.cwd() });
+    // v0.6.0 C3：Web 服务是同进程的出网主体之一（模型调用/技能库），必须同样过闸门
+    const { installEgressGate } = await import('../net-guard.js');
+    installEgressGate(cfg.net);
     for (const w of packCtx.warnings) console.error(`[MingDao] ⚠ ${w}`);
     if (packCtx.mounted.length) console.error(`[MingDao] 📦 已加载垂域 Pack：${packCtx.mounted.map((p) => `${p.name} v${p.version}`).join(', ')}`);
   }

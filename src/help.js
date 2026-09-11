@@ -32,6 +32,7 @@ export function helpLines({ variant = 'cli', home = '' } = {}) {
         ['  mingdao diagnose           一键生成诊断报告（脱敏打包日志/审计/配置，便于反馈排查）', null],
         // v0.6.0 C1
         ['  mingdao ledger list/show/export/verify 执行账本（每步可审计、脱敏可导出、哈希链可校验）', null],
+        ['  mingdao net report/policy     出网白名单与出网自证（数据不出门可导出）', null],
       ]);
   // 仅会话内才存在的行
   const replOnly = /** @type {Array<[string, string|null]>} */ (isRepl

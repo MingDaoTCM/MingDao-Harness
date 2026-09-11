@@ -164,6 +164,7 @@
 | C3.2 | 在 `fetch`/`http` 出口统一判定：越界记 `net.egress` 事件并按 mode 处理 | block 模式下未列入白名单的请求被拒且入账；warn 模式放行但入账 |
 | C3.3 | `mingdao net report [--since]`：导出「本机访问过哪些外部地址」 | 输出含 host/次数/是否命中白名单；**不含**请求体 |
 | C3.4 | 诚实边界 | 只覆盖**内核自己发起**的请求；bash 里用户自己 `curl` 不走此闸门——文档必须写明，不得声称「全面阻断数据外发」 |
+| C3.5 | 收口方式 | ✅ 只包 `globalThis.fetch` 一处，而不是逐个改调用点——出网点分散在 Provider/fetch 工具/技能库/模型发现/定价/Batch，逐个改既易漏也会随时间漂移（本项目已因「同一规则多份实现」栽过两次）。`sync.js` 自签名证书走 `node:https` 会绕过全局 fetch，已显式调 `decideEgress()` 补上 |
 
 ### C4. 离线/内网安装 + 信创预设（约 3–4 天）
 
@@ -208,8 +209,8 @@ README 增「合规与确定性」小节（含 C0.4/C3.4 两处诚实边界）�
 | C0 设计拍板 | ✅ 完成 | 本文件 §二（五条决策 + 两条诚实边界） |
 | C1 账本 + 导出 | ✅ 完成（可选签名未做） | `src/ledger.js`（写入器/哈希链/两级脱敏/配额轮转/导出）+ `src/commands/ledger.js`（list/show/export/verify）+ agent 接线（run.start / model.round / tool.call / tool.result / constraint / permission / cost / run.end 八类全部落地）|
 | C2 决策回放 | ✅ 完成 | `src/replay.js`（四类差异 now-blocked/now-denied/still-blocked/relaxed）+ `mingdao ledger replay [--json]`（now-blocked 时退出码 1，可当 CI 门禁）+ 抽出 `evaluatePermission` 纯判定 |
-| C3 出网白名单 | ⏳ 下一步 | — |
-| C4 离线安装 + 信创预设 | ⏳ 待开始 | — |
+| C3 出网白名单 | ✅ 完成 | `src/net-policy.js`（纯匹配：精确/通配子域/CIDR/回环豁免）+ `src/net-guard.js`（fetch 出口收口、记账、block/warn、账本 sink）+ `mingdao net report/policy`；同步的 `node:https` 路径显式过闸 |
+| C4 离线安装 + 信创预设 | ⏳ 下一步 | — |
 | C5 发布 | ⏳ 待开始 | — |
 
 > 上游另有一条**不阻塞**本计划的待办：Deyi-TCM 回迁在 Linux 原机执行，

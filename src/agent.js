@@ -19,6 +19,7 @@ import { estimateCost, cacheSplit, isPeakHour } from './pricing.js';
 import { resolveProviderConfig, createProvider } from './providers/index.js';
 import { compileConstraints, checkPreTool, checkPostTool, checkOutput, blockedOutputText } from './constraints.js';
 import { createLedger, newRunId } from './ledger.js';
+import { registerEgressSink } from './net-guard.js';
 import { getActivePackContext } from './packs.js';
 
 const MAX_STEPS = 24;
@@ -326,6 +327,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const startedAt = Date.now();
     // v0.6.0 C1：本回合的执行账本（cfg.ledger=false 可关；写失败整体降级为 no-op）
     turnLedger = createLedger(newRunId(), { enabled: cfg.ledger !== false });
+    // v0.6.0 C3：把本回合账本接成出网事件的 sink——这样「这一步向哪些外部地址发了请求」
+    // 与其它账本事件同处一份时间线，而不是散在另一个文件里对不上时间。
+    const offEgressSink = registerEgressSink((info) => {
+      try {
+        turnLedger?.netEgress({ host: info.host, port: info.port, allowed: info.allowed, reason: info.rule ? `命中白名单 ${info.rule}` : info.reason });
+      } catch {}
+    });
     turnLedger.runStart({
       model: modelName,
       provider: cfg.provider ?? null,
@@ -1214,6 +1222,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         } catch {}
         turnLedger = null;
       }
+      offEgressSink();
       offSigint();
     }
   }

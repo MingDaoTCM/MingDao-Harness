@@ -61,6 +61,9 @@ export async function runWorkerTask(id, question, { permission, model, offpeak }
     {
       const { mountPacks } = await import('../packs.js');
       const packCtx = await mountPacks(cfg, { cwd: process.cwd() });
+      // v0.6.0 C3：worker 是独立进程，必须各自安装出网闸门（否则后台任务成为绕过口）
+      const { installEgressGate } = await import('../net-guard.js');
+      installEgressGate(cfg.net);
       for (const w2 of packCtx.warnings) console.error(`[MingDao] ⚠ ${w2}`);
     }
     const permissionObj = createPermission(perm, io);

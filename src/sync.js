@@ -16,6 +16,7 @@ import { loadConfig, saveConfig, mingdaoHome, ensureHome } from './config.js';
 import { loadCredentials, saveCredentials } from './credentials.js';
 import { listSessions, CONFLICT_BACKUP_RE } from './session.js';
 import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
+import { decideEgress, currentPolicy } from './net-guard.js';
 
 const TIMEOUT_MS = 20000;
 // 自签证书（--insecure）只影响同步请求本身，不再改写进程级 NODE_TLS_REJECT_UNAUTHORIZED
@@ -29,6 +30,13 @@ const insecureOn = () => syncSettings()?.insecure === true;
  */
 function rawRequest(target, { headers, body, timeoutMs, insecure }) {
   return new Promise((resolve, reject) => {
+    // v0.6.0 C3：这条路径走 node:https（自签名证书场景），**绕过**全局 fetch 闸门，
+    // 因此必须显式过一遍出网判定——否则「只有自签名证书的部署能外传」会成为一个隐蔽缺口。
+    const egress = decideEgress(target);
+    if (!egress.allowed && currentPolicy()?.mode === 'block') {
+      reject(new Error(`出网被拦截：${egress.host} 不在 config.net.allow 白名单内（mode=block）`));
+      return;
+    }
     const mod = target.protocol === 'http:' ? http : https;
     /** @type {any} */
     const opts = { method: 'POST', headers };

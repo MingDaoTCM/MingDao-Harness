@@ -4210,7 +4210,8 @@ console.log(JSON.stringify({ okOn, xml }));`;
     '  mingdao --preset <名>      应用智能体预设（工具白名单/权限/参数，v0.4.0 契约化）',
     '  mingdao diagnose           一键生成诊断报告（脱敏打包日志/审计/配置，便于反馈排查）',
     '  mingdao ledger list/show/export/verify 执行账本（每步可审计、脱敏可导出、哈希链可校验）',
-  ], `CLI 独有行应恰好是 --preset / diagnose / ledger，实际 ${JSON.stringify(onlyCli)}`);
+    '  mingdao net report/policy     出网白名单与出网自证（数据不出门可导出）',
+  ], `CLI 独有行应恰好是 --preset / diagnose / ledger / net，实际 ${JSON.stringify(onlyCli)}`);
   assert.deepEqual(onlyRepl, ['  /preset      列出/切换智能体预设（v0.4.0 契约化）'],
     `会话内独有行应恰好是 /preset，实际 ${JSON.stringify(onlyRepl)}`);
 
@@ -4569,6 +4570,123 @@ console.log(JSON.stringify({ okOn, xml }));`;
   process.env.MINGDAO_HOME = prevHome73;
   safeRmSync(home73, { recursive: true, force: true });
   ok('v0.6.0 C2：决策回放（now-blocked/still-blocked/relaxed/now-denied 四类差异 + ask≠deny + 局限如实声明）');
+}
+
+
+// ---------- 74. v0.6.0 C3：出网白名单（匹配 / 记账 / 拦截 / 零影响） ----------
+// 这个特性的价值全在「可自证」上，因此断言分两类：判定必须正确（含后缀伪装这类绕过），
+// 以及未配置时**绝不介入**（否则每个既有部署都会被一个默认闸门影响）。
+{
+  const np = await import(pathToFileURL(path.join(srcDir, 'net-policy.js')).href);
+  const ng = await import(pathToFileURL(path.join(srcDir, 'net-guard.js')).href);
+
+  // 74a. 匹配语义
+  assert.equal(np.matchRule('api.deepseek.com', 'api.deepseek.com'), true, '精确主机应匹配');
+  assert.equal(np.matchRule('API.DeepSeek.COM', 'api.deepseek.com'), true, '主机名不区分大小写');
+  assert.equal(np.matchRule('a.example.com', '*.example.com'), true, '通配应匹配子域');
+  assert.equal(np.matchRule('a.b.example.com', '*.example.com'), true, '通配应匹配多级子域');
+  assert.equal(np.matchRule('example.com', '*.example.com'), false, '*.example.com 不得隐式包含裸域（否则是越权放行）');
+  assert.equal(np.matchRule('notexample.com', '*.example.com'), false, '后缀伪装必须不匹配');
+  assert.equal(np.matchRule('evil-example.com', '*.example.com'), false, '连字符伪装必须不匹配');
+  assert.equal(np.matchRule('10.1.2.3', '10.0.0.0/8'), true, 'CIDR 应命中');
+  assert.equal(np.matchRule('11.1.2.3', '10.0.0.0/8'), false, 'CIDR 外不得命中');
+  assert.equal(np.matchRule('10.1.2.3', '10.0.0.0/33'), false, '非法掩码长度不得命中（不能退化成放行一切）');
+  assert.equal(np.matchRule('1.2.3.4', '999.0.0.0/8'), false, '非法 IP 不得命中');
+  assert.equal(np.isLoopback('127.0.0.1'), true, 'loopback 判定');
+  assert.equal(np.isLoopback('localhost'), true, 'localhost 判定');
+  assert.equal(np.isLoopback('[::1]'), true, 'IPv6 loopback 判定');
+  assert.equal(np.isLoopback('127.1.2.3'), true, '整个 127/8');
+  assert.equal(np.isLoopback('10.0.0.1'), false, '私网不等于回环（私网仍需显式列入白名单）');
+
+  // 74b. 判定 + 回环豁免
+  {
+    const P = np.parseNetPolicy({ allow: ['api.deepseek.com'], mode: 'block' });
+    assert.equal(np.checkEgress(P, 'https://api.deepseek.com/v1/chat').allowed, true, '白名单内放行');
+    const denied = np.checkEgress(P, 'https://evil.example.org/x');
+    assert.equal(denied.allowed, false, '白名单外拦截');
+    assert.equal(denied.kind, 'not-listed', '应标明是「不在白名单」');
+    // 回环豁免：本地模型（Ollama/vLLM）是内网/本机主力场景，把它当外发只会制造噪音
+    assert.equal(np.checkEgress(P, 'http://127.0.0.1:11434/api').allowed, true, '回环必须豁免');
+    assert.equal(np.checkEgress(P, 'http://127.0.0.1:11434/api').kind, 'loopback', '应标明豁免原因');
+    // 未配置：一切放行
+    const off = np.parseNetPolicy(undefined);
+    assert.equal(off.enabled, false, '未配置应 disabled');
+    assert.equal(np.checkEgress(off, 'https://anything.example').allowed, true, '未配置时一切放行');
+    assert.equal(np.checkEgress(off, 'https://anything.example').kind, 'disabled', '应标明未启用');
+    // 非法 URL 不得被当成放行
+    assert.equal(np.checkEgress(P, 'not a url').allowed, false, 'URL 解析失败必须按不放行处理');
+  }
+
+  // 74c. 闸门：未配置时不安装（对既有部署零影响），配置后记账且 block 真拦得住
+  const home74 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-net74-'));
+  const prevHome74 = process.env.MINGDAO_HOME;
+  {
+    process.env.MINGDAO_HOME = home74;
+    // 前置：未安装时 fetch 不被包裹
+    assert.equal(ng.installEgressGate(undefined), false, '未配置 config.net 时不得安装闸门（零影响不变量）');
+    assert.equal(ng.isInstalled(), false, '未配置时不应处于已安装状态');
+    assert.equal(ng.decideEgress('https://x.example').allowed, true, '未安装时一切放行');
+    assert.equal(ng.readEgressLog().length, 0, '未安装时不应有任何记账');
+
+    assert.equal(ng.installEgressGate({ allow: ['api.deepseek.com'], mode: 'block' }), true, '配置后应安装');
+    assert.equal(ng.isInstalled(), true, '应处于已安装状态');
+    // 判定 + 记账
+    const ok = ng.decideEgress('https://api.deepseek.com/v1/chat');
+    const no = ng.decideEgress('https://evil.example.org/steal');
+    assert.equal(ok.allowed, true, '白名单内放行');
+    assert.equal(no.allowed, false, '白名单外拦截');
+    const log = ng.readEgressLog();
+    assert.equal(log.length, 2, `白名单内/外各记一条，实际 ${log.length}`);
+    assert.ok(log.every((e) => !('body' in e) && !('url' in e)), '记账只含主机/端口/判定——不得记录请求体或完整 URL');
+    const sum = ng.summarizeEgress(log);
+    assert.equal(sum.blocked, 1, '汇总里的拦截数应为 1');
+    assert.ok(sum.hosts.some((h) => h.host.startsWith('evil.example.org') && h.denied === 1), '汇总应按主机归并并标出拦截');
+
+    // block 模式必须真的拦住 fetch（否则「白名单」只是日志装饰）
+    let blockedMsg = null;
+    try {
+      await fetch('https://evil.example.org/steal');
+    } catch (e) {
+      blockedMsg = String(e?.message || e);
+    }
+    assert.ok(blockedMsg, 'block 模式下越界 fetch 必须抛错');
+    assert.ok(blockedMsg.includes('config.net.allow'), '拦截错误必须给出可操作的放行指引，而不是光秃秃的 network error');
+
+    // warn 模式：放行但记账
+    ng.uninstallEgressGate();
+    assert.equal(ng.installEgressGate({ allow: [], mode: 'warn' }), true, 'warn 模式应安装');
+    const before = ng.readEgressLog().length;
+    const d = ng.decideEgress('https://warn.example.org/x');
+    assert.equal(d.allowed, false, 'warn 模式下判定依然是「未列入」');
+    assert.equal(ng.currentPolicy().mode, 'warn', '模式应为 warn');
+    assert.equal(ng.readEgressLog().length, before + 1, 'warn 模式必须逐条记账（用于先观测再收紧）');
+
+    // 卸载后必须完全还原（测试与运行期都不能留下全局副作用）
+    ng.uninstallEgressGate();
+    assert.equal(ng.isInstalled(), false, '卸载后不应仍处于已安装状态');
+    assert.equal(ng.currentPolicy(), null, '卸载后策略应清空');
+  }
+
+  // 74d. 回合账本的 net.egress sink：出网与其它账本事件同处一条时间线
+  {
+    process.env.MINGDAO_HOME = home74;
+    ng.installEgressGate({ allow: ['api.deepseek.com'], mode: 'warn' });
+    const off = ng.registerEgressSink((info) => { globalThis.__sinkHit = info; });
+    globalThis.__sinkHit = null;
+    ng.decideEgress('https://sketchy.example.org/x');
+    off();
+    assert.ok(globalThis.__sinkHit, 'sink 应收到出网事件');
+    assert.equal(globalThis.__sinkHit.host, 'sketchy.example.org', 'sink 应收到主机名');
+    assert.equal(globalThis.__sinkHit.allowed, false, 'sink 应收到判定结果');
+    ng.decideEgress('https://after-off.example.org/x');
+    assert.equal(globalThis.__sinkHit.host, 'sketchy.example.org', '注销后 sink 不应再收到事件');
+    ng.uninstallEgressGate();
+    delete globalThis.__sinkHit;
+  }
+
+  process.env.MINGDAO_HOME = prevHome74;
+  safeRmSync(home74, { recursive: true, force: true });
+  ok('v0.6.0 C3：出网白名单（匹配含后缀伪装/CIDR/回环豁免 + 记账不记请求体 + block 真拦 + 未配置零影响 + sink）');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });
