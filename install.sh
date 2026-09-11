@@ -51,17 +51,17 @@ fetch_repo(){
       REPO_MODE="git"; cd "$dir"; info "已从 $p 克隆仓库（git）"; return 0
     fi
     rm -rf "$dir"
-    if curl -fsSL -m 120 "$tgz" -o /tmp/mingdao-repo.tgz 2>/dev/null; then
+    if curl -fsSL -m 120 "$tgz" -o "$TMP_TGZ" 2>/dev/null; then
       mkdir -p "$dir"
-      if tar -xzf /tmp/mingdao-repo.tgz -C "$dir" --strip-components=1 2>/dev/null; then
-        rm -f /tmp/mingdao-repo.tgz
+      if tar -xzf "$TMP_TGZ" -C "$dir" --strip-components=1 2>/dev/null; then
+        rm -f "$TMP_TGZ"
         REPO_MODE="tarball"; cd "$dir"
         info "已从 $p 下载源码包（无 .git；升级请重新运行本安装脚本）"
         return 0
       fi
       rm -rf "$dir"
     fi
-    rm -f /tmp/mingdao-repo.tgz
+    rm -f "$TMP_TGZ"
   done
   die "无法获取仓库（git 与源码包下载均失败）。请手动克隆任意平台仓库后，在仓库内运行 bash install.sh。"
 }
@@ -72,6 +72,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 if is_repo "$SCRIPT_DIR"; then
   cd "$SCRIPT_DIR"
 else
+  TMP_TGZ="$(mktemp 2>/dev/null || echo /tmp/mingdao-repo.$$.tgz)"
   info "未在仓库目录中运行，自动获取仓库（平台：${PLATFORM:-自动}）…"
   fetch_repo
 fi
@@ -79,10 +80,16 @@ fi
 # ---------- 1. 检查 Node.js >= 18.17 ----------
 need_node() {
   if command -v node >/dev/null 2>&1; then
-    local major
-    major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-    if [ "$major" -ge 18 ]; then return 0; fi
-    warn "检测到 Node.js $(node -p 'process.versions.node' 2>/dev/null)，需要 >= 18.17"
+    # v0.4.7（T23）：此前只比主版本（>=18），而 package.json 的 engines 与文档都要求 >= 18.17——
+    # Node 18.0–18.16 会被判为合格，随后在运行期才暴露问题。现比较完整的三段版本。
+    local cur
+    cur="$(node -p 'process.versions.node' 2>/dev/null || echo 0.0.0)"
+    local maj min
+    maj="$(printf '%s' "$cur" | cut -d. -f1)"
+    min="$(printf '%s' "$cur" | cut -d. -f2)"
+    maj="${maj:-0}"; min="${min:-0}"
+    if [ "$maj" -gt 18 ] || { [ "$maj" -eq 18 ] && [ "$min" -ge 17 ]; }; then return 0; fi
+    warn "检测到 Node.js $cur，需要 >= 18.17"
     return 1
   fi
   return 1
@@ -96,14 +103,16 @@ install_node() {
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
   # nvm 安装源：官方 raw.githubusercontent → 失败回落 Gitee 镜像（国内可用）
   local official=1
-  if ! curl -fsSL -m 60 https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh -o /tmp/mingdao-nvm.sh 2>/dev/null; then
+  local NVM_TMP
+  NVM_TMP="$(mktemp 2>/dev/null || echo /tmp/mingdao-nvm.$$)"
+  if ! curl -fsSL -m 60 https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh -o "$NVM_TMP" 2>/dev/null; then
     official=0
     warn "nvm 官方源不可达，改用 Gitee 镜像 + npmmirror 的 Node 下载源（国内网络）…"
-    curl -fsSL -m 60 https://gitee.com/mirrors/nvm/raw/master/install.sh -o /tmp/mingdao-nvm.sh || die "nvm 下载失败（官方与镜像均不可达），请手动安装 Node.js 18+"
+    curl -fsSL -m 60 https://gitee.com/mirrors/nvm/raw/master/install.sh -o "$NVM_TMP" || die "nvm 下载失败（官方与镜像均不可达），请手动安装 Node.js 18+"
     export NVM_NODEJS_ORG_MIRROR="${NVM_NODEJS_ORG_MIRROR:-https://npmmirror.com/mirrors/node}"
   fi
-  bash /tmp/mingdao-nvm.sh >/dev/null 2>&1 || true
-  rm -f /tmp/mingdao-nvm.sh
+  bash "$NVM_TMP" >/dev/null 2>&1 || true
+  rm -f "$NVM_TMP"
   # shellcheck disable=SC1090
   [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
   if ! command -v nvm >/dev/null 2>&1; then

@@ -53,16 +53,20 @@ npm install -g mingdao-harness   # 之后 mingdao / mdh 即可用（升级：npm
 
 ```bash
 # Gitee（国内推荐）
-curl -fsSL https://gitee.com/MingDaoTCM/MingDao-harness/raw/main/install.sh | bash -s -- gitee
+curl -fsSL -o /tmp/mingdao-install.sh https://gitee.com/MingDaoTCM/MingDao-harness/raw/main/install.sh && bash /tmp/mingdao-install.sh gitee
 
 # GitCode（国内推荐；其 raw 接口对 curl 有反爬拦截，改用克隆式）
 git clone https://gitcode.com/MingDaoTCM/MingDao-Harness.git MingDao-Harness && cd MingDao-Harness && bash install.sh
 
 # GitHub（海外）
-curl -fsSL https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main/install.sh | bash -s -- github
+curl -fsSL -o /tmp/mingdao-install.sh https://raw.githubusercontent.com/MingDaoTCM/MingDao-Harness/main/install.sh && bash /tmp/mingdao-install.sh github
 ```
 
-> 若某平台的 raw 脚本下载被反爬拦截，把 `| bash` 换成克隆式安装即可（见下方「手动克隆」）。
+> **为什么不是 `curl … | bash`**：管道形式下 curl 失败（网络中断/被反爬拦截）时不会输出任何内容，
+> 右侧 bash 读到 EOF 后**以 0 退出**——终端什么都不打印，用户会以为装好了。先下载再执行可以用
+> `&&` 卡住失败，也能看到真实报错。
+>
+> 若某平台的 raw 脚本下载被反爬拦截，改用克隆式安装（见下方「手动克隆」）。
 
 或手动克隆（建议在本平台克隆，速度最快；目录名统一为 `MingDao-Harness`）：
 
