@@ -300,12 +300,32 @@ export function daemonAlive(/** @type {any} */ home) {
     return false;
   }
 }
+/**
+ * 进程是否存活（best-effort）。EPERM 说明进程存在但无权限发信号 → 视为存活。
+ * @param {any} pid
+ */
+export function procAlive(pid) {
+  const n = Number(pid);
+  if (!Number.isFinite(n) || n <= 0) return false;
+  try {
+    process.kill(n, 0);
+    return true;
+  } catch (/** @type {any} */ e) {
+    return e?.code === 'EPERM';
+  }
+}
+
 export function stopDaemon(/** @type {any} */ home) {
   try {
     // pidfile 格式 "<pid> <nonce>"——必须取首段（此前整串 Number()=NaN，SIGTERM 永远不发，
     // 只删 pidfile → 孤儿 daemon 继续跑，新 daemon 再被拉起 → 双守护重复执行任务）
-    const pid = Number(String(fs.readFileSync(daemonPidFile(home), 'utf8')).trim().split(/\s+/)[0]);
-    if (pid) {
+    const parts = String(fs.readFileSync(daemonPidFile(home), 'utf8')).trim().split(/\s+/);
+    const pid = Number(parts[0]);
+    const nonce = String(parts[1] || '');
+    // v0.4.7：kill 前校验 PID 归属（nonce 命中才动手）——pidfile 可能陈旧，PID 被无关进程复用后
+    // 直接 SIGTERM 会误杀。pidOwnedBy 返回 null（非 Linux 读不到 /proc）时按 best-effort 放行。
+    const owned = nonce ? pidOwnedBy(pid, nonce) : true;
+    if (pid && owned !== false) {
       try {
         process.kill(pid, 'SIGTERM');
       } catch {}
@@ -317,20 +337,28 @@ export function stopDaemon(/** @type {any} */ home) {
   return true;
 }
 export function spawnDaemon(/** @type {any} */ home) {
-  if (daemonAlive(home)) return true;
-  const nonce = Math.random().toString(36).slice(2, 10);
-  const child = spawn(process.execPath, [CLI_PATH, 'schedule-daemon', nonce], {
-    detached: true,
-    stdio: 'ignore',
-    env: { ...process.env, MINGDAO_HOME: home },
+  // v0.4.7（P2 T15）：必须在**跨进程锁内**完成「查活 → spawn → 写 pidfile」这一步。
+  // 此前是「先 daemonAlive 判断、再 spawn、最后写 pidfile」，两个并发调用方都会看到「没有 daemon」
+  // 而各自 spawn 一个：pidfile 被后者覆盖，前者成为无主的第二个 daemon，两者同时监督同一批任务
+  // → 同一个定时任务被**并发执行两次**（有副作用的定时任务尤其危险）。
+  withFileLockSync(daemonPidFile(home) + '.lock', () => {
+    // 锁内复查：已有 daemon 就不再 spawn。返回值语义保持与旧版一致——
+    // 「调用后存在可用 daemon」为 true（无论本次是否真的 spawn），调用方据此判断可用性。
+    if (daemonAlive(home)) return;
+    const nonce = Math.random().toString(36).slice(2, 10);
+    const child = spawn(process.execPath, [CLI_PATH, 'schedule-daemon', nonce], {
+      detached: true,
+      stdio: 'ignore',
+      env: { ...process.env, MINGDAO_HOME: home },
+    });
+    child.on('error', () => {}); // 质检 M12：error 事件必须有监听（ENOENT 等）
+    try {
+      // 原子写（审计 workbuddy P3-4）：tmp+rename 与 writeSchedule 同款——崩溃不留半截 pid 文件
+      const target = daemonPidFile(home);
+      atomicWriteFileSync(target, `${child.pid} ${nonce}`);
+    } catch {}
+    child.unref();
   });
-  child.on('error', () => {}); // 质检 M12：error 事件必须有监听（ENOENT 等）
-  try {
-    // 原子写（审计 workbuddy P3-4）：tmp+rename 与 writeSchedule 同款——崩溃不留半截 pid 文件
-    const target = daemonPidFile(home);
-    atomicWriteFileSync(target, `${child.pid} ${nonce}`);
-  } catch {}
-  child.unref();
   return true;
 }
 
@@ -354,9 +382,17 @@ export function reconcileSchedules(/** @type {any} */ home) {
   spawnDaemon(home);
 }
 // —— sleeper 主循环（schedule-worker 进程内运行）——
-export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id) {
+/**
+ * 任务监督循环（每个调度任务一个协程）。
+ * opts.shouldStop：可选回调——返回 true 时本协程立即退出（v0.4.7 用于「daemon 租约丢失」：
+ * every 型任务是 `for(;;)` 常驻循环，不主动通知就会一直跑下去，旧 daemon 因此无法退出，
+ * 与新 daemon 并跑同一批任务 = 重复执行）。
+ * @param {any} home @param {any} id @param {{ shouldStop?: () => boolean }} [opts]
+ */
+export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id, opts = {}) {
   const job = readSchedule(home, id);
   if (!job) return;
+  const shouldStop = typeof opts.shouldStop === 'function' ? opts.shouldStop : () => false;
 
   const wait = (/** @type {any} */ ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -365,7 +401,10 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
   const markRunning = () => withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
     const c = readSchedule(home, id);
     if (!c || c.status === 'paused') return false; // 已删除或已暂停：不覆盖、不再触发
-    writeSchedule(home, { ...c, status: 'running' });
+    // v0.4.7（T15）：进入 running 的同时就写上宿主 pid。`status=running` 与「lastTaskId 落盘」
+    // 之间存在一个窗口（要等 startTask 返回），期间另一个 daemon 的恢复分支会把它误判成
+    // 「崩溃残留」→ 重置 pending → 并发重跑。带上 runnerPid 后，接管方能立刻判断「宿主还活着，等它」。
+    writeSchedule(home, { ...c, status: 'running', runnerPid: process.pid });
     return true;
   });
 
@@ -397,6 +436,7 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
         if (curN && curN.status !== 'paused') writeSchedule(home, { ...curN, note: `避峰等待至北京时间 ${defer.toISOString().slice(11, 16)}（闲时起执行）` });
       });
       await wait(defer.getTime() - Date.now() + 2000);
+      if (shouldStop()) return 'aborted'; // 睡醒后若已失去租约，直接放弃（避免接管方并跑）
     }
     if (job.after?.length) {
       const st = await depsSatisfied(job.after);
@@ -406,6 +446,11 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
     // 连续失败熔断（审计：右下角「失败：避峰任务」通知刷屏根因）——周期任务失败后按原周期
     // 无限重试且每次失败都弹系统通知；这里记录连续失败次数：重试轮次静默（quietNotify），
     // 连续 3 次失败由 every 主循环熔断停止
+    // v0.4.7（P2 T14）：避峰等待可能长达数小时。醒来后必须复查任务是否已被 pause/remove——
+    // 此前会照样 startTask：暂停的任务被执行、删除的任务留下孤儿 worker（与用户意图相反）。
+    const beforeStart = readSchedule(home, id);
+    if (!beforeStart || beforeStart.status === 'paused') return 'aborted';
+
     const prevFails = Number(readSchedule(home, id)?.consecutiveFailures) || 0;
     const task = startTask(home, job.question, {
       permission: job.permission || undefined,
@@ -413,6 +458,17 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
       cwd: job.cwd || process.cwd(),
       quietNotify: prevFails >= 1,
     });
+    // v0.4.7（P2 T14/T15）：**立刻**把「在跑的任务 id + 宿主 pid」写进 job（锁内）。
+    // 此前只在跑完后才写 lastTaskId：这整个窗口内，另一个 daemon 看到 status=running 且
+    // lastTaskId=null，会误判为「崩溃残留」→ 重置为 pending → 并发重跑同一任务；
+    // 同时 pause/remove 也因为没有任务 id 可杀而无法停止在途运行。
+    try {
+      withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+        const curS = readSchedule(home, id);
+        if (curS) writeSchedule(home, { ...curS, lastTaskId: task.id, runnerPid: process.pid });
+      });
+    } catch {}
+
     // 轮询 worker 状态直至结束（最长 2 小时）；超时清理 worker 防孤儿（审计 P2-8）
     let t = readTask(home, task.id);
     const deadline = Date.now() + 2 * 3600000;
@@ -443,6 +499,7 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
         ...curL,
         lastRunAt: Date.now(),
         lastTaskId: task.id,
+        runnerPid: null, // v0.4.7：本轮已收尾，清掉宿主标记
         runs: (curL?.runs || 0) + 1,
         history: historyL,
         consecutiveFailures: result === 'done' ? 0 : prevFails + 1,
@@ -454,6 +511,7 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id)
   };
 
   for (;;) {
+    if (shouldStop()) return; // v0.4.7：租约丢失/被接管 → 协程立即退出
     const cur = readSchedule(home, id);
     if (!cur || cur.status === 'paused') return;
     const now = Date.now();

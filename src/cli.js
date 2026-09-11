@@ -271,18 +271,25 @@ async function main() {
   // 单守护进程调度器（评估 P3-5）：一进程监督全部调度任务（协程复用 runSleeper），无任务自动退出
   if (opts.prompt[0] === 'schedule-daemon') {
     const home0 = ensureHome();
-    const { listSchedules, runSleeper, sleeperAlive, daemonPidFile, writeSchedule } = await import('./schedule.js');
+    const { listSchedules, runSleeper, sleeperAlive, procAlive, daemonPidFile, writeSchedule } = await import('./schedule.js');
     const { readTask } = await import('./tasks.js');
     const handled = new Set();
     const supervising = new Set(); // 本 daemon 正在监督的任务（防崩溃恢复误判正在执行的任务）
     const nonce = String(opts.prompt[1] || '');
+    // v0.4.7（T15）：租约丢失后置位——在途的 runSleeper 协程据此立即退出。
+    // every 型任务是常驻循环，不通知就永远不结束，旧 daemon 会一直被撑住 → 与新 daemon 并跑。
+    let leaseLost = false;
     try {
       for (;;) {
         // 守护进程租约自检（2026-09-03，防双 daemon）：pidfile 不再等于「我的 pid nonce」
         // 即视为已被 stop 或已被新 daemon 取代——立即退出，绝不与新 daemon 并跑重复执行任务
         try {
-          if (fs.readFileSync(daemonPidFile(home0), 'utf8').trim() !== `${process.pid} ${nonce}`) break;
+          if (fs.readFileSync(daemonPidFile(home0), 'utf8').trim() !== `${process.pid} ${nonce}`) {
+            leaseLost = true;
+            break;
+          }
         } catch {
+          leaseLost = true;
           break; // pidfile 被删 = 已被 stop
         }
         const jobs = listSchedules(home0);
@@ -292,6 +299,10 @@ async function main() {
           // 避免任务永久卡在 running（此前 daemon 重启后既不重跑也不收尾）
           if (j.status === 'running' && !supervising.has(j.id) && !sleeperAlive(j.pid)) {
             const t = j.lastTaskId ? readTask(home0, j.lastTaskId) : null;
+            // v0.4.7（P2 T15）：先看「跑这个任务的宿主进程」是否仍存活。存活说明它正在跑
+            // （可能还没写 lastTaskId），**等它**——否则「本 daemon 刚接管 + 旧 daemon 在途」
+            // 会被当成崩溃残留 → 重置 pending → 并发重跑同一任务。
+            if (procAlive(j.runnerPid)) continue;
             if (!t) {
               await writeSchedule(home0, { ...j, status: 'pending' });
               continue;
@@ -308,7 +319,10 @@ async function main() {
               }
               continue;
             }
-            continue; // worker 仍在跑：等它（外层 2s 轮询）
+            // 走到这里：t.status === 'running' 但宿主进程已死 → 孤儿任务。
+            // 显式重新排队（清掉宿主标记），而不是留一个永远 running 的 job。
+            await writeSchedule(home0, { ...j, status: 'pending', runnerPid: null });
+            continue;
           }
           if (j.status !== 'pending' || handled.has(j.id)) continue;
           if (sleeperAlive(j.pid)) continue; // 旧式 sleeper 仍在：交回给它，避免双跑
@@ -318,7 +332,7 @@ async function main() {
           }
           handled.add(j.id);
           supervising.add(j.id);
-          runSleeper(home0, j.id)
+          runSleeper(home0, j.id, { shouldStop: () => leaseLost })
             .catch(() => {})
             .finally(() => {
               handled.delete(j.id);
@@ -336,7 +350,14 @@ async function main() {
         }
       } catch {}
     }
-    return;
+    // v0.4.7（P2 T15）：租约丢失（或已无待办）后，**等在途任务收尾再主动退出进程**。
+    // 此前只 break 出监督循环：已启动的 runSleeper 协程仍持有定时器把事件循环撑住，
+    // 进程不退出、继续监督 → 与新 daemon 并跑同一批任务（重复执行的第二个来源）。
+    // 上限 5 分钟兜底，避免某个任务卡死导致旧 daemon 永不退出。
+    for (let i = 0; i < 300 && supervising.size > 0; i++) {
+      await new Promise((r) => setTimeout(r, 1000));
+    }
+    process.exit(0);
   }
 
   // 任务队列与调度：mingdao schedule add/list/remove/pause/resume/chain

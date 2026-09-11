@@ -54,6 +54,14 @@ const mock = http.createServer((req, res) => {
       res.end(JSON.stringify({ error: { message: 'mock 故障' } }));
       return;
     }
+    // 双 daemon 回归（v0.4.7 T15）：SCHEDSLOW 的任务响应延迟 6s，制造「在途运行」窗口，
+    // 用于验证 daemon 接管时不会并发重跑同一任务。
+    if (JSON.stringify(parsed?.messages || []).includes('SCHEDSLOW')) {
+      setTimeout(() => {
+        sse({ choices: [{ delta: { content: '慢任务完成' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } });
+      }, 6000);
+      return;
+    }
     if (!parsed.tools || !parsed.tools.length) {
       return sse({ choices: [{ delta: { content: '摘要' }, finish_reason: 'stop' }], usage: { prompt_tokens: 10, completion_tokens: 2 } });
     }
@@ -307,6 +315,83 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   victim.kill('SIGKILL');
   if (sid) await runCli(['schedule', 'remove', sid]);
   ok('守护进程租约：spawn 存活 / 租约自退 / stopDaemon 真正终止');
+}
+
+// ---------- 8. 双 daemon 重复执行回归（v0.4.7 T15） ----------
+// 复现审计报告的场景：任务在途运行期间 daemon 租约被接管。修复前——
+//  ① 恢复分支看到 status=running 且 lastTaskId=null，误判「崩溃残留」→ 重置 pending → 并发重跑；
+//  ② 旧 daemon 只 break 监督循环、不退出进程（在途协程撑住事件循环）→ 与新 daemon 并跑。
+// 断言：任务只被执行一次；且 runOnce 在启动瞬间就把 lastTaskId/runnerPid 落进 job 文件。
+{
+  const { spawnDaemon, daemonPidFile } = await import(pathToFileURL(path.join(root, 'src', 'schedule.js')).href);
+  const jobFile = (id) => path.join(home, 'schedule', id + '.json');
+  const aliveCheck = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+  const readPid = () => {
+    try {
+      return Number(fs.readFileSync(daemonPidFile(home), 'utf8').trim().split(/\s+/)[0]) || 0;
+    } catch {
+      return 0;
+    }
+  };
+  const readJob = (id) => {
+    try {
+      return JSON.parse(fs.readFileSync(jobFile(id), 'utf8'));
+    } catch {
+      return null;
+    }
+  };
+
+  // 用 --at（一次性）而非 --every：周期任务会在测试窗口内合法地跑多轮，无法区分「重复执行」。
+  // 一次性任务只应执行一次 —— runs 必须是 1。
+  // 先用一个远期时间把任务建出来，再把 nextRunAt 直接改到 1 秒后：
+  // 本用例测的是 **daemon 接管行为**，不依赖 CLI 的分钟级时间解析（避免测试受整分边界影响）。
+  const r2 = await runCli(['schedule', 'add', '慢任务 SCHEDSLOW', '--at', fmt(new Date(Date.now() + 3600 * 1000))]);
+  assert.equal(r2.code, 0, r2.err);
+  const sid2 = (r2.out.match(/已创建\s+(\S+)/) || [])[1];
+  assert.ok(sid2, '应创建一次性任务');
+  {
+    const jf = jobFile(sid2);
+    const j0 = JSON.parse(fs.readFileSync(jf, 'utf8'));
+    j0.nextRunAt = Date.now() + 1000;
+    fs.writeFileSync(jf, JSON.stringify(j0, null, 2));
+  }
+
+  spawnDaemon(home);
+  const daemonPid = await waitFor(() => {
+    const p = readPid();
+    return p && aliveCheck(p) ? p : null;
+  }, 15000);
+  assert.ok(daemonPid, 'daemon 应启动');
+
+  // 等在途运行：job 必须出现 lastTaskId + runnerPid（修复前这两项要等跑完才写）
+  const inFlight = await waitFor(() => {
+    const j = readJob(sid2);
+    return j && j.status === 'running' && j.lastTaskId && j.runnerPid ? j : null;
+  }, 25000);
+  assert.ok(inFlight, '任务开始运行后 job 文件应立即带 lastTaskId + runnerPid（否则接管方会误判崩溃）');
+  assert.equal(Number(inFlight.runnerPid), daemonPid, 'runnerPid 应指向正在监督的 daemon');
+
+  // 接管：篡改 pidfile 模拟新 daemon 上位；同时真的拉起一个新 daemon
+  fs.writeFileSync(daemonPidFile(home), '99999999 newcomer');
+  spawnDaemon(home);
+
+  // 旧 daemon 必须在在途任务收尾后退出（修复前它会一直被协程撑住、继续监督）
+  const oldExited = await waitFor(() => (aliveCheck(daemonPid) ? null : true), 40000);
+  assert.ok(oldExited, '旧 daemon 在租约丢失后必须退出（否则与新 daemon 并跑）');
+
+  // 等这轮跑完，核对「只跑了一次」
+  const done = await waitFor(() => {
+    const j = readJob(sid2);
+    return j && Array.isArray(j.history) && j.history.length >= 1 ? j : null;
+  }, 40000);
+  assert.ok(done, '任务应完成一轮');
+  assert.equal(done.runs, 1, `同一任务不得被并发执行两次（实际 runs=${done.runs}）`);
+  assert.equal((done.history || []).length, 1, '历史应只有一条记录');
+
+  const stop = readPid();
+  if (stop) { try { process.kill(stop, 'SIGTERM'); } catch {} }
+  if (sid2) await runCli(['schedule', 'remove', sid2]);
+  ok('双 daemon 重复执行回归：在途标记 + 租约丢失退出（同一任务只执行一次）');
 }
 
 // 清理

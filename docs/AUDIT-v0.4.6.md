@@ -102,8 +102,8 @@
 ## 三、登记待办（14 项，未在本轮修复）
 
 > 均已定位到 `file:line` 并有可复现路径；按优先级排列，建议 v0.4.7 / v0.5.0 消化。
-> 消化进度：第二轮 T4–T9、T11–T13、T16；**第三轮（v0.4.7 批次）** T18（文件锁 fn-EEXIST 死循环）、
-> T22 的 ANSI/OSC 转义注入、T23 的技能描述上限、T21 的草稿槽无上限与 `/api/config` 模型名校验 —— 均已修复并有回归断言。
+> 消化进度：第二轮 T4–T9、T11–T13、T16；第三轮 T18 / T21（两项）/ T22（转义）/ T23（描述上限）；
+> **第四轮 T15 + T14（调度生命周期）**——这两条是本清单里影响面最大的（同一任务被并发执行两次 / 暂停删除后仍执行）。
 > 下表为**剩余**项。
 
 ### 安全 / 隔离
@@ -119,8 +119,8 @@
 | # | 级别 | 问题 | 位置 |
 | --- | --- | --- | --- |
 | T10 | P2 | 同一会话并发回合未串行化（`withSessionLock` 只锁单次写，不覆盖 load→推理→写回整段）→ 会话记录交错；若触发自动压缩会整文件覆盖丢另一路消息 | `src/web/server.js:391,487,590,552` |
-| T14 | P2 | 调度：daemon 模式下 `job.pid` 恒 null、`lastTaskId` 仅在跑完后写 → pause/remove 无法停止在途运行；`--offpeak` 等待期间 pause/remove 后仍会启动 | `src/schedule.js:165-177,389-415` |
-| T15 | P2 | 重复 daemon → 同一调度任务被**并发执行两次**（lease 自检只 break 监督循环，未取消已启动的协程；pidfile 在 spawn 后才写、无 `O_EXCL` 认领）。这是剩余项里影响最大的一条 | `src/cli.js:279-338`、`schedule.js:319-335` |
+| ~~T14~~ | ✅ 已修 | ~~daemon 模式 `lastTaskId` 仅在跑完后写 → pause/remove 无法停止在途运行；`--offpeak` 等待期间 pause/remove 后仍会启动~~ 现 `markRunning` 与 `runOnce` 启动瞬间即落 `runnerPid`/`lastTaskId`；避峰等待醒来后复查 paused/已删除 | `src/schedule.js:401,455-470` |
+| ~~T15~~ | ✅ 已修 | ~~重复 daemon → 同一调度任务被并发执行两次~~ 四处协同修复：① `spawnDaemon` 的「查活→spawn→写 pidfile」移入跨进程锁（消除并发双 spawn）；② `markRunning` 即写 `runnerPid`、`runOnce` 启动瞬间写 `lastTaskId`（关闭恢复分支的误判窗口）；③ 恢复分支先看 `procAlive(runnerPid)`，「宿主还活着就等它」；④ 租约丢失时通知在途 `runSleeper` 退出（`shouldStop`）并在收尾后 `process.exit(0)`（此前 every 型常驻协程会把旧 daemon 永远撑住）。新增端到端回归：接管后任务 `runs` 必须为 1（修复前实测为 2） | `src/cli.js:289-345`、`schedule.js:319-350,401,455-470` |
 | T17 | P2 | 辅助模型调用（路由分类器 / 自动标题 / 记忆提炼）从不 `recordUsage` → 「自动路由省钱」在本框架自己的账本里无法验证，且护栏少计这部分消费 | `src/routing.js:95-110`、`titles.js:31-57`、`memory.js:183,321` |
 | ~~T18~~ | ✅ 已修 | ~~`withFileLockSync` 把 `fn` 的 `EEXIST` 误判为「锁被占」→ 同步死循环~~ 已用 acquiring 标志分离「抢锁」与「执行 fn」两个阶段 | `src/atomic-write.js:47-70` |
 | T19 | P3 | `workspaces.json` / `session-workspaces.json` / `sync-state.json` 的 read-modify-write 未加锁（WebUI 每次建会话都会 touch 工作空间） | `src/workspace.js:32-81`、`src/sync.js:227-242` |
