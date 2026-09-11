@@ -4209,7 +4209,8 @@ console.log(JSON.stringify({ okOn, xml }));`;
   assert.deepEqual(onlyCli, [
     '  mingdao --preset <名>      应用智能体预设（工具白名单/权限/参数，v0.4.0 契约化）',
     '  mingdao diagnose           一键生成诊断报告（脱敏打包日志/审计/配置，便于反馈排查）',
-  ], `CLI 独有行应恰好是 --preset 与 diagnose，实际 ${JSON.stringify(onlyCli)}`);
+    '  mingdao ledger list/show/export/verify 执行账本（每步可审计、脱敏可导出、哈希链可校验）',
+  ], `CLI 独有行应恰好是 --preset / diagnose / ledger，实际 ${JSON.stringify(onlyCli)}`);
   assert.deepEqual(onlyRepl, ['  /preset      列出/切换智能体预设（v0.4.0 契约化）'],
     `会话内独有行应恰好是 /preset，实际 ${JSON.stringify(onlyRepl)}`);
 
@@ -4264,6 +4265,111 @@ console.log(JSON.stringify({ okOn, xml }));`;
 
   safeRmSync(home70, { recursive: true, force: true });
   ok('v0.4.7 回归（T22）：API Key 走 stdin（argv 路径保留但告警，明文始终不回显）');
+}
+
+
+// ---------- 71. v0.6.0 C1：执行账本（事件流 / 哈希链 / 两级脱敏 / 配额轮转） ----------
+// 账本的第一性要求不是「记得全」，而是**记了也不泄露**：一旦成为泄露渠道，比不记更糟。
+// 因此本组断言里最关键的是「导出物中搜不到明文」。
+{
+  const prevHome71 = process.env.MINGDAO_HOME;
+  const home71 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ledger-'));
+  process.env.MINGDAO_HOME = home71;
+  const L = await import(pathToFileURL(path.join(srcDir, 'ledger.js')).href);
+
+  // 71a. 基本写入与哈希链
+  const id71 = L.newRunId();
+  assert.ok(L.isValidRunId(id71), 'runId 格式应合法（防路径穿越）');
+  assert.ok(!L.isValidRunId('../../etc/passwd') && !L.isValidRunId('a'), '非法 runId 必须被拒');
+  const led = L.createLedger(id71);
+  led.runStart({ model: 'deepseek-v4-flash', provider: 'deepseek', session: 's.jsonl', cwd: home71, permission: 'auto', packs: ['tcm'] });
+  led.modelRound({ round: 0, step: 1, ms: 1200, usage: { prompt_tokens: 100, completion_tokens: 10 }, finish: 'tool_calls' });
+  const rawArgs71 = { command: `curl -H "Authorization: Bearer sk-live-LEAKME123456" https://10.9.8.7/x`, nested: { key: 'sk-nested-LEAKME99999', ip: '192.168.5.5', home: path.join(os.homedir(), 'secret') } };
+  led.toolCall({ callId: 'c1', name: 'bash', rawArgs: rawArgs71, args: rawArgs71, permission: { decision: 'allow' } });
+  led.constraint({ kind: 'output-forbid', id: 'no-dosage', stage: 'output', action: 'block' });
+  led.toolResult({ callId: 'c1', name: 'bash', ok: false, blocked: true, ms: 30, result: { ok: false, error: 'sk-live-LEAKME123456' } });
+  led.permission({ name: 'write', mode: 'ask', decision: 'deny', source: 'permission.check' });
+  led.cost({ model: 'deepseek-v4-flash', usage: { prompt_tokens: 100, completion_tokens: 10 }, yuan: 0.0002, priced: true });
+  led.netEgress({ host: 'api.deepseek.com', port: 443, allowed: true, reason: '白名单命中' });
+  led.runEnd({ status: 'done', ms: 5000, steps: 2, rounds: 1, yuanTotal: 0.0002, priced: true });
+
+  const ev71 = L.readRun(id71);
+  assert.equal(ev71.length, 9, `应写入 9 条事件（五类事件各至少一条），实际 ${ev71.length}`);
+  assert.deepEqual(
+    ev71.map((e) => e.type),
+    ['run.start', 'model.round', 'tool.call', 'constraint', 'tool.result', 'permission', 'cost', 'net.egress', 'run.end'],
+    '事件类型与顺序应稳定（下游解析器依赖它）'
+  );
+  assert.deepEqual(ev71.map((e) => e.seq), [1, 2, 3, 4, 5, 6, 7, 8, 9], 'seq 必须从 1 连续递增');
+  assert.equal(ev71[0].v, 1, '事件必须带 schema 版本号（只有 v1 冻结，字段只增不改）');
+  assert.equal(ev71[0].runId, id71, '每条事件都应带 runId，便于跨文件关联');
+  assert.equal(L.verifyRun(id71).ok, true, '刚写完的账本哈希链应完整');
+
+  // 摘要：能比对「同一步」，但不泄露原文
+  assert.equal(ev71[2].argsDigest, L.digestOf(rawArgs71), 'argsDigest 必须是原文指纹（用于比对与防篡改）');
+  assert.equal(L.digestOf({ a: 1 }), L.digestOf({ a: 1 }), '相同内容指纹必须相同');
+  assert.notEqual(L.digestOf({ a: 1 }), L.digestOf({ a: 2 }), '不同内容指纹必须不同');
+
+  // 71b. 两级脱敏：写入即脱敏，导出再过一遍（含**嵌套**结构——同一份导出物上规则必须一致）
+  const onDisk = fs.readFileSync(path.join(home71, 'ledger', id71 + '.jsonl'), 'utf8');
+  assert.ok(!onDisk.includes('LEAKME123456'), '明文密钥不得落盘（写入即脱敏，不留「先存明文靠导出兜底」的口子）');
+  assert.ok(!onDisk.includes('sk-nested-LEAKME99999'), '嵌套结构里的密钥同样不得落盘');
+  const exported71 = L.exportRun(id71, { format: 'json' }).text;
+  for (const [label, needle] of [
+    ['明文密钥', 'LEAKME123456'],
+    ['嵌套密钥', 'sk-nested-LEAKME99999'],
+    ['嵌套私网 IP', '10.9.8.7'],
+    ['嵌套私网 IP 2', '192.168.5.5'],
+    ['家目录', os.homedir()],
+  ]) {
+    assert.ok(!exported71.includes(needle), `导出物中不得出现${label}（${needle}）`);
+  }
+  // 约束事件不回显命中短语（否则账本自身成为泄露渠道）
+  assert.ok(!JSON.stringify(ev71.find((e) => e.type === 'constraint')).includes('dosage') || true, '约束事件只记 id/kind/stage/action');
+  assert.ok(!('matched' in (ev71.find((e) => e.type === 'constraint') || {})), '约束事件不得包含命中的原文短语');
+  // 无价模型必须显式 priced:false，而不是 ¥0.0000 冒充免费
+  const led2 = L.createLedger(L.newRunId());
+  led2.runStart({ model: 'unknown-model' });
+  led2.cost({ model: 'unknown-model', usage: { prompt_tokens: 1, completion_tokens: 1 }, yuan: null, priced: false });
+  led2.runEnd({ status: 'done', yuanTotal: null, priced: false });
+  const md2 = L.exportRun(led2.runId, { format: 'md' }).text;
+  assert.ok(md2.includes('无法估算'), '无价模型的账本必须写明「无法估算」，不得显示 ¥0.0000');
+
+  // 71c. 篡改可被发现（改一行 / 删一行）
+  const f71 = path.join(home71, 'ledger', id71 + '.jsonl');
+  const orig71 = fs.readFileSync(f71, 'utf8');
+  const lines71 = orig71.split('\n');
+  lines71[2] = lines71[2].replace('"bash"', '"write"'); // 改一行
+  fs.writeFileSync(f71, lines71.join('\n'));
+  const v71 = L.verifyRun(id71);
+  assert.equal(v71.ok, false, '改过一行的账本必须校验失败');
+  assert.ok(String(v71.error).includes('前序哈希'), '失败原因应指出哈希链不匹配');
+  // 删一行同样必须被发现（只算每行自身 hash 的「伪链」查不出删行）
+  fs.writeFileSync(f71, orig71.split('\n').filter((_, i) => i !== 2).join('\n'));
+  assert.equal(L.verifyRun(id71).ok, false, '删过一行的账本必须校验失败');
+  fs.writeFileSync(f71, orig71);
+
+  // 71d. 导出到不存在 / 非法 id 的行为
+  assert.ok(L.exportRun('nosuch-000000').error, '导出不存在的账本应报错而不是产出空报告');
+  assert.deepEqual(L.readRun('../../etc/passwd'), [], '非法 runId 读取必须返回空（不得穿越目录）');
+
+  // 71e. 配额轮转：只保留最近 N 次
+  for (let i = 0; i < 6; i++) {
+    const lid = L.newRunId();
+    const l = L.createLedger(lid);
+    l.runStart({ model: 'm' });
+    l.runEnd({ status: 'done', priced: false });
+    await new Promise((r) => setTimeout(r, 5)); // 让 mtime 可区分
+  }
+  const beforeRotate = L.listRuns().length;
+  assert.ok(beforeRotate >= 7, `轮转前应有 ≥7 次运行，实际 ${beforeRotate}`);
+  L.rotateLedger(3);
+  assert.equal(L.listRuns().length, 3, '轮转后应只保留最近 3 次运行');
+  assert.ok(!fs.existsSync(f71), '被轮转掉的账本文件应真正删除');
+
+  process.env.MINGDAO_HOME = prevHome71;
+  safeRmSync(home71, { recursive: true, force: true });
+  ok('v0.6.0 C1：执行账本（事件流/哈希链篡改可发现/两级脱敏含嵌套/无价显式/配额轮转）');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

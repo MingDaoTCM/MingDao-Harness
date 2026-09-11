@@ -28,7 +28,11 @@ export function helpLines({ variant = 'cli', home = '' } = {}) {
       ]);
   const diagnoseRow = /** @type {Array<[string, string|null]>} */ (isRepl
     ? []
-    : [['  mingdao diagnose           一键生成诊断报告（脱敏打包日志/审计/配置，便于反馈排查）', null]]);
+    : [
+        ['  mingdao diagnose           一键生成诊断报告（脱敏打包日志/审计/配置，便于反馈排查）', null],
+        // v0.6.0 C1
+        ['  mingdao ledger list/show/export/verify 执行账本（每步可审计、脱敏可导出、哈希链可校验）', null],
+      ]);
   // 仅会话内才存在的行
   const replOnly = /** @type {Array<[string, string|null]>} */ (isRepl
     ? [['  /preset      列出/切换智能体预设（v0.4.0 契约化）', null]]

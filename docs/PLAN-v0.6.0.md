@@ -115,7 +115,20 @@
 | C1.3 | 接线约束/权限：`constraint`、`permission` 事件（复用已有 `onConstraintEvent` 与权限决策点） | 三时机各产出一条事件；`tool-deny` 拦住时 `permission=allow` 但 `constraint=block` 两个事件都在（证明「权限放行 ≠ 可以执行」） |
 | C1.4 | 费用：`cost` 事件（含 `priced` 与峰谷窗口标记） | 有价模型 `priced:true` 且金额与 `recordUsage` 一致；无价模型 `priced:false` |
 | C1.5 | `src/commands/ledger.js`：`list / show / export / verify` | `export --format md` 产出人工可读报告；`verify` 能报出被改过的那一行 |
-| C1.6 | 脱敏回归 | 喂入含 `sk-` / Bearer / URL 内嵌凭据 / 私网 IP 的命令，导出物中搜不到明文（**这是本步最重要的断言**） |
+| C1.6 | 脱敏回归 | ✅ 已做：喂入含 `sk-` / Bearer / **嵌套**私网 IP / 家目录的参数，导出物与落盘文件中都搜不到明文（**这是本步最重要的断言**） |
+
+**C1 实施记录（已完成部分）**：
+- 八类事件全部接线，实测一次真实回合（fake provider + 工具调用）产出
+  `run.start → model.round → tool.call → tool.result → model.round → cost → run.end`，哈希链完整；
+- 约束事件只在 `auditConstraint` **一处**记账——三个时机本已汇聚到那里，新增时机无需补埋点；
+- `status` 与模型层 `finish_reason` 分开（前者是「这次怎么结束的」，后者记在 `model.round` 里），
+  否则账本会出现 `status=stop` 这种答不出「完成了没有」的记录；
+- 费用按**发起时刻**计价（与 `recordUsage` 同口径），无价模型落 `priced:false` + 「无法估算」；
+- 单测 71 组：事件顺序与 seq 连续、哈希链能发现改行**与删行**、两级脱敏**含嵌套结构**、
+  无价不冒充免费、配额轮转、非法 runId 拒绝（防路径穿越）。三项关键行为均做变异校验。
+- 另修一处自己写出的真缺陷：`redactDeep` 曾把脱敏函数写死为 `redactSecrets`，导致导出时
+  「顶层字符串过了 `redactSensitive`、嵌在 `args` 里的私网 IP 原样输出」——同一份导出物上
+  两级规则不一致，是最容易被忽略的泄露路径。
 
 **接线点（已勘察，供实施时直接定位）**：`src/agent.js` 中
 `runTurn` 起点（`:307`，已在此处建 `usage`/`startedAt`）、每轮 usage 回调（`:452` 附近）、
@@ -182,7 +195,7 @@ README 增「合规与确定性」小节（含 C0.4/C3.4 两处诚实边界）�
 | 阶段 | 状态 | 产出 |
 | --- | --- | --- |
 | C0 设计拍板 | ✅ 完成 | 本文件 §二（五条决策 + 两条诚实边界） |
-| C1 账本 + 导出 | ⏳ 待开始 | — |
+| C1 账本 + 导出 | 🚧 进行中 | `src/ledger.js`（写入器/哈希链/两级脱敏/配额轮转/导出）+ `src/commands/ledger.js`（list/show/export/verify）+ agent 接线（run.start / model.round / tool.call / tool.result / constraint / permission / cost / run.end 八类全部落地）|
 | C2 决策回放 | ⏳ 待开始 | — |
 | C3 出网白名单 | ⏳ 待开始 | — |
 | C4 离线安装 + 信创预设 | ⏳ 待开始 | — |

@@ -15,9 +15,10 @@ import { writeAudit } from './audit.js';
 import { redactSecrets } from './redact.js';
 import { checkCostGuard, costGuardConfig, todayCost } from './cost-guard.js';
 import { recordCacheStats, packDailyCost } from './cachestats.js';
-import { estimateCost } from './pricing.js';
+import { estimateCost, cacheSplit, isPeakHour } from './pricing.js';
 import { resolveProviderConfig, createProvider } from './providers/index.js';
 import { compileConstraints, checkPreTool, checkPostTool, checkOutput, blockedOutputText } from './constraints.js';
+import { createLedger, newRunId } from './ledger.js';
 import { getActivePackContext } from './packs.js';
 
 const MAX_STEPS = 24;
@@ -72,6 +73,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   );
   /** 约束事件写审计（pack/constraint/kind/stage/action）——受监管场景要能回答「红线何时被触发」 */
   const auditConstraint = (/** @type {any} */ ev) => {
+    // v0.6.0 C1：账本与 audit 在此**同一处**记录——三个时机（pre/post/output）都汇聚到这里，
+    // 新增时机时不需要记得再补一处账本埋点。
+    // 只记「哪条约束、什么时机、如何处理」，**不记命中的原文**（否则账本自身成为泄露渠道）。
+    if (turnLedger && ev) {
+      turnLedger.constraint({ kind: ev.kind, id: ev.id, stage: ev.stage, tool: ev.tool, action: ev.action ?? ev.decision });
+    }
     if (cfg.audit === false || !ev) return;
     try {
       writeAudit({ at: Date.now(), session: sessionRef?.name ?? null, model: modelName, tool: null, constraint: ev });
@@ -83,6 +90,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // （CLI/REPL 每次派子代理都漏计；README 主推的「多方向并行调研」场景漏计最重）。
   // runTurn 开始时指向本轮 usage，finally 清空；runTurn 之外调用 spawnTask 时为 null（安全跳过）。
   let currentUsage = /** @type {any} */ (null);
+  // v0.6.0 C1：当前回合的账本写入器（与 currentUsage 同款：runTurn 内赋值、finally 清空）。
+  // 账本不可用/被关闭时它是 no-op，**绝不影响主流程**——与 writeAudit 同款容错。
+  let turnLedger = /** @type {any} */ (null);
   // v0.5.0 A4：当前正在执行的 Pack 工具所属 Pack（由 runTool 按 `pack__<pack>__` 前缀设置），
   // 供 ctx.llm 写归因记录时标注来源。
   let currentPack = /** @type {any} */ (null);
@@ -314,6 +324,17 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const usage = /** @type {{ prompt_tokens: number, completion_tokens: number, prompt_cache_hit_tokens?: number, prompt_cache_miss_tokens?: number }} */ ({ prompt_tokens: 0, completion_tokens: 0 });
     currentUsage = usage; // 子代理消耗并入本回合总量（见 spawnTask）
     const startedAt = Date.now();
+    // v0.6.0 C1：本回合的执行账本（cfg.ledger=false 可关；写失败整体降级为 no-op）
+    turnLedger = createLedger(newRunId(), { enabled: cfg.ledger !== false });
+    turnLedger.runStart({
+      model: modelName,
+      provider: cfg.provider ?? null,
+      session: sessionRef?.name ?? null,
+      cwd: workingDir,
+      permission: cfg.permission ?? permission?.mode ?? null,
+      preset: preset?.name ?? cfg.preset ?? null,
+      packs: getActivePackContext()?.packs ?? [],
+    });
     // 回合性能指标（状态栏：LLM 时长 / 工具时长 / 首 token 延迟 / 步数）
     let llmMsTotal = 0;
     let toolMsTotal = 0;
@@ -667,6 +688,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       }
 
       finish = res.finish ?? finish;
+      // v0.6.0 C1：模型轮次事件（耗时/首 token/用量/完成原因）——「这一步花了多少钱、等了多久」的最小依据
+      turnLedger.modelRound({
+        round,
+        step: steps,
+        ms: Date.now() - llmT0,
+        firstTokenMs: firstTokenAt ? firstTokenAt - llmT0 : null,
+        requestStartAt: lastRequestStartAt,
+        finish: res.finish ?? null,
+        usage: res.usage ?? null,
+      });
       // 省钱 B1：只读阶段中模型文字明确表达写意图 → 下一轮注入全量工具（多一轮，几乎无感）
       if (readOnlyPhase && hasWriteIntent(res.text)) readOnlyPhase = false;
       if (res.usage) {
@@ -790,16 +821,33 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (!allowed) {
             io.renderToolDenied(name, args, '未授权');
             if (auditOn) auditEntry({ denied: true, reason: '未授权' });
+            // v0.6.0 C1：权限拒绝是「为什么没执行」的头号答案，必须入账
+            turnLedger.permission({ name, mode: permission?.mode ?? cfg.permission ?? null, decision: 'deny', source: 'permission.check' });
+            turnLedger.toolCall({ callId: tc.id, name, rawArgs: args, args, permission: { decision: 'deny' } });
+            turnLedger.toolResult({ callId: tc.id, name, ok: false, blocked: true, ms: 0, error: '权限拒绝' });
             messages.push({ role: 'tool', tool_call_id: tc.id, content: '用户拒绝了该工具的执行权限。' });
             return null;
           }
           // v0.5.0 A3 ①：领域约束（PreToolUse）——权限放行之后、执行之前强制。
           // 与权限引擎的分工：权限回答「用户是否允许」，约束回答「领域是否允许」；两者都通过才执行。
           const cv = checkPreTool(constraints, name, args);
+          // v0.6.0 C1：工具调用事件——参数留「脱敏明细 + 原文指纹」两份，指纹用于比对/防篡改；
+          // 权限与约束**两者都记**：受监管场景要能回答「权限放行了，但领域红线拦住了」这类问题。
+          turnLedger.toolCall({
+            callId: tc.id,
+            name,
+            pack: /^pack__([a-z0-9-]+)__/.exec(String(name || ''))?.[1] ?? null,
+            rawArgs: args,
+            args,
+            permission: { decision: 'allow', source: 'permission.check' },
+            constraint: cv?.blocked ? { blocked: true, id: cv.event?.id ?? null, kind: cv.event?.kind ?? null } : null,
+          });
           if (cv?.blocked) {
             io.renderToolDenied(name, args, cv.reason);
             if (auditOn) auditEntry({ denied: true, reason: cv.reason });
             auditConstraint(cv.event);
+            // 被约束拦下的调用不会有 tool.result，这里补一条终态，避免账本出现「只有调用没有结果」的悬空步
+            turnLedger.toolResult({ callId: tc.id, name, ok: false, blocked: true, ms: 0, error: '领域约束拦截' });
             messages.push({ role: 'tool', tool_call_id: tc.id, content: `【领域约束】${cv.reason}` });
             return null;
           }
@@ -880,6 +928,22 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               timedOut: Boolean(rObj?.timedOut),
               durationMs: ms,
               outputBytes: Buffer.byteLength(typeof result === 'string' ? result : JSON.stringify(result ?? {}), 'utf8'),
+            });
+          }
+          // v0.6.0 C1：工具结果事件（只记指纹/大小/成败/耗时，不记正文——正文可能很长且含敏感内容）
+          {
+            let rObj2 = result;
+            if (typeof result === 'string') {
+              try { rObj2 = JSON.parse(result); } catch { rObj2 = null; }
+            }
+            turnLedger.toolResult({
+              callId: prep.tc?.id ?? null,
+              name: prep.name,
+              ok: rObj2 ? rObj2.ok !== false : !String(result ?? '').includes('"ok": false'),
+              exitCode: rObj2?.exitCode ?? null,
+              ms,
+              result,
+              error: rObj2?.error ?? null,
             });
           }
           let text = typeof result === 'string' ? result : JSON.stringify(result); // 紧凑 JSON（评估 B3）：嵌套结果省 10-20% 回填 token，且下轮按 prompt 重复计费
@@ -1116,6 +1180,40 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     } finally {
       currentAc = null;
       currentUsage = null; // 回合结束：避免 runTurn 之外调用的 spawnTask 写入陈旧累加器
+      // v0.6.0 C1：回合收尾事件（状态/步数/费用）。
+      // 费用按**发起时刻**计价（lastRequestStartAt）——与 recordUsage 同款口径，跨 12:00/18:00
+      // 边界的请求才不会被错记一档。estimateCost 对无价模型返回 null，于是 priced:false 会与
+      // 金额一起落盘：账本里「无法估算」是一个显式事实，而不是被读成 ¥0.0000（v0.4.5 的诚实原则）。
+      if (turnLedger) {
+        try {
+          const costDate = lastRequestStartAt ? new Date(lastRequestStartAt) : new Date();
+          const yuan = estimateCost(modelName, usage.prompt_tokens, usage.completion_tokens, cacheSplit(usage), costDate);
+          const priced = typeof yuan === 'number' && Number.isFinite(yuan);
+          turnLedger.cost({
+            model: modelName,
+            usage,
+            yuan: priced ? yuan : null,
+            priced,
+            pricing: { requestStartAt: lastRequestStartAt, peak: isPeakHour(costDate) },
+          });
+          turnLedger.runEnd({
+            ms: Date.now() - startedAt,
+            // status 是「这次运行怎么结束的」，与模型层的 finish_reason（stop/tool_calls/length）
+            // 不是一回事：前者给人看账本，后者记在 model.round 里。混用会让「status=stop」这种
+            // 记录无法回答「这次到底完成了没有」。
+            status: aborted ? 'aborted' : finish === 'length' || finish === 'max_steps' ? 'capped' : 'done',
+            steps,
+            rounds: round + 1,
+            yuanTotal: priced ? yuan : null,
+            priced,
+            // capHit/truncated 的判定与下方返回值保持同一口径：跑到步数上限被迫收尾
+            capHit: Boolean(finish === 'length' || finish === 'max_steps'),
+            truncated: Boolean(finish === 'length'),
+            aborted,
+          });
+        } catch {}
+        turnLedger = null;
+      }
       offSigint();
     }
   }
