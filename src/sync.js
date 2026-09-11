@@ -14,7 +14,7 @@ import http from 'node:http';
 import https from 'node:https';
 import { loadConfig, saveConfig, mingdaoHome, ensureHome } from './config.js';
 import { loadCredentials, saveCredentials } from './credentials.js';
-import { listSessions } from './session.js';
+import { listSessions, CONFLICT_BACKUP_RE } from './session.js';
 import { atomicWriteFileSync } from './atomic-write.js';
 
 const TIMEOUT_MS = 20000;
@@ -437,7 +437,10 @@ export function listSyncConflicts() {
     return [];
   }
   const groups = new Map();
-  const m = /^(.+)\.(server|remote)-(\d+)\.jsonl$/;
+  // v0.4.6 P1 修复：用与 producer（conflictCopyName）一致的共享正则——此前这里只认
+  // `<名>.server-<纯数字>.jsonl`，而实际写入的是 `<名>.server-<时间戳>-<随机后缀>.jsonl`，
+  // 备份永远匹配不到 → 冲突面板恒空、resolveSyncConflict 恒报「没有找到冲突备份」。
+  const m = CONFLICT_BACKUP_RE;
   for (const f of files) {
     const mm = f.match(m);
     if (!mm) continue;
@@ -464,7 +467,7 @@ export function resolveSyncConflict(base, choice) {
   const home = mingdaoHome();
   if (!/^[\w\u4e00-\u9fa5.-]{1,140}\.jsonl$/.test(base)) return { error: '会话名非法' };
   const sessions = path.join(home, 'sessions');
-  const m = /^(.+)\.(server|remote)-(\d+)\.jsonl$/;
+  const m = CONFLICT_BACKUP_RE; // v0.4.6 P1：与 listSyncConflicts / producer 同一正则
   let files = [];
   try {
     files = fs.readdirSync(sessions);

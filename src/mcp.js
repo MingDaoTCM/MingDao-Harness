@@ -65,6 +65,10 @@ export class McpClient {
     this.child.stderr.on('data', (d) => {
       this.stderrTail = (this.stderrTail + d.toString()).slice(-2000);
     });
+    // P1 修复（v0.4.6）：stdin 必须有 error 监听。MCP 服务器若在调用途中退出（或某帧超过管道
+    // 缓冲，约 64KB 的 tools/call 参数），stdin.write 的 EPIPE 会作为异步 error 事件抛出；
+    // 无人监听即未捕获异常 → 整个进程崩溃（WebUI 下所有并发会话一起死）。try/catch 捕不到异步事件。
+    this.child.stdin.on('error', () => {});
     this.child.on('error', (err) => {
       this.error = `启动失败：${err.message}`;
       this._failAll(this.error);

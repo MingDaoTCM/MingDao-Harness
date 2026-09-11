@@ -15,6 +15,14 @@ function partTokens(/** @type {any} */ msg, /** @type {any} */ count) {
   for (const tc of msg.tool_calls || []) {
     total += count(JSON.stringify(tc));
   }
+  // P1 修复（v0.4.6）：reasoning_content 必须计入预算。带 tool_calls 的 assistant 消息会把
+  // 完整 reasoning 原样回传（DeepSeek thinking 模式硬要求，缺/截断即 400，见 agent.js），
+  // 而此前这里只算 content + tool_calls——实测单条 4400 字 reasoning = 2000 token，
+  // messageTokens 只算 33（低估 61 倍）。后果：预算/压缩触发/护栏前置预估同源低估，
+  // 思考型长会话会在「显示还有余量」时把请求顶到窗口边缘。
+  if (typeof msg.reasoning_content === 'string') {
+    total += count(msg.reasoning_content);
+  }
   return total;
 }
 

@@ -9,8 +9,9 @@ import os from 'node:os';
 const srcDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'src');
 const { toolSchemas, buildToolSchemas } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
 const { approxTokens } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
+const { countTokens } = await import(pathToFileURL(path.join(srcDir, 'tokenizer.js')).href);
 const { estimateBatchCost, BATCH_DISCOUNT, estimateCost } = await import(pathToFileURL(path.join(srcDir, 'pricing.js')).href);
-const { createAgent } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
+const { createAgent, READONLY_TIER_SET } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
 const { createIO } = await import(pathToFileURL(path.join(srcDir, 'ui.js')).href);
 const { saveConfig } = await import(pathToFileURL(path.join(srcDir, 'config.js')).href);
 const { recordUsage } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
@@ -21,17 +22,23 @@ const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.error('  �
 // ---------- 1. Schema 瘦身收益（token 口径） ----------
 {
   const full = toolSchemas();
-  const fullTokens = approxTokens(JSON.stringify(full));
+  // v0.4.6：schema 瘦身收益是**面向 DeepSeek 的省钱主张**，必须用随包官方词表的精确计数
+  // （此前用 approxTokens 启发式——JSON 结构字符占比高，启发式与精确值偏差 1.1~1.8 倍，
+  // 测出来的百分比不是真实节省额）。启发式只用于无词表模型的预算兜底。
+  const schemaTok = (/** @type {any} */ v) => countTokens(JSON.stringify(v), 'deepseek-v4-flash');
+  const fullTokens = schemaTok(full);
   const usedAll = new Set(full.map((t) => t.function.name));
   const stripped = buildToolSchemas(usedAll);
-  const strippedTokens = approxTokens(JSON.stringify(stripped));
+  const strippedTokens = schemaTok(stripped);
   ok(fullTokens > 900, `全量 schema 应 >900 tokens（实际 ${fullTokens}）`);
   ok(strippedTokens <= fullTokens * 0.6, `全剥后应 ≤60%（实际 ${((strippedTokens / fullTokens) * 100).toFixed(1)}%）`);
-  // 只读档（B1 分层）：8 个只读工具（含 git/fetch）
-  const READONLY_TIER_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch']);
+  // 只读档（B1 分层）：用 agent.js 导出的**唯一**集合（此前本地副本已漂移，漏了 task）
   const tier = full.filter((t) => READONLY_TIER_SET.has(t.function.name));
-  const tierTokens = approxTokens(JSON.stringify(tier));
-  ok(tierTokens <= fullTokens * 0.55, `只读档应 ≤55% 全量（实际 ${((tierTokens / fullTokens) * 100).toFixed(1)}%）`);
+  const tierTokens = schemaTok(tier);
+  // v0.4.6 实测：真实只读档（含 v0.4.4 加入的 task，其描述很长）为全量的 ~71%，
+  // 远不及文档曾写的 48%——本地副本漏了 task 才让旧断言看起来成立。阈值按实测设定，
+  // 好处依然实在（每轮省 ~331 tokens），但不再宣称「省一半」。
+  ok(tierTokens <= fullTokens * 0.75, `只读档应 ≤75% 全量（实际 ${((tierTokens / fullTokens) * 100).toFixed(1)}%）`);
   console.log(`  schema：全量 ${fullTokens} · 全剥 ${strippedTokens}（-${(100 - (strippedTokens / fullTokens) * 100).toFixed(0)}%）· 只读档 ${tierTokens}（-${(100 - (tierTokens / fullTokens) * 100).toFixed(0)}%）tokens`);
 }
 

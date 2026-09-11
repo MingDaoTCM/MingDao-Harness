@@ -115,15 +115,37 @@ export function isPeakHour(date = new Date()) {
   }
 }
 
-// —— 北京时间墙钟工具（避峰调度/费用护栏按天统计用，零依赖 Intl） ——
-export function beijingParts(date = new Date()) {
-  let tz = 'Asia/Shanghai';
+// —— 计价时区墙钟工具（避峰调度/费用护栏按天统计用，零依赖 Intl） ——
+// v0.4.6：抽出「生效时区」解析（坏配置回退 Asia/Shanghai，绝不让计费/护栏崩溃）。
+function activeTimezone() {
   try {
-    tz = peakCfg().timezone;
+    const tz = peakCfg().timezone;
     new Intl.DateTimeFormat('en-US', { timeZone: tz }).format(); // 非法时区在此抛错
+    return tz;
   } catch {
-    tz = 'Asia/Shanghai'; // 审计 B1：坏时区配置回退北京时间，绝不让计费/护栏崩溃
+    return 'Asia/Shanghai';
   }
+}
+
+/** @param {Date} date @param {string} tz 该时刻在 tz 的墙钟与 UTC 的偏移（毫秒） */
+function tzOffsetMs(date, tz) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: tz,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const g = (/** @type {any} */ t) => Number(parts.find((/** @type {any} */ p) => p.type === t)?.value);
+  const asUtc = Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'), g('second'));
+  return asUtc - Math.floor(date.getTime() / 1000) * 1000;
+}
+
+export function beijingParts(date = new Date()) {
+  const tz = activeTimezone();
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone: tz,
     year: 'numeric',
@@ -138,12 +160,24 @@ export function beijingParts(date = new Date()) {
   return { year: g('year'), month: g('month'), day: g('day'), hour: g('hour'), minute: g('minute'), second: g('second') };
 }
 
-// 北京时间墙钟 → Date（UTC+8）
+// 时区墙钟 → Date。
+// v0.4.6 P3 修复：此前硬编码 `- 8h`（只管 Asia/Shanghai），而 beijingParts() 用的是可配置的
+// `pricing.timezone`——用户按文档覆盖时区后，日界（费用护栏按自然日累计）与 --offpeak 顺延
+// 会同时算错（美东实测错 12 小时：日界落在当地中午、避峰时刻整体偏移）。
+// 现按目标时区真实偏移换算，用「两遍法」处理含夏令时的时区。
 /**
  * @param {any} parts
  */
 export function beijingToDate(parts) {
-  return new Date(Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second) - 8 * 3600 * 1000);
+  const tz = activeTimezone();
+  const guessMs = Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+  let ts = guessMs;
+  for (let i = 0; i < 3; i++) {
+    const next = guessMs - tzOffsetMs(new Date(ts), tz);
+    if (next === ts) break;
+    ts = next;
+  }
+  return new Date(ts);
 }
 
 // 避峰顺延：当前处于高峰 → 顺延到该高峰段的结束整点（即最近一个闲时起点）
@@ -181,7 +215,10 @@ export const BATCH_DISCOUNT = 0.5;
  */
 export function estimateBatchCost(modelName, promptTokens, completionTokens) {
   const pricing = effectivePricing(modelName);
-  if (!pricing) return 0;
+  // P0-4 同口径（v0.4.6）：无价模型返 null 而非 0。Batch 路径此前恒返 0，导致
+  // ① `--max-cost` 预算拦截对「无内置/外部/覆盖价格」的模型静默失效（0 > maxCost 恒 false），
+  // ② /cost 把未知费用显示成 ≈¥0.00000 冒充免费。与 estimateCost 的语义保持一致。
+  if (!pricing) return null;
   return ((promptTokens * pricing.offpeak.input + completionTokens * pricing.offpeak.output) / 1e6) * BATCH_DISCOUNT;
 }
 
@@ -225,10 +262,22 @@ export function hasPricing(/** @type {any} */ modelName) {
 function effectivePricing(modelName) {
   const preset = modelPreset(modelName);
   const ext = externalPricing().data?.models?.[modelName] || null;
-  if (!preset?.pricing && !ext) return null;
-  const base = ext || preset?.pricing || null;
-  if (!base) return null;
   const over = pricingOverrides()[modelName] || {}; // 审计 Q3：mtime 缓存替代每轮读盘
+  const base = ext || preset?.pricing || null;
+  // P0 修复（v0.4.6）：overrides 本身就是一条价格来源，必须与 ext/preset 等价对待。
+  // 此前「先判 base 是否存在」就 return null，导致用户按护栏提示给 gpt-5 / 本地模型配的
+  // config.pricing.overrides 完全不生效：hasPricing=false → estimateCost=null →
+  // cache-stats 记 cost=null（当 0 累计）→ todayCost 看不到这些消费 → 护栏永不拦截。
+  // 内置 12 个模型里只有 3 个 DeepSeek 带 pricing，即「每日上限防超支」对另外 9 个
+  // 以及全部动态发现/自定义模型形同虚设，而护栏给出的补救办法恰是这条不生效的路径。
+  const hasOver = Object.keys(over).length > 0;
+  if (!base && !hasOver) return null;
+  // 仅靠 overrides 供价时，要求 input 与 output 都是有限正数：半张价格表会把缺失的一侧
+  // 静默当成 0（输出免费 / 命中免费），比「未知（null）」更危险——宁可报无价并告警。
+  if (!base) {
+    const ok = (/** @type {any} */ v) => Number.isFinite(Number(v)) && Number(v) > 0;
+    if (!ok(over.input) || !ok(over.output)) return null;
+  }
   /** @type {(b: any, o?: any) => { input: number, output: number, cacheHit: number }} */
   const merge = (b, o = {}) => ({
     input: Number(o.input ?? b?.input ?? 0),
@@ -244,8 +293,8 @@ function effectivePricing(modelName) {
     cacheHit: over.peak?.cacheHit ?? over.cacheHit,
   };
   return {
-    offpeak: merge(base.offpeak || base, over),
-    peak: merge(base.peak || base.offpeak || base, peakOver),
+    offpeak: merge(base?.offpeak || base || {}, over),
+    peak: merge(base?.peak || base?.offpeak || base || {}, peakOver),
   };
 }
 

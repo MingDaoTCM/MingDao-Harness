@@ -61,6 +61,12 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     const entry = tasks.get(body.taskId);
     if (!entry || !entry.pendingAsk) return json(res, 409, { error: '没有挂起的权限确认' });
     const pa = entry.pendingAsk;
+    // P1 修复（v0.4.6）：必须校验服务端下发、仅经该任务 SSE 流送达的 ask id。
+    // 此前只凭 taskId 取 pendingAsk（taskId 是 t1/t2… 顺序号，且 GET /api/tasks 全量列出），
+    // 任何能访问 API 的一方都能替他人挂起的确认直接答「允许」，绕过默认 ask 档人工闸门。
+    if (!pa.id || String(body.id || '') !== String(pa.id)) {
+      return json(res, 403, { error: '权限确认标识不匹配（该确认属于另一个客户端会话）' });
+    }
     entry.pendingAsk = null;
     const answer = String(body.answer ?? '');
     if (pa.options && Array.isArray(pa.options)) {

@@ -53,7 +53,12 @@ function safeRmSync(p, opts) {
   const zh = approxTokens('你好世界');
   // CJK 校准（P0-2）：流畅中文 ≈0.75 token/字（旧版 1 字=1 token 高估约 2 倍）
   assert.equal(zh, 3, '4 字中文应按 0.75/字计为 3 tokens');
-  assert.equal(en, 6, '英文按 4 字符/token 估算');
+  // v0.4.6：英文启发式改为「按词/字母串」估算（每串 floor(长度/4)，至少 1；空白不重复计），
+  // 不再用整体 字符数/4 —— 4 个 5 字母词各计 1 token = 4。旧断言值 6 对应已废弃的旧口径。
+  assert.equal(en, 4, '英文按字母串估算（每串 ≥1 token，空白不重复计）');
+  // 类别化保守性：非自然语言类别必须是硬上界（旧口径对这些低估 2–3 倍）
+  assert.ok(approxTokens('!@#$%^&*()_+-=[]{}|;:,.<>?/') >= 20, '纯标点应按近 1 token/字符保守计');
+  assert.ok(approxTokens('a b c d e f g h') === 8, '单字母成词各计 1 token');
   const msgs = [
     { role: 'system', content: '系统提示' },
     { role: 'user', content: '很早的问题'.repeat(500) },
@@ -224,9 +229,25 @@ const ctx = { cwd: tmp };
   const { dispatch } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
   const tmpGit = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-git-'));
   const ctx = { workingDir: tmpGit };
-  // git 只读：status 正常
+  // v0.4.6 回归：git 工具此前用 `await execFile(...)`（execFile 是回调式、返回 ChildProcess，
+  // 不是 thenable）——解构出的 stdout/stderr 是两个流，工具恒返回 ok:true exitCode:0
+  // output="[object Object][object Object]"，退出码与错误全被吞。下面的断言锁定真实语义。
   const gs = await dispatch('git', { command: 'status' }, ctx);
-  assert.equal(gs.ok, true, 'git status 应成功（空仓库或非仓库均可返回）');
+  assert.equal(gs.ok, false, '非 git 仓库里 git status 应失败（此前因 await 缺陷恒报成功）');
+  assert.ok(!String(gs.output || gs.error).includes('[object Object]'), 'git 输出不得是 [object Object]');
+  // 真实仓库：status / log 必须返回真实内容
+  if (spawnSync('git', ['--version']).status === 0) {
+    spawnSync('git', ['init', '-q'], { cwd: tmpGit });
+    spawnSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '--allow-empty', '-m', 'first'], { cwd: tmpGit });
+    const gs2 = await dispatch('git', { command: 'status --short' }, ctx);
+    assert.equal(gs2.ok, true, '真实仓库里 git status 应成功：' + JSON.stringify(gs2));
+    const gl = await dispatch('git', { command: 'log --oneline -3' }, ctx);
+    assert.equal(gl.ok, true, 'git log 应成功');
+    assert.ok(String(gl.output).includes('first'), 'git log 应返回真实提交信息（实际：' + String(gl.output).slice(0, 80) + '）');
+    const gbad = await dispatch('git', { command: 'log --oneline definitely-not-a-revision' }, ctx);
+    assert.equal(gbad.ok, false, '不存在的 revision 应失败并带真实退出码');
+    assert.equal(gbad.exitCode, 128, 'git 退出码应透传（实际 ' + gbad.exitCode + '）');
+  }
   // git 非只读子命令应拒绝
   const gp = await dispatch('git', { command: 'push --force' }, ctx);
   assert.equal(gp.ok, false, 'git push（非只读）应拒绝');
@@ -246,6 +267,20 @@ const ctx = { cwd: tmp };
   // fetch：非 http 协议应拒绝
   const fFile = await dispatch('fetch', { url: 'file:///etc/passwd' }, ctx);
   assert.equal(fFile.ok, false, 'fetch file:// 应拒绝');
+  // v0.4.6 回归（P1 SSRF）：IPv4-mapped IPv6 的**十六进制**形态必须同样被判为私网。
+  // URL 解析器会把 [::ffff:127.0.0.1] 规范化成 [::ffff:7f00:1]，此前只处理点分四段 → 判为公网，
+  // 加上 DNS 复检对带方括号的 IPv6 字面量 lookup 失败后放行 → 可抓回环 WebUI/内网/云元数据。
+  {
+    const { isPrivateHost } = await import(pathToFileURL(path.join(srcDir, 'tools', 'fetch.js')).href);
+    const mustBlock = ['[::ffff:127.0.0.1]', '[::ffff:7f00:1]', '[0:0:0:0:0:ffff:7f00:1]', '[::ffff:a00:1]', '[::ffff:a9fe:a9fe]', '[::1]', '[::]', '[fe80::1]', '[fd00::1]', '[64:ff9b::7f00:1]'];
+    for (const h of mustBlock) assert.equal(isPrivateHost(h), true, `SSRF：${h} 应判为内网/本机`);
+    const mustAllow = ['[::ffff:8.8.8.8]', '[2606:4700::1111]', '8.8.8.8', 'example.com'];
+    for (const h of mustAllow) assert.equal(isPrivateHost(h), false, `SSRF：${h} 应判为公网`);
+    // URL 规范化后的真实取值必须被拦（这是最初的绕过点）
+    assert.equal(isPrivateHost(new URL('http://[::ffff:127.0.0.1]:9/').hostname), true, 'URL 规范化后的 ::ffff 形态必须被拦');
+    const f6 = await dispatch('fetch', { url: 'http://[::ffff:127.0.0.1]:9/' }, ctx);
+    assert.equal(f6.ok, false, 'fetch IPv4-mapped IPv6 回环地址应拒绝');
+  }
   // fetch：302 重定向到内网应拒绝（P0 SSRF 复检，v0.4.1）
   const httpMod = await import('node:http');
   const victim = httpMod.createServer((req, res) => { res.end('secret-metadata'); });
@@ -1666,6 +1701,25 @@ const ctx = { cwd: tmp };
   const pullA3 = await syncPull();
   assert.ok(pullA3.conflicts.includes('sync-smoke.jsonl'), '远端变化且本地有改动时 pull 应报冲突');
   assert.ok(fs.readdirSync(path.join(homeA, 'sessions')).some((f) => f.includes('.remote-')), '应生成 .remote- 副本');
+  // v0.4.6 P1 回归：冲突备份必须能被「冲突三选一」入口发现并解析。
+  // 此前 producer 写 `<名>.server-<时间戳>-<随机后缀>.jsonl`，consumer 正则只认 `<名>.server-<纯数字>.jsonl`
+  // → listSyncConflicts 恒空、resolveSyncConflict 恒报「没有找到」，整个冲突功能静默失效。
+  {
+    const { listSyncConflicts, resolveSyncConflict } = await import(pathToFileURL(path.join(srcDir, 'sync.js')).href);
+    const { isConflictBackupName } = await import(pathToFileURL(path.join(srcDir, 'session.js')).href);
+    const conflicts = listSyncConflicts();
+    const group = conflicts.find((c) => c.base === 'sync-smoke.jsonl');
+    assert.ok(group, '冲突面板应列出 sync-smoke.jsonl 的冲突备份（实际列出：' + JSON.stringify(conflicts.map((c) => c.base)) + '）');
+    assert.ok(group.entries.length >= 1, '冲突组应至少含一条备份');
+    assert.ok(group.entries.every((e) => isConflictBackupName(e.file)), '列出的条目应为合法冲突备份名');
+    // 备份不能被当成普通会话（否则会被推到其他设备变成幽灵会话）
+    const { listSessions } = await import(pathToFileURL(path.join(srcDir, 'session.js')).href);
+    const names = listSessions(homeA).map((s) => s.name);
+    assert.ok(names.includes('sync-smoke.jsonl'), '真实会话应仍在列表');
+    assert.ok(!names.some((n) => isConflictBackupName(n)), '冲突备份不应出现在会话列表中');
+    const rs = resolveSyncConflict('sync-smoke.jsonl', 'local');
+    assert.ok(!rs.error, 'resolveSyncConflict 应能找到备份（实际：' + JSON.stringify(rs) + '）');
+  }
 
   // 错误路径与状态
   const badPass = await syncLogin({ url: `http://127.0.0.1:${syncPort}`, username: 'smoketest', password: 'wrong-password', deviceName: 'x' });
@@ -2328,6 +2382,9 @@ const ctx = { cwd: tmp };
   assert.equal(BATCH_DISCOUNT, 0.5);
   const bc = estimateBatchCost('deepseek-v4-flash', 1000000, 1000000);
   assert.ok(Math.abs(bc - 3.0) < 1e-9, `batch 应为半价（得到 ${bc}）`);
+  // v0.4.6：无价模型的 Batch 费用必须返 null（未知），不能返 0——否则 --max-cost 静默失效、
+  // /cost 把未知费用显示成「免费」（与 estimateCost 的 P0-4 同口径）
+  assert.equal(estimateBatchCost('no-such-model-xyz', 1000000, 1000000), null, '无价模型 batch 费用应为 null（未知）而非 0');
   ok('pricing：时区锚定 / 周末低价 / 避峰顺延 / Batch 半价计价');
 }
 
@@ -2776,7 +2833,12 @@ const ctx = { cwd: tmp };
   // 省钱 B1：工具 schema 按需下发——已用工具省描述（工具级 + 参数级），未用工具保留；
   // 全部用过时 schema token 至少降 40%（基准 1051）；结构（name/parameters/required）不受影响。
   const full = toolSchemas();
-  const fullTokens = approxTokens(JSON.stringify(full));
+  // v0.4.6：schema 瘦身是面向 DeepSeek 的省钱主张 → 用随包官方词表精确计数。
+  // 此前用 approxTokens（启发式），JSON 结构字符占比高、与精确值偏差 1.1–1.8 倍，
+  // 测出来的百分比不是真实节省额（同 bench-cost/bench-savings 的口径修正）。
+  const { countTokens: countSchemaTok } = await import(pathToFileURL(path.join(srcDir, 'tokenizer.js')).href);
+  const schemaTok = (v) => countSchemaTok(JSON.stringify(v), 'deepseek-v4-flash');
+  const fullTokens = schemaTok(full);
   assert.equal(full.length, 13, '内置工具应为 13 个');
   assert.ok(full[0].function.description.length > 0, 'toolSchemas() 应保留完整描述');
   const usedAll = new Set(full.map((t) => t.function.name));
@@ -2792,7 +2854,7 @@ const ctx = { cwd: tmp };
   assert.ok(usedHalf[1].function.description.length > 0, 'write 未用 → 保留');
   // 原数组不被修改（缓存安全）
   assert.ok(full[0].function.description.length > 0, '原 TOOLS 不被 buildToolSchemas 修改');
-  const strippedTokens = approxTokens(JSON.stringify(stripped));
+  const strippedTokens = schemaTok(stripped);
   const saving = 1 - strippedTokens / fullTokens;
   assert.ok(saving >= 0.4, `全用过时 schema 应降 ≥40%，实际 ${(saving * 100).toFixed(1)}%`);
   ok(`省钱 B1：schema 按需瘦身（全用过降 ${(saving * 100).toFixed(0)}%，参数结构保留）`);
@@ -2935,6 +2997,304 @@ const ctx = { cwd: tmp };
     assert.equal(typeof api[f], 'function', `公共 API ${f} 应导出且为函数`);
   }
   ok(`公共 API 导出面：${stableFns.length} 个 stable 导出全部可用（v0.4.0 契约化）`);
+}
+
+// ---------- 50. v0.4.6 回归：只读去重缓存失效 + 子代理费用并入 ----------
+// 两个都是「省钱/正确性」链路上的静默错误：前者让模型读到写入前的内容，后者让今日费用系统性少计。
+{
+  // 50a：同回合 read → write → read 同一文件，第 3 步必须拿到写入后的内容
+  // （v0.4.1 把 turnToolCache 提到轮内让去重跨步生效，却没有失效点）
+  const tmpC = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-toolcache-'));
+  const target = path.join(tmpC, 'demo.txt');
+  fs.writeFileSync(target, 'ORIGINAL\n');
+  let phase = 0;
+  const providerSeq = {
+    async chat() {
+      phase += 1;
+      const mk = (id, name, args) => ({ text: '', reasoning: '', finish: 'tool_calls', usage: { prompt_tokens: 1, completion_tokens: 1 }, toolCalls: [{ id, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
+      if (phase === 1) return mk('r1', 'read', { path: target });
+      if (phase === 2) return mk('w1', 'write', { path: target, content: 'UPDATED\n' });
+      if (phase === 3) return mk('r2', 'read', { path: target });
+      return { text: 'done', reasoning: '', finish: 'stop', usage: { prompt_tokens: 1, completion_tokens: 1 }, toolCalls: null };
+    },
+  };
+  const agentCache = createAgent({
+    provider: providerSeq,
+    permission: { mode: 'auto', async check() { return true; } },
+    io: createIO({ quiet: true }),
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmpC,
+    cfg: { permission: 'auto', autoCompact: false, maxRounds: 1 },
+  });
+  const msgsCache = [{ role: 'system', content: '系统' }, { role: 'user', content: '读-写-再读' }];
+  await agentCache.runTurn(msgsCache);
+  const toolResults = msgsCache.filter((m) => m.role === 'tool').map((m) => String(m.content));
+  assert.ok(toolResults[0].includes('ORIGINAL'), '首次 read 应看到原始内容');
+  assert.ok(toolResults[2].includes('UPDATED'), '写后再读必须看到新内容（缓存应已作废），实际：' + String(toolResults[2]).slice(0, 120));
+  assert.ok(!toolResults[2].includes('已复用'), '写后再读不应命中只读去重缓存');
+
+  // 50b：子代理消耗必须计入父回合 usage（CLI/REPL 无 onUsage，此前完全漏计）
+  const SUB = { prompt_tokens: 1000, completion_tokens: 200 };
+  let calls = 0;
+  const providerSub = {
+    async chat({ messages }) {
+      calls += 1;
+      const isSub = String(messages?.[0]?.content || '').includes('子代理');
+      if (isSub) return { text: '子代理结论', reasoning: '', finish: 'stop', usage: { ...SUB }, toolCalls: null };
+      if (!messages.some((m) => m.role === 'tool')) {
+        return { text: '', reasoning: '', finish: 'tool_calls', usage: { ...SUB }, toolCalls: [{ id: 't1', type: 'function', function: { name: 'task', arguments: JSON.stringify({ description: '调研', prompt: '调研一下', readOnly: true }) } }] };
+      }
+      return { text: '完成', reasoning: '', finish: 'stop', usage: { ...SUB }, toolCalls: null };
+    },
+  };
+  const agentSub = createAgent({
+    provider: providerSub,
+    permission: { mode: 'auto', async check() { return true; } },
+    io: createIO({ quiet: true }),
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmpC,
+    cfg: { permission: 'auto', autoCompact: false, maxRounds: 1 },
+  });
+  const resSub = await agentSub.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: '派子代理' }]);
+  assert.equal(calls, 3, '父回合 2 次 + 子代理 1 次模型调用');
+  assert.equal(resSub.usage.prompt_tokens, SUB.prompt_tokens * calls, '子代理 prompt token 必须并入父回合 usage（不漏计）');
+  assert.equal(resSub.usage.completion_tokens, SUB.completion_tokens * calls, '子代理 completion token 必须并入父回合 usage');
+  safeRmSync(tmpC, { recursive: true, force: true });
+  ok('v0.4.6 回归：写后再读不吃旧缓存 + 子代理 token 全额并入父回合费用');
+}
+
+// ---------- 51. v0.4.6 回归：日志轮转不写放大 / 已存在日志收权 ----------
+{
+  const tmpL = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-log-'));
+  const lf = path.join(tmpL, 'x.log');
+  fs.writeFileSync(lf, 'old\n', { mode: 0o644 }); // 历史遗留的宽松权限
+  const { createLogWriter } = await import(pathToFileURL(path.join(srcDir, 'log-writer.js')).href);
+  const write = createLogWriter(lf, { maxBytes: 65536 });
+  // 统计整文件重写次数（轮转走 .tmp + rename）
+  const origWriteFileSync = fs.writeFileSync;
+  let rewrites = 0;
+  // @ts-ignore - 测试内临时替换
+  fs.writeFileSync = (p, ...rest) => { if (String(p).includes('.tmp')) rewrites += 1; return origWriteFileSync(p, ...rest); };
+  try {
+    for (let i = 0; i < 2000; i++) write('中文日志行 ' + i + ' '.repeat(20));
+  } finally {
+    // @ts-ignore - 恢复
+    fs.writeFileSync = origWriteFileSync;
+  }
+  const st = fs.statSync(lf);
+  assert.ok(st.size <= 65536, `日志应保持在字节上限内（实际 ${st.size}）`);
+  assert.equal(st.mode & 0o777, 0o600, '已存在的 644 日志应被收权为 600');
+  // 修复前：上限之后每次追加都整文件重写（2000 次）；修复后仅按低水位偶尔轮转
+  assert.ok(rewrites < 100, `2000 次追加不应产生 2000 次整文件重写（实际 ${rewrites} 次）`);
+  safeRmSync(tmpL, { recursive: true, force: true });
+  ok('v0.4.6 回归：日志按字节轮转到低水位（无写放大）+ 历史 644 日志收权为 600');
+}
+
+// ---------- 52. v0.4.6 回归：限流不可被查询串绕过（P1 安全） ----------
+// 此前桶键用 req.url（含查询串）而路由用 pathname：给每个请求加随机 `?n=i` 即每次落进新桶，
+// 登录/配对/改密的限流被整体绕过（scrypt 约 18ms/次 → 无限速爆破 + 阻塞事件循环）。
+// 独立起一个服务器，避免污染上一组同步测试的限流桶。
+{
+  const rlDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ratelimit-'));
+  const { runSyncServer } = await import(pathToFileURL(path.join(srcDir, 'sync-server.js')).href);
+  const rlSrv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: rlDir });
+  await new Promise((r) => rlSrv.once('listening', r));
+  const rlPort = rlSrv.address().port;
+  const N = 40;
+  let got429 = 0;
+  for (let i = 0; i < N; i++) {
+    const r = await fetch(`http://127.0.0.1:${rlPort}/api/pair?n=${i}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: 'victim', password: 'brute-force-attempt', deviceName: 'x' }),
+    });
+    if (r.status === 429) got429 += 1;
+    await r.text().catch(() => {});
+  }
+  rlSrv.close();
+  assert.ok(got429 > 0, `带随机查询串的重复尝试必须被限流（${N} 次请求中 429 次数=${got429}）`);
+  safeRmSync(rlDir, { recursive: true, force: true });
+  ok('v0.4.6 回归：限流桶键按 pathname（随机查询串无法绕过限流）');
+}
+
+// ---------- 53. v0.4.6 回归：随包资源目录必须同时进 npm files 与桌面 extraResources ----------
+// 教训：skills-lib/ 被 src/skill-lib.js 以 `new URL('../skills-lib', import.meta.url)` 运行时读取，
+// 却既不在 package.json#files 也不在 desktop/electron-builder.yml 的 extraResources 里，
+// readdirSync 的 ENOENT 被 try/catch 静默吞掉 → npm 全局安装与桌面版都拿不到「22 个可安装技能库」，
+// 而 README/官网把它当主卖点。静态护栏：扫描 src/ 里所有 `../<dir>` 形式的资源引用，逐一核对。
+{
+  const repoRoot = path.join(srcDir, '..');
+  const referenced = new Set();
+  const scanDirs = [srcDir, path.join(srcDir, 'tools'), path.join(srcDir, 'providers')];
+  for (const d of scanDirs) {
+    let files = [];
+    try { files = fs.readdirSync(d).filter((f) => f.endsWith('.js')); } catch { continue; }
+    for (const f of files) {
+      const code = fs.readFileSync(path.join(d, f), 'utf8');
+      // 只取「目录」引用：../<dir> 或 ../<dir>/，排除 ../<file>.js 这类
+      for (const m of code.matchAll(/new URL\(\s*'\.\.\/([A-Za-z0-9_-]+)(?=['/])/g)) referenced.add(m[1]);
+    }
+  }
+  assert.ok(referenced.size > 0, '应至少扫描到一个随包资源目录引用');
+  const rootPkgFiles = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).files || [];
+  const builderYml = fs.readFileSync(path.join(repoRoot, 'desktop', 'electron-builder.yml'), 'utf8');
+  for (const dir of referenced) {
+    assert.ok(
+      rootPkgFiles.some((f) => String(f).replace(/\/$/, '') === dir),
+      `随包资源目录 ${dir}/ 必须出现在根 package.json#files（否则 npm 安装形态缺文件）`
+    );
+    assert.ok(
+      new RegExp(`from:\\s*\\.\\./${dir}\\b`).test(builderYml),
+      `随包资源目录 ${dir}/ 必须出现在 desktop/electron-builder.yml 的 extraResources（否则桌面版缺文件）`
+    );
+  }
+  // 版本真源一致性：desktop 版本必须已被同步（dist 脚本前置 sync，但仓库内也不应漂移）
+  const rootVer = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).version;
+  const deskVer = JSON.parse(fs.readFileSync(path.join(repoRoot, 'desktop', 'package.json'), 'utf8')).version;
+  assert.equal(deskVer, rootVer, `desktop/package.json 版本必须与根 package.json 一致（${deskVer} vs ${rootVer}）`);
+  ok(`v0.4.6 回归：随包资源目录齐全（${[...referenced].sort().join('/ ')}）+ 桌面版本与根同步`);
+}
+
+// ---------- 54. v0.4.6 回归：审计第二批修复（脱敏 / undo / hooks / 预设 / 深度 / 环境变量 / ReDoS） ----------
+{
+  // 54a. URL 内嵌凭据必须脱敏（此前注释声称覆盖、规则里却没有）
+  const { redactSecrets } = await import(pathToFileURL(path.join(srcDir, 'redact.js')).href);
+  const urlCred = redactSecrets('git clone https://oauth2:glpat-XYZ1234567890@gitlab.example.com/repo.git');
+  assert.ok(!urlCred.includes('glpat-XYZ1234567890'), 'URL 内嵌凭据必须被掩码：' + urlCred);
+  assert.ok(urlCred.includes('gitlab.example.com'), '主机名应保留便于排查');
+  assert.ok(!redactSecrets('postgres://admin:s3cretPw@db.internal:5432/app').includes('s3cretPw'), '连接串密码必须被掩码');
+
+  // 54b. undo 指定越界 path 必须报错，绝不回落「撤销最近一次」（此前会回滚无关文件）
+  const tmpU = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-undo-'));
+  const { dispatch: dispatchU } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
+  const undoStore = { backups: new Map() };
+  const ctxU = { cwd: tmpU, workingDir: tmpU, cfg: {}, undoStore };
+  fs.writeFileSync(path.join(tmpU, 'important.txt'), 'v1');
+  await dispatchU('write', { path: path.join(tmpU, 'important.txt'), content: 'v2' }, ctxU);
+  fs.writeFileSync(path.join(tmpU, 'other.txt'), 'o1');
+  await dispatchU('write', { path: path.join(tmpU, 'other.txt'), content: 'o2' }, ctxU);
+  const badUndo = await dispatchU('undo', { path: '/etc/hosts' }, ctxU);
+  assert.equal(badUndo.ok, false, '越界 path 的 undo 必须失败而不是回滚别的文件');
+  assert.equal(fs.readFileSync(path.join(tmpU, 'other.txt'), 'utf8'), 'o2', '无关文件不得被回滚');
+  const goodUndo = await dispatchU('undo', { path: path.join(tmpU, 'important.txt') }, ctxU);
+  assert.equal(goodUndo.ok, true, '合法的 undo 应成功');
+  assert.equal(fs.readFileSync(path.join(tmpU, 'important.txt'), 'utf8'), 'v1', '指定文件应被还原');
+
+  // 54c. hook matcher 支持文档写明的 `|` 分隔（此前只认 `,`，按文档写的策略钩子静默失效）
+  const { createHooks } = await import(pathToFileURL(path.join(srcDir, 'hooks.js')).href);
+  const hooksPipe = createHooks({ PreToolUse: [{ matcher: 'write|edit|bash', cmd: 'echo \'{"decision":"block","reason":"policy"}\'' }] }, tmpU, {});
+  const hr = await hooksPipe.pre('write', { path: 'x' });
+  assert.equal(hr.decision, 'block', '`|` 分隔的 matcher 必须命中 write（文档契约）');
+  const hr2 = await hooksPipe.pre('read', { path: 'x' });
+  assert.equal(hr2.decision, 'approve', '未匹配的工具应放行');
+
+  // 54d. 预设提权防护在 permission 为对象形态时必须生效（{mode:'readonly'} 不得被提权为 ask）
+  const { presetPermissionOverride } = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
+  const esc1 = presetPermissionOverride({ permission: 'ask' }, { mode: 'readonly', allow: ['read'] });
+  assert.equal(esc1.escalated, true, 'readonly → ask 属提权，必须拦截');
+  assert.equal(esc1.permission.mode, 'readonly', '被拦截时应保持只读档（保留 allow/deny 结构）');
+  const esc2 = presetPermissionOverride({ permission: 'auto' }, 'ask');
+  assert.equal(esc2.escalated, true, '字符串形态 ask → auto 仍应拦截');
+  const ok2 = presetPermissionOverride({ permission: 'readonly' }, 'ask');
+  assert.equal(ok2.escalated, false, '收紧权限不算提权');
+
+  // 54e. SSH_AUTH_SOCK 不得被当作敏感变量剥离（否则 bash 内 git-over-SSH 失效）
+  const bashMod = await import(pathToFileURL(path.join(srcDir, 'tools', 'bash.js')).href);
+  assert.equal(bashMod.isSensitiveEnv('SSH_AUTH_SOCK'), false, 'SSH_AUTH_SOCK 是连接句柄，不应被剥离');
+  assert.equal(bashMod.isSensitiveEnv('MINGDAO_API_KEY'), true, 'API Key 仍应被剥离');
+  assert.equal(bashMod.isSensitiveEnv('MY_TOKEN'), true, 'TOKEN 仍应被剥离');
+
+  // 54f. 深嵌套 schema 不得让 buildToolSchemas 抛 RangeError（恶意 MCP inputSchema）
+  const { buildToolSchemas } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
+  let deep = { type: 'string' };
+  for (let i = 0; i < 5000; i++) deep = { type: 'object', properties: { n: deep }, description: 'x' };
+  const deepTool = [{ type: 'function', function: { name: 'deep-tool', description: 'd', parameters: deep } }];
+  const schemas = buildToolSchemas(new Set(['deep-tool']), deepTool);
+  assert.ok(Array.isArray(schemas), '深嵌套 schema 应安全返回而不是抛 RangeError');
+
+  // 54g. grep 必须拒绝「同前缀歧义分支 + 量词」的 ReDoS 形态，且不误伤安全分支
+  const { grep } = await import(pathToFileURL(path.join(srcDir, 'tools', 'fs-tools.js')).href);
+  const ctxG = { cwd: tmpU, workingDir: tmpU, cfg: {} };
+  fs.writeFileSync(path.join(tmpU, 'g.txt'), 'foo bar post get\n');
+  const reDoS = grep({ pattern: '(a|aa)+$', path: tmpU }, ctxG);
+  assert.equal(reDoS.ok, false, '(a|aa)+$ 应被判定为灾难性回溯并拒绝');
+  const safeRe = grep({ pattern: '(foo|bar)+', path: tmpU }, ctxG);
+  assert.equal(safeRe.ok, true, '无重叠前缀的分支不应被误伤');
+
+  safeRmSync(tmpU, { recursive: true, force: true });
+  ok('v0.4.6 回归：URL 凭据脱敏 / undo 越界报错 / hook `|` matcher / 预设对象形态提权 / SSH_AUTH_SOCK / 深 schema / grep ReDoS');
+}
+
+// ---------- 55. v0.4.6 回归：时区 / 轮转保留当天 / 峰谷锚点 / 输出上限 ----------
+{
+  const prevHome55 = process.env.MINGDAO_HOME;
+  const home55 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-r55-'));
+  process.env.MINGDAO_HOME = home55;
+
+  // 55a. 覆盖 pricing.timezone 后，日界与避峰顺延必须按该时区真实偏移换算（此前硬编码 UTC+8）
+  fs.writeFileSync(path.join(home55, 'config.json'), JSON.stringify({ pricing: { timezone: 'America/New_York' } }));
+  const pricingMod = await import(pathToFileURL(path.join(srcDir, 'pricing.js')).href + '?tz55');
+  const ny = new Date('2026-09-11T14:00:00Z'); // 纽约 10:00（高峰窗口内）
+  assert.equal(pricingMod.beijingDayStart(ny).toISOString(), '2026-09-11T04:00:00.000Z', '日界应为纽约当地 0 点');
+  assert.equal(pricingMod.deferToOffpeak(ny).toISOString(), '2026-09-11T16:00:00.000Z', '避峰应顺延到纽约 12:00');
+  fs.writeFileSync(path.join(home55, 'config.json'), '{}');
+  const pricingMod2 = await import(pathToFileURL(path.join(srcDir, 'pricing.js')).href + '?tz55b');
+  assert.equal(pricingMod2.beijingDayStart(ny).toISOString(), '2026-09-10T16:00:00.000Z', '默认时区仍为北京 0 点');
+
+  // 55b. 峰谷单价按「请求发起时刻」锚定（非响应落账时刻）
+  const { recordUsage } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+  const peakAt = Date.parse('2026-09-02T02:00:00Z'); // 周三 10:00 北京 = 高峰
+  const offAt = Date.parse('2026-09-02T05:00:00Z'); // 周三 13:00 北京 = 闲时
+  recordUsage('deepseek-v4-flash', { prompt_tokens: 1000000, completion_tokens: 0 }, { requestStartAt: peakAt });
+  recordUsage('deepseek-v4-flash', { prompt_tokens: 1000000, completion_tokens: 0 }, { requestStartAt: offAt });
+  const rows55 = fs
+    .readFileSync(path.join(home55, 'cache-stats.jsonl'), 'utf8')
+    .split('\n')
+    .filter(Boolean)
+    .map((l) => JSON.parse(l));
+  assert.ok(Math.abs(rows55[0].cost - 3.0) < 1e-9, `高峰请求应记高峰价 3.0（实际 ${rows55[0].cost}）`);
+  assert.ok(Math.abs(rows55[1].cost - 1.5) < 1e-9, `闲时请求应记闲时价 1.5（实际 ${rows55[1].cost}）`);
+
+  // 55c. maxOutputCeiling（官方单次输出规格）必须真正约束显式配置的 maxOutputTokens
+  const { createAgent: ca55 } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
+  const { createIO: cio55 } = await import(pathToFileURL(path.join(srcDir, 'ui.js')).href);
+  const stub55 = { async chat() { return { text: 'x', reasoning: '', finish: 'stop', usage: { prompt_tokens: 1, completion_tokens: 1 }, toolCalls: null }; } };
+  const ag55 = ca55({
+    provider: stub55,
+    permission: { async check() { return true; } },
+    io: cio55({ quiet: true }),
+    modelName: 'deepseek-v4-pro',
+    workingDir: home55,
+    cfg: { permission: 'auto', maxOutputTokens: 999999999 },
+  });
+  assert.ok(ag55.maxOutput <= 384000, `显式 maxOutputTokens 应被 maxOutputCeiling(384K) 封顶（实际 ${ag55.maxOutput}）`);
+
+  process.env.MINGDAO_HOME = prevHome55;
+  safeRmSync(home55, { recursive: true, force: true });
+  ok('v0.4.6 回归：时区感知日界/避峰 · 峰谷锚定请求发起时刻 · 输出上限封顶');
+}
+
+// ---------- 56. v0.4.6 回归：macOS 自启 plist 用绝对路径（launchd 极简 PATH 下可解析） ----------
+{
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-autostart-'));
+  const script = `import { enableAutostart, disableAutostart, autostartPath } from ${JSON.stringify(pathToFileURL(path.join(srcDir, 'autostart.js')).href)};
+import fs from 'node:fs';
+const okOn = enableAutostart();
+const xml = okOn ? fs.readFileSync(autostartPath(), 'utf8') : '';
+disableAutostart();
+console.log(JSON.stringify({ okOn, xml }));`;
+  const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
+    env: { ...process.env, HOME: fakeHome, MINGDAO_HOME: path.join(fakeHome, 'mh') },
+    encoding: 'utf8',
+  });
+  const parsed = JSON.parse(String(r.stdout || '{}').trim() || '{}');
+  if (process.platform === 'darwin') {
+    assert.equal(parsed.okOn, true, '自启应写入成功：' + String(r.stderr || '').slice(0, 200));
+    assert.ok(String(parsed.xml).includes(process.execPath), 'plist 必须使用 node 绝对路径（launchd 不读登录 shell 的 PATH）');
+    assert.ok(!/<string>mingdao web/.test(String(parsed.xml)), 'plist 不得再使用裸命令名 mingdao');
+  }
+  safeRmSync(fakeHome, { recursive: true, force: true });
+  ok('v0.4.6 回归：自启命令使用绝对路径（launchd 下不再静默 command not found）');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

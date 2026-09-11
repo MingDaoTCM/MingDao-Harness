@@ -16,9 +16,16 @@ const MAX_TIMEOUT_SECONDS = 600;
 const SENSITIVE_ENV_PAIR = /(api[_-]?key|access[_-]?key|client[_-]?secret|private[_-]?key)/i;
 const SENSITIVE_ENV_SEGMENT = /(^|_)(token|secret|password|passwd|credential|authorization|auth)(_|$)/i;
 // 审计 P3-6（v0.4.2）：导出供 hooks.js 复用——hook 子进程 env 与 bash 工具同口径过滤敏感变量。
-export const isSensitiveEnv = (/** @type {any} */ k) => SENSITIVE_ENV_PAIR.test(k) || SENSITIVE_ENV_SEGMENT.test(k);
+// P3 修复（v0.4.6）：SSH_AUTH_SOCK 会被 `(^|_)auth(_|$)` 段规则误判为敏感变量而剥离，导致
+// bash 工具里 git-over-SSH / ssh-agent 全部失效（macOS 常态：push/pull 走 SSH 时必用）。
+// 它是**连接句柄**而非凭据，显式放行；其余变量的过滤语义不变。
+const ENV_ALWAYS_KEEP = new Set(['SSH_AUTH_SOCK']);
+export const isSensitiveEnv = (/** @type {any} */ k) =>
+  !ENV_ALWAYS_KEEP.has(String(k)) && (SENSITIVE_ENV_PAIR.test(k) || SENSITIVE_ENV_SEGMENT.test(k));
 
-function buildChildEnv(/** @type {any} */ ctx, /** @type {any} */ filterSensitive) {
+// 审计修复（v0.4.6）：导出供 config.tools 子进程复用——此前它是唯一不筛敏感变量的子进程入口
+// （bash / hooks / MCP 都筛），与全项目「默认剥离 *_API_KEY/*_TOKEN/*_SECRET」口径不一致。
+export function buildChildEnv(/** @type {any} */ ctx, /** @type {any} */ filterSensitive) {
   if (!filterSensitive) return process.env;
   const keep = new Set((ctx?.cfg?.bashEnvKeep || []).map(String));
   const env = {};

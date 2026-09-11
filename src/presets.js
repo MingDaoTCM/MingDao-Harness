@@ -157,10 +157,20 @@ const PERM_RANK = /** @type {Record<string, number>} */ ({ readonly: 0, ask: 1, 
 export function presetPermissionOverride(/** @type {any} */ preset, /** @type {any} */ currentPermission) {
   const want = preset && preset.permission !== undefined ? String(preset.permission) : null;
   if (!want || !(want in PERM_RANK)) return { permission: currentPermission, escalated: false };
-  const cur = currentPermission in PERM_RANK ? currentPermission : 'ask';
+  // P2 修复（v0.4.6）：currentPermission 也可能是**对象形态**（docs/CONFIG.md 推荐的
+  // {mode, allow, deny}，且 cli/repl/web 三个入口传的都是 cfg.permission 对象）——对象做 `in`
+  // 运算时键名变成 "[object Object]"，不入 PERM_RANK，于是 cur 被当成 'ask'：
+  // 当前 {mode:'readonly'} 时，预设声明 permission:'ask' 不判为提权，只读档被静默放宽为 ask
+  // （写操作从「禁止」变成「逐次确认」），且无 banner、无 escalated 标记。现先归一化 mode。
+  const curMode =
+    currentPermission && typeof currentPermission === 'object'
+      ? String(currentPermission.mode ?? '')
+      : String(currentPermission ?? '');
+  // 识别不出时取最保守的 readonly（fail-closed），而不是 ask
+  const cur = curMode in PERM_RANK ? curMode : 'readonly';
   if (PERM_RANK[want] > PERM_RANK[cur]) {
-    // 提权：忽略预设值，保持当前更保守的权限
-    return { permission: cur, escalated: true };
+    // 提权：忽略预设值，保持当前更保守的权限（对象形态保留其 allow/deny）
+    return { permission: curMode in PERM_RANK ? currentPermission : cur, escalated: true };
   }
   return { permission: want, escalated: false };
 }

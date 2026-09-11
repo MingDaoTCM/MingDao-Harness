@@ -23,6 +23,11 @@ const MAX_STEPS = 24;
 // 提到与主循环一致（24），只读子任务每步是 read/grep（输入便宜、无输出 token），成本增量可忽略。
 const SUBAGENT_MAX_STEPS = 24;
 
+// 只读档工具集（省钱 B1 的「只读阶段」）——模块级单一来源。
+// v0.4.6：此前 test/bench 各自维护一份副本，已经漂移（漏了 v0.4.4 加入的 task），
+// 导致基准测的不是真实只读档。导出后基准与实现共用同一集合。
+export const READONLY_TIER_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch', 'task']);
+
 /**
  * 创建 Agent 循环（调用方只需传 provider/permission/io/modelName/workingDir，其余可选）
  * @param {{ provider: any, permission: any, io: any, modelName: any, workingDir: any,
@@ -39,7 +44,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   const budget = safeBudget(cfg, caps);
   // maxOutput 也按窗口封顶：显式配超大 maxOutputTokens 时，prompt(预算)+output 仍不得越过窗口
   // （预算已按 caps.maxOutputTokens 留余量，但显式值可能更大——此处兜底，防服务端截断/拒绝）
-  const maxOutput = Math.min(cfg.maxOutputTokens || caps.maxOutputTokens, Math.max(1024, caps.contextWindow - budget));
+  const maxOutput = Math.min(
+    cfg.maxOutputTokens || caps.maxOutputTokens,
+    // v0.4.6：显式 maxOutputTokens 也要受官方单次输出规格（maxOutputCeiling，DeepSeek 384K）约束——
+    // 该字段此前只定义不生效，README 的「单次输出上限 384K」实际拿不到。
+    caps.maxOutputCeiling || Number.MAX_SAFE_INTEGER,
+    Math.max(1024, caps.contextWindow - budget)
+  );
   // v0.3.2 工具输出截断自适应：窗口越小截得越狠（单条工具结果按窗口 1/16 封顶，最少 2000 字），
   // 但绝不超过旧默认 20000（大窗口模型如 1M 不因公式放大回灌、不推高成本）。
   // 本地小模型（32k 窗口 → 2k 字）不再把大段代码/日志整条回灌，省 prompt 且不撑爆窗口。
@@ -48,6 +59,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   const reasoningEffort = cfg.reasoningByModel?.[modelName] ?? cfg.reasoningEffort ?? preset.reasoningEffort?.default ?? undefined;
   const hooks = createHooks(cfg.hooks, workingDir, cfg);
   const todos = /** @type {any[]} */ ([]);
+  // v0.4.6 修复：当前 runTurn 的 usage 累加器引用——spawnTask 定义在 runTurn 之外，
+  // 此前子代理的 token 消耗只用于生成汇报文本、从不并入父回合 usage，导致「今日费用」系统性少计
+  // （CLI/REPL 每次派子代理都漏计；README 主推的「多方向并行调研」场景漏计最重）。
+  // runTurn 开始时指向本轮 usage，finally 清空；runTurn 之外调用 spawnTask 时为 null（安全跳过）。
+  let currentUsage = /** @type {any} */ (null);
   // 会话级共享：调用方传入则复用（/model 切换、子代理均共享，undo 不丢失）
   const undo = undoStore || { backups: new Map() };
   const stepLimit = maxSteps || MAX_STEPS;
@@ -64,7 +80,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // + 已用过的工具；检测到写意图（用户消息或模型明说需要写/改/建）后注入全量工具。
   // v0.4.4：加 task——审计/调研等只读长任务此前因 task 不在只读档而看不到「派只读子代理」能力
   // （readOnly 子代理只读，权限引擎仍门控写操作，无越权）。
-  const READONLY_TIER_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch', 'task']);
+  // 只读档工具集：单一来源见模块顶部导出的 READONLY_TIER_SET
   // 中英双语写意图（CodeArts 报告：纯中文正则让英文会话整回合只读死锁）
   const WRITE_INTENT_RE = /写|建|创|改|修|删|装|加|添|增|补|换|移|部署|执行|运行|实现|重构|生成|迁移|安装|更新|升级|发布|调整|优化|修复|提交|推送|打包|编译|测试|implement|fix|create|modify|update|delete|deploy|build|make|generate|install|write|refactor|migrate|test|run|commit|push|remove|add|change|patch/i;
   const hasWriteIntent = (/** @type {any} */ text) => WRITE_INTENT_RE.test(String(text || ''));
@@ -112,7 +128,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       maxSteps: SUBAGENT_MAX_STEPS,
       mcp,
       sessionRef, // 子代理的审计记录归入主会话
-      onUsage, // P1-5（v0.4.5）：透传逐轮入账回调——子代理消耗计入今日费用（子代理内部 activeModel=subModel 正确归属）
+      // 注意：这里**不**透传 onUsage。子代理的消耗改为在下方 runTurn 返回后一次性并入父回合 usage
+      // （v0.4.6）。若同时透传 onUsage 又并入总量，WebUI 会对子代理已逐轮入账的部分重复计费。
     });
     const sys =
       `你是主智能体 MingDao 派出的子代理，独立完成一项子任务。` +
@@ -127,6 +144,20 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const t0 = Date.now();
     const res = await subAgent.runTurn(messages);
     const ms = Date.now() - t0;
+    // v0.4.6 P1 修复：子代理 token 消耗并入父回合 usage（缓存命中/未命中字段一并累加）——
+    // 否则子代理完全不计费：CLI/REPL（无 onUsage）恒漏计；WebUI 仅在子代理跨轮时偶发计入。
+    // 并入后父回合 res.usage 即「真总量」，护栏在途估算、分账、今日费用同时变准。
+    if (currentUsage && res?.usage) {
+      const u = res.usage;
+      currentUsage.prompt_tokens += u.prompt_tokens || 0;
+      currentUsage.completion_tokens += u.completion_tokens || 0;
+      if (Number.isFinite(u.prompt_cache_hit_tokens)) {
+        currentUsage.prompt_cache_hit_tokens = (currentUsage.prompt_cache_hit_tokens || 0) + u.prompt_cache_hit_tokens;
+      }
+      if (Number.isFinite(u.prompt_cache_miss_tokens)) {
+        currentUsage.prompt_cache_miss_tokens = (currentUsage.prompt_cache_miss_tokens || 0) + u.prompt_cache_miss_tokens;
+      }
+    }
     // v0.4.1：子代理空输出给主线程可用的失败信号（含 note 原因），而非笼统「无输出」——
     // 主智能体据此决定是否重试/换法，而非把子代理静默当作「已完成但没说话」。
     const text =
@@ -161,11 +192,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const maxRounds = Math.max(1, Number(cfg.maxRounds) || 3);
     let round = 0;
     const usage = /** @type {{ prompt_tokens: number, completion_tokens: number, prompt_cache_hit_tokens?: number, prompt_cache_miss_tokens?: number }} */ ({ prompt_tokens: 0, completion_tokens: 0 });
+    currentUsage = usage; // 子代理消耗并入本回合总量（见 spawnTask）
     const startedAt = Date.now();
     // 回合性能指标（状态栏：LLM 时长 / 工具时长 / 首 token 延迟 / 步数）
     let llmMsTotal = 0;
     let toolMsTotal = 0;
     let firstTokenAt = /** @type {any} */ (null);
+    // v0.4.6：记录最近一次模型请求的**发起**时刻——峰谷单价必须按发起时刻判定。
+    // 此前 recordUsage 在响应落地后用 new Date() 计价，跨 12:00/18:00 边界的请求会错记一档
+    // （1M prompt 的 pro 调用是 ¥9 vs ¥4.5 的差别）。
+    let lastRequestStartAt = /** @type {any} */ (null);
     // 省钱 B3（费用二级分账）：推理 token 估算（按增量累计）与逐工具调用/耗时累加
     let reasoningTokens = 0;
     const toolStats = /** @type {Map<string, {calls: number, ms: number}>} */ (new Map());
@@ -178,6 +214,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       reasoningTokens,
       toolStats: [...toolStats.entries()].map(([tool, s]) => ({ tool, calls: s.calls, ms: s.ms })),
       usedModel: activeModel, // 省钱 B4：本回合实际使用模型（降级后归属它）
+      requestStartAt: lastRequestStartAt, // v0.4.6：峰谷计价锚点（请求发起时刻，非落账时刻）
       deliverables: [...deliverables], // v0.3.1：CLI/REPL 续跑检查点复用（此前 artifacts 恒空）
     });
     let aborted = false;
@@ -225,6 +262,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     // v0.4.1 P1 修复：turnToolCache 必须声明在 while 之外、for 轮内——此前在 while 体内每步重建，
     // 去重只在本步的多个工具调用间生效，跨步（如先 grep 定位再 read 确认同一文件）完全失效。
     const turnToolCache = new Map();
+    // v0.4.6 P1 修复：有副作用的工具一旦执行，本回合的只读去重缓存必须整片作废。
+    // v0.4.1 把 turnToolCache 提到 for 轮内，让去重跨步生效（评估 A4），却没有失效点——
+    // 同回合「read a → write a → read a」的第 3 步会命中第 1 步缓存，模型拿到写入前的内容、
+    // 误判写入未生效，进而重复写入或得出错误结论（已实测复现）。只读工具与 task(readOnly)
+    // 不改变文件状态，缓存保留（去重收益不受影响）。
+    const invalidateReadCache = (/** @type {any} */ prep) => {
+      if (!prep.isMcp && READONLY_TOOLS_SET.has(prep.name)) return;
+      if (prep.name === 'task' && prep.args?.readOnly === true) return;
+      turnToolCache.clear();
+    };
     for (round = 0; round < maxRounds; round++) {
       steps = 0;
       // v0.4.4：每轮结束回调本轮增量 usage（长任务费用逐轮入账——此前只在 runTurn 全结束后才
@@ -386,6 +433,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       // 审计（tsc 扩面发现）：llmT0 此前在 try 内声明、catch 内引用——chat 抛错时
       // catch 自身 ReferenceError，掩盖原始错误且计时丢失；提到 try 外声明。
       const llmT0 = Date.now();
+      lastRequestStartAt = llmT0;
       try {
         res = await provider.chat({
           model: activeModel,
@@ -584,9 +632,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             } else {
               result = await dispatch(prep.name, prep.args, ctx);
             }
+            invalidateReadCache(prep); // 有副作用 → 作废本回合只读缓存（写后再读必须看到新内容）
             if (dedupKey) turnToolCache.set(dedupKey, result);
             return result;
           } catch (/** @type {any} */ err) {
+            // 失败也可能已产生副作用（半写入/部分执行）→ 同样作废缓存
+            invalidateReadCache(prep);
             return JSON.stringify({ ok: false, error: String(err?.message || err) });
           }
         }
@@ -803,6 +854,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           { role: 'user', content: '（系统提示）任务已执行完毕。请用一段话总结刚才完成的工作，列出交付物（文件路径），并说明遗留问题与后续建议。' },
         ];
         currentAc = new AbortController();
+        lastRequestStartAt = Date.now();
+        // v0.4.6 P1 修复：进入兜底总结前本回合已多次 io.endTurn()（步数上限分支），TUI 的 renderer
+        // 已被置空，而 onDelta → io.writeText 只做 `renderer?.push(...)`——总结文本被静默丢弃，
+        // 跑满 24 步的长任务（审计/重构/调研）在终端里只看到一屏工具调用、没有最终答复。
+        // 重新 beginTurn() 开一个渲染段（web-io 的 beginTurn 是空实现，不受影响）。
+        io.beginTurn();
         const wrapRes = await provider.chat({
           model: activeModel,
           messages: wrapReq,
@@ -815,6 +872,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             if (d.text) io.writeText(d.text);
           },
         });
+        io.endTurn(); // 收尾：flush 流式渲染段（与正常 turn 一致）
         if (wrapRes.usage) {
           usage.prompt_tokens += wrapRes.usage.prompt_tokens || 0;
           usage.completion_tokens += wrapRes.usage.completion_tokens || 0;
@@ -839,6 +897,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       throw err;
     } finally {
       currentAc = null;
+      currentUsage = null; // 回合结束：避免 runTurn 之外调用的 spawnTask 写入陈旧累加器
       offSigint();
     }
   }

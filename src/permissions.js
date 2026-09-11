@@ -23,8 +23,8 @@ function summarize(name, args) {
   }
 }
 
-/** @param {any} rule @param {any} name @param {any} args */
-function ruleMatches(rule, name, args) {
+/** @param {any} rule @param {any} name @param {any} args @param {boolean} [forDeny] */
+function ruleMatches(rule, name, args, forDeny = false) {
   const idx = rule.indexOf(':');
   if (idx > 0) {
     const ruleName = rule.slice(0, idx);
@@ -34,7 +34,13 @@ function ruleMatches(rule, name, args) {
     // bash 前缀规则防链式命令绕过（P0 安全，v0.4.1）：白名单字符法——前缀规则仅匹配
     // 单条简单命令（字母数字/空格/下划线/./-/），任何 shell 元字符（&&/||/;|&<>`$()\n\r）都不匹配，
     // 回落权限确认。黑名单枚举永远追不上绕过手法（单 & 后台串联、重定向、\r 等），白名单才可靠。
-    if (name === 'bash' && !/^[A-Za-z0-9_ ./\\:-]+$/.test(have)) return false;
+    //
+    // P1 修复（v0.4.6）：该白名单只适用于 **allow** 规则（目的正是防止 `git status && rm -rf /`
+    // 借前缀匹配提权）。deny 是「硬拦截」，方向相反——失配 = 不拦 = fail-open：命令里只要出现
+    // & ; | $ @ = ' " Tab 等元字符，deny 规则就失配并回落到 mode，而 auto 档下 deny 是唯一防线，
+    // 等于形同不存在（实测 deny:['bash:rm *'] 拦得住 `rm -rf /x`，却放过 `cd /tmp && rm -rf /x`）。
+    // 故 deny 一律按命令原文匹配，不设字符白名单。
+    if (!forDeny && name === 'bash' && !/^[A-Za-z0-9_ ./\\:-]+$/.test(have)) return false;
     if (want.endsWith('*')) return have.startsWith(want.slice(0, -1));
     return have === want;
   }
@@ -69,7 +75,7 @@ export function createPermission(rawMode, io) {
       };
       // 需要特殊授权时弹出对话框与用户交互，而不是静默拒绝：
       // 1) 被 deny 规则拦截 → 询问是否本次强制放行
-      if (deny.some((/** @type {any} */ r) => ruleMatches(r, name, args))) {
+      if (deny.some((/** @type {any} */ r) => ruleMatches(r, name, args, true))) {
         return askOverride(`规则拦截了 ${name}${summarize(name, args)}，是否本次强制放行？[y/N] `);
       }
       if (allow.some((/** @type {any} */ r) => ruleMatches(r, name, args))) return true;

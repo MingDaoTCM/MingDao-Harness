@@ -89,7 +89,7 @@ PreToolUse（stdin 收 JSON，stdout 输出 `{decision:"block", reason}` 可阻�
 
 ## 5. 面向 DeepSeek-V4 的优化设计
 
-1. **预设调优**：v4-pro（推理/规划：温度 0.4、输出上限 32k、预算 200k）；v4-flash（日常：温度 0.6、输出 8k、预算 128k）；两者 `contextWindow` 均为 1M（官方规格；384K 是单次最大输出，字段 `maxOutputCeiling`），预算可随时调高。
+1. **预设调优**：v4-pro（推理/规划：温度 0.4、单次输出 `maxOutputTokens` 64k、预算 200k）；v4-flash（日常：温度 0.6、输出 8k、预算 128k）；两者 `contextWindow` 均为 1M（官方规格）。`maxOutputCeiling`=384K 是官方单次最大输出规格，作为用户显式调大 `config.maxOutputTokens` 时的硬上限（v0.4.6 起生效，此前该字段只定义未使用）。预算可随时调高。
 2. **推理内容流式展示**：`reasoning_content` 以暗色增量渲染，与正文同流。
 3. **峰谷定价适配**：每轮后展示 prompt/completion tokens，便于用户把批处理放在谷时段（v4 系列 2026-08-17 起峰谷定价，高峰＝北京工作日 9:00–12:00、14:00–18:00，闲时价＝高峰一半）。官方同时提供 Responses API 与 Anthropic 兼容接口；MingDao 默认走 OpenAI 兼容 chat/completions，如需原生协议可写自定义 Provider 模块。
 4. **模型路由（路线图）**：规划用 v4-pro、执行用 v4-flash 的自动分工；Provider 抽象已支持任意切换。

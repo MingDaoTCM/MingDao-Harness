@@ -134,11 +134,19 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
   }
 
   // —— 省钱 B2：--max-cost 预算上限（提交前估算拦截）——
-  let estimatedCost = 0;
+  let estimatedCost = /** @type {number|null} */ (0);
   if (maxCost > 0) {
     const estPrompt = unique.reduce((s, q) => s + sysTokens + approxTokens(q), 0);
     const estCompletion = unique.length * Math.min(maxTokens, 2048); // 保守按平均 2K 输出估算
     estimatedCost = estimateBatchCost(model, estPrompt, estCompletion);
+    // v0.4.6：无价模型估算为 null（未知）——--max-cost 是「预算保障」，未知即无法保障，
+    // 必须 fail-closed 中止提交；此前 null 被当 0、拦截恒不触发（与 P0-4 同类静默失效）。
+    if (estimatedCost == null) {
+      return {
+        error: `模型 ${model} 没有价格数据，无法估算 Batch 费用，--max-cost 预算保障失效，已中止提交。请先在 config.pricing.overrides 配置该模型价格，或去掉 --max-cost（自行承担预算风险）后重试。`,
+        estimatedCost: null,
+      };
+    }
     if (estimatedCost > maxCost) {
       return {
         error: `预计费用 ≈¥${estimatedCost.toFixed(4)}（已按半价）超过 --max-cost ¥${maxCost}，已中止提交。可缩小问题集或调高上限。`,

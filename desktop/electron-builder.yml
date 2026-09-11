@@ -24,6 +24,11 @@ extraResources:
     to: assets
   - from: ../skills
     to: skills
+  # P1 修复（v0.4.6）：可安装技能库（22 个技能预设）——src/skill-lib.js 按 ../skills-lib 解析
+  # （打包后即 resources/skills-lib）。此前漏打包，readdirSync 被 try/catch 静默吞掉，
+  # 桌面版「技能库」面板恒为空、README/官网主打的「22 个可安装技能」实际不存在。
+  - from: ../skills-lib
+    to: skills-lib
   # v0.4.0 Agent Preset：内置预设目录（builtinPresetDir() 解析到 resources/presets/）——
   # 漏打包会导致桌面版「预设…」下拉恒为空（无内置参考预设）
   - from: ../presets

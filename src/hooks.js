@@ -19,8 +19,12 @@ function normalize(/** @type {any} */ list) {
 function match(/** @type {any} */ hook, /** @type {any} */ toolName) {
   const m = String(hook.matcher || '*').trim();
   if (!m || m === '*') return true;
-  return m.split(',').some((part) => {
+  // P2 修复（v0.4.6）：同时支持 `,` 与 `|` 分隔。docs/CONFIG.md 的官方示例写的是
+  // `"matcher": "write|edit|bash"` 并明文声明支持 `|`，而实现只按 `,` 切分——按文档写的
+  // PreToolUse 策略钩子永不触发（fail-open），且没有任何日志，一个本该拦写操作的合规钩子静默失效。
+  return m.split(/[,|]/).some((part) => {
     const p = part.trim();
+    if (!p) return false;
     if (p.endsWith('*')) return toolName.startsWith(p.slice(0, -1));
     return p === toolName;
   });
@@ -81,6 +85,11 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
       }, 10000);
       child.stdout.on('data', (d) => (out = cap(out, d)));
       child.stderr.on('data', (d) => (err = cap(err, d)));
+      // P1 修复（v0.4.6）：stdin 必须有 error 监听。hook 若「不读 stdin 就退出」（如
+      // cmd:'true' / echo 形式的策略脚本）且载荷超过管道缓冲（约 64KB，write 大文件时必然发生），
+      // write 的 EPIPE 会作为异步 error 事件抛出——无人监听即未捕获异常，整个进程崩溃
+      // （WebUI 场景下所有并发会话一起死）。write() 本身的 try/catch 捕不到异步事件。
+      child.stdin.on('error', () => {});
       child.on('error', (e) => {
         clearTimeout(timer);
         finish({ ok: false, error: `hook 启动失败：${e.message}` });

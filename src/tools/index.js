@@ -2,7 +2,7 @@
 // 文件/命令工具 + 智能体工具（skill 技能加载 / task 子代理 / todo 任务清单 / undo 撤销）。
 
 import { read, write, edit, ls, glob, grep, undo } from './fs-tools.js';
-import { runBash } from './bash.js';
+import { runBash, buildChildEnv } from './bash.js';
 import { runGit } from './git.js';
 import { runFetch } from './fetch.js';
 import { listSkills, loadSkill } from '../skills.js';
@@ -336,7 +336,9 @@ export function mountConfigTools(/** @type {any} */ cfg) {
             const timeoutMs = Math.min(Number(e.timeout) > 0 ? Number(e.timeout) : 120, 600) * 1000;
             const child = spawn(shell, shellArgs, {
               cwd: ctx.cwd,
-              env: { ...process.env, MINGDAO_TOOL_ARGS: JSON.stringify(args ?? {}) },
+              // v0.4.6：与 bash/hooks/MCP 同口径过滤敏感环境变量——此前这里用 {...process.env}，
+              // 是唯一不筛的子进程入口（声明式工具子进程能读到 MINGDAO_API_KEY/AWS_SECRET_ACCESS_KEY）。
+              env: { ...buildChildEnv(ctx, ctx?.cfg?.bashEnvFilter !== false), MINGDAO_TOOL_ARGS: JSON.stringify(args ?? {}) },
             });
             let out = '';
             let err = '';
@@ -382,16 +384,21 @@ export function mountConfigTools(/** @type {any} */ cfg) {
 
 /**
  * 递归去除对象中的全部 description 键（保留类型/required/enum 等结构性字段）。
+ * P2 修复（v0.4.6）：加深度上限。MCP 服务器的 inputSchema 属**不可信输入**，此前纯递归无保护——
+ * 20 万层嵌套的 schema 会抛 RangeError；而 buildToolSchemas 每轮都跑，模型调用过一次该工具后
+ * （名字进 usedNames 即走剥离分支）该会话此后每轮都抛错。超深时原样保留，不再递归。
  * @param {any} obj
+ * @param {number} [depth]
  * @returns {any}
  */
-function stripDescriptions(obj) {
-  if (Array.isArray(obj)) return obj.map(stripDescriptions);
+function stripDescriptions(obj, depth = 0) {
+  if (depth > 32) return obj;
+  if (Array.isArray(obj)) return obj.map((/** @type {any} */ v) => stripDescriptions(v, depth + 1));
   if (obj && typeof obj === 'object') {
     const out = /** @type {Record<string, any>} */ ({});
     for (const [k, v] of Object.entries(obj)) {
       if (k === 'description') continue;
-      out[k] = stripDescriptions(v);
+      out[k] = stripDescriptions(v, depth + 1);
     }
     return out;
   }

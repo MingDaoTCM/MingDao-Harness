@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SECURITY_HEADERS } from '../constants.js';
 
 import * as configDomain from './domains/config.js';
 import * as sessionsDomain from './domains/sessions.js';
@@ -77,7 +78,8 @@ export function createApiDispatch(deps) {
     if (method === 'GET' && (p === '/' || p === '/index.html')) {
       try {
         const html = fs.readFileSync(INDEX_HTML);
-        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+        // v0.4.6：HTML 壳同样下发安全头（frame-ancestors 不支持 meta，必须走 HTTP 头）
+        res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...SECURITY_HEADERS });
         res.end(html);
       } catch {
         json(res, 500, { error: '前端文件缺失' });

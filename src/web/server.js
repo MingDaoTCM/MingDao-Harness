@@ -25,9 +25,10 @@ import { createProvider, resolveProviderConfig, helperProvider } from '../provid
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { routeTask, routingConfig } from '../routing.js';
 import { buildUserContent } from './attachments.js';
-import { MAX_CONCURRENT } from './constants.js';
+import { MAX_CONCURRENT, SECURITY_HEADERS } from './constants.js';
 import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
+import { isPrivateHost as sharedIsPrivateHost } from '../tools/fetch.js';
 import { buildSystemPrompt } from '../prompts.js';
 import { loadProjectMemory, loadProjectMemoryEntries, retrieveRelevant, extractAndAppendProjectMemory } from '../memory.js';
 import { saveTaskStateMerge, clearTaskState, loadTaskState, resumePrompt } from '../task-state.js';
@@ -69,7 +70,7 @@ const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'inde
 
 /** @param {any} res @param {any} code @param {any} obj */
 function json(res, code, obj) {
-  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.writeHead(code, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store', ...SECURITY_HEADERS });
   res.end(JSON.stringify(obj));
   // 返回 truthy：域路由 `return json(...)` 必须被编排器视为「已处理」——
   // 否则兜底 404 会对已结束的响应二次写入（Node 18 下 write-after-end 未捕获 → 整服务崩溃）
@@ -275,23 +276,12 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   const srvlog = createLogWriter(path.join(mingdaoHome(), 'logs', 'web-server.log'));
 
   // —— SSRF 防护（质检 S1）：远端地址校验 ——
-  /** @param {any} hostname */
-  function isPrivateHost(hostname) {
-    let h = String(hostname || '').toLowerCase();
-    if (!h) return true;
-    h = h.replace(/^\[|\]$/g, ''); // IPv6 字面量去括号（URL('http://[::1]/').hostname 带方括号）
-    if (h === 'localhost' || h.endsWith('.localhost') || h === '::1') return true;
-    if (h.includes(':')) {
-      // IPv6：回环 ::1、链路本地 fe80::/10、唯一本地 fc00::/7、IPv4 映射 ::ffff:私网
-      if (/^::ffff:/.test(h)) return isPrivateHost(h.slice(7));
-      return /^fe[89ab]/.test(h) || /^f[cd]/.test(h) || h === '::' || h === '::1';
-    }
-    const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-    if (!m) return false; // 域名：由 validateRemoteUrl 的 DNS 解析复检
-    const a = Number(m[1]);
-    const b = Number(m[2]);
-    return a === 10 || a === 127 || a === 0 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
-  }
+  // v0.4.6 P1：本文件的 isPrivateHost 副本已删除，改用 tools/fetch.js 的单一实现。
+  // 副本只识别 `::ffff:` + 点分四段，而 URL 解析器会把该形态规范化成十六进制
+  // （[::ffff:127.0.0.1] → [::ffff:7f00:1]），副本判为公网 → 私网目标放行。
+  // 单一来源同时覆盖 skill-lib.installFromUrl 与 fetch 工具，避免复现同款缺口。
+  const isPrivateHost = (/** @type {any} */ h) => sharedIsPrivateHost(h);
+  const isIpLiteral = (/** @type {any} */ h) => /^\d{1,3}(\.\d{1,3}){3}$/.test(String(h)) || String(h).includes(':');
   /** @param {any} raw */
   async function validateRemoteUrl(raw) {
     let u;
@@ -308,7 +298,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     if (!cfg.web?.allowPrivateEndpoints && !serverBoundLocal) {
       const h = String(u.hostname || '').toLowerCase();
       let blocked = isPrivateHost(h);
-      if (!blocked && h && h !== 'localhost' && !/^\d{1,3}(\.\d{1,3}){3}$/.test(h)) {
+      if (!blocked && h && h !== 'localhost' && !isIpLiteral(h)) {
         try {
           const { lookup } = await import('node:dns/promises');
           const addrs = await lookup(h, { all: true, verbatim: true });
@@ -490,8 +480,12 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     // 权限/选择类交互：发 ask 事件（带 taskId），等待 POST /api/permission 应答
     const askHandler = (/** @type {any} */ { question, hidden, options, label, confirm }) =>
       new Promise((resolve) => {
-        const id = Math.random().toString(36).slice(2);
-        entry.pendingAsk = { id, resolve };
+        // P1 修复（v0.4.6）：ask id 必须是不可猜测的随机值，且服务端在应答时校验它——
+        // 此前用 Math.random().toString(36) 且 /api/permission 从不核对 id，导致任何能访问
+        // API 的一方（局域网共享 token、或回环下的本机进程）只要知道可枚举的 taskId，
+        // 就能替他人的挂起确认直接答「允许」，把默认 ask 档这道唯一的人工闸门整个绕过。
+        const id = crypto.randomBytes(16).toString('hex');
+        entry.pendingAsk = { id, options: options || null, resolve };
         send({
           type: 'ask',
           id,

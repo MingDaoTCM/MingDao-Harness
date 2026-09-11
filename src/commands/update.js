@@ -93,7 +93,7 @@ export async function handleUpdateFamily(/** @type {any} */ cmd, /** @type {any}
       return true;
     }
     const rr = /** @type {any} */ (r);
-    console.log(`✓ 完成 ${rr.results.length} 条 · ↑${rr.usage.prompt_tokens} ↓${rr.usage.completion_tokens} tokens · 费用 ≈¥${rr.cost.toFixed(5)}（已按半价）`);
+    console.log(`✓ 完成 ${rr.results.length} 条 · ↑${rr.usage.prompt_tokens} ↓${rr.usage.completion_tokens} tokens · 费用 ${rr.cost == null ? '未知（该模型无价格数据，已记为「未知」而非免费；可配 config.pricing.overrides）' : `≈¥${rr.cost.toFixed(5)}（已按半价）`}`);
     if (r.deduped) console.log(`  （去重合并 ${r.deduped} 条重复问题，结果已回填全部位置）`);
     console.log(`  结果文件：${r.outputFile}`);
     console.log(`  任务 ID：${r.batchId}（结果已计入 /cost 分账）`);

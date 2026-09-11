@@ -9,6 +9,8 @@ const { estimateCost, estimateBatchCost, BATCH_DISCOUNT } = await import(pathToF
 const { approxTokens, clampText, TOOL_RESULT_LIMIT } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
 const { toolSchemas, buildToolSchemas } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
 const { countTokens, heuristicTokens } = await import(pathToFileURL(path.join(srcDir, 'tokenizer.js')).href);
+// v0.4.6：只读档工具集从实现单源导入（此前本文件本地维护一份 6 工具副本，已漂移 → 节省额虚高）
+const { READONLY_TIER_SET } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
 const { modelPreset } = await import(pathToFileURL(path.join(srcDir, 'models.js')).href);
 
 let pass = 0, fail = 0;
@@ -54,9 +56,12 @@ const report = [];
 // ---------- 任务 4：工具 Schema 瘦身（已用工具剥描述） ----------
 {
   const full = toolSchemas();
-  const fullTok = approxTokens(JSON.stringify(full));
+  // v0.4.6：这是面向 DeepSeek 的省钱主张，用随包官方词表精确计数（此前用启发式，
+  // 与精确值偏差 1.1~1.8 倍，报出来的百分比不是真实节省额）。
+  const schemaTok = (v) => countTokens(JSON.stringify(v), 'deepseek-v4-flash');
+  const fullTok = schemaTok(full);
   const stripped = buildToolSchemas(new Set(full.map((t) => t.function.name)));
-  const strippedTok = approxTokens(JSON.stringify(stripped));
+  const strippedTok = schemaTok(stripped);
   const inputPrice = 1.5 / 1e6; // flash 闲时输入价（元/token）
   const saved = (fullTok - strippedTok) * inputPrice;
   ok(strippedTok <= fullTok * 0.6, `全剥后应 ≤60%（实际 ${((strippedTok / fullTok) * 100).toFixed(1)}%）`);
@@ -67,11 +72,12 @@ const report = [];
 // ---------- 任务 5：只读阶段收缩（只读工具子集） ----------
 {
   const full = toolSchemas();
-  const fullTok = approxTokens(JSON.stringify(full));
-  const RO = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo']);
-  const tier = full.filter((t) => RO.has(t.function.name));
-  const tierTok = approxTokens(JSON.stringify(tier));
-  ok(tierTok <= fullTok * 0.55, `只读档应 ≤55% 全量（实际 ${((tierTok / fullTok) * 100).toFixed(1)}%）`);
+  const schemaTok2 = (v) => countTokens(JSON.stringify(v), 'deepseek-v4-flash');
+  const fullTok = schemaTok2(full);
+  // 用 agent.js 导出的唯一只读档集合（此前本地 6 工具副本已漂移，报出的节省额虚高）
+  const tier = full.filter((t) => READONLY_TIER_SET.has(t.function.name));
+  const tierTok = schemaTok2(tier);
+  ok(tierTok <= fullTok * 0.75, `只读档应 ≤75% 全量（实际 ${((tierTok / fullTok) * 100).toFixed(1)}%）`);
   report.push(['只读阶段收缩', pct(tierTok / fullTok)]);
   console.log(`  ⑤ 只读阶段：${fullTok}→${tierTok} tokens，省 ${pct(tierTok / fullTok)}`);
 }
@@ -88,16 +94,34 @@ const report = [];
   console.log(`  ⑥ 工具结果截断：${origTok}→${clampTok} tokens，省 ${pct(clampTok / origTok)}`);
 }
 
-// ---------- 任务 7：精确 tokenizer 不虚高（启发式为上界，不反向多计） ----------
+// ---------- 任务 7：启发式计数在各类别上的误差有界（v0.4.6 类别化） ----------
 {
   const text = '人工智能正在改变世界，MingDao 让每个人都拥有自己的智能体。MCP 连接外部工具，tokenizer 精确计量，WebUI 开箱即用。'.repeat(20);
   const exact = countTokens(text, 'deepseek-v4-flash');
   const heur = heuristicTokens(text);
   ok(exact > 0 && heur > 0, '两种计数都应为正');
-  // 启发式是保守上界（CJK 0.75 token/字），不应低于精确值（低于=反向虚低、可能漏计费）
-  ok(heur >= exact, `启发式应为上界（exact ${exact} ≤ heuristic ${heur}）`);
-  report.push(['精确 tokenizer 不虚高', '—']);
-  console.log(`  ⑦ 精确 tokenizer：exact ${exact} ≤ heuristic ${heur}（不虚高、不漏计）`);
+  ok(heur >= exact, `中英混排下启发式应为上界（exact ${exact} ≤ heuristic ${heur}）`);
+
+  // v0.4.6：此前这里只用一个 CJK 密集样本断言 `heur >= exact`，把「某条样本成立」当成了
+  // 「普适不变量」——实际纯标点低估 3 倍、单字母词/随机字母数字低估 2 倍、纯数字低估 1.3 倍。
+  // 字符级启发式无法同时贴合「自然语言词表合并」与「随机串」，故改为类别化断言：
+  // ① 非自然语言类别（标点/数字/单字母词）必须是硬上界；② 自然语言允许 ≤15% 的轻微低估。
+  const CASES = [
+    ['!@#$%^&*()_+-=[]{}|;:,.<>?/'.repeat(4), 'punctuation', true],
+    ['1234567890'.repeat(10), 'digits', true],
+    ['a b c d e f g h i j k l m n o p', 'single-letter words', true],
+    ['hello world', 'english', false],
+    ['The quick brown fox jumps over the lazy dog. '.repeat(10), 'prose', false],
+    ['function foo(a, b) { return a + b; }', 'code', false],
+  ];
+  for (const [s, label, mustBeUpperBound] of CASES) {
+    const e = countTokens(s, 'deepseek-v4-flash');
+    const h = heuristicTokens(s);
+    if (mustBeUpperBound) ok(h >= e, `启发式在「${label}」类别必须是上界（exact ${e} > heuristic ${h}）`);
+    else ok(h >= e * 0.85, `启发式在「${label}」类别误差应在 15% 内（exact ${e}, heuristic ${h}）`);
+  }
+  report.push(['启发式计数类别化', '—']);
+  console.log(`  ⑦ 启发式计数：中英混排 ${exact} ≤ ${heur}（上界）；标点/数字/单字母词为硬上界，自然语言误差 ≤15%`);
 }
 
 // ---------- 任务 8：推理分级能力契约（pro 支持、flash 不支持） ----------

@@ -13,6 +13,11 @@ export function redactSecrets(/** @type {any} */ text) {
   s = s.replace(/(Authorization\s*:\s*Bearer\s+)[^\s"',}]+/gi, '$1***');
   s = s.replace(/((?:api[_-]?key|token|secret|password|passwd|access_token)\s*[=:]\s*["']?)[^\s"',}]+/gi, '$1***');
   s = s.replace(/([?&](?:key|token|secret|api_key|access_token)=)[^&\s"']+/gi, '$1***');
+  // P2 修复（v0.4.6）：URL 内嵌凭据（scheme://user:pass@host）——本文件头注释一直声称覆盖，
+  // 但规则里从来没有这一条：`git clone https://oauth2:glpat-xxx@host/repo`、
+  // `postgres://user:pw@host/db` 这类命令行会**原样**落入 ~/.mingdao/audit.jsonl
+  // （bash/fetch 的完整参数写审计）与 diagnose 诊断包。只掩码密码段，保留用户名与主机便于排查。
+  s = s.replace(/(:\/\/[^/\s:@]{1,64}:)[^/\s@]{1,256}@/g, '$1***@');
   return s;
 }
 

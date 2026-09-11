@@ -123,8 +123,14 @@ function backup(ctx, p) {
 export function undo(args, ctx) {
   const store = ctx?.undoStore?.backups;
   if (!(store instanceof Map) || !store.size) return { ok: false, error: '没有可撤销的修改。' };
-  const p = args.path ? (() => { const bb = boundedPath(ctx, args.path); return bb.ok ? bb.path : null; })() : null;
-  if (p) {
+  // P2 修复（v0.4.6）：显式传入 path 但越界/无效时必须报错。此前 boundedPath 失败会得到
+  // p=null，代码静默落到下方「撤销最近一次」分支——模型指定 /etc/hosts，实际回滚的却是
+  // **另一个无关文件**（实测 other.txt 被还原），还回报「已撤销成功」。指定路径与省略路径的
+  // 语义必须分开，绝不互相回落。
+  if (args.path) {
+    const bb = boundedPath(ctx, args.path);
+    if (!bb.ok) return bb;
+    const p = bb.path;
     const list = store.get(p);
     if (!list?.length) return { ok: false, error: `${p} 没有可撤销的修改记录。` };
     const last = list.pop();
@@ -291,7 +297,12 @@ export function edit(args, ctx) {
     if (count > 1 && !replaceAll) {
       return { ok: false, error: `old_string 匹配到 ${count} 处。请提供更精确的上下文，或设置 replace_all=true。` };
     }
-    const next = replaceAll ? text.split(oldString).join(newString) : text.replace(oldString, newString);
+    // P1 修复（v0.4.6）：单处替换必须用「函数式替换值」。String.replace 的字符串替换值会解释
+    // `$&`（匹配文本）、`` $` ``（匹配前）、`$'`（匹配后）、`$$`（字面 $）等模式——new_string 里
+    // 出现这些序列（写 shell/模板字符串/正则/sed/LaTeX 时极常见）会静默写坏文件甚至把文件尾部
+    // 整段复制进来，而工具仍回报「已编辑成功」。replace_all 路径走 split/join 本就是字面量，
+    // 这里统一为同一语义。
+    const next = replaceAll ? text.split(oldString).join(newString) : text.replace(oldString, () => newString);
     backup(ctx, p);
     fs.writeFileSync(p, next);
     invalidateReadCache(p);
@@ -433,6 +444,25 @@ export function glob(args, ctx) {
 }
 
 /**
+ * 判定「同前缀歧义分支被量词修饰」这一 ReDoS 形态（v0.4.6）。
+ * 提取 `(…|…)` 后紧跟量词的分组，若存在两个分支首字符相同（分支前缀重叠），
+ * 则形如 (a|aa)+ / (\d|\d\d)+ 会在失败匹配时指数回溯。
+ * 保守起见只看首字符：`(foo|bar)+`、`(get|post)+` 这类无重叠分支不会误伤。
+ * @param {string} pattern
+ */
+function hasAmbiguousAlternation(pattern) {
+  const re = /\(([^()]*)\)\s*(?:[+*]|\{\d+,?\d*\})/g;
+  let m;
+  while ((m = re.exec(pattern))) {
+    const branches = m[1].split('|').map((b) => b.trim());
+    if (branches.length < 2) continue;
+    const firsts = branches.map((b) => b.replace(/^\^/, '')[0] || '');
+    if (new Set(firsts).size < firsts.length) return true;
+  }
+  return false;
+}
+
+/**
  * @param {any} args
  * @param {any} ctx
  */
@@ -444,6 +474,13 @@ export function grep(args, ctx) {
     // 拒绝嵌套量词类灾难回溯模式（如 (a+)+b），避免同步 ReDoS 卡死事件循环
     if (/\([^)]*[+*][^)]*\)[+*{]/.test(pattern)) {
       return { ok: false, error: 'pattern 疑似灾难性回溯（嵌套量词），请改写为等价安全形式。' };
+    }
+    // P2 修复（v0.4.6）：上面的嵌套量词检查覆盖不到「歧义分支 + 外层量词」这一大类
+    // （`(a|aa)+$` 的括号里没有任何量词，直接放行）——实测 20KB 行 n=60 时同步回溯 >180s，
+    // 冻结整个 Node 进程（WebView/全部会话/SSE 一起卡死，同步阻塞连 setTimeout 都不触发）。
+    // 这里补一条精确判定：分组内以 `|` 分支、且**存在两个分支首字符相同**（重叠前缀 → 指数回溯）。
+    if (hasAmbiguousAlternation(pattern)) {
+      return { ok: false, error: 'pattern 疑似灾难性回溯（同前缀歧义分支被量词修饰，如 (a|aa)+），请改写为等价安全形式。' };
     }
     let re;
     try {
@@ -459,11 +496,16 @@ export function grep(args, ctx) {
     if (!root0.ok) return root0;
     const root = root0.path;
     const include = args.include ? globToRegExp(String(args.include)) : null;
+    // v0.4.6：总时间预算——即使静态检查漏过某种回溯形态，也不让一次 grep 无限期占用事件循环。
+    const grepStart = Date.now();
+    const GREP_BUDGET_MS = 5000;
+    let budgetHit = false;
     /** @type {any[]} */
     const matches = [];
     let truncated = false;
     let scannedFiles = 0;
     walkFiles(root, (full) => {
+      if (Date.now() - grepStart > GREP_BUDGET_MS) { budgetHit = true; return false; }
       if (include && !include.test(path.basename(full))) return;
       if (matches.length >= MAX_GREP_MATCHES) {
         truncated = true;
@@ -499,6 +541,9 @@ export function grep(args, ctx) {
     output += truncated
       ? `\n…[匹配超过 ${MAX_GREP_MATCHES} 条，已截断；已扫描 ${scannedFiles} 个文件]`
       : `\n[已扫描 ${scannedFiles} 个文件]`;
+    if (budgetHit) {
+      output += `\n…[已用满 ${GREP_BUDGET_MS / 1000}s 时间预算，提前停止扫描；请缩小路径范围或改写 pattern]`;
+    }
     return { ok: true, output };
   } catch (/** @type {any} */ err) {
     return { ok: false, error: `grep 失败：${err?.message || err}` };

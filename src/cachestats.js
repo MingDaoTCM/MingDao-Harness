@@ -47,8 +47,28 @@ export function recordCacheStats(/** @type {any} */ entry) {
         const raw = fs.readFileSync(cacheStatsFile(), 'utf8');
         const lines = raw.split('\n').filter(Boolean);
         if (lines.length > MAX_LINES) {
-          atomicWriteFileSync(cacheStatsFile(), lines.slice(-KEEP_LINES).join('\n') + '\n');
-          cacheStatsCount = KEEP_LINES;
+          // v0.4.6 P2 修复：轮转必须保留**当天全部**记录。此前只保留最后 KEEP_LINES 行——
+          // 单进程写满 2 万条后，当天早先的费用会被裁掉，todayCost() 随之变小，
+          // 日费用护栏被静默重置（用户可再次超支而不自知）。当天行（最多 MAX_LINES 条）
+          // 与最近 KEEP_LINES 行取并集，去重且保持原顺序。
+          const dayStart = beijingDayStart().getTime();
+          const todayLines = lines.filter((/** @type {string} */ l) => {
+            try {
+              return (JSON.parse(l).at || 0) >= dayStart;
+            } catch {
+              return false;
+            }
+          });
+          const tail = lines.slice(-KEEP_LINES);
+          const tailSet = new Set(tail);
+          const todayCapped = todayLines.length > MAX_LINES ? todayLines.slice(-MAX_LINES) : todayLines;
+          const todaySet = new Set(todayCapped);
+          const merged = [...todayCapped, ...tail.filter((l) => !todaySet.has(l))];
+          // 顺序按原文件恢复（避免打乱 byDay 折线的时间序）
+          const order = new Map(lines.map((l, i) => [l, i]));
+          merged.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+          atomicWriteFileSync(cacheStatsFile(), merged.join('\n') + '\n');
+          cacheStatsCount = merged.length;
         }
       });
     } catch {}
@@ -108,18 +128,21 @@ export function summarizeCacheStats(/** @type {any} */ entries) {
 // 记录一次用量（agent 侧调用）：自动计算命中拆分与节省额；perf 为回合性能指标（状态栏）
 export function recordUsage(/** @type {any} */ modelName, /** @type {any} */ usage, /** @type {any} */ perf = null) {
   const split = cacheSplit(usage);
+  // v0.4.6：峰谷单价按「请求发起时刻」判定。响应落地与发起可能跨 12:00/18:00 边界，
+  // 用 new Date()（落账时刻）会把高峰调用记成闲时价（或少记一半），日累计与护栏随之偏移。
+  const priceAt = Number(perf?.requestStartAt) > 0 ? new Date(Number(perf.requestStartAt)) : undefined;
   const prompt = usage?.prompt_tokens || 0;
   const completion = usage?.completion_tokens || 0;
   let cost = null;
   let saved = null;
   if (split) {
-    const base = estimateCost(modelName, prompt, completion, null);
-    cost = estimateCost(modelName, prompt, completion, split);
+    const base = estimateCost(modelName, prompt, completion, null, priceAt);
+    cost = estimateCost(modelName, prompt, completion, split, priceAt);
     if (base != null && cost != null) saved = base - cost;
   } else {
     // P0-4（v0.4.5）：estimateCost 无价返 null，直接记录 null（未知）而非 0（免费）——
     // 覆盖内置定价 + 外部定价 + config.pricing.overrides 三条来源，不再依赖 modelPreset 单一判断。
-    cost = estimateCost(modelName, prompt, completion, null);
+    cost = estimateCost(modelName, prompt, completion, null, priceAt);
   }
   recordCacheStats({
     model: modelName,

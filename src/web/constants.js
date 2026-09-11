@@ -7,3 +7,13 @@ export const MAX_IMAGE_BYTES = 5 * 1024 * 1024; // 单张图片原图上限（5M
 export const MAX_IMAGE_DATAURL = 7 * 1024 * 1024; // base64 膨胀 1.33 倍后的 dataURL 上限（≈5MB 原图）
 export const MAX_TEXT_BYTES = 200 * 1024; // 文本附件上限（200KB）
 export const MAX_FILE_READ_BYTES = 5 * 1024 * 1024; // read/edit 工具单文件读取上限（独立语义，非附件上限）
+
+// 安全响应头（v0.4.6）：CSP 的 frame-ancestors **不支持 meta 标签**（写在 index.html 的 meta 里
+// 会被浏览器忽略），必须由 HTTP 头下发。缺它时任意网页可用 iframe 嵌 WebUI 并叠透明浮层，把用户
+// 点击导向权限弹窗的「允许」按钮——即点击劫持绕过人工确认。服务端两处出口（HTML 壳 / JSON API）共用。
+export const SECURITY_HEADERS = {
+  'Content-Security-Policy': "frame-ancestors 'none'",
+  'X-Frame-Options': 'DENY',
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+};

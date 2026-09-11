@@ -2,6 +2,20 @@
 
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
+## v0.4.6（2026-09-11）— 迁移 macOS 后首次全量审计：P0 费用护栏盲区 + 50 项根因修复 + 省钱口径自纠
+
+- **省钱口径自纠（重要）**：`bench-savings`「综合省 64%」系虚高，真实值 **51%**——④Schema 瘦身 / ⑤只读阶段此前用**启发式**计数去测「面向 DeepSeek 的省钱主张」（工具 Schema 是 JSON，结构字符占 46%，两种计数偏差 1.1–1.8 倍），且 ⑤ 的基准里维护了一份**过期 6 工具副本**（实现的只读档自 v0.4.4 起已含 `task`）。两项改用随包官方词表**精确**计数、只读档集合从 `agent.js` 单源导出，并新增类别化断言防止再次虚高；真实值 ④48.9%（1145→585）、⑤28.9%（1145→814）。`docs/SAVINGS-BENCHMARK.md` 与 `docs/STRATEGY-NEXT.md` 同步修正
+- P0 费用护栏盲区：`effectivePricing` 在读 `pricing.overrides` **之前**就因无内置价返回 null → gpt-5/qwen/glm/kimi/本地/动态发现模型全部 hasPricing=false、estimateCost=null、cost 记 null（当 0 累计）→ 今日费用看不到消费、护栏永不拦截；而护栏给出的补救办法恰是这条不生效的路径。现 overrides 与内置/外部价等价作为来源，并要求仅靠 overrides 供价时 input+output 均为有限正数
+- P1 安全 ×5：**WebUI 权限确认可被任意客户端代答**（`/api/permission` 从不校验 ask id，而 taskId 是顺序号且 `/api/tasks` 全量列出 → 任何能访问 API 的一方都能替他人挂起的写文件/执行命令确认答「允许」，绕过默认 ask 档唯一人工闸门）· **任意环境变量外泄**（自定义模型 `envKey`+`baseUrl` 均用户可控，密钥解析把宿主任意变量当 Bearer 发到攻击者端点，不填 envKey 还回落主密钥）· **SSRF 绕过**（URL 解析器把 `[::ffff:127.0.0.1]` 规范化成 `[::ffff:7f00:1]`，旧判定只认点分四段 → 可抓回环 WebUI/内网/云元数据）· **`deny` 规则 fail-open**（防 allow 提权的白名单字符校验被同一函数用于 deny，命令含 `& ; | @ = ' "` 即失配，auto 档下 deny 形同不存在）· **sync-server 限流可用随机查询串绕过**（桶键用含 query 的 `req.url` 而路由用 pathname）
+- P1 正确性 ×8：**`git` 工具 100% 失效**（`await execFile` 非 thenable → 输出恒 `[object Object][object Object]`、退出码/ENOENT/timeout 全被吞）· **`edit` 静默写坏文件**（`$&`/`$'`/`$$` 被当替换模式）· **read-after-write 命中旧缓存**（写后再读返回写前内容，模型误判写入未生效）· **自动压缩吞掉整段会话**（`compactTrigger<0.6` 或 force 时除 system 外全部压成摘要，WebUI 还会永久写回会话文件）· **`reasoning_content` 不计入预算**（思考型会话低估 61 倍）· **冲突备份对产品不可见**（producer/consumer 文件名正则不一致 → 「冲突三选一」100% 失效，且备份被当普通会话推送到其他设备变成幽灵会话）· **hooks/MCP 子进程 stdin 无 error 监听**（载荷 >64KB 且子进程先退出时 EPIPE 未捕获异常带走整个进程）· **步数上限兜底总结被静默丢弃**（长任务终端只看到一屏工具调用、没有最终答复）
+- P1 费用 ×2：**子代理 token 从不并入父回合**（CLI/REPL 恒漏计，README 主推的「多方向并行调研」漏计最重）· **启发式计数并非其自称的「保守上界」**（纯标点低估 3 倍、单字母词/随机字母数字 2 倍 → 非 DeepSeek 模型预算/压缩/批量预检系统性偏小）
+- P1 打包 ×2：**`skills-lib/` 未随 npm 包与桌面版分发**（README/官网主打的「36 个技能」在两条主分发渠道只剩 14 个，失败还被 try/catch 静默吞）· **桌面版版本漂移**（`desktop/package.json` 停在 0.2.0，而 README 教用户的 `dist:linux|win|mac` 不跑同步 → 本地打包产出 0.2.0）
+- P2 安全/健壮性：预设提权防护对**对象形态** `{mode,allow,deny}`（文档推荐写法）失效（只读档可被静默提权为 ask）· 点击劫持防护缺失（`frame-ancestors` 不支持 meta 标签而服务端未下发 HTTP 头）· 审计日志泄漏 URL 内嵌凭据 · `config.tools` 子进程不筛敏感环境变量 · `undo` 越界回落回滚**无关文件** · hook `matcher` 不支持文档写明的 `|`（策略钩子永不触发）· `grep` ReDoS 可绕过（`(a|aa)+$` 同步回溯 >180s 冻结整个进程）· `fetch` 上限在整包下载后才判（实测写满 30MB 才报错）· 深嵌套 MCP schema 抛 RangeError · `SSH_AUTH_SOCK` 被误剥离致 git-over-SSH 失效 · TLS 静默降级
+- P2/P3 成本与平台：**峰谷单价按落账时刻判定**（跨 12:00/18:00 边界错记一档）· **cache-stats 轮转丢当天费用**（日费用护栏被静默重置）· **日界/避峰时区错位**（`beijingToDate` 硬编码 UTC+8，而 `beijingParts` 用可配置时区 → 覆盖 `pricing.timezone` 后错 12 小时）· Batch `--max-cost` 对无价模型静默失效 · `maxOutputCeiling`(384K) 只定义不生效（README 的「单次输出上限 384K」拿不到）· **macOS 自启必然静默失败**（plist 用裸命令 `mingdao`，launchd 极简 PATH 找不到，且从不 `launchctl` 注册）→ 改绝对路径 + 注入 PATH + bootstrap/bootout · 日志轮转写放大（达上限后每次追加整文件重写，2000 次 ≈1GB I/O；中文日志因字节/码元混用几乎不截断）· CI strict 棘轮排在 `npm ci` 之前空转假通过（tsc 缺失被当成 0 错误）
+- 测试与工程：smoke 74→**81 组断言** · bench 208→**214 断言** · 全绿门禁 + strict 0/0 + tsc 0 错误；**并修正两处「测试自身编码缺陷行为」**——smoke 曾断言 `git status` 在非 git 目录**成功**（只有坏实现才成立）、tokenizer 断言锁定旧口径，二者都会让回归测试反过来保护 bug
+- 官网（独立仓库）：论坛板块名未转义进列表页 `<h2>`（存储型 XSS）· 反代下限速按 `127.0.0.1` 聚合成全站共享配额 · `deploy.sh` 漏部署 `site-stats.mjs`
+- 审计方法与剩余项：六路并行只读审计 + 独立复核，逐项给出 `file:line` 与复现证据；完整报告见 `docs/AUDIT-v0.4.6.md`（含 14 项登记待办与「已确认无问题」清单）
+
 ## v0.4.5（2026-09-07）— 费用护栏根因修复 + 本地模型 507 中断根治 + 调度/CLI/安全收尾
 
 - P0 费用护栏：`estimateCost` 无价返 null（0 与「未知」语义分离）+ `costGuard` 显式 `noPricing` 告警，不再静默当「没花钱」；`recordUsage` 记录 null 成本（覆盖内置/外部/overrides 三来源）

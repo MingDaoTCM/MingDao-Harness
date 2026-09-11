@@ -4,13 +4,26 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+// —— 冲突备份名（单一事实来源，v0.4.6）——
+// 同步冲突时写入的备份：<会话名>.server-<时间戳>[-<随机后缀>].jsonl（远端版本）与 .remote-（远端拉取版本）。
+// 教训：producer（sync.js conflictCopyName）带随机后缀，而 consumer 的正则只认 <数字>.jsonl，
+// 导致 listSyncConflicts/resolveSyncConflict 永远匹配不到自己的备份——「冲突三选一」100% 失效；
+// 且这些备份被 listSessions 当成普通会话推出/拉取，在其他设备上变成无法解析的幽灵会话。
+// 现由本模块统一给出「识别 + 排除」，写入 / 冲突面板 / 会话列表与同步三处共用同一判定。
+export const CONFLICT_BACKUP_RE = /^(.+)\.(server|remote)-(\d+)(?:-[a-z0-9]+)?\.jsonl$/;
+/** @param {any} n */
+export function isConflictBackupName(n) {
+  return typeof n === 'string' && CONFLICT_BACKUP_RE.test(n);
+}
+
 /** @param {any} home */
 export function listSessions(home) {
   const dir = path.join(home, 'sessions');
   try {
     return fs
       .readdirSync(dir)
-      .filter((f) => f.endsWith('.jsonl'))
+      // 冲突备份不是会话：排除后不再出现在会话列表/最近会话/搜索/云同步推送集合中
+      .filter((f) => f.endsWith('.jsonl') && !isConflictBackupName(f))
       .map((f) => {
         const file = path.join(dir, f);
         return { file, name: f, mtime: fs.statSync(file).mtimeMs };

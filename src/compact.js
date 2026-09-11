@@ -64,7 +64,12 @@ export async function compactConversation(/** @type {any} */ { messages, budget,
     sizes.push(t);
     total += t;
   }
-  const trigger = Number.isFinite(Number(triggerRatio)) ? Number(triggerRatio) : DEFAULT_TRIGGER_RATIO;
+  // P1 修复（v0.4.6）：触发线不得低于目标保留比。若 trigger < TARGET_RATIO，会出现
+  // 「total 已越过触发线、却仍 ≤ budget×TARGET_RATIO」的区间——此时下面的保留循环不会 break，
+  // boundary 保持 messages.length，于是除 system 外整段会话（含最新用户指令）被全部压成摘要，
+  // 且 WebUI 的 onCompact 会把结果 rewriteSession 永久写回会话文件（真·失忆）。
+  // config.compactTrigger 是文档化的 0–1 可调项，「想更早压缩」的自然用法正好命中。
+  const trigger = Number.isFinite(Number(triggerRatio)) ? Math.max(Number(triggerRatio), TARGET_RATIO) : DEFAULT_TRIGGER_RATIO;
   // force（v0.3.2 边缘检测）：逼近窗口时即便启发式计数低估（total 未达触发线）也强制压缩——
   // 非 DeepSeek 模型启发式计数误差可达 ±2 倍，等它越过触发线时真实 prompt 可能已到窗口边缘。
   if (total <= budget * trigger && !force) return null;
@@ -78,6 +83,16 @@ export async function compactConversation(/** @type {any} */ { messages, budget,
     }
     keepTokens += sizes[i];
   }
+  // 兜底（v0.4.6）：保留循环没 break = 除 system 外的消息在计数上都装得进保留区
+  // （system 提示词通常占绝对多数，容易走到这里）。此时若沿用 boundary=messages.length，
+  // 结果就是「system + 摘要」——除 system 外整段会话（含最新用户指令）全部消失，
+  // WebUI 的 onCompact 还会把它 rewriteSession 永久写回会话文件。改为保留最后一段原文
+  // （MIN_KEEP_TAIL 条，至少覆盖最近一轮问答），只压缩更早的部分。
+  const MIN_KEEP_TAIL = 2;
+  if (boundary >= messages.length) {
+    boundary = messages.length - MIN_KEEP_TAIL;
+  }
+  if (boundary <= 1) return null; // 没有可压缩的前缀（会话太短）：放弃，交回普通裁剪
   const droppedCount = boundary - 1; // 不含 system
   if (!force && droppedCount < MIN_DROP_MESSAGES) return null;
   let droppedTokens = 0;

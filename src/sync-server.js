@@ -149,7 +149,15 @@ function clientKey(req) {
 function rateLimited(req, limit = 20, extra = '') {
   // 质检 M5：键 = IP + 路由 + 用户名——单账号爆破按用户名限（分布式 IP 无法绕过）；
   // 表满按最旧淘汰而非整表 clear（整表 clear 可被攻击者重置全员限额）
-  const key = clientKey(req) + '|' + req.url + '|' + String(extra || '');
+  // P1 修复（v0.4.6）：路由分量必须用 pathname，不能用 req.url——后者含查询串，攻击者给每个
+  // 请求加一个随机 `?x=` 就能每次落进新桶，登录/配对/改密的限流被整体绕过（实测：固定 URL
+  // 15 次 → 10×429；带随机查询串 60 次 → 0×429）。scrypt 约 18ms/次，绕过等于无限速爆破
+  // 外加阻塞事件循环的 DoS。
+  let route = String(req.url || '');
+  try {
+    route = new URL(route, 'http://placeholder').pathname;
+  } catch {}
+  const key = clientKey(req) + '|' + route + '|' + String(extra || '');
   const now = Date.now();
   const b = rateBuckets.get(key);
   if (b && now - b.t0 < 60000) {
@@ -671,12 +679,32 @@ export function runSyncServer({ port, host, dataDir, cert, key } = {}) {
     handle(req, res).catch(() => {});
   };
   let server;
+  // P2 修复（v0.4.6）：只配了 SYNC_CERT / SYNC_KEY 之一时必须拒绝启动，而不是静默降级成明文。
+  // 此前「配了证书但漏配私钥」会得到一个监听 443 的 http.Server，部署方以为在跑 HTTPS，
+  // 实际密码、设备 token、全部会话内容都在明文里传（实测：仅设 SYNC_CERT → server 非 https.Server）。
+  if (Boolean(certFile) !== Boolean(keyFile)) {
+    throw new Error(
+      `TLS 配置不完整：SYNC_CERT 与 SYNC_KEY 必须同时提供（当前 ${certFile ? '只设置了 SYNC_CERT' : '只设置了 SYNC_KEY'}）。` +
+        '拒绝以降级为明文 HTTP 的方式启动——请补齐另一个环境变量，或两者都不设并显式设置 SYNC_ALLOW_INSECURE=1 使用内网明文模式。'
+    );
+  }
+  const insecureAllowed = String(process.env.SYNC_ALLOW_INSECURE || '') === '1';
   if (certFile && keyFile) {
     server = https.createServer({ cert: fs.readFileSync(certFile), key: fs.readFileSync(keyFile) }, handler);
     console.log(new Date().toISOString(), 'HTTPS 模式（证书 ' + certFile + '）');
   } else {
     server = http.createServer(handler);
     console.log(new Date().toISOString(), '警告：HTTP 明文模式（仅限内网/过渡，公网请配置 SYNC_CERT/SYNC_KEY）');
+    // 非回环绑定（默认 SYNC_HOST=0.0.0.0 即是）时再加一条醒目告警：明文模式下密码/设备 token/
+    // 会话内容都在网络上裸奔。不直接拒绝启动，以免破坏 README 记载的 `mingdao sync-server 443` 内网用法。
+    const loopback = /^(127\.|::1$|localhost$)/.test(String(listenHost || ''));
+    if (!loopback && !insecureAllowed) {
+      console.log(
+        new Date().toISOString(),
+        `⚠ 安全警告：正在 ${listenHost}（非回环）上以明文 HTTP 提供同步服务——密码、设备 token 与全部会话内容均可被网络窃听。` +
+          '请务必配置 SYNC_CERT/SYNC_KEY 启用 HTTPS；确需内网明文可设置 SYNC_ALLOW_INSECURE=1 显式确认并消除本告警。'
+      );
+    }
   }
   // 质检 M5：全局并发连接上限（防连接耗尽）
   if (typeof server.maxConnections === 'number') server.maxConnections = 500;

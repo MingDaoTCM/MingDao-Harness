@@ -133,21 +133,58 @@ const CJK_RANGES = [
 /** @param {number} code */
 const isCjk = (code) => CJK_RANGES.some(([lo, hi]) => code >= lo && code <= hi);
 
+// 启发式估算（无精确词表的模型：非 DeepSeek 端点）——用于上下文预算/裁剪/批量超窗口预检。
+//
+// P1 修复（v0.4.6）：原实现只按「ASCII 字符数 / 4」算，对**非自然语言**的 ASCII 严重低估——
+// 实测纯标点 0.34×、单字母词 0.50×、随机字母数字 0.50×、纯数字 0.75×（10 类样本 6 类偏低）。
+// 而 docs/SAVINGS-BENCHMARK 与 bench-savings 一直声称它是「保守上界」，属虚假保证：
+// 非 DeepSeek 模型的预算/压缩/批量预检会系统性偏小，长上下文可能顶穿模型窗口。
+// 现改为按「字符类别 + 连续串」估算，并把标点与数字两类单独收紧（这两类是最大缺口）。
+// 诚实边界：BPE 词表会合并常用英文词（"hello" = 1 token），而随机字母串约 1.7 字符/token——
+// 任何字符级启发式都无法同时满足两者，因此**随机字母串仍可能被低估**。真正的兜底是 agent 的
+// 「边缘检测」：用服务端回传的真实 prompt_tokens 判断逼近窗口并强制压缩（EDGE_RATIO）。
 /** @param {any} text */
 export function heuristicTokens(text) {
   if (!text) return 0;
-  let ascii = 0;
-  let cjk = 0;
-  let other = 0;
-  for (const ch of String(text)) {
-    const code = /** @type {number} */ (ch.codePointAt(0));
-    if (code < 128) ascii += 1;
-    else if (isCjk(code)) cjk += 1;
-    else other += code > 0xffff ? 2 : 1; // 审计 B5：增补平面 emoji 按 2 token 保守计
+  const s = String(text);
+  const n = s.length;
+  let tokens = 0;
+  let i = 0;
+  while (i < n) {
+    const code = /** @type {number} */ (s.codePointAt(i));
+    if (code < 128) {
+      const ch = s[i];
+      if (ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
+        let j = i;
+        while (j < n && (s[j] === ' ' || s[j] === '\t' || s[j] === '\n' || s[j] === '\r')) j += 1;
+        tokens += Math.floor((j - i) / 8); // 空白多与相邻词合并且成串极便宜（单个空格按 0 计，不重复计词）
+        i = j;
+        continue;
+      }
+      if (ch >= '0' && ch <= '9') {
+        let j = i;
+        while (j < n && s[j] >= '0' && s[j] <= '9') j += 1;
+        tokens += Math.ceil((j - i) / 2); // 实测纯数字约 0.34 token/字符，1/2 留余量
+        i = j;
+        continue;
+      }
+      if ((ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z')) {
+        let j = i;
+        while (j < n && /[A-Za-z]/.test(s[j])) j += 1;
+        tokens += Math.max(1, Math.floor((j - i) / 4)); // 至少 1：单字母成词也是 1 token
+        i = j;
+        continue;
+      }
+      tokens += 1; // 标点/符号：词表合并极少（实测纯标点约 0.71 token/字符），按 1:1 保守计
+      i += 1;
+      continue;
+    }
+    const step = String.fromCodePoint(code).length;
+    if (isCjk(code)) tokens += 0.75;
+    else tokens += code > 0xffff ? 2 : 1; // 审计 B5：增补平面 emoji 按 2 token 保守计
+    i += step;
   }
-  // 审计 B5：非 CJK 非 ASCII（emoji 等）按码点计但每个 2 个 UTF-16 单元的 emoji 计 2，
-  // 避免对预算的过度乐观（ZWJ 序列仍可能低估，但方向已保守）
-  return Math.ceil(ascii / 4 + cjk * 0.75 + other);
+  return Math.ceil(tokens);
 }
 
 // 单个预分词片段的 BPE 计数（tiktoken 语义：优先合并 rank 最小的对，同 rank 取最左）。

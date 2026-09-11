@@ -14,21 +14,42 @@ import { pathToFileURL } from 'node:url';
 import { chat as openaiChat } from './openai-compatible.js';
 import { modelPreset, providerPreset } from '../models.js';
 import { mingdaoHome } from '../config.js';
-import { resolveApiKey } from '../credentials.js';
+import { resolveApiKey, getStoredKey } from '../credentials.js';
 import { isLocalBaseUrl } from '../model-caps.js';
 
 export function resolveProviderConfig(/** @type {any} */ cfg, /** @type {any} */ modelName) {
   // 自定义模型（config.customModels，WebUI 可增删改）：优先于内置预设
   const cm = cfg?.customModels?.[modelName];
   if (cm) {
-    const envKeys = [cm.envKey, 'MINGDAO_API_KEY'].filter(Boolean);
-    const apiKey = resolveApiKey(cfg, `custom:${modelName}`, envKeys[0]) || resolveApiKey(cfg, 'custom', envKeys[0]);
+    // P1 修复（v0.4.6）：自定义模型的密钥解析不得成为「任意环境变量外泄」通道。
+    // 此前 envKeys = [cm.envKey, 'MINGDAO_API_KEY']，而 envKey 与 baseUrl 都完全由调用方指定
+    // （WebUI 的 addCustom 接受任意输入）——于是任何能加一个自定义模型的人，都能把宿主环境里的
+    // 任意变量（AWS_SECRET_ACCESS_KEY / GITHUB_TOKEN / …）当作 Bearer 发到自己的端点；
+    // 即使不填 envKey 也会回落 MINGDAO_API_KEY，把用户的主密钥送出去。两条路一起封：
+    //   ① envKey 必须是「像模型密钥」的名字（大写、以 _API_KEY/_KEY 结尾、不含 SECRET/TOKEN/…）；
+    //   ② 未声明（或被拒）时不读任何环境变量，只认凭证库——环境变量必须被显式点名才可用。
+    const rawEnvKey = String(cm.envKey || '').trim();
+    const safeEnvKey =
+      /^[A-Z][A-Z0-9_]{2,63}$/.test(rawEnvKey) &&
+      /(_API_KEY|_KEY)$/.test(rawEnvKey) &&
+      !/(SECRET|TOKEN|PASSWORD|CREDENTIAL|PRIVATE|PASSWD)/.test(rawEnvKey)
+        ? rawEnvKey
+        : '';
+    if (rawEnvKey && !safeEnvKey) {
+      console.warn(
+        `[MingDao] 自定义模型 ${modelName} 的 envKey「${rawEnvKey}」不是合法的模型密钥变量名，已忽略。` +
+          `如需用环境变量提供密钥，请用形如 MY_GATEWAY_API_KEY 的名字；否则请用 mingdao key set custom:${modelName} 存入凭证库。`
+      );
+    }
+    const envVal = safeEnvKey ? process.env[safeEnvKey] || '' : '';
+    const storedKey = getStoredKey(`custom:${modelName}`) || getStoredKey('custom') || '';
+    const apiKey = envVal || storedKey || '';
     return {
       name: `custom:${modelName}`,
       kind: 'openai-compatible',
       baseUrl: cm.baseUrl || cfg?.baseUrl || '',
       apiKey,
-      envHint: envKeys[0] || 'MINGDAO_API_KEY',
+      envHint: safeEnvKey || `custom:${modelName}`,
       isCustom: true,
       modelName,
     };

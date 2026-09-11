@@ -1,6 +1,14 @@
 // git 只读工具（v0.3.1）：只允许只读子命令（status/log/diff/show/blame/rev-parse/branch/tag/ls-files/shortlog），
 // 经 execFile 无 shell 执行（防注入），运行于 ctx.workingDir，输出与退出码结构化返回。
 import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
+
+// P1 修复（v0.4.6）：execFile 是回调式 API、返回 ChildProcess（不是 thenable）——直接 await 得到的
+// 是 ChildProcess 对象，解构出的 stdout/stderr 其实是两个可读流，于是工具恒返回
+// `ok:true exitCode:0 output:"[object Object][object Object]"`：不等待、不报错，退出码 / ENOENT /
+// maxBuffer / timeout 全部被吞。git 属 READONLY_TOOLS（免权限确认）且 schema 反复推荐给模型，
+// 等于该工具 100% 失效，还让模型把「不是 git 仓库 / 版本号不存在 / 仓库损坏」都当成成功。
+const execFileAsync = promisify(execFile);
 
 const GIT_READONLY = new Set(['status', 'log', 'diff', 'show', 'blame', 'rev-parse', 'branch', 'tag', 'ls-files', 'shortlog']);
 // P1-8（v0.4.5）：参数级过滤——此前只校验子命令首词，`diff --no-index` 可越界读任意文件（git∈
@@ -33,7 +41,7 @@ export async function runGit(/** @type {any} */ args, /** @type {any} */ ctx) {
   }
   const cwd = ctx.workingDir || process.cwd();
   try {
-    const { stdout, stderr } = await execFile('git', effectiveArgv, {
+    const { stdout, stderr } = await execFileAsync('git', effectiveArgv, {
       cwd,
       timeout: 15000,
       maxBuffer: 4 * 1024 * 1024,

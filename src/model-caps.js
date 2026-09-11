@@ -71,7 +71,7 @@ export function isLocalBaseUrl(/** @type {any} */ baseUrl) {
  * 解析模型能力。优先级：customModels.<name>.contextWindow/maxOutputTokens > 内置 preset > 兜底。
  * @param {any} cfg
  * @param {string} modelName
- * @returns {{ contextWindow: number, maxOutputTokens: number, isLocal: boolean, budgetTokens: number|null, preset: any }}
+ * @returns {{ contextWindow: number, maxOutputTokens: number, maxOutputCeiling: number, isLocal: boolean, budgetTokens: number|null, preset: any }}
  */
 export function resolveModelCaps(/** @type {any} */ cfg, /** @type {any} */ modelName) {
   const preset = modelPreset(modelName);
@@ -90,7 +90,12 @@ export function resolveModelCaps(/** @type {any} */ cfg, /** @type {any} */ mode
       ? Number(cm.maxOutputTokens)
       : preset?.maxOutputTokens || Math.min(DEFAULT_MAX_OUTPUT, Math.max(1024, Math.floor(contextWindow / 8)));
   const budgetTokens = preset?.budgetTokens || null;
-  return { contextWindow, maxOutputTokens, isLocal, budgetTokens, preset };
+  // v0.4.6：把 models.js 的 maxOutputCeiling（官方单次最大输出规格，如 DeepSeek 384K）纳入能力面。
+  // 此前该字段只定义、源码零引用——README 宣称「单次输出上限 384K」在框架里拿不到
+  // （pro 实际被 maxOutputTokens=65536 封顶，用户显式调大也无处生效）。现在它作为
+  // 「用户显式配置 maxOutputTokens 时的硬上限」，让文档承诺可用且仍受窗口约束。
+  const maxOutputCeiling = Number(cm.maxOutputCeiling) > 0 ? Number(cm.maxOutputCeiling) : preset?.maxOutputCeiling || maxOutputTokens;
+  return { contextWindow, maxOutputTokens, maxOutputCeiling, isLocal, budgetTokens, preset };
 }
 
 /**

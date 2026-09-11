@@ -1,6 +1,6 @@
 {
   "name": "mingdao-desktop",
-  "version": "0.2.0",
+  "version": "0.4.6",
   "private": true,
   "type": "module",
   "main": "main.js",
@@ -9,6 +9,11 @@
   "license": "MIT",
   "scripts": {
     "start": "electron .",
+    "sync-version": "node ../scripts/sync-versions.mjs",
+    "predist:dir": "npm run sync-version",
+    "predist:linux": "npm run sync-version",
+    "predist:win": "npm run sync-version",
+    "predist:mac": "npm run sync-version",
     "dist:dir": "electron-builder --dir",
     "dist:linux": "electron-builder --linux AppImage deb",
     "dist:win": "electron-builder --win nsis",
