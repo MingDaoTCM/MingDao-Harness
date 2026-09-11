@@ -225,7 +225,7 @@ const out = await ctx.llm({
   system: '…', user: '…',
   maxTokens: 2000,
   reasoningEffort: 'off',        // 复用内核的模型能力表与参数校验
-  json: true,                    // 结构化输出（内核负责解析与重试）
+  json: true,                    // 结构化输出：内核发 response_format=json_object，并把回复解析到 data
   purpose: 'patient-extract',    // 归因标签（进账本与分账）
 });
 // → { text, data, usage: { prompt_tokens, completion_tokens, prompt_cache_hit_tokens, … } }
@@ -248,6 +248,13 @@ manifest 可声明 `budget.dailyYuan` + `budget.action`。超限时 `ctx.llm()` 
 查看某 Pack 今日花费：`mingdao cost --by pack`。
 
 ---
+
+**`json: true` 的确切语义（v0.6.0 更正）**：内核会带上 `response_format: {type:'json_object'}`，
+并把回复解析到 `data`——解析方式与下游 `deepseekJson` 同款：取文本里**第一个 `{` 到最后一个 `}`**
+再 `JSON.parse`。两点请注意：
+- **不重试**（此前文档写「负责解析与重试」，重试并不存在）；
+- 解析失败时 `data` 为 **null**，**不抛错**——因此调用方自己判断 `data` 是否为空，
+  不要把「拿不到结构化结果」当成异常路径。
 
 ## 6. 兼容性与版本策略
 

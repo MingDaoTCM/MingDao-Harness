@@ -143,6 +143,21 @@ async function deepseekJson(system, user, maxTokens = 2000) {
 
 `purpose` 建议取值：`patient-extract`（患者识别）、`intake-extract`（结构化落盘）、`visit-compare`（四态对比）、`followup-script`（随访话术）。
 
+#### 3.3.1 逐参数核对结论（`deepseekJson` → `ctx.llm()`）
+
+> 按下游真实代码逐参数核对过（`dify.mjs` 的 `deepseekJson`），**可以等价替换**：
+
+| 下游 `deepseekJson` 的线上参数 | `ctx.llm()` 的写法 | 核对结果 |
+| --- | --- | --- |
+| `model: 'deepseek-v4-flash'`（硬编码） | `model` | ✅ |
+| `temperature: 0` | `temperature: 0` | ✅ 支持（缺省回落到会话温度） |
+| `max_tokens: maxTokens` | `maxTokens` | ✅（缺省 2048，受模型输出上限封顶） |
+| **`thinking: { type: 'disabled' }`** | `reasoningEffort: 'off'` | ✅ **线上参数完全一致**——内核在 `reasoningEffort==='off'` 时正是发 `thinking:{type:'disabled'}` |
+| 自己 `indexOf('{')…lastIndexOf('}')` 再 `JSON.parse` | `json: true` | ✅ 内核 `ctx.llm` 用**同一套**花括号切片解析，结果放在 `data`；解析失败为 `null` 而**不抛错**（与下游返回 `null` 同语义） |
+
+一个必须注意的差异：下游 `deepseekJson` 用 `deepseekKey` 直连，**usage 不入账**（这正是要迁的原因）；
+改走 `ctx.llm()` 后 usage 并入当前回合 → 今日费用、缓存命中、峰谷、日护栏同时生效。
+
 ### 3.4 患者注册表与快照落盘 → 受权限约束的 IO
 
 `patients.json` / `intake/**` 的读写改用 `permissions.fs` 声明的路径（内核据此校验越界）：
