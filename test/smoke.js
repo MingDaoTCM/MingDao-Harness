@@ -4366,6 +4366,26 @@ console.log(JSON.stringify({ okOn, xml }));`;
   assert.ok(beforeRotate >= 7, `轮转前应有 ≥7 次运行，实际 ${beforeRotate}`);
   L.rotateLedger(3);
   assert.equal(L.listRuns().length, 3, '轮转后应只保留最近 3 次运行');
+  // 轮转走 listRunFiles（只 stat、不读内容）：它必须**按文件**计数，而不是按「能解析出来的」
+  // 计数——否则一个损坏的账本会永远删不掉、并把配额算错。这是「轮转为性能只 stat」这个
+  // 优化的语义边界，用断言钉住，避免以后有人顺手改回读内容。
+  {
+    const homeRot = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-rot-'));
+    const prevHomeRot = process.env.MINGDAO_HOME;
+    process.env.MINGDAO_HOME = homeRot;
+    fs.mkdirSync(path.join(homeRot, 'ledger'), { recursive: true });
+    for (let i = 0; i < 10; i++) {
+      const lid = L.newRunId();
+      fs.writeFileSync(path.join(homeRot, 'ledger', lid + '.jsonl'), i === 0 ? '这不是 JSON\n' : '{"v":1,"type":"run.start","seq":1,"prev":"0"}\n');
+      await new Promise((r) => setTimeout(r, 3));
+    }
+    assert.equal(L.listRunFiles().length, 10, 'listRunFiles 应按文件计数（损坏的那份也要计入）');
+    const removedRot = L.rotateLedger(4);
+    assert.equal(removedRot.length, 6, `轮转应删掉最旧的 6 份（含损坏的那份），实际 ${removedRot.length}`);
+    assert.equal(L.listRunFiles().length, 4, '轮转后应剩 4 份');
+    process.env.MINGDAO_HOME = prevHomeRot;
+    safeRmSync(homeRot, { recursive: true, force: true });
+  }
   assert.ok(!fs.existsSync(f71), '被轮转掉的账本文件应真正删除');
 
   process.env.MINGDAO_HOME = prevHome71;

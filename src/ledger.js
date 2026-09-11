@@ -274,7 +274,34 @@ export function verifyRun(/** @type {any} */ runId) {
   return { ok: true, error: null, badSeq: null, total: lines.length };
 }
 
-/** 列出账本（按修改时间倒序），供 `ledger list` 与轮转使用 */
+/**
+ * 只列文件与 mtime（**不读内容**），供轮转使用。
+ * 为什么要分开：轮转在**每个回合开始**都会跑一次，而 `listRuns()` 会把每个账本文件的每一行都
+ * JSON.parse 一遍——200 次运行 × 60 条事件 = 每次回合白解析 1.2 万行，且纯粹是为了回答
+ * 「要不要删文件」。轮转只需要「文件名 + mtime」，内容一行都不用读。
+ * @returns {{runId: string, mtime: number}[]} 按 mtime 倒序
+ */
+export function listRunFiles() {
+  const dir = ledgerDir();
+  let files;
+  try {
+    files = fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl'));
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const f of files) {
+    const runId = f.replace(/\.jsonl$/, '');
+    let mtime = 0;
+    try {
+      mtime = fs.statSync(path.join(dir, f)).mtimeMs;
+    } catch {}
+    out.push({ runId, mtime });
+  }
+  return out.sort((a, b) => b.mtime - a.mtime);
+}
+
+/** 列出账本（含解析后的事件统计，按修改时间倒序），供 `ledger list` 使用 */
 export function listRuns() {
   const dir = ledgerDir();
   let files;
@@ -308,9 +335,10 @@ export function listRuns() {
   return out.sort((a, b) => b.mtime - a.mtime);
 }
 
-/** 配额轮转：只保留最近 maxRuns 次运行（按 mtime），返回被删除的 runId */
+/** 配额轮转：只保留最近 maxRuns 次运行（按 mtime），返回被删除的 runId。
+ *  走 listRunFiles（只 stat 不读内容）——这是每个回合都会调用的路径。 */
 export function rotateLedger(/** @type {any} */ maxRuns = DEFAULT_MAX_RUNS) {
-  const runs = listRuns();
+  const runs = listRunFiles();
   if (runs.length <= maxRuns) return [];
   const removed = [];
   for (const r of runs.slice(maxRuns)) {
