@@ -696,6 +696,18 @@ async function init(){
     if(dj.text){ input.value=dj.text; input.style.height=Math.min(input.scrollHeight,200)+'px'; input.focus(); }
   }catch(e){}
 }
+
+// v0.4.7（T24）：IDE「发送选中代码」此前不生效——扩展 POST /api/draft 时只带 text（写进**全局槽**），
+// 而 WebUI 只在 init() 里按**会话槽**读取一次；扩展聚焦面板并不会重新加载页面，草稿永远读不到。
+// 这里在窗口重新获得焦点时兜底读一次全局槽（读取即清除，不影响会话槽语义）。
+window.addEventListener('focus',async()=>{
+  try{
+    if(typeof generating!=='undefined'&&generating) return;
+    if(!input||String(input.value||'').trim()) return; // 输入框已有内容则不覆盖
+    const d=await (await fetch('/api/draft',{cache:'no-store'})).json();
+    if(d&&d.text){ input.value=d.text; input.style.height=Math.min(input.scrollHeight,200)+'px'; input.focus(); }
+  }catch(e){}
+});
 // 设置多级菜单：左侧分组导航 ↔ 右侧面板切换（记住上次所在分组）
 let cfgPanel='models';
 function showCfgPanel(name){

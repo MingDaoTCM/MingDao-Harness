@@ -130,7 +130,7 @@
 | ~~T21~~ | ✅ 已修 | WebUI 边角全部收敛：草稿槽 LRU 64 槽；`/api/config` 校验模型名（保留 `provider:"custom"` 任意端点形态）；`updateCustom` 不再 upsert（不存在即 400）；非法 JSON body → 400（不再静默当 `{}` 并落盘）；`/api/session-finalize` 缺文件 → 404 且不回显服务端绝对路径；`HEAD` 与 `GET` 同等对待（不再 415） | `web/routes/domains/{sessions,config}.js`、`web/server.js:125`、`routes/api.js:44` |
 | T22 | P3 | TUI/CLI 边角：~~ANSI/OSC 转义直通终端~~（✅ `sanitizeTerminal`）、~~`batch` 清空全进程 SIGINT 监听~~（✅ 只摘自己那一个）、`box()` 不看终端宽度、隐藏输入把提示语一起隐藏、`key set` 经 argv 传密钥、HELP_LINES 两份已分叉（**仍未修**） | `src/ui.js`、`src/commands/{key,update}.js`、`src/cli.js` |
 | T23 | P3 | 技能/安装链边角：~~技能 `description` 无长度上限~~（✅ 200 字符上限）、~~技能「安装/信任/重装」三入口不校验名称~~（✅ 统一到 `assertSafeSkillName`：拒绝 `.`/`..`/含 `..`/含分隔符/超长）、`install.sh` 的 Node 门槛已改为完整版本比较（≥18.17，此前 18.0–18.16 被误判合格）+ 临时文件改用 `mktemp`；一行安装改为「先下载再执行」（README 与官网同步） | `src/skill-lib.js:85`、`install.sh:71,84` |
-| T24 | P3 | 官网/IDE 边角：openresty 对不存在路径返回 200+首页（死链接不可发现、污染下载计数，需服务器侧 `try_files`）、VS Code「发送选中代码」写全局槽而 WebUI 只读会话槽（功能不生效）、JetBrains 文档要 `./gradlew` 但仓库无 wrapper | 官网 nginx 配置、`ide/vscode/extension.js:65-78`、`src/web/app.js:695`、`ide/jetbrains` |
+| T24 | P3 | 官网/IDE 边角：~~VS Code「发送选中代码」不生效~~（✅ 已修：窗口重新获得焦点时兜底读全局草稿槽）、~~JetBrains 文档要 `./gradlew` 但仓库无 wrapper + 产物版本写死 0.5.0~~（✅ 已修文档）；openresty 对不存在路径返回 200+首页（**需服务器侧 `try_files`，不在仓库内**，已在官网仓库说明） | 官网 nginx 配置、`ide/vscode/README.md`、`ide/jetbrains/README.md` |
 
 ## 四、已确认无问题（避免过度修复）
 

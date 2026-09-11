@@ -8,13 +8,18 @@
 
 ```bash
 cd ide/jetbrains
-./gradlew buildPlugin          # 产物：build/distributions/mingdao-jetbrains-0.5.0.zip
+gradle buildPlugin             # 产物：build/distributions/mingdao-jetbrains-<版本>.zip
 ```
+
+> 本仓库**未提交 Gradle wrapper**（`gradlew`），因此请使用系统安装的 `gradle`（或用
+> `gradle wrapper` 自行生成 wrapper 后再用 `./gradlew`）。产物版本号取自
+> `build.gradle.kts` 的 `version`，不在此处硬编码（v0.4.7 修正：此前文档写死 0.5.0 且
+> 与 build.gradle.kts 的 0.6.0 不一致；同时给出无法执行的 `./gradlew` 命令）。
 
 安装：IDE → Settings → Plugins → ⚙ → Install Plugin from Disk → 选择 zip。开发调试：
 
 ```bash
-./gradlew runIde               # 启动带插件的沙箱 IDE
+gradle runIde                  # 启动带插件的沙箱 IDE
 ```
 
 说明：`build.gradle.kts` 默认面向 IntelliJ IDEA Community（IC）；PyCharm/WebStorm 请把 `intellij.type` 改为 `PC`/`WS` 等并调整版本号。
