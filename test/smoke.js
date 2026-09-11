@@ -4689,6 +4689,77 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.6.0 C3：出网白名单（匹配含后缀伪装/CIDR/回环豁免 + 记账不记请求体 + block 真拦 + 未配置零影响 + sink）');
 }
 
+
+// ---------- 75. v0.6.0 C4：内网/信创适配（离线安装 + 国产推理栈预设 + 本地端点免 Key） ----------
+// 这一组对准「私有化/内网部署」的真实卡点：装不上、连不上、被一个不需要的 Key 挡住。
+{
+  const models75 = await import(pathToFileURL(path.join(srcDir, 'models.js')).href);
+  const caps75 = await import(pathToFileURL(path.join(srcDir, 'model-caps.js')).href);
+
+  // 75a. 国产推理栈 / 内网端点预设存在且指向本机端口（不是公网占位）
+  for (const [key, port] of [['vllm', '8000'], ['ollama', '11434'], ['oneapi', '3000']]) {
+    const pp = models75.PROVIDERS[key];
+    assert.ok(pp, `预设 ${key} 应存在`);
+    assert.equal(pp.kind, 'openai-compatible', `${key} 应是 OpenAI 兼容（国产栈绝大多数提供兼容层）`);
+    assert.ok(String(pp.baseUrl).includes(port), `${key} 的 baseUrl 应指向本机默认端口 ${port}`);
+    // 关键：这些 baseUrl 必须被识别为「本地」，否则会套用远程超时、并在无 Key 时被硬拦
+    assert.equal(caps75.isLocalBaseUrl(pp.baseUrl), true, `${key} 的 baseUrl 必须被识别为本地端点`);
+  }
+
+  // 75b. 本地端点免除「必须有 API Key」的硬校验，但公网端点**不放松**
+  {
+    const home75 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-c4-'));
+    const cli75 = path.join(srcDir, 'cli.js');
+    const run75 = (cfgObj) => {
+      fs.writeFileSync(path.join(home75, 'config.json'), JSON.stringify(cfgObj));
+      return spawnSync(process.execPath, [cli75, '--format', 'json', 'hi'], {
+        encoding: 'utf8', timeout: 60000, env: { ...process.env, MINGDAO_HOME: home75, MINGDAO_API_KEY: '' },
+      });
+    };
+    // 内网端点：不能被 Key 校验挡住（应走到连接层失败，说明闸门已放行）
+    const local = run75({ model: 'qwen3-32b', permission: 'readonly', customModels: { 'qwen3-32b': { label: '内网', baseUrl: 'http://127.0.0.1:8000/v1' } } });
+    const localOut = String(local.stdout || '') + String(local.stderr || '');
+    assert.ok(!localOut.includes('未找到 API Key'), '内网端点不得被「必须有 Key」挡住——那正是私有化部署的常态');
+    assert.ok(localOut.includes('内网端点') || localOut.includes('无凭证') || localOut.includes('fetch failed'),
+      `内网端点应放行到连接层，实际输出：${localOut.slice(0, 160)}`);
+    // 公网端点：仍必须要求 Key（安全不放松）
+    const remote = run75({ model: 'gpt-5', permission: 'readonly' });
+    assert.ok(String(remote.stdout || '').includes('未找到 API Key'), '公网端点无 Key 时仍必须拒绝（不能为内网便利而放松公网）');
+
+    // 75c. 离线安装的守卫：只在「curl | bash」形态下有意义——那时 BASH_SOURCE 未绑定，
+    // 脚本按当前目录判断，拿不到本地源码就必须**明确拒绝**，而不是偷偷联网去下载。
+    // （注意：用绝对路径调用 `bash <repo>/install.sh` 能定位到仓库，因此不会拒绝——
+    //   那是正确行为，我第一版测试把它误当成了失败。）
+    const notRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-notrepo-'));
+    const instSrc = fs.readFileSync(path.join(srcDir, '..', 'install.sh'), 'utf8');
+    const r75 = spawnSync('bash', ['-s', '--', '--offline'], {
+      cwd: notRepo, input: instSrc, encoding: 'utf8', timeout: 30000,
+      env: { ...process.env, HOME: home75 },
+    });
+    const out75 = String(r75.stdout || '') + String(r75.stderr || '');
+    assert.ok(out75.includes('离线安装需要在本仓库目录内运行'),
+      `离线 + 无本地源码时必须明确拒绝，实际：${out75.slice(0, 200)}`);
+    assert.ok(out75.includes('解压') || out75.includes('仓库目录'), '拒绝理由应告诉用户怎么做（解压离线包后进入目录）');
+    assert.ok(!fs.existsSync(path.join(home75, '.local', 'bin', 'mingdao')), '被拒绝时不得留下半成品安装');
+
+    safeRmSync(notRepo, { recursive: true, force: true });
+    safeRmSync(home75, { recursive: true, force: true });
+  }
+
+  // 75d. 离线打包脚本存在且可解析（真正的断网安装已在提交说明中记录了人工验证）
+  {
+    const bundle = path.join(srcDir, '..', 'scripts', 'build-offline-bundle.sh');
+    assert.ok(fs.existsSync(bundle), '离线打包脚本应存在');
+    const chk = spawnSync('bash', ['-n', bundle], { encoding: 'utf8' });
+    assert.equal(chk.status, 0, `离线打包脚本语法应正确：${chk.stderr}`);
+    const inst = fs.readFileSync(path.join(srcDir, '..', 'install.sh'), 'utf8');
+    assert.ok(inst.includes('--offline'), 'install.sh 应支持 --offline');
+    assert.ok(inst.includes('离线安装不下载 Node.js'), '离线模式必须明确不下载 Node（否则 air-gap 会卡住）');
+  }
+
+  ok('v0.6.0 C4：内网/信创适配（国产栈预设 + 本地端点免 Key 而公网不放松 + 离线安装明确拒绝联网 + 打包脚本）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

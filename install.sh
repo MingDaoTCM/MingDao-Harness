@@ -22,8 +22,17 @@ case "$(uname -s 2>/dev/null)" in
     ;;
 esac
 
-# 首选平台（可选参数；未指定时按 gitee → gitcode → github 依次尝试，哪个通装哪个）
-PLATFORM="${1:-}"
+# 参数：可选的平台名（gitee|gitcode|github）+ --offline（v0.6.0 C4：内网/air-gap 安装）
+# 离线模式的两条硬要求：①源码必须已在本地（解压后的离线包内）②不装 Node、不碰 npm。
+OFFLINE=0
+PLATFORM=""
+for _a in "$@"; do
+  case "$_a" in
+    --offline) OFFLINE=1 ;;
+    gitee|gitcode|github) PLATFORM="$_a" ;;
+  esac
+done
+[ "${MINGDAO_OFFLINE:-}" = "1" ] && OFFLINE=1
 
 # 各平台 git 克隆地址与源码包下载地址（|分隔：平台|git|tarball）
 REPO_URLS="
@@ -71,6 +80,9 @@ fetch_repo(){
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 if is_repo "$SCRIPT_DIR"; then
   cd "$SCRIPT_DIR"
+elif [ "$OFFLINE" = "1" ]; then
+  # 离线模式绝不联网：拿不到本地源码就直接失败并说清怎么做，而不是偷偷去下载
+  die "离线安装需要在本仓库目录内运行（离线包解压后进入该目录再执行）。当前目录不是仓库：$SCRIPT_DIR"
 else
   TMP_TGZ="$(mktemp 2>/dev/null || echo /tmp/mingdao-repo.$$.tgz)"
   info "未在仓库目录中运行，自动获取仓库（平台：${PLATFORM:-自动}）…"
@@ -124,13 +136,33 @@ install_node() {
   info "Node.js 已就绪：$(node --version)"
 }
 
-if ! need_node; then install_node; fi
-if ! need_node; then die "Node.js 版本检查失败。"; fi
+if [ "$OFFLINE" = "1" ]; then
+  if ! need_node; then
+    die "离线安装不下载 Node.js。请先在离线包/内网源中安装 Node.js ≥ 18.17，再重新执行本脚本。"
+  fi
+  info "离线模式：使用本机已有 Node.js $(node --version)"
+else
+  if ! need_node; then install_node; fi
+  if ! need_node; then die "Node.js 版本检查失败。"; fi
+fi
 
 # ---------- 2. 安装 mingdao 命令 ----------
 # 优先 npm link：全局命令软链到仓库 → 仓库常驻，mingdao update 可自更新
 info "安装 mingdao 命令…"
-if command -v npm >/dev/null 2>&1 && npm link --silent >/dev/null 2>&1; then
+if [ "$OFFLINE" = "1" ]; then
+  # 离线模式不走 npm：`npm link` 可能因 devDependencies 触发 registry 访问，
+  # 而本项目**运行时零依赖**，直接用软链即可，完全不需要 npm。
+  warn "离线模式：跳过 npm，改用用户目录软链（不访问 registry）"
+  chmod +x "$(pwd)/src/cli.js"
+  mkdir -p "$HOME/.local/bin"
+  ln -sf "$(pwd)/src/cli.js" "$HOME/.local/bin/mingdao"
+  ln -sf "$(pwd)/src/cli.js" "$HOME/.local/bin/mdh"
+  if ! printf '%s' "$PATH" | tr ':' '\n' | grep -qx "$HOME/.local/bin"; then
+    warn "请把 $HOME/.local/bin 加入 PATH（在 ~/.bashrc 或 ~/.zshrc 末尾添加）："
+    echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+  fi
+  info "已安装到 $HOME/.local/bin（离线模式不支持 mingdao update 自更新——没有 .git，且升级需重新投放离线包）"
+elif command -v npm >/dev/null 2>&1 && npm link --silent >/dev/null 2>&1; then
   info "已全局安装（npm link → 指向仓库，支持 mingdao update 自更新）"
 else
   warn "npm link 失败（可能没有管理员权限），改为用户目录软链（同样支持 mingdao update）…"

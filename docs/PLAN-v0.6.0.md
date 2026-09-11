@@ -118,6 +118,17 @@
 | C1.7 | ~~可选 Ed25519 签名~~（C0.4） | ⏳ **未实现**——`--sign-key` 尚未落地；当前只有哈希链完整性校验。写在这里以免被误当作已完成 |
 | C1.6 | 脱敏回归 | ✅ 已做：喂入含 `sk-` / Bearer / **嵌套**私网 IP / 家目录的参数，导出物与落盘文件中都搜不到明文（**这是本步最重要的断言**） |
 
+**C4 实施记录**：
+- 断网实测（屏蔽 curl/wget/git/npm + 代理指向黑洞）：解压离线包 → `bash install.sh --offline` → `mingdao --version` 成功。
+- 顺带修掉一个**会挡死内网部署**的真问题：CLI 此前一律硬性要求 API Key，而 vLLM/Ollama/OneAPI
+  这类本机/内网端点通常不校验、也不发放密钥——等于把本期要服务的场景挡在门外。现按 `isLocalBaseUrl`
+  （与本地模型分层超时同一来源）免除该校验；**公网端点仍然必须有 Key**，不因内网便利而放松。
+- 另修：无 Key 时不再发送 `Authorization: Bearer `（空凭证），部分网关会因此 401。
+- 诚实登记：离线模式**不支持 `mingdao update` 自更新**（没有 .git），升级需重新投放离线包；
+  离线包**不含 Node 运行时**，需内网预装 ≥18.17——两条都写进包内说明，避免现场卡住。
+- GNU tar 与 bsdtar 打包参数分开处理：前者固定 mtime/属主使哈希可复现，后者如实标注
+  「哈希用于传输完整性、跨机不可复现」，不假装两者一样。
+
 **C2 实施记录**：
 - 四类差异已实现并各有断言：`now-blocked`（当时放行、今天被红线拦住 —— 合规复检最关心的一类）、
   `now-denied`、`still-blocked`、`relaxed`；`now-blocked > 0` 时 CLI 退出码为 1，可直接当门禁。
@@ -210,8 +221,8 @@ README 增「合规与确定性」小节（含 C0.4/C3.4 两处诚实边界）�
 | C1 账本 + 导出 | ✅ 完成（可选签名未做） | `src/ledger.js`（写入器/哈希链/两级脱敏/配额轮转/导出）+ `src/commands/ledger.js`（list/show/export/verify）+ agent 接线（run.start / model.round / tool.call / tool.result / constraint / permission / cost / run.end 八类全部落地）|
 | C2 决策回放 | ✅ 完成 | `src/replay.js`（四类差异 now-blocked/now-denied/still-blocked/relaxed）+ `mingdao ledger replay [--json]`（now-blocked 时退出码 1，可当 CI 门禁）+ 抽出 `evaluatePermission` 纯判定 |
 | C3 出网白名单 | ✅ 完成 | `src/net-policy.js`（纯匹配：精确/通配子域/CIDR/回环豁免）+ `src/net-guard.js`（fetch 出口收口、记账、block/warn、账本 sink）+ `mingdao net report/policy`；同步的 `node:https` 路径显式过闸 |
-| C4 离线安装 + 信创预设 | ⏳ 下一步 | — |
-| C5 发布 | ⏳ 待开始 | — |
+| C4 离线安装 + 信创预设 | ✅ 完成 | `install.sh --offline`（不装 Node、不碰 npm、断网实测通过）+ `scripts/build-offline-bundle.sh`（含内网说明与校验值）+ `vllm`/`ollama`/`oneapi` 预设 + 本地端点免 Key（公网不放松） |
+| C5 发布 | ⏳ 待开始（按 RELEASE-TRAIN.md 排在第 4 步） | — |
 
 > 上游另有一条**不阻塞**本计划的待办：Deyi-TCM 回迁在 Linux 原机执行，
 > 按 `MIGRATION-DEYI-v0.5.md` 落地，其反馈进入 v0.5.x 的 Pack 契约加固。

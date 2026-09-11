@@ -39,6 +39,35 @@ export const PROVIDERS = {
     envKey: 'MOONSHOT_API_KEY',
     models: ['kimi-latest', 'kimi-k2'],
   },
+  // —— v0.6.0 C4：信创 / 国产推理栈与内网部署预设 ——
+  // 这些栈绝大多数提供 OpenAI 兼容层（vLLM 系、Ollama、OneAPI/NewAPI 聚合网关、
+  // 以及昇腾 MindIE / 海光 DCU / 寒武纪等以 vLLM 为后端的国产加速栈）。
+  // baseUrl 指向本机/内网，`isLocalBaseUrl` 会自动套用本地模型的分层超时。
+  // **这些预设不需要 API Key**（内网端点通常不校验；CLI 已对本地端点免除「必须有 Key」的硬校验）。
+  vllm: {
+    label: 'vLLM（自建 / 国产加速栈，OpenAI 兼容）',
+    kind: 'openai-compatible',
+    baseUrl: 'http://127.0.0.1:8000/v1',
+    envKey: 'VLLM_API_KEY',
+    models: [],
+    note: '昇腾 MindIE、海光 DCU、寒武纪等以 vLLM 为后端的国产推理栈同样走这个预设——只要它暴露 OpenAI 兼容端点。默认不需 Key；如网关要求，用 mingdao key set vllm 存入。',
+  },
+  ollama: {
+    label: 'Ollama（本机模型，OpenAI 兼容）',
+    kind: 'openai-compatible',
+    baseUrl: 'http://127.0.0.1:11434/v1',
+    envKey: 'OLLAMA_API_KEY',
+    models: [],
+    note: '默认不需 Key。模型名用 ollama 里的名字（如 qwen3:32b）。',
+  },
+  oneapi: {
+    label: 'OneAPI / NewAPI 聚合网关（内网统一入口）',
+    kind: 'openai-compatible',
+    baseUrl: 'http://127.0.0.1:3000/v1',
+    envKey: 'ONEAPI_API_KEY',
+    models: [],
+    note: '内网常见做法：一个网关聚合多家上游（含国产模型），客户端只认这一处。Key 由网关注册后发放。',
+  },
   custom: {
     label: '自定义 OpenAI 兼容端点（任意模型网关/本地部署）',
     kind: 'openai-compatible',

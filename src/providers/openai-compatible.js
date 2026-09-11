@@ -45,7 +45,14 @@ export async function chat(/** @type {any} */ { baseUrl, apiKey, model, messages
       // 与部分网关/NAT 组合下复用已断开的 keep-alive 连接会静默挂起——首个请求正常、
       // 后续请求无响应，重启进程恢复。显式 Connection: close 每次新建连接，可靠性优先
       // （模型请求本身是长流式调用，建连开销占比可忽略）。
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}`, Connection: 'close' },
+      // v0.6.0 C4：内网/本机端点（vLLM、Ollama、OneAPI…）通常不校验密钥。此前无论有没有
+      // Key 都发 `Authorization: Bearer `（空凭证），部分网关会因此直接 401——反而把
+      // 「不需要 Key」的部署挡在门外。故没有 Key 时**不发这个头**。
+      headers: {
+        'Content-Type': 'application/json',
+        ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+        Connection: 'close',
+      },
       body: JSON.stringify(payload),
       signal,
     });

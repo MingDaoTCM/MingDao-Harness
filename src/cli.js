@@ -17,6 +17,7 @@ import { messageTokens } from './context.js';
 import { startMcpServers } from './mcp.js';
 import { startTask, listTasks, patchTask, killTask, formatTaskRow } from './tasks.js';
 import { enableAutostart, disableAutostart, autostartStatus, autostartPath } from './autostart.js';
+import { isLocalBaseUrl } from './model-caps.js';
 import { notifyTaskDone } from './notify.js';
 import { addWorkspace, removeWorkspace, workspacePath, touchWorkspace, listWorkspaces, currentWorkspace } from './workspace.js';
 import { finalizeSession, extractMemory, loadMemory, appendMemory, recentJournal, dedupeMemory, removeMemoryLines } from './memory.js';
@@ -379,7 +380,10 @@ async function main() {
   const agentCfg = Object.keys(presetOverlay).length ? { ...cfg, ...presetOverlay } : cfg;
 
   const pc0 = resolveProviderConfig(cfg, modelName);
-  if (!pc0.apiKey) {
+  // v0.6.0 C4：内网/本机端点（vLLM、Ollama、OneAPI 等）通常不校验密钥，很多也不发放密钥。
+  // 此前一律硬性要求 Key，等于把「不需要 Key」的私有化部署挡在门外——而那正是本期要服务的场景。
+  // 判据复用 isLocalBaseUrl（与本地模型分层超时同一来源），不另起一套「什么算本地」的定义。
+  if (!pc0.apiKey && !isLocalBaseUrl(pc0.baseUrl)) {
     io.print(
       style(
         `未找到 API Key。\n` +
@@ -391,6 +395,9 @@ async function main() {
     );
     process.exitCode = 1;
     return;
+  }
+  if (!pc0.apiKey) {
+    io.print(style(`使用本机/内网端点 ${pc0.baseUrl}（未配置 API Key——本地端点通常不校验，按无凭证发送：不发 Authorization 头）`, C.dim));
   }
 
   let provider = await createProvider(cfg, modelName);
