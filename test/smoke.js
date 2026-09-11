@@ -3899,6 +3899,61 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.4.7 回归：项目级技能来源不可验证标注 + disableProjectSkills 可关断');
 }
 
+
+// ---------- 66. v0.4.7 回归：box 边框宽度收敛（不等宽/超宽会破框，此前必然错位一列） ----------
+{
+  const { createIO: createIO66 } = await import(pathToFileURL(path.join(srcDir, 'ui.js')).href);
+  // 与 ui.js 内部同口径的显示宽度：CJK/全角按 2 列计
+  const wide66 = (str) => {
+    let w = 0;
+    for (const ch of str) {
+      const c = ch.codePointAt(0);
+      const isWide = c >= 0x1100 && (c <= 0x115f || (c >= 0x2e80 && c <= 0xa4cf && c !== 0x303f) ||
+        (c >= 0xac00 && c <= 0xd7a3) || (c >= 0xf900 && c <= 0xfaff) || (c >= 0xff00 && c <= 0xff60));
+      w += isWide ? 2 : 1;
+    }
+    return w;
+  };
+  const strip66 = (str) => str.replace(/\u001b\[[0-9;]*m/g, '');
+  const origCols = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
+  const origTTY = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+  const origWrite = process.stdout.write;
+  const restore66 = () => {
+    if (origCols) Object.defineProperty(process.stdout, 'columns', origCols); else delete process.stdout.columns;
+    if (origTTY) Object.defineProperty(process.stdout, 'isTTY', origTTY); else delete process.stdout.isTTY;
+    process.stdout.write = origWrite;
+  };
+  try {
+    for (const cols of [10, 20, 24, 40, 60, 79, 80, 120, 200]) {
+      let captured = '';
+      Object.defineProperty(process.stdout, 'columns', { value: cols, configurable: true, writable: true });
+      Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true, writable: true });
+      process.stdout.write = (chunk) => { captured += String(chunk); return true; };
+      createIO66({}).box('很长的中文横幅标题明道 Harness', ['/very/long/path/'.repeat(8), '短行', '']);
+      process.stdout.write = origWrite;
+      const rows = captured.split('\n').filter((l) => l.length > 0).map((l) => wide66(strip66(l)));
+      assert.ok(rows.length >= 5, `cols=${cols} 应渲染出边框+内容+边框共 ≥5 行`);
+      assert.equal(new Set(rows).size, 1, `cols=${cols} 每行显示宽度必须一致，实际 ${rows.join(',')}`);
+      assert.ok(rows.every((w) => w <= cols), `cols=${cols} 任何一行都不得超出终端宽度，实际 ${rows.join(',')}`);
+      // 下界 24，但始终给终端留一列（避免贴右边缘触发自动换行）
+      assert.ok(rows[0] >= Math.min(24, cols - 1), `cols=${cols} 宽度应达下限 min(24, cols-1)，实际 ${rows[0]}`);
+    }
+    // 非 TTY（重定向/管道）走退化分支：不打边框，逐行原样输出，便于 grep / 落日志
+    {
+      let captured = '';
+      Object.defineProperty(process.stdout, 'isTTY', { value: false, configurable: true, writable: true });
+      process.stdout.write = (chunk) => { captured += String(chunk); return true; };
+      createIO66({}).box('标题', ['正文']);
+      process.stdout.write = origWrite;
+      assert.ok(!captured.includes('╭') && !captured.includes('│'), '非 TTY 不得输出制表符边框');
+      assert.ok(captured.includes('标题') && captured.includes('正文'), '非 TTY 应原样逐行输出');
+    }
+  } finally {
+    restore66();
+  }
+  ok('v0.4.7 回归：box 宽度收敛（各行等宽 / 不超终端 / 极窄不崩 / 非 TTY 退化）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

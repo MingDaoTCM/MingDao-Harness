@@ -105,7 +105,8 @@
 > 消化进度：第二轮 T4–T9、T11–T13、T16；第三轮 T18 / T21（两项）/ T22（转义）/ T23（描述上限）；
 > **第四轮 T15 + T14（调度生命周期）**——这两条是本清单里影响面最大的（同一任务被并发执行两次 / 暂停删除后仍执行）；
 > **第五轮 T17 + F7 + T19；第六轮 T1（工作空间登记闸门）+ T3（技能完整性诚实边界）；
-> 第七轮 T21/T22/T23 收尾（WebUI/CLI 边角 + 技能名校验）+ T10（同一会话回合串行化）。**
+> 第七轮 T21/T22/T23 收尾（WebUI/CLI 边角 + 技能名校验）+ T10（同一会话回合串行化）；
+> **第八轮 T22 终项（`box()` 终端宽度收敛 + 隐藏输入保留提示语）。**
 > 下表为**剩余**项。
 
 ### 安全 / 隔离
@@ -128,7 +129,7 @@
 | T19 | P3 | ~~`workspaces.json` / `session-workspaces.json` 的 read-modify-write 未加锁~~（✅ 已修：add/remove/rename/touch 与三个会话级映射全部移入跨进程锁）；`sync-state.json` 的 RMW 仍未加锁（P3，留待后续——其临界区跨网络调用，需要「末尾合并」式加锁而非整段加锁） | `src/workspace.js`、`src/sync.js:227-242` |
 | T20 | P3 | 调度/任务的生命周期边角：僵尸任务不回收（守护可能空转到 2h）、`killed` 被 worker 的终态写覆盖、无 `/proc` 平台（macOS）无法校验 PID 归属 → 存在 PID 复用误杀风险 | `src/tasks.js:18-43,95-101`、`src/schedule.js:286-318` |
 | ~~T21~~ | ✅ 已修 | WebUI 边角全部收敛：草稿槽 LRU 64 槽；`/api/config` 校验模型名（保留 `provider:"custom"` 任意端点形态）；`updateCustom` 不再 upsert（不存在即 400）；非法 JSON body → 400（不再静默当 `{}` 并落盘）；`/api/session-finalize` 缺文件 → 404 且不回显服务端绝对路径；`HEAD` 与 `GET` 同等对待（不再 415） | `web/routes/domains/{sessions,config}.js`、`web/server.js:125`、`routes/api.js:44` |
-| T22 | P3 | TUI/CLI 边角：~~ANSI/OSC 转义直通终端~~（✅ `sanitizeTerminal`）、~~`batch` 清空全进程 SIGINT 监听~~（✅ 只摘自己那一个）、`box()` 不看终端宽度、隐藏输入把提示语一起隐藏、`key set` 经 argv 传密钥、HELP_LINES 两份已分叉（**仍未修**） | `src/ui.js`、`src/commands/{key,update}.js`、`src/cli.js` |
+| T22 | P3 | TUI/CLI 边角：~~ANSI/OSC 转义直通终端~~（✅ `sanitizeTerminal`）、~~`batch` 清空全进程 SIGINT 监听~~（✅ 只摘自己那一个）、~~`box()` 不看终端宽度~~（✅ 总宽统一 + 按 `process.stdout.columns` 收敛，边框行与内容行此前必然错位一列）、~~隐藏输入把提示语一起隐藏~~（✅ 先写提示语再抑制回显，已修）、`key set` 经 argv 传密钥、HELP_LINES 两份已分叉（**仍未修**） | `src/ui.js`、`src/commands/{key,update}.js`、`src/cli.js` |
 | T23 | P3 | 技能/安装链边角：~~技能 `description` 无长度上限~~（✅ 200 字符上限）、~~技能「安装/信任/重装」三入口不校验名称~~（✅ 统一到 `assertSafeSkillName`：拒绝 `.`/`..`/含 `..`/含分隔符/超长）、`install.sh` 的 Node 门槛已改为完整版本比较（≥18.17，此前 18.0–18.16 被误判合格）+ 临时文件改用 `mktemp`；一行安装改为「先下载再执行」（README 与官网同步） | `src/skill-lib.js:85`、`install.sh:71,84` |
 | T24 | P3 | 官网/IDE 边角：~~VS Code「发送选中代码」不生效~~（✅ 已修：窗口重新获得焦点时兜底读全局草稿槽）、~~JetBrains 文档要 `./gradlew` 但仓库无 wrapper + 产物版本写死 0.5.0~~（✅ 已修文档）；openresty 对不存在路径返回 200+首页（**需服务器侧 `try_files`，不在仓库内**，已在官网仓库说明） | 官网 nginx 配置、`ide/vscode/README.md`、`ide/jetbrains/README.md` |
 

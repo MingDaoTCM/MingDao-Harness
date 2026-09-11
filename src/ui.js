@@ -425,14 +425,33 @@ export function createIO({ quiet = false } = {}) {
         for (const l of lines) io.print(l);
         return;
       }
-      const inner = Math.max(...lines.map(displayWidth), displayWidth(title)) + 4;
-      const topTitle = ` ${title} `;
-      const rest = inner - displayWidth(topTitle);
+      // v0.4.7（T22）：按终端可用宽度收敛，并把「边框行」与「内容行」统一到同一个总宽。
+      // 此前两处宽度算法不同（边框 = inner+3、内容 = inner+4），必然错位一列，且完全不看
+      // process.stdout.columns——长路径/长标题在 80 列终端上必然折行破框。
+      const widthOf = (/** @type {any} */ x) => displayWidth(x);
+      const clip = (/** @type {any} */ x, /** @type {any} */ w) => {
+        if (widthOf(x) <= w) return x;
+        let out = '';
+        let acc = 0;
+        for (const ch of String(x)) {
+          const cw = widthOf(ch);
+          if (acc + cw > w - 1) break;
+          out += ch;
+          acc += cw;
+        }
+        return out + '…';
+      };
+      const cols = Number(process.stdout.columns) || 80;
+      const desired = Math.max(...lines.map(widthOf), widthOf(title)) + 4; // 左右边框 + 内边距
+      const total = Math.min(Math.max(24, desired), Math.max(1, cols - 1));
+      const inner = total - 4; // 内容行 = '│ ' + inner + ' │'
+      const topTitle = ` ${clip(title, Math.max(0, inner - 2))} `;
+      const rest = Math.max(0, total - 3 - widthOf(topTitle));
       io.print(style('╭─', C.cyan) + topTitle + style('─'.repeat(rest) + '╮', C.cyan));
       for (const l of lines) {
-        io.print(style('│ ', C.cyan) + padTo(l, inner) + style(' │', C.cyan));
+        io.print(style('│ ', C.cyan) + padTo(clip(String(l), inner), inner) + style(' │', C.cyan));
       }
-      io.print(style('╰', C.cyan) + style('─'.repeat(inner) + '╯', C.cyan));
+      io.print(style('╰', C.cyan) + style('─'.repeat(Math.max(0, total - 2)) + '╯', C.cyan));
     },
 
     // —— 一轮生成的生命周期 ——
@@ -675,6 +694,11 @@ export function createIO({ quiet = false } = {}) {
           if (typeof orig === 'function') r._writeToOutput = orig;
         };
         if (opts.hidden && typeof r._writeToOutput === 'function') {
+          // v0.4.7（T22）：_writeToOutput 同时负责输出**提示语**，整体置空会让用户面对空白行盲敲
+          // （key set 时看不到「请输入 ... API Key」）。提示语先直接写出，之后只屏蔽回显。
+          try {
+            process.stdout.write(question);
+          } catch {}
           r._writeToOutput = () => {};
         }
         const entry = { resolve, restore };
