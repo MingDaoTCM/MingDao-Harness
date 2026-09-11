@@ -135,7 +135,8 @@
 > + T22 收尾（`key set` 改走 stdin、帮助正文合并为单一来源）；
 > 第十轮 T25–T29（实现决策回放时发现的约束引擎 fail-open 与契约缺口）；
 > 第十一轮 T30（出网白名单的重定向绕过）；
-> 第十二轮 T31（Batch 中止不落到服务端——「停了」只是本地幻觉，账单照涨）。**
+> 第十二轮 T31（Batch 中止不落到服务端——「停了」只是本地幻觉，账单照涨）；
+> 第十三轮 T32/T33（windows CI 连续变红的根因 + install.ps1 的版本判断缺陷）。**
 > 下表为**剩余**项。
 
 ### 第十轮（v0.6.0 实现 C2 时发现，均已修）
@@ -149,6 +150,8 @@
 | T26 | P2 | `arg-forbid` 缺失 `pattern` 退化成 `new RegExp('')`（匹配一切），「忘了写」变成「该参数任何取值都拦」，理由印出 `/undefined/`（✅ 已修：缺失即判不可用并在装载时拒绝） | `src/constraints.js`、`src/packs.js` |
 | T27 | **P1** | `result-forbid` 在 `PACK-API.md` v1 契约表格与引擎头注释中列出，但 kind 集合与实现**都没有它**——下游按冻结契约写会被判「kind 非法」而整包装载失败。成因是 `packs.js` 另存了一份 kind 集合副本并已漂移（✅ 已修：实现补齐 + kind 集合单一来源） | `src/constraints.js`、`src/packs.js`、`docs/PACK-API.md` |
 | T28 | P2 | `arg-forbid` 只校验 `tool` 不校验 `arg`：漏写 `arg` 时引擎读 `args[undefined]` 并与字符串 `"undefined"` 做匹配——看起来在跑、其实判错对象（✅ 已修：装载时要求 `arg` 必填） | `src/packs.js` |
+| T32 | **P1（工程纪律）** | **windows CI 腿连续 5 个提交变红而未被发现**（v0.6.0 C4 引入）：C4 的冒烟断言用 `spawnSync('bash', …)` 验证 **install.sh** 的离线行为，但 install.sh **自己**会拒绝 Windows 并转给 install.ps1 → 断言必然失败。首次修复只判断「有没有 bash」，而 GitHub 的 windows runner **自带 Git Bash**，探测为真、断言照跑 → 仍然红。✅ 已修：能力探测改为「有 bash **且**不在 Windows」——判据是**被测对象是否适用**，不是「能否启动解释器」。更深一层的教训：我连推 5 个提交都没查 CI 结果，已在发版清单加「推送后必须查 CI」的硬规则 | `test/smoke.js`、`.github/workflows/ci.yml`、`docs/RELEASE-CHECKLIST.md` |
+| T33 | P2 | `install.ps1` 的 Node 版本判断只看 major（`-lt 18`）→ **18.0–18.16 被判合格**，而内核 `engines` 要求 ≥18.17，用户会拿到「装得上、跑不起来」的安装。这正是审计 T23 在 POSIX 侧修过、Windows 侧漏掉的同类缺陷（✅ 已修：`[version]'18.17.0'` 完整比较，两处都比较） | `install.ps1` |
 | T31 | **P1** | **Batch 中止不落到服务端 = 用户以为停了、钱照扣**（v0.6.0 审计发现）：`src/batch.js` 只处理服务端**报告** `cancelled` 状态，从不调用取消端点。用户按 Ctrl+C 后本地轮询停止、进程退出，但服务端批次照跑照结算（Batch 0.5× 但全量 token）。对一个主打「成本确定性」的项目，这是最不该有的缺口。✅ 已修：中止与 24h 超时都先 `POST /batches/{id}/cancel`，并按结果如实上报（服务端不支持取消时明确提示「可能仍在计费」，不假装已停） | `src/batch.js` |
 | T30 | **P1** | **出网白名单可被重定向绕过**（v0.6.0 C3 自查发现，实现当天即修）：调用方不指定 `redirect` 时 undici 默认自行跟随 3xx，而闸门只看得到**首个** URL——于是「允许 api.deepseek.com」可被利用成「该主机返回 302 指向任意地址，内核照样跟过去」，并且会把 `Authorization` 头一起带过去。模型端点可被配置/接管，这不是理论风险。✅ 已修：闸门自行逐跳跟随并逐跳判定，非白名单跳转**在发出请求前**即中止（有断言钉住「绝不向白名单外的目标发请求」）；调用方显式 `redirect:'manual'`（如 fetch 工具自己逐跳处理）时不介入，避免改变既有语义 | `src/net-guard.js` |
 | T29 | P2 | 契约缺口未登记：`require-citation`（输出前 kind）与 `mingdao constraint test <pack>` 在 `PACK-API.md` 中列出但从未实现，文档等于在做空头承诺（✅ 已修：新增 `PACK-API.md §4.1` 明确标注「请勿依赖」，并说明 `require-citation` 需先与下游定规格） | `docs/PACK-API.md` |

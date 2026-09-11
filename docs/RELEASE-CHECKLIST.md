@@ -48,6 +48,34 @@ node src/cli.js diagnose             # 自检报告（脱敏）
 
 ---
 
+### 1.1 推送后必须查 CI（硬规则，2026-09-11 教训）
+
+**每次 `git push` 之后都要确认 CI 结果**，不能假定「本地绿了就是绿了」。本节规则来自一次真实事故：
+v0.6.0 C4 起 windows 腿连续 **5 个提交**变红而无人发现——本地是 macOS，跑不到 Windows 分支；
+而我没有在推送后查看结果，于是红了一个多小时才被这轮梳理发现。
+
+```bash
+# 查最近一次运行的五条腿（含 windows）
+curl -s "https://api.github.com/repos/MingDaoTCM/MingDao-Harness/commits/<sha>/check-runs" \
+  -H "Accept: application/vnd.github+json" | python3 -c "
+import json,sys
+for c in json.load(sys.stdin)['check_runs']:
+    print(c['name'], c['status'], c['conclusion'])"
+```
+
+**日志下载不了怎么办**：`/actions/jobs/{id}/logs` 需要权限（403）。但**注解接口匿名可读**，
+因此 ci.yml 的冒烟步骤已改成失败时把断言原文做成 `::error title=冒烟失败（OS / node）::<消息>`：
+
+```bash
+curl -s "https://api.github.com/repos/.../check-runs/<check_run_id>/annotations"
+```
+
+这条在 T32 的定位中当天就派上用场——没读日志就拿到了失败断言原文。
+
+> 另一条教训（同一次事故）：跨平台断言的能力探测要对应**被测对象是否适用**，
+> 而不是「能不能启动解释器」。GitHub 的 windows runner **自带 Git Bash**，
+> 所以「有 bash」根本不等于「POSIX 安装器适用」。
+
 ## 二、本机人工验收（必做，未确认不得进入 §三）
 
 ```bash
