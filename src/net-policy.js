@@ -73,6 +73,25 @@ export function parseNetPolicy(/** @type {any} */ raw) {
 }
 
 /**
+ * 从 **scp 形式**的 git 远端里取主机名：`git@github.com:org/repo.git` → `github.com`。
+ *
+ * 为什么必须支持：git 远端大多数是 SSH 的 scp 写法，`new URL()` 解析不了 → 会被判成
+ * `invalid-url`（一律不放行）。后果有两个，都不可接受：
+ *   ① 白名单里写了 `github.com` 也**依然拦得住**自更新（功能坏掉，不是安全）；
+ *   ② 拦截理由里的主机名是空的，报「远端（）不在白名单内」，用户无从下手。
+ * 刻意**不要求主机含点**：企业内网常用 SSH 别名（`git@gitlab:group/repo.git`），
+ * 那类主机没有点。若强行要求含点，白名单里写了别名也依然拦得住自更新——又是一个「功能故障」。
+ * 盘符不会被误判，因为正则的 `(?![\\/])` 已排除 `:` 后紧跟分隔符的形态（`C:\…` 与 `C:/…` 都不匹配）。
+ * @param {any} raw
+ */
+export function scpLikeHost(/** @type {any} */ raw) {
+  const m = /^(?:[A-Za-z0-9._-]+@)?([A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?):(?![\\/])/.exec(String(raw || '').trim());
+  if (!m) return null;
+  const host = m[1];
+  return host;
+}
+
+/**
  * 判定一次出网。
  * @param {any} policy parseNetPolicy 的结果
  * @param {any} url 目标 URL（字符串或 URL）
@@ -86,6 +105,18 @@ export function checkEgress(/** @type {any} */ policy, /** @type {any} */ url) {
     host = u.hostname;
     port = u.port || (u.protocol === 'https:' ? '443' : u.protocol === 'http:' ? '80' : '');
   } catch {
+    // scp 形式的 git 远端（git@host:path）不是 URL，但**是内核会去联系的目标**，必须能判定
+    const sshHost = scpLikeHost(url);
+    if (sshHost) {
+      if (!policy?.enabled) return { allowed: true, host: sshHost, port: '', rule: null, kind: 'disabled', reason: '未配置出网策略' };
+      if (isLoopback(sshHost) && policy.allowLoopback !== false) {
+        return { allowed: true, host: sshHost, port: '', rule: null, kind: 'loopback', reason: '回环地址' };
+      }
+      const r = (policy.allow || []).find((/** @type {any} */ x) => matchRule(sshHost, x));
+      return r
+        ? { allowed: true, host: sshHost, port: '', rule: r, kind: 'git-remote', reason: `命中白名单 ${r}` }
+        : { allowed: false, host: sshHost, port: '', rule: null, kind: 'not-listed', reason: '不在出网白名单内' };
+    }
     return { allowed: false, host: '', port: '', rule: null, kind: 'invalid-url', reason: 'URL 无法解析' };
   }
   if (!policy?.enabled) return { allowed: true, host, port, rule: null, kind: 'disabled', reason: '未配置出网策略' };

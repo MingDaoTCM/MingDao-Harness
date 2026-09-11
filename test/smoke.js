@@ -4756,9 +4756,31 @@ console.log(JSON.stringify({ okOn, xml }));`;
     }
   }
 
+  // 74f. scp 形式的 git 远端（自更新的主力形态）必须能被判定——
+  //      否则「白名单里写了 github.com 却依然拦得住自更新」是**功能故障**，
+  //      而且拦截理由里的主机名会是空的，用户无从下手。
+  {
+    assert.equal(np.scpLikeHost('git@github.com:org/repo.git'), 'github.com', 'scp 形式应能取出主机');
+    assert.equal(np.scpLikeHost('git@gitee.com:MingDaoTCM/MingDao-harness.git'), 'gitee.com', 'scp 形式应能取出主机');
+    assert.equal(np.scpLikeHost('C:\\Users\\x'), null, 'Windows 盘符（反斜杠）不得被当成主机');
+    assert.equal(np.scpLikeHost('C:/Users/x'), null, 'Windows 盘符（正斜杠）同样不得被当成主机');
+    // 企业内网常用 SSH 别名（无点）：必须能判定，否则「白名单写了别名仍被拦」是功能故障
+    assert.equal(np.scpLikeHost('git@gitlab:group/repo.git'), 'gitlab', '无点的 SSH 别名必须能取出主机');
+    const P74b = np.parseNetPolicy({ allow: ['gitlab'], mode: 'block' });
+    assert.equal(np.checkEgress(P74b, 'git@gitlab:group/repo.git').allowed, true, '白名单里的 SSH 别名应放行');
+    assert.equal(np.scpLikeHost('https://github.com/x'), null, '普通 URL 不走这条（应由 URL 解析处理）');
+    const P74 = np.parseNetPolicy({ allow: ['github.com'], mode: 'block' });
+    const ok74f = np.checkEgress(P74, 'git@github.com:org/repo.git');
+    assert.equal(ok74f.allowed, true, '远端在白名单内时必须放行（否则自更新被误拦）');
+    assert.equal(ok74f.host, 'github.com', '主机必须被正确解析出来');
+    const no74f = np.checkEgress(P74, 'git@gitee.com:org/repo.git');
+    assert.equal(no74f.allowed, false, '不在白名单的远端应拦下');
+    assert.equal(no74f.host, 'gitee.com', '拦截理由里必须有主机名（否则用户不知道加什么）');
+  }
+
   process.env.MINGDAO_HOME = prevHome74;
   safeRmSync(home74, { recursive: true, force: true });
-  ok('v0.6.0 C3：出网白名单（匹配含后缀伪装/CIDR/回环豁免 + 记账不记请求体 + block 真拦 + 未配置零影响 + sink + 重定向逐跳判定）');
+  ok('v0.6.0 C3：出网白名单（匹配含后缀伪装/CIDR/回环豁免 + 记账不记请求体 + block 真拦 + 未配置零影响 + sink + 重定向逐跳判定 + scp 远端）');
 }
 
 

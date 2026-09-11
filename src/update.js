@@ -11,13 +11,69 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mingdaoHome, ensureHome } from './config.js';
 import { atomicWriteFileSync } from './atomic-write.js';
+import { decideEgress, currentPolicy } from './net-guard.js';
+
+/**
+ * 对「内核发起的 git 联网操作」做一次出网判定（v0.6.0 C3 补漏）。
+ * 解析出真正要联系的远端 URL（显式远端名 → 该远端 URL；未指明 → 全部远端），
+ * 逐个过闸门；block 模式下若**全部**远端都不在白名单内则拒绝执行。
+ * 之所以是「全部都不在白名单才拒」：多镜像部署（github/gitee/gitcode）里只要有一个可达即可，
+ * 拒绝整个操作会因为一个未列入的镜像而挡住本可成功的升级。
+ * 返回类型必须写实（不能用 any）：否则 git() 的推断类型会被 any 吞掉，
+ * 导致 `st.out.split('\n').map((l) => …)` 这类回调参数变成隐式 any（noImplicitAny 报错）。
+ * @returns {{ok: boolean, out: string, err: string, error: undefined, egressBlocked: boolean} | null} 被拒绝时返回与 git() 同形的结果；放行返回 null
+ */
+function egressCheckGitRemote(/** @type {any} */ cwd, /** @type {any} */ args) {
+  if (!currentPolicy()?.enabled) return null;
+  try {
+    const named = args.find((/** @type {any} */ a, /** @type {number} */ i) => i > 0 && !String(a).startsWith('-') && /^[A-Za-z0-9._-]+$/.test(String(a)) && !['FETCH_HEAD', 'HEAD'].includes(String(a)));
+    const remotes = named ? [named] : listRemotes(cwd);
+    if (!remotes.length) return null;
+    const urls = [];
+    for (const r of remotes) {
+      const u = gitRaw(['remote', 'get-url', r], cwd);
+      if (u) urls.push(u);
+    }
+    if (!urls.length) return null;
+    const verdicts = urls.map((u) => ({ url: u, d: decideEgress(u) }));
+    if (verdicts.some((v) => v.d.allowed)) return null; // 至少一个远端在白名单内 → 放行
+    return {
+      ok: false,
+      out: '',
+      err: `出网被拦截：自更新要联系的远端（${verdicts.map((v) => v.d.host).join(', ')}）都不在 config.net.allow 白名单内（mode=block）`,
+      error: undefined,
+      egressBlocked: true,
+    };
+  } catch {
+    return null; // 判定过程出错时不阻断升级（与其它调用点同款容错）
+  }
+}
+
+/** 不经过闸门判定的原始 git 调用（仅用于读取远端 URL 这类本地元数据操作） */
+function gitRaw(/** @type {any} */ args, /** @type {any} */ cwd) {
+  try {
+    const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 15000 });
+    return r.status === 0 && !r.error ? String(r.stdout || '').trim() : '';
+  } catch {
+    return '';
+  }
+}
 
 function git(/** @type {any} */ args, /** @type {any} */ cwd) {
+  // v0.6.0 C3 自查：`git fetch/pull` 是**内核发起**的出网（内核决定去联系远端），
+  // 但它走子进程网络栈，**绕过** globalThis.fetch 闸门。此前文档只提到「bash 里用户自己敲的
+  // curl 不走闸门」，却漏了这条内核自己的路径——对「数据不出门」的自证来说，这是过度声明。
+  // 这里把远端 URL 先过一遍闸门：策略为 block 且远端不在白名单时直接拒绝联网。
+  if (args[0] === 'fetch' || args[0] === 'pull' || args[0] === 'ls-remote' || args[0] === 'clone') {
+    const v = egressCheckGitRemote(cwd, args);
+    if (v) return v;
+  }
   const r = spawnSync('git', args, { cwd, encoding: 'utf8', timeout: 120000 });
   return {
     ok: r.status === 0 && !r.error,
     out: String(r.stdout || '').trim(),
     err: String(r.stderr || '').trim(),
+    egressBlocked: undefined,
     error: r.error,
   };
 }
@@ -81,8 +137,10 @@ function writeState(/** @type {any} */ s) {
 // 按本地 refs 判断会误报「已是最新」。ls-remote 思路的等价实现。
 function remoteVersion(/** @type {any} */ repo, /** @type {any} */ remote, /** @type {any} */ branch) {
   const r = git(['fetch', '--quiet', remote, branch], repo);
-  if (!r.ok) return null;
-  return versionAt(repo, 'FETCH_HEAD');
+  // 把「被出网闸门拦下」与「网络失败」区分开往上传：两者的用户动作完全不同
+  // （前者去改 config.net.allow 或接受不升级；后者去查网络）。
+  if (!r.ok) return { version: null, blocked: r.egressBlocked ? String(r.err) : null };
+  return { version: versionAt(repo, 'FETCH_HEAD'), blocked: null };
 }
 
 function listRemotes(/** @type {any} */ repo) {
@@ -95,16 +153,23 @@ function listRemotes(/** @type {any} */ repo) {
 function newestRemote(/** @type {any} */ repo) {
   let latest = '';
   let ref = '';
+  /** @type {any} */
+  let egressBlocked = null;
+  let attempts = 0;
   for (const remote of listRemotes(repo)) {
     for (const branch of ['main', 'master']) {
-      const v = remoteVersion(repo, remote, branch);
-      if (v && compareVersions(v, latest) > 0) {
-        latest = v;
+      attempts += 1;
+      const r = remoteVersion(repo, remote, branch);
+      if (r.blocked) egressBlocked = r.blocked;
+      if (r.version && compareVersions(r.version, latest) > 0) {
+        latest = r.version;
         ref = `${remote}/${branch}`;
       }
     }
   }
-  return { version: latest, ref };
+  // 只在「确实一次都没成功、且至少一次是被闸门拦下」时上报拦截，避免误导
+  if (!latest && egressBlocked) return { version: latest, ref, egressBlocked, attempts };
+  return { version: latest, ref, egressBlocked: null, attempts };
 }
 
 const NPM_HINT =
@@ -119,6 +184,14 @@ export async function updateCheck({ repo } = /** @type {any} */ ({})) {
   const local = versionAt(root) || '未知';
   const newest = newestRemote(root);
   if (!newest.version) {
+    // 区分「网络不通」与「被出网白名单拦下」：后者不是故障而是策略生效，
+    // 若混进「请检查网络」会让人去排查网络，而正确动作是改 config.net.allow（或就此接受不升级）。
+    if (newest.egressBlocked) {
+      return {
+        ok: false,
+        lines: [`当前版本 v${local}`, `✖ ${newest.egressBlocked}`, '（这是出网白名单在生效，不是网络故障；如需升级请把远端加入 config.net.allow）'],
+      };
+    }
     return { ok: false, lines: [`当前版本 v${local}`, '✖ 无法连接远端（git fetch 全部失败），请检查网络。'] };
   }
   if (compareVersions(newest.version, local) <= 0) {

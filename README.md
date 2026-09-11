@@ -253,8 +253,10 @@ mingdao cost --by pack          # 垂域费用分账
   离线包由 `bash scripts/build-offline-bundle.sh` 生成（含内网操作说明与校验值）
 - **出网白名单**（v0.6.0）：`config.net.allow` 声明允许的出网目标（精确主机 / `*.子域` / IPv4 CIDR），
   `mode: warn|block` 决定越界是记账放行还是拒绝；`mingdao net report` 导出「本机访问过哪些外部地址」用于自证。
-  **边界**：只覆盖内核自己发起的请求，用户在 `bash` 里自己敲的 `curl` 不走这里——它证明「内核没有偷偷外传」，
-  不等于「这台机器绝对没有外传」（详见 [docs/CONFIG.md](docs/CONFIG.md) 出网白名单一节）
+  **边界**：覆盖内核经由 HTTP 出口与自更新 `git` 联系的目标；**不覆盖** MCP 服务器、
+  `config.tools`/Pack 工具自起的子进程、桌面版 Electron 外壳的更新检查，以及用户在 `bash` 里自己敲的命令
+  ——它证明「内核没有偷偷外传」，不等于「这台机器绝对没有外传」。
+  需要进程级强制请用出网代理/防火墙，本闸门是**内核自证**工具而非沙箱（详见 [docs/CONFIG.md](docs/CONFIG.md) 出网白名单一节）
 - **PID 归属校验分平台**（v0.4.7 明确边界）：`killTask` / `stopDaemon` 在动手前会确认
   「这个 pid 确实还是我启动的那个进程」，避免 pid 被系统回收复用后误杀无关进程。
   Linux 读 `/proc/<pid>/cmdline`、macOS 走 `ps`，两者都能精确校验；**Windows 两者皆无**

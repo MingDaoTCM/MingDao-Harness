@@ -73,9 +73,11 @@ export async function handleNet(cmd, args) {
     }
     io.print('');
     io.print(style(`记账文件：${egressLogFile()}（只记主机/端口/判定，**不记请求体**）`, C.dim));
-    io.print(style('边界：本记录只覆盖**内核自己发起**的请求（模型 API / fetch 工具 / 技能库 / 同步 / 模型发现）。', C.dim));
-    io.print(style('      用户在 bash 里自己敲的 curl 走子进程网络栈，不在此列——它证明「内核没有偷偷外传」，', C.dim));
-    io.print(style('      不等于「这台机器绝对没有外传」。把它当后者用就是误用。', C.dim));
+    io.print(style('边界（完整版，勿扩大）：覆盖 模型 API / fetch 工具 / 技能库 / 模型发现 / 定价 / Batch / 云同步', C.dim));
+    io.print(style('      / 自更新 git 远端；**不覆盖** MCP 服务器、config.tools 与 Pack 工具自起的子进程、', C.dim));
+    io.print(style('      桌面版 Electron 外壳的更新检查，以及用户在 bash 里自己敲的命令。', C.dim));
+    io.print(style('      故它证明「内核经 HTTP 出口与自更新联系的目标都在白名单内」，不等于「本机绝对没有外传」；', C.dim));
+    io.print(style('      需要进程级强制请用出网代理/防火墙。', C.dim));
     return true;
   }
 
