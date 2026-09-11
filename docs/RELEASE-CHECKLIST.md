@@ -62,6 +62,33 @@ MINGDAO_HOME=~/.mingdao node src/cli.js web 3820     # 或后台托管：见下
 
 ---
 
+### 2.1 建议实测项（v0.6.0 新增能力，逐条可复现）
+
+界面上点得到：
+- [ ] 对话正常（模型调用、流式输出、工具卡片）
+- [ ] 设置面板：模型/密钥展示正确
+- [ ] 任务面板、调度面板可打开
+
+命令行可复现（新能力，建议逐条跑一遍）：
+```bash
+mingdao --version
+mingdao ledger list                 # 每跑完一次对话就应出现一条账本
+mingdao ledger show                 # 人读明细：run.start/model.round/tool.call/…/run.end
+mingdao ledger verify               # 哈希链校验（试着改一行账本，应报「前序哈希不匹配」）
+mingdao ledger export --format md --out /tmp/led.md   # 导出物应搜不到密钥/私网 IP/家目录
+mingdao ledger replay               # 按当前规则重判历史调用（输出四类差异）
+mingdao net policy                  # 未配置时应显示「闸门未安装」——零影响
+mingdao net report                  # 出网自证（含「只覆盖内核请求」的边界说明）
+mingdao pack list                   # 垂域 Pack
+mingdao audit                       # 原审计日志行为不变
+```
+日志与约束：
+- [ ] 若配置了 `config.net`（`mode:block` + 空 allow），模型调用应被**明确拒绝**并给出放行指引，
+      且 `mingdao net report` 里能看到这次拦截
+- [ ] 若挂载了带约束的 Pack，命中红线时输出被改写，且 `mingdao ledger show` 里有 `constraint` 事件
+
+> 验收通过 = 明确回复确认。**确认之前不创建 tag、不推 tag、不建 Release。**
+
 ## 三、发布（拿到确认后）
 
 ### 3.1 打 tag 并推送（触发桌面版构建与 GitHub Release）
