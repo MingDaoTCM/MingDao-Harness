@@ -303,9 +303,20 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   fs.writeFileSync(daemonPidFile(home), '99999999 someone-else');
   const selfExited = await waitFor(() => (aliveCheck(pidLine.pid) ? null : true), 20000);
   assert.ok(selfExited, '租约被改写后 daemon 应自退（防双 daemon 重复执行）');
-  // 3) stopDaemon 解析 "pid nonce" 首段并真正终止目标进程（此前 Number("pid nonce")=NaN 杀不掉）
-  const victim = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)']);
-  fs.writeFileSync(daemonPidFile(home), `${victim.pid} abcdefg`);
+  // 3a) 归属匹配：受害进程 cmdline 带上 nonce（模拟真 daemon）→ stopDaemon 应真正终止它
+  //     （v0.4.7 起 stopDaemon 会先校验 PID 归属；ndoe 的 argv 尾部带上 nonce 即视为「是我们的人」）
+  const nonce7 = 'abcdefg';
+  const victim = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)', nonce7]);
+  // Linux 上 stopDaemon 会读 /proc/<pid>/cmdline 校验归属——刚 spawn 时可能尚未 exec，
+  // 等 cmdline 出现再写 pidfile，避免时序抖动导致「归属校验失败 → 不杀」的假失败。
+  await waitFor(() => {
+    try {
+      return fs.readFileSync(`/proc/${victim.pid}/cmdline`, 'utf8').includes(nonce7) ? true : null;
+    } catch {
+      return process.platform === 'linux' ? null : true; // 非 Linux 无 /proc：直接放行
+    }
+  }, 5000);
+  fs.writeFileSync(daemonPidFile(home), `${victim.pid} ${nonce7}`);
   let victimExited = false;
   victim.on('exit', () => { victimExited = true; });
   stopDaemon(home);
@@ -313,6 +324,25 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   assert.ok(victimExited, 'stopDaemon 应真正终止 pidfile 指向的进程');
   assert.ok(!fs.existsSync(daemonPidFile(home)), 'stopDaemon 应删除 pidfile');
   victim.kill('SIGKILL');
+
+  // 3b) 归属不匹配：pidfile 陈旧、PID 被无关进程复用时**绝不误杀**。
+  //     仅 Linux 能校验（读 /proc/<pid>/cmdline）；macOS 读不到 → best-effort 放行，跳过该断言。
+  if (process.platform === 'linux') {
+    const stranger = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 60000)']);
+    // 同理：等 cmdline 就绪，确保「归属不匹配」是因为 nonce 不同，而不是读不到
+    await waitFor(() => (fs.existsSync(`/proc/${stranger.pid}/cmdline`) ? true : null), 5000);
+    fs.writeFileSync(daemonPidFile(home), `${stranger.pid} not-my-nonce`);
+    stopDaemon(home);
+    await sleep(800);
+    let strangerAlive = true;
+    try {
+      process.kill(stranger.pid, 0);
+    } catch {
+      strangerAlive = false;
+    }
+    assert.ok(strangerAlive, 'PID 归属不匹配时 stopDaemon 不得误杀无关进程（防 PID 复用误杀）');
+    stranger.kill('SIGKILL');
+  }
   if (sid) await runCli(['schedule', 'remove', sid]);
   ok('守护进程租约：spawn 存活 / 租约自退 / stopDaemon 真正终止');
 }
