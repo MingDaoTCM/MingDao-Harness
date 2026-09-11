@@ -243,6 +243,33 @@ let base = await startWeb(work1);
   const startIdx = events.findIndex((e) => e.type === 'toolStart');
   const toolIdx = events.findIndex((e) => e.type === 'tool');
   assert.ok(startIdx > -1 && toolIdx > startIdx, '工具开始事件应在完成事件之前');
+
+  // v0.6.0 C1：**WebUI 回合也必须进执行账本**。
+  // 此前只有 CLI 路径有账本断言（smoke），WebUI 走的是同一条 agent.runTurn 但没有任何用例覆盖
+  // ——有人重构 runTurn 时很容易让账本只在 CLI 生效而无人察觉。这里钉住这条跨特性链路。
+  {
+    const ledDir = path.join(home, 'ledger');
+    const files = fs.existsSync(ledDir) ? fs.readdirSync(ledDir).filter((f) => f.endsWith('.jsonl')) : [];
+    assert.ok(files.length >= 1, 'WebUI 回合应产生执行账本');
+    const evs = fs
+      .readFileSync(path.join(ledDir, files[0]), 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        try {
+          return JSON.parse(l);
+        } catch {
+          return { type: 'corrupt' };
+        }
+      });
+    const evTypes = evs.map((e) => e.type);
+    for (const need of ['run.start', 'model.round', 'run.end']) {
+      assert.ok(evTypes.includes(need), `WebUI 回合的账本应含 ${need}（实际：${evTypes.join(',')}）`);
+    }
+    // 账本默认即脱敏：不得出现明文密钥（桩环境的 key 是 sk-rc 之类，这里用通用断言）
+    const raw = fs.readFileSync(path.join(ledDir, files[0]), 'utf8');
+    assert.ok(!/sk-[A-Za-z0-9_-]{10,}/.test(raw), '账本不得包含明文密钥');
+  }
   assert.equal(events[toolIdx].seq, events[startIdx].seq, '开始与完成事件应同 seq 配对');
   const doneEv = events.find((e) => e.type === 'done');
   assert.ok(doneEv.stats && doneEv.stats.deliverables.includes('web.txt'), 'done 应带交付物统计（web.txt）');
