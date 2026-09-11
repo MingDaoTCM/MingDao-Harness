@@ -11,21 +11,28 @@
 
 | 阶段 | 状态 | 产出 |
 | --- | --- | --- |
-| A0 契约冻结 | ✅ 完成 | `PACK-API.md` v1 冻结 + 三条决策拍板；新增 `docs/CHANGELOG-PACK.md`（v1 条目） |
-| A1 Pack 加载器 | ✅ 完成 | `src/packs.js`：三级遮蔽发现 / manifest 严格校验 / 极简 semver（npm 语义）/ 工具注册为 `pack__<pack>__<tool>` / 坏 Pack 只告警不阻塞 / 幂等挂载 |
-| A2 CLI | ✅ 完成 | `src/commands/pack.js`：`pack list / verify / new / info`；`pack verify` 即下游 CI 门禁（静态校验，不 import 代码） |
-| A3 约束引擎 | 🟡 引擎核心完成，**待接 agent** | `src/constraints.js`：三时机（PreToolUse / PostToolUse / 输出前）+ 6 种 kind + fail-closed + 零约束惰性，已有完整单测；**尚未接入 agent 主循环** |
-| A4 成本确定性 | ⬜ 未开始 | `ctx.llm()` / 四维归因 / `cost report --by pack` |
-| A5 提示词段 | ⬜ 未开始 | `promptSections` 注入系统提示（数据已由 A1 收集） |
-| A6 文档与示例 | 🟡 部分 | `packs/example-hello/`（1 工具 + 1 约束 + 1 提示词段，`pack verify` 通过）；`PACK-API.md` / `CHANGELOG-PACK.md` 已就绪；README 与 DEVELOPER 章节待补 |
-| A7 发布 + Deyi 回迁 | ⬜ 未开始 | 版本仍为 0.4.6（v0.5.0 发布时统一 bump） |
+| A0 契约冻结 | ✅ 完成 | `PACK-API.md` v1 冻结 + 三条决策拍板；`docs/CHANGELOG-PACK.md`（v1 条目） |
+| A1 Pack 加载器 | ✅ 完成 | `src/packs.js`：三级遮蔽发现 / manifest 严格校验 / 极简 semver（npm 语义）/ 工具注册 / 坏 Pack 只告警 / 幂等挂载 |
+| A2 CLI | ✅ 完成 | `src/commands/pack.js`：`list / verify / new / info`；`verify` 即下游 CI 门禁 |
+| A3 约束引擎 | ✅ 完成（含接线） | `src/constraints.js` 三时机 + 6 kind + fail-closed；**已接入 agent**：PreToolUse（工具/参数）、PostToolUse（缺项拒绝结果）、输出前（回填历史之前改写/拦截）；约束事件写审计；CLI/WebUI/worker 启动各挂载一次 |
+| A4 成本确定性 | 🟡 核心完成 | `ctx.llm()` 统一模型出口（usage 并入当前回合 → 今日费用/缓存/峰谷/护栏全部生效）；**Pack 归因记录**（cost=null 标记，不与回合级重复计费）；`mingdao cost --by pack`。**待补**：Pack 级预算（A4.5）、`pack verify` 对直连模型端点的静态告警（A4.6） |
+| A5 提示词段 | ✅ 完成 | `buildSystemPrompt` 注入 `<pack_rules>`（按 order + pack/id 确定性排序，字节稳定不破坏前缀缓存） |
+| A6 文档 | 🟡 部分 | `packs/example-hello/` 示例 + `PACK-API.md` + `CHANGELOG-PACK.md`；README / DEVELOPER 的 Pack 章节待补 |
+| A7 发布 + Deyi 回迁 | ⬜ 未开始 | 版本仍 0.4.6（v0.5.0 发布时统一 bump） |
 
-**本轮已验证**：`mingdao pack verify/list/info/new` 四条命令端到端可用；`example-hello` 的工具进入 schema 并可执行、约束与提示词段带 pack 归属被收集；重复挂载幂等；坏 Pack 只产生告警不崩启动；约束引擎的三时机判定与 fail-closed 全部有断言；smoke 82→**83 组断言**。
+**已验证的端到端行为**（均有回归断言）：
 
-**下一步（A3 收尾 → A4）**：
-1. 把 `mountPacks()` 的 `constraints` 接入 `createAgent`（CLI/REPL/WebUI 三个入口），在既有工具管线里插入 PreToolUse / PostToolUse 检查点，并在输出前接 `checkOutput`；
-2. 约束事件写审计（结构见 `PACK-API.md` §4）；
-3. 然后做 `ctx.llm()`（A4）——这是 Deyi 域内费用「不再隐身」的关键。
+- `pack verify/list/info/new` 四条命令可用；`example-hello` 工具进 schema 且可执行；坏 Pack 只告警不崩启动；重复挂载幂等；
+- 约束三时机在真实 agent 循环里生效：`tool-deny` 拦住已获权限的工具、`completeness` 缺项时**原始结果不进入模型上下文**、输出命中红线时在**回填会话历史之前**改写/拦截（否则违规措辞会被当既成事实喂回）；
+- 零约束时三处检查点全部惰性，正文原样返回（对既有行为零影响）；
+- `ctx.llm` 的子调用 usage **并入父回合**（实测 1000+500+1000=2500 prompt），并在账本留下 Pack 归因记录而不重复计费；`mingdao cost --by pack` 可见。
+
+断言规模：smoke 83 → **86 组**；6/6 套测试全绿；tsc 0 错误；strict 0/0。
+
+**下一步（A4 收尾 → A6 → A7）**：
+1. A4.5 Pack 级预算（日/任务）与护栏 action 联动；A4.6 `pack verify` 对「直连模型端点」的 fetch 静态告警；
+2. A6 补 README「垂域 Pack」段与 `DEVELOPER.md` Pack 章节；
+3. A7 bump 到 0.5.0 → 自检 → 发布 → 触发 Deyi 回迁（3 个域工具从 Provider 搬进 `pack-tcm`）。
 
 ---
 

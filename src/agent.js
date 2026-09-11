@@ -14,8 +14,9 @@ import { subagentModel } from './routing.js';
 import { writeAudit } from './audit.js';
 import { redactSecrets } from './redact.js';
 import { checkCostGuard, costGuardConfig, todayCost } from './cost-guard.js';
+import { recordCacheStats } from './cachestats.js';
 import { estimateCost } from './pricing.js';
-import { resolveProviderConfig } from './providers/index.js';
+import { resolveProviderConfig, createProvider } from './providers/index.js';
 import { compileConstraints, checkPreTool, checkPostTool, checkOutput, blockedOutputText } from './constraints.js';
 import { getActivePackContext } from './packs.js';
 
@@ -82,6 +83,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // （CLI/REPL 每次派子代理都漏计；README 主推的「多方向并行调研」场景漏计最重）。
   // runTurn 开始时指向本轮 usage，finally 清空；runTurn 之外调用 spawnTask 时为 null（安全跳过）。
   let currentUsage = /** @type {any} */ (null);
+  // v0.5.0 A4：当前正在执行的 Pack 工具所属 Pack（由 runTool 按 `pack__<pack>__` 前缀设置），
+  // 供 ctx.llm 写归因记录时标注来源。
+  let currentPack = /** @type {any} */ (null);
   // 会话级共享：调用方传入则复用（/model 切换、子代理均共享，undo 不丢失）
   const undo = undoStore || { backups: new Map() };
   const stepLimit = maxSteps || MAX_STEPS;
@@ -186,6 +190,90 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     return text;
   }
 
+  /**
+   * v0.5.0 A4：Pack 统一模型出口 `ctx.llm()`（Pack API §5）。
+   *
+   * 为什么必须有它：垂域层此前把模型调用写在 Provider 的 chat() 里（Deyi 的 dify.mjs 就是如此），
+   * usage 硬编码为 0 —— 域内调用**完全不计费、不触发日费用护栏、无法归因**。
+   * 走这里则：复用内核的 Provider 解析/重试/超时/能力表；usage 并入当前回合累加器 →
+   * 今日费用、缓存命中率、峰谷判断、日费用护栏在途估算**同时生效**。
+   * @param {any} opts
+   */
+  async function packLlm(/** @type {any} */ opts = {}) {
+    const usedModel = String(opts.model || modelName);
+    const system = String(opts.system || '');
+    const user = String(opts.user ?? opts.prompt ?? '');
+    if (!user) throw new Error('ctx.llm 需要 user（或 prompt）参数');
+    const messages = [...(system ? [{ role: 'system', content: system }] : []), { role: 'user', content: user }];
+    let prov = provider;
+    if (usedModel !== modelName) {
+      const pc = resolveProviderConfig(cfg, usedModel);
+      if (!pc || !pc.apiKey) throw new Error(`ctx.llm：模型 ${usedModel} 未配置 API Key`);
+      prov = await createProvider(cfg, usedModel);
+    }
+    const subCaps = resolveModelCaps(cfg, usedModel);
+    const maxTokens = Math.min(
+      Number(opts.maxTokens) > 0 ? Number(opts.maxTokens) : 2048,
+      subCaps.maxOutputCeiling || subCaps.maxOutputTokens
+    );
+    const t0 = Date.now();
+    const res = await prov.chat({
+      model: usedModel,
+      messages,
+      tools: [],
+      temperature: opts.temperature ?? temperature,
+      maxTokens,
+      ...(opts.reasoningEffort ? { reasoningEffort: opts.reasoningEffort } : {}),
+      ...(opts.json ? { responseFormat: { type: 'json_object' } } : {}),
+      ...(opts.signal ? { signal: opts.signal } : {}),
+    });
+    // 并入当前回合 usage（与子代理同一机制）：CLI 直接按 res.usage 入账，
+    // WebUI 的 remaining 补记与护栏在途估算随之变准。
+    if (currentUsage && res?.usage) {
+      const u = res.usage;
+      currentUsage.prompt_tokens += u.prompt_tokens || 0;
+      currentUsage.completion_tokens += u.completion_tokens || 0;
+      if (Number.isFinite(u.prompt_cache_hit_tokens)) {
+        currentUsage.prompt_cache_hit_tokens = (currentUsage.prompt_cache_hit_tokens || 0) + u.prompt_cache_hit_tokens;
+      }
+      if (Number.isFinite(u.prompt_cache_miss_tokens)) {
+        currentUsage.prompt_cache_miss_tokens = (currentUsage.prompt_cache_miss_tokens || 0) + u.prompt_cache_miss_tokens;
+      }
+    }
+    // v0.5.0 A4：写一条 **Pack 归因标记记录**（cost=null，不计入 todayCost → 与回合级记录不重复计费；
+    // packCost 仅供 `mingdao cost report --by pack` 展示）。这样垂域团队能看到「自己的红线/工具花了多少」。
+    try {
+      const u = res?.usage || {};
+      const pack = currentPack || opts.pack || null;
+      const pCost = estimateCost(usedModel, u.prompt_tokens || 0, u.completion_tokens || 0, null);
+      recordCacheStats({
+        model: usedModel,
+        prompt: u.prompt_tokens || 0,
+        completion: u.completion_tokens || 0,
+        hit: null,
+        miss: null,
+        cost: null,
+        saved: null,
+        pack,
+        purpose: opts.purpose || null,
+        packCost: pCost,
+      });
+    } catch {}
+
+    const text = String(res?.text || '');
+    let data = null;
+    if (opts.json) {
+      const a = text.indexOf('{');
+      const b = text.lastIndexOf('}');
+      if (a >= 0 && b > a) {
+        try {
+          data = JSON.parse(text.slice(a, b + 1));
+        } catch {}
+      }
+    }
+    return { text, data, usage: res?.usage || null, model: usedModel, purpose: opts.purpose || null, durationMs: Date.now() - t0 };
+  }
+
   function makeCtx() {
     return {
       cwd: workingDir,
@@ -199,6 +287,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       todos,
       undoStore: undo,
       spawnTask: (/** @type {any} */ prompt, /** @type {any} */ opts) => spawnTask(prompt, opts),
+      // v0.5.0 A4：Pack 内所有模型调用必须走这里（禁止自己 fetch 模型接口）——
+      // 否则费用隐身、护栏失效、无法归因。详见 PACK-API §5。
+      llm: (/** @type {any} */ opts) => packLlm(opts),
     };
   }
 
@@ -709,6 +800,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 后续相同调用直接复用结果（仍逐个回填 tool 消息以保持 tool_call_id 配对）
         async function runTool(/** @type {any} */ prep) {
           io.renderToolStart?.(prep.name, prep.args);
+          // Pack 工具名形如 pack__<pack>__<tool>；执行期间标注来源，供 ctx.llm 归因
+          const pkMatch = /^pack__([a-z0-9-]+)__/.exec(String(prep.name || ''));
+          const prevPack = currentPack;
+          currentPack = pkMatch ? pkMatch[1] : null;
           usedToolNames.add(prep.name); // 省钱 B1：执行过即标记，后续轮次省略其 description
           const dedupKey = !prep.isMcp && READONLY_TOOLS_SET.has(prep.name) ? prep.name + ':' + JSON.stringify(prep.args || {}) : null;
           if (dedupKey && turnToolCache.has(dedupKey)) {
@@ -730,6 +825,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             // 失败也可能已产生副作用（半写入/部分执行）→ 同样作废缓存
             invalidateReadCache(prep);
             return JSON.stringify({ ok: false, error: String(err?.message || err) });
+          } finally {
+            currentPack = prevPack; // 还原（并行只读批次下 finally 保证不乱序）
           }
         }
 

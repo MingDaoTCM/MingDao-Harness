@@ -35,6 +35,11 @@ export function recordCacheStats(/** @type {any} */ entry) {
       firstTokenMs: entry.firstTokenMs ?? undefined, // 首 token 延迟（状态栏平均首 token）
       reasoning: entry.reasoning ?? undefined, // 省钱 B3：推理 token 估算（费用二级分账维度）
       byTool: Array.isArray(entry.byTool) ? entry.byTool : undefined, // 省钱 B3：逐工具 {tool,calls,ms}
+      // v0.5.0 A4：垂域 Pack 归因（**标记记录**：cost 记 null 不计入 todayCost，
+      // 真实费用仍在回合级记录里 —— 两者相加不会重复计费；packCost 仅供 --by pack 展示）
+      pack: entry.pack ? String(entry.pack) : undefined,
+      purpose: entry.purpose ? String(entry.purpose) : undefined,
+      packCost: Number.isFinite(Number(entry.packCost)) ? Number(entry.packCost) : undefined,
     });
     fs.appendFileSync(cacheStatsFile(), line + '\n');
     cacheStatsCount += 1;
@@ -178,6 +183,8 @@ export function costBreakdown() {
   const byModel = new Map();
   const byTool = /** @type {Map<string, {calls: number, ms: number}>} */ (new Map());
   const byDay = /** @type {Map<string, number>} */ (new Map()); // 'MM-DD' → cost（近 14 个北京日，含 0 值日）
+  // v0.5.0 A4：垂域 Pack 分账（来自 ctx.llm 的标记记录；cost 为 null 不入总额，取 packCost 展示）
+  const byPack = /** @type {Map<string, {prompt: number, completion: number, cost: number, calls: number}>} */ (new Map());
   const start = beijingDayStart().getTime();
   let totalCost = 0;
   let totalSaved = 0;
@@ -194,6 +201,14 @@ export function costBreakdown() {
     reasoning += e.reasoning || 0;
     if (e.batch) batchCost += e.cost || 0;
     if (e.at >= start) today += e.cost || 0;
+    if (e.pack) {
+      const pk = byPack.get(e.pack) || { prompt: 0, completion: 0, cost: 0, calls: 0 };
+      pk.prompt += e.prompt || 0;
+      pk.completion += e.completion || 0;
+      pk.cost += Number(e.packCost) || 0;
+      pk.calls += 1;
+      byPack.set(e.pack, pk);
+    }
     const m = byModel.get(e.model) || { prompt: 0, completion: 0, cost: 0, saved: 0, turns: 0, batchTurns: 0, reasoning: 0 };
     m.prompt += e.prompt || 0;
     m.completion += e.completion || 0;
@@ -237,6 +252,8 @@ export function costBreakdown() {
     byModel: [...byModel.entries()].map(([model, m]) => ({ model, ...m })).sort((a, b) => b.cost - a.cost),
     byTool: [...byTool.entries()].map(([tool, t]) => ({ tool, ...t })).sort((a, b) => b.ms - a.ms),
     byDay: days,
+    // v0.5.0 A4：垂域 Pack 分账（ctx.llm 归因；cost 为 null 的标记记录不计入 totalCost，故不重复计费）
+    byPack: [...byPack.entries()].map(([pack, v]) => ({ pack, ...v })).sort((a, b) => b.cost - a.cost),
   };
 }
 

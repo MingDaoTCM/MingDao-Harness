@@ -3609,6 +3609,94 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.5.0A5 回归：Pack 领域提示词段注入（未挂载零影响 + 注入正确 + 字节稳定）');
 }
 
+
+// ---------- 61. v0.5.0 阶段 A4 回归：ctx.llm 统一模型出口（Pack 调用不再「费用隐身」） ----------
+{
+  const { registerTool: reg61, dispatch: disp61 } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
+  const tmp61 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-a4-'));
+  const MAIN = { prompt_tokens: 1000, completion_tokens: 200 };
+  const PACK = { prompt_tokens: 500, completion_tokens: 50 };
+
+  // 模拟垂域 Pack 工具：内部通过 ctx.llm 调模型（而不是自己 fetch——那正是 Deyi 的 usage:0 老路）
+  let packSawUsage = null;
+  let packSawPurpose = null;
+  let packSawTools = 'unset';
+  try {
+    reg61({
+      name: 'pack__demo__summarize',
+      description: 'd',
+      parameters: { type: 'object', properties: {} },
+      readOnly: true,
+      run: async (_args, ctx) => {
+        const r = await ctx.llm({ model: 'deepseek-v4-flash', system: '你是摘要器', user: '总结一下', maxTokens: 100, purpose: 'patient-extract' });
+        packSawUsage = r.usage;
+        packSawPurpose = r.purpose;
+        return { ok: true, output: String(r.text || ''), data: { done: true } };
+      },
+    });
+  } catch {}
+
+  let seen = 0;
+  const provider61 = {
+    async chat(o) {
+      seen += 1;
+      // 带非空 tools = 主循环；tools 为空数组 = ctx.llm 的子调用
+      const isPackCall = Array.isArray(o.tools) && o.tools.length === 0;
+      if (isPackCall) {
+        packSawTools = o.tools.length;
+        return { text: '摘要正文', reasoning: '', finish: 'stop', usage: { ...PACK }, toolCalls: null };
+      }
+      if (!o.messages.some((m) => m.role === 'tool')) {
+        return { text: '', reasoning: '', finish: 'tool_calls', usage: { ...MAIN },
+          toolCalls: [{ id: 'c1', type: 'function', function: { name: 'pack__demo__summarize', arguments: '{}' } }] };
+      }
+      return { text: '完成', reasoning: '', finish: 'stop', usage: { ...MAIN }, toolCalls: null };
+    },
+  };
+  const agent61 = createAgent({
+    provider: provider61,
+    permission: { mode: 'auto', async check() { return true; } },
+    io: createIO({ quiet: true }),
+    modelName: 'deepseek-v4-flash',
+    workingDir: tmp61,
+    cfg: { permission: 'auto', autoCompact: false, maxRounds: 1 },
+  });
+  const res61 = await agent61.runTurn([{ role: 'system', content: 's' }, { role: 'user', content: 'summarize' }]);
+
+  assert.equal(seen, 3, '应为 主调用 + ctx.llm + 主调用 共 3 次');
+  assert.equal(packSawTools, 0, 'ctx.llm 子调用不得携带工具');
+  assert.ok(packSawUsage && packSawUsage.prompt_tokens === PACK.prompt_tokens, 'ctx.llm 应把子调用 usage 返回给 Pack');
+  assert.equal(packSawPurpose, 'patient-extract', 'ctx.llm 应透传 purpose（归因标签）');
+  // 关键断言：Pack 的调用必须并入父回合 usage——否则今日费用/护栏/分账全都看不到这笔钱
+  assert.equal(res61.usage.prompt_tokens, MAIN.prompt_tokens * 2 + PACK.prompt_tokens,
+    `Pack 经 ctx.llm 的 token 必须计入父回合（实际 ${res61.usage.prompt_tokens}）`);
+  assert.equal(res61.usage.completion_tokens, MAIN.completion_tokens * 2 + PACK.completion_tokens,
+    `Pack 经 ctx.llm 的 completion 必须计入父回合（实际 ${res61.usage.completion_tokens}）`);
+
+  // 归因：ctx.llm 写"标记记录"（cost=null → 不进 todayCost，与回合级记录不重复计费），
+  // 由 pack 前缀自动标注来源 → `mingdao cost --by pack` 可见
+  {
+    const { costBreakdown } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+    const { todayCost } = await import(pathToFileURL(path.join(srcDir, 'cost-guard.js')).href);
+    const bd = costBreakdown();
+    const pk = (bd.byPack || []).find((x) => x.pack === 'demo');
+    assert.ok(pk, '应产生 Pack 归因记录（byPack 含 demo）：' + JSON.stringify(bd.byPack));
+    assert.equal(pk.prompt, PACK.prompt_tokens, '归因记录应含 Pack 子调用的 prompt tokens');
+    assert.equal(pk.calls, 1, '应记录 1 次 Pack 模型调用');
+    assert.ok(pk.cost > 0, 'packCost 应为正（供 --by pack 展示）');
+    // 关键：标记记录不得被计入今日费用（否则与回合级记录重复计费）
+    const today = todayCost();
+    assert.equal(today, 0, '仅标记记录时今日费用应为 0（cost=null 不计入）');
+  }
+
+  // 未显式传 constraints 且进程未挂载 Pack 时，agent 的 llm 仍然可用（库使用方场景）
+  const ctxProbe = await disp61('pack__demo__summarize', {}, { cwd: tmp61, llm: undefined });
+  assert.equal(ctxProbe.ok, false, '无 ctx.llm 时 Pack 工具应得到结构化失败而非崩溃（说明工具确实依赖注入的 ctx）');
+
+  safeRmSync(tmp61, { recursive: true, force: true });
+  ok('v0.5.0A4 回归：ctx.llm 统一模型出口（usage 并入父回合 + Pack 归因记录不重复计费）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

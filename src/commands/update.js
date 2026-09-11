@@ -102,6 +102,24 @@ export async function handleUpdateFamily(/** @type {any} */ cmd, /** @type {any}
 
   // 费用报告（/cost 月度导出）：mingdao cost [report [YYYY-MM|all]]
   if (cmd === 'cost') {
+    // v0.5.0 A4：`mingdao cost --by pack` —— 垂域 Pack 分账（来自 ctx.llm 的归因标记记录）
+    if (args[0] === '--by' && args[1] === 'pack') {
+      const { costBreakdown } = await import('../cachestats.js');
+      const bd = costBreakdown();
+      const packs = bd.byPack || [];
+      if (!packs.length) {
+        console.log('暂无垂域 Pack 费用记录（Pack 内模型调用需经 ctx.llm，才会被归因）。');
+        return true;
+      }
+      console.log('按垂域 Pack 分账（ctx.llm 归因）：');
+      console.log('  Pack                 调用   ↑prompt    ↓completion   ≈费用');
+      for (const p of packs) {
+        console.log(`  ${String(p.pack).padEnd(20)} ${String(p.calls).padStart(4)}   ${String(p.prompt).padStart(8)}   ${String(p.completion).padStart(11)}   ¥${p.cost.toFixed(5)}`);
+      }
+      const total = packs.reduce((s, p) => s + p.cost, 0);
+      console.log(`  合计 ≈¥${total.toFixed(5)}（这些费用已包含在回合级总账中，此处仅作归因拆分，不重复计费）`);
+      return true;
+    }
     const valid = args.length === 0 || (args.length >= 1 && args[0] === 'report' && args.length <= 2 && (!args[1] || args[1] === 'all' || /^\d{4}-\d{2}$/.test(args[1])));
     if (!valid) return false; // 参数不合法 → 按提问处理
     const { costMonthlyReport } = await import('../cachestats.js');
