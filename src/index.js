@@ -25,6 +25,23 @@ export {
   presetDirs,
 } from './presets.js';
 
+// —— @stable：垂域 Pack（v0.5.0 契约，Pack API v1）——
+export {
+  listPacks,
+  loadPack,
+  validateManifest,
+  mountPacks,
+  satisfiesRange,
+  packDirs,
+  coreVersionOf,
+  loadedPackNames,
+  SUPPORTED_PACK_API,
+  CONSTRAINT_KINDS,
+} from './packs.js';
+
+// —— @stable：约束引擎（v0.5.0 契约，Pack API v1 的领域红线）——
+export { compileConstraints, checkPreTool, checkPostTool, checkOutput, blockedOutputText, toolMatches } from './constraints.js';
+
 // —— @stable：上下文与压缩 ——
 export { trimMessages, approxTokens, clampText, TOOL_RESULT_LIMIT } from './context.js';
 export { compactConversation, summarizeConversation } from './compact.js';

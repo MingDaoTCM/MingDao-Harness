@@ -205,6 +205,7 @@ async function main() {
       key: { module: 'key', handler: 'handleKey' },
       desktop: { module: 'desktop', handler: 'handleDesktop' },
       diagnose: { module: 'diagnose', handler: 'handleDiagnose' },
+      pack: { module: 'pack', handler: 'handlePack' }, // v0.5.0：垂域 Pack 查看/校验/脚手架
     });
     const hit = dispatchTable[opts.prompt[0]];
     if (hit) {

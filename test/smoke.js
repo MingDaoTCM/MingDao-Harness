@@ -3148,6 +3148,14 @@ const ctx = { cwd: tmp };
       `随包资源目录 ${dir}/ 必须出现在 desktop/electron-builder.yml 的 extraResources（否则桌面版缺文件）`
     );
   }
+  // v0.5.0：内置垂域 Pack 目录也必须随包分发（packs.js 按 ../packs 解析内置来源，
+  // 不是 `new URL('../x')` 形式，故上面的自动扫描覆盖不到——单独断言）
+  assert.ok(
+    rootPkgFiles.some((f) => String(f).replace(/\/$/, '') === 'packs'),
+    '内置 Pack 目录 packs/ 必须出现在根 package.json#files'
+  );
+  assert.ok(/from:\s*\.\.\/packs\b/.test(builderYml), '内置 Pack 目录必须出现在 desktop/electron-builder.yml 的 extraResources');
+
   // 版本真源一致性：desktop 版本必须已被同步（dist 脚本前置 sync，但仓库内也不应漂移）
   const rootVer = JSON.parse(fs.readFileSync(path.join(repoRoot, 'package.json'), 'utf8')).version;
   const deskVer = JSON.parse(fs.readFileSync(path.join(repoRoot, 'desktop', 'package.json'), 'utf8')).version;
@@ -3295,6 +3303,138 @@ console.log(JSON.stringify({ okOn, xml }));`;
   }
   safeRmSync(fakeHome, { recursive: true, force: true });
   ok('v0.4.6 回归：自启命令使用绝对路径（launchd 下不再静默 command not found）');
+}
+
+// ---------- 58. v0.5.0 阶段 A3 回归：约束引擎（领域红线的内核强制） ----------
+{
+  const C = await import(pathToFileURL(path.join(srcDir, 'constraints.js')).href);
+  const list = [
+    { id: 'no-cross-patient', kind: 'tool-arg-require', pack: 'tcm', tool: 'intake_read', requireArg: 'patientId' },
+    { id: 'no-destructive', kind: 'tool-deny', pack: 'tcm', tool: 'bash' },
+    { id: 'no-pii-arg', kind: 'arg-forbid', pack: 'tcm', tool: 'fetch', arg: 'url', pattern: '^http://' },
+    { id: 'ten-questions', kind: 'completeness', pack: 'tcm', tool: 'intake_collect', fields: ['zhushu', 'zhendan'] },
+    { id: 'no-conclusion', kind: 'output-forbid', pattern: '好转|治愈|确诊为', action: 'block-and-rewrite' },
+  ];
+  const c = C.compileConstraints(list);
+  assert.equal(c.size, 5, '5 条约束都应编译通过');
+  assert.deepEqual(c.invalid, [], '不应有非法约束');
+
+  // ① PreToolUse：工具与参数红线
+  assert.equal(C.checkPreTool(c, 'pack__tcm__intake_read', {}).blocked, true, '缺 patientId 应被阻断（不得跨患者串病历）');
+  assert.equal(C.checkPreTool(c, 'pack__tcm__intake_read', { patientId: 'P001' }), null, '带 patientId 应放行');
+  assert.equal(C.checkPreTool(c, 'pack__tcm__bash', { command: 'rm -rf /' }).blocked, true, 'tool-deny 应阻断');
+  assert.equal(C.checkPreTool(c, 'pack__tcm__fetch', { url: 'http://evil/x' }).blocked, true, 'arg-forbid 应阻断');
+  assert.equal(C.checkPreTool(c, 'pack__tcm__fetch', { url: 'https://ok/x' }), null, '未命中参数应放行');
+
+  // ② PostToolUse：缺项绝不编造
+  const miss = C.checkPostTool(c, 'pack__tcm__intake_collect', { data: { zhushu: '头痛' } });
+  assert.equal(miss.rejected, true, '必填项缺失应拒绝该工具结果');
+  assert.deepEqual(miss.missing, ['zhendan'], '应指出缺失字段');
+  assert.equal(C.checkPostTool(c, 'pack__tcm__intake_collect', { data: { zhushu: '头痛', zhendan: '无' } }), null, '齐全应放行');
+  assert.equal(C.checkPostTool(c, 'pack__tcm__intake_collect', {}).rejected, true, '未返回结构化 data 应拒绝（fail-closed）');
+
+  // ③ 输出前：只陈述事实，不出结论
+  const hit = C.checkOutput(c, '服药后明显好转');
+  assert.equal(hit.action, 'block-and-rewrite', '命中禁用措辞应按 action 处理');
+  assert.equal(C.checkOutput(c, '血压 120/80，睡眠一般'), null, '事实陈述不应被拦');
+
+  // fail-closed：非法正则条目被忽略（不参与判定），但整体仍可用
+  const c2 = C.compileConstraints([{ id: 'bad', kind: 'output-forbid', pattern: '([' }]);
+  assert.equal(c2.size, 0, '非法正则约束应被忽略');
+  assert.equal(c2.invalid.length, 1, '应记录非法约束');
+  assert.equal(c2.active, false, '无有效约束时应为非活跃');
+
+  // 零约束时完全惰性（零 Pack 场景对既有行为零影响）
+  const empty = C.compileConstraints([]);
+  assert.equal(empty.active, false, '空集合应惰性');
+  assert.equal(C.checkPreTool(empty, 'bash', {}), null, '空集合不得阻断任何工具');
+  assert.equal(C.checkPostTool(empty, 'x', {}), null, '空集合不得拒绝任何结果');
+  assert.equal(C.checkOutput(empty, '好转'), null, '空集合不得改写任何输出');
+
+  ok('v0.5.0A3 回归：约束引擎（工具/参数/缺项/输出三时机强制 + fail-closed + 零约束惰性）');
+}
+
+// ---------- 57. v0.5.0 阶段 A 回归：垂域 Pack 契约（manifest 校验 / semver / 加载挂载） ----------
+{
+  const packs = await import(pathToFileURL(path.join(srcDir, 'packs.js')).href);
+
+  // 57a. semver 语义（npm 一致）——engines.mingdao 的兼容窗口判定基础
+  const sem = [
+    ['0.5.0', '>=0.5 <0.7', true], ['0.4.6', '>=0.5 <0.7', false], ['0.6.9', '>=0.5 <0.7', true], ['0.7.0', '>=0.5 <0.7', false],
+    ['1.9.9', '^1.2.0', true], ['2.0.0', '^1.2.0', false], ['0.5.9', '^0.5.0', true], ['0.6.0', '^0.5.0', false],
+    ['0.0.3', '^0.0.3', true], ['0.0.4', '^0.0.3', false], ['1.2.9', '~1.2.0', true], ['1.3.0', '~1.2.0', false],
+    ['1.2.3', '*', true], ['1.2.3', '1.2.3', true], ['1.2.4', '1.2.3', false],
+  ];
+  for (const [v, r, want] of sem) assert.equal(packs.satisfiesRange(v, r), want, `semver ${v} in ${r} 应 ${want}`);
+
+  // 57b. manifest 校验：合法通过、各类非法被拒且原因可操作
+  const base = { apiVersion: 1, name: 'demo', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' } };
+  assert.equal(packs.validateManifest(base).ok, true, '合法 manifest 应通过');
+  const rejects = [
+    [{ ...base, apiVersion: 99 }, 'apiVersion'],
+    [{ ...base, name: 'Bad Name' }, 'name'],
+    [{ ...base, name: 'core' }, '保留名'],
+    [{ ...base, version: 'v1' }, 'version'],
+    [{ ...base, engine: {} }, '未知字段'],
+    [{ ...base, engines: { mingdao: '>=9.0 <10.0' } }, '不匹配'],
+    [{ ...base, permissions: { shell: [] } }, 'permissions'],
+    [{ ...base, contributes: { nope: true } }, 'contributes'],
+  ];
+  for (const [m, label] of rejects) {
+    const r = packs.validateManifest(m);
+    assert.equal(r.ok, false, `${label} 的 manifest 应被拒绝`);
+    assert.ok(r.errors.length > 0 && typeof r.errors[0] === 'string', `${label} 应给出可操作原因`);
+  }
+
+  // 57c. 约束静态校验
+  const cOk = packs.validateManifest({ ...base, contributes: { constraints: true } });
+  assert.equal(cOk.ok, true, '声明 constraints 的 manifest 应通过');
+
+  // 57d. 发现 + 挂载内置示例 Pack：工具注册 / 约束与提示词段收集 / 幂等 / 不抛错
+  const prevHome57 = process.env.MINGDAO_HOME;
+  const home57 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-pack-'));
+  process.env.MINGDAO_HOME = home57;
+  const repoRoot57 = path.join(srcDir, '..');
+  const found = packs.listPacks({}, repoRoot57);
+  const demo = found.find((p) => p.name === 'example-hello');
+  assert.ok(demo, '应发现内置示例 Pack（实际：' + JSON.stringify(found.map((p) => p.name)) + '）');
+  assert.equal(demo.error, null, '内置示例 Pack 应校验通过：' + demo.error);
+
+  const mounted = await packs.mountPacks({}, { cwd: repoRoot57 });
+  assert.ok(mounted.mounted.some((p) => p.name === 'example-hello'), '应挂载 example-hello');
+  assert.equal(mounted.warnings.length, 0, '不应有告警：' + JSON.stringify(mounted.warnings));
+  const toolName = 'pack__example-hello__count_lines';
+  const schemaNames = buildToolSchemas(new Set(), []).map((t) => t.function.name);
+  assert.ok(schemaNames.includes(toolName), 'Pack 工具应进入 tools schema');
+  const toolRes = await dispatch(toolName, { path: path.join(repoRoot57, 'package.json') }, { cwd: repoRoot57 });
+  assert.equal(toolRes.ok, true, 'Pack 工具应可执行：' + JSON.stringify(toolRes));
+  assert.ok(mounted.constraints.some((c) => c.id === 'no-conclusion' && c.pack === 'example-hello'), '约束应带 pack 归属');
+  assert.ok(mounted.promptSections.some((s) => s.id === 'domain' && s.pack === 'example-hello'), '提示词段应带 pack 归属');
+
+  // 幂等：重复挂载不报错、不重复注册
+  const again = await packs.mountPacks({}, { cwd: repoRoot57 });
+  assert.equal(again.warnings.filter((w) => w.includes('注册失败')).length, 0, '重复挂载不得重复注册工具');
+
+  // 57e. 坏 Pack 不阻塞启动（缺 pack.mjs / 非法约束）
+  const badDir = path.join(home57, 'packs', 'broken');
+  fs.mkdirSync(badDir, { recursive: true });
+  fs.writeFileSync(path.join(badDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'broken', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { tools: true } }));
+  const bad = await packs.loadPack(badDir);
+  assert.equal(bad.ok, false, '声明代码贡献但缺 pack.mjs 应被拒');
+  assert.ok(String(bad.errors[0]).includes('pack.mjs'), '应指出缺 pack.mjs');
+
+  const badDir2 = path.join(home57, 'packs', 'badconstraint');
+  fs.mkdirSync(badDir2, { recursive: true });
+  fs.writeFileSync(path.join(badDir2, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'badconstraint', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { constraints: true } }));
+  fs.writeFileSync(path.join(badDir2, 'pack.mjs'), 'export function createPack(){ return { constraints: [{ id: "x", kind: "not-a-kind" }] }; }');
+  const bad2 = await packs.loadPack(badDir2);
+  assert.equal(bad2.ok, false, '非法 constraint.kind 应被拒');
+  const m2 = await packs.mountPacks({}, { cwd: repoRoot57 });
+  assert.ok(Array.isArray(m2.warnings) && m2.warnings.length >= 1, '坏 Pack 应只产生告警，不抛错');
+
+  process.env.MINGDAO_HOME = prevHome57;
+  safeRmSync(home57, { recursive: true, force: true });
+  ok('v0.5.0A 回归：Pack 契约（semver / manifest 校验 / 发现挂载 / 幂等 / 坏 Pack 不崩启动）');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

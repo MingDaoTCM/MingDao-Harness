@@ -1,0 +1,18 @@
+{
+  "apiVersion": 1,
+  "name": "example-hello",
+  "displayName": "示例垂域包（最小可用）",
+  "version": "1.0.0",
+  "engines": {
+    "mingdao": ">=0.4.6 <0.7"
+  },
+  "description": "最小示例：1 个领域工具 + 1 条输出红线约束 + 1 段领域提示词。不含任何业务逻辑，供垂域团队照抄。",
+  "license": "MIT",
+  "contributes": {
+    "tools": true,
+    "promptSections": [
+      "prompts/domain.md"
+    ],
+    "constraints": true
+  }
+}
