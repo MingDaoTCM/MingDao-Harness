@@ -43,6 +43,25 @@ async function api(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type
   return j;
 }
 
+/**
+ * 请求服务端**真正取消**批次（OpenAI 兼容：POST /batches/{id}/cancel）。
+ *
+ * 为什么必须有这一步：本地「停止轮询」不等于「停止计费」。此前用户按 Ctrl+C 后，
+ * 轮询停了、进程退了，但服务端批次照跑照结算（Batch 是 0.5× 但**全量 token**）。
+ * 对一个主打「成本确定性」的项目来说，这是最不该有的缺口——用户以为停了，钱照扣。
+ * 服务端不一定实现该端点（返回 404/400 都出现过），因此失败必须如实上报，
+ * 而不是让用户以为已经停了。
+ * @returns {Promise<boolean>} 服务端是否接受了取消
+ */
+async function cancelServerBatch(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type {any} */ id) {
+  try {
+    await api(base, apiKey, `/batches/${id}/cancel`, {}, 'POST');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function uploadFile(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type {any} */ jsonl) {
   const form = new FormData();
   form.append('file', new Blob([jsonl], { type: 'application/jsonl' }), 'mingdao-batch.jsonl');
@@ -193,8 +212,26 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
     let failures = 0;
     let polls = 0;
     for (;;) {
-      if (signal?.aborted) return { error: '已取消轮询（任务仍在服务端运行）', batchId: batch.id };
-      if (Date.now() - t0 > 24 * 3600 * 1000) return { error: '批处理超过 24h 窗口', batchId: batch.id };
+      if (signal?.aborted) {
+        // 本地取消必须尽力转化为服务端取消，否则用户以为停了、账单照涨
+        const cancelled = await cancelServerBatch(base, apiKey, batch.id);
+        return {
+          error: cancelled
+            ? '已取消（已请求服务端停止该批次）'
+            : '已停止本地轮询，但服务端取消未成功——该批次可能仍在运行并计费。请到服务商后台确认。',
+          batchId: batch.id,
+          cancelled,
+        };
+      }
+      if (Date.now() - t0 > 24 * 3600 * 1000) {
+        // 超窗口同样要尝试停掉，避免留下一个无人接管却在计费的批次
+        const cancelled = await cancelServerBatch(base, apiKey, batch.id);
+        return {
+          error: `批处理超过 24h 窗口${cancelled ? '（已请求服务端停止）' : '（服务端取消失败，批次可能仍在计费）'}`,
+          batchId: batch.id,
+          cancelled,
+        };
+      }
       let j = null;
       try {
         j = await api(base, apiKey, `/batches/${batch.id}`, undefined, 'GET');

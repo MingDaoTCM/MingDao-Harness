@@ -4832,6 +4832,76 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.6.0 C4：内网/信创适配（国产栈预设 + 本地端点免 Key 而公网不放松 + 离线安装明确拒绝联网 + 打包脚本）');
 }
 
+
+// ---------- 76. v0.6.0 审计：Batch 取消必须真正落到服务端（否则「停了」只是本地幻觉） ----------
+// 缺陷：本地「停止轮询」不等于「停止计费」。此前用户按 Ctrl+C 后轮询停了、进程退了，
+// 但服务端批次照跑照结算（Batch 0.5× 但**全量 token**）——对一个主打「成本确定性」的项目，
+// 这是最不该有的缺口：用户以为停了，钱照扣。
+{
+  const http76 = await import('node:http');
+  const { runBatch } = await import(pathToFileURL(path.join(srcDir, 'batch.js')).href);
+  const prevEnv76 = process.env.MINGDAO_HOME;
+  const prevKey76 = process.env.TEST_API_KEY;
+  process.env.MINGDAO_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-batch76-'));
+  process.env.TEST_API_KEY = 'sk-stub';
+
+  /** 起一个桩服务端；supportsCancel 决定取消端点是否可用 */
+  const startStub = (supportsCancel) => {
+    const seen = [];
+    const srv = http76.createServer((req, res) => {
+      let b = '';
+      req.on('data', (d) => (b += d));
+      req.on('end', () => {
+        seen.push(`${req.method} ${req.url}`);
+        const send = (o, code = 200) => {
+          res.writeHead(code, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(o));
+        };
+        if (req.url.endsWith('/cancel')) {
+          return supportsCancel ? send({ id: 'b1', status: 'cancelling' }) : send({ error: { message: 'not supported' } }, 404);
+        }
+        if (req.url.endsWith('/files')) return send({ id: 'f1' });
+        if (req.url.endsWith('/batches')) return send({ id: 'b1', status: 'validating' });
+        if (req.url.endsWith('/batches/b1')) return send({ id: 'b1', status: 'in_progress', request_counts: { completed: 1, total: 2 } });
+        return send({});
+      });
+    });
+    return { srv, seen };
+  };
+  const runAbort = async (supportsCancel) => {
+    const { srv, seen } = startStub(supportsCancel);
+    await new Promise((r) => srv.listen(0, '127.0.0.1', r));
+    const cfg = { model: 'stub', customModels: { stub: { baseUrl: `http://127.0.0.1:${srv.address().port}/v1`, envKey: 'TEST_API_KEY' } } };
+    const ac = new AbortController();
+    setTimeout(() => ac.abort(), 400);
+    const r = await runBatch({ cfg, model: 'stub', questions: ['q1', 'q2'], signal: ac.signal, onStatus: () => {} });
+    srv.close();
+    return { r, seen };
+  };
+
+  // 76a. 服务端支持取消 → 必须真的发出取消请求，并如实报告已取消
+  {
+    const { r, seen } = await runAbort(true);
+    assert.ok(seen.some((x) => x.includes('/cancel')), `中止时必须请求服务端取消，实际请求：${seen.join(' | ')}`);
+    assert.equal(r.cancelled, true, '服务端接受取消时应如实标记 cancelled');
+    assert.ok(String(r.error).includes('已取消'), '应告知用户已取消');
+  }
+  // 76b. 服务端不支持取消（404）→ 不得假装已停，必须提示可能仍在计费
+  {
+    const { r, seen } = await runAbort(false);
+    assert.ok(seen.some((x) => x.includes('/cancel')), '即便服务端可能不支持，也应尝试一次');
+    assert.equal(r.cancelled, false, '服务端拒绝取消时 cancelled 必须为 false');
+    assert.ok(/仍在运行并计费|仍在计费/.test(String(r.error)),
+      `取消失败必须提示仍可能计费，实际：${r.error}`);
+  }
+
+  process.env.MINGDAO_HOME = prevEnv76;
+  if (prevKey76 === undefined) delete process.env.TEST_API_KEY;
+  else process.env.TEST_API_KEY = prevKey76;
+  safeRmSync(tmp, { recursive: true, force: true });
+  ok('v0.6.0 审计：Batch 中止必须落到服务端取消（并如实上报失败，不假装已停）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });
