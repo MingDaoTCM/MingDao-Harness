@@ -10,7 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { mingdaoHome } from './config.js';
+import { mingdaoHome, loadConfig } from './config.js';
 import { skillDirHash, readSourceMeta } from './skill-lib.js';
 
 const BUILTIN_DIR = fileURLToPath(new URL('../skills', import.meta.url));
@@ -47,7 +47,13 @@ function readDescription(/** @type {any} */ skillMd) {
   }
 }
 
-// 完整性校验（P3-3）：带指纹（sha256）来源记录的技能，内容与安装时不一致 → 拒绝加载
+// 完整性校验（P3-3）：带指纹（sha256）来源记录的技能，内容与安装时不一致 → 拒绝加载。
+//
+// v0.4.7（T3）诚实边界：这个检查**只能**发现「安装之后本地被改动」——指纹（`.mingdao-source.json`）
+// 与技能内容在同一个目录里，因此它对「仓库投毒」这类场景**零收益**：克隆下来的仓库可以不带指纹
+// （直接放行），也可以带一个自算的指纹（同样放行）。真正的来源可信只能靠 registry 侧签名 +
+// 固定指纹白名单，那是另一条路线。此前注释声称「防仓库投毒」属过度承诺，现改正；
+// 项目级技能在系统提示里标注「来源不可验证」，并由 skillsRegistryBlock 给出一次性提示。
 function isTampered(/** @type {any} */ dir) {
   const meta = readSourceMeta(dir);
   if (!meta?.sha256) return false; // 旧版安装（无指纹）不拦截
@@ -87,7 +93,14 @@ export function tamperedSkillNames(/** @type {any} */ workingDir) {
 export function listSkills(/** @type {any} */ workingDir) {
   const seen = new Set();
   const out = [];
+  // v0.4.7（T3）：config.disableProjectSkills=true 时整层跳过项目级技能——
+  // 项目级技能随仓库分发、来源不可验证，受监管/敏感场景可直接关断。
+  let skipProject = false;
+  try {
+    skipProject = loadConfig()?.disableProjectSkills === true;
+  } catch {}
   for (const { dir, source } of skillDirs(workingDir)) {
+    if (skipProject && source === 'project') continue;
     let entries;
     try {
       entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -103,9 +116,10 @@ export function listSkills(/** @type {any} */ workingDir) {
         continue;
       }
       seen.add(e.name); // 优先级：user > project > builtin，先出现的生效
-      // P3-3：技能指纹不符 → 拒绝加载（绝不静默执行被篡改的提示词）。
-      // project 级（.mingdao/skills/）同样校验（CodeBuddy 报告：仓库投毒可直通提示词注入）；
-      // 无 .source.json 指纹的旧仓库/手写技能不受影响（isTampered 返回 false）。
+      // P3-3：技能指纹不符 → 拒绝加载（绝不静默执行**被改动过**的提示词）。
+      // 注意（v0.4.7 T3）：这只覆盖「安装后本地被改」；对 project 级技能，指纹与内容同在
+      // 仓库目录内，攻击者可以不带指纹或自签一个 → 不构成防投毒。故 project 级仅作此校验并
+      // 在提示里标注来源不可验证；user 级由 registry 安装时写入指纹，这里的校验才真正有意义。
       if ((source === 'user' || source === 'project') && isTampered(path.join(dir, e.name))) continue;
       out.push({
         name: e.name,
@@ -132,11 +146,31 @@ export function loadSkill(/** @type {any} */ workingDir, /** @type {any} */ name
 function sourceLabel(/** @type {any} */ source) {
   if (source === 'user') return '（用户级）';
   if (source === 'builtin') return '（内置）';
+  // v0.4.7（T3）：项目级技能随仓库分发、来源不可验证（指纹可缺失或自签），
+  // 必须在注入系统提示时就标明，让模型与用户都知道这不是可信来源。
+  if (source === 'project') return '（项目级·来源不可验证）';
   return '';
 }
 
+// 项目级技能的一次性提示（每进程一次，避免每轮刷屏）
+let projectSkillWarned = false;
+
 // 注入系统提示的技能清单（仅名称+描述）
 export function skillsRegistryBlock(/** @type {any} */ workingDir) {
+  // v0.4.7（T3）：项目级技能来自被打开的仓库，来源不可验证（见 isTampered 的诚实边界）。
+  // 一次性提示并给出关断开关——不静默即可，也不默认破坏既有流程。
+  if (!projectSkillWarned) {
+    try {
+      const projSkills = listSkills(workingDir).filter((s) => s.source === 'project');
+      if (projSkills.length) {
+        projectSkillWarned = true;
+        console.warn(
+          `[MingDao] ⚠ 本仓库携带 ${projSkills.length} 个项目级技能（${projSkills.map((s) => s.name).join('、')}）：` +
+            '来源不可验证（指纹可缺失或自签），其描述会进入系统提示。若不确定来源，请删除 .mingdao/skills/ 或设置 config.disableProjectSkills: true。'
+        );
+      }
+    } catch {}
+  }
   const skills = listSkills(workingDir);
   if (!skills.length) return '';
   return (
