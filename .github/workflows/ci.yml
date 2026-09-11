@@ -38,6 +38,8 @@ jobs:
         # 失败时把断言原文做成 **注解**（annotation）再退出非 0。
         # 起因（v0.6.0）：windows 腿连续失败，但 Actions 日志下载需要权限（403），
         # 而注解接口是匿名可读的——把失败信息放进注解，远端也能定位，不用靠猜。
+        # 后来 ubuntu-22 的「端到端：调度」也失败，而注解当时只覆盖冒烟 → 看不到原因。
+        # 故把同一套包装推广到**每一个测试步骤**（见下方 run_with_annotation 定义）。
         shell: bash
         run: |
           set +e
@@ -58,11 +60,41 @@ jobs:
         if: runner.os == 'Linux' && matrix.node == 20
         run: npm run coverage
       - name: 端到端：本地 Agent / 同步 / 分享
-        run: node test/e2e-local.js
+        shell: bash
+        run: |
+          set +e
+          node test/e2e-local.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=e2e-local 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
       - name: 端到端：WebUI HTTP/SSE/权限/访问控制
-        run: node test/e2e-web.js
+        shell: bash
+        run: |
+          set +e
+          node test/e2e-web.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=e2e-web 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
       - name: 端到端：调度
-        run: node test/e2e-schedule.js
+        shell: bash
+        run: |
+          set +e
+          node test/e2e-schedule.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=e2e-schedule 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
       - name: API 域契约测试（7 域路由契约 + body 上限）
         run: node test/api-contracts.js
       - name: 类型门禁（tsc --checkJs 全量严格，与 strict 棘轮同一 tsconfig.full.json）
