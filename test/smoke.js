@@ -3083,7 +3083,10 @@ const ctx = { cwd: tmp };
   }
   const st = fs.statSync(lf);
   assert.ok(st.size <= 65536, `日志应保持在字节上限内（实际 ${st.size}）`);
-  assert.equal(st.mode & 0o777, 0o600, '已存在的 644 日志应被收权为 600');
+  // Windows 无 POSIX 权限位（chmod 为 no-op、mode 恒为 0666 一类）——与既有测试同口径跳过
+  if (process.platform !== 'win32') {
+    assert.equal(st.mode & 0o777, 0o600, '已存在的 644 日志应被收权为 600');
+  }
   // 修复前：上限之后每次追加都整文件重写（2000 次）；修复后仅按低水位偶尔轮转
   assert.ok(rewrites < 100, `2000 次追加不应产生 2000 次整文件重写（实际 ${rewrites} 次）`);
   safeRmSync(tmpL, { recursive: true, force: true });
@@ -3292,7 +3295,14 @@ const xml = okOn ? fs.readFileSync(autostartPath(), 'utf8') : '';
 disableAutostart();
 console.log(JSON.stringify({ okOn, xml }));`;
   const r = spawnSync(process.execPath, ['--input-type=module', '-e', script], {
-    env: { ...process.env, HOME: fakeHome, MINGDAO_HOME: path.join(fakeHome, 'mh') },
+    env: {
+      ...process.env,
+      HOME: fakeHome,
+      MINGDAO_HOME: path.join(fakeHome, 'mh'),
+      // Windows 的 os.homedir() 走 USERPROFILE、autostart 走 APPDATA——一并重定向，
+      // 避免写到 CI 运行器真实的「启动」文件夹（与既有 autostart 测试同口径）
+      ...(process.platform === 'win32' ? { USERPROFILE: fakeHome, APPDATA: path.join(fakeHome, 'AppData', 'Roaming') } : {}),
+    },
     encoding: 'utf8',
   });
   const parsed = JSON.parse(String(r.stdout || '{}').trim() || '{}');
