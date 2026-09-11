@@ -217,6 +217,14 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     if (mounted.length) console.error(`[MingDao] 🔧 已挂载声明式工具（config.tools）：${mounted.join(', ')}`);
   }
 
+  // v0.5.0 阶段 A：挂载垂域 Pack（工具/约束/提示词段）——启动一次，进程级生效
+  {
+    const { mountPacks } = await import('../packs.js');
+    const packCtx = await mountPacks(cfg, { cwd: process.cwd() });
+    for (const w of packCtx.warnings) console.error(`[MingDao] ⚠ ${w}`);
+    if (packCtx.mounted.length) console.error(`[MingDao] 📦 已加载垂域 Pack：${packCtx.mounted.map((p) => `${p.name} v${p.version}`).join(', ')}`);
+  }
+
   // MCP：A2 预热——await 连接（6s 超时）；超时本会话冻结工具集（不再中途注入，保护前缀缓存）
   /** @type {any} */
   let mcpManager = null;

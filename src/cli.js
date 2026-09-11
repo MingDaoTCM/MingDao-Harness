@@ -427,6 +427,16 @@ async function main() {
     const mounted = mountConfigTools(cfg);
     if (mounted.length && !jsonMode) io.print(style(`🔧 已挂载声明式工具（config.tools）：${mounted.join(', ')}`, C.dim));
   }
+  // v0.5.0 阶段 A：挂载垂域 Pack（工具进注册表；约束与提示词段进进程级上下文）。
+  // 坏 Pack 只告警不阻塞启动；未装 Pack 时全部惰性。
+  {
+    const { mountPacks } = await import('./packs.js');
+    const packCtx = await mountPacks(cfg, { cwd: workingDir });
+    for (const w of packCtx.warnings) console.error(`[MingDao] ⚠ ${w}`);
+    if (packCtx.mounted.length && !jsonMode) {
+      io.print(style(`📦 已加载垂域 Pack：${packCtx.mounted.map((p) => `${p.name} v${p.version}`).join(', ')}`, C.dim));
+    }
+  }
   // 会话级 undo 备份仓：模型切换、子代理均共享，撤销记录不丢失
   const sessionUndoStore = { backups: new Map() };
   // MCP 服务器：后台启动（不阻塞交互），就绪后工具自动出现在后续轮次

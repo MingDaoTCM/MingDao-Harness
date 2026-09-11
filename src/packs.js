@@ -236,6 +236,10 @@ function validateConstraint(c, i) {
 
 const loadedPacks = new Map(); // name -> { manifest, contributions }
 let mountedTools = 0;
+// 进程级「当前 Pack 上下文」：启动路径调用一次 mountPacks 后，agent/prompts 直接取用，
+// 避免把 packCtx 一路穿透到每个 createAgent 调用点（调用点有 5+ 处）。
+// 未调用 mountPacks 的库使用方拿到 null → 约束/提示词段完全惰性，行为与今天一致。
+let activeCtx = /** @type {any} */ (null);
 
 /**
  * 加载单个 Pack 目录：校验 manifest + 文件齐全 + import pack.mjs。
@@ -338,8 +342,11 @@ export async function mountPacks(cfg, opts = {}) {
       continue;
     }
     if (loadedPacks.has(info.name)) {
-      // 已挂载：贡献面直接复用（幂等）
+      // 已挂载：贡献面直接复用（幂等）。
+      // 注意：`mounted` 必须同样列出「此前已挂载」的 Pack——否则第二次调用会返回空列表，
+      // 调用方（CLI 横幅 / 测试 / 下游集成）会误判「没有 Pack」。
       const cached = loadedPacks.get(info.name);
+      mounted.push({ name: info.name, source: info.source, version: cached.manifest.version, apiVersion: cached.manifest.apiVersion });
       promptSections.push(...packSectionEntries(cached));
       constraints.push(...(cached.contributions.constraints || []).map((/** @type {any} */ c) => ({ ...c, pack: info.name })));
       continue;
@@ -379,7 +386,9 @@ export async function mountPacks(cfg, opts = {}) {
     promptSections.push(...packSectionEntries(res));
     constraints.push(...(res.contributions.constraints || []).map((/** @type {any} */ c) => ({ ...c, pack: info.name })));
   }
-  return { mounted, warnings, promptSections, constraints, toolCount: mountedTools };
+  const result = { mounted, warnings, promptSections, constraints, toolCount: mountedTools };
+  activeCtx = result;
+  return result;
 }
 
 /** @param {any} res */
@@ -395,6 +404,11 @@ function packSectionEntries(res) {
     }));
 }
 
+/** 当前进程已挂载的 Pack 上下文（未挂载时为 null——所有 Pack 能力随之惰性） */
+export function getActivePackContext() {
+  return activeCtx;
+}
+
 /** 已加载 Pack 列表（供 CLI/WebUI 展示） */
 export function loadedPackNames() {
   return [...loadedPacks.keys()];
@@ -404,4 +418,5 @@ export function loadedPackNames() {
 export function resetPacksForTest() {
   loadedPacks.clear();
   mountedTools = 0;
+  activeCtx = null;
 }

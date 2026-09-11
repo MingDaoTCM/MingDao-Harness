@@ -6,6 +6,7 @@ import path from 'node:path';
 import { skillsRegistryBlock } from './skills.js';
 import { mingdaoHome, loadConfig } from './config.js';
 import { recentJournalBlock, loadProjectMemory } from './memory.js';
+import { getActivePackContext } from './packs.js';
 
 const BASE = `你是 MingDao Harness，一个由 MingDao Harness 驱动的 AI 编程助手。你在用户的电脑上工作：通过工具读写文件、搜索代码、执行命令，帮助用户完成编程、调试与自动化任务。
 
@@ -61,6 +62,11 @@ export function buildSystemPrompt({ workingDir, withJournal = false, projectMemo
   // 技能清单（渐进披露：仅名称+描述，按需加载全文）
   prompt += skillsRegistryBlock(workingDir);
 
+  // v0.5.0 A5：垂域 Pack 的领域提示词段（Pack API v1 contributes.promptSections）。
+  // 位置：预设 / 记忆 / 技能之后（PACK-API §3）。Pack 在启动时挂载一次，
+  // 段内容在会话内恒定 → 不破坏前缀缓存（这是与「每轮重算记忆」的关键区别）。
+  prompt += packPromptBlock();
+
   // 项目约定（./AGENTS.md）——体积可配置（审计 MiniMax §3.3-B，v0.1.48 P0-D）：
   // 典型项目 6-12K 的 AGENTS.md 全量进 system 每轮按缓存价计费；默认截 4K，超长部分
   // 模型可 read 工具按需读全文。config.maxAgentsMdChars 可调（0 表示不注入）。
@@ -72,4 +78,24 @@ export function buildSystemPrompt({ workingDir, withJournal = false, projectMemo
   }
 
   return prompt;
+}
+
+/**
+ * 垂域 Pack 的领域提示词段（v0.5.0 A5）。
+ * 按 order 升序、同 order 按 pack+id 字典序排序——排序必须**确定**，
+ * 否则同一输入两次构建出不同字节，会打掉前缀缓存（DeepSeek 按前缀字节匹配计价）。
+ * 未挂载任何 Pack 时返回空串（零影响）。
+ */
+export function packPromptBlock() {
+  const ctx = getActivePackContext();
+  const sections = Array.isArray(ctx?.promptSections) ? [...ctx.promptSections] : [];
+  if (!sections.length) return '';
+  sections.sort(
+    (/** @type {any} */ a, /** @type {any} */ b) =>
+      (Number(a.order) || 0) - (Number(b.order) || 0) || `${a.pack}/${a.id}`.localeCompare(`${b.pack}/${b.id}`)
+  );
+  const body = sections
+    .map((/** @type {any} */ s) => `<pack_section pack="${s.pack}" id="${s.id}">\n${s.content}\n</pack_section>`)
+    .join('\n');
+  return `\n\n<pack_rules>\n${body}\n</pack_rules>`;
 }

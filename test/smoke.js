@@ -2843,7 +2843,10 @@ const ctx = { cwd: tmp };
   assert.ok(full[0].function.description.length > 0, 'toolSchemas() 应保留完整描述');
   const usedAll = new Set(full.map((t) => t.function.name));
   const stripped = buildToolSchemas(usedAll);
-  assert.equal(stripped.length, 13, '数量不变');
+  // 断言「剥描述不改变工具数量」——不能与 toolSchemas() 的 13 直接比：
+  // buildToolSchemas 还含进程内已注册的第三方/ Pack 工具（v0.5.0 起 WebUI 启动会挂载 Pack），
+  // 与用例执行顺序耦合。改与「全量未剥描述」的结果比，语义更准且稳定。
+  assert.equal(stripped.length, buildToolSchemas(new Set()).length, '剥描述不应改变工具数量');
   assert.equal(stripped[0].function.description, '', '已用工具 description 应清空');
   assert.ok(!('description' in stripped[0].function.parameters.properties.path), '已用工具参数 description 应清除');
   assert.equal(JSON.stringify(stripped[0].function.parameters.properties.path.type), '"string"', '参数 type 保留');
@@ -3445,6 +3448,165 @@ console.log(JSON.stringify({ okOn, xml }));`;
   process.env.MINGDAO_HOME = prevHome57;
   safeRmSync(home57, { recursive: true, force: true });
   ok('v0.5.0A 回归：Pack 契约（semver / manifest 校验 / 发现挂载 / 幂等 / 坏 Pack 不崩启动）');
+}
+
+
+// ---------- 59. v0.5.0 阶段 A3 回归：约束接入 agent 三时机（端到端，真实 agent 循环） ----------
+{
+  const tmpC59 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-cst-'));
+  const io59 = createIO({ quiet: true });
+
+  // 59a. PreToolUse：tool-deny 在权限放行之后仍必须拦住执行
+  {
+    let ran = 0;
+    const provider59 = {
+      async chat({ messages }) {
+        if (!messages.some((m) => m.role === 'tool')) {
+          return { text: '', reasoning: '', finish: 'tool_calls', usage: { prompt_tokens: 1, completion_tokens: 1 },
+            toolCalls: [{ id: 'c1', type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: 'echo hi' }) } }] };
+        }
+        return { text: '完成', reasoning: '', finish: 'stop', usage: { prompt_tokens: 1, completion_tokens: 1 }, toolCalls: null };
+      },
+    };
+    const agent59 = createAgent({
+      provider: provider59,
+      permission: { mode: 'auto', async check() { ran += 1; return true; } },
+      io: io59,
+      modelName: 'deepseek-v4-flash',
+      workingDir: tmpC59,
+      cfg: { permission: 'auto', autoCompact: false, maxRounds: 1 },
+      constraints: [{ id: 'no-bash', kind: 'tool-deny', tool: 'bash' }],
+    });
+    const msgs59 = [{ role: 'system', content: 's' }, { role: 'user', content: 'run something' }];
+    await agent59.runTurn(msgs59);
+    const toolMsg = msgs59.find((m) => m.role === 'tool');
+    assert.ok(toolMsg && String(toolMsg.content).includes('领域约束'), '被约束拦下的工具应回填【领域约束】而非执行结果');
+    assert.ok(String(toolMsg.content).includes('no-bash'), '回填应指出是哪条约束');
+  }
+
+  // 59b. PostToolUse：completeness 缺项时拒绝工具结果（「缺项绝不编造」由内核强制）
+  {
+    const provider59b = {
+      async chat({ messages }) {
+        if (!messages.some((m) => m.role === 'tool')) {
+          return { text: '', reasoning: '', finish: 'tool_calls', usage: { prompt_tokens: 1, completion_tokens: 1 },
+            toolCalls: [{ id: 'c1', type: 'function', function: { name: 'pack__demo__intake', arguments: '{}' } }] };
+        }
+        return { text: '已继续采集', reasoning: '', finish: 'stop', usage: { prompt_tokens: 1, completion_tokens: 1 }, toolCalls: null };
+      },
+    };
+    const { registerTool } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
+    try {
+      registerTool({ name: 'pack__demo__intake', description: 'd', parameters: { type: 'object', properties: {} }, readOnly: true,
+        run: async () => ({ ok: true, output: '已落盘', data: { zhushu: '头痛' } }) });
+    } catch {}
+    const agent59b = createAgent({
+      provider: provider59b,
+      permission: { mode: 'auto', async check() { return true; } },
+      io: io59,
+      modelName: 'deepseek-v4-flash',
+      workingDir: tmpC59,
+      cfg: { permission: 'auto', autoCompact: false, maxRounds: 1 },
+      constraints: [{ id: 'ten-questions', kind: 'completeness', tool: 'intake', fields: ['zhushu', 'zhendan'] }],
+    });
+    const msgs59b = [{ role: 'system', content: 's' }, { role: 'user', content: 'collect' }];
+    await agent59b.runTurn(msgs59b);
+    const tm = msgs59b.find((m) => m.role === 'tool');
+    assert.ok(tm && String(tm.content).includes('领域约束'), '缺项时工具结果应被拒绝并回填约束原因');
+    assert.ok(String(tm.content).includes('zhendan'), '应指出缺失字段 zhendan');
+    assert.ok(!String(tm.content).includes('已落盘'), '被拒绝的原始结果不得进入模型上下文');
+  }
+
+  // 59c. 输出前：block-and-rewrite 命中后自动改写
+  {
+    let call = 0;
+    const provider59c = {
+      async chat() {
+        call += 1;
+        if (call === 1) return { text: '服药后明显好转，建议继续。', reasoning: '', finish: 'stop', usage: { prompt_tokens: 1, completion_tokens: 1 }, toolCalls: null };
+        return { text: '服药后症状较前减轻，建议继续观察并复诊。', reasoning: '', finish: 'stop', usage: { prompt_tokens: 1, completion_tokens: 1 }, toolCalls: null };
+      },
+    };
+    const agent59c = createAgent({
+      provider: provider59c,
+      permission: { mode: 'auto', async check() { return true; } },
+      io: io59,
+      modelName: 'deepseek-v4-flash',
+      workingDir: tmpC59,
+      cfg: { permission: 'auto', autoCompact: false, maxRounds: 1 },
+      constraints: [{ id: 'no-conclusion', kind: 'output-forbid', pattern: '好转|治愈', action: 'block-and-rewrite' }],
+    });
+    const msgs59c = [{ role: 'system', content: 's' }, { role: 'user', content: '复诊' }];
+    const r59c = await agent59c.runTurn(msgs59c);
+    assert.ok(call >= 2, 'block-and-rewrite 应触发一次改写请求');
+    assert.ok(!String(r59c.text).includes('好转'), '改写后不得包含禁用措辞（实际：' + r59c.text + '）');
+    assert.ok(String(r59c.note || '').includes('领域约束'), '应给出约束提示 note');
+    // 被拦下的违规正文不得留在会话历史里
+    assert.ok(!msgs59c.some((m) => m.role === 'assistant' && String(m.content).includes('好转')), '违规正文不得回填历史');
+  }
+
+  // 59d. 输出前：block 直接拦截（改写不是必然可用时的兜底路径）
+  {
+    const provider59d = {
+      async chat() { return { text: '已确诊为某种疾病。', reasoning: '', finish: 'stop', usage: { prompt_tokens: 1, completion_tokens: 1 }, toolCalls: null }; },
+    };
+    const agent59d = createAgent({
+      provider: provider59d, permission: { mode: 'auto', async check() { return true; } }, io: io59,
+      modelName: 'deepseek-v4-flash', workingDir: tmpC59,
+      cfg: { permission: 'auto', autoCompact: false, maxRounds: 1 },
+      constraints: [{ id: 'no-diagnosis', kind: 'output-forbid', pattern: '确诊为', action: 'block' }],
+    });
+    const r59d = await agent59d.runTurn([{ role: 'system', content: 's' }, { role: 'user', content: 'x' }]);
+    assert.ok(!String(r59d.text).includes('确诊为'), 'block 动作必须拦下违规正文');
+    assert.ok(String(r59d.text).includes('领域约束'), '应替换为合规说明');
+  }
+
+  // 59e. 零约束必须完全惰性（对既有行为零影响）
+  {
+    const provider59e = {
+      async chat() { return { text: '服药后明显好转。', reasoning: '', finish: 'stop', usage: { prompt_tokens: 1, completion_tokens: 1 }, toolCalls: null }; },
+    };
+    const agent59e = createAgent({
+      provider: provider59e, permission: { mode: 'auto', async check() { return true; } }, io: io59,
+      modelName: 'deepseek-v4-flash', workingDir: tmpC59,
+      cfg: { permission: 'auto', autoCompact: false, maxRounds: 1, constraints: [] },
+    });
+    const r59e = await agent59e.runTurn([{ role: 'system', content: 's' }, { role: 'user', content: 'x' }]);
+    assert.equal(r59e.text, '服药后明显好转。', '无约束时正文必须原样返回（零影响）');
+    assert.equal(r59e.note, undefined, '无约束时不应产生 note');
+  }
+
+  safeRmSync(tmpC59, { recursive: true, force: true });
+  ok('v0.5.0A3 回归：约束接入 agent（tool-deny 阻断 / 缺项拒绝结果 / 输出改写与拦截 / 零约束惰性）');
+}
+
+
+// ---------- 60. v0.5.0 阶段 A5 回归：Pack 提示词段注入系统提示（且字节稳定） ----------
+{
+  const promptsMod = await import(pathToFileURL(path.join(srcDir, 'prompts.js')).href);
+  const prevHome60 = process.env.MINGDAO_HOME;
+  const home60 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-a5-'));
+  process.env.MINGDAO_HOME = home60;
+  const { resetPacksForTest, mountPacks } = await import(pathToFileURL(path.join(srcDir, 'packs.js')).href);
+
+  // 未挂载 Pack：不得出现 pack_rules（对既有系统提示零影响）
+  resetPacksForTest();
+  const plain = promptsMod.buildSystemPrompt({ workingDir: process.cwd() });
+  assert.ok(!plain.includes('<pack_rules>'), '未挂载 Pack 时系统提示不得含 pack_rules');
+
+  // 挂载后：领域段进入系统提示，且**两次构建字节一致**（前缀缓存安全）
+  await mountPacks({}, { cwd: path.join(srcDir, '..') });
+  const withPack = promptsMod.buildSystemPrompt({ workingDir: process.cwd() });
+  assert.ok(withPack.includes('<pack_rules>'), '挂载 Pack 后应注入 pack_rules 段');
+  assert.ok(withPack.includes('pack="example-hello"'), '应标注段来源 Pack');
+  assert.ok(withPack.includes('不输出结论性判断'), '应包含 prompts/domain.md 的内容');
+  const again = promptsMod.buildSystemPrompt({ workingDir: process.cwd() });
+  assert.equal(again, withPack, '同一状态下两次构建必须字节一致（否则打掉前缀缓存）');
+
+  resetPacksForTest();
+  process.env.MINGDAO_HOME = prevHome60;
+  safeRmSync(home60, { recursive: true, force: true });
+  ok('v0.5.0A5 回归：Pack 领域提示词段注入（未挂载零影响 + 注入正确 + 字节稳定）');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

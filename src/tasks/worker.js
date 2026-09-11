@@ -56,6 +56,12 @@ export async function runWorkerTask(id, question, { permission, model, offpeak }
     // v0.4.0 契约化：后台任务同样挂载 config.tools 声明式工具（幂等）
     const { mountConfigTools } = await import('../tools/index.js');
     mountConfigTools(cfg);
+    // v0.5.0 阶段 A：后台任务同样挂载垂域 Pack（独立进程，必须各自挂载）
+    {
+      const { mountPacks } = await import('../packs.js');
+      const packCtx = await mountPacks(cfg, { cwd: process.cwd() });
+      for (const w2 of packCtx.warnings) console.error(`[MingDao] ⚠ ${w2}`);
+    }
     const permissionObj = createPermission(perm, io);
     /** @type {any} */
     let mcpManager = null;

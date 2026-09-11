@@ -16,6 +16,8 @@ import { redactSecrets } from './redact.js';
 import { checkCostGuard, costGuardConfig, todayCost } from './cost-guard.js';
 import { estimateCost } from './pricing.js';
 import { resolveProviderConfig } from './providers/index.js';
+import { compileConstraints, checkPreTool, checkPostTool, checkOutput, blockedOutputText } from './constraints.js';
+import { getActivePackContext } from './packs.js';
 
 const MAX_STEPS = 24;
 // 子代理步数上限：审计/精读类只读子任务需要读多个文件 + 交叉引用，12 步易在「读不全」时被截断
@@ -32,9 +34,10 @@ export const READONLY_TIER_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill',
  * 创建 Agent 循环（调用方只需传 provider/permission/io/modelName/workingDir，其余可选）
  * @param {{ provider: any, permission: any, io: any, modelName: any, workingDir: any,
  *   cfg?: any, undoStore?: any, maxSteps?: number, mcp?: any, onCompact?: any, sessionRef?: any,
- *   onUsage?: (modelName: string, usage: any) => void }} params
+ *   onUsage?: (modelName: string, usage: any) => void,
+ *   constraints?: any[] }} params
  */
-export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact, sessionRef, onUsage }) {
+export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact, sessionRef, onUsage, constraints: rawConstraints }) {
   const preset = modelPreset(modelName) || {};
   // v0.3.2 模型自适应：预算按模型上下文窗口推导（留输出余量 + 75% 舒适区），
   // 自定义/本地小模型不再套 128000 默认撑爆窗口；prompt 永不逼近窗口边缘（prefill 不爆炸）。
@@ -58,6 +61,21 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   const temperature = cfg.temperature ?? preset.temperature ?? 0.6;
   const reasoningEffort = cfg.reasoningByModel?.[modelName] ?? cfg.reasoningEffort ?? preset.reasoningEffort?.default ?? undefined;
   const hooks = createHooks(cfg.hooks, workingDir, cfg);
+  // v0.5.0 阶段 A3：领域约束（Pack API v1 的「领域红线」）——在三个时机强制：
+  // PreToolUse（工具/参数）、PostToolUse（工具结果缺项）、输出前（正文禁用措辞）。
+  // 约束**只收紧不放松**权限；未传约束时 compiled.active=false，所有检查点完全惰性，
+  // 对既有行为零影响（这是接入主循环时最重要的不变量）。
+  // 显式传入优先；否则取进程级已挂载的 Pack 约束；都没有 → 空集合（惰性）
+  const constraints = compileConstraints(
+    Array.isArray(rawConstraints) ? rawConstraints : cfg?.constraints ?? getActivePackContext()?.constraints
+  );
+  /** 约束事件写审计（pack/constraint/kind/stage/action）——受监管场景要能回答「红线何时被触发」 */
+  const auditConstraint = (/** @type {any} */ ev) => {
+    if (cfg.audit === false || !ev) return;
+    try {
+      writeAudit({ at: Date.now(), session: sessionRef?.name ?? null, model: modelName, tool: null, constraint: ev });
+    } catch {}
+  };
   const todos = /** @type {any[]} */ ([]);
   // v0.4.6 修复：当前 runTurn 的 usage 累加器引用——spawnTask 定义在 runTurn 之外，
   // 此前子代理的 token 消耗只用于生成汇报文本、从不并入父回合 usage，导致「今日费用」系统性少计
@@ -251,7 +269,69 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     // 整个回合注册一次 SIGINT：思考、工具执行、权限询问期间都能中断
     const offSigint = io.onSigint ? io.onSigint(() => { aborted = true; currentAc?.abort(); }) : () => {};
     const ctx = makeCtx();
-    const stripOrphanCalls = () => {
+    /**
+   * v0.5.0 A3 ③：输出前领域约束（正文禁用措辞）。
+   * 无约束时零开销（constraints.active=false 直接返回原文）；有约束时按 action 处理：
+   *   warn → 放行并附提示；block → 替换为合规说明；block-and-rewrite → 请求一次改写，仍命中则拦截。
+   * 改写请求计入本回合 usage（费用归属当前模型），并写约束审计事件。
+   */
+  const applyOutputConstraints = async (/** @type {any} */ text, /** @type {any} */ ctxRun) => {
+    if (!constraints.active || !text) return { text, note: null };
+    const hit = checkOutput(constraints, text);
+    if (!hit) return { text, note: null };
+    auditConstraint(hit.event);
+    const cid = hit.constraint?.id || '领域红线';
+    if (hit.action === 'warn') {
+      try { io.print(style(`⚠ 领域约束「${cid}」提示：${hit.reason}`, C.yellow)); } catch {}
+      return { text, note: `⚠ 领域约束「${cid}」：${hit.reason}（已放行，请自行复核）` };
+    }
+    if (hit.action === 'block-and-rewrite') {
+      try {
+        io.print(style(`⛔ 领域约束「${cid}」命中，正在自动改写…`, C.yellow));
+        const sys = ctxRun.messages.find((/** @type {any} */ m) => m.role === 'system');
+        const fix = await ctxRun.provider.chat({
+          model: ctxRun.activeModel,
+          messages: [
+            ...(sys ? [sys] : []),
+            {
+              role: 'user',
+              content: `下面这段回复命中了领域红线（${hit.reason}）。请在不改变事实内容的前提下改写成**不含该措辞**的表述，只输出改写后的正文：\n\n${text}`,
+            },
+          ],
+          tools: [],
+          temperature: ctxRun.temperature,
+          maxTokens: Math.min(ctxRun.maxOutput, 2048),
+          signal: ctxRun.signal,
+        });
+        if (fix?.usage) {
+          ctxRun.usage.prompt_tokens += fix.usage.prompt_tokens || 0;
+          ctxRun.usage.completion_tokens += fix.usage.completion_tokens || 0;
+        }
+        const fixed = String(fix?.text || '').trim();
+        if (fixed) {
+          const re = checkOutput(constraints, fixed);
+          if (!re) return { text: fixed, note: `⛔ 领域约束「${cid}」命中，已自动改写` };
+          auditConstraint(re.event);
+          return { text: blockedOutputText(re), note: `⛔ 领域约束「${re.constraint?.id || cid}」改写后仍命中，已拦截` };
+        }
+      } catch {
+        // 改写失败：回落到拦截（fail-closed）
+      }
+      return { text: blockedOutputText(hit), note: `⛔ 领域约束「${cid}」命中，已拦截` };
+    }
+    return { text: blockedOutputText(hit), note: `⛔ 领域约束「${cid}」命中，已拦截` };
+  };
+
+  /** 安全解析工具结果字符串（约束引擎需要结构化对象） */
+  const safeParse = (/** @type {any} */ v) => {
+    if (typeof v !== 'string') return v;
+    try {
+      return JSON.parse(v);
+    } catch {
+      return null;
+    }
+  };
+  const stripOrphanCalls = () => {
       const last = messages[messages.length - 1];
       if (last?.role === 'assistant' && Array.isArray(last.tool_calls) && last.tool_calls.length) {
         messages[messages.length - 1] = { ...last, tool_calls: undefined };
@@ -515,8 +595,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         if (steps === stepLimit) {
           io.endTurn();
           if (res.text) {
-            messages.push({ role: 'assistant', content: res.text });
-            return { text: res.text, reasoning: res.reasoning || '', usage, steps, finish, truncated: false, aborted: false, durationMs: Date.now() - startedAt, perf: perf() };
+            const ap = await applyOutputConstraints(res.text, { messages, provider, activeModel, temperature, maxOutput, usage, signal: currentAc?.signal });
+            messages.push({ role: 'assistant', content: ap.text });
+            return { text: ap.text, reasoning: res.reasoning || '', usage, steps, finish, truncated: false, aborted: false, note: ap.note || undefined, durationMs: Date.now() - startedAt, perf: perf() };
           }
           break;
         }
@@ -610,6 +691,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             messages.push({ role: 'tool', tool_call_id: tc.id, content: '用户拒绝了该工具的执行权限。' });
             return null;
           }
+          // v0.5.0 A3 ①：领域约束（PreToolUse）——权限放行之后、执行之前强制。
+          // 与权限引擎的分工：权限回答「用户是否允许」，约束回答「领域是否允许」；两者都通过才执行。
+          const cv = checkPreTool(constraints, name, args);
+          if (cv?.blocked) {
+            io.renderToolDenied(name, args, cv.reason);
+            if (auditOn) auditEntry({ denied: true, reason: cv.reason });
+            auditConstraint(cv.event);
+            messages.push({ role: 'tool', tool_call_id: tc.id, content: `【领域约束】${cv.reason}` });
+            return null;
+          }
           return { tc, name, args, isMcp };
         }
 
@@ -683,8 +774,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               outputBytes: Buffer.byteLength(typeof result === 'string' ? result : JSON.stringify(result ?? {}), 'utf8'),
             });
           }
-          const text = typeof result === 'string' ? result : JSON.stringify(result); // 紧凑 JSON（评估 B3）：嵌套结果省 10-20% 回填 token，且下轮按 prompt 重复计费
+          let text = typeof result === 'string' ? result : JSON.stringify(result); // 紧凑 JSON（评估 B3）：嵌套结果省 10-20% 回填 token，且下轮按 prompt 重复计费
           const prefix = prep.cached ? '（与同回合相同调用结果一致，已复用）\n' : '';
+          // v0.5.0 A3 ②：领域约束（PostToolUse）——completeness 缺项时**拒绝该工具结果**，
+          // 让模型必须继续采集而不是把「未提及」当作已完成（「缺项绝不编造」从提示词升级为内核强制）。
+          const pv = checkPostTool(constraints, prep.name, typeof result === 'string' ? safeParse(result) : result);
+          if (pv?.rejected) {
+            auditConstraint(pv.event);
+            text = `【领域约束】${pv.reason}`;
+          }
           messages.push({ role: 'tool', tool_call_id: prep.tc.id, content: prefix + clampText(text, toolResultCap) });
         }
 
@@ -749,8 +847,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         io.endTurn();
         // 最终纯文本回复回填消息历史（会话持久化与多轮上下文依赖它）；
         // 空文本不回填，避免个别 API 对 assistant 空 content 报错
+        let outputNote = /** @type {any} */ (null);
+        let finalText = res.text || '';
         if (res.text) {
-          messages.push({ role: 'assistant', content: res.text });
+          // v0.5.0 A3 ③：输出前领域约束必须在**回填历史之前**应用——
+          // 否则被拦下的违规措辞会留在会话里，下一轮又被当作既成事实喂回模型。
+          const ap = await applyOutputConstraints(res.text, { messages, provider, activeModel, temperature, maxOutput, usage, signal: currentAc?.signal });
+          finalText = ap.text;
+          outputNote = ap.note;
+          messages.push({ role: 'assistant', content: finalText });
         }
         // 输出被长度上限截断（DeepSeek 推理吃满 maxOutput 时正文为空）：让模型从断点续写，绝不静默结束。
         // 空轮护栏（评估 4.2-2）：每轮空输出都是全额 completion 计费（pro 32k 闲时 ≈ ¥0.43/轮），
@@ -803,13 +908,14 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           continue;
         }
         return {
-          text: res.text || '',
+          text: finalText,
           reasoning: res.reasoning || '',
           usage,
           steps,
           finish,
           truncated: false,
           aborted: false,
+          note: outputNote || undefined,
           durationMs: Date.now() - startedAt,
           perf: perf(),
         };
@@ -877,9 +983,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           usage.prompt_tokens += wrapRes.usage.prompt_tokens || 0;
           usage.completion_tokens += wrapRes.usage.completion_tokens || 0;
         }
-        if (wrapRes.text) messages.push({ role: 'assistant', content: wrapRes.text });
+        // v0.5.0 A3 ③：兜底总结同样过一遍输出约束
+        const wrapApplied = wrapRes.text
+          ? await applyOutputConstraints(wrapRes.text, { messages, provider, activeModel, temperature, maxOutput, usage, signal: currentAc?.signal })
+          : { text: null, note: null };
+        if (wrapApplied.text) messages.push({ role: 'assistant', content: wrapApplied.text });
         // capHit：本轮因步数上限被迫收尾（任务可能未真正完成）→ 供上层落检查点续跑
-        return { text: wrapRes.text || null, reasoning: wrapRes.reasoning || '', usage, steps, finish, truncated: false, aborted: false, capHit: true, durationMs: Date.now() - startedAt, perf: perf() };
+        return { text: wrapApplied.text || null, reasoning: wrapRes.reasoning || '', usage, steps, finish, truncated: false, aborted: false, capHit: true, note: wrapApplied.note || undefined, durationMs: Date.now() - startedAt, perf: perf() };
       } catch (/** @type {any} */ err) {
         // v0.4.1：不再静默吞异常——总结失败原因透出，便于定位（此前用户只见「输出截断/无反馈」）
         try { io.print(style(`⚠ 兜底总结失败：${String(err?.message || err)}`, C.yellow)); } catch {}

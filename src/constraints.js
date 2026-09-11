@@ -249,5 +249,7 @@ export function checkOutput(compiled, text) {
  */
 export function blockedOutputText(hit) {
   const id = hit?.constraint?.id || '领域红线';
-  return `（输出已被领域约束「${id}」拦截：命中禁用措辞「${hit?.matched || ''}」。请改写为不包含该措辞的事实陈述，或补充依据。本提示由内核强制，非模型自觉。）`;
+  // 刻意**不回显命中的措辞**：回显会把被禁用的表述重新写进正文与会话历史，
+  // 下一轮又被当作既成事实喂回模型——拦截就白做了。（命中详情仍进审计事件，可追溯。）
+  return `（本段回复已被领域约束「${id}」拦截：内容命中该约束的禁用表述。请改写为不含该表述的事实陈述，或补充依据。本提示由内核强制，非模型自觉。）`;
 }
