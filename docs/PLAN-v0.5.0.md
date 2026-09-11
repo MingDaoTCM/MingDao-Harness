@@ -15,10 +15,11 @@
 | A1 Pack 加载器 | ✅ 完成 | `src/packs.js`：三级遮蔽发现 / manifest 严格校验 / 极简 semver（npm 语义）/ 工具注册 / 坏 Pack 只告警 / 幂等挂载 |
 | A2 CLI | ✅ 完成 | `src/commands/pack.js`：`list / verify / new / info`；`verify` 即下游 CI 门禁 |
 | A3 约束引擎 | ✅ 完成（含接线） | `src/constraints.js` 三时机 + 6 kind + fail-closed；**已接入 agent**：PreToolUse（工具/参数）、PostToolUse（缺项拒绝结果）、输出前（回填历史之前改写/拦截）；约束事件写审计；CLI/WebUI/worker 启动各挂载一次 |
-| A4 成本确定性 | ✅ 完成（A4.5 除外） | `ctx.llm()` 统一模型出口（usage 并入当前回合 → 今日费用/缓存/峰谷/护栏全部生效）；**Pack 归因记录**（cost=null 标记，不与回合级重复计费）；`mingdao cost --by pack`；`pack verify` 对「自建模型调用」的静态告警（A4.6）。**待补**：Pack 级预算（A4.5） |
+| A4 成本确定性 | ✅ 完成 | `ctx.llm()` 统一模型出口（usage 并入当前回合 → 今日费用/缓存/峰谷/护栏全部生效）；**Pack 归因记录**（cost=null 标记，不与回合级重复计费）；`mingdao cost --by pack`；`pack verify` 对「自建模型调用」的静态告警（A4.6）；**Pack 级预算**（A4.5：`budget.dailyYuan` + action，调用前拦截） |
 | A5 提示词段 | ✅ 完成 | `buildSystemPrompt` 注入 `<pack_rules>`（按 order + pack/id 确定性排序，字节稳定不破坏前缀缓存） |
 | A6 文档 | ✅ 完成 | `packs/example-hello/` 示例 + `PACK-API.md` + `CHANGELOG-PACK.md`；README「垂域 Pack」小节 + `DEVELOPER.md` Pack 章节（含最小 pack.mjs 与三条要点） |
-| A7 发布 + Deyi 回迁 | ⬜ 未开始 | 版本仍 0.4.6（v0.5.0 发布时统一 bump） |
+| A7 发布 | ✅ 完成 | 版本 0.5.0；CHANGELOG + `RELEASE-NOTES-0.5.0.md`；tag `v0.5.0` |
+| A7 下游回迁 | ⏳ 待下游执行 | 上游已交付 `docs/MIGRATION-DEYI-v0.5.md`；回迁在 Linux 原机进行 |
 
 **已验证的端到端行为**（均有回归断言）：
 
@@ -29,10 +30,11 @@
 
 断言规模：smoke 83 → **86 组**；6/6 套测试全绿；tsc 0 错误；strict 0/0。
 
-**下一步（A4.5 → A7）**：
-1. A4.5 Pack 级预算（日/任务）与护栏 action 联动（唯一剩余的 A4 项）；
-2. A7 bump 到 0.5.0 → 发布前自检 → 发布 → 触发 Deyi 回迁（3 个域工具从 Provider 搬进 `pack-tcm`，
-   并让 `pack verify` 进下游 CI）。
+**下一步**：
+1. **下游执行回迁**（Linux 原机）：按 `MIGRATION-DEYI-v0.5.md` 把 3 个域工具搬进 `pack-tcm`，
+   `pack verify` 进下游 CI；回迁中遇到的每个「别扭点」都反馈上游当契约缺陷修（dogfooding）。
+2. **v0.5.x**：Pack API 按回迁反馈做兼容性加固（minor 只增不改）。
+3. **v0.6.0「合规与确定性」**：确定性③——执行账本（脱敏可导出）+ 可回放 + 离线/内网安装包 + 出网白名单自证。
 
 ---
 

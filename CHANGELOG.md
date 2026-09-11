@@ -2,6 +2,24 @@
 
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
+## v0.5.0（2026-09-11）— 垂域 Pack 契约 v1（约束确定性 + 成本确定性）
+
+定位升级：从「省钱 Coding Agent + 开放内核」→ **可私有化的垂域智能体内核**（详见 `docs/STRATEGY-0.5.md`）。
+本期落地上游与下游之间的正式契约：垂域团队**不改内核源码**即可把领域工具、领域红线、领域提示词、领域费用接进内核。
+决策已确认：v0.5 做确定性①约束 + ②成本；③行为确定性（执行账本/可回放/合规导出）放 v0.6.0。
+
+- **Pack API v1（契约冻结）**：`pack.json`（manifest）+ `pack.mjs`（contributions）。三级遮蔽发现（项目 > 用户 > 内置）+ `config.packs` 声明；manifest 严格校验（未知字段/版本窗口/保留名/权限/贡献项），错误信息可操作；极简 semver 按 npm 语义（`^` 对 0.x 锁 minor）；挂载**幂等**；**坏 Pack 只告警、不阻塞启动**。契约见 `docs/PACK-API.md`，变更史 `docs/CHANGELOG-PACK.md`
+- **约束引擎（确定性①）**：领域红线从「提示词里的一句话」升级为**内核强制**——`tool-deny` / `tool-arg-require` / `arg-forbid` / `output-forbid` / `completeness` / `confirm`，三个时机（调用工具前 / 工具返回后 / 正文输出前）强制执行，命中写审计。**fail-closed**（求值异常按阻断处理）；**零约束时三处检查点全部惰性**（对既有行为零影响）。输出约束在**回填会话历史之前**生效，避免违规措辞被当既成事实喂回；`block`/`block-and-rewrite` **不回显**命中措辞
+- **成本确定性（②）**：`ctx.llm()` 统一模型出口——Pack 内模型调用复用内核 Provider 解析/重试/超时/能力表，usage 并入当前回合 → **今日费用 / 缓存命中率 / 峰谷 / 日费用护栏同时生效**（对照：垂域层此前把调用写在 Provider 里，usage 硬编码 0，完全不计费也不触护栏）。新增 **Pack 归因记录**（`cost=null` 标记，与回合级总账不重复计费）与 `mingdao cost --by pack` 分账视图；Pack 级预算 `budget.dailyYuan` + `action`（block/warn）在调用前拦截
+- **领域提示词段**：`promptSections` 注入系统提示（预设/记忆/技能之后），按 `order` + `pack/id` 确定性排序，**字节稳定不破坏前缀缓存**
+- **CLI**：`mingdao pack list / verify / new / info`；`pack verify` 为静态校验（不 import 代码）→ 可直接作**下游 CI 门禁**；`pack verify` 对「Pack 自建模型调用（fetch 且不用 ctx.llm）」给出静态告警（先剥注释，防脚手架模板注释掩盖真实调用）
+- **内置中立示例** `packs/example-hello/`（1 工具 + 1 输出红线 + 1 提示词段）；随 npm 包与桌面版分发，并有静态护栏断言
+- **文档**：`PACK-API.md`（v1 冻结）/ `PLAN-v0.5.0.md`（落地计划与进度）/ **`MIGRATION-DEYI-v0.5.md`（下游回迁指南）**；README 增「垂域 Pack」小节；`DEVELOPER.md` 增 Pack 章节
+- 测试：smoke 81→**86 组断言**；6/6 套测试全绿 · tsc 0 错误 · strict 棘轮 0/0 · 三平台 CI（Ubuntu 18/20/22 + Windows + macOS）全绿
+
+> 下游衔接：按决策「v0.5.0 发布即迁」，`Deyi-TCM-Harness` 的 3 个域工具从 `providers/dify.mjs` 的 `chat()` 搬进 `pack-tcm`，
+> 并让 `mingdao pack verify` 进下游 CI。迁移前域内调用硬编码 `usage: 0`（完全不计费），迁移后进入 `cost --by pack`。
+
 ## v0.4.6（2026-09-11）— 迁移 macOS 后首次全量审计：P0 费用护栏盲区 + 50 项根因修复 + 省钱口径自纠
 
 - **省钱口径自纠（重要）**：`bench-savings`「综合省 64%」系虚高，真实值 **51%**——④Schema 瘦身 / ⑤只读阶段此前用**启发式**计数去测「面向 DeepSeek 的省钱主张」（工具 Schema 是 JSON，结构字符占 46%，两种计数偏差 1.1–1.8 倍），且 ⑤ 的基准里维护了一份**过期 6 工具副本**（实现的只读档自 v0.4.4 起已含 `task`）。两项改用随包官方词表**精确**计数、只读档集合从 `agent.js` 单源导出，并新增类别化断言防止再次虚高；真实值 ④48.9%（1145→585）、⑤28.9%（1145→814）。`docs/SAVINGS-BENCHMARK.md` 与 `docs/STRATEGY-NEXT.md` 同步修正

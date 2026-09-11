@@ -177,6 +177,25 @@ export function formatCacheSummary(/** @type {any} */ sum) {
 }
 
 // 分账统计（评估 /cost 升级）：按模型分账、今日费用、batch 半价任务、节省归因
+/**
+ * v0.5.0 A4.5：某垂域 Pack 的「今日」费用（北京自然日）。
+ * 来源是 ctx.llm 写的归因标记记录（packCost 字段）——标记记录本身 cost=null 不计入总额，
+ * 因此这里不会与回合级总账重复。
+ * @param {any} pack
+ */
+export function packDailyCost(pack) {
+  const want = String(pack || '');
+  if (!want) return 0;
+  const start = beijingDayStart().getTime();
+  let sum = 0;
+  for (const e of listCacheStats(100000)) {
+    if (e.pack !== want) continue;
+    if (!(e.at >= start)) continue;
+    sum += Number(e.packCost) || 0;
+  }
+  return sum;
+}
+
 // 省钱 B3：新增 reasoning 维度、byTool 逐工具累加、byDay 近 14 天按日折线数据
 export function costBreakdown() {
   const entries = listCacheStats(100000);

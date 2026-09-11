@@ -3453,6 +3453,39 @@ console.log(JSON.stringify({ okOn, xml }));`;
   assert.equal(cleanRes.ok, true, '使用 ctx.llm 的 Pack 应正常加载');
   assert.equal((cleanRes.warnings || []).length, 0, '使用 ctx.llm 时不应告警：' + JSON.stringify(cleanRes.warnings));
 
+  // 57g. A4.5 Pack 级预算：超限时按 action 阻止 Pack 内的模型调用
+  {
+    const bDir = path.join(home57, 'packs', 'budgeted');
+    fs.mkdirSync(bDir, { recursive: true });
+    fs.writeFileSync(path.join(bDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'budgeted', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, budget: { dailyYuan: 0.5, action: 'block' }, contributes: { tools: true } }));
+    fs.writeFileSync(path.join(bDir, 'pack.mjs'), 'export function createPack(){ return { tools:[{ name:"go", description:"d", parameters:{type:"object",properties:{}}, readOnly:true, run: async (_a,c)=>{ const r= await c.llm({user:"hi",maxTokens:10}); return {ok:true,output:r.text}; } }] }; }');
+    const { registerTool: regB } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
+    const { resetPacksForTest: resetB } = await import(pathToFileURL(path.join(srcDir, 'packs.js')).href);
+    resetB();
+    const mountedB = await packs.mountPacks({}, { cwd: repoRoot57 });
+    assert.ok(mountedB.mounted.some((m) => m.name === 'budgeted' && m.budget && m.budget.dailyYuan === 0.5), '应挂载带预算的 Pack 并暴露 budget');
+    const { recordCacheStats: recB, packDailyCost: pdcB } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+    recB({ model: 'deepseek-v4-flash', prompt: 1000, completion: 0, hit: null, miss: null, cost: null, saved: null, pack: 'budgeted', purpose: 'seed', packCost: 0.6 });
+    assert.ok(Math.abs(pdcB('budgeted') - 0.6) < 1e-9, 'packDailyCost 应汇总今日该 Pack 的 packCost');
+    let packCallHappened = false;
+    const providerB = {
+      async chat(o) {
+        if (Array.isArray(o.tools) && o.tools.length === 0) { packCallHappened = true; return { text: 'SHOULD-NOT-HAPPEN', reasoning: '', finish: 'stop', usage: { prompt_tokens: 1, completion_tokens: 1 }, toolCalls: null }; }
+        if (!o.messages.some((m) => m.role === 'tool')) return { text: '', reasoning: '', finish: 'tool_calls', usage: { prompt_tokens: 5, completion_tokens: 1 }, toolCalls: [{ id: 'c', type: 'function', function: { name: 'pack__budgeted__go', arguments: '{}' } }] };
+        return { text: 'done', reasoning: '', finish: 'stop', usage: { prompt_tokens: 5, completion_tokens: 1 }, toolCalls: null };
+      },
+    };
+    const agentB = createAgent({ provider: providerB, permission: { mode: 'auto', async check() { return true; } }, io: createIO({ quiet: true }), modelName: 'deepseek-v4-flash', workingDir: repoRoot57, cfg: { permission: 'auto', autoCompact: false, maxRounds: 1 } });
+    const msgsB = [{ role: 'system', content: 's' }, { role: 'user', content: 'go' }];
+    await agentB.runTurn(msgsB);
+    const tmB = msgsB.find((m) => m.role === 'tool');
+    assert.ok(String(tmB && tmB.content).includes('已达上限'), '超预算时 Pack 内模型调用应被阻止并给出可操作提示');
+    assert.equal(packCallHappened, false, '被预算阻止时不得真的发起模型调用');
+    resetB();
+    await packs.mountPacks({}, { cwd: repoRoot57 });
+    void regB;
+  }
+
   const badDir2 = path.join(home57, 'packs', 'badconstraint');
   fs.mkdirSync(badDir2, { recursive: true });
   fs.writeFileSync(path.join(badDir2, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'badconstraint', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { constraints: true } }));

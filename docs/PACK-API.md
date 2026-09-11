@@ -72,6 +72,11 @@
     "env": ["DIFY_API_KEY"]
   },
 
+  "budget": {                             // 可选：Pack 级预算（v0.5.0 A4.5）
+    "dailyYuan": 20,                      // 该 Pack 当日模型调用费用上限（元）；经 ctx.llm 归因统计
+    "action": "block"                     // 超限处理：block（阻止调用，默认）/ warn（放行并提示）
+  },
+
   "contributes": {
     "tools": true,                       // 由 pack.mjs 提供
     "provider": "dify",                  // 复用/覆盖 Provider 名
@@ -201,6 +206,13 @@ const out = await ctx.llm({
 5. 受当前权限模式与预算约束（超预算按护栏 action 处理）。
 
 > 这一条直接修复「域内调用 `usage: 0`」问题——**Pack 内不可能再有隐身花费**。
+
+### Pack 级预算
+
+manifest 可声明 `budget.dailyYuan` + `budget.action`。超限时 `ctx.llm()` 在**发起调用前**拦截
+（`action: block`）或放行并告警（`action: warn`），粒度到 Pack 而非整个进程——
+垂域团队能为自己包住的模型调用单独设上限，不必与宿主的日费用护栏争额度。
+查看某 Pack 今日花费：`mingdao cost --by pack`。
 
 ---
 

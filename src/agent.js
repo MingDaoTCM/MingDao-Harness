@@ -14,7 +14,7 @@ import { subagentModel } from './routing.js';
 import { writeAudit } from './audit.js';
 import { redactSecrets } from './redact.js';
 import { checkCostGuard, costGuardConfig, todayCost } from './cost-guard.js';
-import { recordCacheStats } from './cachestats.js';
+import { recordCacheStats, packDailyCost } from './cachestats.js';
 import { estimateCost } from './pricing.js';
 import { resolveProviderConfig, createProvider } from './providers/index.js';
 import { compileConstraints, checkPreTool, checkPostTool, checkOutput, blockedOutputText } from './constraints.js';
@@ -204,6 +204,17 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const system = String(opts.system || '');
     const user = String(opts.user ?? opts.prompt ?? '');
     if (!user) throw new Error('ctx.llm 需要 user（或 prompt）参数');
+    // v0.5.0 A4.5：Pack 级预算前置检查（与日费用护栏同语义，粒度到 Pack）。
+    // 预算在 pack.json 的 budget 声明；超限按 action 处理（block 抛错 / warn 放行并提示）。
+    const packBudget = getActivePackContext()?.mounted?.find((/** @type {any} */ x) => x.name === currentPack)?.budget;
+    if (packBudget && Number(packBudget.dailyYuan) > 0) {
+      const spent = packDailyCost(currentPack);
+      if (spent >= Number(packBudget.dailyYuan)) {
+        const msg = `垂域 Pack「${currentPack}」今日费用 ≈¥${spent.toFixed(5)} 已达上限 ¥${Number(packBudget.dailyYuan).toFixed(2)}`;
+        if (String(packBudget.action || 'block') === 'block') throw new Error(`${msg}（budget.action=block，已阻止本次模型调用）`);
+        try { io.print(style(`⚠ ${msg}（budget.action=warn，本次放行）`, C.yellow)); } catch {}
+      }
+    }
     const messages = [...(system ? [{ role: 'system', content: system }] : []), { role: 'user', content: user }];
     let prov = provider;
     if (usedModel !== modelName) {

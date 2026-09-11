@@ -29,7 +29,7 @@ const TOOL_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 /** 约束 kind 合法集合（v1） */
 export const CONSTRAINT_KINDS = new Set(['tool-deny', 'tool-arg-require', 'arg-forbid', 'output-forbid', 'completeness', 'confirm']);
 /** manifest 允许的顶层字段（未知字段拒绝，防拼写错误被静默忽略） */
-const KNOWN_MANIFEST_FIELDS = new Set(['apiVersion', 'name', 'displayName', 'version', 'engines', 'description', 'author', 'license', 'permissions', 'contributes']);
+const KNOWN_MANIFEST_FIELDS = new Set(['apiVersion', 'name', 'displayName', 'version', 'engines', 'description', 'author', 'license', 'permissions', 'contributes', 'budget']);
 const KNOWN_CONTRIBUTES = new Set(['tools', 'provider', 'presets', 'promptSections', 'constraints', 'skills', 'commands', 'memorySchema']);
 
 // ---------- 极简 semver（零依赖） ----------
@@ -125,6 +125,18 @@ export function validateManifest(m, opts = {}) {
       for (const key of ['fs', 'net', 'env']) {
         if (p[key] !== undefined && !Array.isArray(p[key])) errors.push(`permissions.${key} 必须是字符串数组`);
       }
+    }
+  }
+  if (m.budget !== undefined) {
+    // v0.5.0 A4.5：Pack 级预算（与日费用护栏同语义）——垂域团队可为自己包住的模型调用设上限
+    const b = m.budget;
+    if (!b || typeof b !== 'object' || Array.isArray(b)) errors.push('budget 必须是对象');
+    else {
+      for (const k of Object.keys(b)) {
+        if (!['dailyYuan', 'action'].includes(k)) errors.push(`budget.${k} 不是可用字段（允许：dailyYuan / action）`);
+      }
+      if (b.dailyYuan !== undefined && !(Number(b.dailyYuan) > 0)) errors.push('budget.dailyYuan 必须是正数（元）');
+      if (b.action !== undefined && !['warn', 'block'].includes(String(b.action))) errors.push("budget.action 只支持 'warn' 或 'block'");
     }
   }
   if (m.contributes !== undefined) {
@@ -362,7 +374,7 @@ export async function mountPacks(cfg, opts = {}) {
       // 注意：`mounted` 必须同样列出「此前已挂载」的 Pack——否则第二次调用会返回空列表，
       // 调用方（CLI 横幅 / 测试 / 下游集成）会误判「没有 Pack」。
       const cached = loadedPacks.get(info.name);
-      mounted.push({ name: info.name, source: info.source, version: cached.manifest.version, apiVersion: cached.manifest.apiVersion });
+      mounted.push({ name: info.name, source: info.source, version: cached.manifest.version, apiVersion: cached.manifest.apiVersion, budget: cached.manifest.budget || null });
       promptSections.push(...packSectionEntries(cached));
       constraints.push(...(cached.contributions.constraints || []).map((/** @type {any} */ c) => ({ ...c, pack: info.name })));
       continue;
@@ -399,7 +411,7 @@ export async function mountPacks(cfg, opts = {}) {
       }
     }
     loadedPacks.set(info.name, res);
-    mounted.push({ name: info.name, source: info.source, version: res.manifest.version, apiVersion: res.manifest.apiVersion });
+    mounted.push({ name: info.name, source: info.source, version: res.manifest.version, apiVersion: res.manifest.apiVersion, budget: res.manifest.budget || null });
     promptSections.push(...packSectionEntries(res));
     constraints.push(...(res.contributions.constraints || []).map((/** @type {any} */ c) => ({ ...c, pack: info.name })));
   }
