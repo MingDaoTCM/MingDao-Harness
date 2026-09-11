@@ -158,6 +158,32 @@ async function deepseekJson(system, user, maxTokens = 2000) {
 一个必须注意的差异：下游 `deepseekJson` 用 `deepseekKey` 直连，**usage 不入账**（这正是要迁的原因）；
 改走 `ctx.llm()` 后 usage 并入当前回合 → 今日费用、缓存命中、峰谷、日护栏同时生效。
 
+#### 3.3.2 密钥从哪来（一个必读的坑）
+
+`ctx.llm()` 解析密钥走**内核**，顺序是（`src/credentials.js` 的 `resolveApiKey`，已按代码核对）：
+
+1. `process.env[<服务商的 envKey>]`（DeepSeek 即 `DEEPSEEK_API_KEY`）
+2. **`process.env.MINGDAO_API_KEY`**（通用兜底）
+3. 凭证库 `<MINGDAO_HOME>/credentials.json` 里以**服务商名**为键的字段（如 `deepseek`）
+4. `cfg.apiKey`
+
+好消息：第 3 步读的就是下游现在写的那**同一个文件、同一个字段**（下游 `dify.mjs` 的
+`creds.deepseek`）——只要 `MINGDAO_HOME` 是同一个目录，迁移后**不需要搬密钥**。
+
+> ⚠ **坑（已实测复现）**：第 2 步的 `MINGDAO_API_KEY` **优先于**第 3 步。
+> 机器上只要残留一个指向别的服务商的 `MINGDAO_API_KEY`，域内调用就会带着**那个** key
+> 打到 DeepSeek 端点（或反之）——表现为 401 或「费用算到莫名其妙的账上」。
+> 回迁时请检查环境变量：`env | grep -E 'MINGDAO_API_KEY|DEEPSEEK_API_KEY'`。
+
+另一个前置条件：`ctx.llm({ model })` 里的模型名必须是内核**能解析**的——
+要么是内置名（`deepseek-v4-flash`），要么在上游 `config.json` 的 `customModels` 里声明过
+（含 `baseUrl`）。否则 `ctx.llm` 直接抛「未配置 API Key」，而下游原来的 `deepseekJson`
+是自己硬编码 URL 的、不会有这个问题。推荐显式写入凭证库：
+
+```bash
+mingdao key set deepseek <你的 DeepSeek Key>     # 写入 <MINGDAO_HOME>/credentials.json
+```
+
 ### 3.4 患者注册表与快照落盘 → 受权限约束的 IO
 
 `patients.json` / `intake/**` 的读写改用 `permissions.fs` 声明的路径（内核据此校验越界）：
