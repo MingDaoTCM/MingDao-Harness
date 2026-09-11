@@ -28,6 +28,8 @@ import {
 export async function handle({ req, res, method, p, url }, deps, shared) {
   const { json, readBody, MAX_API_BODY } = shared;
   const { home, state, draftTexts } = deps;
+  // v0.4.7：草稿槽上限（超出按插入顺序淘汰最旧）——防单个已认证客户端无界增长
+  const MAX_DRAFTS = 64;
 
   if (method === 'GET' && p === '/api/sessions') {
     const q = url.searchParams.get('q');
@@ -131,7 +133,15 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
   if (method === 'POST' && p === '/api/draft') {
     const body = await readBody(req, MAX_API_BODY);
     const key = String(body.file || '');
+    // v0.4.7：草稿槽必须有界。key 完全由调用方指定（每次请求可以是新 key），此前 Map 永不淘汰——
+    // 实测 150 次请求（每次 200KB）让 RSS +40MB 且不回收。改为 LRU 上限（重新 set 会移到队尾）。
+    draftTexts.delete(key);
     draftTexts.set(key, String(body.text ?? '').slice(0, 200000));
+    while (draftTexts.size > MAX_DRAFTS) {
+      const oldest = draftTexts.keys().next().value;
+      if (oldest === undefined) break;
+      draftTexts.delete(oldest);
+    }
     json(res, 200, { ok: true });
     return true;
   }

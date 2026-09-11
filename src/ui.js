@@ -38,6 +38,21 @@ export function style(text, code) {
   return `${code}${text}${C.reset}`;
 }
 
+// ---------- 终端转义注入防护（v0.4.7） ----------
+// 模型输出、bash stdout、被 read 回显的文件内容都可能含 ANSI/OSC 序列。直通终端可以清屏、
+// 改窗口标题、移动光标伪造界面，部分终端还支持 OSC 52 写剪贴板；管道场景更会把控制字节写进
+// 用户的输出文件。这里做**白名单过滤**：保留 \t 与 \n，剥掉全部 ESC 序列与其余 C0 控制符。
+/**
+ * @param {any} text
+ */
+export function sanitizeTerminal(text) {
+  return String(text ?? '')
+    .replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '') // OSC …（BEL 或 ST 结束）
+    .replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '') // CSI（含 SGR 颜色）
+    .replace(/\x1b[@-Z\\-_]/g, '') // 其余双字符 ESC 序列
+    .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ''); // 保留 \t(09) \n(0a)，其余 C0/DEL 丢弃
+}
+
 // ---------- 终端显示宽度（CJK 占 2 列） ----------
 /** @param {any} s */
 function displayWidth(s) {
@@ -462,7 +477,7 @@ export function createIO({ quiet = false } = {}) {
         io._answerStarted = true;
         io.print(style('─'.repeat(20) + ' 回答 ' + '─'.repeat(20), C.dim));
       }
-      renderer?.push(String(text));
+      renderer?.push(sanitizeTerminal(text));
     },
 
     /** @param {any} text */
@@ -472,7 +487,7 @@ export function createIO({ quiet = false } = {}) {
         io._reasoningStarted = true;
         io.print(style('┄ 思考过程', C.dim));
       }
-      process.stdout.write(style(String(text), C.dim));
+      process.stdout.write(style(sanitizeTerminal(text), C.dim));
     },
 
     /** @param {any} todos */
@@ -515,7 +530,7 @@ export function createIO({ quiet = false } = {}) {
         io.print(style(`  ✎ 写入 ${args.path}`, C.bold));
         const lines = String(args.content ?? '').split('\n');
         const preview = lines.slice(0, 8).join('\n');
-        if (preview) io.print(style(indent(preview, '    │ '), C.dim));
+        if (preview) io.print(style(indent(sanitizeTerminal(preview), '    │ '), C.dim));
         if (lines.length > 8) io.print(style(`    │ …（共 ${lines.length} 行）`, C.dim));
         io.print(style(`  ✓ ${r.output}${ms}`, C.green));
         return;
@@ -561,7 +576,7 @@ export function createIO({ quiet = false } = {}) {
 
       if (name === 'ls') {
         // 目录列表只给一行摘要 + 前几项，不整屏刷文件
-        const lines = String(r.output ?? '').split('\n').filter(Boolean);
+        const lines = sanitizeTerminal(r.output ?? '').split('\n').filter(Boolean);
         io.print(style(`  📁 列出 ${lines.length} 项` + (lines.length ? '：' + lines.slice(0, 3).map((x) => x.trim()).join('、') + (lines.length > 3 ? ' 等' : '') : '') + ms, C.bold));
         return;
       }
@@ -576,7 +591,8 @@ export function createIO({ quiet = false } = {}) {
 
       // 只读工具：read / ls / glob / grep
       io.print(style(`  🔍 ${name}${summarizeArgs(name, args)}`, C.bold));
-      const out = String(r.output ?? '');
+      // v0.4.7：工具输出（bash stdout / 文件内容）可能夹带终端转义序列，回显前统一净化
+      const out = sanitizeTerminal(r.output ?? '');
       if (out) {
         const lines = out.split('\n');
         io.print(style(indent(lines.slice(0, 8).join('\n'), '    '), C.dim));

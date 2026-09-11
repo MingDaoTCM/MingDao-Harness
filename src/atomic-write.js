@@ -45,6 +45,10 @@ export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() =
   fs.mkdirSync(path.dirname(lockPath), { recursive: true });
   const t0 = Date.now();
   for (;;) {
+    // v0.4.7：区分「抢锁阶段」与「执行 fn 阶段」。此前 fn 自身抛出的 EEXIST 也会落进下方的
+    // 锁重试分支，而 finally 已释放锁 → 重抢成功后再次执行 fn → 再次抛出 → **同步死循环**
+    // （100% CPU，连超时分支都不可达）。acquiring 在 fn 开始执行前置 false。
+    let acquiring = true;
     try {
       const fd = fs.openSync(lockPath, 'wx'); // 独占创建
       try {
@@ -53,6 +57,7 @@ export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() =
         fs.closeSync(fd);
       }
       heldLocks.add(lockPath);
+      acquiring = false; // 锁已持有：此后 fn 的任何异常都不得进入锁重试分支
       try {
         return fn();
       } finally {
@@ -62,6 +67,7 @@ export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() =
         } catch {}
       }
     } catch (err) {
+      if (!acquiring) throw err; // fn 自身的异常绝不进入锁重试
       if (/** @type {any} */ (err).code !== 'EEXIST') throw err;
       try {
         const st = fs.statSync(lockPath);

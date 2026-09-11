@@ -3747,6 +3747,57 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.5.0A4 回归：ctx.llm 统一模型出口（usage 并入父回合 + Pack 归因记录不重复计费）');
 }
 
+
+// ---------- 62. v0.4.7 回归：终端转义净化 / 技能描述上限 / 文件锁不再死循环 ----------
+{
+  // 62a. 终端转义注入：模型输出、bash stdout、文件内容回显前必须净化
+  const { sanitizeTerminal } = await import(pathToFileURL(path.join(srcDir, 'ui.js')).href);
+  const evil = '标题\x1b]0;HIJACK\x07清屏\x1b[2J\x1b[H普通\x1b[31m红\x1b[0m\ttab\n换行\r回车';
+  const clean = sanitizeTerminal(evil);
+  assert.ok(!clean.includes('HIJACK'), 'OSC 序列（改窗口标题）必须被剥掉');
+  assert.ok(!clean.includes('\x1b'), '所有 ESC 序列必须被剥掉');
+  assert.ok(!clean.includes('\r'), '回车必须被剥掉（防行覆盖伪造）');
+  assert.ok(clean.includes('\t') && clean.includes('\n'), '制表与换行必须保留');
+  assert.ok(clean.includes('清屏') && clean.includes('普通') && clean.includes('红'), '可见文本必须保留');
+  // 无转义时原样返回（零影响）
+  assert.equal(sanitizeTerminal('普通文本\n第二行'), '普通文本\n第二行', '无转义时不得改动文本');
+
+  // 62b. 技能描述上限：描述每轮拼进系统提示，必须有界
+  const tmpSk = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skcap-'));
+  const skDir = path.join(tmpSk, '.mingdao', 'skills', 'huge');
+  fs.mkdirSync(skDir, { recursive: true });
+  fs.writeFileSync(path.join(skDir, 'SKILL.md'), '---\nname: huge\ndescription: ' + 'X'.repeat(2 * 1024 * 1024) + '\n---\n\n# huge\n');
+  const { skillsRegistryBlock } = await import(pathToFileURL(path.join(srcDir, 'skills.js')).href);
+  const block62 = skillsRegistryBlock(tmpSk);
+  assert.ok(block62.length < 4000, `技能块必须被截断（实际 ${block62.length} 字符，此前可达 2MB）`);
+  assert.ok(block62.includes('huge'), '技能名仍应出现（只是描述被截断）');
+  safeRmSync(tmpSk, { recursive: true, force: true });
+
+  // 62c. withFileLockSync：fn 自身抛出的 EEXIST 必须外抛，绝不进入锁重试（否则同步死循环）
+  const { withFileLockSync } = await import(pathToFileURL(path.join(srcDir, 'atomic-write.js')).href);
+  const tmpLk = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-lk-'));
+  const lp = path.join(tmpLk, 'x.lock');
+  const t0 = Date.now();
+  let caught = null;
+  try {
+    withFileLockSync(lp, () => {
+      const e = new Error('fn-boom');
+      e.code = 'EEXIST';
+      throw e;
+    });
+  } catch (e) {
+    caught = e;
+  }
+  assert.ok(caught && caught.message === 'fn-boom', 'fn 的异常应原样外抛');
+  assert.ok(Date.now() - t0 < 1000, `不得进入重试循环（耗时 ${Date.now() - t0}ms）`);
+  assert.ok(!fs.existsSync(lp), '外抛后锁文件必须已释放');
+  assert.equal(withFileLockSync(lp, () => 42), 42, '正常路径仍应工作');
+  assert.equal(withFileLockSync(lp, () => withFileLockSync(lp, () => 'nested')), 'nested', '可重入仍应工作');
+  safeRmSync(tmpLk, { recursive: true, force: true });
+
+  ok('v0.4.7 回归：终端转义净化 / 技能描述上限 / 文件锁 fn-EEXIST 不再死循环');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

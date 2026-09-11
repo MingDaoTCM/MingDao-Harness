@@ -102,7 +102,9 @@
 ## 三、登记待办（14 项，未在本轮修复）
 
 > 均已定位到 `file:line` 并有可复现路径；按优先级排列，建议 v0.4.7 / v0.5.0 消化。
-> （第二轮已消化 T4–T9、T11–T13、T16；下表为**剩余**项。）
+> 消化进度：第二轮 T4–T9、T11–T13、T16；**第三轮（v0.4.7 批次）** T18（文件锁 fn-EEXIST 死循环）、
+> T22 的 ANSI/OSC 转义注入、T23 的技能描述上限、T21 的草稿槽无上限与 `/api/config` 模型名校验 —— 均已修复并有回归断言。
+> 下表为**剩余**项。
 
 ### 安全 / 隔离
 
@@ -120,12 +122,12 @@
 | T14 | P2 | 调度：daemon 模式下 `job.pid` 恒 null、`lastTaskId` 仅在跑完后写 → pause/remove 无法停止在途运行；`--offpeak` 等待期间 pause/remove 后仍会启动 | `src/schedule.js:165-177,389-415` |
 | T15 | P2 | 重复 daemon → 同一调度任务被**并发执行两次**（lease 自检只 break 监督循环，未取消已启动的协程；pidfile 在 spawn 后才写、无 `O_EXCL` 认领）。这是剩余项里影响最大的一条 | `src/cli.js:279-338`、`schedule.js:319-335` |
 | T17 | P2 | 辅助模型调用（路由分类器 / 自动标题 / 记忆提炼）从不 `recordUsage` → 「自动路由省钱」在本框架自己的账本里无法验证，且护栏少计这部分消费 | `src/routing.js:95-110`、`titles.js:31-57`、`memory.js:183,321` |
-| T18 | P3 | `withFileLockSync` 会把 `fn` 抛出的 `EEXIST` 误判为「锁被占」→ 潜在同步死循环（当前调用方暂无必然触发路径，但属共享锁原语的隐患） | `src/atomic-write.js:64-65` |
+| ~~T18~~ | ✅ 已修 | ~~`withFileLockSync` 把 `fn` 的 `EEXIST` 误判为「锁被占」→ 同步死循环~~ 已用 acquiring 标志分离「抢锁」与「执行 fn」两个阶段 | `src/atomic-write.js:47-70` |
 | T19 | P3 | `workspaces.json` / `session-workspaces.json` / `sync-state.json` 的 read-modify-write 未加锁（WebUI 每次建会话都会 touch 工作空间） | `src/workspace.js:32-81`、`src/sync.js:227-242` |
 | T20 | P3 | 调度/任务的生命周期边角：僵尸任务不回收（守护可能空转到 2h）、`killed` 被 worker 的终态写覆盖、无 `/proc` 平台（macOS）无法校验 PID 归属 → 存在 PID 复用误杀风险 | `src/tasks.js:18-43,95-101`、`src/schedule.js:286-318` |
-| T21 | P3 | WebUI 边角：草稿槽 `draftTexts` 无上限（实测 150 请求 +40MB 不回收）、`/api/config` 不校验模型名、`updateCustom` 实为 upsert、非法 JSON body 被当 `{}` 并落盘、`/api/session-finalize` 缺文件返回 500 并回显绝对路径、`HEAD` 被当写方法返回 415 | `web/routes/domains/{sessions,config,misc}.js`、`web/server.js:125`、`routes/api.js:43` |
-| T22 | P3 | TUI/CLI 边角：模型/工具输出中的 ANSI/OSC 转义直通终端（可清屏/改标题/污染管道）、`box()` 不看终端宽度、隐藏输入把提示语一起隐藏、`key set` 经 argv 传密钥、`batch` 清空全进程 SIGINT 监听、HELP_LINES 两份已分叉 | `src/ui.js`、`src/notify.js`、`src/commands/{key,update}.js`、`src/cli.js` |
-| T23 | P3 | 技能/安装链边角：技能 `description` 无长度上限（可撑大每轮系统提示）、技能「安装/信任/重装」三入口不校验名称（纵深防御缺口）、`install.sh` 的 `curl \| bash` 失败静默成功且 Node 门槛查 ≥18.0（文档写 ≥18.17） | `src/skills.js:26-39`、`src/skill-lib.js:80`、`install.sh:71,84` |
+| T21 | P3 | WebUI 边角：~~草稿槽 `draftTexts` 无上限~~（✅ 已修：LRU 64 槽）、~~`/api/config` 不校验模型名~~（✅ 已修，并保留 `provider:"custom"` 任意端点形态）、`updateCustom` 实为 upsert、非法 JSON body 被当 `{}` 并落盘、`/api/session-finalize` 缺文件返回 500 并回显绝对路径、`HEAD` 被当写方法返回 415 | `web/routes/domains/{sessions,config,misc}.js`、`web/server.js:125`、`routes/api.js:43` |
+| T22 | P3 | TUI/CLI 边角：~~ANSI/OSC 转义直通终端~~（✅ 已修：新增 `sanitizeTerminal`，模型/工具输出统一白名单过滤，保留 `\t`/`\n`）、`box()` 不看终端宽度、隐藏输入把提示语一起隐藏、`key set` 经 argv 传密钥、`batch` 清空全进程 SIGINT 监听、HELP_LINES 两份已分叉 | `src/ui.js`、`src/notify.js`、`src/commands/{key,update}.js`、`src/cli.js` |
+| T23 | P3 | 技能/安装链边角：~~技能 `description` 无长度上限~~（✅ 已修：200 字符上限 + 空白归一）、技能「安装/信任/重装」三入口不校验名称（纵深防御缺口）、`install.sh` 的 `curl \| bash` 失败静默成功且 Node 门槛查 ≥18.0（文档写 ≥18.17） | `src/skills.js:26-39`、`src/skill-lib.js:80`、`install.sh:71,84` |
 | T24 | P3 | 官网/IDE 边角：openresty 对不存在路径返回 200+首页（死链接不可发现、污染下载计数，需服务器侧 `try_files`）、VS Code「发送选中代码」写全局槽而 WebUI 只读会话槽（功能不生效）、JetBrains 文档要 `./gradlew` 但仓库无 wrapper | 官网 nginx 配置、`ide/vscode/extension.js:65-78`、`src/web/app.js:695`、`ide/jetbrains` |
 
 ## 四、已确认无问题（避免过度修复）

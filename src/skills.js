@@ -23,16 +23,25 @@ export function skillDirs(/** @type {any} */ workingDir) {
   ];
 }
 
+// v0.4.7：技能描述长度上限。描述会**每轮**拼进系统提示（buildSystemPrompt → skillsRegistryBlock），
+// 此前无任何截断——实测一个 2MB 单行 description 会让技能块变成 2MB，每轮全额计费。
+const MAX_SKILL_DESC = 200;
+/** @param {any} s */
+function capDesc(s) {
+  const t = String(s ?? '').replace(/\s+/g, ' ').trim();
+  return t.length > MAX_SKILL_DESC ? t.slice(0, MAX_SKILL_DESC) + '…' : t;
+}
+
 function readDescription(/** @type {any} */ skillMd) {
   try {
     const text = fs.readFileSync(skillMd, 'utf8');
     const fm = text.match(/^---\n([\s\S]*?)\n---/);
     if (fm) {
       const d = fm[1].match(/^description:\s*(.+)$/m);
-      if (d) return d[1].trim();
+      if (d) return capDesc(d[1].trim());
     }
     const h = text.match(/^#\s+(.+)$/m);
-    return h ? h[1].trim() : '';
+    return h ? capDesc(h[1].trim()) : '';
   } catch {
     return '';
   }

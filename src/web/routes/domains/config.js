@@ -71,6 +71,20 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     if (body.model !== undefined) {
       const target = String(body.model).trim();
       if (!target) return json(res, 400, { error: '模型名不能为空' });
+      // v0.4.7：必须校验模型名本身。此前只校验「能否解析出 apiKey + 预热」，任何字符串都会落盘
+      // （实测 {model:12345} → 200，并把 config.json 的 model 写成 "12345"，后续对话直接 404）。
+      // 例外：`provider: "custom"` 的「任意 OpenAI 兼容端点」形态下，模型名由用户端点决定，
+      // 内核无从枚举——此时不校验（这正是 README「mingdao init → custom → 填 baseUrl」的用法）。
+      const genericEndpoint = resolveProviderConfig(cfg, target).name === 'custom';
+      if (!genericEndpoint) {
+        const known =
+          Object.prototype.hasOwnProperty.call(cfg.customModels || {}, target) ||
+          Object.prototype.hasOwnProperty.call(MODELS, target) ||
+          Boolean(modelPreset(target));
+        if (!known) {
+          return json(res, 400, { error: `未知模型 "${target}"——请先在 ⚙ 设置里选择内置模型，或添加自定义模型后再切换。` });
+        }
+      }
       const tpc = resolveProviderConfig(cfg, target);
       if (!tpc.apiKey) {
         const hint = tpc.name.startsWith('custom:')
