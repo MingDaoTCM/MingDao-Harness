@@ -208,6 +208,28 @@ git push <mirror> refs/tags/v<版本>:refs/tags/v<版本>
 **验收**：三平台的 `git ls-remote <url> refs/heads/main` 与本地 `main` 同 SHA；
 `git ls-remote <url> 'refs/tags/v<版本>^{}'` 解析到的提交也一致。
 
+> **2026-09-12 又犯了一次，所以改成脚本硬约束。** 现象：GitHub `main` 到了 `d986d1c`，
+> 两个镜像还停在 `f6b7d92` 的 `chore: release v0.6.1`。两个原因叠加：
+> ① 本机**只配了 `origin`**，没有 `gitee`/`gitcode` 两个 remote，于是 `git push origin main`
+> 之后镜像毫无变化；② 发布脚本当时**只推 tag**（`git push gitee "$TAG"`），从不推分支。
+> 文档写了要求，但脚本没落实——**文档约束不住流程，脚本才能**。现在
+> `scripts/publish-mirror-releases.sh` 会：推 tag 前先 `git push <mirror> main:main`；
+> remote 缺失时**直接报错退出**（不再静默只推 tag）；并做「main 对齐检查」，
+> 三处 SHA 与本地不一致就退出非 0。
+>
+> 一次性环境准备（SSH，不需要 token；`~/.ssh/config` 里 gitee.com / gitcode.com
+> 已指向 `~/.ssh/mingdao_git`）：
+> ```bash
+> git remote add gitee   git@gitee.com:MingDaoTCM/MingDao-Harness.git
+> git remote add gitcode git@gitcode.com:MingDaoTCM/MingDao-Harness.git
+> ```
+> 全量核对（**别只比 `main`**——要连全部 tag 一起比，否则漏推的 tag 看不出来）：
+> ```bash
+> for r in origin gitee gitcode; do git ls-remote "$r" | sort > /tmp/refs_$r.txt; done
+> diff /tmp/refs_origin.txt /tmp/refs_gitee.txt && diff /tmp/refs_origin.txt /tmp/refs_gitcode.txt
+> ```
+> 2026-09-12 实测：三平台各 105 个 ref（分支 + 全部 tag）名称与 SHA 完全一致。
+
 **③ 差量更新素材漏采（v0.6.2 起）** —— 此前**三个平台的自动更新每次都整包重下**
 （exe 76MB / mac zip 93–101MB / AppImage 104MB）。根因不是功能没做，而是发布链路把
 差量素材丢了：CI 的产物 glob 和 Release 上传的 `find` 都没有 `*.blockmap`，

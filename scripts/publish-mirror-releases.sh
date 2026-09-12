@@ -68,8 +68,8 @@ echo "发行版标题：$NAME"
 # remote（只有 origin），于是 `git push origin main` 之后镜像毫无变化。
 #
 # 前置（一次性，SSH，不需要 token）：
-#   git remote add gitee   git@gitee.com:mingdaotcm/MingDao-Harness.git
-#   git remote add gitcode git@gitcode.com:mingdaotcm/MingDao-Harness.git
+#   git remote add gitee   git@gitee.com:MingDaoTCM/MingDao-Harness.git
+#   git remote add gitcode git@gitcode.com:MingDaoTCM/MingDao-Harness.git
 for R in gitee gitcode; do
   git remote get-url "$R" >/dev/null 2>&1 || { echo "✗ 未配置 remote $R——按上面注释加好再跑（否则镜像分支会停在旧提交）"; exit 1; }
 done
