@@ -31,6 +31,34 @@ TAG="v$V"
 DL="/opt/1panel/www/sites/mingdao-site/downloads"
 FILES="mingdao-setup-$V-x64.exe mingdao-$V-amd64.deb mingdao-$V-arm64.dmg mingdao-$V-x64.dmg mingdao-$V-x86_64.AppImage mingdao-$V-arm64-mac.zip mingdao-$V-x64-mac.zip"
 
+# 发行版标题：从 CHANGELOG 的 `## vX.Y.Z（日期）— 描述` 取「vX.Y.Z 描述」。
+# 此前标题被直接设成 tag（如 "v0.6.1"），于是 Gitee/GitCode 的发行版只剩一个裸版本号：
+# 在仓库首页「发行版」组件和发行版列表里，用户只看到一个 v0.6.1，看不出这版干了什么。
+# 而 v0.4.4 及更早是有描述的——那时是在 Gitee 网页上手工建、标题照抄 CHANGELOG。
+# 首页组件本来就不会渲染「最新版」徽标（那是 Gitee 平台行为，对比其它仓库同样如此），
+# 所以标题就是唯一能让人读懂的信息，别再退化成裸版本号。
+rel_name() {
+  python3 - "$1" <<'PY'
+import re, sys
+v = sys.argv[1]
+try:
+    t = open('CHANGELOG.md', encoding='utf8').read()
+except OSError:
+    print('v' + v); raise SystemExit
+m = re.search(r'^## v' + re.escape(v) + r'[^\n]*', t, re.M)
+if not m:
+    print('v' + v); raise SystemExit
+line = re.sub(r'^## ', '', m.group(0))
+line = re.sub(r'（\d{4}-\d{2}-\d{2}）', '', line)   # 只去掉日期那个括号。不能写成
+                                                    # （[^）]*）——那会把「（补丁版）」
+                                                    # 「（确定性③）」等真描述一起吃掉
+line = re.sub(r'\s*—\s*', ' ', line).strip()        # 长破折号换成空格
+print(line)
+PY
+}
+NAME="$(rel_name "$V")"
+echo "发行版标题：$NAME"
+
 # 1) 同步 tag（与 GitHub 同 commit）
 git push gitee "$TAG" --force
 git push gitcode "$TAG" --force
@@ -45,14 +73,14 @@ cat > /tmp/mirror-release-$V.sh <<'INNER'
 #!/bin/bash
 set -uo pipefail
 V="$1"; TAG="v$1"; BODY="$2"
-GITEE_TOKEN="$3"; GITCODE_TOKEN="$4"
+GITEE_TOKEN="$3"; GITCODE_TOKEN="$4"; NAME="$5"
 DL="/opt/1panel/www/sites/mingdao-site/downloads"
 FILES="mingdao-setup-$V-x64.exe mingdao-$V-amd64.deb mingdao-$V-arm64.dmg mingdao-$V-x64.dmg mingdao-$V-x86_64.AppImage mingdao-$V-arm64-mac.zip mingdao-$V-x64-mac.zip"
 
 echo "== gitee release =="
 GID=$(curl -s -X POST "https://gitee.com/api/v5/repos/MingDaoTCM/MingDao-harness/releases?access_token=$GITEE_TOKEN" \
   -H "Content-Type: application/json" \
-  -d "$(python3 -c 'import json,sys;print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[1],"body":open(sys.argv[2]).read(),"target_commitish":"main"}))' "$TAG" "$BODY")" \
+  -d "$(python3 -c 'import json,sys;print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[3],"body":open(sys.argv[2]).read(),"target_commitish":"main"}))' "$TAG" "$BODY" "$NAME")" \
   | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))')
 echo "gitee release id=$GID"
 [ -n "$GID" ] || { echo "gitee 创建失败"; exit 1; }
@@ -60,7 +88,7 @@ echo "gitee release id=$GID"
 echo "== gitcode release =="
 curl -s -X POST "https://api.gitcode.com/api/v5/repos/MingDaoTCM/MingDao-Harness/releases" \
   -H "Content-Type: application/json" -H "private-token: $GITCODE_TOKEN" \
-  -d "$(python3 -c 'import json,sys;print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[1],"body":open(sys.argv[2]).read(),"target_commitish":"main"}))' "$TAG" "$BODY")" \
+  -d "$(python3 -c 'import json,sys;print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[3],"body":open(sys.argv[2]).read(),"target_commitish":"main"}))' "$TAG" "$BODY" "$NAME")" \
   -o /tmp/gc-rel.json -w "gitcode http=%{http_code}\n"
 grep -q tag_name /tmp/gc-rel.json || { echo "gitcode 创建失败"; head -c 300 /tmp/gc-rel.json; exit 1; }
 
@@ -115,4 +143,4 @@ echo "MIRROR_RELEASE_DONE $TAG"
 INNER
 chmod +x /tmp/mirror-release-$V.sh
 echo "上传脚本已生成 /tmp/mirror-release-$V.sh —— 在服务器运行："
-echo "  ssh mingdao-server 'nohup bash /tmp/mirror-release-$V.sh \"$V\" \"$BODY\" \"$GITEE_TOKEN\" \"$GITCODE_TOKEN\" > /tmp/mirror-release-$V.log 2>&1 &'"
+echo "  ssh mingdao-server 'nohup bash /tmp/mirror-release-$V.sh \"$V\" \"$BODY\" \"$GITEE_TOKEN\" \"$GITCODE_TOKEN\" \"$NAME\" > /tmp/mirror-release-$V.log 2>&1 &'"

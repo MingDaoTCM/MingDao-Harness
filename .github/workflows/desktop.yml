@@ -127,6 +127,22 @@ jobs:
           set -uo pipefail
           TAG="${{ github.ref_name }}"
           REPO="${{ github.repository }}"
+          # 发行版标题（v0.6.2 起）：取 CHANGELOG 的「## vX.Y.Z（日期）— 描述」，去掉日期。
+          # 此前标题就是 tag 本身，于是发行版列表里只见一个裸版本号 "v0.6.1"，
+          # 看不出这版做了什么；Gitee/GitCode 侧同样问题（见 scripts/publish-mirror-releases.sh）。
+          #
+          # 用 python3 而不是 grep/sed：本机用 grep 匹配全角「（」时偶发
+          # `grep: illegal byte sequence`（locale 相关），一旦命中就得到空标题——
+          # 而「写空标题」是会真把发行版标题清掉的。python3 显式按 UTF-8 读，不受 locale 影响。
+          # 只删日期那个括号：写成 （[^）]*） 会把「（补丁版）」「（确定性③）」一起吃掉。
+          TITLE="$(python3 -c 'import re,sys
+          t=open("CHANGELOG.md",encoding="utf8").read()
+          m=re.search(r"^## v"+re.escape(sys.argv[1])+r"[^\n]*",t,re.M)
+          line=re.sub(r"^## ","",m.group(0)) if m else ""
+          line=re.sub(r"（\d{4}-\d{2}-\d{2}）","",line)
+          print(re.sub(r"\s*—\s*"," ",line).strip())' "${TAG#v}")"
+          [ -n "$TITLE" ] || TITLE="$TAG"
+          echo "发行版标题：$TITLE"
           echo "gh 版本：$(gh --version | head -1)"
           gh auth status 2>&1 | sed 's/^/auth: /' | head -6
           # 只上传安装包 + 平台更新清单 + blockmap（差量更新用，见 build 步骤注释）。
@@ -149,7 +165,7 @@ jobs:
             fi
           else
             echo "Release 不存在：创建并上传"
-            if gh release create "$TAG" "${FILE_ARR[@]}" -R "$REPO" --generate-notes --title "$TAG" > /tmp/cr.out 2>&1; then
+            if gh release create "$TAG" "${FILE_ARR[@]}" -R "$REPO" --generate-notes --title "$TITLE" > /tmp/cr.out 2>&1; then
               echo "创建成功"
             else
               echo "::error title=gh-release-create::$(tail -c 1500 /tmp/cr.out)"
@@ -160,7 +176,7 @@ jobs:
           # 此前（2026-08-28 政策）附件只作官网收割的构建转运、同步后由
           # scripts/github-release-cleanup.mjs 删除；该做法已废止——用户应能直接从任一平台下载。
           # 官网 https://harness.mingdao.ai/#downloads 与 gitee/gitcode 的 Release 同步提供同一批包。
-          gh release edit "$TAG" -R "$REPO" --notes '桌面版安装包（Windows / macOS / Linux）直接在本页下方附件下载；国内直连极速镜像与校验值见官网：https://harness.mingdao.ai/#downloads —— 本 Release 附件长期保留，不再清理。' >/dev/null 2>&1 || true
+          gh release edit "$TAG" -R "$REPO" --title "$TITLE" --notes '桌面版安装包（Windows / macOS / Linux）直接在本页下方附件下载；国内直连极速镜像与校验值见官网：https://harness.mingdao.ai/#downloads —— 本 Release 附件长期保留，不再清理。' >/dev/null 2>&1 || true
 
   # Release 正文规范化（2026-09-11 发行政策修订的配套）
   #
@@ -177,7 +193,8 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: 改写指定 tag 的 Release 正文
+      - uses: actions/checkout@v4
+      - name: 改写指定 tag 的 Release 正文与标题
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ inputs.normalize_tag }}
@@ -186,7 +203,20 @@ jobs:
           REPO="${{ github.repository }}"
           # 确认 Release 存在，避免把拼错的 tag 静默当成成功
           gh release view "$TAG" -R "$REPO" >/dev/null
-          gh release edit "$TAG" -R "$REPO" --notes '桌面版安装包（Windows / macOS / Linux）直接在本页下方附件下载；国内直连极速镜像与校验值见官网：https://harness.mingdao.ai/#downloads —— 本 Release 附件长期保留，不再清理。'
-          echo "已改写 $TAG 的正文："
-          gh release view "$TAG" -R "$REPO" --json body -q .body
+          # 顺手把标题也纠正成「vX.Y.Z 描述」（v0.4.5–v0.6.1 的历史发行版标题是裸版本号）。
+          # 走这个通道回填的理由与正文规范化相同：复用工作流自带的 GITHUB_TOKEN，
+          # 不需要本地 PAT，改动留在 CI 审计里可追溯。
+          # 用 python3 而非 grep/sed：全角字符在 grep 下可能触发 illegal byte sequence，
+          # 那会得到空标题并把发行版标题真清掉（本机回填时就踩过，见 CHANGELOG 说明）。
+          TITLE="$(python3 -c 'import re,sys
+          t=open("CHANGELOG.md",encoding="utf8").read()
+          m=re.search(r"^## v"+re.escape(sys.argv[1])+r"[^\n]*",t,re.M)
+          line=re.sub(r"^## ","",m.group(0)) if m else ""
+          line=re.sub(r"（\d{4}-\d{2}-\d{2}）","",line)
+          print(re.sub(r"\s*—\s*"," ",line).strip())' "${TAG#v}")"
+          [ -n "$TITLE" ] || TITLE="$TAG"
+          echo "标题将为：$TITLE"
+          gh release edit "$TAG" -R "$REPO" --title "$TITLE" --notes '桌面版安装包（Windows / macOS / Linux）直接在本页下方附件下载；国内直连极速镜像与校验值见官网：https://harness.mingdao.ai/#downloads —— 本 Release 附件长期保留，不再清理。'
+          echo "已改写 $TAG 的正文与标题："
+          gh release view "$TAG" -R "$REPO" --json name,body -q '.name, .body'
 

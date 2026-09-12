@@ -247,6 +247,34 @@ ssh mingdao-server 'bash /tmp/gen-update-feeds.sh <版本> <downloads> <updates>
 > **从 v0.6.2 升到 v0.6.3** 的「一路自动更新上来的」用户；手工下载安装的用户没有缓存，
 > 仍然整包下载。别在发布说明里写成「更新体积立刻变小」。
 
+**④ 发行版标题退化成裸版本号（v0.6.2 起）** —— 负责人问「为什么 Gitee 发行版只显示 `v0.6.1`」。
+查下来是三件事，别混为一谈：
+
+1. **首页「发行版」组件本来就不渲染「最新版」徽标** —— 这是 Gitee 平台行为，不是我们配错：
+   对比 `y_project/RuoYi` 等仓库，首页组件用的是**完全相同的 markup**，同样没有徽标。
+   发行版**列表页**与**详情页**都有「最新版」，且 API `GET /releases/latest` 返回的就是 v0.6.1。
+   GitHub 首页组件会显示 `Latest` 徽标，Gitee 不会——**这个差异改不了**。
+2. **真正能修的是标题**：Gitee/GitCode 的 `name` 被 `scripts/publish-mirror-releases.sh`
+   直接设成了 tag（`"name": sys.argv[1]`），GitHub 侧是 `gh release create --title "$TAG"`。
+   于是 v0.4.5 起三个平台的发行版标题**全是裸版本号**，而 v0.4.4 及更早（当年在 Gitee 网页上
+   手工建、标题照抄 CHANGELOG）是有描述的——用户看到的「只有一个 v0.6.1」就是这么来的。
+   既然是首页组件里唯一能读的信息，标题必须带描述。
+3. **回填历史**：v0.4.5–v0.6.1 共 5 个版本 × 3 平台已按 `## vX.Y.Z（日期）— 描述` 回填标题
+   （GitHub `PATCH /releases/{id}`；Gitee 必须带 `tag_name`+`body` 且 token 放 **query**；
+   GitCode 用 `PATCH /releases/{tag}` 且载荷必须是 `{tag_name,name,body}`）。
+   回填时逐项核对：正文长度与附件数**前后一致**才算成功。
+
+```bash
+# 标题取自 CHANGELOG 的 `## vX.Y.Z（日期）— 描述`，脚本已自动带上，无需手填。
+# 回填历史可用既有通道（复用 CI 的 GITHUB_TOKEN，不需要本地 PAT）：
+#   Actions → Desktop → Run workflow → normalize_tag 填 v0.6.0（只改正文与标题，不构建）
+```
+
+> ⚠ 提取标题**不要用 grep/sed 匹配全角「（」**：本机回填时踩到
+> `grep: illegal byte sequence`（locale 相关），一旦命中就得到**空标题**，
+> 而写空标题会把发行版标题真清掉（v0.6.1 当场被清空过一次，已恢复）。
+> 一律用 `python3` 显式 `encoding='utf8'` 读，且**写之前必须断言标题非空**。
+
 ## 三、发布（拿到确认后）
 
 ### 3.1 打 tag 并推送（触发桌面版构建与 GitHub Release）
