@@ -173,12 +173,27 @@ v0.6.0 上线后负责人发现两个问题，都是**流程漏了一步**，不
 两者格式也不同：`/downloads/` 用 GitHub 直链（CI 生成），`/updates/` 用**官网直链**（发布流程生成）。
 
 ```bash
-# 必须为**每个平台**各生成一份（electron-updater 用 base64 的 sha512，不是 sha256）：
-#   /updates/latest.yml         → Windows exe
-#   /updates/latest-linux.yml   → Linux AppImage
-#   /updates/latest-mac.yml     → macOS 两个 dmg（合并成一份）
-# 校验法与 CI 生成的值对得上：sha512 应与 Release 里 latest*.yml 的 sha512 一致
-sha512b64() { openssl dgst -sha512 -binary "$1" | base64 -w0; }
+# 已在官网仓库提供生成器，**别再手写**（手写过两次，两次都错）：
+ssh mingdao-server 'bash /tmp/gen-update-feeds.sh <版本> <downloads 目录> <updates 目录> https://harness.mingdao.ai/downloads'
+#   源文件：MingDao-Harness-Site/scripts/gen-update-feeds.sh（scp 到服务器再跑）
+#
+#   /updates/latest.yml         → Windows NSIS exe
+#   /updates/latest-linux.yml   → Linux AppImage（deb 不支持 electron-updater）
+#   /updates/latest-mac.yml     → macOS **两个 zip**（arm64 + x64 合并成一份）
+```
+
+> ⚠ **macOS 必须是 zip，不能是 dmg**。v0.6.0 上线后用户报
+> 「`ZIP file not provided`」，根因就是 mac feed 指向了 dmg——electron-updater 在 macOS 上
+> 要下载 **zip** 解包替换 .app，dmg 只能手动安装。**0.4.5 的 feed 也是 dmg，所以这个错误一直存在**
+> （该步由「服务器侧发布流程」生成，长期没人写对）。相应地在**收割步骤**里也要把两个
+> `MingDao.Harness-<版本>-{arm64-,}mac.zip` 一并放进 downloads，否则 feed 指向的文件不存在。
+
+```bash
+# 验收（三个平台各自取 feed → 下载 → 核对字节 sha512 与 size）：
+for f in latest.yml latest-linux.yml latest-mac.yml; do
+  curl -s https://harness.mingdao.ai/updates/$f | head -1        # 必须是新版本
+done
+# 注意：从 HTTP 头取 content-length 要用 `tr -d '\r'` 去掉 CR，否则 "$size" = "$act" 会假失败（我踩过）
 ```
 **验收**：三份 `/updates/*.yml` 的 `version` 都是新版本，且 `curl https://harness.mingdao.ai/updates/latest.yml | head -1` 即为新版本。
 
