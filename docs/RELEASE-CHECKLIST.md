@@ -163,6 +163,36 @@ mingdao audit                       # 原审计日志行为不变
 
 > 验收通过 = 明确回复确认。**确认之前不创建 tag、不推 tag、不建 Release。**
 
+### 3.0 本轮（v0.6.0）暴露的两个**流程缺口**——已补进清单
+
+v0.6.0 上线后负责人发现两个问题，都是**流程漏了一步**，不是代码缺陷：
+
+**① 桌面版无法在线更新** —— 我把自动更新的 feed 收割到了 `/downloads/`，
+但桌面版读的是官网 **`/updates/`**（`desktop/main.js` 里写明 `feed: 官网 /updates`）。
+`/updates/*.yml` 还停在 0.4.5，于是应用永远认为「已是最新」。
+两者格式也不同：`/downloads/` 用 GitHub 直链（CI 生成），`/updates/` 用**官网直链**（发布流程生成）。
+
+```bash
+# 必须为**每个平台**各生成一份（electron-updater 用 base64 的 sha512，不是 sha256）：
+#   /updates/latest.yml         → Windows exe
+#   /updates/latest-linux.yml   → Linux AppImage
+#   /updates/latest-mac.yml     → macOS 两个 dmg（合并成一份）
+# 校验法与 CI 生成的值对得上：sha512 应与 Release 里 latest*.yml 的 sha512 一致
+sha512b64() { openssl dgst -sha512 -binary "$1" | base64 -w0; }
+```
+**验收**：三份 `/updates/*.yml` 的 `version` 都是新版本，且 `curl https://harness.mingdao.ai/updates/latest.yml | head -1` 即为新版本。
+
+**② 代码只推了 tag、没推分支** —— gitee/gitcode 的 `main` 仍停在旧提交（只有 tag 是新的），
+用户在镜像上看到的是过期代码；同时 Gitee 的「最新版」标注也因此对不上。
+
+```bash
+# 发布时必须把分支与 tag 一起推（tag 触发 CI 构建，分支供人阅读/克隆）
+git push <mirror> main:main
+git push <mirror> refs/tags/v<版本>:refs/tags/v<版本>
+```
+**验收**：三平台的 `git ls-remote <url> refs/heads/main` 与本地 `main` 同 SHA；
+`git ls-remote <url> 'refs/tags/v<版本>^{}'` 解析到的提交也一致。
+
 ## 三、发布（拿到确认后）
 
 ### 3.1 打 tag 并推送（触发桌面版构建与 GitHub Release）

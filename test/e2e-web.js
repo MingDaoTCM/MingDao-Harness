@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
+import net from 'node:net';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -102,13 +103,49 @@ fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ custom: '
 // 启动 web 服务器（可反复调用；返回 {child, base}）。
 // Windows 随机端口可能命中 Hyper-V 保留段（如 50770–50869）抛 EACCES/EADDRINUSE——捕获后换端口重试（评估 P2-2）
 let webChild = null;
+/**
+ * 取一个可用的监听端口。两步走，优先第一步：
+ *  ① 在 **20000–32000** 里随机挑一个并实测能否 bind——这段在三大平台的默认临时端口范围
+ *     （Linux 32768–60999、macOS/Windows 49152–65535）**之外**，因此内核不会把它分配给
+ *     本测试自己的出站连接。原写法 `40000+random*20000` 正落在临时范围内，这才是
+ *     `EADDRINUSE 127.0.0.1:45730` 的根因。
+ *  ② ①全失败时退回 `listen(0)`（系统分配），保证任何环境下都拿得到端口。
+ * 两种情况都会「先 bind 验证再交还」，把端口被别的东西抢先占住的概率压到最低。
+ */
+async function probe(port) {
+  return await new Promise((resolve) => {
+    const srv = net.createServer();
+    srv.once('error', () => resolve(false));
+    srv.listen(port, '127.0.0.1', () => srv.close(() => resolve(true)));
+  });
+}
+async function freePort() {
+  for (let i = 0; i < 8; i++) {
+    const p = 20000 + Math.floor(Math.random() * 12000);
+    if (await probe(p)) return p;
+  }
+  return await new Promise((resolve, reject) => {
+    const srv = net.createServer();
+    srv.on('error', reject);
+    srv.listen(0, '127.0.0.1', () => {
+      const p = srv.address().port;
+      srv.close(() => resolve(p));
+    });
+  });
+}
 async function startWeb(workDir) {
   if (webChild) {
     webChild.kill('SIGTERM');
     await new Promise((r) => webChild.once('close', r));
   }
   for (let attempt = 0; attempt < 3; attempt++) {
-    const port = 40000 + Math.floor(Math.random() * 20000); // 随机端口，避免与常驻服务冲突
+    // v0.6.0 修复（CI ubuntu-22 实测失败：`listen EADDRINUSE 127.0.0.1:45730`）：
+    // 旧写法 `40000 + random*20000` 落在 **Linux 的临时端口范围 32768–60999** 内，
+    // 而本测试自身要发大量 HTTP 请求——内核会把同一个端口分配给测试自己的**出站**连接，
+    // 于是「随机挑一个空闲端口」变成「随机挑一个正在被自己占用的端口」，负载高时必现。
+    // 改为与其它测试一致的做法：让系统在 listen(0) 时分配，再关闭交还给被测进程；
+    // 并叠加「发现被占用就立刻换端口」，把残余的 TOCTOU 窗口也兜住。
+    const port = await freePort();
     const child = spawn(process.execPath, [path.join(root, 'src', 'cli.js'), 'web', String(port)], {
       cwd: workDir,
       env: { ...process.env, MINGDAO_HOME: home },
@@ -123,10 +160,16 @@ async function startWeb(workDir) {
     child.on('exit', (code) => {
       if (code !== null && code !== 0) exitedEarly = true;
     });
-    for (let i = 0; i < 60 && !base && !exitedEarly; i++) {
+    const deadline = Date.now() + 20000; // 由 12s 放宽到 20s：CI 负载下 CLI 启动（挂载 Pack 等）可能更慢
+    while (!base && !exitedEarly && Date.now() < deadline) {
       const m = log.match(/地址: http:\/\/127\.0\.0\.1:(\d+)/);
-      if (m) base = `http://127.0.0.1:${m[1]}`;
-      else await new Promise((r) => setTimeout(r, 200));
+      if (m) {
+        base = `http://127.0.0.1:${m[1]}`;
+        break;
+      }
+      // 端口被占用时不必等满预算——立刻换一个端口重试（旧写法会白等 12s×3）
+      if (/已占用|EADDRINUSE/.test(log)) break;
+      await new Promise((r) => setTimeout(r, 200));
     }
     if (base) return base;
     // 端口被保留/占用：杀掉换端口重试
@@ -135,7 +178,7 @@ async function startWeb(workDir) {
     } catch {}
     await new Promise((r) => child.once('close', r));
   }
-  assert.ok(false, 'web 服务器三次尝试均未在 12s 内就绪（端口可能命中系统保留段）');
+  assert.ok(false, 'web 服务器三次尝试均未在 20s 内就绪（端口冲突或启动超时）');
   return null;
 }
 
