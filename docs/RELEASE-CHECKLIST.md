@@ -316,14 +316,20 @@ git tag v<版本> && git push origin v<版本>
 ```bash
 cd MingDao-Harness-Site
 # 1) 服务器 downloads/ 已收到本版本 7 个包（官网收割流程）
-# 2) site/index.html 的下载区更新：文件名、体积、sha256 全部换成新版本
-# 3) 更新日志 / 版本号相关内容同步
+# 2) 机械字段交给脚本，别手改（scripts/update-downloads.mjs 已覆盖下载区 **和首页标语**）：
+node scripts/update-downloads.mjs <版本> --check   # 先查：标语或下载区过期会退出非 0
+node scripts/update-downloads.mjs <版本>           # 再改：链接/体积/sha256/平台标签/首页标语
+# 3) 更新日志 / 版本号相关内容同步（展示区卡片、版本历史表属于**内容**，脚本不碰，要人写）
 bash deploy.sh
 ```
 
 - [ ] `site/index.html` 中版本号、每个包的 `href`、体积、`sha256` 均为**本版本**
-- [ ] 首页无残留旧版本号（如 `0.4.5`）
-- [ ] `bash deploy.sh` 成功，线上页面可访问
+- [ ] **首页顶部标语「零依赖 · 开放内核 vX.Y.Z」是本版本** —— 它是一句*当前版本*声明，
+      最容易漏：v0.6.1 上线后它还停在 `v0.4.6`（负责人报障"版本号没更新"）。
+      脚本此前只动 `#downloads` 区，现已把标语纳入机械字段，`--check` 也会查它。
+- [ ] 首页无残留旧版本号——注意区分：**「vX.Y.Z 起 /（vX.Y.Z 已修复）」是历史叙述，不要改**；
+      版本历史表与功能展示区的旧版本锚点也是故意的。脚本每次会列出所有旧版本号位置供扫一眼。
+- [ ] `bash deploy.sh` 成功，线上页面可访问（`curl -s https://harness.mingdao.ai/ | grep 开放内核`）
 
 ### 3.3 Gitee / GitCode 同步发行（含附件）
 
