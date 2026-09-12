@@ -4967,6 +4967,56 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.6.0 审计：Batch 中止必须落到服务端取消（并如实上报失败，不假装已停）');
 }
 
+
+// ---------- 78. v0.6.0 回归：厂家改名后，发现得到的模型必须能选中且能计费 ----------
+// 用户实测报障：DeepSeek 官方把 `deepseek-v4-flash` 改名为 `deepseek-flash` 后，
+// 设置界面能拉到（动态名单），聊天界面选中却报「未知模型」并弹回旧模型。
+// 根因是**两处不同步**：界面用动态名单，切换接口只认静态表。这一组钉住两端。
+{
+  const prevHome78 = process.env.MINGDAO_HOME;
+  const home78 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-model78-'));
+  process.env.MINGDAO_HOME = home78;
+  const models78 = await import(pathToFileURL(path.join(srcDir, 'models.js')).href);
+  const pricing78 = await import(pathToFileURL(path.join(srcDir, 'pricing.js')).href);
+  const disc78 = await import(pathToFileURL(path.join(srcDir, 'model-discovery.js')).href);
+
+  // 78a. 新名字是一等公民：有上限、**有价格**（无价格会退化成「无法估算」，对成本确定性是硬伤）
+  {
+    const f = models78.MODELS['deepseek-flash'];
+    assert.ok(f, 'deepseek-flash 必须在内置表里（官方当前名字）');
+    assert.equal(f.provider, 'deepseek', '应归属 deepseek 服务商');
+    assert.ok(f.pricing && f.pricing.offpeak && f.pricing.peak, '必须有峰谷价格——否则费用显示「无法估算」');
+    assert.ok(f.contextWindow > 0 && f.maxOutputCeiling > 0, '必须有上下文与输出上限');
+    assert.equal(pricing78.hasPricing('deepseek-flash'), true, 'hasPricing 必须为真');
+    const c = pricing78.estimateCost('deepseek-flash', 1000000, 100000);
+    assert.ok(typeof c === 'number' && c > 0, `应能算出费用，实际 ${c}`);
+  }
+  // 78b. 旧名字必须保留：老配置与历史会话里写的就是它，删掉会直接 404
+  {
+    assert.ok(models78.MODELS['deepseek-v4-flash'], '旧名 deepseek-v4-flash 必须保留（向后兼容）');
+    const label = String(models78.MODELS['deepseek-v4-flash'].label || '');
+    assert.ok(label.includes('旧名') || label.includes('已改名'), '旧名条目应标明「官方已改名」，避免用户以为是内核丢模型');
+  }
+  // 78c. 服务商回退名单应与官方 /v1/models 一致（拉取失败时它才会被用到，更不该给出已下线的名字）
+  {
+    const list = models78.PROVIDERS.deepseek.models;
+    assert.ok(list.includes('deepseek-flash'), '回退名单应含新名字 deepseek-flash');
+    assert.ok(!list.includes('deepseek-v4-flash'), '回退名单不应再含官方已不返回的旧名字');
+  }
+  // 78d. 动态发现的名字必须被判为「已知」（这是修复的核心），任意字符串仍须被拒
+  {
+    assert.equal(disc78.isDiscoveredModel('deepseek-next-gen'), false, '缓存为空时不应认任何名字');
+    fs.writeFileSync(path.join(home78, 'model-cache.json'), JSON.stringify({ deepseek: { models: ['deepseek-flash', 'deepseek-next-gen'], fetchedAt: Date.now() } }));
+    assert.equal(disc78.isDiscoveredModel('deepseek-next-gen'), true, '动态名单里的名字必须被判为已知（否则「界面能显示、选中被拒」）');
+    assert.equal(disc78.isDiscoveredModel('12345'), false, '任意字符串仍须被拒（v0.4.7 护栏不能破）');
+    assert.equal(disc78.isDiscoveredModel(''), false, '空名字应被拒');
+  }
+
+  process.env.MINGDAO_HOME = prevHome78;
+  safeRmSync(home78, { recursive: true, force: true });
+  ok('v0.6.0 回归：厂家改名后的模型（新名一等公民有价格 / 旧名保留 / 回退名单与官方一致 / 动态名字可选但护栏不破）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

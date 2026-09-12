@@ -109,6 +109,30 @@ export async function fetchProviderModels(/** @type {any} */ cfg, /** @type {any
   }
 }
 
+/**
+ * 该模型名是否出现在**已动态拉取的**服务商名单里（v0.6.0 修复）。
+ *
+ * 为什么需要它：设置界面用 `availableModels()`（动态优先，未在静态表里的标「（线上最新）」），
+ * 而切换模型的 `/api/config` 只认静态 `MODELS` 表——于是出现「应用自己列出来的模型却选不了」：
+ * DeepSeek 官方把 `deepseek-v4-flash` 改名为 `deepseek-flash` 后，界面能拉到、一点就报
+ * 「未知模型」并弹回旧模型。
+ *
+ * 判据用「服务商自己返回的名单」：它仍是有界集合（`/models` 结果、已按 isChatModel 过滤、
+ * 上限 200），因此既不放过任意字符串（v0.4.7 加这条校验就是为了拦 `{model:12345}`），
+ * 又能让**厂家改名/上新**这一类正常演进立刻可用，不必等内核发版。
+ * @param {any} name
+ */
+export function isDiscoveredModel(/** @type {any} */ name) {
+  const target = String(name || '').trim();
+  if (!target) return false;
+  const cache = loadCache();
+  for (const entry of Object.values(cache || {})) {
+    const models = /** @type {any} */ (entry)?.models;
+    if (Array.isArray(models) && models.includes(target)) return true;
+  }
+  return false;
+}
+
 // 合并可用模型列表：只含已设置 Key 的服务商；动态名单优先、预设回退；自定义模型恒在。
 export async function availableModels(/** @type {any} */ cfg, /** @type {any} */ currentModel) {
   const out = [];

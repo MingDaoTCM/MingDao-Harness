@@ -8,7 +8,8 @@ export const PROVIDERS = {
     kind: 'openai-compatible',
     baseUrl: 'https://api.deepseek.com/v1',
     envKey: 'DEEPSEEK_API_KEY',
-    models: ['deepseek-v4-flash', 'deepseek-v4-pro', 'deepseek-v4-flash-vision-exp'],
+    // 与官方 `GET /v1/models` 的实际返回保持一致（拉取失败时的回退名单也应是真实可用的）
+    models: ['deepseek-flash', 'deepseek-v4-pro'],
     note: 'DeepSeek-V4 正式版（2026-08-17 起商用）：1M 上下文（单次最大输出 384K），峰谷定价（高峰＝北京工作日 9:00–12:00、14:00–18:00，闲时价＝高峰一半），支持工具调用 / Responses API / Anthropic 兼容接口。',
   },
   openai: {
@@ -97,8 +98,29 @@ export const MODELS = {
       peak: { input: 9, output: 27, cacheHit: 0.3 },
     },
   },
-  'deepseek-v4-flash': {
+  // v0.6.0：DeepSeek 官方把 `deepseek-v4-flash` **改名**为 `deepseek-flash`
+  // （依据：`GET /v1/models` 现只返回 `deepseek-flash` 与 `deepseek-v4-pro` 两个，
+  //  而本项目静态表里还是旧名 → 设置界面能拉到、聊天界面选中却被判「未知模型」）。
+  // 上限/价格沿用 v4-flash 的数值（同一个模型换了名字）；若官方后续公布不同规格，
+  // 只需改这一处——**价格必须在这里显式给出**，否则费用会变成「无法估算」而不是真实计费。
+  'deepseek-flash': {
     label: '极速响应 · 日常问答与轻量任务',
+    provider: 'deepseek',
+    contextWindow: 1000000,
+    maxOutputCeiling: 384000,
+    budgetTokens: 128000,
+    maxOutputTokens: 8192,
+    temperature: 0.6,
+    supportsReasoning: false,
+    pricing: {
+      offpeak: { input: 1.5, output: 4.5, cacheHit: 0.05 },
+      peak: { input: 3, output: 9, cacheHit: 0.1 },
+    },
+  },
+  // 旧名保留：**老配置与历史会话里写的是这个字符串**，删掉会让它们直接 404。
+  // 但官方已不再在 /v1/models 里返回它，故标签里标明原因，避免用户以为是内核丢了三方模型。
+  'deepseek-v4-flash': {
+    label: '极速响应 · 日常问答与轻量任务（旧名；官方已改名为 deepseek-flash，建议切换）',
     provider: 'deepseek',
     contextWindow: 1000000, // 官方上下文 1M
     maxOutputCeiling: 384000,
