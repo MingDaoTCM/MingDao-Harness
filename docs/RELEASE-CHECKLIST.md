@@ -163,9 +163,9 @@ mingdao audit                       # 原审计日志行为不变
 
 > 验收通过 = 明确回复确认。**确认之前不创建 tag、不推 tag、不建 Release。**
 
-### 3.0 本轮（v0.6.0）暴露的两个**流程缺口**——已补进清单
+### 3.0 已暴露的**流程缺口**——均已补进本清单
 
-v0.6.0 上线后负责人发现两个问题，都是**流程漏了一步**，不是代码缺陷：
+v0.6.0 / v0.6.1 上线后负责人与用户发现下面几个问题，都是**流程漏了一步**，不是代码缺陷：
 
 **① 桌面版无法在线更新** —— 我把自动更新的 feed 收割到了 `/downloads/`，
 但桌面版读的是官网 **`/updates/`**（`desktop/main.js` 里写明 `feed: 官网 /updates`）。
@@ -207,6 +207,45 @@ git push <mirror> refs/tags/v<版本>:refs/tags/v<版本>
 ```
 **验收**：三平台的 `git ls-remote <url> refs/heads/main` 与本地 `main` 同 SHA；
 `git ls-remote <url> 'refs/tags/v<版本>^{}'` 解析到的提交也一致。
+
+**③ 差量更新素材漏采（v0.6.2 起）** —— 此前**三个平台的自动更新每次都整包重下**
+（exe 76MB / mac zip 93–101MB / AppImage 104MB）。根因不是功能没做，而是发布链路把
+差量素材丢了：CI 的产物 glob 和 Release 上传的 `find` 都没有 `*.blockmap`，
+自研的 feed 生成器也没写 `blockMapSize`。三平台机制**各不相同**，别按一个套路处理：
+
+| 平台 | 差量素材 | feed 里需要的字段 |
+| --- | --- | --- |
+| Windows NSIS `exe` | **独立文件** `<exe URL>.blockmap` | 无 |
+| macOS `zip` | **独立文件** `<zip URL>.blockmap` | 无 |
+| Linux `AppImage` | **内嵌在文件尾部** | **必须** `blockMapSize` |
+
+依据 electron-updater `providers/Provider.js#getBlockMapFiles`（按 `<安装包 URL>.blockmap`
+取；旧版本块映射按「把 URL 里的新版本号替换成当前版本号」取）与
+`differentialDownloader/FileWithEmbeddedBlockMapDifferentialDownloader.js`
+（`偏移 = size - (blockMapSize + 4)`，**末尾 4 字节是大端 uint32 的块映射长度**）。
+缺素材**不会让更新失败**——electron-updater 捕获异常后回退整包下载——所以这是一个
+**静默**降级，不特意查就发现不了。
+
+```bash
+# 采集：用脚本，别再手写 /tmp/harvest-<版本>.sh（手写漏过 mac zip，见 ①）
+#   scp MingDao-Harness-Site/scripts/harvest-release.mjs mingdao-server:/tmp/
+ssh mingdao-server 'MINGDAO_GITHUB_TOKEN=xxx node /tmp/harvest-release.mjs <版本> /opt/1panel/www/sites/mingdao-site/downloads'
+#   · 采安装包 + *.blockmap + latest.yml/latest-linux.yml，跳过 latest-mac.yml 与 builder-debug.yml
+#   · 每个文件按 GitHub 的 sha256(digest) + size 双校验，不符即删并退出非 0
+#   · 末尾会打印「差量更新素材」自查（缺哪个平台的 .blockmap 会直接点名）
+
+# 生成 feed（生成器自身也会打印同一份自查）
+ssh mingdao-server 'bash /tmp/gen-update-feeds.sh <版本> <downloads> <updates> https://harness.mingdao.ai/downloads'
+```
+
+**验收**：生成器输出里 Windows/mac 三项 `.blockmap` 都是 `✓`，
+且 `grep blockMapSize /updates/latest-linux.yml` 有值；`/updates/latest-linux.yml` 的分区
+应形如 `size: …` 后紧跟 `blockMapSize: …`。
+
+> 收益的时间线要说清楚：差量下载需要**本机已缓存上一版的安装包**，且需要**上一版的块映射**
+> 在服务器上。而 0.6.1 及以前从未发布过 `.blockmap`，所以第一个真正吃到差量的是
+> **从 v0.6.2 升到 v0.6.3** 的「一路自动更新上来的」用户；手工下载安装的用户没有缓存，
+> 仍然整包下载。别在发布说明里写成「更新体积立刻变小」。
 
 ## 三、发布（拿到确认后）
 

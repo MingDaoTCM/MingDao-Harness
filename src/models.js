@@ -98,9 +98,11 @@ export const MODELS = {
       peak: { input: 9, output: 27, cacheHit: 0.3 },
     },
   },
-  // v0.6.0：DeepSeek 官方把 `deepseek-v4-flash` **改名**为 `deepseek-flash`
+  // v0.6.1：DeepSeek 官方把 `deepseek-v4-flash` **改名**为 `deepseek-flash`
   // （依据：`GET /v1/models` 现只返回 `deepseek-flash` 与 `deepseek-v4-pro` 两个，
   //  而本项目静态表里还是旧名 → 设置界面能拉到、聊天界面选中却被判「未知模型」）。
+  // 版本标注订正：本条修复落在 v0.6.1（提交 `9f19de7`，在 v0.6.0 标签 `a9167d1` 之后），
+  // 原先误标为 v0.6.0。
   // 上限/价格沿用 v4-flash 的数值（同一个模型换了名字）；若官方后续公布不同规格，
   // 只需改这一处——**价格必须在这里显式给出**，否则费用会变成「无法估算」而不是真实计费。
   'deepseek-flash': {

@@ -99,6 +99,12 @@ jobs:
             desktop/dist/*.dmg
             desktop/dist/*.zip
             desktop/dist/*.yml
+            # 差量更新（v0.6.2）：Windows NSIS 与 macOS zip 的 blockmap 是**独立文件**，
+            # electron-updater 按 `<安装包 URL>.blockmap` 取（providers/Provider.js
+            # getBlockMapFiles）。此前不上传 → 差量永远不触发、每次更新整包重下
+            # （exe 76MB / mac zip 93–101MB）。Linux AppImage 的 blockmap 内嵌在文件尾部，
+            # 不需要独立文件，但 feed 必须给出 blockMapSize。
+            desktop/dist/*.blockmap
           if-no-files-found: warn
   publish:
     needs: build
@@ -123,10 +129,11 @@ jobs:
           REPO="${{ github.repository }}"
           echo "gh 版本：$(gh --version | head -1)"
           gh auth status 2>&1 | sed 's/^/auth: /' | head -6
-          # 只上传 7 个安装包 + 2 份平台更新清单。排除 builder-debug.yml（每平台 dist 都有一份，
+          # 只上传安装包 + 平台更新清单 + blockmap（差量更新用，见 build 步骤注释）。
+          # 排除 builder-debug.yml（每平台 dist 都有一份，
           # 同批次重名会上传 422）与 latest-mac.yml（双架构合并版由官网发布流程在服务器生成）。
           # mac zip 文件名含空格，必须按行拆成数组再传参（不能直接 $FILES 分词）。
-          mapfile -t FILE_ARR < <(find artifacts -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name 'latest.yml' -o -name 'latest-linux.yml' \) | sort)
+          mapfile -t FILE_ARR < <(find artifacts -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.exe' -o -name '*.dmg' -o -name '*.zip' -o -name '*.blockmap' -o -name 'latest.yml' -o -name 'latest-linux.yml' \) | sort)
           echo "待上传："; printf '%s\n' "${FILE_ARR[@]}"
           if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
             echo "Release 已存在：先清空旧资产"
