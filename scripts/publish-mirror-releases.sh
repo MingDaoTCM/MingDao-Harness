@@ -59,9 +59,40 @@ PY
 NAME="$(rel_name "$V")"
 echo "发行版标题：$NAME"
 
-# 1) 同步 tag（与 GitHub 同 commit）
+# 1) 同步**分支与** tag（与 GitHub 同 commit）
+#
+# **分支必须一起推。** 只推 tag 的话镜像的 main 会停在旧提交，用户在 gitee/gitcode
+# 上看到的仍是过期代码——RELEASE-CHECKLIST §3.0 ② 记的就是这个坑，而 2026-09-12 又犯了
+# 一次：GitHub 的 main 到了 d986d1c，两个镜像却还停在 f6b7d92 的
+# "chore: release v0.6.1"。原因是本脚本当时只推 tag，且本机没配 gitee/gitcode 两个
+# remote（只有 origin），于是 `git push origin main` 之后镜像毫无变化。
+#
+# 前置（一次性，SSH，不需要 token）：
+#   git remote add gitee   git@gitee.com:mingdaotcm/MingDao-Harness.git
+#   git remote add gitcode git@gitcode.com:mingdaotcm/MingDao-Harness.git
+for R in gitee gitcode; do
+  git remote get-url "$R" >/dev/null 2>&1 || { echo "✗ 未配置 remote $R——按上面注释加好再跑（否则镜像分支会停在旧提交）"; exit 1; }
+done
+git push gitee main:main
+git push gitcode main:main
 git push gitee "$TAG" --force
 git push gitcode "$TAG" --force
+
+# 1b) 对齐自证：三平台 main 必须是同一个 commit（不一致就别继续发版）
+echo "== main 对齐检查 =="
+LOCAL_SHA="$(git rev-parse main)"
+ALIGN_OK=1
+for R in origin gitee gitcode; do
+  git remote get-url "$R" >/dev/null 2>&1 || continue
+  REMOTE_SHA="$(git ls-remote "$R" refs/heads/main 2>/dev/null | cut -f1)"
+  if [ "$REMOTE_SHA" = "$LOCAL_SHA" ]; then
+    echo "  ✓ $R ${LOCAL_SHA:0:8}"
+  else
+    echo "  ✗ $R ${REMOTE_SHA:0:8}（本地 ${LOCAL_SHA:0:8}）"
+    ALIGN_OK=0
+  fi
+done
+[ "$ALIGN_OK" = "1" ] || { echo "✗ 三平台 main 未对齐，先修好再发版"; exit 1; }
 
 # 2) 发布文案（默认取仓库 RELEASE-NOTES，或用指定文件）
 BODY="${NOTES:-RELEASE-NOTES-$V.md}"
