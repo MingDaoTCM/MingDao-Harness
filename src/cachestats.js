@@ -11,10 +11,14 @@ export function cacheStatsFile() {
   return path.join(mingdaoHome(), 'cache-stats.jsonl');
 }
 
-// 内存计数 + 低频轮转（评估 P3-3：此前无限增长且每次全量解析）
+// 低频轮转（评估 P3-3：此前无限增长且每次全量解析）
+// v0.6.2（第三方代码审计 P2-2）：触发改为**文件大小**，删掉进程内计数。
+// 三份「追加 + 超限截断」实现（audit / journal / cachestats）此前都用进程内计数，
+// 对 CLI 用户永远不成立（每次只写几条、进程结束归零）——轮转全是**死代码**，文件无界增长。
+// 这里尤其要紧：todayCost() 与日费用护栏读的就是本文件。
 const MAX_LINES = 20000;
 const KEEP_LINES = 10000;
-let cacheStatsCount = 0;
+const MAX_BYTES = 4 * 1024 * 1024; // 约合 20000 行
 
 export function recordCacheStats(/** @type {any} */ entry) {
   try {
@@ -46,10 +50,9 @@ export function recordCacheStats(/** @type {any} */ entry) {
       auxReason: entry.auxReason ? String(entry.auxReason) : undefined,
     });
     fs.appendFileSync(cacheStatsFile(), line + '\n');
-    cacheStatsCount += 1;
   } catch {}
-  if (cacheStatsCount > MAX_LINES && cacheStatsCount % 200 === 0) {
-    try {
+  try {
+    if (fs.statSync(cacheStatsFile()).size > MAX_BYTES) {
       // 审计 P2-3（v0.4.2）：轮转 read-modify-write 加跨进程锁——web/CLI/worker 多进程并发轮转时，
       // 读与写之间他人追加的行会被覆写丢失；锁内重读再瘦身，写用原子替换。
       withFileLockSync(cacheStatsFile() + '.lock', () => {
@@ -77,11 +80,10 @@ export function recordCacheStats(/** @type {any} */ entry) {
           const order = new Map(lines.map((l, i) => [l, i]));
           merged.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
           atomicWriteFileSync(cacheStatsFile(), merged.join('\n') + '\n');
-          cacheStatsCount = merged.length;
         }
       });
-    } catch {}
-  }
+    }
+  } catch {}
 }
 
 // listCacheStats 读取缓存（审计：costGuard 每步 / WebUI 每 15s / /cost 命令都调用——

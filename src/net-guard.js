@@ -18,10 +18,14 @@ import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { parseNetPolicy, checkEgress } from './net-policy.js';
 import { redactSecrets } from './redact.js';
+import { atomicWriteFileSync } from './atomic-write.js';
 
 const MAX_LINES = 20000;
 const KEEP_LINES = 10000;
-let appendCount = 0;
+// v0.6.2（第三方代码审计 P2-2/P2-3）：与 audit/journal/cachestats 同款修正——
+// 触发改看**文件大小**（进程内计数对 CLI 永远不成立 → 轮转是死代码），并把
+// 非原子写改成原子写（轮转中崩溃会留下半截出网账本，而它是审计证据）。
+const MAX_BYTES = 2 * 1024 * 1024; // 约合 20000 行
 
 /** 当前生效策略（null = 未安装，一切放行且不记账） */
 let activePolicy = /** @type {any} */ (null);
@@ -78,20 +82,18 @@ export function recordEgress(/** @type {any} */ info) {
     try {
       fs.chmodSync(file, 0o600);
     } catch {}
-    appendCount += 1;
   } catch {
     return entry;
   }
-  // 低频轮转（与 audit.jsonl 同款策略）：只保留最近 KEEP_LINES 行
-  if (appendCount > MAX_LINES && appendCount % 200 === 0) {
-    try {
+  // 低频轮转（与 audit.jsonl 同款策略：按大小触发 + 原子写）：只保留最近 KEEP_LINES 行
+  try {
+    if (fs.statSync(egressLogFile()).size > MAX_BYTES) {
       const lines = fs.readFileSync(egressLogFile(), 'utf8').split('\n').filter(Boolean);
       if (lines.length > MAX_LINES) {
-        fs.writeFileSync(egressLogFile(), lines.slice(-KEEP_LINES).join('\n') + '\n', { mode: 0o600 });
-        appendCount = KEEP_LINES;
+        atomicWriteFileSync(egressLogFile(), lines.slice(-KEEP_LINES).join('\n') + '\n', { mode: 0o600 });
       }
-    } catch {}
-  }
+    }
+  } catch {}
   return entry;
 }
 

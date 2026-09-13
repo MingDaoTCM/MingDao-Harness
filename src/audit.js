@@ -8,10 +8,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { redactSecrets } from './redact.js';
+import { atomicWriteFileSync } from './atomic-write.js';
 
-const MAX_LINES = 20000;
+// v0.6.2（第三方代码审计 P2-2）：截断触发改为看**文件大小**。
+// 原判据 `auditCount > 20000` 是**进程内**计数：CLI 每次会话只 append 几次、进程结束即归零，
+// 于是这个条件永远不成立 → 截断是**死代码**，audit.jsonl 对 CLI 用户无界增长
+// （与注释里「低频截断」的意图正好相反）。按大小判断跨进程有效且同样是 O(1)。
+const MAX_BYTES = 4 * 1024 * 1024; // 约合 20000 行
 const KEEP_LINES = 10000;
-let auditCount = 0; // 内存计数（评估 P3-2）：避免每次写入都整文件读一遍只为查行数
 
 export function auditFile() {
   return path.join(mingdaoHome(), 'audit.jsonl');
@@ -28,21 +32,23 @@ export function writeAudit(/** @type {any} */ entry) {
     try {
       fs.chmodSync(file, 0o600);
     } catch {}
-    auditCount += 1;
+
   } catch {
     return; // 审计失败绝不影响会话
   }
-  // 低频截断：跨过上限后每 200 条才读盘检查一次
-  if (auditCount > MAX_LINES && auditCount % 200 === 0) {
-    try {
-      const raw = fs.readFileSync(auditFile(), 'utf8');
-      const lines = raw.split('\n').filter(Boolean);
-      if (lines.length > MAX_LINES) {
-        fs.writeFileSync(auditFile(), lines.slice(-KEEP_LINES).join('\n') + '\n', { mode: 0o600 });
-        auditCount = KEEP_LINES;
+  // 低频截断：statSync 廉价，只有真的超过阈值才整文件读一次并重写
+  try {
+    const f = auditFile(); // 上面 try 里的 file 是块内作用域，这里单独取一次
+    if (fs.statSync(f).size > MAX_BYTES) {
+      const lines = fs.readFileSync(f, 'utf8').split('\n').filter(Boolean);
+      if (lines.length > KEEP_LINES) {
+        // v0.6.2（P2-3）：**原子写**——原先直接 writeFileSync，截断过程中崩溃会留下半截
+        // audit.jsonl（审计证据丢事件）。atomicWriteFileSync 的 tmp 名含 pid+随机后缀，
+        // 写完 rename 原子替换，读者永远看到完整文件；mode 保持 0600。
+        atomicWriteFileSync(f, lines.slice(-KEEP_LINES).join('\n') + '\n', { mode: 0o600 });
       }
-    } catch {}
-  }
+    }
+  } catch {}
 }
 
 export function listAudit(limit = 20) {

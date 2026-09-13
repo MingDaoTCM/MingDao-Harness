@@ -93,12 +93,20 @@ export function removeMemoryLines(/** @type {any} */ keyword) {
   }
   if (removed > 0) {
     backupMemory();
-    atomicWriteFileSync(memoryFile(), kept.join('\n'));
+    // v0.6.2（第三方代码审计 P2-1）：必须补**尾换行**。
+    // 少了它，文件结尾与下一次 append 的内容会拼成同一行
+    // （`- [date] 旧条目- [date] 新条目`），整条记忆既解析不出来也读不懂。
+    // 隔壁 dedupeMemory 一直是带 `+ '\n'` 的，这里漏了。
+    atomicWriteFileSync(memoryFile(), kept.length ? kept.join('\n') + '\n' : '');
   }
   return removed;
 }
 
-let journalCount = 0; // 内存计数（评估 P3-2）：避免每次写入都整文件读一遍只为查行数
+// v0.6.2（第三方代码审计 P2-2）：截断改看**文件大小**，不再依赖进程内计数。
+// 原判据 `journalCount > 600` 对 CLI 用户永远不成立——每个进程只写一两条，
+// 计数随进程结束归零，于是截断是**死代码**，journal 无界增长。
+const JOURNAL_MAX_BYTES = 256 * 1024;
+const JOURNAL_KEEP_LINES = 500;
 
 export function appendJournal(/** @type {any} */ home, /** @type {any} */ entry) {
   try {
@@ -108,22 +116,20 @@ export function appendJournal(/** @type {any} */ home, /** @type {any} */ entry)
     fs.mkdirSync(path.dirname(journalFile()), { recursive: true });
     // 纯追加：并发会话收尾互不覆盖；崩溃最多丢最后一行
     fs.appendFileSync(journalFile(), JSON.stringify(entry) + '\n');
-    journalCount += 1;
   } catch (err) {
     // 静默吞错面收窄（评估建议 3）：调试开关可见原因，正常使用仍零打扰
     if (process.env.MINGDAO_DEBUG) console.warn('[MingDao] journal 写入失败：' + ((/** @type {any} */ (err))?.message || err));
   }
-  // 低频截断：超过 600 行时重写保留最近 500 行（跨过上限后每 200 条检查一次）
-  if (journalCount > 600 && journalCount % 200 === 0) {
-    try {
-      const raw = fs.readFileSync(journalFile(), 'utf8');
-      const lines = raw.split('\n').filter(Boolean);
-      if (lines.length > 600) {
-        atomicWriteFileSync(journalFile(), lines.slice(-500).join('\n') + '\n');
-        journalCount = 500;
+  // 低频截断：**按文件大小**判断（跨进程有效），超限时保留最近 500 行。
+  // statSync 是廉价系统调用；只有真的超限才整文件读一次，截断后大小回落，不会反复读。
+  try {
+    if (fs.statSync(journalFile()).size > JOURNAL_MAX_BYTES) {
+      const lines = fs.readFileSync(journalFile(), 'utf8').split('\n').filter(Boolean);
+      if (lines.length > JOURNAL_KEEP_LINES) {
+        atomicWriteFileSync(journalFile(), lines.slice(-JOURNAL_KEEP_LINES).join('\n') + '\n');
       }
-    } catch {}
-  }
+    }
+  } catch {}
 }
 
 export function recentJournal(/** @type {any} */ home, n = 3) {

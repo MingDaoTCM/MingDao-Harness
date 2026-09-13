@@ -5646,6 +5646,95 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.6.2 P2-12：结构守卫——全仓 generateTitle 调用点都有独立 try（防第 5 处遗漏）');
 }
 
+
+// ---------- 89. v0.6.2 代码审计 P2-1/P2-2/P2-3：日志写入与轮转 ----------
+// P2-2：四份「追加 + 超限截断」实现（audit / journal / cachestats / egress 账本）都用**进程内计数**
+// 作触发条件。CLI 每次进程只写几条、计数随进程结束归零，于是条件永远不成立——轮转是**死代码**，
+// 文件对 CLI 用户无界增长（与注释里「低频截断」的意图正好相反）。
+// P2-3：其中两处轮转用非原子写，崩溃会留下半截文件（而它们是审计证据）。
+// P2-1：removeMemoryLines 写回缺尾换行，下次追加会把两条记忆拼成同一行。
+{
+  const homeLog = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-log89-'));
+  const prevHomeLog = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = homeLog;
+  try {
+    const { writeAudit, auditFile } = await import(pathToFileURL(path.join(srcDir, 'audit.js')).href);
+    const { appendJournal, journalFile, appendMemory, removeMemoryLines, memoryFile, loadMemory } = await import(
+      pathToFileURL(path.join(srcDir, 'memory.js')).href
+    );
+    const { recordCacheStats, cacheStatsFile } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+    // 填充行必须是**合法 JSON**：否则「轮转后每行都是完整 JSON」这条断言验的是我的假数据，
+    // 而不是轮转本身有没有截出半行（第一版就写错了，被自己的断言抓出来）。
+    const filler = JSON.stringify({ at: 1, session: 'filler', model: 'm', pad: 'x'.repeat(200) });
+
+    // 89a. 审计轮转：**单次** writeAudit 也必须能触发（旧实现依赖进程内计数 → 永远不触发）
+    fs.writeFileSync(auditFile(), (filler + '\n').repeat(20000)); // ≈4.8MB > 4MB 阈值
+    const before89 = fs.statSync(auditFile()).size;
+    writeAudit({ at: Date.now(), session: 's89', model: 'm', tool: 'bash' });
+    const after89 = fs.readFileSync(auditFile(), 'utf8').split('\n').filter(Boolean);
+    assert.ok(fs.statSync(auditFile()).size < before89, '超过字节阈值后必须真的轮转（旧计数式实现永远不触发）');
+    assert.ok(after89.length <= 10001, '轮转后应保留约 KEEP_LINES 行，实测 ' + after89.length);
+    assert.ok(
+      after89.every((l) => {
+        try {
+          JSON.parse(l);
+          return true;
+        } catch {
+          return false;
+        }
+      }),
+      '轮转后每行仍必须是完整 JSON（非原子写崩溃会留下半截行）'
+    );
+    assert.equal(fs.readdirSync(homeLog).filter((x) => x.includes('.tmp')).length, 0, '原子写不得留下 .tmp 残留');
+
+    // 89b. journal 同款（阈值 256KB）
+    fs.writeFileSync(journalFile(), ('y'.repeat(200) + '\n').repeat(2000)); // ≈400KB
+    const jBefore = fs.statSync(journalFile()).size;
+    appendJournal(homeLog, { at: Date.now(), workspace: 'w', firstUser: 'x', outcome: 'y', turns: 1 });
+    assert.ok(fs.statSync(journalFile()).size < jBefore, 'journal 超阈值也必须轮转');
+
+    // 89c. cachestats 同款（阈值 4MB），且轮转必须保住**当天**记录——
+    //      否则 todayCost() 变小、日费用护栏被静默重置（这是 v0.4.6 修过的 P2，别改回归）
+    const todayEntry = JSON.stringify({ at: Date.now(), model: 'm89', prompt: 1, completion: 1, cost: 0.01 });
+    fs.writeFileSync(cacheStatsFile(), todayEntry + '\n' + (filler + '\n').repeat(20000));
+    recordCacheStats({ model: 'm89', prompt: 1, completion: 1, cost: 0.01 });
+    const csLines = fs.readFileSync(cacheStatsFile(), 'utf8').split('\n').filter(Boolean);
+    assert.ok(csLines.length <= 10002, 'cachestats 应轮转，实测 ' + csLines.length);
+    assert.ok(
+      csLines.some((l) => {
+        try {
+          return JSON.parse(l).cost === 0.01;
+        } catch {
+          return false;
+        }
+      }),
+      '轮转必须保住当天的费用记录（否则日费用护栏被静默重置）'
+    );
+
+    // 89d. P2-1：删除条目后必须仍有尾换行，否则下次追加会拼成同一行。
+    // 必须**构造真实触发条件**：`raw.split('\n')` 会保留末尾空串，所以"文件本来以换行结尾"时
+    // `kept.join('\n')` 恰好仍带换行，缺陷不复现。原缺陷只在**末尾无换行**时出现
+    // （用户用编辑面板保存、或手改文件后可能出现）——第一版测试没构造这个前提，
+    // 变异验证时把修复撤掉也毫无反应，属于"假绿"。
+    fs.writeFileSync(memoryFile(), '- [2026-01-01] 第一条\n- [2026-01-01] 第二条'); // 注意：无尾换行
+    removeMemoryLines('第二条');
+    assert.ok(fs.readFileSync(memoryFile(), 'utf8').endsWith('\n'), 'removeMemoryLines 写回必须带尾换行');
+    assert.equal(removeMemoryLines('不存在的关键词'), 0, '没有命中时不应改动文件');
+    appendMemory(['- 第三条']);
+    const mLines = fs.readFileSync(memoryFile(), 'utf8').split('\n').filter(Boolean);
+    assert.equal(mLines.length, 2, '删一条 + 加一条后应恰好两行，实测 ' + JSON.stringify(mLines));
+    assert.ok(
+      mLines.every((l) => /^- \[\d{4}-\d{2}-\d{2}\] /.test(l)),
+      '每行都应是独立完整的条目（拼接坏行的特征是第二条缺日期前缀）：' + JSON.stringify(mLines)
+    );
+    assert.ok(loadMemory().includes('第三条'), 'loadMemory 应能读到新条目');
+  } finally {
+    process.env.MINGDAO_HOME = prevHomeLog;
+    safeRmSync(homeLog, { recursive: true, force: true });
+  }
+  ok('v0.6.2 P2-1/P2-2/P2-3：轮转按文件大小触发（单次写即生效）+ 原子写无残行 + 记忆尾换行不粘行');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });
