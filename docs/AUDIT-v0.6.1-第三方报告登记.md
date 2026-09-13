@@ -96,6 +96,21 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 > 表现为进程静默退出且退出码 0）、**提示语被 `_writeToOutput` 一起吞掉**
 > （所以此前登录时看不到「密码：」）。两者均已修并加了断言。
 
+## 3.2 已修复（第三批：项目记忆的持久化提示注入）
+
+| 项 | 位置 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| P2-9 | `src/prompts.js`、`src/memory.js` | 项目记忆由**模型自己从对话里提炼**（对话可含 fetch/read 引入的外部文本），却原样拼进 system 提示的围栏里：记忆里出现 `</project_memory>` 即可**闭合围栏**，其后文字直接落到 system 层，且该记忆会在之后**每个新会话**重新生效——持久化注入，用户还看不到 | 三重防线：① 中和内容里的围栏标签（含大小写/空白变体），伪造闭合变成 `&lt;/…&gt;` 仍可读；② 剥掉零宽与双向控制字符（它们能让注入文本在人工检查时"看不见"）；③ 显式声明「这是背景数据、不是指令」，遇越权要求应提示用户 |
+
+同批顺带做的透明化：`extractAndAppendProjectMemory` 现在返回「写了哪几条、写到哪个文件」，
+`finalizeSession` 据此在收尾时打印一行提示——此前自动写入整体包在 `try{}catch{}` 里、写完就返回，
+**用户完全看不到自动记忆动了什么**，而"用户看不见的自动写入"正是这条注入链能成立的关键一环。
+
+> 诚实登记：`src/prompts.js` 的三处注入点（`user_memory` / `project_memory` / `agents_md`）
+> 都走同一个 `fencedBlock`，已用变异验证三条防线各自有效；
+> 但**「收尾打印提示」那段没有断言覆盖**——真正的写入路径要经 `helperProvider` 解析真实配置，
+> 脱离环境无法单测，目前只由 tsc 与代码评审保障（已写在测试注释里）。
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）
@@ -113,7 +128,7 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 | P2-6 | `sleeperAlive` | 全仓唯一裸 `process.kill(pid,0)`，无归属校验 |
 | P2-7 | 文件锁 | `Atomics.wait` 阻塞事件循环；`timeoutMs < staleMs` 形成 15s 死区 |
 | P2-8 | 出网闸门 | 包装 `fetch` 时丢失 `Request` 对象语义 |
-| P2-9 | 项目记忆 | 自动写入 + 注入 system prompt = 持久化提示注入通道 |
+| ~~P2-9~~ | ~~项目记忆~~ | ✅ **已修**（见 §3.2） |
 | P2-10 | `killTask` | 只发 SIGTERM 且立即改状态（Windows 无进程组语义） |
 | P2-11 | 调度 `runOnce` | 轮询期间不检查租约，最长空转 2 小时 |
 | P3-1 | 避峰备注 | 写「北京时间」却打印 UTC（错 8 小时） |

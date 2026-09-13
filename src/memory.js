@@ -370,14 +370,23 @@ export async function extractProjectMemory(/** @type {any} */ provider, /** @typ
 
 // 项目记忆提取 + 追加（CLI finalizeSession 与 WebUI 收尾共用；配置 autoProjectMemory 默认开）
 export async function extractAndAppendProjectMemory(/** @type {any} */ { cfg, provider, model, messages, workingDir }) {
-  if (!workingDir || cfg?.autoProjectMemory === false) return;
+  const none = { written: 0, lines: /** @type {string[]} */ ([]), file: '' };
+  if (!workingDir || cfg?.autoProjectMemory === false) return none;
   try {
     const existing = loadProjectMemory(workingDir);
     const { helperProvider } = await import('./providers/index.js');
     const memProvider = await helperProvider(cfg, model, provider);
     const lines = await extractProjectMemory(memProvider, model, messages, existing);
-    if (lines.length) appendProjectMemory(workingDir, lines);
-  } catch {}
+    if (!lines.length) return none;
+    const file = projectMemoryFile(workingDir);
+    const written = appendProjectMemory(workingDir, lines);
+    // v0.6.2（第三方审计 P2-9）：把「写入了什么」交给调用方去**显式提示用户**。
+    // 此前这个函数整体包在 try{}catch{} 里、写完就返回，用户完全看不到自动记忆动了什么——
+    // 而「用户看不见的自动写入」正是持久化提示注入能成立的关键一环。
+    return { written, lines, file };
+  } catch {
+    return none;
+  }
 }
 
 // 会话收尾：写日志 + 自动记忆（turns 太少的一次性会话只记日志不提取）
@@ -414,6 +423,16 @@ export async function finalizeSession(/** @type {any} */ { cfg, provider, model,
   // 单轮重型任务也会执行工具，故按「是否有 tool 消息」判定而非 turn 数）
   const hadToolWork = messages.some((/** @type {any} */ m) => m.role === 'tool');
   if (workingDir && (hadToolWork || turns >= 2)) {
-    await extractAndAppendProjectMemory({ cfg, provider, model, messages, workingDir });
+    const mem = await extractAndAppendProjectMemory({ cfg, provider, model, messages, workingDir });
+    if (mem.written) {
+      // 让用户看得见自动记忆写了什么（可据此发现被注入的指令）
+      try {
+        const preview = mem.lines.slice(0, 2).map((/** @type {string} */ l) => '   · ' + String(l).slice(0, 70));
+        console.log(`📝 项目记忆：本次自动写入 ${mem.written} 条 → ${mem.file}`);
+        for (const l of preview) console.log(l);
+        if (mem.lines.length > preview.length) console.log(`   · …（共 ${mem.lines.length} 条）`);
+        console.log('   （直接编辑该文件即可增删；关闭自动记忆：config.autoProjectMemory=false）');
+      } catch {}
+    }
   }
 }
