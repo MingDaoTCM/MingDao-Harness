@@ -497,7 +497,7 @@ let base = await startWeb(work1);
   assert.equal(rk.ok, true);
   const rm = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'removeCustom', name: 'web-custom' }) })).json();
   assert.equal(rm.ok, true, rm.error);
-  assert.equal(rm.model, 'deepseek-v4-flash', '删除当前自定义模型应回退默认');
+  assert.equal(rm.model, 'deepseek-flash', '删除当前自定义模型应回退默认（新名，见 models.js 的 DEFAULT_MODEL）');
   const back = await (await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'test-model' }) })).json();
   assert.equal(back.ok, true, back.error);
   const b1 = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setBaseUrl', baseUrl: `http://127.0.0.1:${mockPort}/v1` }) })).json();

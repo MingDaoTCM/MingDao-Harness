@@ -12,6 +12,7 @@
 // SSE 事件：banner/text/reasoning/code/tool/toolDenied/todo/usage/ask/error/done
 
 import http from 'node:http';
+import { DEFAULT_MODEL } from '../models.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -192,7 +193,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     if (candidates.has(h)) return true;
     return host === '0.0.0.0' && authEnabled;
   };
-  let modelName = cfg.model || 'deepseek-v4-flash';
+  let modelName = cfg.model || DEFAULT_MODEL;
   const pc = resolveProviderConfig(cfg, modelName);
   if (!pc.apiKey) {
     // 首次运行/未配置密钥：界面照常启动（黑屏根因修复——此前这里直接 return，桌面版窗口

@@ -1,10 +1,11 @@
 // 费用护栏（四报告共识 A2/Kimi P-1：把峰谷定价从「展示」升级为「主动约束」）：
-// config.costGuard = { dailyLimitYuan: 10, warnAtYuan: 8, action: 'warn'|'block'|'downgrade', downgradeModel?: 'deepseek-v4-flash' }
+// config.costGuard = { dailyLimitYuan: 10, warnAtYuan: 8, action: 'warn'|'block'|'downgrade', downgradeModel?: DEFAULT_MODEL }
 // 按北京时间自然日累计 cache-stats 实际费用（含 batch 半价与缓存折扣后的真实口径）。
 // Agent 每轮开始前检查：超 warn 线提醒；超 limit 时按 action 处理——
-//   block：暂停执行；downgrade（省钱 B4）：自动切换便宜模型继续跑（默认 deepseek-v4-flash）。
+//   block：暂停执行；downgrade（省钱 B4）：自动切换便宜模型继续跑（默认 DEFAULT_MODEL）。
 
 import fs from 'node:fs';
+import { DEFAULT_MODEL } from './models.js';
 import { listCacheStats, cacheStatsFile } from './cachestats.js';
 import { beijingDayStart, hasPricing } from './pricing.js';
 import { loadConfig } from './config.js';
@@ -73,7 +74,7 @@ export function costGuardStatus(modelName) {
     limit,
     warnAt,
     action,
-    downgradeModel: String(g.downgradeModel || 'deepseek-v4-flash'),
+    downgradeModel: String(g.downgradeModel || DEFAULT_MODEL),
     degraded: cost === null, // 统计不可读：护栏降级为「无法判断」
     noPricing, // 无价格数据：费用护栏无法累计，需显式告警
     overWarn: cost !== null && !noPricing && limit > 0 && cost >= warnAt,

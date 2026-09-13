@@ -2,6 +2,7 @@
 // 由 cli.js 的内部入口 `mingdao run-worker <id> ...` 启动（startTask 拉起的子进程）。
 // 无交互：ask 权限降级 readonly；支持避峰顺延、MCP、自动标题、费用入账、完成通知与自动同步。
 import fs from 'node:fs';
+import { DEFAULT_MODEL } from '../models.js';
 import path from 'node:path';
 import { loadConfig, ensureHome } from '../config.js';
 import { createProvider, resolveProviderConfig, helperProvider } from '../providers/index.js';
@@ -33,7 +34,7 @@ export async function runWorkerTask(id, question, { permission, model, offpeak }
   try {
     cfg = loadConfig();
     if (!cfg) throw new Error('未初始化配置，请先运行 mingdao init');
-    const modelName = model || cfg.model || 'deepseek-v4-flash';
+    const modelName = model || cfg.model || DEFAULT_MODEL;
     const pc = resolveProviderConfig(cfg, modelName);
     if (!pc.apiKey) throw new Error(`模型 ${modelName} 没有可用 API Key`);
     const workingDir = process.cwd();

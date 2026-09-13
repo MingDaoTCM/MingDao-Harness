@@ -1,6 +1,7 @@
 // 配置域（Phase C C1）：/api/state /api/config /api/models-config
 // 服务商 Key 管理、自定义模型增删改、API 地址覆盖、系统状态快照。
 import fs from 'node:fs';
+import { DEFAULT_MODEL, DEFAULT_EXECUTOR_MODEL } from '../../../models.js';
 import path from 'node:path';
 import { loadConfig, saveConfig } from '../../../config.js';
 import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../../../credentials.js';
@@ -120,7 +121,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       cfg.routing = {
         enabled: on,
         planner: cfg.routing?.planner || 'deepseek-v4-pro',
-        executor: cfg.routing?.executor || 'deepseek-v4-flash',
+        executor: cfg.routing?.executor || DEFAULT_EXECUTOR_MODEL,
       };
       next.routing = on;
     }
@@ -295,7 +296,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       delete cfg.customModels[name];
       removeStoredKey(`custom:${name}`);
       if (state.modelName === name) {
-        state.modelName = 'deepseek-v4-flash';
+        state.modelName = DEFAULT_MODEL;
         cfg.model = state.modelName;
       }
       saveConfig(cfg);

@@ -120,6 +120,23 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 > `redactConfig` 的设计取向写在代码注释里：`author` 这类含 `auth` 的键会被过度掩码，
 > 诊断可读性略降——但方向是安全的，**宁可少显示，不可泄漏**。
 
+## 3.4 已修复（第五批：默认模型名散落 12 处 + 老配置路由静默失效）
+
+| 项 | 位置 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| P3-4（自评报告）+ P2-10（代码审计报告） | `models.js` / `routing.js` / `config.js` / `web/*` / `tasks/worker.js` / `cost-guard.js` / `cli.js` / `commands/{repl,update}.js` | 厂家把 `deepseek-v4-flash` 改名后，**默认值仍以字面量散落在 12 处**——全是新装用户与兜底路径会走到的位置，等于给新用户一个 API 已不提供的模型名（v0.6.1 那次故障的翻版） | 新增单一来源 `DEFAULT_MODEL` / `DEFAULT_PLANNER_MODEL` / `DEFAULT_EXECUTOR_MODEL`，12 处全部改引用；旧名只保留在 `MODELS` 里做兼容 |
+
+**修复过程中由既有测试抓出的一个更严重的连带问题**（比原报告说得更深）：
+把默认值改成新名后，路由/子代理的「当前模型是否在池内」是**精确字符串比较**——
+老用户 config 里仍是旧名，于是被判成「**池外模型**（用户手动指定）」，**自动路由对他们静默失效**，
+而且没有任何提示。已新增 `canonicalModel()` 归一（只用于「是不是同一个模型」的比较，
+发给 API 的名字仍用配置原值），并在 `routeTask` / `subagentModel` 的池判定处使用。
+
+**防复发**：新增**结构守卫**断言——旧名作为字面量只允许出现在 `models.js`；
+其余任何文件写回字面量即测试失败并指名文件。这样厂家下次改名时不可能再散落。
+（实测变异：把字面量写回 `commands/update.js` → 守卫报
+「旧模型名不得作为字面量散落在 models.js 之外：commands/update.js(1)」。）
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）
@@ -143,7 +160,7 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 | P3-1 | 避峰备注 | 写「北京时间」却打印 UTC（错 8 小时） |
 | P3-2 | `kind:'every'` | `nextRunAt` 缺失时每 1 秒空转 |
 | P3-3 | git 工具 | 默认加 `--stat` 与模型显式 `--no-stat` 冲突 |
-| P3-4 | 模型默认值 | 改名后仍散落 8 处，与「单一来源」教训相悖 |
+| ~~P3-4~~ | ~~模型默认值~~ | ✅ **已修**（见 §3.4；实测 12 处，非 8 处） |
 | P3-5 | Pack lint | 去注释正则会把字符串里的 `//` 一起删掉（漏报） |
 
 ### 4.2 第三方代码审计报告（`MingDao-Harness-v0.6.1-代码审计报告.md`）

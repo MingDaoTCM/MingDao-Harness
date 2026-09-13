@@ -6,7 +6,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { loadConfig, saveConfig, runWizard, ensureHome, mingdaoHome } from '../config.js';
 import { helpLines } from '../help.js';
-import { modelPreset, PROVIDERS } from '../models.js';
+import { modelPreset, PROVIDERS, DEFAULT_PLANNER_MODEL, DEFAULT_EXECUTOR_MODEL } from '../models.js';
 import { maskKey, getStoredKey } from '../credentials.js';
 import { createProvider, resolveProviderConfig, helperProvider } from '../providers/index.js';
 import { compactConversation } from '../compact.js';
@@ -319,7 +319,7 @@ export async function runRepl(ctx) {
         }
         await switchToModel(arg);
       } else if (cmd === '/mode') {
-        const map = { pro: 'deepseek-v4-pro', flash: 'deepseek-v4-flash' };
+        const map = { pro: DEFAULT_PLANNER_MODEL, flash: DEFAULT_EXECUTOR_MODEL };
         const target = /** @type {Record<string, any>} */ (map)[arg] || arg;
         if (!target) {
           io.print('用法：/mode pro|flash|<模型名>（pro=deepseek-v4-pro，flash=deepseek-v4-flash）');
@@ -352,7 +352,7 @@ export async function runRepl(ctx) {
         io.print(style(`✓ 计划模式：${planMode ? '开' : '关'}${planMode ? '（先出计划，确认后执行）' : ''}`, C.green));
       } else if (cmd === '/route') {
         if (!routing) {
-          io.print(style('未配置自动路由（config.json 的 routing 字段，如 {"enabled":true,"planner":"deepseek-v4-pro","executor":"deepseek-v4-flash"}）', C.dim));
+          io.print(style(`未配置自动路由（config.json 的 routing 字段，如 {"enabled":true,"planner":"${DEFAULT_PLANNER_MODEL}","executor":"${DEFAULT_EXECUTOR_MODEL}"}）`, C.dim));
           continue;
         }
         if (arg === 'on' || arg === 'off') routingEnabled = arg === 'on';

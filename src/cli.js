@@ -4,6 +4,7 @@
 // /mode 模型快捷切换、/verbose 思考开关、/status、/cost、会话选择恢复。
 
 import fs from 'node:fs';
+import { DEFAULT_MODEL } from './models.js';
 import path from 'node:path';
 import readline from 'node:readline';
 import { loadConfig, saveConfig, runWizard, ensureHome, mingdaoHome } from './config.js';
@@ -345,7 +346,7 @@ async function main() {
   }
 
   // 模型回退链（向导允许跳过模型选择 → cfg.model 可缺省）：参数 > config > 该服务商首个预设模型 > flash
-  let modelName = opts.model || cfg.model || /** @type {any} */ (PROVIDERS)[cfg.provider]?.models?.[0] || 'deepseek-v4-flash';
+  let modelName = opts.model || cfg.model || /** @type {any} */ (PROVIDERS)[cfg.provider]?.models?.[0] || DEFAULT_MODEL;
   const io = createIO();
   const workingDir = process.cwd();
 

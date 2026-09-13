@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { PROVIDERS, modelPreset, providerPreset } from './models.js';
+import { PROVIDERS, modelPreset, providerPreset, DEFAULT_MODEL, DEFAULT_PLANNER_MODEL, DEFAULT_EXECUTOR_MODEL } from './models.js';
 import { setStoredKey, resolveApiKey, maskKey } from './credentials.js';
 import { atomicWriteFileSync } from './atomic-write.js';
 
@@ -41,7 +41,7 @@ export function ensureMinimalConfig() {
   if (existing) return existing;
   ensureHome();
   const pp = PROVIDERS['deepseek'] || Object.values(PROVIDERS)[0];
-  const model = modelPreset('deepseek-v4-flash') ? 'deepseek-v4-flash' : pp.models[0];
+  const model = modelPreset(DEFAULT_MODEL) ? DEFAULT_MODEL : pp.models[0];
   const cfg = {
     provider: 'deepseek',
     model,
@@ -152,12 +152,12 @@ export async function runWizard(io) {
   ]);
 
   let routing = null;
-  if (modelPreset('deepseek-v4-pro') && modelPreset('deepseek-v4-flash')) {
+  if (modelPreset(DEFAULT_PLANNER_MODEL) && modelPreset(DEFAULT_EXECUTOR_MODEL)) {
     const routeChoice = await io.choose('自动模型路由（规划类任务→pro，执行类→flash）：', [
       { value: 'on', label: 'on — 开启（省钱又高效，推荐）' },
       { value: 'off', label: 'off — 关闭（始终用当前模型）' },
     ]);
-    if (routeChoice === 'on') routing = { enabled: true, planner: 'deepseek-v4-pro', executor: 'deepseek-v4-flash' };
+    if (routeChoice === 'on') routing = { enabled: true, planner: DEFAULT_PLANNER_MODEL, executor: DEFAULT_EXECUTOR_MODEL };
   }
 
   const preset = model ? modelPreset(model) : null;

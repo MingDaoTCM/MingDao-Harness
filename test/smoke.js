@@ -1283,25 +1283,28 @@ const ctx = { cwd: tmp };
 // ---------- 17. 自动路由 ----------
 {
   const { routeTask, heuristicRoute, routingConfig, subagentModel } = await import(pathToFileURL(path.join(srcDir, 'routing.js')).href);
+  // 引用单一来源常量而不是写字面量：厂家再改名时这些断言会**跟着变**，
+  // 而不是像过去那样「默认值散落 12 处、各自漂移」（本次修复的根因）。
+  const { DEFAULT_MODEL, DEFAULT_PLANNER_MODEL } = await import(pathToFileURL(path.join(srcDir, 'models.js')).href);
   const rc = routingConfig({ routing: { enabled: true } });
-  assert.ok(rc && rc.planner === 'deepseek-v4-pro' && rc.executor === 'deepseek-v4-flash');
-  assert.equal(heuristicRoute('帮我写个函数', rc), 'deepseek-v4-flash');
+  assert.ok(rc && rc.planner === DEFAULT_PLANNER_MODEL && rc.executor === DEFAULT_MODEL, '路由默认值必须来自单一来源');
+  assert.equal(heuristicRoute('帮我写个函数', rc), DEFAULT_MODEL);
   assert.equal(heuristicRoute('请设计这个系统的整体架构，梳理模块划分与数据流，并给出分阶段重构方案与风险评估与测试计划', rc), 'deepseek-v4-pro');
   // 生成类任务（需要大输出）即使短句也路由 planner
   assert.equal(heuristicRoute('给我生成一个愤怒的小鸟网页版游戏', rc), 'deepseek-v4-pro', '游戏生成应路由 planner');
   assert.equal(heuristicRoute('帮我写一份详细的周报', rc), 'deepseek-v4-pro', '文档生成应路由 planner');
-  assert.equal(heuristicRoute('今天天气怎么样', rc), 'deepseek-v4-flash');
+  assert.equal(heuristicRoute('今天天气怎么样', rc), DEFAULT_MODEL);
   // 分类器路径（fake provider 返回 plan / execute）
   const fake = { async chat() { return { text: 'plan' }; } };
   const r1 = await routeTask({ cfg: { routing: { enabled: true } }, provider: fake, currentModel: 'deepseek-v4-flash', text: '这是一条用于触发分类器判定流程的测试消息，其内容需要足够长以超过六十个字符的启发式阈值，才能进入分类器环节进行判定，请务必用分类器来判定本条消息的类别' });
   assert.equal(r1.model, 'deepseek-v4-pro');
   const fake2 = { async chat() { return { text: 'execute' }; } };
   const r2 = await routeTask({ cfg: { routing: { enabled: true } }, provider: fake2, currentModel: 'deepseek-v4-pro', text: '这是另一条用于触发分类器判定流程的测试消息，其内容同样需要足够长以超过六十个字符的启发式阈值，才能进入分类器环节进行判定，请务必用分类器判定类别' });
-  assert.equal(r2.model, 'deepseek-v4-flash');
+  assert.equal(r2.model, DEFAULT_MODEL);
   // 路由池外模型不干预
   const r3 = await routeTask({ cfg: { routing: { enabled: true } }, provider: fake, currentModel: 'qwen-max', text: '设计一个系统' });
   assert.equal(r3.model, 'qwen-max');
-  assert.equal(subagentModel({ routing: { enabled: true } }, 'deepseek-v4-pro'), 'deepseek-v4-flash');
+  assert.equal(subagentModel({ routing: { enabled: true } }, DEFAULT_PLANNER_MODEL), DEFAULT_MODEL);
   // v0.4.1 修复：池外模型（本地/自定义）子代理应跟随当前模型，而非被切到 executor（发错 baseUrl）
   assert.equal(subagentModel({ routing: { enabled: true, planner: 'deepseek-v4-pro', executor: 'deepseek-v4-flash' } }, 'mtplx-qwen38-27b-optimized-quality'), 'mtplx-qwen38-27b-optimized-quality', '池外模型子代理应跟随当前模型');
   ok('routing：启发式 / 分类器 / 池外不干预 / 子代理 executor（池外跟随）');
@@ -2372,6 +2375,8 @@ const ctx = { cwd: tmp };
   assert.equal(r1.model, 'deepseek-v4-flash', '分类器判定 execute 应切 executor');
   assert.equal(classifyCalls, 1);
   const r2 = await routeTask({ cfg, provider, currentModel: 'deepseek-v4-pro', text: longText });
+  // 这组刻意用**改名前旧名**配置（老用户现场）：断言写旧名字面量；
+  // 它同时覆盖 canonicalModel——旧名若不被归一，池判定会走「池外不干预」，下面这条就会失败。
   assert.equal(r2.model, 'deepseek-v4-flash');
   assert.equal(classifyCalls, 1, '同一文本应命中分类缓存，不再重复分类');
   const otherText = '这是另一段足够长的文本，内容与之前完全不同，用来验证会话粘滞路径。'.repeat(3);
@@ -5472,6 +5477,56 @@ console.log(JSON.stringify({ okOn, xml }));`;
     safeRmSync(homeD, { recursive: true, force: true });
   }
   ok('v0.6.2 P2-13：诊断包结构脱敏（自定义名 env/headers 全覆盖）+ 0600 落盘');
+}
+
+
+// ---------- 86. v0.6.2 第三方审计 P2-10/P3-4：默认模型名单一来源 ----------
+// 厂家把 deepseek-v4-flash 改名为 deepseek-flash 后，「默认值」仍以字面量散落在 12 处
+// （routing / config 向导 / WebUI 兜底 / 任务 worker / 费用护栏降级目标 / update / CLI / REPL…）。
+// 这些全是**新装用户与兜底路径**会走到的位置——等于给新用户一个 API 已不提供的模型名。
+{
+  const { DEFAULT_MODEL, DEFAULT_PLANNER_MODEL, DEFAULT_EXECUTOR_MODEL, canonicalModel } = await import(pathToFileURL(path.join(srcDir, 'models.js')).href);
+  assert.equal(DEFAULT_MODEL, 'deepseek-flash', '默认模型必须是厂家当前提供的名字');
+  assert.equal(DEFAULT_EXECUTOR_MODEL, DEFAULT_MODEL, 'executor 默认 = 默认模型');
+  assert.equal(canonicalModel('deepseek-v4-flash'), DEFAULT_MODEL, '旧名必须归一到现名');
+  assert.equal(canonicalModel(DEFAULT_MODEL), DEFAULT_MODEL, '现名归一后不变');
+  assert.equal(canonicalModel('qwen-max'), 'qwen-max', '池外模型不得被改动');
+
+  // 结构守卫：旧名作为**字面量**只允许出现在 models.js（兼容条目 + 别名表）。
+  // 意义：厂家下次改名时，默认值不可能再散落各处各自漂移——本次修复前它散在 12 处。
+  const jsFiles86 = [];
+  const walk86 = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const fp = path.join(d, e.name);
+      if (e.isDirectory()) walk86(fp);
+      else if (e.name.endsWith('.js')) jsFiles86.push(fp);
+    }
+  };
+  walk86(srcDir);
+  const offenders86 = [];
+  for (const f of jsFiles86) {
+    const rel = path.relative(srcDir, f);
+    if (rel === 'models.js') continue;
+    const t = fs.readFileSync(f, 'utf8');
+    const n = (t.match(/'deepseek-v4-flash'|"deepseek-v4-flash"/g) || []).length;
+    if (n) offenders86.push(`${rel}(${n})`);
+  }
+  assert.deepEqual(offenders86, [], `旧模型名不得作为字面量散落在 models.js 之外（应引用 DEFAULT_MODEL）：${offenders86.join(', ')}`);
+
+  // 老配置（config 里仍是旧名）必须仍能正常路由——否则自动路由对老用户**静默失效**
+  const { routingConfig, routeTask, subagentModel } = await import(pathToFileURL(path.join(srcDir, 'routing.js')).href);
+  const rc86 = routingConfig({ routing: { enabled: true } });
+  assert.equal(rc86.executor, DEFAULT_MODEL, '路由默认 executor 必须是现名');
+  const r86 = await routeTask({
+    cfg: { routing: { enabled: true } },
+    provider: { async chat() { return { text: 'plan' }; } },
+    currentModel: 'deepseek-v4-flash',
+    text: 'x'.repeat(90),
+  });
+  assert.equal(r86.model, DEFAULT_PLANNER_MODEL, '当前模型是旧名时路由仍须生效（不能被误判成池外模型）');
+  assert.equal(subagentModel({ routing: { enabled: true } }, 'deepseek-v4-flash'), DEFAULT_MODEL, '旧名同样应被视为池内模型');
+
+  ok('v0.6.2 P2-10：默认模型名单一来源（旧名字面量只允许在 models.js / 旧名可归一 / 老配置路由不再静默失效）');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

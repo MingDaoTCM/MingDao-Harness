@@ -2,6 +2,37 @@
 // 所有字段都可以通过 ~/.mingdao/config.json 或环境变量覆盖，
 // 也可以在 <mingdao-home>/providers/<name>.mjs 中注册完全自定义的 Provider 模块。
 
+// ---------- v0.6.2：默认模型名的**单一来源** ----------
+// 为什么单独立常量：DeepSeek 把 `deepseek-v4-flash` 改名为 `deepseek-flash` 后，
+// 「默认值」仍以字面量散落在 12 处（routing / config 向导 / WebUI 兜底 / 任务 worker /
+// 费用护栏降级目标 / update / CLI / REPL 别名…）。厂家只要再改一次名，这些地方就会
+// **各自漂移**——而它们全是"新装用户与兜底路径"会走到的，等于给新用户一个 API 不提供的模型名。
+// 这正是 v0.6.1 那次故障的翻版，也是本项目「同一逻辑多份副本」的老教训。
+// 旧名 `deepseek-v4-flash` 仍保留在 MODELS 里（兼容老配置与历史会话），但**不再作为任何默认值**。
+export const DEFAULT_MODEL = 'deepseek-flash';
+export const DEFAULT_PLANNER_MODEL = 'deepseek-v4-pro';
+export const DEFAULT_EXECUTOR_MODEL = DEFAULT_MODEL;
+
+// 旧名 → 现名的别名表（厂家改名后保留兼容）
+/** @type {Record<string, string>} */
+const MODEL_ALIASES = { 'deepseek-v4-flash': 'deepseek-flash' };
+
+/**
+ * 归一化模型名：把已改名的旧名映射到当前名。
+ *
+ * 为什么必须有：厂家改名后老配置里仍是旧名，而路由/子代理判断「当前模型是否在池内」
+ * 用的是**精确字符串比较**。不归一的话，旧名会被判成「池外模型（用户手动指定）」，
+ * 于是**自动路由对老用户静默失效**——他们从此永远停在同一个模型上，且没有任何提示。
+ * （这个后果是我把默认值改成新名后由既有测试抓出来的：分类器路径断言突然失败。）
+ *
+ * 只用于「是不是同一个模型」的比较；真正发给 API 的模型名仍用配置里的原值，保留用户意图。
+ * @param {any} name
+ */
+export function canonicalModel(/** @type {any} */ name) {
+  const n = String(name || '');
+  return MODEL_ALIASES[n] || n;
+}
+
 export const PROVIDERS = {
   deepseek: {
     label: 'DeepSeek 官方 API',

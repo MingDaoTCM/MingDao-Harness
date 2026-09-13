@@ -7,14 +7,15 @@
 // 子代理（task）固定走 executor（子任务以执行/调研为主，便宜又够用）。
 
 import crypto from 'node:crypto';
+import { DEFAULT_PLANNER_MODEL, DEFAULT_EXECUTOR_MODEL } from './models.js';
 import { recordAuxUsage } from './cachestats.js';
-import { modelPreset } from './models.js';
+import { modelPreset, canonicalModel } from './models.js';
 
 export function routingConfig(/** @type {any} */ cfg) {
   const r = cfg?.routing;
   if (!r || r.enabled === false) return null;
-  const planner = r.planner || 'deepseek-v4-pro';
-  const executor = r.executor || 'deepseek-v4-flash';
+  const planner = r.planner || DEFAULT_PLANNER_MODEL;
+  const executor = r.executor || DEFAULT_EXECUTOR_MODEL;
   if (!planner || !executor || planner === executor) return null;
   return { planner, executor };
 }
@@ -45,14 +46,17 @@ const routeCache = new Map();
 export async function routeTask(/** @type {any} */ { cfg, provider, currentModel, text, sticky = null, sessionStats = null }) {
   const rc = routingConfig(cfg);
   if (!rc) return { model: currentModel, reason: null };
-  // 当前模型已在路由池外（用户手动指定）：不干预
-  if (currentModel !== rc.planner && currentModel !== rc.executor) {
+  // 当前模型已在路由池外（用户手动指定）：不干预。
+  // 比较必须走 canonicalModel：老配置里是改名前旧名（deepseek-v4-flash），
+  // 直接比字符串会把它判成「池外」→ 自动路由对老用户静默失效。
+  const cur = canonicalModel(currentModel);
+  if (cur !== canonicalModel(rc.planner) && cur !== canonicalModel(rc.executor)) {
     return { model: currentModel, reason: null };
   }
 
   const quick = heuristicRoute(text, rc);
   if (quick) {
-    return quick === currentModel
+    return canonicalModel(quick) === cur
       ? { model: currentModel, reason: null }
       : { model: quick, reason: quick === rc.planner ? '规划类任务' : '执行类任务' };
   }
@@ -147,7 +151,9 @@ export async function routeTask(/** @type {any} */ { cfg, provider, currentModel
 export function subagentModel(/** @type {any} */ cfg, /** @type {any} */ currentModel) {
   const rc = routingConfig(cfg);
   if (!rc) return currentModel;
-  // v0.4.1 修复：与 routeTask 的池外检查一致——当前模型不在 planner/executor 池内时不干预
-  if (currentModel !== rc.planner && currentModel !== rc.executor) return currentModel;
+  // v0.4.1 修复：与 routeTask 的池外检查一致——当前模型不在 planner/executor 池内时不干预。
+  // v0.6.2：同样走 canonicalModel，否则旧名配置会被误判成池外（见 models.js#canonicalModel）。
+  const cur = canonicalModel(currentModel);
+  if (cur !== canonicalModel(rc.planner) && cur !== canonicalModel(rc.executor)) return currentModel;
   return modelPreset(rc.executor) ? rc.executor : currentModel;
 }

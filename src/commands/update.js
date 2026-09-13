@@ -1,6 +1,7 @@
 // 命令族：mingdao update / rollback / batch / cost / audit（自 cli.js 拆出，评估 P0-1 拆包）
 // 每个 handler 返回 true 表示已处理（主流程 return）；false 表示按普通提问继续（子命令劫持防护）。
 import fs from 'node:fs';
+import { DEFAULT_MODEL } from '../models.js';
 import path from 'node:path';
 import { loadConfig } from '../config.js';
 
@@ -42,7 +43,7 @@ export async function handleUpdateFamily(/** @type {any} */ cmd, /** @type {any}
       process.exitCode = 1;
       return true;
     }
-    let model = cfgB.model || 'deepseek-v4-flash';
+    let model = cfgB.model || DEFAULT_MODEL;
     let maxTokens = 4096;
     let maxCost = 0; // 省钱 B2：预算上限（元），提交前按估算拦截
     let srcFile = null;
