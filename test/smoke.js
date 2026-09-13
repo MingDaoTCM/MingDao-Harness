@@ -5738,8 +5738,19 @@ console.log(JSON.stringify({ okOn, xml }));`;
 
 // ---------- 90. v0.6.2 P2-6/P2-9：进程归属校验与整组清理 ----------
 {
-  const { procAlive, ownershipVerifiable } = await import(pathToFileURL(path.join(srcDir, 'proc.js')).href);
+  const { procAlive, ownershipVerifiable, normalizeCmdline } = await import(pathToFileURL(path.join(srcDir, 'proc.js')).href);
   const { sleeperAlive } = await import(pathToFileURL(path.join(srcDir, 'schedule.js')).href);
+
+  // 命令行归一：Linux 的 /proc/<pid>/cmdline 是 **NUL 分隔**，ps 路径是空格分隔，
+  // 两条路必须同形态——否则「多词针」（如 `schedule-worker <id>`）在 Linux 上永远匹配不到，
+  // 而单 token 针恰好掩盖它。这正是 CI 三个 Linux 腿失败的原因（macOS 通过）。
+  const nulForm = 'node\u0000/a/cli.js\u0000schedule-worker\u0000jobZ\u0000';
+  assert.ok(normalizeCmdline(nulForm).includes('schedule-worker jobZ'), 'NUL 分隔必须归一成空格，多词针才能匹配');
+  assert.equal(
+    normalizeCmdline(nulForm),
+    normalizeCmdline('node /a/cli.js schedule-worker jobZ\n'),
+    '两条读取路径（/proc 与 ps）归一后必须完全一致'
+  );
 
   // 90a. sleeperAlive 必须做归属校验（此前是全仓唯一的裸 process.kill(pid,0)）。
   //      PID 会被系统回收复用：睡着的 worker 崩溃后 pid 被无关进程占用时，

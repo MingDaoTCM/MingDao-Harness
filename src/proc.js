@@ -34,19 +34,30 @@ export function procAlive(pid) {
 }
 
 /**
+ * 归一化命令行文本：NUL 分隔（Linux /proc）→ 空格分隔，并去掉首尾空白。
+ * 与 `ps -o command=` 的输出形态对齐，使两条读取路径的匹配语义一致。
+ * @param {any} raw
+ */
+export function normalizeCmdline(/** @type {any} */ raw) {
+  return String(raw ?? '').replace(/\u0000/g, ' ').trim();
+}
+
+/**
  * 读取指定进程的完整命令行。
  * Linux 走 /proc（零子进程开销）；其余平台回退 ps（macOS/BSD 与 procps 均支持
  * `-ww -o command=`，-ww 关掉按终端宽度截断，否则长命令行被截断会误判为「不含 needle」）。
  * @param {any} pid
  * @returns {string|null} 读不到返回 null
  */
-function readCmdline(pid) {
+export function readCmdline(pid) {
   try {
-    // Linux：cmdline 以 NUL 分隔；此处只需「是否包含」，无需切分
-    const raw = fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8');
+    // Linux：cmdline 以 **NUL 分隔**各 argv。这里必须归一成空格，否则「多词针」在 Linux 上
+    // 永远匹配不到——而 ps 路径（macOS/BSD）本来就是空格分隔，两条路语义必须一致。
+    // v0.6.2：这个不一致是 CI 抓出来的：`schedule-worker <id>` 这种两段针在 macOS 通过、
+    // 在三个 Linux 腿全部失败。单 token 针（`id`）恰好掩盖了它——而那正是安全问题最爱的形状。
     // 已退出但未被回收的僵尸 / 内核线程 cmdline 为空：视为「读到了但内容为空」，
     // 不能当成读不到（否则会退回 best-effort 放行，反而更危险）
-    return raw;
+    return normalizeCmdline(fs.readFileSync(`/proc/${pid}/cmdline`, 'utf8'));
   } catch {
     // 继续尝试 ps
   }
