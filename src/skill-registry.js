@@ -119,7 +119,7 @@ export async function installFromRegistry(/** @type {any} */ name) {
     // 逐文件下载按镜像回退（审计：国内网络下 raw.githubusercontent 常超时/被断，
     // 此前只试首选主机 → 安装报「This operation was aborted」；gitee/gitcode 国内秒开）
     const hosts = [r.host, ...registryBase().hosts.filter((h) => h !== r.host)];
-    let verified = false; // 是否至少一个文件做了 sha256 校验（索引声明了哈希才校验）
+    let verified = false; // 每个文件都必须通过 sha256 校验（缺哈希直接拒绝安装），成功即 true
     for (const f of entry.files) {
       const rel = String(f.path || '').replace(/\\/g, '/');
       if (!rel || rel.includes('..') || rel.startsWith('/')) {
@@ -140,14 +140,24 @@ export async function installFromRegistry(/** @type {any} */ name) {
       }
       if (text === null) return { error: `下载 ${name}/${rel} 失败：${lastErr}（已尝试全部镜像）` };
       if (text.length > MAX_FILE) return { error: `${name}/${rel} 超过 512KB 上限` };
-      // 完整性校验（P3-3）：索引声明 sha256 时逐文件比对，不符即拒绝安装（供应链防护）
-      if (f.sha256 && typeof f.sha256 === 'string') {
-        const got = crypto.createHash('sha256').update(text).digest('hex');
-        if (got !== f.sha256.toLowerCase()) {
-          return { error: `完整性校验失败：${name}/${rel} 与 registry 声明的 sha256 不符（文件可能被篡改或索引过期），已拒绝安装` };
-        }
-        verified = true;
+      // 完整性校验（P3-3）：**索引必须声明 sha256，否则拒绝安装**（v0.6.2 改为 fail-closed）。
+      //
+      // 原状是 `if (f.sha256 && ...)`——索引没写哈希时**完全不校验**，文件照样落盘，
+      // 而 CLI 无条件打印「✓ 已安装技能」，用户以为这是校验过的技能。
+      // 技能是从**远端索引**下载的，属于供应链路径：缺哈希 = 无从判断是否被篡改，
+      // 这种「静默降级为不校验」必须改成显式失败（与约束引擎 fail-closed 同口径）。
+      if (typeof f.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(f.sha256)) {
+        return {
+          error:
+            `索引未为 ${name}/${rel} 声明合法的 sha256，已拒绝安装（无法校验完整性）。` +
+            `自建 registry 请先运行 scripts/build-registry-hashes.js 为 index.json 补齐哈希。`,
+        };
       }
+      const got = crypto.createHash('sha256').update(text).digest('hex');
+      if (got !== f.sha256.toLowerCase()) {
+        return { error: `完整性校验失败：${name}/${rel} 与 registry 声明的 sha256 不符（文件可能被篡改或索引过期），已拒绝安装` };
+      }
+      verified = true;
       fs.writeFileSync(dest, text);
     }
     const check = validateSkillDir(tmp, name);

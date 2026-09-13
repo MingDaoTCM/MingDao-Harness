@@ -1611,16 +1611,20 @@ const ctx = { cwd: tmp };
   const regRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-regweb-'));
   fs.mkdirSync(path.join(regRoot, 'registry'), { recursive: true });
   fs.mkdirSync(path.join(regRoot, 'skills-lib', 'online-skill'), { recursive: true });
+  // v0.6.2：索引必须声明 sha256（缺哈希现在会 fail-closed 拒绝安装），
+  // 夹具同步补上——否则这组断言测的是「一个按新策略本就不该被安装的索引」。
+  const onlineSkillMd = '---\nname: online-skill\ndescription: 线上技能\n---\n\n# 线上\n内容';
+  const onlineHash = (await import('node:crypto')).createHash('sha256').update(onlineSkillMd).digest('hex');
   fs.writeFileSync(
     path.join(regRoot, 'registry', 'index.json'),
     JSON.stringify({
       version: 1,
       updatedAt: new Date().toISOString(),
       total: 1,
-      skills: [{ name: 'online-skill', description: '线上技能', files: [{ path: 'SKILL.md', size: 1 }] }],
+      skills: [{ name: 'online-skill', description: '线上技能', files: [{ path: 'SKILL.md', size: onlineSkillMd.length, sha256: onlineHash }] }],
     })
   );
-  fs.writeFileSync(path.join(regRoot, 'skills-lib', 'online-skill', 'SKILL.md'), '---\nname: online-skill\ndescription: 线上技能\n---\n\n# 线上\n内容');
+  fs.writeFileSync(path.join(regRoot, 'skills-lib', 'online-skill', 'SKILL.md'), onlineSkillMd);
   const http = await import('node:http');
   const srv = http.createServer((req, res) => {
     const u = new URL(req.url, 'http://x').pathname;
@@ -2170,6 +2174,21 @@ const ctx = { cwd: tmp };
   safeRmSync(path.join(homeS, 'skill-registry-cache.json'), { force: true });
   const bad = await installFromRegistry('demo-bad');
   assert.ok(bad.error && bad.error.includes('完整性校验失败'), '哈希不符应拒绝安装');
+  // 4b) **索引缺 sha256** → 同样必须拒绝安装（v0.6.2 改为 fail-closed）。
+  //     原状是 `if (f.sha256 && ...)`：索引没写哈希就完全不校验，文件照样落盘，
+  //     而 CLI 无条件打印「✓ 已安装技能」——用户以为这是校验过的技能。
+  //     技能来自**远端索引**，属供应链路径，缺哈希等于无从判断是否被篡改。
+  currentIndex = { version: 1, skills: [{ name: 'demo-nohash', description: 'x', files: [{ path: 'SKILL.md', size: skillMd.length }] }] };
+  safeRmSync(path.join(homeS, 'skill-registry-cache.json'), { force: true });
+  const nohash = await installFromRegistry('demo-nohash');
+  assert.ok(nohash.error && nohash.error.includes('sha256'), '索引缺 sha256 必须拒绝安装：' + JSON.stringify(nohash));
+  assert.ok(!fs.existsSync(path.join(homeS, 'skills', 'demo-nohash')), '被拒绝的技能绝不能落盘');
+  // 4c) 非法哈希（不是 64 位 hex）同样不能放行——否则等于换个形式绕过校验
+  currentIndex = { version: 1, skills: [{ name: 'demo-badhash', description: 'x', files: [{ path: 'SKILL.md', size: skillMd.length, sha256: 'deadbeef' }] }] };
+  safeRmSync(path.join(homeS, 'skill-registry-cache.json'), { force: true });
+  const badHash = await installFromRegistry('demo-badhash');
+  assert.ok(badHash.error && badHash.error.includes('sha256'), '非法 sha256 必须拒绝安装：' + JSON.stringify(badHash));
+  assert.ok(!fs.existsSync(path.join(homeS, 'skills', 'demo-badhash')), '被拒绝的技能绝不能落盘');
   // 5) 目录哈希稳定（排除元数据文件）
   assert.equal(skillDirHash(path.join(homeS, 'skills', 'demo-int')), skillDirHash(path.join(homeS, 'skills', 'demo-int')), '哈希应稳定');
   regServer.close();
@@ -5277,6 +5296,36 @@ console.log(JSON.stringify({ okOn, xml }));`;
     safeRmSync(proj81, { recursive: true, force: true });
   }
   ok('v0.6.2 P1-1：项目级 Pack 默认不挂载（未信任有明确指引 / 指纹变化自动失效 / config.packs 显式授权照常 / 撤销生效）');
+}
+
+
+// ---------- 82. v0.6.2 第三方审计 P2-6：密码绝不走命令行参数 ----------
+// 位置参数会让明文出现在 ps aux / shell history / CI 日志里。
+// `sync login` 早就拒绝了这种做法，而 `sync passwd` 仍收位置参数——同一文件两套口径。
+{
+  const { handleSync } = await import(pathToFileURL(path.join(srcDir, 'commands', 'sync.js')).href);
+  const logs = [];
+  const realLog = console.log;
+  const realExit = process.exitCode;
+  console.log = (...a) => logs.push(a.join(' '));
+  try {
+    const handled = await handleSync('sync', ['passwd', 'hunter2-plaintext']);
+    assert.equal(handled, true, 'sync passwd 应被处理');
+    const out = logs.join('\n');
+    assert.ok(/不再支持命令行参数/.test(out), '位置参数形式必须被明确拒绝：' + out);
+    assert.ok(!/hunter2-plaintext/.test(out), '拒绝提示里都不得回显密码本身');
+    assert.equal(process.exitCode, 1, '拒绝后应以非 0 退出码结束');
+
+    // 反向：flag 形式不应被误判成密码（--help 之类仍能走到正常流程）
+    logs.length = 0;
+    process.exitCode = 0;
+    await handleSync('sync', ['passwd', '--help']);
+    assert.ok(!/不再支持命令行参数/.test(logs.join('\n')), '以 - 开头的参数是 flag，不应被当成密码拒绝');
+  } finally {
+    console.log = realLog;
+    process.exitCode = realExit;
+  }
+  ok('v0.6.2 P2-6：sync passwd 拒绝命令行传密码（且不回显），flag 参数不误伤');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

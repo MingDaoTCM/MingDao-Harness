@@ -199,7 +199,7 @@ sudo mingdao sync-server 443
 ```bash
 mingdao sync login <用户名> <密码> https://你的服务器   # 首次自动注册 + 设备配对
 mingdao sync push / pull / status                      # 推送 / 拉取 / 状态
-mingdao sync passwd <新密码>                           # 改密码（吊销全部设备，需重新登录）
+mingdao sync passwd                                  # 改密码（隐藏输入旧/新密码两次；吊销全部设备，需重新登录）
 mingdao sync share <会话名>                            # 分享会话 → 16 位分享码
 mingdao sync accept <分享码>                           # 接受分享（再次接受即刷新）
 mingdao sync conflicts                                 # 跨设备冲突三选一（保留本地/采用远端/都保留）

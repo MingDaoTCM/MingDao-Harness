@@ -16,18 +16,60 @@ import {
   resolveSyncConflict,
 } from '../sync.js';
 
-async function askHidden(/** @type {any} */ question) {
-  return new Promise((resolve) => {
-    // _writeToOutput 为 readline 内部接口：静音回显（密码输入），类型护栏下显式 any
-    const rl = /** @type {any} */ (readline.createInterface({ input: process.stdin, output: process.stdout }));
-    const orig = rl._writeToOutput;
-    rl._writeToOutput = () => {};
-    rl.question(question, (/** @type {any} */ a) => {
+/**
+ * 隐藏输入提问器：**一个实例共用一个 readline 接口**，可连续问多题。
+ *
+ * 为什么不能每题各建一个接口（v0.6.2 实测踩到）：`rl.close()` 会连带丢掉 stdin 上
+ * 还没被读走的数据。于是「旧密码 → 新密码 → 再输一次」这种连续提问在**管道输入**下
+ * 第二问就拿不到数据：进程静默退出、输出为空，退出码却是 0
+ * （e2e 实测 `{code:0, out:"", err:""}`——最坏的一种失败：看起来成功，其实什么都没做）。
+ *
+ * 用法：`const ask = createHiddenAsker(); try { … await ask.ask('…') … } finally { ask.close(); }`
+ */
+function createHiddenAsker() {
+  // _writeToOutput 为 readline 内部接口：静音**回显**（密码输入），类型护栏下显式 any
+  const rl = /** @type {any} */ (readline.createInterface({ input: process.stdin, output: process.stdout }));
+  const orig = rl._writeToOutput;
+  rl._writeToOutput = () => {};
+  // 自己挂常驻 'line' 监听并入队：**不能**逐题 rl.question()。
+  // 非 TTY（管道/CI）下 readline 只在「有挂起问题」时才把行交给回调——
+  // 两问之间哪怕只有一个微任务间隙，下一行也会在无人接收时被丢掉：
+  // 表现为第一问答上了、第二问永远等不到，进程静默退出且退出码 0
+  // （e2e 实测 {code:0, out:"", err:""}，是"看起来成功其实什么都没做"的最坏形态）。
+  const queue = /** @type {string[]} */ ([]);
+  const waiters = /** @type {((v: string) => void)[]} */ ([]);
+  rl.on('line', (/** @type {any} */ line) => {
+    const v = String(line ?? '').trim();
+    const w = waiters.shift();
+    if (w) w(v);
+    else queue.push(v);
+  });
+  return {
+    /** @param {string} question */
+    ask(question) {
+      // 提示语自己 write：静音 _writeToOutput 是为了不回显输入，但它同时也吞掉了提示语
+      // （Node 的 question() 走同一个出口），于是用户此前看不到「密码：」这类提示。
+      try {
+        process.stdout.write(question);
+      } catch {}
+      if (queue.length) return Promise.resolve(/** @type {string} */ (queue.shift()));
+      return new Promise((resolve) => waiters.push(resolve));
+    },
+    close() {
       if (typeof orig === 'function') rl._writeToOutput = orig;
       rl.close();
-      resolve(a.trim());
-    });
-  });
+    },
+  };
+}
+
+/** 单问便捷包装（登录等只用一次的场景） */
+async function askHidden(/** @type {any} */ question) {
+  const ask = createHiddenAsker();
+  try {
+    return await ask.ask(question);
+  } finally {
+    ask.close();
+  }
 }
 
 export async function handleSync(/** @type {any} */ cmd, /** @type {any} */ args) {
@@ -78,21 +120,61 @@ export async function handleSync(/** @type {any} */ cmd, /** @type {any} */ args
     return true;
   }
   if (sub === 'passwd') {
-    const newPassword = args[1];
-    if (!newPassword) {
-      console.log('用法：mingdao sync passwd <新密码>（将提示输入旧密码）');
+    // P2-6（第三方审计）：新密码**绝不接受位置参数**。
+    // 位置参数会让明文出现在 ps aux / shell history / CI 日志里——而同文件的
+    // `sync login` 早已明确拒绝这种做法（上面那条质检 A2）。同一文件两套口径本身就是缺陷，
+    // 这里对齐为「只走隐藏输入」。以 `-` 开头的仍放行（那是 flag，不是密码）。
+    if (args[1] && !String(args[1]).startsWith('-')) {
+      console.log('[错误] 出于安全考虑，新密码不再支持命令行参数（会明文出现在 ps/shell history）——运行 mingdao sync passwd 后按提示隐藏输入。');
       process.exitCode = 1;
       return true;
     }
-    const oldPassword = await askHidden('旧密码：');
-    const r = await syncChangePassword({ oldPassword, newPassword });
-    if (r.error) {
-      console.log('[错误] ' + r.error);
-      process.exitCode = 1;
+    // 显式 help 分支：否则 `passwd --help` 会走到隐藏输入上干等 stdin（测试里直接挂住）
+    if (args[1] === '--help' || args[1] === '-h') {
+      console.log('用法：mingdao sync passwd');
+      console.log('  旧密码与新密码均**隐藏输入**（两次确认），不接受命令行传密码——');
+      console.log('  位置参数会让明文出现在 ps aux / shell history / CI 日志里。');
       return true;
     }
-    console.log('✓ 密码已修改（其他设备下次登录用新密码）');
-    return true;
+    // 三次提问必须共用同一个 readline 接口（见 createHiddenAsker 的注释：
+    // 每题各建一个会在管道输入下丢掉后续数据，表现为"成功但什么都没做"）
+    const ask = createHiddenAsker();
+    try {
+      const oldPassword = await ask.ask('旧密码：');
+      if (!oldPassword) {
+        console.log('[错误] 未输入旧密码');
+        process.exitCode = 1;
+        return true;
+      }
+      const newPassword = await ask.ask('新密码（至少 8 位）：');
+      if (!newPassword) {
+        console.log('[错误] 未输入新密码');
+        process.exitCode = 1;
+        return true;
+      }
+      if (newPassword.length < 8) {
+        console.log('[错误] 新密码至少 8 位');
+        process.exitCode = 1;
+        return true;
+      }
+      // 改密码不像登录那样"试一次就知道了"：输错就得再走一遍流程，所以本地确认一次
+      const again = await ask.ask('再输一次新密码：');
+      if (again !== newPassword) {
+        console.log('[错误] 两次输入不一致，未做任何改动');
+        process.exitCode = 1;
+        return true;
+      }
+      const r = await syncChangePassword({ oldPassword, newPassword });
+      if (r.error) {
+        console.log('[错误] ' + r.error);
+        process.exitCode = 1;
+        return true;
+      }
+      console.log('✓ 密码已修改（其他设备下次登录用新密码）');
+      return true;
+    } finally {
+      ask.close();
+    }
   }
   if (sub === 'share') {
     const name = args[1];

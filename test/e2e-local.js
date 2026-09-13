@@ -400,10 +400,16 @@ function ok(name) {
   const p2 = await runCli(['sync', 'pull']);
   assert.equal(p2.code, 0, p2.err + p2.out);
   assert.ok(p2.out.includes('已拉取'), '拉取应成功');
-  // 改密码（stdin 输旧密码）→ 服务端吊销全部设备 token，需用新密码重新登录
-  const pw = await runCli(['sync', 'passwd', 'newpassword456'], { stdin: 'password123\n' });
+  // 改密码 → 服务端吊销全部设备 token，需用新密码重新登录。
+  // v0.6.2（P2-6）：新密码**不再走命令行参数**（会明文进 ps aux / shell history），
+  // 改为三次隐藏输入：旧密码 → 新密码 → 再输一次确认。
+  const pw = await runCli(['sync', 'passwd'], { stdin: 'password123\nnewpassword456\nnewpassword456\n' });
   assert.equal(pw.code, 0, pw.err + pw.out);
-  assert.ok(pw.out.includes('已修改'), '密码修改应成功');
+  assert.ok(pw.out.includes('已修改'), '密码修改应成功：' + JSON.stringify({ code: pw.code, out: pw.out, err: pw.err }));
+  // 提示语必须可见：静音 _writeToOutput 是为了不回显输入，但它此前连提示语一起吞掉了
+  // （用户看不到「旧密码：」这类提示）；同时三次提问必须共用同一个 readline 接口 +
+  // 常驻 line 队列，否则管道输入下第二问会丢行、进程静默退出且退出码为 0。
+  assert.ok(pw.out.includes('旧密码') && pw.out.includes('再输一次新密码'), '三次隐藏输入的提示语都应可见：' + JSON.stringify(pw.out));
   const relogin = await runCli(['sync', 'login', 'cli-user', syncUrl], { stdin: 'newpassword456\n' });
   assert.equal(relogin.code, 0, relogin.err + relogin.out);
   assert.ok(relogin.out.includes('已登录'), '改密后应能用新密码重新登录');
