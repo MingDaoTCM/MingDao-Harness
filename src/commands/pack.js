@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { listPacks, loadPack, validateManifest, coreVersionOf, SUPPORTED_PACK_API, CONSTRAINT_KINDS, packedDirsForHelp, packTrustState, trustPack, untrustPack } from '../packs.js';
+import { loadConfig } from '../config.js';
 
 const HELP = `用法：
   mingdao pack list                 已发现的 Pack（名/版本/来源/兼容状态）
@@ -33,7 +34,9 @@ export async function handlePack(cmd, args) {
   }
 
   if (sub === 'list') {
-    const found = listPacks({}, process.cwd());
+    // v0.6.2（代码审计 P2-4）：这里硬传 `{}` 导致**读不到 config.packs 声明的 Pack**——
+    // 用户按文档在 config.json 里声明了目录，`mingdao pack list` 却看不见它（info 同病）。
+    const found = listPacks(loadConfig() || {}, process.cwd());
     if (!found.length) {
       console.log('未发现任何 Pack。');
       console.log(`放置位置（三级遮蔽）：<项目>/.mingdao/packs/ > ${packedDirsForHelp()} > 内置 packs/`);
@@ -214,7 +217,7 @@ export function createPack(ctx) {
 
   if (sub === 'info') {
     const name = String(args[1] || '').trim();
-    const found = listPacks({}, process.cwd()).find((p) => p.name === name);
+    const found = listPacks(loadConfig() || {}, process.cwd()).find((p) => p.name === name);
     if (!found) {
       console.log(`[错误] 未发现 Pack "${name}"。可用：mingdao pack list`);
       process.exitCode = 1;

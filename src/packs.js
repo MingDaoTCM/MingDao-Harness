@@ -283,15 +283,23 @@ export function packDirs(cfg, projectDir) {
 export function listPacks(cfg, projectDir, opts = {}) {
   const seen = new Map(); // name -> entry
   for (const tier of packDirs(cfg, projectDir).sort((a, b) => a.priority - b.priority)) {
+    // v0.6.2（代码审计 P2-4 的连带发现）：`config.packs` 的**文档写法是直接指向 Pack 目录**
+    // （`"./packs/tcm"`、Deyi 迁移指南里的 `"<仓库>/layer/packs/tcm"`），而这里一律当作
+    // 「装着若干 Pack 的根目录」扫描子目录——于是按文档声明的 Pack **一个都发现不了**。
+    // 现在两种形态都接受：tier 目录本身有 pack.json 就当成单个 Pack，否则按子目录扫描。
     let entries = [];
     try {
-      entries = fs.readdirSync(tier.dir, { withFileTypes: true });
+      if (fs.existsSync(path.join(tier.dir, 'pack.json'))) {
+        entries = [{ isDirectory: () => true, name: '.' }];
+      } else {
+        entries = fs.readdirSync(tier.dir, { withFileTypes: true });
+      }
     } catch {
       continue;
     }
     for (const e of entries) {
       if (!e.isDirectory()) continue;
-      const dir = path.join(tier.dir, e.name);
+      const dir = e.name === '.' ? tier.dir : path.join(tier.dir, e.name);
       const mf = path.join(dir, 'pack.json');
       if (!fs.existsSync(mf)) continue;
       let manifest;
@@ -302,8 +310,8 @@ export function listPacks(cfg, projectDir, opts = {}) {
         continue;
       }
       const v = validateManifest(manifest, opts);
-      seen.set(manifest?.name || e.name, {
-        name: manifest?.name || e.name,
+      seen.set(manifest?.name || (e.name === '.' ? path.basename(tier.dir) : e.name), {
+        name: manifest?.name || (e.name === '.' ? path.basename(tier.dir) : e.name),
         displayName: manifest?.displayName || '',
         version: manifest?.version || '',
         apiVersion: manifest?.apiVersion,

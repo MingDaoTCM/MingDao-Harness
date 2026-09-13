@@ -238,6 +238,19 @@ timeout 就是死区，期间**所有写方必然失败**——`cachestats` 会�
 > ⚠ P2-4 的端到端竞态窗口很短（改名后仅剩 token 统计与 `done` 事件），难以稳定复现，
 > 故用**结构守卫**断言（改名分支必须调用 `claimSessionKey(session.file)`）——已如实标注。
 
+## 3.12 已修复（第十三批：pack list 读配置 / 只读集合单一来源）
+
+| 项 | 位置 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| P2-4（代码审计报告） | `src/commands/pack.js` | `listPacks({}, cwd)` 硬传空配置 → 用户按文档在 `config.packs` 里声明的 Pack，`mingdao pack list` / `pack info` **根本看不见** | 改传 `loadConfig()` |
+| P2-11（代码审计报告） | `src/agent.js` | 只读子代理工具集是**手写的第二份副本**（与导出的 `READONLY_TIER_SET` 内容相近但不同），两处必然漂移 | 从 `READONLY_TIER_SET` 派生，并把两处**刻意**差异写明（去掉 `task`：子代理不再派子代理；去掉 `todo`：清单不与主线程共享）。派生结果与历史可见集逐项一致，**行为不变** |
+
+> **连带发现（比报告说的更深）**：`listPacks` 把每个 tier 目录一律当作「装着若干 Pack 的
+> **根目录**」扫描其子目录，而文档与 `MIGRATION-DEYI-v0.5.md` 写的都是**直接指向 Pack 目录**——
+> 于是按文档声明的 Pack **一个都发现不了**（修好 `loadConfig` 也还是发现不了）。
+> 现已两种形态都支持，并在 PACK-API 里写明。这个坑是写测试夹具时撞出来的：
+> 我按**文档**写夹具，测试失败——第一反应是夹具错了，实际是**实现与文档不一致**。
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）
@@ -271,14 +284,14 @@ timeout 就是死区，期间**所有写方必然失败**——`cachestats` 会�
 | P2-1 | `src/memory.js:96` | `removeMemoryLines` 写回无尾换行，下次 append 拼出坏行 |
 | P2-2 | `src/audit.js:36-45`、`memory.js:101/117` | 截断依赖**进程内**计数 → CLI 下截断是死代码，日志无界增长 |
 | P2-3 | `src/audit.js:41` | 截断用 `writeFileSync` 而非原子写，崩溃丢事件 |
-| P2-4 | `src/commands/pack.js:31/166` | `listPacks({}, cwd)` 硬传 `{}`，读不到 `config.packs` 声明的 Pack |
+| ~~P2-4~~ | ~~`src/commands/pack.js:31/166`~~ | ✅ **已修**（见 §3.12，并修掉连带发现的文档/实现不一致） |
 | P2-5 | `src/mcp-presets.js:43-48` | sqlite 预设必填参数含 `{dir}` 未替换，静默落到 cwd |
 | ~~P2-6~~ | ~~`src/commands/sync.js:81-88`~~ | ✅ **已修**（见 §3.1） |
 | P2-7 | `src/skill-registry.js:56` | `redirect:'follow'` 无逐跳复检，与 `skill-lib.js` 两种口径 |
 | P2-8 | `src/skill-registry.js:144-150` | sha256 校验可选，缺字段仍打印「✓ 已安装」 |
 | ~~P2-9~~ | ~~`src/tools/index.js:332-374`~~ | ✅ **已修**（见 §3.8） |
 | P2-10 | `src/routing.js:17`、`config.js:160` | 路由默认仍是改名前的旧模型名 |
-| P2-11 | `src/agent.js:104` vs `:34` | 只读工具集合两份副本（`READONLY_TOOLS_SET` / `READONLY_TIER_SET`） |
+| ~~P2-11~~ | ~~`src/agent.js:104` vs `:34`~~ | ✅ **已修**（见 §3.12） |
 | P2-12 | `src/commands/repl.js:677-685` | 自动标题无 try/catch（`cli.js` 已为同类问题加过） |
 | P2-13 | `src/commands/diagnose.js:101` | 诊断包未按 0600 落盘，脱敏只按字段名匹配 |
 | P2-14 | `src/autostart.js:62-77/86` | plist/desktop 字符串插值未转义，路径含 `&<>` 时静默失效 |

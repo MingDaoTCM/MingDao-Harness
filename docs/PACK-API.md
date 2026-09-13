@@ -44,12 +44,17 @@
 ```jsonc
 {
   "packs": [
-    "./packs/tcm",                          // 本地目录
+    "./packs/tcm",                          // ① 直接指向 Pack 目录（该目录下有 pack.json）
+    "./packs",                              // ② 或指向"装着若干 Pack 的根目录"（扫其子目录）
     "npm:@mingdao/pack-legal",              // npm 包（需 --allow-npm）
     "https://example.com/pack-tcm.tgz"      // 归档（需 --allow-remote + sha256）
   ]
 }
 ```
+
+> 两种形态**都支持**（v0.6.2 起）。此前实现只认形态②（一律当根目录扫子目录），
+> 而文档与 `MIGRATION-DEYI-v0.5.md` 写的都是形态①——于是**按文档声明的 Pack 一个都发现不了**。
+> 顺带修掉 `mingdao pack list` 硬传 `{}` 读不到 `config.packs` 的问题（代码审计 P2-4）。
 
 ### 1.1 项目级 Pack 的信任门（v0.6.2 起，**行为变更**）
 

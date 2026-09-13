@@ -6054,6 +6054,72 @@ if (process.platform !== 'win32') {
   ok('v0.6.2 P2-1/2/3/4：deny 按段匹配 / git 缩写前缀拦截 / pack 能力声明说实话 / 忙锁键随改名迁移');
 }
 
+
+// ---------- 94. v0.6.2 代码审计 P2-4 / P2-11：pack list 读配置 + 只读集合单一来源 ----------
+{
+  // 94a. P2-4：`mingdao pack list` 必须能看见 `config.packs` 声明的目录
+  //      （原来硬传 `{}`，用户按文档声明的 Pack 在列表里根本看不见）
+  const { handlePack } = await import(pathToFileURL(path.join(srcDir, 'commands', 'pack.js')).href);
+  const home94 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p94-'));
+  const prevHome94 = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = home94;
+  const packDir94 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p94pack-'));
+  const packRoot94 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p94root-'));
+  try {
+    const mkPack94 = (dir, name) => {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, 'pack.json'),
+        JSON.stringify({ apiVersion: 1, name, version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: {} })
+      );
+    };
+    // 形态 A：直接指向 Pack 目录（文档与 Deyi 迁移指南的写法）
+    mkPack94(packDir94, 'fromconf94');
+    // 形态 B：指向「装着若干 Pack 的根目录」
+    mkPack94(path.join(packRoot94, 'nested94'), 'nested94');
+    fs.writeFileSync(path.join(home94, 'config.json'), JSON.stringify({ packs: [packDir94, packRoot94] }));
+    const logs94 = [];
+    const realLog94 = console.log;
+    console.log = (...a) => logs94.push(a.join(' '));
+    try {
+      await handlePack('pack', ['list']);
+    } finally {
+      console.log = realLog94;
+    }
+    const out94 = logs94.join('\n');
+    // 两种形态都必须被发现——文档写的是"直接指向 Pack 目录"，而实现原本只认"根目录"，
+    // 于是按文档声明的 Pack 一个都发现不了（这是 P2-4 的连带发现）。
+    assert.ok(out94.includes('fromconf94'), 'config.packs 直接指向 Pack 目录时必须被发现：' + out94.slice(0, 200));
+    assert.ok(out94.includes('nested94'), 'config.packs 指向"装着 Pack 的根目录"时也必须被发现');
+    assert.ok(out94.includes('来源 config'), '来源应显示为 config');
+  } finally {
+    process.env.MINGDAO_HOME = prevHome94;
+    safeRmSync(home94, { recursive: true, force: true });
+    safeRmSync(packDir94, { recursive: true, force: true });
+    safeRmSync(packRoot94, { recursive: true, force: true });
+  }
+
+  // 94b. P2-11：只读子代理工具集必须**从只读档派生**，不得另写第二份
+  const { READONLY_TIER_SET } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
+  const agentSrc94 = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+  assert.ok(
+    /const READONLY_TOOLS_SET = new Set\(\[\.\.\.READONLY_TIER_SET\]/.test(agentSrc94),
+    '只读子代理工具集必须由 READONLY_TIER_SET 派生（否则两份集合各自漂移）'
+  );
+  assert.ok(
+    !/const READONLY_TOOLS_SET = new Set\(\['read'/.test(agentSrc94),
+    '不得再出现手写的第二份字面量集合'
+  );
+  // 派生结果（刻意差异：去掉 task / todo）必须与历史可见集一致，不能悄悄改变行为
+  const derived94 = [...READONLY_TIER_SET].filter((n) => n !== 'task' && n !== 'todo').sort();
+  assert.deepEqual(
+    derived94,
+    ['fetch', 'git', 'glob', 'grep', 'ls', 'read', 'skill'],
+    '派生结果必须与既有的只读子代理可见集完全一致（行为不变，只是单一来源）'
+  );
+  ok('v0.6.2 P2-4/P2-11：pack list 读 config.packs / 只读子代理工具集从只读档派生（行为不变）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

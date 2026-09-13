@@ -101,7 +101,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   const undo = undoStore || { backups: new Map() };
   const stepLimit = maxSteps || MAX_STEPS;
   // 只读工具集合（子代理只读模式 + 并行批次共用）。v0.3.1 起含 git/fetch（只读、审计常用）
-  const READONLY_TOOLS_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'git', 'fetch']);
+  // v0.6.2（代码审计 P2-11）：**不要另写一份集合**——从只读档派生，把刻意差异写清楚。
+  // 此前这里是手写的第二份副本（与模块顶部的 READONLY_TIER_SET 内容相近但不同），
+  // 两处各自演化必然漂移（本仓已多次吃过"同一逻辑多份副本"的亏）。
+  //   差异（刻意，不是遗漏）：
+  //     · 去掉 task：子代理不再派子代理，避免无限嵌套与成本失控；
+  //     · 去掉 todo：子代理的任务清单不与主线程共享（主线程 todo 由主代理维护）。
+  const READONLY_TOOLS_SET = new Set([...READONLY_TIER_SET].filter((n) => n !== 'task' && n !== 'todo'));
   // 精确 token 计数：DeepSeek 词表，其他模型回退启发式
   const count = makeTokenCounter(modelName);
   // MCP 工具集（每次取，服务器晚就绪也能在后续轮次出现）
