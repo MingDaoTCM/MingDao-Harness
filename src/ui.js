@@ -53,6 +53,36 @@ export function sanitizeTerminal(text) {
     .replace(/[\x00-\x08\x0b-\x1f\x7f]/g, ''); // 保留 \t(09) \n(0a)，其余 C0/DEL 丢弃
 }
 
+/**
+ * 终端安全过滤（**放行 SGR 颜色**）——给 `io.print` 这类「入参自带样式」的出口用。
+ *
+ * 与 `sanitizeTerminal` 的区别（不能直接复用）：后者是给「本就不该含样式」的场景用的
+ * （写文件、流式渲染前的净化），它连 SGR 一起剥；而 `io.print` 的入参**常常就是
+ * `style()` 的产物**，一并剥掉会让 CLI 全部配色消失。
+ *
+ * 所以这里只放行「以 m 结尾的 CSI」（颜色/属性），其余一律剥：
+ * OSC（改窗口标题、**OSC 52 写剪贴板**）、光标移动/清屏等其它 CSI、其余双字符 ESC、
+ * 以及除 \t \n 外的 C0 控制符。
+ *
+ * 为什么必须做（第三方审计 P2-5）：流式输出早已走 sanitizeTerminal，但一次性输出
+ * `print()` 是 `console.log(text)` 直通。而 `io.print` 的调用点里有**模型/文件内容直入**
+ * 的入口（REPL 把模型生成的计划原文打印出来紧接着问「是否按此计划执行」、记忆库条目、
+ * 账本导出等）——配合 fetch/read 引入的提示注入，可在用户终端清屏伪造界面、
+ * 改窗口标题、写剪贴板，或把控制字节写进 CI 日志。
+ * @param {any} text
+ */
+export function sanitizeKeepingSgr(text) {
+  // **单趟扫描 + 有序分支**，不能拆成多段 replace。
+  // 拆开写过一版，结果是「自我抵消」：第 2 段刚把 SGR（`\x1b[31m`）原样保留，
+  // 第 4 段的 C0 过滤又把里面那个 ESC(0x1B) 当成控制符剥掉，于是只留下 `[31m` 这种垃圾，
+  // 颜色全丢还平白多出一串可见字符。单趟扫描时 SGR 被分支 2 整体吃掉，
+  // C0 分支不会再看到它里面的 ESC。
+  return String(text ?? '').replace(
+    /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-Z\\-_]|[\x00-\x08\x0b-\x1f\x7f]/g,
+    (/** @type {string} */ m) => (/^\x1b\[[0-9;?]*[ -/]*m$/.test(m) ? m : '')
+  );
+}
+
 // ---------- 终端显示宽度（CJK 占 2 列） ----------
 /** @param {any} s */
 function displayWidth(s) {
@@ -411,7 +441,9 @@ export function createIO({ quiet = false } = {}) {
     },
 
     print(text = '') {
-      if (!quiet) console.log(text);
+      // v0.6.2（第三方审计 P2-5）：一次性输出也必须过终端安全过滤。
+      // 入参常为 style() 的结果，故用「放行 SGR」的版本，避免把配色一起剥掉。
+      if (!quiet) console.log(sanitizeKeepingSgr(text));
     },
 
     /**

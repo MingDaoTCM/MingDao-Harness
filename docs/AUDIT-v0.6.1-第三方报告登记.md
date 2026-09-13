@@ -78,6 +78,24 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 （`mingdao pack trust <仓库根>` 或写进 `config.packs`）。装在 `$MINGDAO_HOME/packs/`
 （用户级）的 Pack 不受影响。
 
+## 3.1 已修复（第二批：凭据泄露类 + 静默失效类）
+
+| 项 | 位置 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| P2-6 | `src/commands/sync.js` | `sync passwd <新密码>` 走位置参数 → 明文进 `ps aux` / shell history / CI 日志（同文件的 `sync login` 早已拒绝这种做法） | 三次隐藏输入（旧/新/确认），拒绝命令行传密码且不回显；README 用法同步 |
+| P2-8 | `src/skill-registry.js` | sha256 校验是「可选」的：索引没写哈希就完全不校验，文件照样落盘，CLI 仍打印「✓ 已安装」 | 改为 fail-closed：缺哈希或格式非法一律拒绝安装，错误信息给出补救方式 |
+| P2-5 | `src/ui.js` | 流式输出走 `sanitizeTerminal`，但一次性输出 `io.print` 是 `console.log(text)` 直通；而它的调用点有**模型/文件内容直入**的入口 | `io.print` 统一过 `sanitizeKeepingSgr`（OSC/清屏等一律剥，只放行 SGR 颜色） |
+
+> P2-5 实现里又踩到一个「自我抵消」的坑，已写进代码注释：
+> 拆成多段 `replace` 时，第 2 段刚把 SGR（`\x1b[31m`）原样保留，第 4 段的 C0 过滤
+> 又把里面那个 ESC(0x1B) 当成控制符剥掉——结果是配色全丢、还平白多出 `[31m` 这种可见垃圾。
+> 必须**单趟扫描 + 有序分支**，让 SGR 被分支整体吃掉。
+
+> 顺带抓到两个报告里没写的真 bug（都在改动过程中暴露）：
+> **连续隐藏提问在管道输入下丢行**（每题各建 readline 接口、或逐题 `question()` 都会丢，
+> 表现为进程静默退出且退出码 0）、**提示语被 `_writeToOutput` 一起吞掉**
+> （所以此前登录时看不到「密码：」）。两者均已修并加了断言。
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）
@@ -110,7 +128,7 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 | P2-3 | `src/audit.js:41` | 截断用 `writeFileSync` 而非原子写，崩溃丢事件 |
 | P2-4 | `src/commands/pack.js:31/166` | `listPacks({}, cwd)` 硬传 `{}`，读不到 `config.packs` 声明的 Pack |
 | P2-5 | `src/mcp-presets.js:43-48` | sqlite 预设必填参数含 `{dir}` 未替换，静默落到 cwd |
-| P2-6 | `src/commands/sync.js:81-88` | `sync passwd` 新密码走位置参数 → 明文进 `ps aux`/history |
+| ~~P2-6~~ | ~~`src/commands/sync.js:81-88`~~ | ✅ **已修**（见 §3.1） |
 | P2-7 | `src/skill-registry.js:56` | `redirect:'follow'` 无逐跳复检，与 `skill-lib.js` 两种口径 |
 | P2-8 | `src/skill-registry.js:144-150` | sha256 校验可选，缺字段仍打印「✓ 已安装」 |
 | P2-9 | `src/tools/index.js:332-374` | 声明式工具超时只 kill child，不清理进程组（对照 `bash.js` 的 killGroup） |

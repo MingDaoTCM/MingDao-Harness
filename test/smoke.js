@@ -5328,6 +5328,48 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.6.2 P2-6：sync passwd 拒绝命令行传密码（且不回显），flag 参数不误伤');
 }
 
+
+// ---------- 83. v0.6.2 第三方审计 P2-5：io.print 必须过滤终端控制序列 ----------
+// 流式输出早已走 sanitizeTerminal，但一次性输出是 console.log(text) 直通。
+// 而 io.print 的调用点里有**模型/文件内容直入**的入口（REPL 把模型生成的计划原文打印出来
+// 紧接着问「是否按此计划执行」、记忆库条目、账本导出等）。配合提示注入可清屏伪造界面、
+// 改窗口标题、OSC 52 写剪贴板，或把控制字节写进 CI 日志。
+{
+  const { sanitizeKeepingSgr, createIO } = await import(pathToFileURL(path.join(srcDir, 'ui.js')).href);
+  const evil = 'A\x1b]0;被改的标题\x07B\x1b[2JC\x1b[31mD\x1b[0mE\x1b]52;c;cGF3bmVk\x07F';
+
+  const out = sanitizeKeepingSgr(evil);
+  assert.ok(!out.includes('\x1b]'), 'OSC 必须全剥（改窗口标题 / OSC 52 写剪贴板）');
+  assert.ok(!out.includes('52;c;'), 'OSC 52 的载荷必须消失（否则等于把内容写进用户剪贴板）');
+  assert.ok(!out.includes('\x1b[2J'), '清屏等非 SGR 的 CSI 必须剥掉');
+  assert.ok(!out.includes('被改的标题'), 'OSC 里的标题文本不得残留');
+  assert.ok(out.includes('\x1b[31m') && out.includes('\x1b[0m'), 'SGR 颜色必须保留（否则 CLI 全部配色消失）');
+  // 可见文本要**剥掉 SGR 后**比：颜色码夹在字母之间，直接找 'ABCDEF' 连续子串是错的
+  const visible = out.replace(/\x1b\[[0-9;?]*[ -/]*m/g, '');
+  assert.equal(visible, 'ABCDEF', '可见文本必须一字不丢：' + JSON.stringify(out));
+  assert.equal(sanitizeKeepingSgr('a\tb\nc'), 'a\tb\nc', '制表符与换行必须保留');
+  assert.equal(sanitizeKeepingSgr(''), '');
+  assert.equal(sanitizeKeepingSgr(null), '');
+  // 单独的 ESC（未构成完整序列）也必须清掉，不能漏网
+  assert.ok(!sanitizeKeepingSgr('X\x1bY').includes('\x1b'), '孤立 ESC 也必须剥掉');
+
+  // 关键：print() 本身必须走过滤——只测 helper 存在是不够的（helper 可能没接上）
+  const io = createIO({ quiet: false });
+  const seen = [];
+  const realLog = console.log;
+  console.log = (...a) => seen.push(a.join(' '));
+  try {
+    io.print(evil);
+  } finally {
+    console.log = realLog;
+  }
+  assert.equal(seen.length, 1, 'print 应输出一次');
+  assert.ok(!seen[0].includes('\x1b]'), 'io.print 的输出里不得有 OSC：' + JSON.stringify(seen[0]));
+  assert.ok(!seen[0].includes('\x1b[2J'), 'io.print 的输出里不得有清屏序列');
+  assert.equal(seen[0].replace(/\x1b\[[0-9;?]*[ -/]*m/g, ''), 'ABCDEF', 'io.print 不得吞掉可见文本：' + JSON.stringify(seen[0]));
+  ok('v0.6.2 P2-5：io.print 过滤终端控制序列（OSC/清屏必剥、SGR 保留、可见文本不丢）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });
