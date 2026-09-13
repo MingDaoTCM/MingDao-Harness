@@ -5908,6 +5908,67 @@ if (process.platform !== 'win32') {
   assert.equal(shouldKeepPolling(null, future, now, () => false), false, '任务不存在应停止');
 }
 
+
+// ---------- 92. v0.6.2 自评 P2-7：文件锁的陈旧判据 ----------
+// 原判据只看 mtime 超过 staleMs，配 timeoutMs(5s) < staleMs(15s) 形成两个问题：
+//   ① 持锁方崩溃后白等满 15 秒才允许回收，而等待方 5 秒就超时 —— 中间是死区，
+//      期间所有写方必然全部失败（cachestats 静默跳过轮转丢计费明细等）；
+//   ② 若某个 fn 本身耗时超过 staleMs（大文件重写/慢盘），别人会把**仍然活着**的锁判成陈旧
+//      并回收 —— 互斥直接失效。
+// 锁内容本来就写着 {pid, at}（此前只用于 TOCTOU 比对），现成判据没用上。
+{
+  const { withFileLockSync } = await import(pathToFileURL(path.join(srcDir, 'atomic-write.js')).href);
+  const dir92 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-lock92-'));
+  const lock92 = path.join(dir92, '.lock');
+  try {
+    // 92a. 持有者**已死** → 必须立刻回收（不留死区）
+    const deadProc = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+    await new Promise((r) => deadProc.on('exit', r));
+    fs.writeFileSync(lock92, JSON.stringify({ pid: deadProc.pid, at: Date.now() - 60000 }));
+    const oldTime = new Date(Date.now() - 60000);
+    fs.utimesSync(lock92, oldTime, oldTime);
+    const t0 = Date.now();
+    let ran92 = false;
+    withFileLockSync(lock92, () => { ran92 = true; }, { timeoutMs: 5000, staleMs: 15000 });
+    const ms92 = Date.now() - t0;
+    assert.ok(ran92, '死锁应被回收并执行 fn');
+    assert.ok(ms92 < 1000, `持有者已死必须**立刻**回收（实测 ${ms92}ms）——旧实现要白等满 staleMs，期间所有写方失败`);
+    assert.ok(!fs.existsSync(lock92), 'fn 结束后锁应被释放');
+
+    // 92b. 持有者**仍活着**（哪怕锁很旧、mtime 很旧）→ 绝不能回收
+    fs.writeFileSync(lock92, JSON.stringify({ pid: process.pid, at: Date.now() - 60000 }));
+    fs.utimesSync(lock92, oldTime, oldTime);
+    let threw92 = null;
+    try {
+      withFileLockSync(lock92, () => {}, { timeoutMs: 300, staleMs: 50 });
+    } catch (e) {
+      threw92 = e;
+    }
+    assert.ok(threw92 && /超时/.test(String(threw92.message)), '持有者还活着时不得回收——否则互斥直接失效：' + String(threw92 && threw92.message));
+    assert.ok(fs.existsSync(lock92), '活锁必须原样留着（不能被抢走）');
+
+    // 92c. 读不到持有者信息（内容损坏）+ 确实超过 staleMs → 允许回收（最后兜底）
+    fs.writeFileSync(lock92, 'not-json');
+    fs.utimesSync(lock92, oldTime, oldTime);
+    let ran92c = false;
+    withFileLockSync(lock92, () => { ran92c = true; }, { timeoutMs: 2000, staleMs: 50 });
+    assert.ok(ran92c, '内容损坏且超龄的锁应能回收（否则永远卡死）');
+
+    // 92d. 默认参数必须满足 timeoutMs > staleMs（否则又造出死区）
+    fs.writeFileSync(lock92, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    const src92 = fs.readFileSync(path.join(srcDir, 'atomic-write.js'), 'utf8');
+    const m92 = src92.match(/timeoutMs = (\d+), staleMs = (\d+) \}/);
+    assert.ok(m92, '应能读到默认参数');
+    assert.ok(Number(m92[1]) > Number(m92[2]), `默认 timeoutMs(${m92[1]}) 必须大于 staleMs(${m92[2]})，否则等待方先超时而陈旧锁还没资格回收`);
+  } finally {
+    try {
+      fs.unlinkSync(lock92);
+    } catch {}
+    safeRmSync(dir92, { recursive: true, force: true });
+  }
+  ok('v0.6.2 P2-7：文件锁陈旧判据看持有者 pid（已死立即回收 / 活着绝不抢 / 损坏超龄兜底 / 默认 timeout>stale）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

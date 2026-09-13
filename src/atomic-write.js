@@ -10,6 +10,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { procAlive } from './proc.js';
 
 export function atomicWriteFileSync(/** @type {string} */ target, /** @type {string|Buffer} */ data, /** @type {any} */ options = {}) {
   const dir = path.dirname(target);
@@ -37,7 +38,11 @@ const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
 const sleepMs = (/** @type {number} */ ms) => Atomics.wait(sleepBuf, 0, 0, ms);
 const heldLocks = new Set(); // 本进程当前持有的锁路径（可重入判定）
 
-export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() => any} */ fn, { timeoutMs = 5000, staleMs = 15000 } = {}) {
+// v0.6.2（自评报告 P2-7）：默认值必须 **timeoutMs > staleMs**。
+// 原为 5000 / 15000——等待方 5 秒就抛「获取文件锁超时」，而陈旧锁要 15 秒才允许回收，
+// 中间 10 秒是纯粹的**死区**：持锁方一旦崩溃，这段时间内所有写方必然全部失败
+// （cachestats 静默跳过轮转丢计费明细；tasks/workspace/schedule/sync 未捕获时直接报错）。
+export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() => any} */ fn, { timeoutMs = 20000, staleMs = 15000 } = {}) {
   // 可重入：同一调用栈内已持该锁 → 直接执行，不再二次抢锁
   if (heldLocks.has(lockPath)) {
     return fn();
@@ -71,7 +76,22 @@ export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() =
       if (/** @type {any} */ (err).code !== 'EEXIST') throw err;
       try {
         const st = fs.statSync(lockPath);
-        if (Date.now() - st.mtimeMs > staleMs) {
+        // v0.6.2（P2-7）：陈旧判据改为「**持有者 pid 已死**」优先。
+        //
+        // 原判据只看 mtime 超过 staleMs，带来两个反向问题：
+        //   ① 崩溃后要白等满 15 秒才允许回收（配上面 5 秒的 timeout 就是死区）；
+        //   ② 若某个 fn 本身耗时超过 15 秒（大文件重写、慢盘），别人会把**仍然活着**的锁
+        //      判成陈旧并回收——互斥直接失效，而且没有任何补救。
+        // 锁内容本来就写着 {pid, at}（此前只用于 TOCTOU 比对），现成的判据没用上。
+        let holderPid = 0;
+        try {
+          holderPid = Number(JSON.parse(fs.readFileSync(lockPath, 'utf8'))?.pid) || 0;
+        } catch {}
+        const holderAlive = holderPid > 0 ? procAlive(holderPid) : null;
+        // 回收条件：持有者已死（立刻回收，不留死区）；或读不到持有者信息且确实超过 staleMs。
+        // 持有者仍活着（哪怕 fn 跑了很久）**绝不回收**——那会破坏互斥。
+        const reclaimable = holderAlive === false || (holderAlive === null && Date.now() - st.mtimeMs > staleMs);
+        if (reclaimable) {
           // TOCTOU 防护（OfficeACE 报告）：unlink 前读锁内容并二次 stat 比对，
           // 防两个进程同时判定陈旧、后者误删前者刚创建的新锁（互斥失效）
           try {
