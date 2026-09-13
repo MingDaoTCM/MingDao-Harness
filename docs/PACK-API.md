@@ -99,7 +99,7 @@ Pack 同样不受限制：前者是用户自己装的，后者随内核分发。
   "author": "…",
   "license": "private",
 
-  "permissions": {                       // Pack 声明它需要的宿主能力（最小权限，加载时校验）
+  "permissions": {                       // 仅**声明**用途（见下方 ⚠：内核当前不据此强制）
     "fs": ["<home>/intake/**", "<home>/patients.json"],
     "net": ["https://dify.example.com"],
     "env": ["DIFY_API_KEY"]
@@ -123,10 +123,29 @@ Pack 同样不受限制：前者是用户自己装的，后者随内核分发。
 ```
 
 **校验规则（加载时即失败并告警，绝不崩启动）：**
+> ### ⚠ `permissions` 目前只是**声明**，内核不据此强制（v0.6.2 更正）
+>
+> v0.6.2 第三方审计（自评报告 P2-1）指出：`permissions` 全仓**没有任何执行点消费它**，
+> 只有 `validateManifest()` 做形状校验（键名限 `fs`/`net`/`env`、值必须是字符串数组）。
+> 而 `pack.mjs` 是 `await import()` 进宿主进程的——**同进程、完整 Node 权限**，
+> 可读写任意文件、可任意出网、可读所有环境变量。
+>
+> **失真的安全叙事比没有声明更危险**：文档写着「最小权限」「越出即拒绝」，使用者就会放心
+> 安装第三方 Pack。所以本版做了两件事：
+>
+> 1. **把话说准**：本节与 §5 里所有"声称强制"的措辞已标注「尚未实现」；
+> 2. **把差距摆出来**：加载时做一次**静态对照**——若 `pack.mjs` 用到了未声明的能力
+>    （`fetch(` → net、`fs.xxx` → fs、`process.env` → env），启动即打印告警，并明确写出
+>    「`permissions` 只是声明、内核不据此强制，安装第三方 Pack 前请人工审阅 `pack.mjs`」。
+>
+> **当前承担安全边界的是「信任门」**（见 §1.1：项目级 Pack 默认不挂载，需 `mingdao pack trust`
+> 记录内容指纹并随内容变化失效）。真正的 `permissions` 强制是**未实现的计划项**——
+> 选型时不要把它当成已存在的沙箱。
+
 - `apiVersion` 不在内核支持列表 → 拒绝加载，提示升级内核或降级 Pack；
 - `engines.mingdao` 与本内核版本不匹配 → 拒绝加载；
 - `name` 冲突 / 保留名（`mcp`、`core`）→ 拒绝；
-- `permissions.fs` 越出 `config.fsAllowDirs` → 拒绝；
+- ~~`permissions.fs` 越出 `config.fsAllowDirs` → 拒绝~~ ⚠ **尚未实现**（见下方 ⚠ 说明）；
 - 任何 contributions 声明但文件缺失 → 拒绝该条并告警，其余继续。
 
 ---
@@ -332,7 +351,7 @@ mingdao constraint test <name>    # 单独跑约束反例
 
 1. **Pack 不得覆盖内置同名 Provider**——只允许新增。理由：内置 Provider 名称是内核契约的一部分，允许覆盖会让「内核行为」变成 Pack 可劫持的对象，安全与可预测性都受损。同名冲突在 `pack verify` 与加载时都会被拒绝并给出明确原因。
 2. **`block-and-rewrite` 的修正请求计费归 Pack**。理由：修正是 Pack 的约束触发的额外开销，归到 Pack 才能让垂域团队看到「自己的红线花了多少钱」，也让 Pack 级预算真实反映其成本。
-3. **Pack 内 `fetch` 允许，但必须**：① 目标在 `permissions.net` 白名单内；② 调用强制入账（`purpose` 标记）并可审计；③ `mingdao pack verify` 对「直连模型端点」的 `fetch` 给出静态告警（引导改用 `ctx.llm()`）。理由：部分垂域必须直连业务系统（HIS/ERP），一刀切禁止会把 Pack 逼回 Provider 里写 `chat()` 的老路——那正是本设计要消灭的形态。
+3. **Pack 内 `fetch` 允许，但必须**：① ~~目标在 `permissions.net` 白名单内~~ ⚠ **尚未实现**；② ~~调用强制入账（`purpose` 标记）并可审计~~ ⚠ **尚未实现**（内核只做静态提示，不强制）；③ `mingdao pack verify` 对「直连模型端点」的 `fetch` 给出静态告警（引导改用 `ctx.llm()`）——**这一条已实现**。理由：部分垂域必须直连业务系统（HIS/ERP），一刀切禁止会把 Pack 逼回 Provider 里写 `chat()` 的老路——那正是本设计要消灭的形态。
 
 ### 仍未定（不阻塞 v1，随 v0.5.x 落地）
 
