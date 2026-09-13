@@ -5203,7 +5203,12 @@ console.log(JSON.stringify({ okOn, xml }));`;
     const t81 = P.trustPack(root81);
     assert.ok(t81.ok, 'trustPack 应成功：' + JSON.stringify(t81));
     const trustFile81 = path.join(home81, 'pack-trust.json');
-    assert.equal(fs.statSync(trustFile81).mode & 0o777, 0o600, '信任表含内容指纹，必须 0600');
+    // 只在 POSIX 断言权限位：Windows 不实现 POSIX mode，statSync().mode 恒为 0o666
+    // （Node 只映射只读属性）。在 Windows 上断言 0600 会让 CI 恒红——
+    // 这正是 v0.4.6 踩过的同类坑（在 Windows 上断言 POSIX 行为），别再犯。
+    if (process.platform !== 'win32') {
+      assert.equal(fs.statSync(trustFile81).mode & 0o777, 0o600, '信任表含内容指纹，必须 0600');
+    }
     P.resetPacksForTest();
     r81 = await P.mountPacks({}, { cwd: proj81 });
     assert.ok(mountedNames(r81).includes('evil'), '信任后应正常挂载');
