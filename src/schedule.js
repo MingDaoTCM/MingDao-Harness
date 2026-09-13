@@ -247,14 +247,25 @@ export function chainSchedules(/** @type {any} */ home, /** @type {any} */ quest
   return { ids };
 }
 
-export function sleeperAlive(/** @type {any} */ pid) {
+/**
+ * sleeper（旧式调度 worker）是否仍在运行。
+ *
+ * v0.6.2（自评报告 P2-6）：**全仓只有这里用裸 `process.kill(pid, 0)` 判活、没有归属校验**，
+ * 而其它等待/回收路径早已走 src/proc.js。PID 会被系统回收复用：睡着的 worker 崩溃后
+ * pid 被无关进程占用时，这里会认为「任务仍在跑」——于是该任务**永不重跑**，
+ * 且 `:309` 的 `process.kill(pid, 'SIGTERM')` 会去**杀一个无关进程**。
+ *
+ * 三值语义与 proc.js 一致：能校验时必须校验（false = 明确不是我们的进程，绝不能当活着）；
+ * 无从判断（Windows 无 /proc 与 ps）则诚实退化为存活判定，行为与修前一致、不夸大。
+ * @param {any} pid
+ * @param {any} [jobId] 传入则可做更精确的匹配（命令行形如 `… schedule-worker <jobId>`）
+ */
+export function sleeperAlive(/** @type {any} */ pid, /** @type {any} */ jobId) {
   if (!pid) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
+  const needle = jobId ? `schedule-worker ${jobId}` : 'schedule-worker';
+  const owned = pidOwnedBy(pid, needle);
+  if (owned === null) return procAlive(pid); // 无从判断 → best-effort（与既有行为一致）
+  return owned === true;
 }
 
 function spawnSleeper(/** @type {any} */ home, /** @type {any} */ job) {
@@ -352,7 +363,7 @@ export function reconcileSchedules(/** @type {any} */ home) {
       // 兜底路径（旧式）
       for (const job of jobs) {
         if (job.status !== 'pending' && job.status !== 'running') continue;
-        if (sleeperAlive(job.pid)) continue;
+        if (sleeperAlive(job.pid, job.id)) continue;
         if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) continue;
         if (job.kind === 'after' || (job.nextRunAt && job.nextRunAt <= Date.now() + 5000)) spawnSleeper(home, job);
       }

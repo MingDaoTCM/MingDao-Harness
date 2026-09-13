@@ -5735,6 +5735,84 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.6.2 P2-1/P2-2/P2-3：轮转按文件大小触发（单次写即生效）+ 原子写无残行 + 记忆尾换行不粘行');
 }
 
+
+// ---------- 90. v0.6.2 P2-6/P2-9：进程归属校验与整组清理 ----------
+{
+  const { procAlive, ownershipVerifiable } = await import(pathToFileURL(path.join(srcDir, 'proc.js')).href);
+  const { sleeperAlive } = await import(pathToFileURL(path.join(srcDir, 'schedule.js')).href);
+
+  // 90a. sleeperAlive 必须做归属校验（此前是全仓唯一的裸 process.kill(pid,0)）。
+  //      PID 会被系统回收复用：睡着的 worker 崩溃后 pid 被无关进程占用时，
+  //      旧实现会认为「任务仍在跑」→ 该任务永不重跑。
+  if (ownershipVerifiable()) {
+    assert.equal(sleeperAlive(process.pid), false, '存活但命令行不含 schedule-worker 的进程不得被判为 sleeper（PID 复用误判）');
+    assert.equal(sleeperAlive(process.pid, 'jobX'), false, '同上，带 job id 时更不得误判');
+  } else {
+    // Windows 无 /proc 且无 ps：诚实退化为存活判定（这是 proc.js 里写明的已知边界，不是漏修）
+    assert.equal(sleeperAlive(process.pid), true, '无从校验时退化为存活判定（与修前行为一致）');
+  }
+  assert.equal(sleeperAlive(0), false, 'pid 为 0/空一律 false');
+  assert.equal(sleeperAlive(null), false);
+
+  // 真正形如 sleeper 的子进程（命令行含 `schedule-worker <id>`）应判为活着
+  const fakeSleeper = spawn(process.execPath, ['-e', 'setTimeout(()=>{}, 8000)', 'schedule-worker', 'jobZ'], { stdio: 'ignore' });
+  try {
+    // 等它真的起来（pidOwnedBy 对已消失的 pid 会先返回 false）
+    for (let i = 0; i < 40 && !procAlive(fakeSleeper.pid); i += 1) await new Promise((r) => setTimeout(r, 25));
+    if (ownershipVerifiable()) {
+      assert.equal(sleeperAlive(fakeSleeper.pid, 'jobZ'), true, '命令行匹配 `schedule-worker <id>` 时应判为活着');
+      assert.equal(sleeperAlive(fakeSleeper.pid, 'otherJob'), false, 'job id 不匹配时不得判为活着（复用 PID 可能属于别的任务）');
+    }
+  } finally {
+    try {
+      fakeSleeper.kill('SIGKILL');
+    } catch {}
+  }
+  ok('v0.6.2 P2-6：sleeperAlive 走归属校验（存活但非本进程 → false；命令行匹配 → true；无从校验时如实退化）');
+
+  // 90b. 声明式工具超时必须**整组清理**：`sh -c 'a && b'` 的孙进程此前会成孤儿继续跑。
+  if (process.platform !== 'win32') {
+    const { mountConfigTools, dispatch } = await import(pathToFileURL(path.join(srcDir, 'tools/index.js')).href);
+    const tmp90 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p90-'));
+    const gcPidFile = path.join(tmp90, 'gc.pid');
+    try {
+      // 命令：后台起一个长睡进程（孙进程）并写下它的 pid，然后自己也长睡 → 必然超时
+      mountConfigTools({ tools: [{ name: 'p90tool', command: `sleep 60 & echo $! > ${gcPidFile}; sleep 60`, timeout: 1 }] });
+      // **先证明前提**：工具还在跑的时候就该能看到孙进程活着。
+      // 第一版直接等 dispatch 结束后再查 pid——结果"孙进程一开始就不存在"时断言也会通过，
+      // 属于**假绿**（变异验证时把整组清理撤掉却毫无反应，才发现）。所以这里中途验一次。
+      const running90 = dispatch('p90tool', {}, { cwd: tmp90, cfg: {} });
+      let gcPid = 0;
+      for (let i = 0; i < 40; i += 1) {
+        await new Promise((r) => setTimeout(r, 25));
+        try {
+          gcPid = Number(fs.readFileSync(gcPidFile, 'utf8').trim());
+        } catch {}
+        if (gcPid > 0 && procAlive(gcPid)) break;
+      }
+      assert.ok(gcPid > 0 && procAlive(gcPid), '工具运行期间应能看到孙进程存活（否则这条断言是空转的）');
+      const t90 = Date.now();
+      const r90 = await running90;
+      const elapsed90 = Date.now() - t90;
+      assert.equal(r90.timedOut, true, '该命令应超时：' + JSON.stringify(r90).slice(0, 120));
+      // **必须带时限**：只看"孙进程最终没了"是会被掩盖的——孙进程持有 stdout/stderr 管道，
+      // 只杀 shell 时 Node 的 close 会一直等到孙进程自己退出（这里 sleep 60），于是调用
+      // "看起来最终正确"，实际上把每次超时都拖成 60 秒。第一版断言没带时限，
+      // 撤掉整组清理后依然全绿（只是整轮慢了 60 秒），属于假绿。
+      assert.ok(
+        elapsed90 < 5000,
+        `超时后必须立刻返回（整组清理才能真正结束调用）；实测 ${elapsed90}ms —— 孙进程持有管道会把 close 拖到它自己退出`
+      );
+      // 且此刻孙进程必须已被清理
+      for (let i = 0; i < 40 && procAlive(gcPid); i += 1) await new Promise((r) => setTimeout(r, 25));
+      assert.equal(procAlive(gcPid), false, '超时后孙进程必须被清理（否则成孤儿继续占用端口/文件）');
+    } finally {
+      safeRmSync(tmp90, { recursive: true, force: true });
+    }
+    ok('v0.6.2 P2-9：声明式工具超时整组清理（孙进程不留孤儿）');
+  }
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

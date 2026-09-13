@@ -252,7 +252,7 @@ async function main() {
         for (const j of jobs) {
           // 崩溃恢复（审计）：'running' 但无人监督且 worker 已死 → 按任务结果定案或重新排队，
           // 避免任务永久卡在 running（此前 daemon 重启后既不重跑也不收尾）
-          if (j.status === 'running' && !supervising.has(j.id) && !sleeperAlive(j.pid)) {
+          if (j.status === 'running' && !supervising.has(j.id) && !sleeperAlive(j.pid, j.id)) {
             const t = j.lastTaskId ? readTask(home0, j.lastTaskId) : null;
             // v0.4.7（P2 T15）：先看「跑这个任务的宿主进程」是否仍存活。存活说明它正在跑
             // （可能还没写 lastTaskId），**等它**——否则「本 daemon 刚接管 + 旧 daemon 在途」
@@ -280,7 +280,7 @@ async function main() {
             continue;
           }
           if (j.status !== 'pending' || handled.has(j.id)) continue;
-          if (sleeperAlive(j.pid)) continue; // 旧式 sleeper 仍在：交回给它，避免双跑
+          if (sleeperAlive(j.pid, j.id)) continue; // 旧式 sleeper 仍在：交回给它，避免双跑
           if (j.lastTaskId) {
             const t = readTask(home0, j.lastTaskId);
             if (t && t.status === 'running') continue; // worker 仍在跑（异常窗口），不重拉

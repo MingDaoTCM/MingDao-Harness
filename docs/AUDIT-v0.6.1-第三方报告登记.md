@@ -172,6 +172,22 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 > 我第一版测试没构造这个前提——把修复撤掉做变异验证时**毫无反应**，属于「假绿」。
 > 改为先写入一个无尾换行的文件后再删条目，变异即被抓住。
 
+## 3.8 已修复（第九批：进程归属校验与整组清理）
+
+| 项 | 位置 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| P2-6（自评报告） | `src/schedule.js#sleeperAlive` | **全仓唯一**的裸 `process.kill(pid, 0)` 判活，没有归属校验（其它等待/回收路径早已走 `proc.js`）。PID 被系统回收复用后，崩溃 worker 的 pid 若被无关进程占用，这里会认为「任务仍在跑」→ 该任务**永不重跑** | 走 `pidOwnedBy(pid, 'schedule-worker <id>')`；三值语义与 `proc.js` 一致（`null` = 无从判断时如实退化为存活判定，不夸大）。调用方一并传入 job id |
+| P2-9（代码审计报告） | `src/tools/index.js` | 声明式工具（`config.tools`）超时只 `child.kill('SIGKILL')`——shell 死了，`sh -c 'a && b'` 的孙进程成孤儿继续跑，且它**持有 stdout/stderr 管道**，Node 的 `close` 会被拖到孙进程自己退出（每次"超时"实际拖满整个命令时长） | 与 `bash.js` 同口径加 `killGroup`（`process.kill(-pid)` 整组杀，失败回退 child）；**并补 `detached: true`** 让子进程自成进程组——见下方教训。顺带给结果补 `timedOut` 字段与 bash 工具对齐 |
+
+> ⚠ **第一个版本只对了一半，是测试把它揪出来的**：我只加了 `killGroup`，注释里还写着
+> 「POSIX 下 spawnOpts 已让子进程自成进程组」——**但这里从来没传 `detached: true`**，
+> 于是子进程与父进程同组，`process.kill(-pid)` 因「无此进程组」抛错、静默回退成只杀 shell，
+> 孙进程照旧存活。补齐 `detached: true` 后，整轮 smoke 从 **92 秒降到 33 秒**（正是被拖住的那 60 秒）。
+>
+> ⚠ **断言必须带时限，只看"最终状态"会被掩盖**：孙进程最终总会退出（`sleep 60` 自己结束），
+> 所以「超时后孙进程不存在」这类断言在缺陷存在时**依然全绿**，只是整轮慢了 60 秒。
+> 改为断言「超时后必须**在 5 秒内**返回」才抓得住——这也正是用户能感知的症状。
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）
@@ -186,7 +202,7 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 | P2-3 | `git` 参数黑名单 | 可被长选项唯一前缀缩写绕过 |
 | P2-4 | Web 会话忙锁 | 键在自动改名后失效 |
 | ~~P2-5~~ | ~~终端渲染~~ | ✅ **已修**（见 §3.1，`io.print` 统一过 `sanitizeKeepingSgr`） |
-| P2-6 | `sleeperAlive` | 全仓唯一裸 `process.kill(pid,0)`，无归属校验 |
+| ~~P2-6~~ | ~~`sleeperAlive`~~ | ✅ **已修**（见 §3.8） |
 | P2-7 | 文件锁 | `Atomics.wait` 阻塞事件循环；`timeoutMs < staleMs` 形成 15s 死区 |
 | P2-8 | 出网闸门 | 包装 `fetch` 时丢失 `Request` 对象语义 |
 | ~~P2-9~~ | ~~项目记忆~~ | ✅ **已修**（见 §3.2） |
@@ -210,7 +226,7 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 | ~~P2-6~~ | ~~`src/commands/sync.js:81-88`~~ | ✅ **已修**（见 §3.1） |
 | P2-7 | `src/skill-registry.js:56` | `redirect:'follow'` 无逐跳复检，与 `skill-lib.js` 两种口径 |
 | P2-8 | `src/skill-registry.js:144-150` | sha256 校验可选，缺字段仍打印「✓ 已安装」 |
-| P2-9 | `src/tools/index.js:332-374` | 声明式工具超时只 kill child，不清理进程组（对照 `bash.js` 的 killGroup） |
+| ~~P2-9~~ | ~~`src/tools/index.js:332-374`~~ | ✅ **已修**（见 §3.8） |
 | P2-10 | `src/routing.js:17`、`config.js:160` | 路由默认仍是改名前的旧模型名 |
 | P2-11 | `src/agent.js:104` vs `:34` | 只读工具集合两份副本（`READONLY_TOOLS_SET` / `READONLY_TIER_SET`） |
 | P2-12 | `src/commands/repl.js:677-685` | 自动标题无 try/catch（`cli.js` 已为同类问题加过） |

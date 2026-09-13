@@ -340,6 +340,12 @@ export function mountConfigTools(/** @type {any} */ cfg) {
               // v0.4.6：与 bash/hooks/MCP 同口径过滤敏感环境变量——此前这里用 {...process.env}，
               // 是唯一不筛的子进程入口（声明式工具子进程能读到 MINGDAO_API_KEY/AWS_SECRET_ACCESS_KEY）。
               env: { ...buildChildEnv(ctx, ctx?.cfg?.bashEnvFilter !== false), MINGDAO_TOOL_ARGS: JSON.stringify(args ?? {}) },
+              // detached: POSIX 下让子进程自成进程组，超时才能**整组**清理（与 bash.js 同口径）。
+              // Windows 由 spawnOpts 强制 detached:false（那里没有可用的进程组回收）。
+              // 注意：**必须显式传 detached**——我第一版只写了 killGroup 却没给这里加 detached，
+              // 于是子进程与父进程同组，`process.kill(-pid)` 因"无此进程组"抛错、静默回退成
+              // 只杀 shell，孙进程照旧存活并把 close 拖到它自己退出（60 秒）。
+              detached: true,
               ...spawnOpts({ piped: true }), // Windows：不 detach + 隐藏控制台
             });
             let out = '';
@@ -356,9 +362,21 @@ export function mountConfigTools(/** @type {any} */ cfg) {
               clearTimeout(timer);
               resolve(result);
             };
+            // v0.6.2（第三方代码审计 P2-9）：超时必须**整组清理**，与 bash.js 同口径。
+            // 原先只 `child.kill('SIGKILL')`——shell 死了，它拉起的孙进程（声明式工具里
+            // 常见 `sh -c 'a && b'`）会被 init 收养继续跑：既成孤儿，也可能继续占用端口/文件。
+            // POSIX 下 spawnOpts 已让子进程自成进程组（detached），故 `-pid` 可整组杀；
+            // Windows 无进程组语义，kill(-pid) 抛错后回退为直接杀 child（与既有行为一致）。
+            const killGroup = (/** @type {any} */ sig) => {
+              try {
+                process.kill(-(/** @type {any} */ (child)).pid, sig);
+              } catch {
+                try { child.kill(sig); } catch {}
+              }
+            };
             const timer = setTimeout(() => {
               timedOut = true;
-              try { child.kill('SIGKILL'); } catch {}
+              killGroup('SIGKILL');
             }, timeoutMs);
             child.stdout.on('data', (d) => { out = cap(out, d); });
             child.stderr.on('data', (d) => { err = cap(err, d); });
@@ -367,6 +385,9 @@ export function mountConfigTools(/** @type {any} */ cfg) {
               const capped = out.length > 20000 ? out.slice(0, 20000) + `\n…[输出过长已截断，共 ${out.length} 字]` : out;
               finish({
                 ok: timedOut ? false : (code ?? 0) === 0,
+                // v0.6.2：与 bash 工具的结果形状对齐——补 timedOut，调用方/UI 才能把
+                // 「超时」与「执行失败」区分开（此前只能靠错误文案里有没有超时二字）
+                timedOut,
                 exitCode: timedOut ? null : (code ?? null),
                 output: (capped || '（无输出）').trim(),
                 ...(err.trim() ? { stderr: err.trim().slice(0, 4000) } : {}),
