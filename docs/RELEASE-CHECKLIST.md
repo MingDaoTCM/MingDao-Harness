@@ -4,8 +4,23 @@
 > npm 首次发布/补发见该文件第 2 步（必须**从 tag** 发布，并用 `--tag backfill` 避免 latest 回退）。
 
 > 起因：2026-09-11 明确发版纪律。**本清单是发版的唯一准入流程**——任何一步没做，就不算发布完成。
-> 纪律的核心是两条：**发布前必须由人验收**，以及**发布是三个平台 + 官网的同一批产物**，
-> 不允许「GitHub 发了、镜像和官网还是旧版本」这种半发布状态。
+> 纪律的核心是两条：**发布前必须由人验收**，以及**发布是「四平台 + 官网」的同一批产物**，
+> 不允许「GitHub 发了、镜像/npm/官网还是旧版本」这种半发布状态。
+
+### 0.1 「四平台」的定义（2026-09-13 负责人明确）
+
+| 渠道 | 接收什么 | 怎么发 |
+| --- | --- | --- |
+| **GitHub** | 代码（main + tag）+ Release（安装包长期保留） | `git push origin main` + tag 触发 `desktop.yml` |
+| **Gitee** | 代码（main + tag）+ Release（**不附安装包**） | `bash scripts/publish-mirror-releases.sh` |
+| **GitCode** | 同上 | 同上（同一脚本） |
+| **npm** | **版本化包**（不是代码分支） | `npm publish`（见 RELEASE-TRAIN §2；补发用 `--tag backfill`） |
+
+> ⚠ **npm 不能「推分支」**：它只接收带版本号的包。所以「代码改动」推的是三个 git 平台，
+> 而**每次发版必须四个渠道齐全**——npm 只在发版时加入。别把这两件事混为一谈。
+>
+> 这条纪律此前只停留在口头，于是负责人不得不专门提醒「应该推送四平台，要包括 npm，以后记住」。
+> **口头约定记不住，脚本才记得住**：发版最后一步必须跑下面这条，它会把四个渠道逐项验一遍。
 
 ---
 
@@ -330,6 +345,25 @@ bash deploy.sh
 - [ ] 首页无残留旧版本号——注意区分：**「vX.Y.Z 起 /（vX.Y.Z 已修复）」是历史叙述，不要改**；
       版本历史表与功能展示区的旧版本锚点也是故意的。脚本每次会列出所有旧版本号位置供扫一眼。
 - [ ] `bash deploy.sh` 成功，线上页面可访问（`curl -s https://harness.mingdao.ai/ | grep 开放内核`）
+
+### 3.4 四平台一致性验收（**最后一步，缺一不可**）
+
+```bash
+cd MingDao-Harness
+set -a && . ./.env && set +a          # 需要三个 token 才能读到镜像的 Release
+node scripts/verify-release.mjs <版本>  # 四个渠道逐项核对，任一缺失即非 0 退出
+```
+
+它逐项核对：
+
+- GitHub / Gitee / GitCode 的 **main 与 tag 是否同一个 commit**（只比 main 会漏掉没推的 tag）；
+- 三个平台的 **Release 是否存在**（Gitee 对不存在的 Release 会返回 `HTTP 200 + null 体`，
+  只看状态码会把「没发布」判成「已发布」——脚本已按 body 判定）；
+- **npm 是否已发布该版本**、`dist-tags.latest` 指向哪里（回填版会用 `--tag backfill`，
+  latest 不指向它属正常，脚本只警告不判失败）。
+
+- [ ] `node scripts/verify-release.mjs <版本>` **退出 0**
+- [ ] 若输出 `⚠ npm/dist-tags.latest` 不是本版本，确认这是有意的回填（否则 latest 需要修正）
 
 ### 3.3 Gitee / GitCode 同步发行（含附件）
 
