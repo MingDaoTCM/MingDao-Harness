@@ -103,10 +103,13 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 | 级别 | 位置 | 摘要 |
 | --- | --- | --- |
 | P2-1 | `pack.json` 的 `permissions` | 纯声明，全仓无人读取 |
+
+> 注意：**两份报告的编号会撞车**（自评报告的 P2-5 是「终端注入」，第三方代码审计报告的
+> P2-5 是「MCP 预设参数未替换」）。引用编号时务必带上来源，否则会对错条目。
 | P2-2 | 权限 `deny` | 前缀规则仍可被链式命令绕过 |
 | P2-3 | `git` 参数黑名单 | 可被长选项唯一前缀缩写绕过 |
 | P2-4 | Web 会话忙锁 | 键在自动改名后失效 |
-| P2-5 | 终端渲染 | 模型输出可注入终端控制序列（OSC 52 等） |
+| ~~P2-5~~ | ~~终端渲染~~ | ✅ **已修**（见 §3.1，`io.print` 统一过 `sanitizeKeepingSgr`） |
 | P2-6 | `sleeperAlive` | 全仓唯一裸 `process.kill(pid,0)`，无归属校验 |
 | P2-7 | 文件锁 | `Atomics.wait` 阻塞事件循环；`timeoutMs < staleMs` 形成 15s 死区 |
 | P2-8 | 出网闸门 | 包装 `fetch` 时丢失 `Request` 对象语义 |
