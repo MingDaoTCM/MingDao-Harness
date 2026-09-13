@@ -3,13 +3,18 @@
 // 因此可以在没有内核运行时的环境里安全执行。
 import fs from 'node:fs';
 import path from 'node:path';
-import { listPacks, loadPack, validateManifest, coreVersionOf, SUPPORTED_PACK_API, CONSTRAINT_KINDS, packedDirsForHelp } from '../packs.js';
+import { listPacks, loadPack, validateManifest, coreVersionOf, SUPPORTED_PACK_API, CONSTRAINT_KINDS, packedDirsForHelp, packTrustState, trustPack, untrustPack } from '../packs.js';
 
 const HELP = `用法：
   mingdao pack list                 已发现的 Pack（名/版本/来源/兼容状态）
   mingdao pack verify <目录>        静态校验 manifest + 文件齐全 + 约束合法（下游 CI 门禁）
   mingdao pack new <名字>           生成最小可用 Pack 脚手架
   mingdao pack info <名字>          单个 Pack 的贡献面明细
+  mingdao pack trust <项目目录>     信任该项目的 .mingdao/packs（未信任则**不挂载**）
+  mingdao pack untrust <项目目录>   撤销信任
+
+项目级 Pack 默认不挂载：项目里的 pack.mjs 会以完整 Node 权限在本进程内执行，
+不受 permission 模式约束。clone 来的仓库必须先 trust 才会加载（内容一变即自动失效）。
 
 说明：Pack API v${SUPPORTED_PACK_API.join('/')}（契约见 docs/PACK-API.md）。
 约束 kind：${[...CONSTRAINT_KINDS].join(' / ')}`;
@@ -37,10 +42,56 @@ export async function handlePack(cmd, args) {
     }
     console.log(`共 ${found.length} 个 Pack（内核 ${coreVersionOf()}）：`);
     for (const p of found) {
-      const status = p.error ? `❌ ${p.error}` : `✅ apiVersion ${p.apiVersion}`;
+      // 未信任的项目级 Pack 会被 mountPacks 跳过——列表里必须**看得出来**，
+      // 否则用户会以为它生效了（这正是原缺陷「静默」的另一半）。
+      const status = p.gate
+        ? `⛔ 未信任（不挂载）——${p.gate === 'changed' ? '信任后内容已变化' : '执行 mingdao pack trust ' + (p.gateDir || '')}`
+        : p.error
+          ? `❌ ${p.error}`
+          : `✅ apiVersion ${p.apiVersion}`;
       console.log(`  ${p.name}${p.displayName ? '（' + p.displayName + '）' : ''} v${p.version || '?'} · 来源 ${p.source} · ${status}`);
       console.log(`      ${p.dir}`);
     }
+    return true;
+  }
+
+  if (sub === 'trust' || sub === 'untrust') {
+    const dir = String(args[1] || '').trim();
+    if (!dir) {
+      console.log(`[错误] 用法：mingdao pack ${sub} <项目目录>（会作用于该目录下的 .mingdao/packs）`);
+      process.exitCode = 1;
+      return true;
+    }
+    // 传项目目录或 packs 目录都接受：统一解析到 .mingdao/packs
+    const abs = path.resolve(dir);
+    const root = path.basename(abs) === 'packs' && path.basename(path.dirname(abs)) === '.mingdao' ? abs : path.join(abs, '.mingdao', 'packs');
+    if (!fs.existsSync(root)) {
+      console.log(`[错误] 未找到 Pack 目录：${root}`);
+      console.log('        该目录不存在时无需信任（没有项目级 Pack 会被加载）。');
+      process.exitCode = 1;
+      return true;
+    }
+    if (sub === 'untrust') {
+      const r = untrustPack(root);
+      if (r.error) {
+        console.log(`[错误] ${r.error}`);
+        process.exitCode = 1;
+        return true;
+      }
+      console.log(`✓ 已撤销信任：${r.dir}（该项目的 Pack 不再挂载）`);
+      return true;
+    }
+    const st = packTrustState(root);
+    const r = trustPack(root);
+    if (r.error) {
+      console.log(`[错误] ${r.error}`);
+      process.exitCode = 1;
+      return true;
+    }
+    console.log(`✓ 已信任项目级 Pack 目录：${r.dir}`);
+    console.log(`  内容指纹 ${String(r.sha256 || '').slice(0, 16)}…${st.reason === 'changed' ? '（与上次信任时不同，已更新为当前内容）' : ''}`);
+    console.log('  ⚠ 该目录下的 pack.mjs 会以完整 Node 权限在本进程内执行——只信任你自己审过的代码。');
+    console.log('  指纹变化后信任自动失效，需要重新执行本命令。');
     return true;
   }
 

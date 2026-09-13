@@ -41,7 +41,7 @@
 **修复**：缓存挂到 `ctx.readCache`（`createAgent` 每个实例一份）。同一代理重复读仍去重省 token，
 跨代理不再污染；没有 `ctx.readCache` 时不去重（宁可多花 token，也不给错信息）。
 
-## 3. 待处理：P1-1 项目级 Pack「克隆即执行」（**已亲自核实，尚未修复**）
+## 3. 已修复：P1-1 项目级 Pack「克隆即执行」（**已亲自核实并修复**）
 
 ```js
 // src/packs.js#packDirs —— 项目级目录无条件进入搜索路径（priority 2）
@@ -59,15 +59,24 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 可读 bash 工具专门过滤掉的敏感环境变量（`bash.js` 的黑名单在进程内代码面前毫无意义）。
 **与 `permission` 模式（ask/readonly）完全无关，也不询问用户。**
 
-**修复方向**（与项目既有模式一致）：
+**修复（v0.6.2，负责人已同意该行为变更）**：
 
-- 项目级 Pack 默认**不挂载**，需显式声明（`config.packs`）或经指纹信任后才生效；
-- 复用 `mingdao skill trust` 的**内容指纹信任**模式（`src/skill-lib.js#trustSkill`）——
-  指纹变化即重新询问；
-- 未信任时打印明确指出文件路径与开启方式的告警，而不是静默执行。
+- 项目级 Pack **默认不挂载**：`packDirs` 只在内容指纹被显式信任后才把它并入搜索路径；
+- 复用 `mingdao skill trust` 的**内容指纹**模式（同一实现 `skillDirHash`）——指纹变化即自动失效；
+- 新增 `mingdao pack trust` / `untrust`；`mingdao pack list` 把未信任的显示为
+  「⛔ 未信任（不挂载）」并给出开启命令；
+- 未信任时启动打印告警，说明**目录、原因与开启命令**——静默执行与静默跳过同样糟糕；
+- `config.packs` 显式声明**不受此门限制**（那是用户自己写下的授权）；
+- 信任表 `${MINGDAO_HOME}/pack-trust.json`，权限 `0600`。
 
-> ⚠ **这条会改变既有行为**：PACK-API v1 目前把「项目级 Pack 自动挂载」当作既定行为，
-> 下游 Deyi-TCM-Harness 也依赖它。所以**没有擅自改**——需要负责人拍板后再动。
+**实现中额外抓到的一个坑**（单元测试漏掉、CLI 端到端实测抓到）：信任表键必须按
+`realpath` 归一。macOS 上 `/tmp` → `/private/tmp`，`os.tmpdir()` 同样是符号链接，
+不归一时「trust 记一个路径、运行时按 `process.cwd()` 查另一个路径」→ 信任看起来完全没生效。
+已修，并补了「经符号链接 trust 后按真实路径也必须命中」的回归断言。
+
+**下游影响**：`docs/MIGRATION-DEYI-v0.5.md` §四 已加迁移步骤与两条一次性命令
+（`mingdao pack trust <仓库根>` 或写进 `config.packs`）。装在 `$MINGDAO_HOME/packs/`
+（用户级）的 Pack 不受影响。
 
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
@@ -120,7 +129,9 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 
 ## 5. 建议的处理顺序
 
-1. **P1-1 项目级 Pack 信任门**（安全，需负责人确认行为变更与下游影响）；
-2. §4.2 中**凭据泄露类**（P2-6 `sync passwd` 位置参数）与**静默失效类**（P2-8 技能校验可选、P2-5 预设参数）；
-3. §4.1 P2-5 终端注入（一次 `io.print` 统一 sanitize 即可封住一族）；
+1. §4.2 中**凭据泄露类**（P2-6 `sync passwd` 位置参数）与**静默失效类**（P2-8 技能校验可选、P2-5 预设参数）；
+2. §4.1 P2-5 终端注入（一次 `io.print` 统一 sanitize 即可封住一族）；
+3. §4.1 P2-9 项目记忆「自动写入 + 注入 system prompt」——与 P1-1 同类的持久化注入通道，值得一并收口；
 4. 其余按「日志/调度/锁」分组批量处理。
+
+> 已完成：三个过程缺陷（§2.1）、P1-2 缓存跨代理污染（§2.2）、P1-1 Pack 信任门（§3）。

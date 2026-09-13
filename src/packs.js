@@ -14,7 +14,11 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
-import { mingdaoHome } from './config.js';
+import { mingdaoHome, ensureHome } from './config.js';
+import { atomicWriteJsonSync } from './atomic-write.js';
+// 目录内容指纹复用技能的同一实现（同一套「逐文件 sha256 → 再哈希」口径），
+// 不另写一份——本仓已经有「同一逻辑多份副本」的教训（见 docs/AUDIT-v0.4.6.md）。
+import { skillDirHash } from './skill-lib.js';
 import { isValidPattern, PATTERN_KINDS, KINDS } from './constraints.js';
 import { registerTool } from './tools/index.js';
 
@@ -158,6 +162,91 @@ export function validateManifest(m, opts = {}) {
 
 // ---------- 目录发现（三级遮蔽） ----------
 
+const PACK_TRUST_FILE = 'pack-trust.json';
+
+/** 读取 Pack 信任表：{ 绝对目录: { sha256, trustedAt } } */
+export function loadPackTrust() {
+  try {
+    const t = JSON.parse(fs.readFileSync(path.join(mingdaoHome(), PACK_TRUST_FILE), 'utf8'));
+    return t && typeof t === 'object' && !Array.isArray(t) ? t : {};
+  } catch {
+    return {};
+  }
+}
+
+/** @param {any} t */
+function savePackTrust(/** @type {any} */ t) {
+  ensureHome();
+  atomicWriteJsonSync(path.join(mingdaoHome(), PACK_TRUST_FILE), t, { mode: 0o600 });
+}
+
+/**
+ * 信任表键**统一用 realpath 归一**。
+ *
+ * 不归一就会出现「trust 记录写在一个路径、查表用另一个路径」而对不上：
+ * macOS 的 `/tmp` 是指向 `/private/tmp` 的符号链接，`os.tmpdir()` 同样是符号链接，
+ * 于是 `mingdao pack trust /tmp/proj` 记的是 `/tmp/proj/...`，而运行时按
+ * `process.cwd()` 得到 `/private/tmp/proj/...` —— 信任看起来没生效。
+ * （这是我在 CLI 端到端实测里抓到的，单元测试因为两处用了同一个字符串而漏掉。）
+ * @param {string} dir
+ */
+function trustKey(/** @type {string} */ dir) {
+  try {
+    return fs.realpathSync(dir);
+  } catch {
+    return path.resolve(dir);
+  }
+}
+
+/**
+ * 项目级 Pack 目录的信任状态。
+ * 判据是**内容指纹**（复用 skillDirHash）：文件被改过指纹就变，等于自动撤销信任。
+ * @param {string} dir
+ */
+export function packTrustState(/** @type {string} */ dir) {
+  const rec = loadPackTrust()[trustKey(dir)];
+  if (!rec?.sha256) return { trusted: false, reason: 'untrusted' };
+  let now;
+  try {
+    now = skillDirHash(dir);
+  } catch {
+    return { trusted: false, reason: 'unreadable' };
+  }
+  if (now !== rec.sha256) return { trusted: false, reason: 'changed', sha256: now };
+  return { trusted: true, sha256: now, trustedAt: rec.trustedAt || 0 };
+}
+
+/** 记录当前内容指纹为已信任（`mingdao pack trust`） */
+export function trustPack(/** @type {string} */ dir) {
+  if (!fs.existsSync(dir)) return { error: `目录不存在：${path.resolve(dir)}` };
+  const key = trustKey(dir);
+  let sha256;
+  try {
+    sha256 = skillDirHash(key);
+  } catch (/** @type {any} */ err) {
+    return { error: `无法计算内容指纹：${err?.message || err}` };
+  }
+  const t = loadPackTrust();
+  // 顺手清理「同一目录但键没归一」的历史记录，避免同一目录两条记录、改一条不生效
+  const raw = path.resolve(dir);
+  if (raw !== key) delete t[raw];
+  t[key] = { sha256, trustedAt: Date.now() };
+  savePackTrust(t);
+  return { ok: true, dir: key, sha256 };
+}
+
+/** 撤销信任（`mingdao pack untrust`） */
+export function untrustPack(/** @type {string} */ dir) {
+  const key = trustKey(dir);
+  const raw = path.resolve(dir);
+  const t = loadPackTrust();
+  if (!t[key] && !t[raw]) return { error: `该目录没有信任记录：${key}` };
+  delete t[key];
+  delete t[raw]; // 兼容未归一的旧键
+  savePackTrust(t);
+  return { ok: true, dir: key };
+}
+
 /** @param {any} [cfg] @param {any} [projectDir] */
 export function packDirs(cfg, projectDir) {
   const out = [];
@@ -165,7 +254,22 @@ export function packDirs(cfg, projectDir) {
   // fileURLToPath 而非 url.pathname：后者在含空格/非 ASCII 的路径上会被百分号编码
   out.push({ dir: path.resolve(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'packs')), source: 'builtin', priority: 0 });
   out.push({ dir: path.join(mingdaoHome(), 'packs'), source: 'user', priority: 1 });
-  if (projectDir) out.push({ dir: path.join(projectDir, '.mingdao', 'packs'), source: 'project', priority: 2 });
+  // v0.6.2（第三方审计 P1-1，已亲自核实）：**项目级 Pack 默认不挂载**。
+  //
+  // mountOne 会 `await import(pack.mjs)`——同进程、完整 Node 权限。于是
+  // 「git clone 一个不可信仓库 → cd 进去 → 跑任意 mingdao 子命令」即可执行仓库里的任意代码：
+  // 可读 ~/.mingdao/credentials.json、可出网外传、可读 bash 工具专门过滤掉的敏感环境变量，
+  // 而且**与 permission 模式（ask/readonly）完全无关，也不询问用户**——只打印一行「已加载」。
+  //
+  // 现在只有内容指纹被显式信任（`mingdao pack trust <项目目录>`）后才并入搜索路径。
+  // `config.packs` 的显式声明**不受此门限制**：那是用户自己写下的授权（见下方 priority 10+）。
+  if (projectDir) {
+    const dir = path.join(projectDir, '.mingdao', 'packs');
+    if (fs.existsSync(dir)) {
+      const st = packTrustState(dir);
+      out.push({ dir, source: 'project', priority: 2, ...(st.trusted ? {} : { gate: st.reason }) });
+    }
+  }
   // config.packs 显式声明（优先级最高，按声明顺序后者胜）
   const declared = Array.isArray(cfg?.packs) ? cfg.packs : [];
   declared.forEach((/** @type {any} */ d, /** @type {number} */ i) => out.push({ dir: path.resolve(String(d)), source: 'config', priority: 10 + i }));
@@ -205,6 +309,8 @@ export function listPacks(cfg, projectDir, opts = {}) {
         apiVersion: manifest?.apiVersion,
         dir,
         source: tier.source,
+        // 项目级未信任：带上 gate，由 mountPacks 拒绝挂载并给出信任指引
+        ...(tier.gate ? { gate: tier.gate, gateDir: tier.dir } : {}),
         manifest,
         error: v.ok ? null : v.errors.join('；'),
       });
@@ -383,6 +489,19 @@ export async function mountPacks(cfg, opts = {}) {
   const constraints = [];
   const projectDir = opts.cwd || process.cwd();
   for (const info of listPacks(cfg, projectDir, opts)) {
+    // 项目级 Pack 未信任 → 不挂载。这里**必须把「为什么 + 怎么办」讲清楚**：
+    // 原缺陷的另一半正是「静默执行 / 静默跳过」都让人不知道发生了什么。
+    if (info.gate) {
+      const root = info.gateDir || info.dir;
+      warnings.push(
+        `项目级 Pack 未挂载（未信任）：${root}\n` +
+          `    原因：项目内的 pack.mjs 会以**完整 Node 权限在本进程内执行**，不受 permission 模式约束，` +
+          `可读取凭据文件与敏感环境变量。\n` +
+          `    ${info.gate === 'changed' ? '该目录内容在信任后发生过变化，需重新确认。' : '确认这个目录是你信任的代码后，执行：'}\n` +
+          `    mingdao pack trust ${root}`
+      );
+      continue;
+    }
     if (info.error) {
       warnings.push(`Pack "${info.name}" 校验失败（已跳过）：${info.error}`);
       continue;

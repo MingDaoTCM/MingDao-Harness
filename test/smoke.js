@@ -5162,6 +5162,118 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.6.2 P1-2：read 去重缓存按代理实例隔离（子代理读过不再让主代理读空；同代理去重与写后作废仍生效）');
 }
 
+
+// ---------- 81. v0.6.2 第三方审计 P1-1：项目级 Pack 默认不挂载（「克隆即执行」） ----------
+// 原状：packDirs 无条件把 <项目>/.mingdao/packs 放进搜索路径，mountOne 用 await import()
+// 同进程执行 pack.mjs。于是 git clone 一个不可信仓库 + cd 进去 + 跑任意 mingdao 子命令，
+// 就会以完整 Node 权限执行仓库里的任意代码（可读凭据文件、可读 bash 过滤掉的敏感环境变量），
+// 且与 permission 模式完全无关。修复后：必须内容指纹被显式信任才挂载。
+{
+  const P = await import(pathToFileURL(path.join(srcDir, 'packs.js')).href);
+  const prevHome81 = process.env.MINGDAO_HOME;
+  const home81 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p11-home-'));
+  process.env.MINGDAO_HOME = home81;
+  const proj81 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p11-proj-'));
+  const root81 = path.join(proj81, '.mingdao', 'packs');
+  const dir81 = path.join(root81, 'evil');
+  fs.mkdirSync(dir81, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir81, 'pack.json'),
+    JSON.stringify({ apiVersion: 1, name: 'evil', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { tools: true } })
+  );
+  const writeEntry81 = (marker) =>
+    fs.writeFileSync(
+      path.join(dir81, 'pack.mjs'),
+      'export const apiVersion = 1;\n' +
+        'export function createPack() { return { tools: [{ name: "pwned_' + marker + '", description: "x", parameters: { type: "object", properties: {} }, readOnly: true, async run() { return { ok: true, output: "x" }; } }] }; }\n'
+    );
+  const mountedNames = (r) => r.mounted.map((x) => x.name);
+
+  try {
+    // 81a. 未信任：不得挂载，且必须**明确告知原因与开启方式**（原缺陷的另一半是静默）
+    writeEntry81('a');
+    P.resetPacksForTest();
+    let r81 = await P.mountPacks({}, { cwd: proj81 });
+    assert.ok(!mountedNames(r81).includes('evil'), '未信任的项目级 Pack 绝不能被挂载（否则等于 clone 即执行）');
+    const warn81 = r81.warnings.find((w) => w.includes('未信任'));
+    assert.ok(warn81, '必须给出未信任告警（而不是静默跳过）：' + JSON.stringify(r81.warnings));
+    assert.ok(warn81.includes('mingdao pack trust'), '告警必须给出可执行的开启命令：' + warn81);
+
+    // 81b. 信任后应当挂载
+    const t81 = P.trustPack(root81);
+    assert.ok(t81.ok, 'trustPack 应成功：' + JSON.stringify(t81));
+    const trustFile81 = path.join(home81, 'pack-trust.json');
+    assert.equal(fs.statSync(trustFile81).mode & 0o777, 0o600, '信任表含内容指纹，必须 0600');
+    P.resetPacksForTest();
+    r81 = await P.mountPacks({}, { cwd: proj81 });
+    assert.ok(mountedNames(r81).includes('evil'), '信任后应正常挂载');
+
+    // 81c. 内容变化 → 信任自动失效（指纹变了就不能继续执行）
+    writeEntry81('b');
+    const st81 = P.packTrustState(root81);
+    assert.equal(st81.trusted, false, '内容指纹变化后信任必须自动失效');
+    assert.equal(st81.reason, 'changed', '失效原因应区分「改过」与「没信任过」');
+    P.resetPacksForTest();
+    r81 = await P.mountPacks({}, { cwd: proj81 });
+    assert.ok(!mountedNames(r81).includes('evil'), '内容变化后不得继续挂载（否则等于指纹信任形同虚设）');
+
+    // 81d. config.packs 显式声明不受此门限制——那是用户自己写下的授权
+    P.resetPacksForTest();
+    r81 = await P.mountPacks({ packs: [root81] }, { cwd: proj81 });
+    assert.ok(mountedNames(r81).includes('evil'), 'config.packs 显式声明的目录应照常挂载');
+
+    // 81e. 撤销信任后回到不挂载
+    P.resetPacksForTest();
+    assert.ok(P.untrustPack(root81).ok, 'untrustPack 应成功');
+    r81 = await P.mountPacks({}, { cwd: proj81 });
+    assert.ok(!mountedNames(r81).includes('evil'), '撤销信任后不得挂载');
+    assert.equal(P.packTrustState(root81).reason, 'untrusted');
+
+    // 81g. 通过**符号链接**访问同一目录：信任必须仍生效（键按 realpath 归一）。
+    // 这个坑是在 CLI 端到端实测里抓到的，单元测试因为两处用了同一个字符串而漏掉：
+    // macOS 的 /tmp → /private/tmp、os.tmpdir() 同样是符号链接，不归一时
+    // 「trust 记一个路径、运行时查另一个路径」→ 信任看起来完全没生效。
+    {
+      const link81 = path.join(os.tmpdir(), `mingdao-p11-link-${process.pid}-${Date.now()}`);
+      let linked = false;
+      try {
+        fs.symlinkSync(root81, link81, 'dir');
+        linked = true;
+      } catch {
+        /* 平台不支持符号链接则跳过（Windows 非开发者模式） */
+      }
+      if (linked) {
+        try {
+          assert.ok(P.trustPack(link81).ok, '通过符号链接 trust 应成功');
+          assert.equal(P.packTrustState(root81).trusted, true, '符号链接信任后，按真实路径查表也必须命中');
+          P.resetPacksForTest();
+          const rLink = await P.mountPacks({}, { cwd: proj81 });
+          assert.ok(mountedNames(rLink).includes('evil'), '符号链接信任后应正常挂载');
+          assert.ok(P.untrustPack(root81).ok, '按真实路径也应能撤销符号链接记录的信任');
+          assert.equal(P.packTrustState(root81).trusted, false, '撤销后不得仍为已信任');
+        } finally {
+          try {
+            fs.unlinkSync(link81);
+          } catch {}
+        }
+      }
+    }
+
+    // 81f. 没有 .mingdao/packs 的项目不受影响（不产生无谓告警）
+    const plain81 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p11-plain-'));
+    P.resetPacksForTest();
+    const r81f = await P.mountPacks({}, { cwd: plain81 });
+    assert.equal(r81f.warnings.filter((w) => w.includes('未信任')).length, 0, '无项目级 Pack 时不得产生未信任告警');
+    safeRmSync(plain81, { recursive: true, force: true });
+  } finally {
+    P.resetPacksForTest();
+    process.env.MINGDAO_HOME = prevHome81;
+    safeRmSync(home81, { recursive: true, force: true });
+    safeRmSync(proj81, { recursive: true, force: true });
+  }
+  ok('v0.6.2 P1-1：项目级 Pack 默认不挂载（未信任有明确指引 / 指纹变化自动失效 / config.packs 显式授权照常 / 撤销生效）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

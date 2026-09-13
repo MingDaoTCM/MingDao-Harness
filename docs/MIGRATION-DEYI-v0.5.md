@@ -219,6 +219,24 @@ mingdao key set deepseek <你的 DeepSeek Key>     # 写入 <MINGDAO_HOME>/crede
 7. `mingdao pack verify ./layer/packs/tcm` 必须退出 0；
 8. 在 Deyi CI 里加：`mingdao pack verify ./layer/packs/tcm`。
 
+> ⚠ **v0.6.2 行为变更：项目级 Pack 默认不再挂载。**
+> `<项目>/.mingdao/packs/` 里的 `pack.mjs` 会被 `await import()` 到**同一进程、完整 Node 权限**，
+> 于是「clone 一个不可信仓库 + cd 进去 + 跑任意 mingdao 子命令」就能执行仓库里的任意代码，
+> 且与 `permission` 模式无关。所以上游加了信任门（详见 `docs/PACK-API.md` §1.1）。
+>
+> **对 Deyi 的影响**：若 Pack 放在 `<Deyi 仓库>/.mingdao/packs/`，升级到 v0.6.2 后
+> **不会自动加载**，启动时会打印「项目级 Pack 未挂载（未信任）」告警。一次性处理二选一：
+>
+> ```bash
+> # A. 记一次内容指纹信任（之后改过代码需重新执行——这正是不被静默劫持的意义）
+> mingdao pack trust <Deyi 仓库根目录>
+>
+> # B. 或写进用户配置（显式声明不受信任门限制，适合本来就装在别处的 Pack）
+> #    ~/.mingdao/config.json: { "packs": ["<Deyi 仓库>/layer/packs/tcm"] }
+> ```
+>
+> 若 `install.sh` 把 Pack 装到 `$MINGDAO_HOME/packs/`（用户级），**不受此变更影响**。
+
 **验收（DoD）**：
 - 域内每次 DeepSeek 调用都出现在 `mingdao cost --by pack` 里；
 - 三条红线可被测试**阻断**（缺项 / 结论性措辞 / 缺 patientId 各一条断言）；
