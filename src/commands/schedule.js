@@ -11,7 +11,7 @@ import {
   daemonAlive,
   stopDaemon,
 } from '../schedule.js';
-import { listTasks, killTask, formatTaskRow } from '../tasks.js';
+import { listTasks, killTask, formatTaskRow, flushKillEscalation } from '../tasks.js';
 import { ensureHome } from '../config.js';
 
 function printTasks(/** @type {any} */ home) {
@@ -56,7 +56,20 @@ export async function handleTasks(/** @type {any} */ cmd, /** @type {any} */ arg
       process.exitCode = 1;
       return true;
     }
-    console.log(killTask(home0, id) ? `已请求停止任务 ${id}` : '任务不存在');
+    const okKill = killTask(home0, id);
+    if (!okKill) {
+      console.log('任务不存在');
+      return true;
+    }
+    // v0.6.2（P2-10）：CLI 是短命进程，必须显式等升级跑完——否则 SIGTERM 发出后进程就退出，
+    // 「仍在跑就 SIGKILL」的定时器随之丢失，遇到忽略 SIGTERM 的 worker 会变成"面板已停止、
+    // 实际还在改文件"。worker 正常退出时这里几乎立刻返回，只有真卡住的才吃满宽限期。
+    const outcome = await flushKillEscalation();
+    console.log(
+      outcome === 'sigkilled'
+        ? `已停止任务 ${id}（SIGTERM 无效，已强制 SIGKILL 整组）`
+        : `已停止任务 ${id}`
+    );
     return true;
   }
   if (sub === 'watch') {

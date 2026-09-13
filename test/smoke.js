@@ -5824,6 +5824,90 @@ console.log(JSON.stringify({ okOn, xml }));`;
   }
 }
 
+
+// ---------- 91. v0.6.2 自评 P2-10：killTask 必须在 SIGTERM 无效时升级 SIGKILL ----------
+// 原实现只发 SIGTERM 就立即置终态 killed：worker 若被 process.on('SIGTERM') 拦下或处于
+// 同步阻塞，SIGTERM 不会让它退出——它继续跑、继续改文件，而面板已显示「已停止」。
+// 全仓此前没有任何超时升级逻辑（bash/hooks/mcp 的 SIGKILL 都是各自的超时路径）。
+if (process.platform !== 'win32') {
+  const { killTask, flushKillEscalation, readTask } = await import(pathToFileURL(path.join(srcDir, 'tasks.js')).href);
+  const { procAlive } = await import(pathToFileURL(path.join(srcDir, 'proc.js')).href);
+  const home91 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-k91-'));
+  fs.mkdirSync(path.join(home91, 'tasks'), { recursive: true });
+  const writeTask91 = (id, pid) =>
+    fs.writeFileSync(
+      path.join(home91, 'tasks', `${id}.json`),
+      JSON.stringify({ id, question: 'q', status: 'running', pid, startedAt: Date.now(), durationMs: null })
+    );
+  const shot = [];
+  try {
+    // 91a. 忽略 SIGTERM 的进程 → 必须被升级为 SIGKILL
+    const idA = 'killtesta91';
+    // 用 ready 文件消除竞态：procAlive 在 node **装好 SIGTERM 处理器之前**就为真，
+    // 若此时就发信号，进程会走默认动作直接退出——测试会误判成"升级没生效"（我第一版就是这样）。
+    const readyA = path.join(home91, 'readyA');
+    const stubborn = spawn(
+      process.execPath,
+      [
+        '-e',
+        `process.on("SIGTERM",()=>{}); require("fs").writeFileSync(${JSON.stringify(readyA)},"1"); setInterval(()=>{},1000)`,
+        idA,
+      ],
+      { detached: true, stdio: 'ignore' } // detached：自成进程组，process.kill(-pid) 才有效
+    );
+    stubborn.on('error', () => {});
+    shot.push(stubborn.pid);
+    for (let i = 0; i < 80 && !fs.existsSync(readyA); i += 1) await new Promise((r) => setTimeout(r, 25));
+    assert.ok(fs.existsSync(readyA), '前提：顽固子进程应已装好 SIGTERM 处理器并宣告就绪');
+    writeTask91(idA, stubborn.pid);
+    const okA = killTask(home91, idA);
+    assert.ok(okA, 'killTask 应返回 true');
+    assert.equal(readTask(home91, idA).status, 'killed', '状态要**立即**置为 killed（用户意图马上可见）');
+    const outA = await flushKillEscalation();
+    assert.equal(outA, 'sigkilled', '忽略 SIGTERM 的进程必须被升级 SIGKILL（否则"已停止"是假的）');
+    for (let i = 0; i < 40 && procAlive(stubborn.pid); i += 1) await new Promise((r) => setTimeout(r, 25));
+    assert.equal(procAlive(stubborn.pid), false, '升级后进程必须真的消失');
+
+    // 91b. 正常响应 SIGTERM 的进程 → 走 'exited'（不该白吃满宽限期再 SIGKILL）
+    const idB = 'killtestb91';
+    const docile = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)', idB], { detached: true, stdio: 'ignore' });
+    docile.on('error', () => {});
+    shot.push(docile.pid);
+    for (let i = 0; i < 40 && !procAlive(docile.pid); i += 1) await new Promise((r) => setTimeout(r, 25));
+    writeTask91(idB, docile.pid);
+    const t0 = Date.now();
+    killTask(home91, idB);
+    const outB = await flushKillEscalation();
+    const ms = Date.now() - t0;
+    assert.equal(outB, 'exited', '正常退出的进程应记为 exited');
+    assert.ok(ms < 2500, `正常退出不该吃满宽限期（实测 ${ms}ms）`);
+    assert.equal(procAlive(docile.pid), false, '进程应已退出');
+  } finally {
+    for (const p of shot) {
+      try {
+        process.kill(p, 'SIGKILL');
+      } catch {}
+    }
+    safeRmSync(home91, { recursive: true, force: true });
+  }
+  ok('v0.6.2 P2-10：killTask 立即置终态 + 后台升级 SIGKILL（忽略 SIGTERM 也真停；正常退出不白等）');
+
+  // 91c. P2-11：轮询期间必须检查租约（判据抽成纯函数，可直接断言）
+  const { shouldKeepPolling } = await import(pathToFileURL(path.join(srcDir, 'schedule.js')).href);
+  const running = { status: 'running' };
+  const future = Date.now() + 3600000;
+  const now = Date.now();
+  assert.equal(shouldKeepPolling(running, future, now, () => false), true, '任务在跑且租约在 → 应继续轮询');
+  assert.equal(
+    shouldKeepPolling(running, future, now, () => true),
+    false,
+    '**租约丢失必须立刻停止陪跑**（否则旧 daemon 会陪跑最多 2 小时并与新 daemon 并发操作同一批状态）'
+  );
+  assert.equal(shouldKeepPolling(running, now - 1, now, () => false), false, '超过兜底上限应停止');
+  assert.equal(shouldKeepPolling({ status: 'done' }, future, now, () => false), false, '任务已结束应停止');
+  assert.equal(shouldKeepPolling(null, future, now, () => false), false, '任务不存在应停止');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

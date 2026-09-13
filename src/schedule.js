@@ -372,6 +372,26 @@ export function reconcileSchedules(/** @type {any} */ home) {
   }
   spawnDaemon(home);
 }
+/**
+ * 轮询 worker 是否该继续等下去。
+ *
+ * v0.6.2（自评报告 P2-11，报告里函数名写作 `runOnce`，实际所在是 `runSleeper`）：
+ * **租约丢失必须立刻停止陪跑**。主循环每个分支开头都有 `shouldStop()`、避峰等待后也有一次，
+ * 唯独这段轮询循环没有——daemon 租约被接管后，旧 daemon 仍会陪跑最多 2 小时，
+ * 期间与新 daemon 并发操作同一批调度状态（双跑同一任务 / 互相覆盖状态）。
+ *
+ * 抽成纯函数是为了能**直接断言**：否则只能写"源码里有没有 shouldStop"这种没有牙的检查。
+ * @param {any} task 任务快照
+ * @param {number} deadline 绝对截止时间
+ * @param {number} now 当前时间
+ * @param {() => boolean} shouldStop 租约/停止判据
+ */
+export function shouldKeepPolling(/** @type {any} */ task, /** @type {number} */ deadline, /** @type {number} */ now, /** @type {() => boolean} */ shouldStop) {
+  if (!task || task.status !== 'running') return false; // 任务已结束
+  if (now >= deadline) return false; // 兜底上限（2 小时）
+  return !shouldStop(); // 租约丢失/被接管 → 立刻停止陪跑
+}
+
 // —— sleeper 主循环（schedule-worker 进程内运行）——
 /**
  * 任务监督循环（每个调度任务一个协程）。
@@ -463,7 +483,11 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
     // 轮询 worker 状态直至结束（最长 2 小时）；超时清理 worker 防孤儿（审计 P2-8）
     let t = readTask(home, task.id);
     const deadline = Date.now() + 2 * 3600000;
-    while (t && t.status === 'running' && Date.now() < deadline) {
+    // v0.6.2（自评报告 P2-11）：轮询期间必须**每轮检查租约**。
+    // 主循环每个分支开头都有 shouldStop()、避峰等待后也有一次，唯独这里没有——
+    // daemon 租约被接管后，旧 daemon 仍会陪跑最多 2 小时，期间与新 daemon 并发操作同一批
+    // 调度状态（双跑同一任务/互相覆盖状态）。
+    while (shouldKeepPolling(t, deadline, Date.now(), shouldStop)) {
       await wait(3000);
       t = readTask(home, task.id);
       // v0.4.7（P3 T20）：worker 进程已消失、状态却仍停在 running（被 SIGKILL / OOM / 系统休眠

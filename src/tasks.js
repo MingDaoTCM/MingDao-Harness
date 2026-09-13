@@ -4,7 +4,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { relativeTime } from './session.js';
 import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
@@ -179,6 +179,73 @@ export function reapTasks(/** @type {any} */ home, { graceMs = 10000 } = {}) {
   return out;
 }
 
+// v0.6.2（自评报告 P2-10）：SIGTERM 之后的**升级终止**。
+// 原实现只发 SIGTERM 就立即置终态 `killed`：worker 若卡在长 LLM 请求、或被
+// `process.on('SIGTERM')` 拦下、或处于同步阻塞，SIGTERM 不会让它退出——它继续跑、
+// 继续改文件，而面板已显示「已停止」（假的"已停止"）。全仓此前没有任何超时升级逻辑。
+const KILL_GRACE_MS = 2500;
+let pendingKill = /** @type {Promise<string>|null} */ (null);
+
+/** 终止整棵进程树。Windows 无进程组语义，用 taskkill /T /F 才杀得掉孙进程。 */
+function killTree(/** @type {any} */ pid, /** @type {any} */ sig) {
+  if (process.platform === 'win32') {
+    try {
+      spawnSync('taskkill', ['/T', '/F', '/PID', String(pid)], { stdio: 'ignore' });
+    } catch {}
+    return;
+  }
+  try {
+    process.kill(-pid, sig);
+  } catch {
+    try {
+      process.kill(pid, sig);
+    } catch {}
+  }
+}
+
+/**
+ * 给进程一点时间自己退出；仍在跑就升级 SIGKILL。
+ * 返回的 promise 在「进程确实消失」或「已升级 SIGKILL」后 resolve——
+ * **不阻塞事件循环**（用定时器轮询，不用 Atomics.wait 同步等；本仓已把"阻塞事件循环"
+ * 列为缺陷 P2-7，不能自己再犯）。
+ * 定时器**刻意不 unref**：升级必须在进程退出前跑完，否则又回到"SIGTERM 发出去就不管了"。
+ * 代价是短命进程会多活到升级结束（进程正常退出时约 100–200ms，真顽固的才吃满宽限期）——
+ * 这正是"让停止真的生效"应付的成本。
+ * @param {any} pid
+ * @returns {Promise<string>} 'exited' | 'sigkilled'
+ */
+function escalateKill(/** @type {any} */ pid) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    const tick = () => {
+      if (!procAlive(pid)) return resolve('exited');
+      if (Date.now() - started >= KILL_GRACE_MS) {
+        killTree(pid, 'SIGKILL');
+        return resolve('sigkilled');
+      }
+      setTimeout(tick, 100);
+    };
+    setTimeout(tick, 100);
+  });
+}
+
+/**
+ * 等本次 kill 的升级流程跑完。
+ * **短命进程（CLI / REPL 单条命令）必须调用**：否则升级用的 setTimeout 会随进程退出丢失，
+ * 又回到"SIGTERM 发出去就不管了"的老问题。长命进程（WebUI / daemon）不必调用。
+ * @returns {Promise<string>} 'none' | 'exited' | 'sigkilled'
+ */
+export async function flushKillEscalation() {
+  if (!pendingKill) return 'none';
+  const p = pendingKill;
+  pendingKill = null;
+  try {
+    return await p;
+  } catch {
+    return 'none';
+  }
+}
+
 export function killTask(/** @type {any} */ home, /** @type {any} */ id) {
   if (!isValidTaskId(id)) return false;
   // 质检 H3：读-改-写加锁（与 worker 自身的状态写互斥）
@@ -196,14 +263,10 @@ function killTaskInner(/** @type {any} */ home, /** @type {any} */ id) {
     // 此前 null 直接跳过，导致 macOS/Windows 上 kill 只改状态不杀进程、worker 继续跑完覆盖状态。
     // 任务 id 含随机 + 启动时 pid，PID 复用误杀概率极低，且任务 id 本就是用户显式指定的目标。
     if (owned === true || owned === null) {
-      try {
-        // worker 是 detached 进程（自成进程组）：优先杀整组，避免工具子进程成孤儿
-        process.kill(-t.pid, 'SIGTERM');
-      } catch {
-        try {
-          process.kill(t.pid, 'SIGTERM');
-        } catch {}
-      }
+      // worker 是 detached 进程（自成进程组）：杀整组，避免工具子进程成孤儿
+      killTree(t.pid, 'SIGTERM');
+      // 立即置终态（用户意图要立刻可见），但**同时**安排"仍在跑就 SIGKILL"的升级
+      pendingKill = escalateKill(t.pid);
     }
   }
   patchTask(home, id, { status: 'killed', durationMs: t.durationMs ?? Date.now() - t.startedAt });
