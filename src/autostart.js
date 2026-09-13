@@ -50,6 +50,68 @@ export function autostartStatus() {
   return fs.existsSync(autostartPath());
 }
 
+// ---------- v0.6.2（第三方审计 P2-14）：三个平台的自启文件都缺转义 ----------
+// 路径是**用户可控**的（家目录/用户名/node 安装位置）。含 & < > 的路径插进 plist 会让 XML
+// 非法 → launchctl 加载失败，而写文件本身"成功"，于是表现为「开关打开了但登录后不自启」，
+// 且错误只在 StandardErrorPath 里（用户看不到）。Linux 的 .desktop 与 Windows 的 .bat 同理。
+// 转义规则按各自格式的规范来，抽成纯函数以便直接测试（不动用户真实的自启配置）。
+
+/** XML 文本转义（plist 的 <string> 内容） */
+export function escapeXml(/** @type {any} */ s) {
+  return String(s ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/** Desktop Entry 规范：双引号参数内的 \ " $ ` 必须反斜杠转义 */
+export function escapeDesktopEntry(/** @type {any} */ s) {
+  return String(s ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\$/g, '\\$')
+    .replace(/`/g, '\\`');
+}
+
+/** Windows 批处理：% 是变量展开符，须写成 %% */
+export function escapeBatch(/** @type {any} */ s) {
+  return String(s ?? '').replace(/%/g, '%%');
+}
+
+/** macOS LaunchAgent plist 内容（纯函数，便于断言转义正确） */
+export function plistContent(/** @type {any} */ node, /** @type {any} */ cli, /** @type {any} */ pathEnv) {
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>org.mingdao.web</string>
+  <key>ProgramArguments</key><array>
+    <string>${escapeXml(node)}</string><string>${escapeXml(cli)}</string><string>web</string><string>3820</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>${escapeXml(pathEnv)}</string>
+  </dict>
+  <key>StandardOutPath</key><string>/tmp/mingdao-web.log</string>
+  <key>StandardErrorPath</key><string>/tmp/mingdao-web.err</string>
+</dict></plist>
+`;
+}
+
+/** Linux XDG Autostart .desktop 内容 */
+export function desktopEntryContent(/** @type {any} */ node, /** @type {any} */ cli) {
+  return (
+    '[Desktop Entry]\nType=Application\nName=MingDao 自动启动\n' +
+    'Comment=MingDao-Harness WebUI 服务器（登录时启动）\n' +
+    `Exec="${escapeDesktopEntry(node)}" "${escapeDesktopEntry(cli)}" web 3820\n` +
+    'X-GNOME-Autostart-enabled=true\nHidden=false\n'
+  );
+}
+
+/** Windows 启动文件夹 .bat 内容 */
+export function batchContent(/** @type {any} */ node, /** @type {any} */ cli) {
+  return `@echo off\r\nstart "" "${escapeBatch(node)}" "${escapeBatch(cli)}" web 3820\r\n`;
+}
+
 export function enableAutostart() {
   const target = autostartPath();
   try {
@@ -57,34 +119,23 @@ export function enableAutostart() {
     const node = nodeBin();
     const cli = cliEntry();
     if (process.platform === 'win32') {
-      fs.writeFileSync(target, `@echo off\r\nstart "" "${node}" "${cli}" web 3820\r\n`);
+      fs.writeFileSync(target, batchContent(node, cli));
     } else if (process.platform === 'darwin') {
-      const plist = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0"><dict>
-  <key>Label</key><string>org.mingdao.web</string>
-  <key>ProgramArguments</key><array>
-    <string>${node}</string><string>${cli}</string><string>web</string><string>3820</string>
-  </array>
-  <key>RunAtLoad</key><true/>
-  <key>EnvironmentVariables</key><dict>
-    <key>PATH</key><string>${path.dirname(node)}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-  </dict>
-  <key>StandardOutPath</key><string>/tmp/mingdao-web.log</string>
-  <key>StandardErrorPath</key><string>/tmp/mingdao-web.err</string>
-</dict></plist>
-`;
+      const plist = plistContent(node, cli, `${path.dirname(node)}:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin`);
       fs.writeFileSync(target, plist);
+      // 写完先自检：转义写错 / 路径怪异会让 plist 非法，而 launchd 只在加载时报错、
+      // 用户看不到（表现为「开关打开了但登录后不自启」）。这里把它变成**立即失败**。
+      try {
+        const chk = spawnSync('plutil', ['-lint', target], { stdio: 'ignore' });
+        if (!chk.error && chk.status !== 0) return false;
+      } catch {}
       // 立即注册（否则要等下次登录才生效，用户以为开关没起作用）。失败不致命：
       // 文件已落盘，下次登录仍会由 RunAtLoad 拉起。
       try {
         spawnSync('launchctl', ['bootstrap', `gui/${process.getuid?.() ?? 0}`, target], { stdio: 'ignore' });
       } catch {}
     } else {
-      fs.writeFileSync(
-        target,
-        `[Desktop Entry]\nType=Application\nName=MingDao 自动启动\nComment=MingDao-Harness WebUI 服务器（登录时启动）\nExec="${node}" "${cli}" web 3820\nX-GNOME-Autostart-enabled=true\nHidden=false\n`
-      );
+      fs.writeFileSync(target, desktopEntryContent(node, cli));
     }
     return true;
   } catch {

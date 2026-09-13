@@ -5529,6 +5529,56 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.6.2 P2-10：默认模型名单一来源（旧名字面量只允许在 models.js / 旧名可归一 / 老配置路由不再静默失效）');
 }
 
+
+// ---------- 87. v0.6.2 第三方审计 P2-14：自启文件必须转义路径 ----------
+// 路径是用户可控的（家目录/用户名/node 安装位置）。含 & < > 的路径插进 plist 会让 XML 非法，
+// launchctl 加载失败——而写文件本身"成功"，于是表现为「开关打开了但登录后不自启」，
+// 错误只在 StandardErrorPath 里，用户看不到。Linux/Windows 同属一类。
+{
+  const { plistContent, desktopEntryContent, batchContent, escapeXml, escapeDesktopEntry, escapeBatch } = await import(
+    pathToFileURL(path.join(srcDir, 'autostart.js')).href
+  );
+
+  const weirdNode = '/Users/Q&A/node<bin>/node';
+  const weirdCli = '/Users/Q&A/proj/src/cli.js';
+
+  const plist = plistContent(weirdNode, weirdCli, '/opt/bin:/usr/bin');
+  assert.ok(plist.includes('Q&amp;A'), 'plist 里的 & 必须转成 &amp;（否则 XML 非法）');
+  assert.ok(plist.includes('&lt;bin&gt;'), 'plist 里的 < > 必须转义');
+  assert.ok(!/&(?!amp;|lt;|gt;)/.test(plist), 'plist 里不得有未转义的裸 &');
+
+  const desktop = desktopEntryContent('/home/a"b/node', '/home/a"b/cli.js');
+  assert.ok(desktop.includes('\\"'), 'Desktop Entry 双引号参数内的引号必须转义');
+  const batch = batchContent('C:\\100%\\node.exe', 'cli.js');
+  assert.ok(batch.includes('100%%'), 'Windows 批处理的 % 必须写成 %%（否则被当变量展开）');
+
+  // 纯函数直接测（不动用户真实的自启配置）
+  assert.equal(escapeXml('a&b<c>d'), 'a&amp;b&lt;c&gt;d');
+  assert.equal(escapeDesktopEntry('a"b'), 'a\\"b');
+  assert.equal(escapeBatch('50%'), '50%%');
+
+  // 真实验证：macOS 上用 plutil 校验——转义过的必须合法，未转义的必须非法
+  if (process.platform === 'darwin') {
+    const dir87 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-auto87-'));
+    try {
+      const okFile = path.join(dir87, 'ok.plist');
+      fs.writeFileSync(okFile, plist);
+      const okChk = spawnSync('plutil', ['-lint', okFile], { encoding: 'utf8' });
+      assert.equal(okChk.status, 0, '转义后的 plist 必须是合法 XML：' + (okChk.stdout || okChk.stderr || ''));
+
+      // 对照：不转义的同内容必须被 plutil 判为非法——否则说明这组断言没有牙
+      const badFile = path.join(dir87, 'bad.plist');
+      fs.writeFileSync(badFile, plistContent(weirdNode, weirdCli, '/x').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>'));
+      const badChk = spawnSync('plutil', ['-lint', badFile], { encoding: 'utf8' });
+      assert.notEqual(badChk.status, 0, '未转义的 plist 必须非法（若这里通过，说明断言没验到真东西）');
+    } finally {
+      safeRmSync(dir87, { recursive: true, force: true });
+    }
+  }
+
+  ok('v0.6.2 P2-14：自启文件按格式转义（plist/desktop/bat），macOS 上经 plutil 实证合法；未转义必失败');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

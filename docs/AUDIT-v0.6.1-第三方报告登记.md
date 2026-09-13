@@ -137,6 +137,12 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 （实测变异：把字面量写回 `commands/update.js` → 守卫报
 「旧模型名不得作为字面量散落在 models.js 之外：commands/update.js(1)」。）
 
+## 3.5 已修复（第六批：自启文件转义）
+
+| 项 | 位置 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| P2-14（代码审计报告） | `src/autostart.js` | 三个平台的自启文件都把**用户可控的路径**直接插进格式里：plist 的 `<string>` 不转义 `& < >` → XML 非法 → `launchctl` 加载失败，而写文件本身"成功"，表现为「开关打开了但登录后不自启」且错误只在 StandardErrorPath 里；`.desktop` 不转义 `\ " $ \``；`.bat` 不转义 `%` | 抽出纯函数 `plistContent` / `desktopEntryContent` / `batchContent` + 各自格式的转义规则；macOS 写完后用 `plutil -lint` **自检**，把静默失败变成立即失败 |
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）
