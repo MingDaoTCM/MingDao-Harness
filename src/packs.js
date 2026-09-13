@@ -429,7 +429,24 @@ export async function loadPack(dir, opts = {}) {
       if (/\bfetch\s*\(/.test(src) && !/ctx\.llm|toolCtx\.llm/.test(src)) {
         warnings.push(
           '检测到 fetch( 调用且未使用 ctx.llm——若这是**模型调用**，其费用不会进入账本与日费用护栏（见 PACK-API §5）。' +
-            '若这是直连业务系统（HIS/ERP 等），请在 permissions.net 声明白名单。'
+            '若这是直连业务系统（HIS/ERP 等），请在 permissions.net 里声明（**声明不等于放行**，见下一条）。'
+        );
+      }
+      // v0.6.2（自评报告 P2-1）：permissions 是**声明**，内核**不做任何强制**
+      // （pack.mjs 是同进程 import 的，做不到真沙箱）。而"失真的安全叙事比没有声明更危险"
+      // ——声明了 fs/net 却不生效，会让使用者放心安装第三方 Pack。所以这里做一次**静态对照**：
+      // 把"源码实际用到的能力"与"声明了的能力"的差距直接摆到用户面前（不阻断，只讲真相）。
+      const decl = manifest && typeof manifest.permissions === 'object' && manifest.permissions ? manifest.permissions : {};
+      const used = [];
+      if (/\bfetch\s*\(|\bhttps?:\/\//.test(src)) used.push('net');
+      if (/\bfs\.(?:readFile|writeFile|readdir|existsSync|mkdir|rm|unlink|appendFile|stat|createWriteStream)/.test(src)) used.push('fs');
+      if (/\bprocess\.env\b/.test(src)) used.push('env');
+      const undeclared = used.filter((u) => !Array.isArray(decl[u]) || decl[u].length === 0);
+      if (used.length && undeclared.length) {
+        warnings.push(
+          `Pack 源码用到了**未声明**的能力：${undeclared.join(' / ')}。` +
+            '注意：`permissions` 只是声明，**内核不据此强制**（pack.mjs 在宿主进程内运行，可读写任意文件、可出网）——' +
+            '安装第三方 Pack 前请人工审阅 pack.mjs。'
         );
       }
     } catch {}

@@ -13,7 +13,36 @@ const execFileAsync = promisify(execFile);
 const GIT_READONLY = new Set(['status', 'log', 'diff', 'show', 'blame', 'rev-parse', 'branch', 'tag', 'ls-files', 'shortlog']);
 // P1-8（v0.4.5）：参数级过滤——此前只校验子命令首词，`diff --no-index` 可越界读任意文件（git∈
 // READONLY_TOOLS 免权限确认）、`branch -D`/`tag -f/-d` 破坏元数据、`--output` 写文件全部放行。
-const BANNED_FLAGS = new Set(['--no-index', '--output', '-o', '--delete', '-D', '-d', '--force', '-f', '-m', '--move', '-M', '--rename']);
+// v0.6.2（自评报告 P2-3）：长选项必须按**前缀**判定。
+// git 的选项解析器接受**唯一前缀缩写**——`git diff --no-inde a b` 等价于 `--no-index`，
+// `--out=/tmp/x` 等价于 `--output=`。原先用 `Set.has()` 精确匹配，这些变体全部放行：
+// `--no-index` 可越界读任意路径（而 git ∈ READONLY_TOOLS，**免权限确认**），`--output` 可写文件。
+// 即 v0.4.5（P1-8）声称堵住的越界读/写仍可绕过。
+const BANNED_LONG = ['no-index', 'output', 'delete', 'force', 'move', 'rename'];
+const BANNED_SHORT = new Set(['-o', '-D', '-d', '-f', '-m', '-M']);
+
+/**
+ * 该参数是否属于被禁选项。
+ *
+ * 关键点：git 接受长选项的**唯一前缀缩写**，方向是「写出的 token 是完整名的**前缀**」
+ * （`--no-inde` ⊂ `--no-index`、`--out=…` ⊂ `--output=…`）。
+ * 我第一版把正则写成 `^--(no-index|…)`，方向正好相反，实测 `--no-inde`、`--out=/tmp/x` 全部放行
+ * ——**假绿**。两个方向都要判：token 去掉 `=value` 后，与任一个禁用名互为前缀即拒。
+ * 极短缩写（如 `--n`）会被一并拦下：只读工具里这类写法本就不该出现，方向 fail-closed。
+ * @param {any} a
+ */
+function isBannedFlag(/** @type {any} */ a) {
+  const s = String(a ?? '');
+  if (s.startsWith('--')) {
+    const name = s.slice(2).split('=')[0];
+    if (!name) return false;
+    return BANNED_LONG.some((b) => b.startsWith(name) || name.startsWith(b));
+  }
+  if (!s.startsWith('-') || s === '-') return false;
+  if (BANNED_SHORT.has(s)) return true;
+  // 短选项可捆绑（`-Df`）：捆绑串里出现任一被禁短选项字母即拒（同样 fail-closed）
+  return [...s.slice(1)].some((c) => BANNED_SHORT.has('-' + c));
+}
 
 export async function runGit(/** @type {any} */ args, /** @type {any} */ ctx) {
   const command = String(args.command ?? '').trim();
@@ -26,7 +55,7 @@ export async function runGit(/** @type {any} */ args, /** @type {any} */ ctx) {
     return { ok: false, error: `git ${sub} 不是只读子命令（仅支持 ${[...GIT_READONLY].join(' / ')}）。写操作请用 bash 并注意授权。` };
   }
   // P1-8（v0.4.5）：拒绝破坏性/越界 flag——`--no-index` 越界读、`--output` 写、`-D/-d/-f/-m` 破坏元数据
-  const banned = argv.find((/** @type {string} */ a) => BANNED_FLAGS.has(a) || a.startsWith('--output='));
+  const banned = argv.find(isBannedFlag);
   if (banned) {
     return { ok: false, error: `git ${sub} 含被禁止的参数 ${banned}——只读工具不允许写文件/越界读/破坏元数据（写操作请用 bash）。` };
   }

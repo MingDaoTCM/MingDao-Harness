@@ -23,6 +23,21 @@ function summarize(name, args) {
   }
 }
 
+/**
+ * 把 bash 命令行按 shell 分隔符拆段：`;` `&&` `||` `|` `&` 与换行。
+ *
+ * 只用于 **deny** 的加严匹配（allow 仍走前缀 + 字符白名单，防止 `git status && rm -rf /`
+ * 借前缀提权）。不做完整 shell 解析——目标不是"理解命令"，而是"不漏掉任何一段可能是危险命令的片段"。
+ * 引号内的分隔符会被一并拆开，可能带来极少量误拦（多问一次），但方向是 fail-closed，可接受。
+ * @param {any} cmd
+ */
+export function splitShellSegments(/** @type {any} */ cmd) {
+  return String(cmd ?? '')
+    .split(/\s*(?:;|&&|\|\||\||&|\n)\s*/)
+    .map((/** @type {string} */ seg) => seg.trim())
+    .filter(Boolean);
+}
+
 /** @param {any} rule @param {any} name @param {any} args @param {boolean} [forDeny] */
 function ruleMatches(rule, name, args, forDeny = false) {
   const idx = rule.indexOf(':');
@@ -41,6 +56,15 @@ function ruleMatches(rule, name, args, forDeny = false) {
     // 等于形同不存在（实测 deny:['bash:rm *'] 拦得住 `rm -rf /x`，却放过 `cd /tmp && rm -rf /x`）。
     // 故 deny 一律按命令原文匹配，不设字符白名单。
     if (!forDeny && name === 'bash' && !/^[A-Za-z0-9_ ./\\:-]+$/.test(have)) return false;
+    if (forDeny && name === 'bash') {
+      // v0.6.2（自评报告 P2-2）：deny 必须**按 shell 分隔符拆段后逐段判**。
+      // 原实现只拿整条命令的前缀去比：`deny:['bash:rm *']` 拦得住 `rm -rf /x`，
+      // 却放过 `cd /tmp && rm -rf /x`（开头不是 rm）——而 auto 档下 deny 是**唯一防线**，
+      // 失配就等于这条规则不存在。v0.4.6 只修了元字符失配那一半，链式仍可绕过。
+      // 方向是 fail-closed：宁可多拦（多问一次），不可漏拦。
+      const segs = splitShellSegments(have);
+      return segs.some((seg) => (want.endsWith('*') ? seg.startsWith(want.slice(0, -1)) : seg === want));
+    }
     if (want.endsWith('*')) return have.startsWith(want.slice(0, -1));
     return have === want;
   }

@@ -5969,6 +5969,91 @@ if (process.platform !== 'win32') {
   ok('v0.6.2 P2-7：文件锁陈旧判据看持有者 pid（已死立即回收 / 活着绝不抢 / 损坏超龄兜底 / 默认 timeout>stale）');
 }
 
+
+// ---------- 93. v0.6.2 自评 P2-1/P2-2/P2-3/P2-4：能力声明与实现一致性 ----------
+{
+  // 93a. P2-2：deny 必须按 shell 分隔符**拆段**匹配（auto 档下 deny 是唯一防线）
+  const { evaluatePermission, splitShellSegments } = await import(pathToFileURL(path.join(srcDir, 'permissions.js')).href);
+  const D = { mode: 'auto', deny: ['bash:rm *'] };
+  const dec = (cmd) => evaluatePermission(D, 'bash', { command: cmd }).decision;
+  assert.equal(dec('rm -rf /x'), 'deny', '裸命令应被拦');
+  assert.equal(dec('cd /tmp && rm -rf /x'), 'deny', '链式（&&）绕过必须被堵住——旧实现只看整条命令前缀');
+  assert.equal(dec('rm -rf /a; echo ok'), 'deny', '分号链式同样要拦');
+  assert.equal(dec('echo ok | rm -rf /x'), 'deny', '管道后段同样要拦');
+  assert.equal(dec('echo ok || rm -rf /x'), 'deny', '|| 同样要拦');
+  assert.equal(dec('echo ok & rm -rf /x'), 'deny', '单 & 后台串联同样要拦');
+  assert.equal(dec('ls -la'), 'allow', '无关命令不得误伤');
+  assert.equal(dec('echo "rm -rf /"'), 'allow', '引号内的字面量不应误判（拆段后不以 rm 开头）');
+  assert.deepEqual(splitShellSegments('cd /tmp && rm -rf /x | tee y'), ['cd /tmp', 'rm -rf /x', 'tee y']);
+
+  // 93b. P2-3：git 长选项的**唯一前缀缩写**必须一并拦（第一版正则方向写反，实测放行，属假绿）
+  const { runGit } = await import(pathToFileURL(path.join(srcDir, 'tools/git.js')).href);
+  const gctx = { cwd: process.cwd(), cfg: {} };
+  const bannedCases = [
+    'diff --no-index a b',
+    'diff --no-inde a b',
+    'diff --out=/tmp/x a',
+    'diff --output /tmp/x',
+    'branch -D feature',
+    'branch -Df feature',
+    'tag -d v1',
+    'branch --forc x',
+  ];
+  for (const c of bannedCases) {
+    const r = await runGit({ command: c }, gctx);
+    assert.ok(!r.ok && /被禁止/.test(String(r.error)), `应拦截：${c}（实际 ${JSON.stringify(r).slice(0, 80)}）`);
+  }
+  for (const c of ['status', 'log -n 5', 'show --stat', 'diff --stat', 'branch -a']) {
+    const r = await runGit({ command: c }, gctx);
+    assert.ok(r.ok || !/被禁止/.test(String(r.error)), `不得误拦：${c}`);
+  }
+
+  // 93c. P2-1：permissions 只是**声明**；源码用到未声明能力时必须把真相说出来
+  {
+    const { loadPack } = await import(pathToFileURL(path.join(srcDir, 'packs.js')).href);
+    const mkPack = (name, manifestExtra, body) => {
+      const d = fs.mkdtempSync(path.join(os.tmpdir(), `mingdao-p93-${name}-`));
+      fs.writeFileSync(
+        path.join(d, 'pack.json'),
+        JSON.stringify({ apiVersion: 1, name, version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { tools: true }, ...manifestExtra })
+      );
+      fs.writeFileSync(path.join(d, 'pack.mjs'), body);
+      return d;
+    };
+    const body = 'import fs from "node:fs";\nexport const apiVersion = 1;\nexport function createPack() { return { tools: [{ name: "t", description: "d", parameters: { type: "object", properties: {} }, readOnly: true, async run() { return { ok: true, output: String(fs.existsSync("/tmp")) }; } }] }; }\n';
+    const d1 = mkPack('p93undeclared', {}, body);
+    const r1 = await loadPack(d1, {});
+    assert.ok(r1.ok, 'pack 应能加载：' + JSON.stringify(r1.errors || []));
+    assert.ok(
+      (r1.warnings || []).some((w) => w.includes('未声明') && w.includes('fs')),
+      '用到 fs 却没声明时必须警告（并说明"只是声明、内核不强制"）：' + JSON.stringify(r1.warnings)
+    );
+    assert.ok(
+      (r1.warnings || []).some((w) => w.includes('不据此强制') || w.includes('不强制')),
+      '警告必须点明"permissions 不强制"，否则就是失真的安全叙事'
+    );
+    const d2 = mkPack('p93declared', { permissions: { fs: ['/tmp'] } }, body);
+    const r2 = await loadPack(d2, {});
+    assert.ok(r2.ok, '声明了 fs 的 pack 应能加载');
+    assert.ok(
+      !(r2.warnings || []).some((w) => w.includes('未声明')),
+      '声明了对应能力就不该再报"未声明"：' + JSON.stringify(r2.warnings)
+    );
+    // 93d. P2-4 结构守卫：忙锁键必须在改名后迁移（端到端竞态窗口很短，难以稳定复现）
+    const srvSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+    assert.ok(/const claimSessionKey\b/.test(srvSrc), '应有 claimSessionKey（占位迁移）');
+    assert.ok(
+      /if \(renamed\) \{[\s\S]{0,240}claimSessionKey\(session\.file\)/.test(srvSrc),
+      '会话改名后必须调用 claimSessionKey(session.file)——否则新文件名发起的回合不会被判「忙」，同一会话可并发两个回合'
+    );
+    assert.ok(/for \(const k of claimedKeys\) busySessions\.delete\(k\)/.test(srvSrc), '释放时必须清掉全部已占用的键');
+    safeRmSync(d1, { recursive: true, force: true });
+    safeRmSync(d2, { recursive: true, force: true });
+  }
+
+  ok('v0.6.2 P2-1/2/3/4：deny 按段匹配 / git 缩写前缀拦截 / pack 能力声明说实话 / 忙锁键随改名迁移');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

@@ -425,11 +425,23 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       return;
     }
     busySessions.add(sessKey);
+    // v0.6.2（自评报告 P2-4）：占位键必须能**随会话改名迁移**。
+    // 原实现把 sessKey 固定在请求开始时的 session.file 上：自动标题改名后（同一请求内
+    // session.file 被改写成新名字），用**新文件名**发起的 /api/chat 不会被判「忙」——
+    // 同一会话文件可被两个回合并发追加消息（交错/丢一轮）。
+    const claimedKeys = new Set([sessKey]);
+    /** 占位迁移：改名后把锁键移到新文件名（旧键一并保留到释放，避免中间态漏放） */
+    const claimSessionKey = (/** @type {any} */ key) => {
+      if (!key || claimedKeys.has(key)) return;
+      claimedKeys.add(key);
+      busySessions.add(key);
+    };
     let sessionClaimReleased = false;
     const releaseSessionClaim = () => {
       if (sessionClaimReleased) return;
       sessionClaimReleased = true;
-      busySessions.delete(sessKey);
+      for (const k of claimedKeys) busySessions.delete(k);
+      claimedKeys.clear();
     };
     // 用 res 的 close 兜底释放（正常结束与客户端断开都会触发），避免漏放导致该会话永久「忙」
     res.on('close', releaseSessionClaim);
@@ -653,7 +665,10 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
           if (title) {
             const oldName = path.basename(session.file);
             const renamed = renameSessionFile(fs, path, home, session, title);
-            if (renamed) moveSessionWorkspace(oldName, path.basename(renamed)); // 会话改名 → 工作空间映射跟随
+            if (renamed) {
+              moveSessionWorkspace(oldName, path.basename(renamed)); // 会话改名 → 工作空间映射跟随
+              claimSessionKey(session.file); // 忙锁键同步迁移，否则新文件名发起的回合不会被判「忙」
+            }
           }
         } catch {}
       }
