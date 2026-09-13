@@ -6,6 +6,7 @@
 // 非 Linux 或未安装 bwrap 时自动降级为 off，并在结果中注明（不静默假装沙箱）。
 
 import { spawn, spawnSync } from 'node:child_process';
+import { spawnOpts } from '../proc.js';
 
 const MAX_OUTPUT = 20000;
 const MAX_TIMEOUT_SECONDS = 600;
@@ -136,7 +137,8 @@ export function runBash(/** @type {any} */ args, /** @type {any} */ ctx) {
       cwd: ctx.cwd,
       env: buildChildEnv(ctx, ctx?.cfg?.bashEnvFilter !== false), // 默认过滤敏感变量（评估 P2-3，与沙箱档位解耦）
       stdio: ['ignore', 'pipe', 'pipe'],
-      detached: true, // 自成进程组：超时/结束可整组清理，孙进程不成孤儿
+      detached: true, // POSIX：自成进程组，超时/结束可整组清理，孙进程不成孤儿
+      ...spawnOpts({ piped: true }), // Windows：不 detach + 隐藏控制台（否则每次命令弹一个终端）
     });
     let out = '';
     let err = '';

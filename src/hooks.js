@@ -9,6 +9,7 @@
 //  - matcher 支持精确工具名、逗号分隔多个名、'*' 通配。
 
 import { spawn } from 'node:child_process';
+import { spawnOpts } from './proc.js';
 import { isSensitiveEnv } from './tools/bash.js';
 
 function normalize(/** @type {any} */ list) {
@@ -57,8 +58,10 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
         cwd: workingDir,
         env: childEnv,
         stdio: ['pipe', 'pipe', 'pipe'],
-        detached: !isWin,
-        windowsHide: isWin,
+        // v0.6.2：收口到统一出口（结论就是从这里提炼的）。spawnOpts 在 Windows 上
+        // 返回 detached:false + windowsHide:true，与原先的 !isWin / isWin 完全等价。
+        detached: true,
+        ...spawnOpts({ piped: true }),
       });
       let out = '';
       let err = '';

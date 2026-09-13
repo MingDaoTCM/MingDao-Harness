@@ -7,6 +7,7 @@
 // 工具命名：mcp__<服务器>__<工具>，与内置工具合并后交给模型；/mcp 查看状态。
 
 import fs from 'node:fs';
+import { spawnOpts } from './proc.js';
 import { spawn } from 'node:child_process';
 import { isSensitiveEnv } from './tools/bash.js';
 
@@ -59,7 +60,8 @@ export class McpClient {
       cwd: this.workingDir,
       env: { ...this.baseEnv, ...this.env }, // 敏感变量已过滤（this.baseEnv），this.env 为用户显式覆盖
       stdio: ['pipe', 'pipe', 'pipe'],
-      detached: true, // 自成进程组：stop 时整组清理（npx 孙进程不成孤儿）
+      detached: true, // POSIX：自成进程组，stop 时整组清理（npx 孙进程不成孤儿）
+      ...spawnOpts({ piped: true }), // Windows：不 detach + 隐藏控制台
     });
     this.child.stdout.on('data', (d) => this._onData(d));
     this.child.stderr.on('data', (d) => {

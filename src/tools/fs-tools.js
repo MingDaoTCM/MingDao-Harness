@@ -161,14 +161,31 @@ export function undo(args, ctx) {
   }
 }
 
-const READ_CACHE_MAX = 200; // 会话级 read 缓存条数上限（超出清最旧，防止无界增长）
-const readCache = new Map(); // 绝对路径 → { mtimeMs, size, lines }
+const READ_CACHE_MAX = 200; // 每个代理实例的 read 缓存条数上限（超出清最旧，防止无界增长）
 
 /**
+ * 读取去重缓存**按代理实例隔离**（v0.6.2，第三方审计 P1-2 实证）。
+ *
+ * 此前它是**模块级 Map**（`const readCache = new Map()`），同一 Node 进程内所有代理
+ * ——主代理、并列子代理、多个 WebUI 会话——共用一个缓存，键只是文件绝对路径。
+ * 于是**子代理读过某文件后，主代理再读同一文件会拿到「内容与上次读取一致」占位串**，
+ * 而主代理的上下文里从来没有这段内容，只能靠子代理转述。第三方审计正是在自己审计
+ * 过程中踩中这一条（子代理先读了 bash.js / permissions.js / fetch.js，主上下文再读
+ * 返回的正是占位串，于是 P1-1 的结论建立在「没读到内容」之上）。
+ *
+ * 现在缓存挂在 `ctx.readCache`（createAgent 每个实例建一份）：同一代理重复读仍去重省 token，
+ * 跨代理不再互相污染。**没有 ctx.readCache 时不去重**——宁可多花 token，也不给错信息。
+ */
+function cacheOf(/** @type {any} */ ctx) {
+  return ctx?.readCache instanceof Map ? ctx.readCache : null;
+}
+
+/**
+ * @param {any} ctx
  * @param {any} p
  */
-export function invalidateReadCache(p) {
-  readCache.delete(p);
+export function invalidateReadCache(ctx, p) {
+  cacheOf(ctx)?.delete(p);
 }
 
 /**
@@ -192,19 +209,20 @@ export function read(args, ctx) {
     // 返回「内容未变化」标记（省下整段重复内容回填的 prompt token）；force=true 强制重读。
     // 注意：带 offset/limit 的切片读取不能走缓存标记（必须返回所请求的切片）。
     const wantsSlice = args.offset !== undefined || args.limit !== undefined;
-    const cached = readCache.get(p);
-    if (!args.force && !wantsSlice && cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
+    const cache = cacheOf(ctx);
+    const cached = cache?.get(p);
+    if (cache && !args.force && !wantsSlice && cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) {
       return { ok: true, output: `[内容与上次读取一致（未变化，共 ${cached.lines} 行）——如需强制重读请传 force:true]`, totalLines: cached.lines, cached: true };
     }
     const buf = fs.readFileSync(p);
     if (isProbablyBinary(buf)) return { ok: false, error: `"${p}" 疑似二进制文件，无法按文本读取。` };
     const lines = buf.toString('utf8').split('\n');
-    if (!wantsSlice) {
-      if (readCache.size >= READ_CACHE_MAX) {
-        const first = readCache.keys().next().value;
-        if (first !== undefined) readCache.delete(first);
+    if (!wantsSlice && cache) {
+      if (cache.size >= READ_CACHE_MAX) {
+        const first = cache.keys().next().value;
+        if (first !== undefined) cache.delete(first);
       }
-      readCache.set(p, { mtimeMs: st.mtimeMs, size: st.size, lines: lines.length });
+      cache.set(p, { mtimeMs: st.mtimeMs, size: st.size, lines: lines.length });
     }
     const offset = Math.max(1, Number(args.offset) || 1);
     const limit = Math.max(1, Number(args.limit) || 400);
@@ -251,7 +269,7 @@ export function write(args, ctx) {
     }
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, content);
-    invalidateReadCache(p);
+    invalidateReadCache(ctx, p);
     return { ok: true, output: `已写入 ${p}（${Buffer.byteLength(content)} 字节）。` };
   } catch (/** @type {any} */ err) {
     return { ok: false, error: `写入失败：${err?.message || err}` };
@@ -305,7 +323,7 @@ export function edit(args, ctx) {
     const next = replaceAll ? text.split(oldString).join(newString) : text.replace(oldString, () => newString);
     backup(ctx, p);
     fs.writeFileSync(p, next);
-    invalidateReadCache(p);
+    invalidateReadCache(ctx, p);
     const idx = text.indexOf(oldString);
     const lineStart = text.slice(0, idx).split('\n').length - 1;
     const before = regionAround(text, lineStart, oldString.split('\n').length);

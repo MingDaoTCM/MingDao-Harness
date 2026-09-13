@@ -5017,6 +5017,151 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.6.0 回归：厂家改名后的模型（新名一等公民有价格 / 旧名保留 / 回退名单与官方一致 / 动态名字可选但护栏不破）');
 }
 
+
+// ---------- 79. v0.6.2：三轮自审暴露的三个过程缺陷 ----------
+// 用户实测（让它审计自己的 v0.6.1）：① 步数受限未产出交付物、要追问才继续；
+// ② 子代理字数超限被截断；③ 桌面版调用工具时不停弹出终端窗口。
+{
+  // 79a. spawnOpts：Windows 不闪控制台 / 管道场景不 detach / 后台进程保留 detached
+  const { spawnOpts } = await import(pathToFileURL(path.join(srcDir, 'proc.js')).href);
+  const realPlatform = process.platform;
+  const setPlat = (v) => Object.defineProperty(process, 'platform', { value: v, configurable: true });
+  try {
+    setPlat('darwin');
+    const posix = spawnOpts({ detached: true, piped: true, stdio: 'ignore', cwd: '/tmp' });
+    assert.equal(posix.windowsHide, true, 'POSIX 也要带 windowsHide（值本身被忽略，但保证来源唯一）');
+    assert.equal(posix.detached, true, 'POSIX 必须保持调用方的 detached 语义（超时整组回收依赖它）');
+    assert.equal(posix.cwd, '/tmp', 'POSIX 必须原样透传其余选项');
+    assert.equal(posix.stdio, 'ignore');
+
+    setPlat('win32');
+    const winPiped = spawnOpts({ detached: true, piped: true, stdio: ['pipe', 'pipe', 'pipe'] });
+    assert.equal(winPiped.windowsHide, true, 'Windows 必须 windowsHide，否则每次 spawn 都弹控制台窗口');
+    assert.equal(winPiped.detached, false, 'Windows + 管道不得 detach（会新建控制台并打断管道，hooks.js v0.4.5 实测）');
+
+    const winBg = spawnOpts({ detached: true, stdio: 'ignore' });
+    assert.equal(winBg.windowsHide, true, 'Windows 后台进程同样要隐藏控制台');
+    assert.equal(winBg.detached, true, '不依赖管道的后台进程（调度 daemon / 后台任务）仍要能脱离父进程');
+
+    const winPlain = spawnOpts({ stdio: 'ignore' });
+    assert.equal(winPlain.detached, undefined, '调用方没要 detached 时不得擅自加上');
+  } finally {
+    setPlat(realPlatform);
+  }
+  ok('v0.6.2 spawnOpts：Windows 不闪控制台（管道不 detach、后台进程保留 detached、POSIX 语义不变）');
+
+  // 79b. 结构守卫：全仓**任何** spawn 都必须走 spawnOpts。
+  //      这一条是防「修一处漏九处」——v0.6.2 修复时 10 个文件里就漏了 3 处 import。
+  {
+    const jsFiles = [];
+    const walkJs = (d) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const fp = path.join(d, e.name);
+        if (e.isDirectory()) walkJs(fp);
+        else if (e.name.endsWith('.js')) jsFiles.push(fp);
+      }
+    };
+    walkJs(srcDir);
+    const offenders = [];
+    let spawnSites = 0;
+    for (const f of jsFiles) {
+      const t = fs.readFileSync(f, 'utf8');
+      const re = /\bspawn\(/g; // 不匹配 spawnSync(（spawn 后面不是左括号）与本文件外的同名函数
+      let m;
+      while ((m = re.exec(t))) {
+        spawnSites += 1;
+        // spawn( 之后 600 字符内必须能看到 spawnOpts
+        if (!t.slice(m.index, m.index + 600).includes('spawnOpts')) {
+          offenders.push(`${path.relative(srcDir, f)}:${t.slice(0, m.index).split('\n').length}`);
+        }
+      }
+    }
+    assert.ok(spawnSites >= 13, `spawn 点应至少 13 处，实测 ${spawnSites}（守卫自身可能失效）`);
+    assert.deepEqual(offenders, [], `以下 spawn 未走 spawnOpts（Windows 上会弹出控制台）：${offenders.join(', ')}`);
+    ok(`v0.6.2 结构守卫：全仓 ${spawnSites} 处 spawn 全部走 spawnOpts（新增 spawn 漏走即测试失败）`);
+  }
+
+  // 79c. 子代理汇报不再被静默截断（结构守卫 + DOM 桩功能测试）
+  {
+    const appSrc = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+    assert.ok(
+      !appSrc.includes('truncText(resultText('),
+      'WebUI 不得对工具/子代理结果做硬截断（1500 字以外用户再也看不到）——应改用 textBody 可展开'
+    );
+
+    const stubEl = () => {
+      const el = {
+        children: [], style: {}, dataset: {}, className: '', textContent: '', innerHTML: '',
+        appendChild(c) { el.children.push(c); return c; },
+        setAttribute() {}, addEventListener() {},
+      };
+      return el;
+    };
+    const realDoc = globalThis.document;
+    globalThis.document = { createElement: () => stubEl(), querySelector: () => null };
+    try {
+      const { textBody } = await import(pathToFileURL(path.join(srcDir, 'web', 'util.js')).href);
+      const shortBody = textBody('短文本');
+      assert.equal(shortBody.textContent, '短文本', '短文本应原样渲染');
+
+      const longText = 'x'.repeat(3000);
+      const longBody = textBody(longText, 1500);
+      const btn = longBody.children.find((c) => c.textContent === '展开全文');
+      assert.ok(btn, '长文本必须提供「展开全文」按钮，否则就是静默截断');
+      const full = longBody.children[1];
+      assert.ok(full.innerHTML.includes(longText), '展开区必须包含完整文本（一个字都不能丢）');
+      assert.ok(
+        longBody.children[0].innerHTML.includes('共 3000 字'),
+        '预览区要说明完整长度，让用户知道被折叠了多少'
+      );
+    } finally {
+      if (realDoc === undefined) delete globalThis.document;
+      else globalThis.document = realDoc;
+    }
+    ok('v0.6.2 子代理汇报：长文本改为「预览 + 展开全文」，1500 字以外的内容不再丢失');
+  }
+}
+
+
+// ---------- 80. v0.6.2 第三方审计 P1-2：read 去重缓存必须按代理隔离 ----------
+// 此前 readCache 是模块级 Map，同一进程内主代理与子代理共用一个缓存：
+// 子代理读过某文件后，主代理再读会拿到「内容与上次读取一致」占位串——而主代理的
+// 上下文里从来没有这段内容。第三方审计在审计本仓时实际踩中（子代理先读了三个文件，
+// 主上下文再读返回占位串），属于「静默给出错误信息」类缺陷。
+{
+  const dir80 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-smoke-read80-'));
+  fs.writeFileSync(path.join(dir80, 'shared.txt'), 'alpha\nbeta\n');
+  const mkCtx = () => ({ cwd: dir80, workingDir: dir80, cfg: {}, readCache: new Map() });
+
+  const sub = await dispatch('read', { path: 'shared.txt' }, mkCtx());
+  assert.ok(sub.output.includes('alpha'), '子代理必须先真正拿到内容');
+
+  const main = await dispatch('read', { path: 'shared.txt' }, mkCtx());
+  assert.ok(main.output.includes('alpha'), '主代理必须拿到内容（隔离前这里拿到的是占位串，等于没读到文件）');
+  assert.ok(!main.output.includes('内容与上次读取一致'), '跨代理不得复用去重标记');
+
+  // 优化本身要保留：同一代理内重复读同一未变文件仍走去重标记（省 prompt token 的初衷）
+  const one = mkCtx();
+  await dispatch('read', { path: 'shared.txt' }, one);
+  const again = await dispatch('read', { path: 'shared.txt' }, one);
+  assert.ok(again.output.includes('内容与上次读取一致'), '同一代理重复读同一未变文件仍应去重（否则等于把优化删掉了）');
+
+  // 没有实例缓存时一律返回内容：宁可多花 token，也不给错信息
+  const bare = { cwd: dir80, workingDir: dir80, cfg: {} };
+  await dispatch('read', { path: 'shared.txt' }, bare);
+  const b2 = await dispatch('read', { path: 'shared.txt' }, bare);
+  assert.ok(b2.output.includes('alpha'), '没有 ctx.readCache 时必须始终返回内容');
+
+  // 写后读必须看到新内容（作废逻辑要跟着缓存作用域走）
+  const w = await dispatch('write', { path: 'shared.txt', content: 'gamma\n' }, one);
+  assert.ok(w.ok, 'write 应成功');
+  const after = await dispatch('read', { path: 'shared.txt' }, one);
+  assert.ok(after.output.includes('gamma'), '同一代理写后读必须看到新内容（作废不能因缓存换位置而失效）');
+
+  safeRmSync(dir80, { recursive: true, force: true });
+  ok('v0.6.2 P1-2：read 去重缓存按代理实例隔离（子代理读过不再让主代理读空；同代理去重与写后作废仍生效）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

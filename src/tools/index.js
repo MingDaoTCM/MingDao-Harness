@@ -2,6 +2,7 @@
 // 文件/命令工具 + 智能体工具（skill 技能加载 / task 子代理 / todo 任务清单 / undo 撤销）。
 
 import { read, write, edit, ls, glob, grep, undo } from './fs-tools.js';
+import { spawnOpts } from '../proc.js';
 import { runBash, buildChildEnv } from './bash.js';
 import { runGit } from './git.js';
 import { runFetch } from './fetch.js';
@@ -339,6 +340,7 @@ export function mountConfigTools(/** @type {any} */ cfg) {
               // v0.4.6：与 bash/hooks/MCP 同口径过滤敏感环境变量——此前这里用 {...process.env}，
               // 是唯一不筛的子进程入口（声明式工具子进程能读到 MINGDAO_API_KEY/AWS_SECRET_ACCESS_KEY）。
               env: { ...buildChildEnv(ctx, ctx?.cfg?.bashEnvFilter !== false), MINGDAO_TOOL_ARGS: JSON.stringify(args ?? {}) },
+              ...spawnOpts({ piped: true }), // Windows：不 detach + 隐藏控制台
             });
             let out = '';
             let err = '';

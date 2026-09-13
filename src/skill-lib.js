@@ -10,6 +10,7 @@
 //  - 安装后自动进入系统提示技能清单，Agent 按需用 skill 工具加载全文（渐进式披露）
 
 import fs from 'node:fs';
+import { spawnOpts } from './proc.js';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -363,7 +364,7 @@ export async function installFromUrl(url, { allowPrivate = false } = {}) {
 /** 异步 spawn（审计 P1-3）：child_process.spawn + Promise，返回 { error?, code, signal }。 */
 function runSpawn(/** @type {string} */ cmd, /** @type {string[]} */ args, /** @type {{ timeoutMs?: number }} */ { timeoutMs } = {}) {
   return new Promise((resolve) => {
-    const child = spawn(cmd, args, { stdio: 'ignore', timeout: timeoutMs });
+    const child = spawn(cmd, args, spawnOpts({ stdio: 'ignore', timeout: timeoutMs }));
     child.on('error', (/** @type {any} */ err) => resolve({ error: err }));
     child.on('close', (code, signal) => resolve({ code, signal }));
   });

@@ -176,6 +176,26 @@ export function resultText(r) {
   return JSON.stringify(r);
 }
 
+/**
+ * 文本结果渲染：短文本原样显示，长文本给「预览 + 展开全文」，而不是**静默截断**。
+ *
+ * v0.6.2（用户实测）：此前子代理汇报走 `truncText(x, 1500)` 硬截断——1500 字以外的内容
+ * 用户**再也看不到**（虽然完整文本仍在模型上下文里），表现为「子代理字数超限时被截断」。
+ * 同一页面里 bash/diff/ls/grep 的结果早已用 expandableBody 可展开，只有文本类结果不一致。
+ */
+export function textBody(text, preview = 1500) {
+  const t = String(text == null ? '' : text);
+  const box = document.createElement('div');
+  if (t.length <= preview) {
+    box.textContent = t;
+    return box;
+  }
+  return expandableBody(
+    esc(t.slice(0, preview)) + '<div style="color:var(--faint)">…（共 ' + t.length + ' 字，点下方「展开全文」查看完整内容）</div>',
+    '<pre style="white-space:pre-wrap;word-break:break-word">' + esc(t) + '</pre>'
+  );
+}
+
 export function truncText(t, n) {
   t = String(t || '');
   return t.length > n ? t.slice(0, n) + '\n…（截断，共 ' + t.length + ' 字）' : t;

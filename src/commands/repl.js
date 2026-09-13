@@ -1,6 +1,7 @@
 // 交互式 TUI REPL（Phase C C2：自 cli.js 抽取）。
 // 会话主循环：斜杠命令 + 多行输入 + 回合执行 + 自动压缩/标题/记忆/同步。
 import fs from 'node:fs';
+import { spawnOpts } from '../proc.js';
 import path from 'node:path';
 import readline from 'node:readline';
 import { loadConfig, saveConfig, runWizard, ensureHome, mingdaoHome } from '../config.js';
@@ -134,6 +135,7 @@ export async function runRepl(ctx) {
         detached: true,
         stdio: 'ignore',
         env: process.env,
+        ...spawnOpts({ detached: true }),
       });
       child.on('error', (err) => io.print(style(`[WebUI 自启失败] ${err?.message || err}（可手动运行 mingdao web ${cfg.web?.port || 3820}）`, C.red)));
       child.unref();

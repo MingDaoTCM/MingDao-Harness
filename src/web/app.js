@@ -1,4 +1,4 @@
-import { $, esc, highlight, renderMarkdown, scrollBottom, expandableBody, resultText, truncText, fmtDur, fmtTok, fmtT } from './util.js';
+import { $, esc, highlight, renderMarkdown, scrollBottom, expandableBody, resultText, truncText, textBody, fmtDur, fmtTok, fmtT } from './util.js';
 import { MAX_ATTACHMENTS, MAX_IMAGE_BYTES, MAX_TEXT_BYTES } from './constants.js';
 
 // 访问令牌（P1-3）：地址带 ?token= 时记入 sessionStorage 并从地址栏移除（防截图/历史外泄），
@@ -474,9 +474,13 @@ function openTraj(msg){
     div.innerHTML='<div class="tj-head"><span>'+ico+'</span><span style="white-space:nowrap">'+esc(subLabel+e.name)+'</span><span class="tj-args">'+esc(String(args).slice(0,80))+'</span><span style="margin-left:auto;color:var(--faint)">'+(e.done?(e.denied?'✖ '+esc(e.denied):'✓'+(e.durationMs!=null?' '+e.durationMs+'ms':'')):'执行中…')+'</span></div>';
     const body=document.createElement('div'); body.className='tj-body';
     if(isSub){
-      body.textContent='任务：'+(e.args&&(e.args.question||e.args.prompt))+'\n\n结果：'+truncText(resultText(e.result), 1500);
+      const q=document.createElement('div'); q.textContent='任务：'+(e.args&&(e.args.question||e.args.prompt)); body.appendChild(q);
+      const rl=document.createElement('div'); rl.textContent='结果：'; body.appendChild(rl);
+      body.appendChild(textBody(resultText(e.result))); // v0.6.2：可展开，不再静默截断到 1500 字
     }else if(e.result!==undefined){
-      body.textContent='参数：'+truncText(JSON.stringify(e.args||{}), 500)+'\n\n结果：'+truncText(resultText(e.result), 1500);
+      const ap=document.createElement('div'); ap.textContent='参数：'+truncText(JSON.stringify(e.args||{}), 500); body.appendChild(ap);
+      const ar=document.createElement('div'); ar.textContent='结果：'; body.appendChild(ar);
+      body.appendChild(textBody(resultText(e.result))); // v0.6.2：可展开，不再静默截断到 1500 字
     }else{
       body.textContent='参数：'+truncText(JSON.stringify(e.args||{}), 500);
     }
@@ -523,7 +527,9 @@ function renderSubPanel(){
     const div=document.createElement('div'); div.className='sb-item';
     div.innerHTML='<div class="sb-q">🤖 '+esc(sub.question.slice(0,60))+'</div><div class="sb-meta">'+(sub.durationMs!=null?sub.durationMs+'ms · ':'')+((sub.result&&sub.result.ok===false)?'失败':'完成')+'</div>';
     const body=document.createElement('div'); body.className='sb-body';
-    body.textContent='任务：'+sub.question+'\n\n结果：'+truncText(resultText(sub.result), 1500);
+    const sq=document.createElement('div'); sq.textContent='任务：'+sub.question; body.appendChild(sq);
+    const sl=document.createElement('div'); sl.textContent='结果：'; body.appendChild(sl);
+    body.appendChild(textBody(resultText(sub.result))); // v0.6.2：子代理汇报可展开全文（用户报过被截断）
     div.appendChild(body);
     div.onclick=(e)=>{ if(e.target.closest('.sb-body')) return; div.classList.toggle('open'); };
     list.appendChild(div);

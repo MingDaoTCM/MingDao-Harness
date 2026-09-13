@@ -1,6 +1,7 @@
 // 命令族：mingdao desktop —— 任意目录启动 Electron 桌面版
 // 定位仓库 → 检查 desktop/node_modules 里的 electron → 拉起；缺依赖给出镜像安装指引。
 import { spawn } from 'node:child_process';
+import { spawnOpts } from '../proc.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { findRepoRoot } from '../update.js';
@@ -32,7 +33,7 @@ export async function handleDesktop(/** @type {any} */ args) {
     return true;
   }
   console.log('正在启动 MingDao Harness 桌面版…（窗口弹出即成功；托盘常驻，关闭窗口 = 最小化到托盘）');
-  const child = spawn(localBin, [desktopDir], { cwd: desktopDir, stdio: 'ignore', detached: true });
+  const child = spawn(localBin, [desktopDir], { cwd: desktopDir, stdio: 'ignore', detached: true, ...spawnOpts({ detached: true }) });
   child.on('error', (err) => {
     console.log('[错误] 启动 Electron 失败：' + (err?.message || err));
     process.exitCode = 1;

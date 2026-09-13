@@ -296,10 +296,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     return { text, data, usage: res?.usage || null, model: usedModel, purpose: opts.purpose || null, durationMs: Date.now() - t0 };
   }
 
+  // v0.6.2（第三方审计 P1-2）：读取去重缓存**每个代理实例一份**。
+  // 之前是模块级共享，导致子代理读过的文件在主代理里返回「内容与上次读取一致」占位串
+  // ——主代理上下文里根本没有内容。子代理由 createAgent 另建实例，因此天然隔离。
+  const agentReadCache = new Map();
+
   function makeCtx() {
     return {
       cwd: workingDir,
       io,
+      readCache: agentReadCache,
       workingDir,
       modelName,
       provider,
@@ -1020,7 +1026,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           messages.push({
             role: 'user',
             content:
-              '（系统提示）已达到工具调用步数上限，请停止调用工具，直接输出最终总结：① 已完成的工作；② 交付物清单（文件路径）；③ 遗留问题与后续建议。',
+              '（系统提示）已达到工具调用步数上限（下一步是最后一步），请停止调用工具，直接输出最终总结：' +
+              '① 已完成的工作；② 已落盘的交付物（文件路径）；③ **尚未完成的部分**；④ 下一步建议。不要声称任务已全部完成。',
           });
         }
       } else {
@@ -1114,16 +1121,37 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         });
       } catch {}
       const art = deliverables.length ? '已交付文件：' + deliverables.join('、') + '。' : '';
+      // v0.6.2（用户实测：长任务「步数受限未产出交付物」）：续跑前必须明确要求**落盘**。
+      // 原因：兜底总结是无工具请求（tools: []），预算一旦用尽就再也写不了文件——
+      // 只留在对话里的结论等于没有交付物。所以在还有工具的轮次里就得把结论写进文件。
+      // 同时告知剩余轮次，让模型自己按预算收口，而不是一路做「未完成」直到被硬停。
+      const roundsLeft = maxRounds - round - 1;
       messages.push({
         role: 'user',
-        content: `（系统提示）已连续执行 ${stepLimit} 步工具操作，任务尚未完成，请继续完成剩余工作。${art}先核对已完成部分（勿重复），再做未完成的部分。`,
+        content:
+          `（系统提示）已连续执行 ${stepLimit} 步工具操作，任务尚未完成，请继续完成剩余工作。${art}` +
+          `还剩 ${roundsLeft} 轮（每轮 ${stepLimit} 步）预算：请**优先把已完成的结论写入交付物文件**` +
+          `（只留在对话里的内容不算交付物），再做未完成的部分。先核对已完成部分（勿重复）。`,
       });
-      io.print(style(`♻ 步数上限，自动续跑第 ${round + 2} 轮…`, C.dim));
+      io.print(style(`♻ 步数上限，自动续跑第 ${round + 2} 轮…（还剩 ${roundsLeft} 轮）`, C.dim));
       continue;
     }
     io.endTurn();
     // 步数上限：清掉未执行的 tool_calls，避免下一轮/恢复后 API 400
     stripOrphanCalls();
+    // v0.6.2（用户实测：「步数受限未能产出交付物，需要继续追问方能继续下一步」）：
+    // 预算用尽必须**明确告诉用户**发生了什么、以及怎么继续。此前这里一行都不打印，
+    // 用户只看到一段总结，很容易误判为「任务已完成」，只能自己追问。
+    try {
+      io.print(style(
+        `⚠ 步数预算已用尽（${maxRounds} 轮 × ${stepLimit} 步，本轮实际执行 ${steps} 步），任务可能尚未完成。\n` +
+        `  已保存检查点，继续方式：\n` +
+        `   · REPL / WebUI / 桌面版：直接发送「继续」即可（会自动注入断点续跑提示）\n` +
+        `   · 命令行：加 --continue（如 mingdao -c "接着往下做"）\n` +
+        `   · 想让单次跑得更久：调高 config.maxRounds（当前 ${maxRounds}，每轮 ${stepLimit} 步），或改用更大预算的预设`,
+        C.yellow
+      ));
+    } catch {}
     // v0.2.8 兜底总结（对齐 DSH）：跑满步数/末轮无正文且未中断时，补一次 no-tool 小输出请求，
     // 让任务以「总结文字 + 交付物清单」收尾，而非静默结束；失败则回退旧行为（text:null）。
     // v0.4.1 修复：输入轻量化——此前用 trimMessages(messages, budget) 全量历史，本地 q8 量化模型
@@ -1137,7 +1165,14 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           ...(deliverables.length
             ? [{ role: 'user', content: '已交付文件：\n' + deliverables.map((/** @type {string} */ f) => `- ${f}`).join('\n') }]
             : []),
-          { role: 'user', content: '（系统提示）任务已执行完毕。请用一段话总结刚才完成的工作，列出交付物（文件路径），并说明遗留问题与后续建议。' },
+          // v0.6.2：原话是「任务已执行完毕」——在**步数上限**这条路径上那是假话，
+          // 模型据此汇报「已完成」，用户就以为交付完成了。改为如实说明是被迫中断。
+          {
+            role: 'user',
+            content:
+              '（系统提示）步数预算已用尽，本轮**被迫中断，任务可能尚未完成**（不要声称已全部完成）。' +
+              '请如实总结：① 已完成的工作；② 已落盘的交付物（文件路径）；③ **尚未完成的部分**；④ 下一步该做什么（供继续时使用）。',
+          },
         ];
         currentAc = new AbortController();
         lastRequestStartAt = Date.now();

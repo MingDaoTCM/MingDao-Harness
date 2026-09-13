@@ -99,3 +99,35 @@ export function ownershipVerifiable() {
   verifiableCache = pidOwnedBy(process.pid, marker) !== null;
   return verifiableCache;
 }
+
+
+/**
+ * 统一的子进程 spawn 选项——**新增 spawn 一律走它，不要各写各的**。
+ *
+ * 为什么必须有（v0.6.2，用户实测）：桌面版 / WebUI 是 **GUI 进程**，而 Windows 上
+ * `spawn` 默认 `windowsHide: false`，于是**每一次工具调用都会弹出一个控制台黑窗**
+ * （用户报「调用工具过程桌面不停弹出终端」）。更糟的是 `detached: true` 在 Windows 上
+ * **本身就会新建控制台**，并会打断依赖管道的 stdio —— hooks.js 在 v0.4.5 已实测：
+ * hook 子进程收不到 stdin EOF，卡满 10s 超时，Windows CI 恒红。
+ *
+ * 此前只有 hooks.js 单独修过这一处，其余 9 处 spawn 全部遗漏（bash 工具、MCP、
+ * 声明式工具、后台任务、调度 worker/daemon、WebUI 自启、桌面版自启、技能安装、系统通知）。
+ * 「同一个坑修一处漏九处」说明它不该靠每处自觉——收拢成本函数后，新代码默认就是对的。
+ *
+ * @param {object} [opts] spawn 原选项；额外识别 `piped`
+ * @param {boolean} [opts.piped] 该子进程是否依赖 stdin/stdout 管道。
+ *   Windows 上依赖管道的子进程**必须不 detach**（detached 会新建控制台并打断管道）；
+ *   POSIX 上保持调用方语义（detached = 自成进程组，便于超时整组回收）。
+ * @returns {any} 可直接传给 child_process.spawn 的选项
+ */
+export function spawnOpts(/** @type {object} */ opts = {}) {
+  const { piped = false, ...rest } = /** @type {any} */ (opts);
+  const isWin = process.platform === 'win32';
+  return {
+    // POSIX 忽略该字段；Windows 靠它不闪控制台。
+    windowsHide: true,
+    ...rest,
+    // 位置在最后：Windows + 管道场景要覆盖调用方的 detached: true。
+    ...(isWin && piped ? { detached: false } : {}),
+  };
+}

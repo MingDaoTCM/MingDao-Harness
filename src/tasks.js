@@ -8,7 +8,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { relativeTime } from './session.js';
 import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
-import { procAlive, pidOwnedBy } from './proc.js';
+import { procAlive, pidOwnedBy, spawnOpts } from './proc.js';
 
 const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url));
 
@@ -91,6 +91,7 @@ export function startTask(/** @type {any} */ home, /** @type {any} */ question, 
     stdio: 'ignore',
     // 连续失败的重试轮次静默：只保留首次失败的系统通知，避免右下角刷屏（审计）
     env: { ...process.env, MINGDAO_HOME: home, ...(quietNotify ? { MINGDAO_TASK_QUIET_NOTIFY: '1' } : {}) },
+    ...spawnOpts(), // Windows：隐藏控制台（stdio 为 ignore，不依赖管道，保留 detached）
   });
   // 质检 M12：spawn 失败（ENOENT/ARG_MAX）必须有 error 监听，否则未捕获事件直接崩进程
   child.on('error', (err) => {

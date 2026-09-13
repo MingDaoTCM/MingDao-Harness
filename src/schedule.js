@@ -10,7 +10,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { startTask, readTask, killTask, patchTask, taskWorkerAlive } from './tasks.js';
-import { procAlive, pidOwnedBy } from './proc.js';
+import { procAlive, pidOwnedBy, spawnOpts } from './proc.js';
 
 function isRunningTask(/** @type {any} */ home, /** @type {any} */ taskId) {
   const t = readTask(home, taskId);
@@ -262,6 +262,7 @@ function spawnSleeper(/** @type {any} */ home, /** @type {any} */ job) {
     detached: true,
     stdio: 'ignore',
     env: { ...process.env, MINGDAO_HOME: home },
+    ...spawnOpts({ detached: true }),
   });
   child.on('error', () => {}); // 质检 M12：error 事件必须有监听（ENOENT 等）
   writeSchedule(home, { ...job, pid: child.pid });
@@ -328,6 +329,7 @@ export function spawnDaemon(/** @type {any} */ home) {
       detached: true,
       stdio: 'ignore',
       env: { ...process.env, MINGDAO_HOME: home },
+      ...spawnOpts({ detached: true }),
     });
     child.on('error', () => {}); // 质检 M12：error 事件必须有监听（ENOENT 等）
     try {
