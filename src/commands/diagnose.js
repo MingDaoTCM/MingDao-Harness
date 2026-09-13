@@ -6,6 +6,7 @@ import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { createIO, style, C } from '../ui.js';
 import { mingdaoHome, ensureHome, loadConfig } from '../config.js';
+import { redactConfig } from '../redact.js';
 import { credentialsPath } from '../credentials.js';
 import { listAudit } from '../audit.js';
 import { redactSensitive } from '../redact.js';
@@ -50,7 +51,9 @@ export async function handleDiagnose(/** @type {any} */ _cmd, /** @type {any} */
     push('');
     push('## 配置（config.json，已脱敏）');
     const cfg = loadConfig();
-    push(cfg ? redactSensitive(JSON.stringify(cfg, null, 2)) : '（不存在或读取失败）');
+    // v0.6.2（P2-13）：改用**结构感知**脱敏——按字段名的正则堵不住
+    // `mcpServers.*.env.<自定义名>` 这类值，而诊断包是用户会贴到公开渠道的产物。
+    push(cfg ? JSON.stringify(redactConfig(cfg), null, 2) : '（不存在或读取失败）');
 
     // v0.4.1：模型能力定位——本地模型未声明 contextWindow 会兜底 32k → maxOutput/budget 偏小，
     // 表现为「输出截断/频繁压缩」。此处显式提示，帮用户自诊。
@@ -98,7 +101,13 @@ export async function handleDiagnose(/** @type {any} */ _cmd, /** @type {any} */
     const cwdMem = projectMemoryFile(process.cwd());
     push(`当前目录项目记忆：${redactSensitive(cwdMem)}（${fs.existsSync(cwdMem) ? '存在' : '无'}）`);
 
-    fs.writeFileSync(outFile, L.join('\n') + '\n');
+    // v0.6.2（P2-13）：诊断包按 0600 落盘——它与 config/日志/审计同属敏感产物，
+    // 本仓其它敏感文件（credentials.json 等）一律 0600，只有这里漏了。先写后 chmod，
+    // 因为 mode 只在**创建**时生效，已存在的旧文件不会自动收紧。
+    fs.writeFileSync(outFile, L.join('\n') + '\n', { mode: 0o600 });
+    try {
+      fs.chmodSync(outFile, 0o600);
+    } catch {}
     io.print(style(`✓ 诊断报告已生成：${outFile}`, C.green));
     io.print(style('请把该文件内容贴到反馈渠道排查；密钥/token/私网路径已脱敏。', C.dim));
   } catch (/** @type {any} */ err) {

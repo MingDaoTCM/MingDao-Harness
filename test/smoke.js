@@ -5415,6 +5415,65 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.6.2 P2-9：记忆/AGENTS.md 注入围栏加固（伪造闭合被中和、零宽字符剥掉、声明为数据非指令）');
 }
 
+
+// ---------- 85. v0.6.2 第三方审计 P2-13：诊断包必须结构脱敏 + 0600 落盘 ----------
+// redactSecrets 是**按字段名**匹配的（api_key|token|secret|password…），于是
+// `mcpServers.foo.env.MY_CUSTOM_CRED` 这类**自定义名**完全不被匹配，值原样落进诊断包
+// ——而诊断包正是用户会主动贴到公开反馈渠道的产物。字段名是用户起的，枚举名字堵不住。
+{
+  const { redactConfig } = await import(pathToFileURL(path.join(srcDir, 'redact.js')).href);
+
+  // 1) 结构感知：env / headers 容器下的**全部值**掩码，无论键名叫什么
+  const cfg = {
+    model: 'deepseek-flash',
+    mcpServers: { foo: { command: 'npx', env: { MY_CUSTOM_CRED: 'super-secret-value', PATH: '/usr/bin' } } },
+    tools: [{ name: 'x', env: { INTERNAL_SSO: 'tok-123' } }],
+    headers: { Authorization: 'Bearer xyz', 'X-Trace': 'abc' },
+    customCredentials: { whatever: 'plain' },
+  };
+  const frozen = JSON.stringify(cfg);
+  const out = redactConfig(cfg);
+  const flat = JSON.stringify(out);
+  assert.ok(!flat.includes('super-secret-value'), 'env 里的自定义名同样必须掩码（这正是原缺口）');
+  assert.ok(!flat.includes('tok-123'), '数组元素里的 env 也必须掩码');
+  assert.ok(!flat.includes('xyz') && !flat.includes('abc'), 'headers 下的值一律掩码');
+  assert.ok(!flat.includes('plain'), '键名含 credential 的值必须掩码');
+  assert.ok(flat.includes('MY_CUSTOM_CRED') && flat.includes('INTERNAL_SSO'), '键名要保留（诊断需要知道"配了哪些"）');
+  assert.ok(flat.includes('npx') && flat.includes('deepseek-flash'), '非敏感值必须保留（否则诊断没用了）');
+  assert.equal(JSON.stringify(cfg), frozen, 'redactConfig 不得就地修改原配置');
+
+  // 2) 端到端：真跑一次诊断命令，验产物权限与内容
+  const homeD = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-diag-'));
+  const prevHomeD = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = homeD;
+  try {
+    fs.writeFileSync(
+      path.join(homeD, 'config.json'),
+      JSON.stringify({ model: 'deepseek-flash', provider: 'deepseek', mcpServers: { s: { command: 'npx', env: { MY_CUSTOM_CRED: 'leak-me-if-you-can' } } } })
+    );
+    const { handleDiagnose } = await import(pathToFileURL(path.join(srcDir, 'commands', 'diagnose.js')).href);
+    const realLog = console.log;
+    console.log = () => {};
+    try {
+      await handleDiagnose('diagnose', []);
+    } finally {
+      console.log = realLog;
+    }
+    const files = fs.readdirSync(homeD).filter((f) => f.startsWith('diagnose-'));
+    assert.equal(files.length, 1, '诊断报告应生成一个文件：' + JSON.stringify(files));
+    const report = fs.readFileSync(path.join(homeD, files[0]), 'utf8');
+    assert.ok(!report.includes('leak-me-if-you-can'), '诊断报告里不得出现自定义名环境变量的值');
+    // 权限只在 POSIX 断言（Windows 不实现 mode 位，见 v0.4.6 的同类教训）
+    if (process.platform !== 'win32') {
+      assert.equal(fs.statSync(path.join(homeD, files[0])).mode & 0o777, 0o600, '诊断包与其它敏感产物同口径：0600');
+    }
+  } finally {
+    process.env.MINGDAO_HOME = prevHomeD;
+    safeRmSync(homeD, { recursive: true, force: true });
+  }
+  ok('v0.6.2 P2-13：诊断包结构脱敏（自定义名 env/headers 全覆盖）+ 0600 落盘');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

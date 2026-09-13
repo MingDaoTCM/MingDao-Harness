@@ -111,6 +111,15 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 > 但**「收尾打印提示」那段没有断言覆盖**——真正的写入路径要经 `helperProvider` 解析真实配置，
 > 脱离环境无法单测，目前只由 tsc 与代码评审保障（已写在测试注释里）。
 
+## 3.3 已修复（第四批：诊断包泄漏面）
+
+| 项 | 位置 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| P2-13（代码审计报告） | `src/commands/diagnose.js`、`src/redact.js` | ① 诊断包 `writeFileSync` 未传 `mode`（本仓其它敏感产物一律 0600）；② 脱敏**按字段名**匹配（`api_key\|token\|secret\|password…`），于是 `mcpServers.*.env.<自定义名>`、`tools[].env.*` 的值原样落进报告——而诊断包正是用户会主动贴到**公开反馈渠道**的产物 | ① 写盘 `{mode:0o600}` **且**补一次 `chmodSync`（mode 只在创建时生效，旧文件不会自动收紧）；② 新增**结构感知**的 `redactConfig()`：`env`/`headers` 容器下的**全部值**掩码、键名命中密钥词的**整棵子树**掩码，保留键名与非敏感值 |
+
+> `redactConfig` 的设计取向写在代码注释里：`author` 这类含 `auth` 的键会被过度掩码，
+> 诊断可读性略降——但方向是安全的，**宁可少显示，不可泄漏**。
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）

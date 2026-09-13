@@ -21,6 +21,63 @@ export function redactSecrets(/** @type {any} */ text) {
   return s;
 }
 
+// ---------- v0.6.2（第三方审计 P2-13）：配置需要**结构感知**脱敏，光靠字段名堵不住 ----------
+// redactSecrets 是按字段名匹配的（api_key|token|secret|password|access_token…）。
+// 而 `mcpServers.foo.env.MY_CUSTOM_CRED`、`tools[].env.INTERNAL_SSO` 这类**自定义名**
+// 完全不被匹配，值会原样落进诊断包——而诊断包正是用户会主动贴到公开反馈渠道的产物。
+// 字段名是用户起的，靠枚举名字永远堵不住，所以按**结构位置**判定。
+const SECRET_KEY_RE = /(?:key|token|secret|password|passwd|credential|authorization|auth|cookie)/i;
+// 这些容器下的**全部值**都当敏感处理（保留键名，便于排查"配了哪些"）
+const OPAQUE_CONTAINERS = new Set(['env', 'headers', 'environment']);
+
+/**
+ * 把一棵子树的所有叶子值掩码，但保留键与结构（诊断需要知道「配了哪些」，不需要「配了什么」）。
+ * @param {any} v
+ * @returns {any}
+ */
+function maskAllValues(/** @type {any} */ v) {
+  if (Array.isArray(v)) return v.map(maskAllValues);
+  if (v && typeof v === 'object') {
+    return Object.fromEntries(Object.entries(v).map(([k, x]) => [k, maskAllValues(x)]));
+  }
+  return '***';
+}
+
+/**
+ * 递归脱敏一份配置对象（返回新对象，不改原值）。
+ * @param {any} value
+ * @param {string} [key] 该值所处的键名（用于按名判定）
+ * @returns {any}
+ */
+export function redactConfigValue(/** @type {any} */ value, /** @type {string} */ key = '') {
+  if (value == null) return value;
+  if (Array.isArray(value)) return value.map((v) => redactConfigValue(v, key));
+  if (typeof value === 'object') {
+    const out = /** @type {any} */ ({});
+    for (const [k, v] of Object.entries(value)) {
+      // 两种情况都掩码整棵子树：① env/headers 这类"装密钥的容器"；
+      // ② 键名本身命中密钥词（credential/token/…）——**哪怕它的值是对象**，
+      //    否则 `customCredentials: { whatever: 'plain' }` 会因为内层键名无害而漏出去。
+      // 代价：`author` 之类含 auth 的键会被过度掩码（诊断可读性略降），
+      // 但方向是安全的——宁可少显示，不可泄漏。
+      const opaque = OPAQUE_CONTAINERS.has(k.toLowerCase()) || SECRET_KEY_RE.test(k);
+      if (opaque && v && typeof v === 'object') out[k] = maskAllValues(v);
+      else out[k] = redactConfigValue(v, k);
+    }
+    return out;
+  }
+  if (typeof value === 'string') {
+    if (key && SECRET_KEY_RE.test(key)) return '***';
+    return redactSensitive(value); // 复用同一套字符串规则（私网 IP / 家目录 / 已知前缀）
+  }
+  return value;
+}
+
+/** 便捷入口：整份 config → 脱敏后的可安全外发对象 */
+export function redactConfig(/** @type {any} */ cfg) {
+  return redactConfigValue(cfg);
+}
+
 export function redactSensitive(/** @type {any} */ text) {
   let s = redactSecrets(text);
   s = s.replace(/\b(?:10|127)(?:\.\d{1,3}){3}\b|\b192\.168(?:\.\d{1,3}){2}\b|\b169\.254(?:\.\d{1,3}){2}\b|\b172\.(?:1[6-9]|2\d|3[01])(?:\.\d{1,3}){2}\b|\b100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])(?:\.\d{1,3}){2}\b/g, '[私网IP]');
