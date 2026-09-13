@@ -677,12 +677,22 @@ export async function runRepl(ctx) {
       appendMessages(session.file, fresh);
       tuiState.persisted = messages.length;
       if (!autoTitled && cfg.autoTitle !== false && res.text) {
-        autoTitled = true;
-        const tModel = titleModel(cfg, modelName);
-        const title = await generateTitle(await helperProvider(cfg, tModel, provider), tModel, input);
-        if (title) {
-          const renamed = renameSessionFile(fs, path, home, session, title);
-          if (renamed) io.print(style(`✓ 会话标题：${path.basename(renamed)}`, C.dim));
+        autoTitled = true; // 只尝试一次（失败多为缺 Key 这类确定性原因，逐轮重试没有意义）
+        // v0.6.2（第三方代码审计 P2-12）：与 cli.js 的同名逻辑保持同一口径——
+        // autoTitle 必须**独立** try/catch。此前标题模型所在服务商没有 Key 时
+        // `helperProvider` 抛错会落到外层 catch，于是「回答已经成功输出」却被报成错误。
+        try {
+          const tModel = titleModel(cfg, modelName);
+          const title = await generateTitle(await helperProvider(cfg, tModel, provider), tModel, input);
+          if (title) {
+            const renamed = renameSessionFile(fs, path, home, session, title);
+            if (renamed) io.print(style(`✓ 会话标题：${path.basename(renamed)}`, C.dim));
+          }
+        } catch (/** @type {any} */ err) {
+          // 不静默：标题失败不该影响本次回答，但用户有权知道"为什么这次没有标题"
+          try {
+            io.print(style(`（自动标题已跳过：${String(err?.message || err).slice(0, 80)}）`, C.dim));
+          } catch {}
         }
       }
       // v0.3.0 P0-2：跑满步数(capHit)或中断(aborted)落检查点，正常完成清除

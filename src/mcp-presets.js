@@ -2,12 +2,15 @@
 // 命令：mingdao mcp preset list / add <名称> [参数]
 // 预设以 npx 运行（无需预装），add 时合并进 config.json 的 mcpServers（重启 WebUI 生效）。
 
+import fs from 'node:fs';
+
 export const MCP_PRESETS = {
   filesystem: {
     label: '文件系统（读写指定目录）',
     command: 'npx',
     args: ['-y', '@modelcontextprotocol/server-filesystem', '{dir}'],
     argLabel: '目录（默认当前工作目录）',
+    argKind: 'dir', // 目录类：缺参时默认 cwd 是合理默认
   },
   fetch: {
     label: '网页抓取（把网页内容转 Markdown）',
@@ -24,6 +27,7 @@ export const MCP_PRESETS = {
     command: 'npx',
     args: ['-y', 'mcp-server-git', '--repository', '{dir}'],
     argLabel: '仓库目录（默认当前工作目录）',
+    argKind: 'dir',
   },
   memory: {
     label: '知识图谱记忆（持久化实体关系记忆）',
@@ -45,6 +49,10 @@ export const MCP_PRESETS = {
     command: 'npx',
     args: ['-y', 'mcp-server-sqlite', '--db-path', '{dir}'],
     argLabel: '数据库文件路径（必填）',
+    // v0.6.2（第三方代码审计 P2-5）：**文件类**参数绝不能套用"缺参默认 cwd"。
+    // 此前 sqlite 的 args 里同样写 {dir}，于是缺参时被静默替换成 cwd（一个目录），
+    // `mcp-server-sqlite --db-path <目录>` 启动即失败，而用户看不到任何原因。
+    argKind: 'file',
   },
   time: {
     label: '时间与时区查询',
@@ -58,6 +66,7 @@ export function presetList() {
     name,
     label: p.label,
     argLabel: (/** @type {any} */ (p)).argLabel || null,
+    argKind: (/** @type {any} */ (p)).argKind || null,
     args: p.args,
     command: p.command,
   }));
@@ -66,11 +75,23 @@ export function presetList() {
 export function buildPreset(/** @type {any} */ name, /** @type {any} */ arg, /** @type {any} */ cwd) {
   const p = /** @type {any} */ (MCP_PRESETS)[name];
   if (!p) return { error: `未知预设 ${name}（mingdao mcp preset list 查看）` };
+  const kind = (/** @type {any} */ (p)).argKind || (p.args.includes('{dir}') ? 'dir' : '');
   if ((/** @type {any} */ (p)).argLabel && !arg) {
-    if (p.args.includes('{dir}')) {
-      arg = cwd; // 目录类参数默认当前工作目录
-    } else {
-      return { error: `该预设需要参数：${p.argLabel}` };
+    // v0.6.2（P2-5）：只有**目录类**参数才默认 cwd。
+    // 旧逻辑是「args 里含 {dir} 就默认 cwd」，把文件类参数（sqlite 的 --db-path）也算进去了
+    // ——缺参时静默传一个目录，MCP 服务器启动即失败且无提示。
+    if (kind === 'dir') arg = cwd;
+    else return { error: `该预设需要参数：${(/** @type {any} */ (p)).argLabel}` };
+  }
+  // 文件类参数做一次「明显传错」的拦截：给的是已存在的**目录**时立刻说清楚，
+  // 而不是让它去启动一个必然失败的服务（sqlite 的 --db-path 传目录是常见误用）。
+  if (kind === 'file' && arg) {
+    try {
+      if (fs.statSync(String(arg)).isDirectory()) {
+        return { error: `该预设需要的是**文件**路径，但给的是目录：${arg}（例如 ./data/app.db）` };
+      }
+    } catch {
+      // 文件还不存在是合法的（sqlite 会自己创建），不拦截
     }
   }
   const args = p.args.map((/** @type {any} */ a) => (a === '{dir}' ? arg : a));

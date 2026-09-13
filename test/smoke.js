@@ -5579,6 +5579,73 @@ console.log(JSON.stringify({ okOn, xml }));`;
   ok('v0.6.2 P2-14：自启文件按格式转义（plist/desktop/bat），macOS 上经 plutil 实证合法；未转义必失败');
 }
 
+
+// ---------- 88. v0.6.2 代码审计 P2-5 / P2-12：静默失效收尾 ----------
+{
+  // 88a. MCP 预设：目录类参数可默认 cwd，**文件类不行**（旧逻辑看 args 里有没有 {dir}，
+  //      把 sqlite 的 --db-path 也算进去 → 缺参时静默传一个目录，服务启动即失败且无提示）
+  const { buildPreset, presetList } = await import(pathToFileURL(path.join(srcDir, 'mcp-presets.js')).href);
+  const ws88 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-mcp88-'));
+  try {
+    assert.equal(buildPreset('filesystem', undefined, ws88).config.args.at(-1), ws88, '目录类缺参应默认 cwd');
+    assert.equal(buildPreset('git', undefined, ws88).config.args.at(-1), ws88, '目录类缺参应默认 cwd');
+
+    const noArg = buildPreset('sqlite', undefined, ws88);
+    assert.ok(noArg.error && noArg.error.includes('需要参数'), '文件类预设缺参必须报错：' + JSON.stringify(noArg));
+    assert.ok(!noArg.config, '报错时不得同时返回可用的 config（否则调用方可能照用）');
+
+    const dirArg = buildPreset('sqlite', ws88, ws88);
+    assert.ok(dirArg.error && dirArg.error.includes('目录'), '文件类预设传目录必须当场说清楚：' + JSON.stringify(dirArg));
+
+    const dbPath = path.join(ws88, 'app.db');
+    const okArg = buildPreset('sqlite', dbPath, ws88);
+    assert.ok(okArg.config && okArg.config.args.at(-1) === dbPath, '文件类传合法文件路径应正常');
+    // 文件还不存在是合法的（sqlite 会自己建），不得被误拦
+    assert.ok(buildPreset('sqlite', path.join(ws88, 'not-yet.db'), ws88).config, '不存在的 db 文件不应被拦');
+
+    const kinds = Object.fromEntries(presetList().map((x) => [x.name, x.argKind]));
+    assert.equal(kinds.sqlite, 'file', 'presetList 应暴露 argKind 供 UI 提示');
+    assert.equal(kinds.filesystem, 'dir');
+  } finally {
+    safeRmSync(ws88, { recursive: true, force: true });
+  }
+  ok('v0.6.2 P2-5：MCP 预设区分目录/文件参数（文件类缺参报错、传目录当场拦截）');
+
+  // 88b. 结构守卫：所有 generateTitle 调用点都必须在独立 try 内。
+  //      理由（cli.js 的 P2-4 教训 + repl.js 的 P2-12）：标题模型所在服务商没有 Key 时
+  //      helperProvider 抛错会落到外层 catch，于是「回答已经成功输出」却被报成错误。
+  //      全仓 4 处调用点里已有 3 处保护过，repl.js 漏了一处——所以这条守卫是防第 5 处。
+  {
+    const titleFiles = [];
+    const walkTitle = (d) => {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const fp = path.join(d, e.name);
+        if (e.isDirectory()) walkTitle(fp);
+        else if (e.name.endsWith('.js')) titleFiles.push(fp);
+      }
+    };
+    walkTitle(srcDir);
+    const unguarded = [];
+    let sites = 0;
+    for (const f of titleFiles) {
+      const lines = fs.readFileSync(f, 'utf8').split('\n');
+      lines.forEach((l, i) => {
+        if (!/await generateTitle\(/.test(l)) return;
+        sites += 1;
+        // 判据：**紧随其后**要有一个 catch 收住这次调用。
+        // 第一版我写成"往前 18 行内要能看到 try {"，结果它匹配到了**外层** try——
+        // 而外层 catch 正是问题本身（标题抛错会把成功的回答报成错误）。
+        // 变异验证当场抓出这个弱点（去掉 repl 的 try/catch 时守卫没响），故改为向前看。
+        const ahead = lines.slice(i, i + 14).join('\n');
+        if (!/\}\s*catch\b/.test(ahead)) unguarded.push(`${path.relative(srcDir, f)}:${i + 1}`);
+      });
+    }
+    assert.ok(sites >= 4, `generateTitle 调用点应至少 4 处，实测 ${sites}（守卫自身可能失效）`);
+    assert.deepEqual(unguarded, [], `generateTitle 必须在独立 try 内（否则标题失败会把成功的回答报成错误）：${unguarded.join(', ')}`);
+  }
+  ok('v0.6.2 P2-12：结构守卫——全仓 generateTitle 调用点都有独立 try（防第 5 处遗漏）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

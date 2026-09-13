@@ -143,6 +143,21 @@ const packCtx = await mountPacks(cfg, { cwd: workingDir });
 | --- | --- | --- | --- |
 | P2-14（代码审计报告） | `src/autostart.js` | 三个平台的自启文件都把**用户可控的路径**直接插进格式里：plist 的 `<string>` 不转义 `& < >` → XML 非法 → `launchctl` 加载失败，而写文件本身"成功"，表现为「开关打开了但登录后不自启」且错误只在 StandardErrorPath 里；`.desktop` 不转义 `\ " $ \``；`.bat` 不转义 `%` | 抽出纯函数 `plistContent` / `desktopEntryContent` / `batchContent` + 各自格式的转义规则；macOS 写完后用 `plutil -lint` **自检**，把静默失败变成立即失败 |
 
+## 3.6 已修复（第七批：静默失效收尾）
+
+| 项 | 位置 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| P2-5（代码审计报告） | `src/mcp-presets.js` | 缺参默认 cwd 的判据是「args 里含 `{dir}`」——把 **sqlite 的 `--db-path`** 也算进去了。于是缺参时静默传一个**目录**给「数据库文件路径（必填）」，`mcp-server-sqlite` 启动即失败且用户看不到原因 | 预设显式声明 `argKind: 'dir' \| 'file'`：只有目录类才默认 cwd；文件类缺参**报错**，且传了已存在目录时当场说清楚 |
+| P2-12（代码审计报告） | `src/commands/repl.js` | `autoTitle` 没有独立 try/catch，而 `cli.js` 早已为同一问题加过（P2-4）——标题模型所在服务商没有 Key 时 `helperProvider` 抛错落到**外层** catch，于是「回答已经成功输出」却被报成错误 | 与 `cli.js` 同口径加独立 try/catch；并把失败原因以 dim 提示出来（不再静默） |
+
+> 这次做了**全仓普查**：`generateTitle` 共 4 处调用（cli / repl / tasks-worker / web-server），
+> 另三处本来就有保护——`repl.js` 是唯一漏的。为防第 5 处，新增**结构守卫**断言。
+>
+> ⚠ 守卫本身也踩了一次坑，值得记下：第一版写成「往前 18 行内要能看到 `try {`」，
+> 变异验证时**发现它匹配到了外层 try**（而外层 catch 正是问题本身），去掉 `repl` 的
+> try/catch 时守卫毫无反应。改为「**紧随其后**必须有 `catch`」后，正向通过、变异被抓并指名
+> `commands/repl.js:685`。**没有变异验证的守卫等于没有守卫**。
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）
