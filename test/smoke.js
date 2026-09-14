@@ -6636,6 +6636,73 @@ if (process.platform !== 'win32') {
   ok('v0.6.2 费用明细/会话索引写失败不再无声（一次告警 + 结果可查 + 措辞如实）');
 }
 
+
+// ---------- 102. v0.6.2：stdout/stderr 的 EPIPE 兜底（audit-report B-UI-1 / B-CLI-1 / B-REPL-1） ----------
+// 实测确认的缺陷：`process.stdout.write` 在读端提前关闭时产生的 EPIPE 是以 **stream 'error' 事件**
+// 抛出的——没有监听者就是未捕获异常，整个进程带堆栈崩溃。同机对照：`console.log` 写满管道
+// 对端关闭退 0（Node 给 console 兜了底），换成 `process.stdout.write` 就崩。
+// 而本仓 7 处输出走裸 `process.stdout.write`（转轮动画 / io.box / 隐藏提问 / 出网告警），
+// 于是 `mingdao … | head -1` 这种最常见的用法正好命中。
+{
+  const srcProcUrl = JSON.stringify(pathToFileURL(path.join(srcDir, 'proc.js')).href);
+  // 自己开临时目录：这个位置 `tmp` 已在第 4999 行被清掉了（用它写标记会 ENOENT）
+  const dir102 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-epipe102-'));
+  const marker102 = path.join(dir102, 'epipe-survived.txt');
+  // 长循环 + 周期性 await：给事件循环机会把缓冲真正 flush 出去，EPIPE 才会浮上来
+  const writeLoop = `
+import { setTimeout as sleep } from 'node:timers/promises';
+for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.repeat(300) + '\\n'); if (i % 200 === 0) await sleep(1); }
+`;
+  const runChild = (/** @type {string} */ body) =>
+    new Promise((resolve) => {
+      const c = spawn(process.execPath, ['--input-type=module', '-e', body], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env, MINGDAO_EPIPE_MARK: marker102 },
+      });
+      let err = '';
+      c.stderr.on('data', (d) => { err += String(d); });
+      // 父进程立刻关闭读端 = 复现「读端提前退出」（不依赖 shell 管道，Windows 上同样成立）
+      c.stdout.destroy();
+      c.on('exit', (code, signal) => resolve({ code, signal, err }));
+      c.on('error', () => resolve({ code: -1, signal: null, err }));
+    });
+
+  // ① 没有兜底时必须真的崩（否则这个测试什么都没测到）
+  const bare = await runChild(writeLoop + 'process.exit(7);');
+  assert.notEqual(bare.code, 7, '对照组：无 handler 时不该安然跑完循环——管道对端已关闭');
+  assert.ok(/EPIPE|ECONNRESET|Unhandled 'error' event/.test(bare.err), `对照组必须复现 EPIPE 崩溃，实际 stderr：${bare.err.slice(0, 200)}`);
+
+  // ② CLI 策略：安静退出 0，绝不打印堆栈、也不继续白跑
+  const cli = await runChild(`import { installPipeGuards } from ${srcProcUrl};\ninstallPipeGuards({ exitOnEpipe: true });\n` + writeLoop + 'process.exit(7);');
+  assert.equal(cli.code, 0, `CLI 策略下应安静退出 0，实际 code=${cli.code} signal=${cli.signal} stderr=${cli.err.slice(0, 160)}`);
+  assert.ok(!/Unhandled 'error'|at afterWriteDispatched/.test(cli.err), 'CLI 策略下不得出现未捕获异常堆栈');
+  assert.ok(!fs.existsSync(marker102), 'CLI 策略应在 EPIPE 时立即停止，而不是跑完整个循环');
+
+  // ③ 服务端策略：常驻进程不能因为"日志管道断了"自杀，必须活下来继续服务
+  const srv = await runChild(
+    `import { installPipeGuards } from ${srcProcUrl};\nimport fs from 'node:fs';\ninstallPipeGuards({ exitOnEpipe: false });\n` +
+      writeLoop +
+      `fs.writeFileSync(process.env.MINGDAO_EPIPE_MARK, 'survived'); process.exit(0);`
+  );
+  assert.equal(srv.code, 0, `服务端策略下应正常跑完，实际 code=${srv.code} stderr=${srv.err.slice(0, 160)}`);
+  assert.ok(fs.existsSync(marker102), '服务端策略必须让进程在 stdout 断开后继续活着（写降级为静默）');
+
+  // ④ 结构守卫：兜底必须由**入口**安装，且两种模式各自装对。
+  // 只加函数不接线 = 完全没修（库里有个没人调用的 handler 是最典型的假修复）。
+  {
+    const cliSrc = fs.readFileSync(path.join(srcDir, 'cli.js'), 'utf8');
+    assert.ok(/installPipeGuards\(\{\s*exitOnEpipe:\s*true\s*\}\)/.test(cliSrc), 'cli.js 必须以 exitOnEpipe:true 安装管道兜底');
+    const webSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+    assert.ok(/installPipeGuards\(\{\s*exitOnEpipe:\s*false\s*\}\)/.test(webSrc), 'web/server.js 必须改回 exitOnEpipe:false（常驻服务不得因日志管道断开而退出）');
+    // 顺序：cli.js 必须在写任何输出之前安装（否则最早那几句仍在裸境界）
+    const iInstall = cliSrc.indexOf('installPipeGuards(');
+    const iFirstLog = cliSrc.search(/console\.(log|error)\(/);
+    assert.ok(iInstall > -1 && (iFirstLog === -1 || iInstall < iFirstLog), 'cli.js 必须在第一次输出之前安装管道兜底');
+  }
+  safeRmSync(dir102, { recursive: true, force: true });
+  ok('v0.6.2 EPIPE 兜底：CLI 安静退出 / 服务端存活 / 未安装时确实会崩（B-UI-1 / B-CLI-1 / B-REPL-1）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

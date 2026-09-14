@@ -363,6 +363,22 @@ Windows 对这种情况回报的正是 **ENOENT**，与"本来就没有检查点
 断言无论实现对错都通过。现在改用导出的 `taskStateFile()` 构造路径，并额外断言"文件确实还在"，
 以证明这次失败不是"本来就没有"。**假绿比红灯更值得警惕**：它会让一个从未生效的断言一直装作在保护你。
 
+## 3.20 已修复（第二十一批：stdout/stderr 的 EPIPE 未处理）
+
+| 项 | 位置 | 核实结论 | 处理 |
+| --- | --- | --- | --- |
+| B-UI-1 / B-CLI-1 / B-REPL-1 | 全部裸 `process.stdout.write` / `process.stderr.write`（`ui.js` ×5、`commands/sync.js`、`net-guard.js`），入口未安装兜底 | **实测复现**：`process.stdout.write` 在读端提前关闭时产生的 EPIPE 是以 **stream `'error'` 事件**抛出的——没有监听者就是未捕获异常，**整个进程带堆栈崩溃**。同机对照：`console.log` 写满管道对端关闭退 0（Node 给 `console` 兜了底），换成 `process.stdout.write` 就崩（未捕获异常，退出码 99）。本仓有 7 处输出走的是裸 write，于是 `mingdao … | head -1` 这种**最常见的用法**正好命中 | `proc.js` 新增 `installPipeGuards()`。**两种策略必须在调用点显式选**：CLI/REPL 为 `exitOnEpipe:true`（对方关了管道就安静退出 0，不打印堆栈、不继续白跑长任务）；常驻 WebUI 服务为 `exitOnEpipe:false`（服务不能因为「日志管道断了」自杀，写降级为静默）。**非 EPIPE 的流错误绝不吞**——重抛保持可见，否则会变成最难查的「输出莫名其妙没了」 |
+
+### 两点值得记下
+1. **「库里有函数」不等于修好**：只加 `installPipeGuards` 而不接线是最典型的假修复。因此结构守卫
+   同时钉住「`cli.js` 必须以 `true` 安装」「`web/server.js` 必须改回 `false`」「安装必须在第一次输出之前」。
+2. **对照组不能省**：测试第一步先验证「不装兜底时确实会崩」。没有这个对照，三个断言在
+   一个从不触发 EPIPE 的环境里会全部假绿——而「从未真正复现过」正是这份审计报告里
+   B-CT-1 那种夸大结论的成因。
+
+> 管道复现不依赖 shell：父进程 spawn 子进程后**立刻 `child.stdout.destroy()`** 关掉读端，
+> 子进程写入即 EPIPE。这样 Windows 上同样成立，不必为跨平台写两套管道命令。
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）
@@ -417,7 +433,7 @@ Windows 对这种情况回报的正是 **ENOENT**，与"本来就没有检查点
 | 代码 | 类别 | 摘要 | 状态 |
 | --- | --- | --- | --- |
 | B-CMD-3 | 凭据泄露 | `sync passwd` 新密码走命令行 | ✅ 已修（§3.1） |
-| B-CMD-1/2 | 资源泄漏 | readline 未 close | ⚠ 待核实（§3.1 的提问器重构顺带处理了 sync 侧；其它调用点未普查） |
+| ~~B-CMD-1/2~~ | 资源泄漏 | readline 未 close | ✅ **已核实为非缺陷**（§3.20 附：全仓仅 3 处 createInterface，均已有 close；EOF 下 question 正常回调） |
 | B-ATW-1/2 | 环境兼容 | SharedArrayBuffer / `Atomics.wait` 阻塞 | ⚠ 已登记（§3.10：正确性已修，**阻塞面未解决**） |
 | B-CT-1 | 性能 | 「WeakMap 缓存永远 miss，每步全量 BPE」 | ✅ **已核实并按其真实影响处理**（§3.15）：**"永远 miss"不成立**——同一计数器下 200 次调用 0.0ms；真问题是计数器 identity 不稳定，已按模型名缓存 |
 | ~~B-CON-1~~ | 安全/注入 | ReDoS | ✅ **已核实并修复**（§3.16：约束 pattern 的嵌套量词，实测 29 字符 4.8 秒） |
@@ -429,7 +445,7 @@ Windows 对这种情况回报的正是 **ENOENT**，与"本来就没有检查点
 | B-WS-1/2 | 数据完整性 | 静默吞写入 | 🟡 **账本这一处已修**（§3.17：写失败留痕 + 收尾提示）；**其余 `catch {}` 包写操作的位置未修**（§3.17 末段列出了具体文件） |
 | B-TOK-1 | 数据完整性 | 词表永不重试 | ⚠ 待核实 |
 | B-SL-1 | 资源泄漏 | 临时目录 | ⚠ 待核实 |
-| B-UI-1 / B-CLI-1 / B-REPL-1 | EPIPE | 标准输出 EPIPE 未处理 | ⚠ 待核实 |
+| ~~B-UI-1 / B-CLI-1 / B-REPL-1~~ | EPIPE | 标准输出 EPIPE 未处理 | ✅ **已核实并修复**（§3.20：实测裸 write 会带堆栈崩溃，已加两种策略的兜底） |
 | B-CMD-4 | 凭据泄露 | skill token | ⚠ 待核实 |
 | D-REL-1/2 | 凭据泄露 | gitee token（发布链路） | ⚠ 待核实（本仓已做「凭据不进产物」核查，见 RELEASE-CHECKLIST §1.2） |
 
@@ -467,8 +483,11 @@ Windows 对这种情况回报的正是 **ENOENT**，与"本来就没有检查点
 2. **`withFileLockSync` 的阻塞面**（自评 P2-7，§3.10）：正确性已修，但它仍是同步 `Atomics.wait`——
    同步锁阻塞事件循环；异步版本 + 24 个调用点迁移（schedule 12 / workspace 7 / tasks 2 /
    cachestats / sync）**未做**。
-3. **EPIPE 未处理**（B-UI-1 / B-CLI-1 / B-REPL-1）：stdout 被管道提前关闭时的行为未普查。
-4. **readline 未 close**（B-CMD-1/2）：§3.1 的提问器重构顺带处理了 sync 侧，**其它调用点未普查**。
+3. ~~**EPIPE 未处理**（B-UI-1 / B-CLI-1 / B-REPL-1）~~ ✅ **已修**（§3.20：实测复现并加了两种策略的兜底）。
+4. ~~**readline 未 close**（B-CMD-1/2）~~ ✅ **已普查完毕**：全仓仅 3 处 `createInterface`
+   （`ui.js` / `commands/sync.js` / `commands/skill.js`），**都已有 `close()`**；
+   另外实测本版 Node 下 `rl.question` 在 stdin EOF 时会正常回调（不会永久挂起），
+   `askAutoStart` 那条路径不存在「泄漏 + 卡死」。**结论：非缺陷，如实登记为已核实。**
 5. **路径穿越**（B-SR-1）：报告未给位置，未定位。
 6. **词表永不重试**（B-TOK-1）、**临时目录**（B-SL-1）、**skill token**（B-CMD-4）、
    **gitee token 发布链路**（D-REL-1/2）：均未定位（后两者本仓已有「凭据不进产物」核查，

@@ -17,6 +17,7 @@ import { makeTokenCounter } from './tokenizer.js';
 import { messageTokens } from './context.js';
 import { startMcpServers } from './mcp.js';
 import { startTask, listTasks, patchTask, killTask, formatTaskRow } from './tasks.js';
+import { installPipeGuards } from './proc.js';
 import { enableAutostart, disableAutostart, autostartStatus, autostartPath } from './autostart.js';
 import { isLocalBaseUrl } from './model-caps.js';
 import { notifyTaskDone } from './notify.js';
@@ -122,6 +123,9 @@ async function generatePlan(/** @type {any} */ provider, /** @type {any} */ mode
 // —— 后台任务 worker（Phase C C2）：已抽取至 src/tasks/worker.js，入口处动态导入 ——
 
 async function main() {
+  // v0.6.2（B-UI-1/B-CLI-1/B-REPL-1）：先装管道兜底，再输出任何东西。
+  // `mingdao … | head -1` 这类最常见的用法此前会因 stdout EPIPE 未捕获而带堆栈崩溃。
+  installPipeGuards({ exitOnEpipe: true });
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
     printHelpLines(console.log);

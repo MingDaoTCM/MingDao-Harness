@@ -142,3 +142,50 @@ export function spawnOpts(/** @type {object} */ opts = {}) {
     ...(isWin && piped ? { detached: false } : {}),
   };
 }
+
+// ---------------------------------------------------------------------------
+// 标准输出/错误管道的 EPIPE 兜底（v0.6.2，第三方报告 B-UI-1 / B-CLI-1 / B-REPL-1）
+//
+// 实测确认的缺陷：`process.stdout.write` 在**读端提前关闭**（`mingdao … | head -1`、
+// 终端分页器退出、GUI 停止读取）时会产生 EPIPE，且它是以 **stream 'error' 事件**的形式
+// 抛出的——**没有监听者就是未捕获异常，整个进程带堆栈崩溃**。
+// 复现对照（同一台机器）：`console.log` 写满管道对端关闭 → 退出码 0（Node 给 console 兜了底）；
+// 换成 `process.stdout.write` → 未捕获异常、退出码 99。
+// 而本仓 7 处输出走的是裸 `process.stdout.write`（转轮动画、io.box、隐藏提问、出网告警），
+// 因此「管道对端先走」这条路径此前是会崩的——`| head` 这种最常见的用法正好命中。
+//
+// 两种策略（必须在调用点显式选，不能靠默认值蒙）：
+//   exitOnEpipe=true （CLI/REPL）：EPIPE 意味着**对方已经不想再看了**，按 Unix 惯例安静退出 0，
+//     不打印堆栈、不继续白跑长任务；
+//   exitOnEpipe=false（常驻 WebUI 服务）：服务不能因为"日志管道断了"就自杀，只静默吞掉
+//     （写本来也不可能成功），进程继续提供服务。
+// 非 EPIPE 的流错误**绝不吞**：重抛保持可见，否则会变成最难查的「输出莫名其妙没了」。
+let pipePolicy = { exitOnEpipe: true };
+let pipeGuardsInstalled = false;
+
+/**
+ * 安装（或更新策略）标准流 EPIPE 兜底。幂等：重复调用只更新策略，不会重复挂监听。
+ * @param {{exitOnEpipe?: boolean}} [opts]
+ */
+export function installPipeGuards({ exitOnEpipe = true } = {}) {
+  pipePolicy = { exitOnEpipe: !!exitOnEpipe };
+  if (pipeGuardsInstalled) return;
+  pipeGuardsInstalled = true;
+  for (const stream of [process.stdout, process.stderr]) {
+    if (!stream || typeof stream.on !== 'function') continue;
+    stream.on('error', (/** @type {any} */ err) => {
+      const code = err?.code;
+      // ECONNRESET 一并认下：Windows 命名管道上「读端已关闭」有时不是 EPIPE 而是连接被重置。
+      // 对**单向输出流**而言两者语义相同（写端已无人接收），放过它不会掩盖真正的故障。
+      if (code === 'EPIPE' || code === 'ERR_STREAM_DESTROYED' || code === 'ECONNRESET') {
+        if (pipePolicy.exitOnEpipe) {
+          try {
+            process.exit(0);
+          } catch {}
+        }
+        return; // 服务端策略：安静地不再写；绝不能让它冒泡成未捕获异常
+      }
+      throw err; // 其它流错误保持可见（原行为）
+    });
+  }
+}

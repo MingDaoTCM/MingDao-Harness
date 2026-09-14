@@ -34,6 +34,7 @@ import { buildSystemPrompt } from '../prompts.js';
 import { loadProjectMemory, loadProjectMemoryEntries, retrieveRelevant, extractAndAppendProjectMemory } from '../memory.js';
 import { saveTaskStateMerge, clearTaskState, loadTaskState, resumePrompt, checkpointHint } from '../task-state.js';
 import { createWebIO } from './web-io.js';
+import { installPipeGuards } from '../proc.js';
 import { startMcpServers } from '../mcp.js';
 import {
   createSession,
@@ -142,6 +143,9 @@ function readBody(req, limit = 40 * 1024 * 1024) {
 
 /** @param {{ host?: string, port?: number, authToken?: string|null, onBusy?: (busy: boolean) => void, [key: string]: any }} [opts] */
 export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken, onBusy } = {}) {
+  // v0.6.2：常驻服务**不能**因日志管道断开而自杀——重新安装为「静默吞掉 EPIPE」策略。
+  // CLI 入口默认是 exitOnEpipe:true（那里对方关了管道就该停），走到服务模式必须改回来。
+  installPipeGuards({ exitOnEpipe: false });
   const home = ensureHome();
   const cfg = loadConfig();
   if (!cfg) {
