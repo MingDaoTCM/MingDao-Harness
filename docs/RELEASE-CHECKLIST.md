@@ -163,7 +163,8 @@ MINGDAO_HOME=~/.mingdao node src/cli.js web 3820     # 或后台托管：见下
 mingdao --version
 mingdao ledger list                 # 每跑完一次对话就应出现一条账本
 mingdao ledger show                 # 人读明细：run.start/model.round/tool.call/…/run.end
-mingdao ledger verify               # 哈希链校验（试着改一行账本，应报「前序哈希不匹配」）
+mingdao ledger verify               # 完整性校验（改一行 → 报「前序哈希不匹配」；删尾部若干行 → 报「账本被截断」）
+                                    # v0.6.2 行为变更：无封条时退 1 并报「完整性无法确认」，不再显示 ✅
 mingdao ledger export --format md --out /tmp/led.md   # 导出物应搜不到密钥/私网 IP/家目录
 mingdao ledger replay               # 按当前规则重判历史调用（输出四类差异）
 mingdao net policy                  # 未配置时应显示「闸门未安装」——零影响

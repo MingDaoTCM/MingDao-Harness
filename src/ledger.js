@@ -11,10 +11,14 @@
 //   ② **摘要替代原文**：`*Digest` = sha256(原文) 前 16 位，用于「证明两次执行的这一步完全相同」
 //      与校验账本未被篡改，而不泄露原文。
 //   ③ **约束事件不回显命中短语**：否则账本自身变成泄露渠道（沿用 v0.4.7 blockedOutputText 的做法）。
+//   ④ **降级必须可见**（v0.6.2，第三方报告 B-WS-1/2 + A-LG-1）：账本写失败不再静默 no-op，
+//      而是记下原因并由调用方提示用户；run.end 额外写一份**封条**侧车文件，
+//      使「删掉尾部若干行（含 run.end）」这种**链内自洽的截断**第一次变得可检出。
 
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { atomicWriteFileSync } from './atomic-write.js';
 import { mingdaoHome, ensureHome } from './config.js';
 import { redactSecrets, redactSensitive } from './redact.js';
 
@@ -69,6 +73,26 @@ function runFile(/** @type {any} */ runId) {
   return path.join(ledgerDir(), String(runId) + '.jsonl');
 }
 
+/** 封条侧车文件：与账本同目录、同名不同后缀（轮转时随之删除） */
+export function sealFile(/** @type {any} */ runId) {
+  return path.join(ledgerDir(), String(runId) + '.seal.json');
+}
+
+/**
+ * 读封条。返回 null = 没有封条（或读不出/格式不对）——**不要**把「读失败」当成「没被截断」，
+ * 调用方据此只能得出「无法判断」，这正是 verifyRun 的 warning 所要表达的。
+ * @param {any} runId
+ */
+export function readSeal(/** @type {any} */ runId) {
+  if (!isValidRunId(runId)) return null;
+  try {
+    const s = JSON.parse(fs.readFileSync(sealFile(runId), 'utf8'));
+    return s && typeof s === 'object' && typeof s.head === 'string' ? s : null;
+  } catch {
+    return null;
+  }
+}
+
 /** 合法的 run id（防路径穿越：id 直接拼进文件路径） */
 export function isValidRunId(/** @type {any} */ id) {
   return typeof id === 'string' && /^[a-z0-9]+-[a-f0-9]{6}$/.test(id);
@@ -84,6 +108,11 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
   let seq = 0;
   let prev = GENESIS;
   let alive = Boolean(enabled) && isValidRunId(runId);
+  // v0.6.2（B-WS-1/2）：降级不再是无声的。此前 catch 只把 alive 置 false——
+  // 用户拿到一段「正常」的总结，却不知道这次运行**没有任何账本**，
+  // 而本文件开头就写着「被静默截断的合规账本比不记账更糟」。失败要留痕、要能说出口。
+  let failure = /** @type {string|null} */ (null);
+  let failures = 0;
 
   /** 事件落盘：一行一个 JSON，返回该行内容（供测试/调试） */
   function write(/** @type {string} */ type, /** @type {any} */ payload) {
@@ -101,8 +130,28 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
       prev = digestOf(line);
       seq += 1;
       return line;
-    } catch {
+    } catch (err) {
       alive = false; // 写失败即整体停用，避免每步都抛一次
+      failures += 1;
+      failure = String(/** @type {any} */ (err)?.message ?? err);
+      return null;
+    }
+  }
+
+  /**
+   * 写封条：把「这一份账本应该有多少条事件、链头是什么」记在账本**之外**。
+   * 为什么必须另存：删掉尾部若干行（含 run.end）后，链内每一行的 prev 依然自洽，
+   * 单看文件查不出被截断——实测「只留前 3 行」原实现照样报 ok:true（A-LG-1 的真实盲区）。
+   * 诚实边界：封条与账本同目录、同权限，能防**误删/漏写/随手改**，防不住同时改写两者的对手。
+   */
+  function seal(/** @type {string} */ lastLine) {
+    try {
+      const rec = { v: LEDGER_VERSION, runId, total: seq, head: digestOf(lastLine), at: now() };
+      atomicWriteFileSync(sealFile(runId), JSON.stringify(rec, null, 2) + '\n', { mode: 0o600 });
+      return rec;
+    } catch (err) {
+      failures += 1;
+      failure = String(/** @type {any} */ (err)?.message ?? err);
       return null;
     }
   }
@@ -114,6 +163,18 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
     },
     get seq() {
       return seq;
+    },
+    /** 本回合是否发生过记账降级（写账本或写封条失败） */
+    get degraded() {
+      return failures > 0;
+    },
+    /** 降级发生了几次 */
+    get failures() {
+      return failures;
+    },
+    /** 最近一次失败原因（无则 null）——给用户看到具体是什么坏了，而不是「记账失败」四个字 */
+    get lastError() {
+      return failure;
     },
     /** 回合开始：模型/权限/预设/Pack 等「当时的规则环境」——复检时要靠它对齐上下文 */
     runStart(/** @type {any} */ f = {}) {
@@ -204,7 +265,7 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
       });
     },
     runEnd(/** @type {any} */ f = {}) {
-      return write('run.end', {
+      const line = write('run.end', {
         ms: f.ms ?? null,
         status: f.status ?? null,
         steps: f.steps ?? null,
@@ -215,6 +276,9 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
         truncated: f.truncated === true,
         aborted: f.aborted === true,
       });
+      // 只有 run.end **真的落盘了**才封条：局部失败时封一条残缺账本会让校验谎报完整
+      if (line) seal(line);
+      return line;
     },
   };
 }
@@ -244,8 +308,12 @@ export function readRun(/** @type {any} */ runId) {
 }
 
 /**
- * 校验哈希链：能发现「改了一行」与「删了一行」（两者都会让 prev 对不上）。
- * 诚实边界：**不含可信时间戳**，只能证明「自写入后未被改动」，不能证明生成时刻。
+ * 校验账本。两层：
+ *   ① **链内一致性**：能发现「改了一行」与「删了一行」（两者都会让 prev 对不上）。
+ *   ② **封条比对**（v0.6.2）：能发现「删掉尾部若干行（含 run.end）」——这一形状链内**完全自洽**，
+ *      只靠 ① 永远查不出（A-LG-1）。没有封条时不得谎报「完整」，只能报 `sealed:false` + warning。
+ * 诚实边界：**不含可信时间戳**，只能证明「自写入后未被改动」，不能证明生成时刻；
+ * 封条与账本同权限同目录，防误删/漏写，不防同时改写两者的对手。
  * @param {any} runId
  */
 export function verifyRun(/** @type {any} */ runId) {
@@ -256,22 +324,44 @@ export function verifyRun(/** @type {any} */ runId) {
       return null;
     }
   })();
-  if (raw === null) return { ok: false, error: '账本不存在', badSeq: null, total: 0 };
+  if (raw === null) return { ok: false, error: '账本不存在', badSeq: null, total: 0, sealed: false, warning: null };
   const lines = raw.split('\n').filter(Boolean);
   let prev = GENESIS;
+  let sawEnd = false;
   for (let i = 0; i < lines.length; i++) {
     let ev;
     try {
       ev = JSON.parse(lines[i]);
     } catch {
-      return { ok: false, error: `第 ${i + 1} 行不是合法 JSON`, badSeq: i + 1, total: lines.length };
+      return { ok: false, error: `第 ${i + 1} 行不是合法 JSON`, badSeq: i + 1, total: lines.length, sealed: false, warning: null };
     }
     if (ev.prev !== prev) {
-      return { ok: false, error: `第 ${i + 1} 行的前序哈希不匹配（该行或其上一行被改动/删除）`, badSeq: ev.seq ?? i + 1, total: lines.length };
+      return { ok: false, error: `第 ${i + 1} 行的前序哈希不匹配（该行或其上一行被改动/删除）`, badSeq: ev.seq ?? i + 1, total: lines.length, sealed: false, warning: null };
     }
+    if (ev.type === 'run.end') sawEnd = true;
     prev = digestOf(lines[i]);
   }
-  return { ok: true, error: null, badSeq: null, total: lines.length };
+  // ② 封条比对：链内自洽之后，回答「尾部有没有被切掉」
+  const seal = readSeal(runId);
+  if (seal) {
+    const total = Number(seal.total) || 0;
+    if (lines.length < total) {
+      return { ok: false, error: `账本被截断：封条记录应有 ${total} 条事件，实际只有 ${lines.length} 条（尾部 ${total - lines.length} 条被删除）`, badSeq: lines.length + 1, total: lines.length, sealed: true, warning: null };
+    }
+    if (lines.length > total) {
+      return { ok: false, error: `封条之后被追加了 ${lines.length - total} 条事件（封条 total=${total}，实际 ${lines.length}）`, badSeq: total + 1, total: lines.length, sealed: true, warning: null };
+    }
+    const head = lines.length ? digestOf(lines[lines.length - 1]) : GENESIS;
+    if (head !== seal.head) {
+      return { ok: false, error: '末条事件与封条记录的链头不一致（尾部被改写）', badSeq: lines.length, total: lines.length, sealed: true, warning: null };
+    }
+    return { ok: true, error: null, badSeq: null, total: lines.length, sealed: true, warning: null };
+  }
+  // 无封条：链内是自洽的，但**尾部是否完整无从判断**——必须说出来，不能报「完整」
+  const warning = sawEnd
+    ? '该账本含 run.end 事件却没有封条文件——封条可能被删除，无法判断尾部是否被截断'
+    : '该账本尚未封条（回合未正常收尾），无法判断尾部是否被截断';
+  return { ok: true, error: null, badSeq: null, total: lines.length, sealed: false, warning };
 }
 
 /**
@@ -344,6 +434,8 @@ export function rotateLedger(/** @type {any} */ maxRuns = DEFAULT_MAX_RUNS) {
   for (const r of runs.slice(maxRuns)) {
     try {
       fs.rmSync(runFile(r.runId), { force: true });
+      // 封条必须随之删除，否则每次轮转都会留下永不回收的孤儿封条文件
+      fs.rmSync(sealFile(r.runId), { force: true });
       removed.push(r.runId);
     } catch {}
   }
@@ -385,7 +477,15 @@ export function exportRun(/** @type {any} */ runId, { format = 'json' } = {}) {
   lines.push(`- 开始：${start?.at ? new Date(start.at).toISOString() : '—'}`);
   lines.push(`- 结束：${end ? `${end.status}（${end.ms}ms，${end.steps} 步）` : '未结束'}`);
   lines.push(`- 费用：${end?.priced ? `¥${Number(end.yuanTotal ?? 0).toFixed(4)}` : '**无法估算**（模型无价，不是 0 元）'}`);
-  lines.push(`- 哈希链校验：${v.ok ? '✅ 完整' : `❌ ${v.error}`}`);
+  lines.push(
+    `- 完整性校验：${
+      v.ok
+        ? v.sealed
+          ? '✅ 链内一致 + 封条吻合（尾部截断可检出）'
+          : `⚠️ 链内一致，但${v.warning}`
+        : `❌ ${v.error}`
+    }`
+  );
   lines.push('');
   lines.push('| # | 时刻 | 事件 | 摘要 |');
   lines.push('| --- | --- | --- | --- |');
@@ -418,6 +518,6 @@ export function exportRun(/** @type {any} */ runId, { format = 'json' } = {}) {
   }
   lines.push('');
   lines.push('> 脱敏说明：明细在**写入时**已按密钥规则掩码，导出时再叠加私网 IP 与家目录路径掩码。');
-  lines.push('> 完整性说明：哈希链只能证明「自写入后未被改动」，**不含可信时间戳**，不等同于审计级不可否认。');
+  lines.push('> 完整性说明：哈希链 + 封条只能证明「自写入后未被改动、尾部未被截断」，**不含可信时间戳**，不等同于审计级不可否认；封条与账本同权限，防误删与漏写，不防同时改写两者的对手。');
   return { ok: true, text: lines.join('\n') + '\n' };
 }

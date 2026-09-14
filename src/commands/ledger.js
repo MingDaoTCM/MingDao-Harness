@@ -74,13 +74,17 @@ export async function handleLedger(cmd, args) {
 
   if (sub === 'verify') {
     const v = verifyRun(runId);
-    if (v.ok) {
-      io.print(`✅ ${runId} 哈希链完整（${v.total} 条事件未被改动）。`);
+    if (v.ok && v.sealed) {
+      io.print(`✅ ${runId} 校验通过：${v.total} 条事件链内一致，且与封条吻合（未被改动、尾部未被截断）。`);
+    } else if (v.ok) {
+      // 链内一致 ≠ 完整。原实现只报「哈希链完整」，把「尾部被删掉一截」说成了完整。
+      io.print(style(`⚠ ${runId} 链内一致（${v.total} 条事件），但完整性无法确认：${v.warning}。`, C.yellow));
+      process.exitCode = 1;
     } else {
       io.print(style(`❌ ${runId} 校验失败：${v.error}`, C.red));
       process.exitCode = 1;
     }
-    io.print(style('说明：哈希链只能证明「自写入后未被改动」，不含可信时间戳，不等同于审计级不可否认。', C.dim));
+    io.print(style('说明：哈希链 + 封条只能证明「自写入后未被改动、尾部未被截断」，不含可信时间戳，不等同于审计级不可否认。', C.dim));
     return true;
   }
 

@@ -1260,7 +1260,26 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             truncated: Boolean(finish === 'length'),
             aborted,
           });
-        } catch {}
+          // v0.6.2（B-WS-1/2）：记账降级必须让用户看见。
+          // 此前写账本失败只把 alive 置 false，用户拿到一段「正常」总结却不知道这次运行
+          // **没有任何账本**——而「被静默截断的合规账本比不记账更糟」正是账本自己的纪律。
+          // 仍然不抛异常（记账失败绝不能影响正常执行），但必须留下可见痕迹与补救方式。
+          if (turnLedger.degraded) {
+            io.print(
+              style(
+                `⚠ 本回合执行账本未能完整写入：${turnLedger.lastError ?? '未知原因'}（失败 ${turnLedger.failures} 次）。\n` +
+                  `  这意味着**这次运行在 ~/.mingdao/ledger 里可能不完整**，不能作为完整审计依据。\n` +
+                  `  常见原因：磁盘写满、目录权限、MINGDAO_HOME 指向不可写位置。可用 mingdao ledger list 核对。`,
+                C.yellow
+              )
+            );
+          }
+        } catch (err) {
+          // 收尾自身失败也不能静默：账本是合规物，用户在意的正是「有没有记全」
+          try {
+            io.print(style(`⚠ 执行账本收尾失败：${/** @type {any} */ (err)?.message ?? err}`, C.yellow));
+          } catch {}
+        }
         turnLedger = null;
       }
       offEgressSink();

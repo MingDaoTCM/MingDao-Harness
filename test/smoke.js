@@ -6302,6 +6302,172 @@ if (process.platform !== 'win32') {
   ok('v0.6.2 B-CON-1：约束 pattern 防灾难性回溯（装载即拒绝嵌套量词 + 具体原因 + 正常写法零误伤）');
 }
 
+
+// ---------- 99. v0.6.2：账本「降级可见 + 尾部截断可检出」（audit-report B-WS-1/2 + A-LG-1） ----------
+// 两个缺陷都属「看起来有账本、其实不算数」这一类，对合规物而言比直接报错严重：
+//   ① 写账本失败时旧实现只把 alive 置 false → 用户拿到正常总结，不知道这次运行**没有任何账本**；
+//   ② verifyRun 只校验链内 prev 自洽 → 「删掉尾部若干行（含 run.end）」完全查不出，
+//      实测「只留前 3 行」照样报 ok:true。尾部截断恰恰是最常见的篡改/丢数据形状（部分写入、误删）。
+{
+  const L99 = await import(pathToFileURL(path.join(srcDir, 'ledger.js')).href);
+  const home99 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ledger99-'));
+  const prevHome99 = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = home99;
+  try {
+    // ① 写失败必须留痕（degraded / failures / lastError），且不得影响执行（不抛）
+    const idA = L99.newRunId();
+    const LA = L99.createLedger(idA);
+    LA.runStart({ model: 'm' });
+    LA.modelRound({ round: 1 });
+    const fA = path.join(home99, 'ledger', idA + '.jsonl');
+    fs.rmSync(fA);
+    fs.mkdirSync(fA); // 用同名目录占位，后续 append 必然 EISDIR
+    let threw = false;
+    let retA = null;
+    try {
+      retA = LA.toolCall({ name: 'bash' });
+      LA.runEnd({ status: 'done' });
+    } catch {
+      threw = true;
+    }
+    assert.equal(threw, false, '记账失败绝不能影响正常执行（不抛异常）');
+    assert.equal(retA, null, '写失败应返回 null');
+    assert.equal(LA.degraded, true, '写账本失败后必须可被察觉（degraded=true）');
+    assert.ok(LA.failures >= 1, '失败次数必须被记下');
+    assert.ok(String(LA.lastError).length > 0, '必须留下具体失败原因，而不是只报「记账失败」四个字');
+    // 降级了就不许封条：否则校验会拿一份残缺账本谎报完整
+    assert.equal(fs.existsSync(path.join(home99, 'ledger', idA + '.seal.json')), false, 'run.end 未落盘时不得写封条');
+    fs.rmSync(fA, { recursive: true, force: true });
+
+    // ② 完整回合：链内一致 + 封条吻合
+    const idB = L99.newRunId();
+    const LB = L99.createLedger(idB);
+    LB.runStart({ model: 'm' });
+    for (let i = 1; i <= 6; i++) LB.modelRound({ round: i });
+    LB.runEnd({ status: 'done' });
+    assert.equal(LB.degraded, false, '正常写入不应标记降级');
+    const vB = L99.verifyRun(idB);
+    assert.equal(vB.ok, true, '完整账本应校验通过');
+    assert.equal(vB.sealed, true, '正常收尾的账本必须有封条（否则尾部截断无从检出）');
+    assert.equal(vB.warning, null, '有封条时不应有完整性警告');
+    assert.ok(fs.existsSync(path.join(home99, 'ledger', idB + '.seal.json')), '封条文件应真实落盘');
+
+    const fB = path.join(home99, 'ledger', idB + '.jsonl');
+    const full = fs.readFileSync(fB, 'utf8');
+    const lB = full.split('\n').filter(Boolean);
+    assert.equal(lB.length, 8, `应有 8 条事件，实际 ${lB.length}`);
+
+    // ②a 删掉尾部 3 行（含 run.end）——**链内完全自洽**，旧实现报 ok:true，这是本次修复的核心
+    fs.writeFileSync(fB, lB.slice(0, lB.length - 3).join('\n') + '\n');
+    const vTrunc = L99.verifyRun(idB);
+    assert.equal(vTrunc.ok, false, '删掉尾部若干行的账本必须校验失败（链内自洽不构成完整）');
+    assert.ok(String(vTrunc.error).includes('截断'), `失败原因应点明截断，实际：${vTrunc.error}`);
+
+    // ②b 极端形态：只留前 3 行（run.end/费用等全没了）
+    fs.writeFileSync(fB, lB.slice(0, 3).join('\n') + '\n');
+    assert.equal(L99.verifyRun(idB).ok, false, '只留前几行的账本同样必须校验失败');
+
+    // ②c 尾部**改写**（只改最后一行）：它没有后继行，链内查不出，只有封条链头能发现
+    fs.writeFileSync(fB, [...lB.slice(0, -1), lB[lB.length - 1].replace('"done"', '"ok"')].join('\n') + '\n');
+    const vTail = L99.verifyRun(idB);
+    assert.equal(vTail.ok, false, '尾部被改写必须校验失败（无后继行可比，只有封条能发现）');
+    assert.ok(String(vTail.error).includes('封条'), `失败原因应指向封条链头不一致，实际：${vTail.error}`);
+
+    // ②d 封条之后被追加内容
+    fs.writeFileSync(fB, full + '{"v":1,"runId":"' + idB + '","seq":99,"prev":"deadbeef","type":"forged"}\n');
+    assert.equal(L99.verifyRun(idB).ok, false, '封条之后追加事件必须校验失败');
+
+    // ③ 封条被删除：不许谎报「完整」，必须报「无法判断」并说明原因
+    fs.writeFileSync(fB, full);
+    const sealPathB = path.join(home99, 'ledger', idB + '.seal.json');
+    const sealRaw = fs.readFileSync(sealPathB, 'utf8');
+    fs.rmSync(sealPathB);
+    const vNoSeal = L99.verifyRun(idB);
+    assert.equal(vNoSeal.ok, true, '无封条时链内一致仍为 true（诚实边界：不能凭缺失断言被篡改）');
+    assert.equal(vNoSeal.sealed, false, '无封条必须显式 sealed=false');
+    assert.ok(String(vNoSeal.warning).includes('封条'), `必须给出「封条可能被删除」的警告，实际：${vNoSeal.warning}`);
+    // 导出物（人读报告）也必须把这件事说出来，而不是只写「完整」
+    const mdNoSeal = L99.exportRun(idB, { format: 'md' }).text;
+    assert.ok(/⚠️ 链内一致/.test(mdNoSeal), '未封条的账本导出时必须显式警告，不得显示为完整');
+    assert.ok(!/✅ 链内一致/.test(mdNoSeal), '未封条的账本导出时不得打 ✅');
+    fs.writeFileSync(sealPathB, sealRaw);
+    const mdSealed = L99.exportRun(idB, { format: 'md' }).text;
+    assert.ok(/✅ 链内一致 \+ 封条吻合/.test(mdSealed), '有封条且一致时应明确写出「尾部截断可检出」');
+
+    // ④ 轮转必须连封条一起删，否则每次轮转都留下永不回收的孤儿封条
+    const homeRot99 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ledger99rot-'));
+    process.env.MINGDAO_HOME = homeRot99;
+    for (let i = 0; i < 6; i++) {
+      const LR = L99.createLedger(L99.newRunId());
+      LR.runStart({ model: 'm' });
+      LR.runEnd({ status: 'done' });
+      await new Promise((r) => setTimeout(r, 3));
+    }
+    const sealCountBefore = fs.readdirSync(path.join(homeRot99, 'ledger')).filter((f) => f.endsWith('.seal.json')).length;
+    assert.equal(sealCountBefore, 6, `轮转前应有 6 份封条，实际 ${sealCountBefore}`);
+    L99.rotateLedger(2);
+    const left = fs.readdirSync(path.join(homeRot99, 'ledger'));
+    assert.equal(left.filter((f) => f.endsWith('.jsonl')).length, 2, '轮转后应剩 2 份账本');
+    assert.equal(left.filter((f) => f.endsWith('.seal.json')).length, 2, '轮转必须连封条一起删（否则孤儿封条永不回收）');
+    process.env.MINGDAO_HOME = home99;
+    safeRmSync(homeRot99, { recursive: true, force: true });
+  } finally {
+    process.env.MINGDAO_HOME = prevHome99;
+    safeRmSync(home99, { recursive: true, force: true });
+  }
+  ok('v0.6.2 账本：写失败留痕可见 + 封条使尾部截断可检出（B-WS-1/2 / A-LG-1）');
+
+  // ⑤ CLI 面：mingdao ledger verify 必须把「链内一致但完整性未知」判为**失败**（退出码 1）。
+  // 只改库而不改命令输出，用户看到的仍然是「✅ 哈希链完整」——修复就白做了。
+  {
+    const home99b = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ledger99cli-'));
+    const prevHome99b = process.env.MINGDAO_HOME;
+    process.env.MINGDAO_HOME = home99b;
+    try {
+      const Lc = await import(pathToFileURL(path.join(srcDir, 'ledger.js')).href);
+      const cli99 = path.join(srcDir, 'cli.js');
+      const idC = Lc.newRunId();
+      const LC = Lc.createLedger(idC);
+      LC.runStart({ model: 'm' });
+      LC.runEnd({ status: 'done' });
+      const rOk = spawnSync(process.execPath, [cli99, 'ledger', 'verify', idC], { encoding: 'utf8', env: { ...process.env, MINGDAO_HOME: home99b } });
+      assert.equal(rOk.status, 0, `有封条时应校验通过，实际 status=${rOk.status} ${rOk.stderr}`);
+      assert.ok(rOk.stdout.includes('校验通过'), `有封条时输出应明确「校验通过」，实际：${rOk.stdout}`);
+      // 删封条 → CLI 必须退 1 并说「无法确认」，不得继续显示 ✅
+      fs.rmSync(path.join(home99b, 'ledger', idC + '.seal.json'));
+      const rNo = spawnSync(process.execPath, [cli99, 'ledger', 'verify', idC], { encoding: 'utf8', env: { ...process.env, MINGDAO_HOME: home99b } });
+      assert.equal(rNo.status, 1, `链内一致但无封条时必须以退出码 1 表示「完整性未知」，实际 status=${rNo.status}`);
+      assert.ok(rNo.stdout.includes('无法确认'), `应明确写出完整性无法确认，实际：${rNo.stdout}`);
+      assert.ok(!rNo.stdout.includes('✅'), '完整性未知时不得输出 ✅');
+      // 尾部截断 → CLI 退 1 且原因点明截断
+      const LC2 = Lc.createLedger(Lc.newRunId());
+      LC2.runStart({ model: 'm' });
+      LC2.modelRound({ round: 1 });
+      LC2.runEnd({ status: 'done' });
+      const fC2 = path.join(home99b, 'ledger', LC2.runId + '.jsonl');
+      const lC2 = fs.readFileSync(fC2, 'utf8').split('\n').filter(Boolean);
+      fs.writeFileSync(fC2, lC2.slice(0, 2).join('\n') + '\n');
+      const rTr = spawnSync(process.execPath, [cli99, 'ledger', 'verify', LC2.runId], { encoding: 'utf8', env: { ...process.env, MINGDAO_HOME: home99b } });
+      assert.equal(rTr.status, 1, '被截断的账本 CLI 必须退 1');
+      assert.ok(rTr.stdout.includes('截断'), `CLI 应点明截断，实际：${rTr.stdout}`);
+    } finally {
+      process.env.MINGDAO_HOME = prevHome99b;
+      safeRmSync(home99b, { recursive: true, force: true });
+    }
+  }
+
+  // ⑥ 结构守卫：降级信号必须有**消费方**，否则 ① 的修复就是没人读的死代码。
+  // 要求检查点在 runEnd 之后——失败只有在写完之后才知道，放在前面必然读不到。
+  {
+    const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+    assert.ok(agentSrc.includes('turnLedger.degraded'), 'agent.js 必须消费账本降级信号（否则写失败仍然无人知晓）');
+    const iCheck = agentSrc.indexOf('turnLedger.degraded');
+    const iRunEnd = agentSrc.indexOf('turnLedger.runEnd(');
+    assert.ok(iRunEnd > -1 && iCheck > iRunEnd, '降级检查必须在 runEnd 之后（写之前不可能知道失败）');
+    assert.ok(agentSrc.includes('lastError'), '提示里必须带出具体失败原因，而不是「记账失败」四个字');
+  }
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });
