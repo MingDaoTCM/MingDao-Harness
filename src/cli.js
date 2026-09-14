@@ -38,7 +38,7 @@ import {
   postRunStatus,
 } from './schedule.js';
 import { createAgent } from './agent.js';
-import { saveTaskStateMerge, clearTaskState } from './task-state.js';
+import { saveTaskStateMerge, clearTaskState, checkpointHint } from './task-state.js';
 import { createPermission } from './permissions.js';
 import { buildSystemPrompt } from './prompts.js';
 import { listSkills, tamperedSkillNames } from './skills.js';
@@ -534,16 +534,20 @@ async function main() {
         } catch {}
       }
       // v0.3.0 P0-2：单次提问跑满步数/中断落检查点（--continue 可续跑），正常完成清除
+      // v0.6.2：检查点写入结果必须被检查——上面 banner 已经承诺「发送『继续』即可」，
+      // 写失败却不出声，就等于给了一个兑现不了的承诺。
       if (res.capHit || res.aborted) {
-        saveTaskStateMerge(path.basename(session.file), {
+        const hint = checkpointHint(saveTaskStateMerge(path.basename(session.file), {
           goal: question,
           progress: res.text || '',
           artifacts: res.perf?.deliverables || [],
           status: res.capHit ? 'cap' : 'interrupted',
           updatedAt: new Date().toISOString(),
-        });
+        }), 'save');
+        if (hint) io.print(style(hint, C.yellow));
       } else {
-        clearTaskState(path.basename(session.file));
+        const hint = checkpointHint(clearTaskState(path.basename(session.file)), 'clear');
+        if (hint) io.print(style(hint, C.yellow));
       }
       try {
         await finalizeSession({ cfg, provider, model: titleModel(cfg, modelName), home, workingDir, messages, turns: 1, lastText: res.text || '' });

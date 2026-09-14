@@ -6468,6 +6468,97 @@ if (process.platform !== 'win32') {
   }
 }
 
+
+// ---------- 100. v0.6.2：任务检查点写失败必须可见（audit-report B-WS-1/2 的第二处） ----------
+// 缺陷形态是「承诺兑现不了」：跑满步数时 agent 打印「继续方式：直接发送『继续』即可」，
+// 而写检查点的是调用方、写在 banner **之后**。旧实现写失败只 catch {}，于是：
+// 用户按提示说「继续」→ 续跑提示永远不出现 → 模型拿不到 goal/进度/交付物清单，只能从头猜。
+{
+  const TS = await import(pathToFileURL(path.join(srcDir, 'task-state.js')).href);
+  const home100 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ts100-'));
+  const prevHome100 = process.env.MINGDAO_HOME;
+  try {
+    // ① 正常路径：写入/清除都返回 ok，且不误报
+    process.env.MINGDAO_HOME = home100;
+    assert.deepEqual(TS.saveTaskState('s.jsonl', { goal: 'g', status: 'cap' }), { ok: true, error: null }, '正常写入应返回 ok');
+    assert.equal(TS.loadTaskState('s.jsonl')?.goal, 'g', '写进去要读得回来');
+    // clearTaskState 对「本来就没有检查点」必须视为成功——ENOENT 是常态，不能借机报警
+    assert.deepEqual(TS.clearTaskState('never-existed.jsonl'), { ok: true, error: null }, 'ENOENT 必须算成功（否则每次正常完成都刷告警）');
+    assert.deepEqual(TS.clearTaskState('s.jsonl'), { ok: true, error: null }, '正常清除应返回 ok');
+    assert.equal(TS.loadTaskState('s.jsonl'), null, '清除后不应再读到检查点');
+    assert.equal(TS.checkpointHint({ ok: true, error: null }, 'save'), null, '成功时不得产生提示');
+    assert.equal(TS.checkpointHint(null, 'save'), null, '没有结果时不得产生提示');
+
+    // ② 失败路径：MINGDAO_HOME 指向一个**文件** → mkdir 必然 ENOTDIR
+    const badHome = path.join(home100, 'not-a-dir');
+    fs.writeFileSync(badHome, 'x');
+    process.env.MINGDAO_HOME = badHome;
+    const rSave = TS.saveTaskState('s.jsonl', { goal: 'g' });
+    assert.equal(rSave.ok, false, '写不进去必须返回 ok:false（旧实现是静默无返回）');
+    assert.ok(String(rSave.error).length > 0, '必须带出具体原因');
+    const hintSave = TS.checkpointHint(rSave, 'save');
+    assert.ok(hintSave && hintSave.includes('不会'), `写失败提示必须点明「下次继续不会带上断点摘要」，实际：${hintSave}`);
+    assert.ok(hintSave.includes('进度与已交付文件'), '提示必须告诉用户补救方式（把进度写进下一条消息）');
+    const rClear = TS.clearTaskState('s.jsonl');
+    assert.equal(rClear.ok, false, '清除失败（非 ENOENT）必须返回 ok:false');
+    const hintClear = TS.checkpointHint(rClear, 'clear');
+    assert.ok(hintClear && hintClear.includes('续跑'), `清除失败提示必须点明「会被误判为未完成、下次会提示续跑」，实际：${hintClear}`);
+    // merge 版本必须把结果透出来（否则调用点永远是 undefined.ok）
+    const rMerge = TS.saveTaskStateMerge('s.jsonl', { goal: 'g', status: 'cap' });
+    assert.equal(rMerge.ok, false, 'saveTaskStateMerge 必须把底层结果透出来');
+
+    // ③ 结构守卫：**每一个**调用点都必须消费结果。
+    // 只修 ledger、或只修 cli 而漏掉 web/repl，正是这类缺陷最常见的复发方式，
+    // 因此这里既查「逐个都被 checkpointHint 包裹」，也查「调用点总数」，新加的裸调用会被立刻发现。
+    {
+      const files = [];
+      const walk = (/** @type {string} */ d) => {
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+          const fp = path.join(d, e.name);
+          if (e.isDirectory()) walk(fp);
+          else if (e.name.endsWith('.js')) files.push(fp);
+        }
+      };
+      walk(srcDir);
+      let callSites = 0;
+      const unwrapped = [];
+      for (const fp of files) {
+        if (path.basename(fp) === 'task-state.js') continue; // 定义处不算调用点
+        // 先剥注释再扫：注释里正当地提到这些名字（解释"为什么必须包"）不该被算作调用点
+        const src = fs
+          .readFileSync(fp, 'utf8')
+          .replace(/\/\*[\s\S]*?\*\//g, '')
+          .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+        const re = /(saveTaskStateMerge|clearTaskState)\(/g;
+        let m;
+        while ((m = re.exec(src))) {
+          const before = src.slice(Math.max(0, m.index - 80), m.index);
+          if (before.includes('export function')) continue; // 定义（理论上不会出现，防御性）
+          callSites += 1;
+          if (!before.includes('checkpointHint(')) unwrapped.push(`${path.relative(srcDir, fp)}: ${m[1]}( 未被 checkpointHint 包裹`);
+        }
+      }
+      assert.equal(unwrapped.length, 0, `所有检查点调用点都必须消费写入结果：\n${unwrapped.join('\n')}`);
+      assert.equal(callSites, 6, `检查点调用点应为 6 处（cli/web/repl 各 save+clear），实际 ${callSites}——新增调用点必须一并包上 checkpointHint`);
+    }
+
+    // ④ 结构守卫：agent.js 的续跑 banner 不得对**尚未发生**的写入做断言
+    {
+      // 同样先剥注释：这次修复的注释里正好写着"不能再写「已保存检查点」"，不剥就会自己绊自己
+      const agentSrc = fs
+        .readFileSync(path.join(srcDir, 'agent.js'), 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      assert.ok(!agentSrc.includes('已保存检查点'), 'banner 不得写「已保存检查点」——此刻检查点还没写（由调用方在 runTurn 返回后落盘）');
+      assert.ok(agentSrc.includes('检查点会在本回合收尾时保存'), '应改为说明「收尾时保存、失败会另行提示」');
+    }
+  } finally {
+    process.env.MINGDAO_HOME = prevHome100;
+    safeRmSync(home100, { recursive: true, force: true });
+  }
+  ok('v0.6.2 任务检查点：写失败可见 + 三个调用点全部消费结果 + banner 不再断言未发生的事（B-WS-1/2）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

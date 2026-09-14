@@ -32,7 +32,7 @@ import { createPermission } from '../permissions.js';
 import { isPrivateHost as sharedIsPrivateHost } from '../tools/fetch.js';
 import { buildSystemPrompt } from '../prompts.js';
 import { loadProjectMemory, loadProjectMemoryEntries, retrieveRelevant, extractAndAppendProjectMemory } from '../memory.js';
-import { saveTaskStateMerge, clearTaskState, loadTaskState, resumePrompt } from '../task-state.js';
+import { saveTaskStateMerge, clearTaskState, loadTaskState, resumePrompt, checkpointHint } from '../task-state.js';
 import { createWebIO } from './web-io.js';
 import { startMcpServers } from '../mcp.js';
 import {
@@ -674,16 +674,20 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       }
       // v0.3.0 P0-2：任务检查点——跑满步数(capHit)或中断(aborted)时落盘供续跑，正常完成清除
       const finalSessionName = path.basename(session.file);
+      // v0.6.2：检查点写入结果必须被检查。WebUI 用 warn 横幅（io.print 走同一通道，
+      // 但这里显式带 warn 让前端按告警样式呈现）
       if (r.capHit || r.aborted) {
-        saveTaskStateMerge(finalSessionName, {
+        const hint = checkpointHint(saveTaskStateMerge(finalSessionName, {
           goal: built.persistText,
           progress: r.text || '',
           artifacts: io.stats().deliverables,
           status: r.capHit ? 'cap' : 'interrupted',
           updatedAt: new Date().toISOString(),
-        });
+        }), 'save');
+        if (hint) send({ type: 'banner', text: hint, warn: true });
       } else {
-        clearTaskState(finalSessionName);
+        const hint = checkpointHint(clearTaskState(finalSessionName), 'clear');
+        if (hint) send({ type: 'banner', text: hint, warn: true });
       }
       entry.status = r.aborted ? 'aborted' : 'done';
       notifyBusy();

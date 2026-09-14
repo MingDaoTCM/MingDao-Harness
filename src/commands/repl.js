@@ -56,7 +56,7 @@ import {
   relativeTime,
   searchSessions,
 } from '../session.js';
-import { loadTaskState, saveTaskStateMerge, clearTaskState, resumePrompt } from '../task-state.js';
+import { loadTaskState, saveTaskStateMerge, clearTaskState, resumePrompt, checkpointHint } from '../task-state.js';
 
 const pkg = JSON.parse(fs.readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
 
@@ -696,16 +696,19 @@ export async function runRepl(ctx) {
         }
       }
       // v0.3.0 P0-2：跑满步数(capHit)或中断(aborted)落检查点，正常完成清除
+      // v0.6.2：检查点写入结果必须被检查（同上 banner 的承诺问题）
       if (res.capHit || res.aborted) {
-        saveTaskStateMerge(path.basename(session.file), {
+        const hint = checkpointHint(saveTaskStateMerge(path.basename(session.file), {
           goal: input,
           progress: res.text || '',
           artifacts: res.perf?.deliverables || [],
           status: res.capHit ? 'cap' : 'interrupted',
           updatedAt: new Date().toISOString(),
-        });
+        }), 'save');
+        if (hint) io.print(style(hint, C.yellow));
       } else {
-        clearTaskState(path.basename(session.file));
+        const hint = checkpointHint(clearTaskState(path.basename(session.file)), 'clear');
+        if (hint) io.print(style(hint, C.yellow));
       }
       if (res.aborted) {
         io.print(style('（已中断）', C.dim));

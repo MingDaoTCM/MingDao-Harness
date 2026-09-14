@@ -1151,7 +1151,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     try {
       io.print(style(
         `⚠ 步数预算已用尽（${maxRounds} 轮 × ${stepLimit} 步，本轮实际执行 ${steps} 步），任务可能尚未完成。\n` +
-        `  已保存检查点，继续方式：\n` +
+        // v0.6.2：这里**不能**再写「已保存检查点」——检查点由调用方在 runTurn 返回**之后**
+        // 才写（cli/web/repl 各自落盘），此刻一个字都还没写；写失败时的提示也在那边。
+        // 一个未经核实的断言会让用户以为断点已经安全，这正是 B-WS-1/2 那类「看起来有、其实没有」。
+        `  检查点会在本回合收尾时保存（保存失败会另行提示），继续方式：\n` +
         `   · REPL / WebUI / 桌面版：直接发送「继续」即可（会自动注入断点续跑提示）\n` +
         `   · 命令行：加 --continue（如 mingdao -c "接着往下做"）\n` +
         `   · 想让单次跑得更久：调高 config.maxRounds（当前 ${maxRounds}，每轮 ${stepLimit} 步），或改用更大预算的预设`,
