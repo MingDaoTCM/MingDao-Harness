@@ -326,7 +326,20 @@ export function stopDaemon(/** @type {any} */ home) {
   } catch {}
   return true;
 }
+// pidfile 写失败的原因（供诊断与测试）：非 null 即说明曾经发生过「拉起又被撤回」。
+// 声明放在 spawnDaemon **之前**：v0.4.1 修过一次同类 TDZ（模块级 let 后置声明，
+// 循环依赖场景下使用点先执行 → ReferenceError），不要重蹈。
+let pidfileWarned = false;
+let pidfileError = /** @type {string|null} */ (null);
+/** 守护进程 pidfile 最近一次写失败原因（无则 null）。 */
+export function daemonPidfileError() {
+  return pidfileError;
+}
+
 export function spawnDaemon(/** @type {any} */ home) {
+  // 返回值语义收紧（v0.6.2）：只有「本次调用后确实存在可用 daemon」才为 true。
+  // pidfile 写失败时 daemon 已被撤回 → 必须如实返回 false，不能沿用旧版「调用即 true」。
+  let spawned = true;
   // v0.4.7（P2 T15）：必须在**跨进程锁内**完成「查活 → spawn → 写 pidfile」这一步。
   // 此前是「先 daemonAlive 判断、再 spawn、最后写 pidfile」，两个并发调用方都会看到「没有 daemon」
   // 而各自 spawn 一个：pidfile 被后者覆盖，前者成为无主的第二个 daemon，两者同时监督同一批任务
@@ -343,15 +356,34 @@ export function spawnDaemon(/** @type {any} */ home) {
       ...spawnOpts({ detached: true }),
     });
     child.on('error', () => {}); // 质检 M12：error 事件必须有监听（ENOENT 等）
+    // v0.6.2（B-WS-1/2 第六处）：pidfile 写失败**必须**把刚拉起的 daemon 收回去。
+    // 危害不是「少一个文件」：上面那段锁注释要防的正是「无主的第二个 daemon 同时监督同一批任务」，
+    // 而 pidfile 写失败会让 daemonAlive() 永远为 false → 之后每次调用都再拉起一个，
+    // 同一个定时任务被并发执行两次、三次……**静默吞掉这一处等于把那个 P0 重新引进门**。
     try {
       // 原子写（审计 workbuddy P3-4）：tmp+rename 与 writeSchedule 同款——崩溃不留半截 pid 文件
       const target = daemonPidFile(home);
       atomicWriteFileSync(target, `${child.pid} ${nonce}`);
-    } catch {}
+    } catch (err) {
+      pidfileError = String(/** @type {any} */ (err)?.message ?? err);
+      try {
+        child.kill('SIGKILL');
+      } catch {}
+      if (!pidfileWarned) {
+        pidfileWarned = true;
+        console.warn(
+          `[MingDao] ⚠ 守护进程 pidfile 写入失败：${pidfileError}\n` +
+            `  已撤回本次拉起的守护进程（否则会留下无人跟踪的第二个 daemon，同一批定时任务被重复执行）。\n` +
+            `  请检查 ${daemonPidFile(home)} 的磁盘空间与权限；本次 spawnDaemon 返回 false。`
+        );
+      }
+      spawned = false;
+    }
     child.unref();
   });
-  return true;
+  return spawned;
 }
+
 
 // 重启自愈：有非终态任务且 daemon 不在 → 拉起单守护（失败才回退旧式逐任务 sleeper）
 export function reconcileSchedules(/** @type {any} */ home) {

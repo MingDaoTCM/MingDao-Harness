@@ -114,7 +114,9 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     }
     if (body.action === 'remove') {
       if (!name) return json(res, 400, { error: '缺少名称' });
-      return json(res, 200, { ok: removeWorkspace(name) });
+      const rm = removeWorkspace(name);
+      if (rm && /** @type {any} */ (rm).error) return json(res, 500, { error: /** @type {any} */ (rm).error });
+      return json(res, 200, { ok: rm === true });
     }
     return json(res, 400, { error: '未知操作：add|rename|set|remove' });
   }

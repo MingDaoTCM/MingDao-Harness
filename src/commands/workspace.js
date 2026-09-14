@@ -27,7 +27,14 @@ export async function handleWorkspace(/** @type {any} */ cmd, /** @type {any} */
       process.exitCode = 1;
       return true;
     }
-    console.log(removeWorkspace(name) ? `✓ 已移除 ${name}` : '未找到该工作空间');
+    // v0.6.2：removeWorkspace 现在可能返回 {error}（注册表写失败）。
+    // 只判真值会把对象当成成功，把「写失败」说成「✓ 已移除」——那正是本批要消灭的假成功。
+    const rm = removeWorkspace(name);
+    if (rm === true) console.log(`✓ 已移除 ${name}`);
+    else if (rm && /** @type {any} */ (rm).error) {
+      console.log('[错误] ' + /** @type {any} */ (rm).error);
+      process.exitCode = 1;
+    } else console.log('未找到该工作空间');
     return true;
   }
   if (sub === 'path') {

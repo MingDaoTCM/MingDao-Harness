@@ -297,6 +297,14 @@ export function appendProjectMemory(/** @type {any} */ workingDir, /** @type {an
   }
 }
 
+// 去重写回的失败痕迹。声明放在 dedupeProjectMemory **之前**（同 v0.4.1 TDZ 教训）
+let dedupeWarned = false;
+let dedupeWriteError = /** @type {string|null} */ (null);
+/** 项目记忆去重写回最近一次失败原因（无则 null）。 */
+export function dedupeWriteFailure() {
+  return dedupeWriteError;
+}
+
 export function dedupeProjectMemory(/** @type {any} */ workingDir) {
   const raw = loadProjectMemory(workingDir);
   if (!raw.trim()) return 0;
@@ -312,10 +320,23 @@ export function dedupeProjectMemory(/** @type {any} */ workingDir) {
     kept.push(t);
   }
   if (removed > 0) {
-    try { atomicWriteFileSync(projectMemoryFile(workingDir), kept.join('\n') + '\n'); } catch {}
+    try {
+      atomicWriteFileSync(projectMemoryFile(workingDir), kept.join('\n') + '\n');
+    } catch (err) {
+      // v0.6.2（B-WS-1/2 第七处）：算出了重复条数但**写不回去**，就不能报告「已去重 N 条」——
+      // 文件里那些重复行一条都没少。返回 0 是唯一诚实的答案（WebUI/CLI 都按这个数报给用户）。
+      const msg = String(/** @type {any} */ (err)?.message ?? err);
+      dedupeWriteError = msg;
+      if (!dedupeWarned) {
+        dedupeWarned = true;
+        console.warn(`[MingDao] ⚠ 项目记忆去重写回失败：${msg}\n  重复条目仍在文件中（本次按「未去重」如实上报）。`);
+      }
+      return 0;
+    }
   }
   return removed;
 }
+
 
 // 项目记忆提取：关键决定及其原因、文件/目录结构、依赖与约定、踩过的坑与教训、未完成事项
 export async function extractProjectMemory(/** @type {any} */ provider, /** @type {any} */ model, /** @type {any} */ messages, /** @type {any} */ existing) {

@@ -21,12 +21,23 @@ export function loadWorkspaces() {
   }
 }
 
+/**
+ * 写注册表，**返回结果而不是静默吞掉**（v0.6.2，audit-report B-WS-1/2 第五处）。
+ *
+ * 危害形态是**假成功**：调用方（addWorkspace / renameWorkspace）无论写没写成
+ * 都返回 `{ok:true}`，CLI 与 WebUI 于是照常打印「✓ 已添加」。用户以为登记好了，
+ * 实际 `mingdao workspace list` 里永远不会有它——下次进入项目时目录也没跟着切换。
+ * @param {any} ws @returns {{ok: boolean, error: string|null}}
+ */
 export function saveWorkspaces(/** @type {any} */ ws) {
   try {
     ensureHome();
     // 原子写（评估 6.6）：随机 tmp 名 + rename，避免崩溃冲空与跨进程共名 tmp 串扰
     atomicWriteFileSync(workspacesFile(), JSON.stringify(ws, null, 2) + '\n');
-  } catch {}
+    return { ok: true, error: null };
+  } catch (err) {
+    return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
+  }
 }
 
 export function addWorkspace(/** @type {any} */ name, /** @type {any} */ dir) {
@@ -40,7 +51,8 @@ export function addWorkspace(/** @type {any} */ name, /** @type {any} */ dir) {
   return withFileLockSync(workspacesFile() + '.lock', () => {
     const ws = loadWorkspaces();
     ws[key] = { dir: target, createdAt: ws[key]?.createdAt || Date.now(), lastUsed: Date.now() };
-    saveWorkspaces(ws);
+    const saved = saveWorkspaces(ws);
+    if (!saved.ok) return { error: `工作空间注册表写入失败：${saved.error}` };
     return { ok: true, name: key, dir: target };
   });
 }
@@ -50,7 +62,10 @@ export function removeWorkspace(/** @type {any} */ name) {
     const ws = loadWorkspaces();
     if (!ws[name]) return false;
     delete ws[name];
-    saveWorkspaces(ws);
+    const saved = saveWorkspaces(ws);
+    // 返回类型仍是 true/false（调用方存在性判断），写失败用 {error} 区分——
+    // 只回 false 会被读成「没找到这个工作空间」，那是另一回事
+    if (!saved.ok) return { error: `工作空间注册表写入失败：${saved.error}` };
     return true;
   });
 }
@@ -66,7 +81,8 @@ export function renameWorkspace(/** @type {any} */ name, /** @type {any} */ newN
     if (ws[key]) return { error: `名称 ${key} 已存在` };
     ws[key] = { ...ws[name] };
     delete ws[name];
-    saveWorkspaces(ws);
+    const saved = saveWorkspaces(ws);
+    if (!saved.ok) return { error: `工作空间注册表写入失败：${saved.error}` };
     return { ok: true, name: key };
   });
 }
@@ -127,12 +143,37 @@ export function loadSessionWorkspaces() {
   }
 }
 
+// 会话→目录映射写失败：后果是「这个会话记不住自己的工作目录」，下个回合可能落到错误目录。
+// 这里没有逐层把结果透到 WebUI 横幅（调用链太长），因此用一次性 console.warn 保证**至少不无声**。
+let sessionMapWarned = false;
+let lastSessionMapError = /** @type {string|null} */ (null);
+
+/** 会话→目录映射最近一次写失败原因（无则 null）。 */
+export function sessionWorkspaceWriteError() {
+  return lastSessionMapError;
+}
+
+/**
+ * @param {any} map @returns {{ok: boolean, error: string|null}}
+ */
 export function saveSessionWorkspaces(/** @type {any} */ map) {
   try {
     ensureHome();
     // 原子写（评估 6.6）：随机 tmp 名 + rename
     atomicWriteFileSync(sessionWorkspacesFile(), JSON.stringify(map, null, 2) + '\n', { mode: 0o600 });
-  } catch {}
+    return { ok: true, error: null };
+  } catch (err) {
+    const msg = String(/** @type {any} */ (err)?.message ?? err);
+    lastSessionMapError = msg;
+    if (!sessionMapWarned) {
+      sessionMapWarned = true;
+      console.warn(
+        `[MingDao] ⚠ 会话工作目录映射写入失败：${msg}\n` +
+          `  该会话下个回合可能回到默认目录（记不住工作空间）；请检查 ${sessionWorkspacesFile()} 的磁盘空间与权限。`
+      );
+    }
+    return { ok: false, error: msg };
+  }
 }
 
 export function getSessionWorkspace(/** @type {any} */ sessionName) {

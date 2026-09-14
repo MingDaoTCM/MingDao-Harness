@@ -6703,6 +6703,249 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
   ok('v0.6.2 EPIPE 兜底：CLI 安静退出 / 服务端存活 / 未安装时确实会崩（B-UI-1 / B-CLI-1 / B-REPL-1）');
 }
 
+
+// ---------- 103. v0.6.2：写失败却报告成功（B-WS-1/2 第五～八处）+ 全仓静默吞写扫描 ----------
+// 本批的形态比「少一个文件」更坏：**用户被告知成功**。
+//   · saveWorkspaces 写失败 → addWorkspace 仍返回 {ok:true}，CLI/WebUI 照常打印「✓ 已添加」；
+//   · spawnDaemon 的 pidfile 写失败 → 留下无人跟踪的第二个 daemon（正是那段锁注释要防的 P0）；
+//   · dedupeProjectMemory 写失败 → 仍上报「已去重 N 条」；
+//   · writeAudit 写失败 → 连"这次审计是空的"都无从得知。
+{
+  const WS = await import(pathToFileURL(path.join(srcDir, 'workspace.js')).href);
+  const MEM = await import(pathToFileURL(path.join(srcDir, 'memory.js')).href);
+  const AUD = await import(pathToFileURL(path.join(srcDir, 'audit.js')).href);
+  const home103 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ws103-'));
+  const prevHome103 = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = home103; // 家目录本身正常，只把**目标文件**变成目录 → 原子写的 rename 必然失败
+  // 为什么不把整个 home 变成一个文件：那样 withFileLockSync 的 mkdir 会先抛 EEXIST，
+  // 根本走不到「写失败要如实上报」这条路径——测的就不是我们想测的东西了。
+  const poison = (/** @type {string} */ p) => { fs.rmSync(p, { recursive: true, force: true }); fs.mkdirSync(p, { recursive: true }); };
+  const warns = [];
+  const realWarn = console.warn;
+  console.warn = (/** @type {any} */ m) => { warns.push(String(m)); };
+  try {
+    // ① 工作空间注册表：写失败绝不能再报成功
+    const good103 = path.join(home103, 'proj');
+    fs.mkdirSync(good103, { recursive: true });
+    const okAdd = WS.addWorkspace('proj', good103);
+    assert.equal(okAdd.ok, true, `正常登记应成功：${JSON.stringify(okAdd)}`);
+    assert.equal(WS.workspacePath('proj'), good103, '正常登记后应能查到目录');
+    assert.equal(WS.addWorkspace('x', good103).ok, true, '先正常登记 x（供 rename/remove 用例）');
+    assert.deepEqual(WS.saveWorkspaces({ a: { dir: good103 } }), { ok: true, error: null }, 'saveWorkspaces 成功时应返回 ok');
+
+    // 失败注入：把**目标文件**占成目录 → 原子写的 rename 必然失败。
+    // 注意不能用「整个家目录只读」：锁文件与目标同目录，那样会在抢锁时先抛 EACCES，
+    // 根本走不到「写失败要如实上报」这条路径，测的就不是我们想测的东西。
+    poison(WS.workspacesFile());
+    const badSave = WS.saveWorkspaces({ a: 1 });
+    assert.equal(badSave.ok, false, 'saveWorkspaces 写失败必须返回 ok:false');
+    assert.ok(String(badSave.error).length > 0, '必须带出具体原因');
+    // add/rename/remove 走跨进程锁：这一场景下它们可能抛（锁内 mkdir/写失败）也可能返回 {error}，
+    // 但**无论如何都不能再报成功**——那正是本批要消灭的假成功。
+    const noFalseSuccess = (/** @type {string} */ label, /** @type {() => any} */ fn) => {
+      let r;
+      try {
+        r = fn();
+      } catch {
+        return; // 抛错是"响亮地失败"，不是假成功
+      }
+      assert.ok(!(r && /** @type {any} */ (r).ok === true), `${label} 在写失败时不得返回 ok:true，实际 ${JSON.stringify(r)}`);
+    };
+    noFalseSuccess('addWorkspace', () => WS.addWorkspace('proj2', good103));
+    noFalseSuccess('renameWorkspace', () => WS.renameWorkspace('proj', 'proj3'));
+
+    // 会话→目录映射写失败：返回结果 + 一次性告警（后果是下个回合落错目录）
+    fs.rmSync(WS.workspacesFile(), { recursive: true, force: true });
+    const sessResOk = WS.saveSessionWorkspaces({ s: { dir: good103 } });
+    assert.equal(sessResOk.ok, true, '会话映射正常写入应返回 ok');
+    poison(WS.sessionWorkspacesFile());
+    const sessResBad = WS.saveSessionWorkspaces({ s: { dir: good103 } });
+    assert.equal(sessResBad.ok, false, '会话映射写失败必须返回 ok:false');
+    assert.ok(WS.sessionWorkspaceWriteError(), '会话映射写失败必须留下可查痕迹');
+    assert.equal(warns.filter((w) => w.includes('会话工作目录映射')).length, 1, `只应告警一次：${warns.join(' | ')}`);
+    fs.rmSync(WS.sessionWorkspacesFile(), { recursive: true, force: true });
+
+    // 结构守卫：这三个函数的成功返回必须排在 `saved.ok` 检查**之后**——
+    // 只加 saveWorkspaces 的返回值而不在调用点检查，等于没修（返回值被丢掉）。
+    {
+      const wsSrc = fs.readFileSync(path.join(srcDir, 'workspace.js'), 'utf8');
+      const iAddCheck = wsSrc.indexOf('if (!saved.ok) return { error: `工作空间注册表写入失败');
+      assert.ok(iAddCheck > -1, 'addWorkspace/renameWorkspace 必须检查 saveWorkspaces 的结果');
+      const iRemoveCheck = wsSrc.indexOf('if (!saved.ok) return { error: `工作空间注册表写入失败');
+      assert.ok(iRemoveCheck > -1, 'removeWorkspace 必须检查 saveWorkspaces 的结果');
+      // 每个 saveWorkspaces( 调用点（模块内）都必须紧跟结果检查
+      const calls = [...wsSrc.matchAll(/const saved = saveWorkspaces\(/g)].length;
+      const checks = [...wsSrc.matchAll(/if \(!saved\.ok\)/g)].length;
+      assert.equal(calls, checks, `每个 saveWorkspaces 调用点都必须检查结果（调用 ${calls} 次 / 检查 ${checks} 次）`);
+      assert.ok(calls >= 3, `add/rename/remove 三处都应检查，实际只有 ${calls} 处`);
+    }
+
+    // ② 项目记忆去重：算出了重复但写不回去时，不能报告「已去重 N 条」
+    const projDir = path.join(home103, 'memproj');
+    fs.mkdirSync(path.join(projDir, '.mingdao'), { recursive: true });
+    // 路径必须走导出函数：项目记忆是 .mingdao/**memory.md**（手拼 PROJECT-MEMORY.md 会写到一个没人读的文件，
+    // 于是「正常去重」断言永远是 0——又一个假绿）
+    const memFile = MEM.projectMemoryFile(projDir);
+    fs.writeFileSync(memFile, ['- [2026-01-01] 同一条', '- [2026-01-02] 同一条', '- [2026-01-03] 另一条'].join('\n') + '\n');
+    process.env.MINGDAO_HOME = home103;
+    assert.equal(MEM.dedupeProjectMemory(projDir), 1, '正常去重应报告真实的去除条数');
+    fs.writeFileSync(memFile, ['- [2026-01-01] 同一条', '- [2026-01-02] 同一条'].join('\n') + '\n');
+    fs.chmodSync(memFile, 0o444);
+    fs.chmodSync(path.dirname(memFile), 0o555); // 目录只读：原子写的 rename 必然失败
+    let dedupeBad = null;
+    try {
+      dedupeBad = MEM.dedupeProjectMemory(projDir);
+    } finally {
+      fs.chmodSync(path.dirname(memFile), 0o755);
+      fs.chmodSync(memFile, 0o644);
+    }
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      assert.ok(true, 'root 下只读目录拦不住写入（CI 容器以 root 运行时跳过该断言）');
+    } else {
+      assert.equal(dedupeBad, 0, `写不回去时必须如实返回 0（不能报「已去重」），实际 ${dedupeBad}`);
+      assert.ok(MEM.dedupeWriteFailure(), '去重写回失败必须留下可查痕迹');
+      assert.ok(warns.some((w) => w.includes('去重写回失败')), `应有一次去重失败告警：${warns.join(' | ')}`);
+    }
+
+    // ③ 审计写入失败：仍然不打断会话，但必须可查、且只告警一次
+    poison(AUD.auditFile());
+    const before = AUD.auditWriteFailures();
+    let threw = false;
+    try {
+      AUD.writeAudit({ at: Date.now(), tool: 'bash' });
+      AUD.writeAudit({ at: Date.now(), tool: 'bash' });
+    } catch {
+      threw = true;
+    }
+    assert.equal(threw, false, '审计失败绝不能打断会话（设计如此，保持不变）');
+    assert.ok(AUD.auditWriteFailures() > before, '审计写失败必须被计数（此前完全无声）');
+    assert.ok(AUD.auditWriteError(), '审计写失败必须留下原因');
+    assert.equal(warns.filter((w) => w.includes('审计记录写入失败')).length, 1, `审计告警只应一次：${warns.join(' | ')}`);
+
+    // ④ spawnDaemon：pidfile 写失败必须撤回刚拉起的 daemon 并如实返回 false。
+    // 只回 false 而不撤回，就会留下无人跟踪的第二个 daemon——那正是 `spawnDaemon` 上方
+    // 那段锁注释要防的「同一批定时任务被并发执行两次」。
+    {
+      const SC = await import(pathToFileURL(path.join(srcDir, 'schedule.js')).href);
+      process.env.MINGDAO_NO_DAEMON = '1'; // 双保险：即使实现出错也不留下真的守护进程
+      poison(SC.daemonPidFile(home103)); // pidfile 变成目录 → 写必然失败
+      const r = SC.spawnDaemon(home103);
+      assert.equal(r, false, `pidfile 写不进去时必须返回 false，实际 ${r}`);
+      assert.ok(SC.daemonPidfileError(), 'pidfile 写失败必须留下原因');
+      assert.ok(warns.some((w) => w.includes('pidfile 写入失败')), `应有 pidfile 失败告警：${warns.join(' | ')}`);
+      delete process.env.MINGDAO_NO_DAEMON;
+      // 「撤回子进程」这一步只能做**结构守卫**，这里如实说明原因：
+      // 子进程是 detached 的，测试里既拿不到它的 pid，也不能让它真的长期存活
+      //（本用例又必须设 MINGDAO_NO_DAEMON=1 以免留下野守护进程，那会让"它自己退出了"与
+      //  "被我们杀了"无法区分 → 行为断言必然假绿）。因此改为钉住该分支同时做了两件事：
+      // 记录原因 + 杀掉子进程 + 返回 false。少任何一件，这个 P0 就可能被重新引进来。
+      const scSrc = fs.readFileSync(path.join(srcDir, 'schedule.js'), 'utf8');
+      const iCatch = scSrc.indexOf('pidfileError = String(');
+      assert.ok(iCatch > -1, 'spawnDaemon 必须有 pidfile 写失败分支');
+      const branch = scSrc.slice(iCatch, iCatch + 500);
+      // 收紧为「无条件」：只查 child.kill( 是否存在是不够的——把它包进 if (false) 也照样"存在"
+      // （实测过：宽松版守不住这个突变）。要求 kill 就是 catch 里的下一条语句。
+      assert.ok(
+        /pidfileError = String\([\s\S]{0,80}?\);\s*try \{\s*child\.kill\('SIGKILL'\);\s*\} catch \{\}/.test(branch),
+        'pidfile 写失败后必须**无条件**杀掉刚拉起的守护进程（否则留下无人跟踪的第二个 daemon，定时任务被重复执行）'
+      );
+      assert.ok(/spawned = false/.test(branch), 'pidfile 写失败必须让 spawnDaemon 如实返回 false');
+    }
+  } finally {
+    console.warn = realWarn;
+    process.env.MINGDAO_HOME = prevHome103;
+    safeRmSync(home103, { recursive: true, force: true });
+  }
+
+  // ⑤ 全仓扫描：把「静默吞掉写操作」变成一个**常驻可审阅的清单**。
+  // 上一轮我是按文件逐个查的，于是 workspace/schedule/memory/audit 这四处全被漏掉——
+  // 「修一个漏九个」的根因不是不仔细，而是**没有穷举的手段**。这里把它穷举出来并钉住：
+  // 白名单里的每一处都经过审阅（并写明为什么可以吞），新增或数量变化立即失败。
+  {
+    const WRITE = /\b(writeFileSync|appendFileSync|renameSync|unlinkSync|rmSync|rmdirSync|mkdirSync|copyFileSync|createWriteStream|atomicWriteFileSync|atomicWriteJsonSync|truncateSync|writeSync|chmodSync|symlinkSync|linkSync|utimesSync|writeFile)\s*\(/;
+    // 已审阅白名单：键 = 文件名，值 = {n: 该文件处数, why: 为什么可以静默}
+    const ALLOWED = {
+      'atomic-write.js': { n: 3, why: '清理临时文件 / 释放锁 / 陈旧锁回收：失败不影响正确性（下次覆写或超时回收）' },
+      'audit.js': { n: 1, why: 'audit.jsonl **轮转**失败（只导致文件增长）；写入失败本身已由 auditWriteFailures() 记录并告警' },
+      'cli.js': { n: 1, why: '守护进程退出时删除 pidfile：只在仍指向自己时才删，删不掉不影响正确性' },
+      'config.js': { n: 1, why: '原子写之后的 chmod 收权：创建时已带 0600，收权失败不影响内容' },
+      'credentials.js': { n: 1, why: '同上：密钥文件创建时即 0600，chmod 失败不影响内容与权限' },
+      'ledger.js': { n: 1, why: '账本 chmod 收权 / 轮转删除旧文件：失败只影响权限或占用空间，不产生错误数据' },
+      'log-writer.js': { n: 3, why: '日志是 best-effort（设计如此，绝不抛错）+ 两处 chmod 收权' },
+      'memory.js': { n: 2, why: '备份复制失败（主写入仍在，失败会如实返回 0）/ journal 轮转失败（只增长）' },
+      'model-discovery.js': { n: 1, why: '模型列表缓存写入失败：缓存可按需重建，不是权威数据' },
+      'net-guard.js': { n: 1, why: '出网日志写入失败：返回值本身已如实反映判定结果，且账本另有 net.egress 事件' },
+      'session-index.js': { n: 2, why: '分词失败时从索引移除该条（"不索引坏文件"的正确降级）/ 空分片文件删除（只占空间）' },
+      'skill-registry.js': { n: 1, why: '技能源索引缓存写入失败：缓存可按需重建' },
+    };
+    const files103 = [];
+    (function walk(/** @type {string} */ d) {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const fp = path.join(d, e.name);
+        if (e.isDirectory()) walk(fp);
+        else if (e.name.endsWith('.js')) files103.push(fp);
+      }
+    })(srcDir);
+    /** @type {Record<string, number>} */
+    const found = {};
+    const sites = [];
+    for (const f of files103) {
+      const code = fs
+        .readFileSync(f, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      const lines = code.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        const m = /catch\s*(\([^)]*\))?\s*\{/.exec(lines[i]);
+        if (!m) continue;
+        let depth = 1;
+        let body = lines[i].slice(m.index + m[0].length);
+        let j = i;
+        while (depth > 0 && j + 1 < lines.length) {
+          j += 1;
+          body += '\n' + lines[j];
+          for (const ch of lines[j]) {
+            if (ch === '{') depth += 1;
+            else if (ch === '}') depth -= 1;
+          }
+        }
+        // 「静默」= catch 里既不打日志、不抛、也不返回任何东西
+        const bodyCode = body.replace(/\{[^{}]*\}/g, '').trim();
+        if (/(console\.|io\.print|warn|throw|process\.stderr|srvlog|lastError|error\s*[:=]|return\s)/.test(bodyCode)) continue;
+        // 向前找最近的 try，确认它确实包着写操作
+        let k = i;
+        for (; k >= 0; k--) if (/\btry\s*\{/.test(lines[k])) break;
+        if (k < 0) continue;
+        let d2 = 1;
+        let tryBody = lines[k].slice(lines[k].indexOf('{') + 1);
+        let kk = k;
+        while (d2 > 0 && kk + 1 < lines.length && kk + 1 <= i) {
+          kk += 1;
+          for (const ch of lines[kk]) {
+            if (ch === '{') d2 += 1;
+            else if (ch === '}') d2 -= 1;
+          }
+          if (kk !== i) tryBody += '\n' + lines[kk];
+        }
+        if (!WRITE.test(tryBody)) continue;
+        const base = path.relative(srcDir, f);
+        found[base] = (found[base] || 0) + 1;
+        sites.push(`${base}:${i + 1}`);
+      }
+    }
+    const problems = [];
+    for (const [file, n] of Object.entries(found)) {
+      if (!ALLOWED[file]) problems.push(`${file}：新增 ${n} 处静默吞写（不在已审阅白名单内）——请改成记录/返回/告警，或补上理由后加入白名单`);
+      else if (ALLOWED[file].n !== n) problems.push(`${file}：静默吞写处数 ${ALLOWED[file].n} → ${n}（实现变了，白名单必须同步复核）`);
+    }
+    for (const file of Object.keys(ALLOWED)) {
+      if (!found[file]) problems.push(`${file}：白名单里的 ${ALLOWED[file].n} 处已不存在（已修好则请从白名单移除）`);
+    }
+    assert.deepEqual(problems, [], `静默吞写清单发生变化：\n${problems.join('\n')}\n当前全部命中：${sites.join(', ')}`);
+  }
+  ok('v0.6.2 写失败不得报告成功（工作空间/守护 pidfile/记忆去重/审计）+ 全仓静默吞写清单受审阅约束');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

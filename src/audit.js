@@ -24,6 +24,18 @@ export function auditFile() {
 // 轻量脱敏（统一单一来源 v0.3.1 P1-1）：sk-/ghp_ 等常见前缀掩码，见 src/redact.js
 export { redactSecrets };
 
+let auditWarned = false;
+let auditError = /** @type {string|null} */ (null);
+let auditFailures = 0;
+/** 审计写入失败次数（0 = 本次进程内从未失败）。 */
+export function auditWriteFailures() {
+  return auditFailures;
+}
+/** 审计最近一次写失败原因（无则 null）。 */
+export function auditWriteError() {
+  return auditError;
+}
+
 export function writeAudit(/** @type {any} */ entry) {
   try {
     ensureHome();
@@ -33,8 +45,20 @@ export function writeAudit(/** @type {any} */ entry) {
       fs.chmodSync(file, 0o600);
     } catch {}
 
-  } catch {
-    return; // 审计失败绝不影响会话
+  } catch (err) {
+    // v0.6.2（B-WS-1/2 第八处）：仍然「不影响会话」（审计不能反过来打断用户干活），
+    // 但**不再无声**——此前连"这次运行的审计记录是空的"都无从得知。
+    // 保留计数与原因供诊断/测试；一次性 console.warn 避免每步刷屏。
+    auditFailures += 1;
+    auditError = String(/** @type {any} */ (err)?.message ?? err);
+    if (!auditWarned) {
+      auditWarned = true;
+      console.warn(
+        `[MingDao] ⚠ 审计记录写入失败：${auditError}\n` +
+          `  该次运行的 audit.jsonl 会缺事件（执行账本 ledger/ 不受影响）；请检查 ${auditFile()} 的磁盘空间与权限。`
+      );
+    }
+    return;
   }
   // 低频截断：statSync 廉价，只有真的超过阈值才整文件读一次并重写
   try {
