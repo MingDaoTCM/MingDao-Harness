@@ -54,14 +54,38 @@ function localSha(rev) {
 }
 
 /** 匿名 ls-remote：不依赖本地 remote 配置（换机器/新克隆也能跑） */
-function remoteSha(url, ref) {
-  try {
-    const out = execFileSync('git', ['ls-remote', url, ref], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] });
-    const line = out.trim().split('\n')[0] || '';
-    return line.split(/\s+/)[0] || null;
-  } catch {
-    return null;
+/**
+ * 取远端 ref 的 SHA。**必须有界重试**：v0.6.2 发布时实测遇到一次瞬时失败
+ * （同一 remote 的 tag 读到了、main 却读成 null），脚本当场报
+ * 「✗ 四平台未对齐——这不算发布完成」。一次抖动的网络读不该在发版收尾时喊狼来了：
+ * **误报会训练人忽略这条告警**，而它恰恰是防止半发布的最后一道闸。
+ * 三次尝试（间隔 1s/2s）仍失败才算「取不到」。
+ * @returns {{sha: string|null, error: string|null}}
+ */
+function remoteShaDetail(url, ref) {
+  let lastErr = null;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      try {
+        execFileSync(process.execPath, ['-e', `setTimeout(()=>{}, ${attempt * 1000})`], { timeout: 5000, stdio: 'ignore' });
+      } catch {}
+    }
+    try {
+      const out = execFileSync('git', ['ls-remote', url, ref], { encoding: 'utf8', timeout: 60000, stdio: ['ignore', 'pipe', 'ignore'] });
+      const line = out.trim().split('\n')[0] || '';
+      const sha = line.split(/\s+/)[0] || null;
+      // 读到了但为空 = 这个 ref 在远端确实不存在（不是网络问题），不再重试
+      if (!sha) return { sha: null, error: null };
+      return { sha, error: null };
+    } catch (e) {
+      lastErr = String(e?.message || e).split('\n')[0];
+    }
   }
+  return { sha: null, error: lastErr || 'git ls-remote 失败' };
+}
+
+function remoteSha(url, ref) {
+  return remoteShaDetail(url, ref).sha;
 }
 
 async function api(url, headers = {}) {
@@ -87,11 +111,28 @@ async function checkGitHosts() {
     }
   }
   for (const [name, url] of Object.entries(GIT_URLS)) {
-    const mainSha = remoteSha(url, 'refs/heads/main');
-    const tagSha = remoteSha(url, `refs/tags/${TAG}^{}`) || remoteSha(url, `refs/tags/${TAG}`);
-    checks.push({ platform: name, item: 'main', expected: localMain, actual: mainSha, ok: Boolean(mainSha) && mainSha === localMain });
-    if (localTag) {
-      checks.push({ platform: name, item: `tag ${TAG}`, expected: localTag, actual: tagSha, ok: Boolean(tagSha) && tagSha === localTag });
+    const m = remoteShaDetail(url, 'refs/heads/main');
+    // 「取不到」（网络/限流）与「读到了但不一样」（真的没推）必须区分开：
+    // 前者重试后再报，且提示是"稍后重跑"；后者是实打实的未对齐
+    checks.push({
+      platform: name,
+      item: 'main',
+      expected: localMain,
+      actual: m.sha || (m.error ? `取不到（${m.error}）` : '远端无此分支'),
+      ok: Boolean(m.sha) && m.sha === localMain,
+    });
+    {
+      const t1 = remoteShaDetail(url, `refs/tags/${TAG}^{}`);
+      const t2 = t1.sha ? t1 : remoteShaDetail(url, `refs/tags/${TAG}`);
+      if (localTag) {
+        checks.push({
+          platform: name,
+          item: `tag ${TAG}`,
+          expected: localTag,
+          actual: t2.sha || (t2.error ? `取不到（${t2.error}）` : `远端无 tag ${TAG}`),
+          ok: Boolean(t2.sha) && t2.sha === localTag,
+        });
+      }
     }
   }
 }

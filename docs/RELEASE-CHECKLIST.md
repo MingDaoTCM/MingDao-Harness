@@ -266,8 +266,13 @@ git push <mirror> refs/tags/v<版本>:refs/tags/v<版本>
 
 ```bash
 # 采集：用脚本，别再手写 /tmp/harvest-<版本>.sh（手写漏过 mac zip，见 ①）
-#   scp MingDao-Harness-Site/scripts/harvest-release.mjs mingdao-server:/tmp/
-ssh mingdao-server 'MINGDAO_GITHUB_TOKEN=xxx node /tmp/harvest-release.mjs <版本> /opt/1panel/www/sites/mingdao-site/downloads'
+scp MingDao-Harness-Site/scripts/harvest-release.mjs mingdao-server:/tmp/
+# ⚠ token **不要**写进 ssh 的命令串（那等于放进 argv，本地与服务器的 ps 都能读到几小时，
+#   与 §3.22 修掉的是同一个毛病）。经 stdin 落到 umask 077 的临时文件，用完即删：
+umask 077; printf 'MINGDAO_GITHUB_TOKEN=%s\n' "$MINGDAO_GITHUB_TOKEN" > /tmp/hr.env
+ssh mingdao-server 'umask 077; cat > /tmp/harvest.env' < /tmp/hr.env && rm -f /tmp/hr.env
+ssh mingdao-server 'set -a; . /tmp/harvest.env; set +a; rm -f /tmp/harvest.env; \
+  node /tmp/harvest-release.mjs <版本> /opt/1panel/www/sites/mingdao-site/downloads'
 #   · 采安装包 + *.blockmap + latest.yml/latest-linux.yml，跳过 latest-mac.yml 与 builder-debug.yml
 #   · 每个文件按 GitHub 的 sha256(digest) + size 双校验，不符即删并退出非 0
 #   · 末尾会打印「差量更新素材」自查（缺哪个平台的 .blockmap 会直接点名）
@@ -378,6 +383,12 @@ node scripts/verify-release.mjs <版本>  # 四个渠道逐项核对，任一缺
 
 - [ ] `node scripts/verify-release.mjs <版本>` **退出 0**
 - [ ] 若输出 `⚠ npm/dist-tags.latest` 不是本版本，确认这是有意的回填（否则 latest 需要修正）
+
+> **v0.6.2 发布实测**：该脚本第一次跑报 `✗ GitHub/main 取不到`，第二次即通过——
+> 是一次 `git ls-remote` 的瞬时失败。**一次网络抖动不该在发版收尾时喊狼来了**：
+> 误报会训练人忽略这条告警，而它恰恰是防半发布的最后一道闸。现已加**三次有界重试**，
+> 并把「取不到」（网络/限流）与「读到了但不一样」（真的没推）在输出里区分开。
+> 若仍显示「取不到」，先确认网络与额度再重跑，**不要**跳过这一步。
 
 ### 3.3 Gitee / GitCode 同步发行（含附件）
 
