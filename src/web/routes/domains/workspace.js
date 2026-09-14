@@ -76,12 +76,12 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
           return json(res, 400, { error: `无法创建目录：${target}（${e.message}）` });
         }
       }
-      const r = addWorkspace(name, target);
+      const r = await addWorkspace(name, target);
       if (r.error) return json(res, 400, { error: r.error });
       return json(res, 200, { ok: true, name: r.name, dir: r.dir, created: body.create !== false });
     }
     if (body.action === 'rename') {
-      const r = renameWorkspace(name, body.newName);
+      const r = await renameWorkspace(name, body.newName);
       if (r.error) return json(res, 400, { error: r.error });
       return json(res, 200, { ok: true, name: r.name });
     }
@@ -96,7 +96,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
             error: `目录 ${t2} 不在允许范围内（家目录 / 启动目录 / 当前工作目录 / web.browseRoots）。确需切换请配置 web.allowAnyWorkspaceDir: true。`,
           });
         }
-        const r = setWorkspaceDir(name, body.dir);
+        const r = await setWorkspaceDir(name, body.dir);
         if (r.error) return json(res, 400, { error: r.error });
       }
       const dir = workspacePath(name);
@@ -106,15 +106,15 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       } catch (/** @type {any} */ e) {
         return json(res, 400, { error: `无法创建目录：${dir}（${e.message}）` });
       }
-      touchWorkspace(name);
+      await touchWorkspace(name);
       state.workingDir = dir;
       // 不再 process.chdir：运行中任务的 cwd 在创建时已固定，全局切换只影响新会话
-      if (body.file) setSessionWorkspace(String(body.file), dir, /** @type {any} */ (name));
+      if (body.file) await setSessionWorkspace(String(body.file), dir, /** @type {any} */ (name));
       return json(res, 200, { ok: true, name, dir, current: name });
     }
     if (body.action === 'remove') {
       if (!name) return json(res, 400, { error: '缺少名称' });
-      const rm = removeWorkspace(name);
+      const rm = await removeWorkspace(name);
       if (rm && /** @type {any} */ (rm).error) return json(res, 500, { error: /** @type {any} */ (rm).error });
       return json(res, 200, { ok: rm === true });
     }

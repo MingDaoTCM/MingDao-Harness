@@ -1336,17 +1336,17 @@ const ctx = { cwd: tmp };
   const projA = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-wsa-'));
   process.env.MINGDAO_HOME = homeW;
   const { addWorkspace, removeWorkspace, workspacePath, touchWorkspace, listWorkspaces, currentWorkspace } = await import(pathToFileURL(path.join(srcDir, 'workspace.js')).href);
-  const r1 = addWorkspace('项目A', projA);
+  const r1 = await addWorkspace('项目A', projA);
   assert.ok(r1.name === '项目A' && r1.dir === projA);
-  const bad = addWorkspace('', projA);
+  const bad = await addWorkspace('', projA);
   assert.ok(bad.error, '空名称应报错');
-  const bad2 = addWorkspace('不存在的目录', path.join(projA, 'nope'));
+  const bad2 = await addWorkspace('不存在的目录', path.join(projA, 'nope'));
   assert.ok(bad2.error, '目录不存在应报错');
   assert.equal(workspacePath('项目A'), projA);
   assert.equal(listWorkspaces().length, 1);
-  assert.ok(touchWorkspace('项目A'));
+  assert.ok(await touchWorkspace('项目A'));
   assert.ok(currentWorkspace(projA)?.name === '项目A', '当前目录应识别工作空间');
-  assert.equal(removeWorkspace('项目A'), true);
+  assert.equal(await removeWorkspace('项目A'), true);
   assert.equal(workspacePath('项目A'), null);
   process.env.MINGDAO_HOME = smokeHome;
   safeRmSync(homeW, { recursive: true, force: true });
@@ -2346,12 +2346,12 @@ const ctx = { cwd: tmp };
   fs.mkdirSync(d1);
   fs.mkdirSync(d2);
   assert.equal(getSessionWorkspace('sess1.jsonl'), null, '未记录时应为 null');
-  setSessionWorkspace('sess1.jsonl', d1, null);
+  await setSessionWorkspace('sess1.jsonl', d1, null);
   assert.equal(getSessionWorkspace('sess1.jsonl'), path.resolve(d1), '记录后可读取');
-  moveSessionWorkspace('sess1.jsonl', 'sess1-renamed.jsonl');
+  await moveSessionWorkspace('sess1.jsonl', 'sess1-renamed.jsonl');
   assert.equal(getSessionWorkspace('sess1-renamed.jsonl'), path.resolve(d1), '改名后映射跟随');
   assert.equal(getSessionWorkspace('sess1.jsonl'), null, '旧名映射应移除');
-  removeSessionWorkspace('sess1-renamed.jsonl');
+  await removeSessionWorkspace('sess1-renamed.jsonl');
   assert.equal(getSessionWorkspace('sess1-renamed.jsonl'), null, '删除后清空');
   assert.equal(workspaceForDir(d2), null, '未登记目录反查为 null');
   process.env.MINGDAO_HOME = smokeHome;
@@ -3885,13 +3885,13 @@ console.log(JSON.stringify({ okOn, xml }));`;
   const dir64 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-wsdir-'));
 
   // 基本行为不回归
-  const a = w.addWorkspace('a', dir64);
+  const a = await w.addWorkspace('a', dir64);
   assert.equal(a.ok, true, '登记工作空间应成功');
-  assert.equal(w.removeWorkspace('a'), true, '删除应成功');
-  assert.equal(w.removeWorkspace('a'), false, '重复删除应为 false');
-  assert.ok(w.renameWorkspace('nope', 'x').error, '改名不存在的条目应报错');
-  w.addWorkspace('b', dir64);
-  assert.equal(w.renameWorkspace('b', 'c').ok, true, '改名应成功');
+  assert.equal(await w.removeWorkspace('a'), true, '删除应成功');
+  assert.equal(await w.removeWorkspace('a'), false, '重复删除应为 false');
+  assert.ok((await w.renameWorkspace('nope', 'x')).error, '改名不存在的条目应报错');
+  await w.addWorkspace('b', dir64);
+  assert.equal((await w.renameWorkspace('b', 'c')).ok, true, '改名应成功');
 
   // 并发登记不得丢更新（v0.4.7 T19：读-改-写移入跨进程锁）
   await Promise.all(Array.from({ length: 20 }, (_, i) => Promise.resolve().then(() => w.addWorkspace('k' + i, dir64))));
@@ -3899,11 +3899,11 @@ console.log(JSON.stringify({ okOn, xml }));`;
   assert.equal(names.length, 20, `并发登记的 20 个条目必须全部保留（实际 ${names.length}）`);
 
   // 会话级映射同样受锁保护
-  w.setSessionWorkspace('s1', dir64, 'c');
+  await w.setSessionWorkspace('s1', dir64, 'c');
   assert.equal(w.getSessionWorkspace('s1'), path.resolve(dir64), '会话级工作空间应记录');
-  assert.equal(w.moveSessionWorkspace('s1', 's2'), true, '改名迁移应成功');
+  assert.equal(await w.moveSessionWorkspace('s1', 's2'), true, '改名迁移应成功');
   assert.equal(w.getSessionWorkspace('s2'), path.resolve(dir64), '迁移后按新名可查');
-  assert.equal(w.removeSessionWorkspace('s2'), true, '删除会话映射应成功');
+  assert.equal(await w.removeSessionWorkspace('s2'), true, '删除会话映射应成功');
 
   safeRmSync(dir64, { recursive: true, force: true });
   process.env.MINGDAO_HOME = prevHome64;
@@ -6727,10 +6727,10 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
     // ① 工作空间注册表：写失败绝不能再报成功
     const good103 = path.join(home103, 'proj');
     fs.mkdirSync(good103, { recursive: true });
-    const okAdd = WS.addWorkspace('proj', good103);
+    const okAdd = await WS.addWorkspace('proj', good103);
     assert.equal(okAdd.ok, true, `正常登记应成功：${JSON.stringify(okAdd)}`);
     assert.equal(WS.workspacePath('proj'), good103, '正常登记后应能查到目录');
-    assert.equal(WS.addWorkspace('x', good103).ok, true, '先正常登记 x（供 rename/remove 用例）');
+    assert.equal((await WS.addWorkspace('x', good103)).ok, true, '先正常登记 x（供 rename/remove 用例）');
     assert.deepEqual(WS.saveWorkspaces({ a: { dir: good103 } }), { ok: true, error: null }, 'saveWorkspaces 成功时应返回 ok');
 
     // 失败注入：把**目标文件**占成目录 → 原子写的 rename 必然失败。
@@ -6742,17 +6742,19 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
     assert.ok(String(badSave.error).length > 0, '必须带出具体原因');
     // add/rename/remove 走跨进程锁：这一场景下它们可能抛（锁内 mkdir/写失败）也可能返回 {error}，
     // 但**无论如何都不能再报成功**——那正是本批要消灭的假成功。
-    const noFalseSuccess = (/** @type {string} */ label, /** @type {() => any} */ fn) => {
+    // 注意必须 await 被测函数：它们现在返回 Promise，不 await 的话 r 是个 Promise，
+    // `r.ok === true` 恒为 false —— 断言会**永远通过**（正是本仓库反复抓到的假绿）
+    const noFalseSuccess = async (/** @type {string} */ label, /** @type {() => any} */ fn) => {
       let r;
       try {
-        r = fn();
+        r = await fn();
       } catch {
         return; // 抛错是"响亮地失败"，不是假成功
       }
       assert.ok(!(r && /** @type {any} */ (r).ok === true), `${label} 在写失败时不得返回 ok:true，实际 ${JSON.stringify(r)}`);
     };
-    noFalseSuccess('addWorkspace', () => WS.addWorkspace('proj2', good103));
-    noFalseSuccess('renameWorkspace', () => WS.renameWorkspace('proj', 'proj3'));
+    await noFalseSuccess('addWorkspace', () => WS.addWorkspace('proj2', good103));
+    await noFalseSuccess('renameWorkspace', () => WS.renameWorkspace('proj', 'proj3'));
 
     // 会话→目录映射写失败：返回结果 + 一次性告警（后果是下个回合落错目录）
     fs.rmSync(WS.workspacesFile(), { recursive: true, force: true });
@@ -6865,7 +6867,7 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
     const WRITE = /\b(writeFileSync|appendFileSync|renameSync|unlinkSync|rmSync|rmdirSync|mkdirSync|copyFileSync|createWriteStream|atomicWriteFileSync|atomicWriteJsonSync|truncateSync|writeSync|chmodSync|symlinkSync|linkSync|utimesSync|writeFile)\s*\(/;
     // 已审阅白名单：键 = 文件名，值 = {n: 该文件处数, why: 为什么可以静默}
     const ALLOWED = {
-      'atomic-write.js': { n: 3, why: '清理临时文件 / 释放锁 / 陈旧锁回收：失败不影响正确性（下次覆写或超时回收）' },
+      'atomic-write.js': { n: 1, why: '原子写失败后的临时文件清理（原错误仍会重抛）；锁的释放与陈旧回收走独立函数，失败不影响正确性（pid 判据会回收）' },
       'audit.js': { n: 1, why: 'audit.jsonl **轮转**失败（只导致文件增长）；写入失败本身已由 auditWriteFailures() 记录并告警' },
       'cli.js': { n: 1, why: '守护进程退出时删除 pidfile：只在仍指向自己时才删，删不掉不影响正确性' },
       'config.js': { n: 1, why: '原子写之后的 chmod 收权：创建时已带 0600，收权失败不影响内容' },
@@ -7122,9 +7124,11 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
     // ⑤ 工作空间名：含路径分隔符一律拒绝（名称只作 JSON 键，但仍不该接受路径字符）
     const good105 = path.join(home105, 'proj');
     fs.mkdirSync(good105, { recursive: true });
-    assert.ok(WS.addWorkspace('a/b', good105).error, '工作空间名含 / 必须被拒绝');
-    assert.ok(WS.addWorkspace('a\\b', good105).error, '工作空间名含 \\ 必须被拒绝');
-    assert.equal(WS.addWorkspace('okname', good105).ok, true, '正常名字应可登记');
+    // 必须 await：这些函数现在返回 Promise，不 await 时 `.error` 恒为 undefined ——
+    // 断言会**恒真**（`.ok === true` 也恒假），是典型的假绿
+    assert.ok((await WS.addWorkspace('a/b', good105)).error, '工作空间名含 / 必须被拒绝');
+    assert.ok((await WS.addWorkspace('a\\b', good105)).error, '工作空间名含 \\ 必须被拒绝');
+    assert.equal((await WS.addWorkspace('okname', good105)).ok, true, '正常名字应可登记');
 
     // ⑥ 会话文件参数：Web 路由一律 path.basename（结构性确认，避免以后有人图省事去掉）
     for (const f of ['src/web/routes/domains/sessions.js', 'src/web/server.js']) {
@@ -7355,6 +7359,182 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
   assert.equal(o.degradedEnoentNoAutoRetry, true, 'ENOENT 表示打包缺失，不应每步重试（显式 reset 才重试）');
   assert.equal(o.degradedAfterExplicitRetry, false, '显式 reset 后应能恢复');
   ok('v0.6.2 B-TOK-1：词表读失败有界重试（瞬时错误可恢复 / 降级一次性说清后果），不再终生锁死');
+}
+
+
+// ---------- 108. v0.6.2：文件锁的阻塞面（自评 P2-7）----------
+// 原状：`withFileLockSync` 用 `Atomics.wait` 睡眠，**等待期间整个事件循环停摆**。
+// 实测（修复前）：持锁方存活 2.6 秒时，一个 100ms 的定时器在锁返回前根本没触发——
+// 对常驻 WebUI 而言，一次文件锁争用就冻结所有并发会话/权限确认/SSE 流。
+//
+// 本节做两件事：① 用**真跨进程持有者**证明异步版不阻塞事件循环（并保留同步版作对照组，
+// 否则测试可能因为"根本没人持锁"而假绿）；② 钉住 AsyncLocalStorage 的可重入语义——
+// 异步临界区会 yield，进程级 Set 会让并发任务互相穿透（读-改-写丢失更新）。
+{
+  const AW = await import(pathToFileURL(path.join(srcDir, 'atomic-write.js')).href);
+  const WS108 = await import(pathToFileURL(path.join(srcDir, 'workspace.js')).href);
+  const dir108 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-lock108-'));
+  const lockPath = path.join(dir108, 'x.lock');
+  const heldFlag = path.join(dir108, 'held.flag');
+  const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
+
+  // 跨进程持有者：抢到锁 → 落标记 → 持有一段时间 → 释放。必须在**另一个进程**里，
+  // 因为锁的可重入是按调用链判定的，同进程同链会走"可重入"而不等待。
+  const HOLD_MS = 1200;
+  const holderCode = `
+    import fs from 'node:fs';
+    // -e 之后第一个参数是 argv[1]（argv[0] 是 node 可执行文件路径）——写成 slice(2) 会让 lockPath 为 undefined
+    const [lockPath, heldFlag, holdMs] = process.argv.slice(1);
+    const fd = fs.openSync(lockPath, 'wx');
+    fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    fs.closeSync(fd);
+    fs.writeFileSync(heldFlag, 'held');
+    setTimeout(() => { try { fs.unlinkSync(lockPath); } catch {} process.exit(0); }, Number(holdMs));
+  `;
+  const holder = spawn(process.execPath, ['--input-type=module', '-e', holderCode, lockPath, heldFlag, String(HOLD_MS)], { stdio: 'ignore' });
+  try {
+    // 等持有者真的拿到锁（否则后面的等待是"没人持锁"，测试恒绿）
+    for (let i = 0; i < 100 && !fs.existsSync(heldFlag); i++) await sleep(20);
+    assert.ok(fs.existsSync(heldFlag), '对照组前提：跨进程持有者必须真的拿到了锁');
+
+    // ① 异步版：等待期间事件循环必须照常跑（100ms 定时器应当准时触发）
+    {
+      let timerAt = /** @type {number|null} */ (null);
+      const t0 = Date.now();
+      setTimeout(() => { timerAt = Date.now() - t0; }, 100);
+      await AW.withFileLock(lockPath, () => {}, { timeoutMs: 15000 });
+      const returnedAt = Date.now() - t0;
+      assert.ok(timerAt !== null, '异步锁等待期间事件循环不得停摆：100ms 定时器必须触发过');
+      assert.ok(returnedAt > 400, `本用例要求真的等过锁（否则没测到东西），实际只等了 ${returnedAt}ms`);
+      assert.ok(
+        timerAt < returnedAt - 200,
+        `定时器应在锁返回**之前**就触发（证明未阻塞）：timerAt=${timerAt}ms returnedAt=${returnedAt}ms`
+      );
+    }
+
+    // ② 对照组：同步版必须**确实**阻塞（证明上面的断言有能力区分）
+    {
+      const flagFile = path.join(dir108, 'rehold.flag');
+      const holder2 = spawn(process.execPath, ['--input-type=module', '-e', holderCode, lockPath, flagFile, '800'], { stdio: 'ignore' });
+      for (let i = 0; i < 100 && !fs.existsSync(flagFile); i++) await sleep(20);
+      assert.ok(fs.existsSync(flagFile), '对照组：第二个持有者也必须拿到锁');
+      let fired = false;
+      setTimeout(() => { fired = true; }, 60);
+      const st = Date.now();
+      AW.withFileLockSync(lockPath, () => {}, { timeoutMs: 15000 });
+      const elapsed = Date.now() - st;
+      assert.equal(fired, false, `对照组：同步锁返回时定时器**不该**已经触发过（说明它确实阻塞了事件循环），实际等了 ${elapsed}ms`);
+      holder2.kill('SIGKILL');
+      await sleep(50);
+    }
+
+    // ③ 迁移后的真实路径：WebUI 里"设会话工作目录"在争用时也不得冻结事件循环
+    {
+      const flagFile = path.join(dir108, 'ws.flag');
+      const lockForWs = path.join(process.env.MINGDAO_HOME || dir108, 'workspaces.json.lock');
+      fs.mkdirSync(process.env.MINGDAO_HOME || dir108, { recursive: true });
+      const holder3 = spawn(process.execPath, ['--input-type=module', '-e', holderCode, lockForWs, flagFile, '900'], { stdio: 'ignore' });
+      for (let i = 0; i < 100 && !fs.existsSync(flagFile); i++) await sleep(20);
+      assert.ok(fs.existsSync(flagFile), '第三个持有者必须拿到工作空间注册表的锁');
+      const proj = path.join(dir108, 'proj');
+      fs.mkdirSync(proj, { recursive: true });
+      let ticked = 0;
+      const iv = setInterval(() => { ticked += 1; }, 50);
+      const t1 = Date.now();
+      const r = await WS108.addWorkspace('并发登记', proj, { timeoutMs: 15000 });
+      clearInterval(iv);
+      const dur = Date.now() - t1;
+      assert.ok(ticked >= 3, `工作空间登记等待锁期间事件循环必须照常跑（50ms 心跳应至少跳 3 次），实际 ${ticked} 次 / ${dur}ms`);
+      assert.equal(r.ok, true, `持有者释放后应登记成功：${JSON.stringify(r)}`);
+      assert.equal(WS108.workspacePath('并发登记'), proj, '登记结果必须真的落盘');
+      holder3.kill('SIGKILL');
+      await sleep(50);
+    }
+
+    // ④ AsyncLocalStorage 的可重入语义（这是迁移的**前提**，单独钉住）
+    {
+      // 4a 并发任务**不得**被误判为可重入：两个 async 临界区各自 read-modify-write，
+      //    都要落上（丢失更新会暴露"进程级 Set"那套旧判据）
+      const counter = path.join(dir108, 'counter.json');
+      fs.writeFileSync(counter, '0');
+      const bump = () =>
+        AW.withFileLock(lockPath, async () => {
+          const v = Number(fs.readFileSync(counter, 'utf8'));
+          await sleep(40); // 关键：异步临界区**会 yield**
+          fs.writeFileSync(counter, String(v + 1));
+        });
+      await Promise.all([bump(), bump(), bump()]);
+      assert.equal(Number(fs.readFileSync(counter, 'utf8')), 3, '并发任务必须串行进入临界区（可重入判据不能穿透并发任务）');
+      // 4b 同一条调用链内嵌套取同一把锁 → 可重入，不得自死锁
+      let nested = false;
+      await AW.withFileLock(lockPath, async () => {
+        await AW.withFileLock(lockPath, async () => {
+          nested = true;
+        });
+      }, { timeoutMs: 3000 });
+      assert.equal(nested, true, '同一调用链内嵌套取同一把锁必须可重入（否则自死锁到超时）');
+    }
+
+    // ⑤ 陈旧锁回收对异步版同样有效：持有者已死 → 立刻回收，不等 staleMs
+    {
+      fs.writeFileSync(lockPath, JSON.stringify({ pid: 999999, at: Date.now() })); // 不存在的 pid
+      const t2 = Date.now();
+      let ran = false;
+      await AW.withFileLock(lockPath, () => { ran = true; }, { timeoutMs: 5000, staleMs: 60000 });
+      assert.equal(ran, true, '持有者已死时必须立刻回收并执行（不能等满 staleMs）');
+      assert.ok(Date.now() - t2 < 2000, `回收应立刻发生，实际等了 ${Date.now() - t2}ms`);
+    }
+  } finally {
+    try { holder.kill('SIGKILL'); } catch {}
+    safeRmSync(dir108, { recursive: true, force: true });
+  }
+
+  // ⑥ 常驻结构守卫：这些异步函数**必须**被 await。
+  // 这类迁移最容易漏的就是调用点（漏了不会报错，只会让 `.ok`/`.error` 恒为 undefined → 断言恒真），
+  // 本项目在本次迁移里就漏了 3 处（靠这个扫描器抓出来）。允许两种正当写法：
+  //   · 作为回调传给**已 await** 的异步助手（`await helper(() => fn(...))`）
+  //   · 在 `Promise.all(...)` / `.then(() => ...)` 里（promise 由外层收口）
+  {
+    const ASYNC_FNS_108 = ['addWorkspace', 'removeWorkspace', 'renameWorkspace', 'setWorkspaceDir', 'touchWorkspace', 'setSessionWorkspace', 'removeSessionWorkspace', 'moveSessionWorkspace'];
+    // **src 与 test 都要查**：src 里的漏 await 才是真正会漏结果的（接口先返回、写入还没落地），
+    // 而 test 里的漏 await 会变成恒真断言。第一版只查了 test，等于漏掉了更重要的那一半。
+    const checkFiles = [
+      ...['smoke.js', 'e2e-web.js', 'e2e-local.js', 'e2e-schedule.js', 'api-contracts.js']
+        .map((f) => path.join(srcDir, '..', 'test', f)),
+      ...[
+        'commands/workspace.js',
+        'web/routes/domains/workspace.js',
+        'web/routes/domains/sessions.js',
+        'web/server.js',
+        'commands/repl.js',
+        'cli.js',
+      ].map((f) => path.join(srcDir, f)),
+    ].filter((f) => fs.existsSync(f));
+    const missing = [];
+    for (const f of checkFiles) {
+      const code = fs
+        .readFileSync(f, 'utf8')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      code.split('\n').forEach((l, i) => {
+        for (const fn of ASYNC_FNS_108) {
+          const re = new RegExp(`(?<![\\w$])${fn}\\s*\\(`, 'g');
+          let m;
+          while ((m = re.exec(l))) {
+            const before = l.slice(Math.max(0, m.index - 40), m.index);
+            if (/await\s+[\w.$]*$/.test(before)) continue;
+            if (/=>\s*[\w.$]*$/.test(before) || /Promise\.all|\.then\(/.test(l)) continue; // 正当写法
+            // `return fn(...)` 也是正当的：promise 交给调用方 await（如 setWorkspaceDir 委托 addWorkspace）
+            if (/return\s+[\w.$]*$/.test(before)) continue;
+            if (/^\s*(export\s+)?(async\s+)?function\s/.test(l) || /import|from '/.test(l)) continue;
+            missing.push(`${path.basename(f)}:${i + 1} ${l.trim().slice(0, 90)}`);
+          }
+        }
+      });
+    }
+    assert.deepEqual(missing, [], `这些函数已是 async，调用点必须 await（漏了也不报错，只会让断言恒真）：\n${missing.join('\n')}`);
+  }
+  ok('v0.6.2 P2-7 阻塞面：异步锁不冻结事件循环（带同步对照组）+ 可重入按调用链限定 + 缺 await 常驻守卫');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

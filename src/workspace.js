@@ -1,3 +1,16 @@
+// v0.6.2（自评 P2-7 阻塞面）：本模块**全部**加锁函数已迁到异步版 `withFileLock`。
+//
+// 为什么先迁这一组：它正好在 WebUI 的请求路径上（开会话设目录、切换工作空间、会话改名），
+// 而同步锁等待期间 `Atomics.wait` 会让**整个事件循环停摆**——实测持锁方存活 2.6 秒时，
+// 一个 100ms 的定时器在锁返回前根本没触发，表现为所有并发会话/权限确认/SSE 流一起卡住。
+// 且这组函数的 11 个调用点**全部**已在 async 处理函数里（web 路由 / 命令处理 / 会话改名），
+// 迁移只是加 `await`，不产生 async 传染。
+//
+// 仍用同步版的调用点（tasks 2 处 / schedule 12 处 / cachestats 1 处 / sync 1 处）见
+// docs/AUDIT-v0.6.1-第三方报告登记.md §3.26 的说明：它们要么在纯同步读-改-写链里
+// （强行异步化会传染 24 个调用点，回归风险大于收益），要么在调度守护进程内部
+// （阻塞只会推迟定时任务，不会冻结用户请求）。
+//
 // 工作空间：项目目录注册表（参考 WorkBuddy 的项目组织思路）——
 // 为常做的项目登记名称与目录，一键回到对应项目，配置与记忆随目录（AGENTS.md / .mingdao/skills 等）自然跟随。
 // 注册表：<mingdao-home>/workspaces.json → { "<名称>": { dir, createdAt, lastUsed } }
@@ -6,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
-import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
+import { atomicWriteFileSync, withFileLock } from './atomic-write.js';
 
 export function workspacesFile() {
   return path.join(mingdaoHome(), 'workspaces.json');
@@ -40,7 +53,7 @@ export function saveWorkspaces(/** @type {any} */ ws) {
   }
 }
 
-export function addWorkspace(/** @type {any} */ name, /** @type {any} */ dir) {
+export async function addWorkspace(/** @type {any} */ name, /** @type {any} */ dir) {
   const key = String(name).trim();
   if (!key) return { error: '名称不能为空' };
   if (/[\\/]/.test(key)) return { error: '名称不能包含路径分隔符' };
@@ -48,7 +61,7 @@ export function addWorkspace(/** @type {any} */ name, /** @type {any} */ dir) {
   if (!fs.existsSync(target)) return { error: `目录不存在：${target}` };
   // v0.4.7（T19）：读-改-写必须在跨进程锁内——WebUI 每次建会话都会 touch 工作空间，
   // 与 CLI 的 add/remove 并发时未加锁会丢更新（注册表少一条工作空间）。
-  return withFileLockSync(workspacesFile() + '.lock', () => {
+  return withFileLock(workspacesFile() + '.lock', () => {
     const ws = loadWorkspaces();
     ws[key] = { dir: target, createdAt: ws[key]?.createdAt || Date.now(), lastUsed: Date.now() };
     const saved = saveWorkspaces(ws);
@@ -57,8 +70,8 @@ export function addWorkspace(/** @type {any} */ name, /** @type {any} */ dir) {
   });
 }
 
-export function removeWorkspace(/** @type {any} */ name) {
-  return withFileLockSync(workspacesFile() + '.lock', () => {
+export async function removeWorkspace(/** @type {any} */ name) {
+  return withFileLock(workspacesFile() + '.lock', () => {
     const ws = loadWorkspaces();
     if (!ws[name]) return false;
     delete ws[name];
@@ -70,12 +83,12 @@ export function removeWorkspace(/** @type {any} */ name) {
   });
 }
 
-export function renameWorkspace(/** @type {any} */ name, /** @type {any} */ newName) {
+export async function renameWorkspace(/** @type {any} */ name, /** @type {any} */ newName) {
   const key = String(newName).trim();
   if (!key) return { error: '新名称不能为空' };
   if (/[\\/]/.test(key)) return { error: '名称不能包含路径分隔符' };
   if (key === name) return { name: key }; // 原样改名：无操作，避免自删条目
-  return withFileLockSync(workspacesFile() + '.lock', () => {
+  return withFileLock(workspacesFile() + '.lock', () => {
     const ws = loadWorkspaces();
     if (!ws[name]) return { error: `工作空间 ${name} 不存在` };
     if (ws[key]) return { error: `名称 ${key} 已存在` };
@@ -88,7 +101,7 @@ export function renameWorkspace(/** @type {any} */ name, /** @type {any} */ newN
 }
 
 // 修改目录：登记同名即可覆盖目录
-export function setWorkspaceDir(/** @type {any} */ name, /** @type {any} */ dir) {
+export async function setWorkspaceDir(/** @type {any} */ name, /** @type {any} */ dir) {
   return addWorkspace(name, dir);
 }
 
@@ -96,9 +109,9 @@ export function workspacePath(/** @type {any} */ name) {
   return loadWorkspaces()[name]?.dir || null;
 }
 
-export function touchWorkspace(/** @type {any} */ name) {
+export async function touchWorkspace(/** @type {any} */ name) {
   // v0.4.7（T19）：同上，加锁防并发丢更新
-  return withFileLockSync(workspacesFile() + '.lock', () => {
+  return withFileLock(workspacesFile() + '.lock', () => {
     const ws = loadWorkspaces();
     if (!ws[name]) return false;
     ws[name].lastUsed = Date.now();
@@ -180,17 +193,17 @@ export function getSessionWorkspace(/** @type {any} */ sessionName) {
   return loadSessionWorkspaces()[sessionName]?.dir || null;
 }
 
-export function setSessionWorkspace(/** @type {any} */ sessionName, /** @type {any} */ dir, wsName = null) {
+export async function setSessionWorkspace(/** @type {any} */ sessionName, /** @type {any} */ dir, wsName = null) {
   // v0.4.7（T19）：多标签页/多任务并行时会话级映射同样会被并发改写
-  return withFileLockSync(sessionWorkspacesFile() + '.lock', () => {
+  return withFileLock(sessionWorkspacesFile() + '.lock', () => {
     const map = loadSessionWorkspaces();
     map[sessionName] = { dir: path.resolve(dir), name: wsName || workspaceForDir(dir)?.name || null, at: Date.now() };
     saveSessionWorkspaces(map);
   });
 }
 
-export function removeSessionWorkspace(/** @type {any} */ sessionName) {
-  return withFileLockSync(sessionWorkspacesFile() + '.lock', () => {
+export async function removeSessionWorkspace(/** @type {any} */ sessionName) {
+  return withFileLock(sessionWorkspacesFile() + '.lock', () => {
     const map = loadSessionWorkspaces();
     if (!map[sessionName]) return false;
     delete map[sessionName];
@@ -200,8 +213,8 @@ export function removeSessionWorkspace(/** @type {any} */ sessionName) {
 }
 
 // 会话改名时迁移映射（记录保留）
-export function moveSessionWorkspace(/** @type {any} */ oldName, /** @type {any} */ newName) {
-  return withFileLockSync(sessionWorkspacesFile() + '.lock', () => {
+export async function moveSessionWorkspace(/** @type {any} */ oldName, /** @type {any} */ newName) {
+  return withFileLock(sessionWorkspacesFile() + '.lock', () => {
     const map = loadSessionWorkspaces();
     if (!map[oldName]) return false;
     map[newName] = map[oldName];

@@ -479,7 +479,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     const sessionWsDir = getSessionWorkspace(sessionName);
     const taskDir = sessionWsDir || workingDir;
     if (!sessionWsDir) {
-      setSessionWorkspace(sessionName, taskDir, currentWorkspace(workingDir)?.name || null);
+      await setSessionWorkspace(sessionName, taskDir, currentWorkspace(workingDir)?.name || null);
     }
     // v0.3.0 P0-3：项目记忆会话内快照——本会话全程用同一份快照（前缀稳定），
     // 每轮结束提取的新条目只写文件、不回灌当前会话。
@@ -670,7 +670,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
             const oldName = path.basename(session.file);
             const renamed = renameSessionFile(fs, path, home, session, title);
             if (renamed) {
-              moveSessionWorkspace(oldName, path.basename(renamed)); // 会话改名 → 工作空间映射跟随
+              await moveSessionWorkspace(oldName, path.basename(renamed)); // 会话改名 → 工作空间映射跟随
               claimSessionKey(session.file); // 忙锁键同步迁移，否则新文件名发起的回合不会被判「忙」
             }
           }

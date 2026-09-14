@@ -50,7 +50,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       const ws = workspaceForDir(wsDir);
       if (wsDir && path.resolve(wsDir) !== path.resolve(state.workingDir)) {
         state.workingDir = wsDir; // 审计 P2-5：仅在目录不同时才切换，减少全局状态抖动
-        if (ws) touchWorkspace(ws.name);
+        if (ws) await touchWorkspace(ws.name);
       }
       json(res, 200, {
         ok: true,
@@ -74,13 +74,13 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       const title = sanitizeTitle(String(body.title || '会话'));
       const renamed = renameSessionFile(fs, path, home, { file: full }, title);
       if (!renamed) return json(res, 500, { error: '重命名失败（可能存在同名会话）' });
-      moveSessionWorkspace(file, path.basename(renamed));
+      await moveSessionWorkspace(file, path.basename(renamed));
       return json(res, 200, { ok: true, file: path.basename(renamed) });
     }
     if (body.action === 'delete') {
       try {
         fs.unlinkSync(full);
-        removeSessionWorkspace(file);
+        await removeSessionWorkspace(file);
         return json(res, 200, { ok: true });
       } catch (/** @type {any} */ err) {
         return json(res, 500, { error: String(err?.message || err) });
