@@ -6240,6 +6240,24 @@ if (process.platform !== 'win32') {
   ok('v0.6.2 P2-8：出网闸门保留 Request 的方法与正文（不再静默降级为 GET）');
 }
 
+
+// ---------- 97. v0.6.2 audit-report B-CT-1：token 计数器的 identity 必须稳定 ----------
+// 该报告称 WeakMap 消息级 token 缓存「**永远** miss、每步全量 BPE」——**实测不成立**：
+// 同一计数器下 200 次调用耗时 0.0ms（缓存命中），失效只发生在「计数器函数对象被重建」时。
+// 但它确实暴露了一个真实（较小）的浪费：makeTokenCounter 每次都返回新函数对象，
+// 于是 context.js 的缓存守卫 `hit.fn === count` 在跨实例/跨回合时必然失配。
+{
+  const { makeTokenCounter } = await import(pathToFileURL(path.join(srcDir, 'tokenizer.js')).href);
+  const { messageTokens } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
+  const a = makeTokenCounter('deepseek-flash');
+  const b = makeTokenCounter('deepseek-flash');
+  assert.equal(a, b, '同一模型的计数器必须是同一个函数对象——缓存守卫是 `hit.fn === count`，identity 不稳就等于缓存失效');
+  assert.notEqual(makeTokenCounter('some-unknown-model-97'), a, '不同模型必须是不同计数器（换模型后不得沿用旧计数）');
+  const msg97 = { role: 'user', content: 'x'.repeat(200) };
+  assert.equal(messageTokens(msg97, a), messageTokens(msg97, a), '同一消息同一计数器应返回一致结果');
+  ok('v0.6.2 B-CT-1：token 计数器按模型名缓存（identity 稳定，跨实例/跨回合的 token 缓存不再白算）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

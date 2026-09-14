@@ -334,9 +334,22 @@ export function countTokens(text, modelName) {
 
 // 供上下文预算使用的计数器工厂
 /** @param {any} modelName */
-export function makeTokenCounter(modelName) {
-  if (isTokenizable(modelName)) {
-    return (/** @type {any} */ text) => countTokens(text, modelName);
-  }
-  return (/** @type {any} */ text) => heuristicTokens(text);
+// v0.6.2（第三方 audit-report 的 B-CT-1，实测后按其真实影响处理）：
+// 该报告称 WeakMap 消息级 token 缓存「**永远** miss、每步全量 BPE」——**实测不成立**：
+// 同一计数器下 200 次调用耗时 0.0ms（缓存命中），失效只发生在「计数器函数对象被重建」时。
+// 但这里原来每次都 `return (text) => countTokens(...)`，**每次调用都产生新函数对象**，
+// 于是 context.js 的缓存守卫 `hit.fn === count` 在跨实例/跨回合时必然失配、白算一遍。
+// 按模型名缓存计数器即可让 identity 稳定（模型名数量有限，不会无界增长）。
+/** @type {Map<string, (text: any) => number>} */
+const tokenCounterCache = new Map();
+
+export function makeTokenCounter(/** @type {any} */ modelName) {
+  const key = String(modelName ?? '');
+  const cached = tokenCounterCache.get(key);
+  if (cached) return cached;
+  const fn = isTokenizable(key)
+    ? (/** @type {any} */ text) => countTokens(text, key)
+    : (/** @type {any} */ text) => heuristicTokens(text);
+  tokenCounterCache.set(key, fn);
+  return fn;
 }
