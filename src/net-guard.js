@@ -145,9 +145,31 @@ export function installEgressGate(/** @type {any} */ rawNet) {
       // 它本来就自己逐跳处理）时不介入，避免改变既有语义。
       const follow = !init || init.redirect === undefined || init.redirect === 'follow';
       if (!follow) return base(input, init);
-      let current = url;
+      // v0.6.2（自评报告 P2-8）：`input` 可能是 **Request 对象**。
+      // 原实现只取它的 `.url`，然后 `curInit = { redirect: 'manual' }` —— method / body / headers /
+      // signal **全部丢失**，请求被**静默降级成 GET**（`fetch(new Request(u, { method:'POST', body }))`
+      // 实际发出的是 GET，服务端只会看到一个空 GET）。
+      // 同一根因还有第二个症状：`new URL(loc, current)` 里 current 若是 Request 对象，
+      // 会退化成字符串 "[object Request]" → 抛「非法重定向地址」。
+      // 现把 Request 的语义摊进 init，并把后续跳的基准统一为字符串 URL。
+      const isRequestInput = Boolean(input) && typeof input === 'object' && typeof input.url === 'string';
       /** @type {any} */
-      let curInit = init ? { ...init, redirect: 'manual' } : { redirect: 'manual' };
+      let current = url; // 字符串 URL：供 new URL(loc, current) 使用（不能是 Request 对象）
+      /** @type {any} */
+      let curInit =
+        isRequestInput && !init
+          ? {
+              // 有 init 时按 fetch 规范由 init 覆盖，这里只在「只传 Request」时继承其语义
+              method: input.method,
+              headers: input.headers,
+              body: input.body,
+              signal: input.signal,
+              ...(input.duplex ? { duplex: input.duplex } : {}),
+              redirect: 'manual',
+            }
+          : init
+            ? { ...init, redirect: 'manual' }
+            : { redirect: 'manual' };
       for (let hop = 0; ; hop++) {
         const res = await base(current, curInit);
         if (![301, 302, 303, 307, 308].includes(res.status)) return res;

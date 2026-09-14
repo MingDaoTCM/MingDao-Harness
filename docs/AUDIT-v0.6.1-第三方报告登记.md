@@ -265,6 +265,15 @@ timeout 就是死区，期间**所有写方必然失败**——`cachestats` 会�
 > `model-discovery` 同样迁入（它的端点是**用户配置的服务商地址**，本地 vLLM/Ollama 就是内网，
 > 故 `allowPrivate: true`），但逐跳的「非 http(s) 跳转拒绝 + 跳数上限 + 大小上限」仍然生效。
 
+## 3.14 已修复（第十五批：出网闸门保留 Request 语义）
+
+| 项 | 位置 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| P2-8（自评报告） | `src/net-guard.js` | 闸门包装 `fetch` 时只取 `Request` 的 `.url`，随后 `curInit = { redirect: 'manual' }` —— method / body / headers / signal **全部丢失**，请求被**静默降级成 GET**（`fetch(new Request(u, { method:'POST', body }))` 实际发出的是空 GET）。同源第二症状：`new URL(loc, current)` 里 current 若是 Request 对象会退化成 `"[object Request]"` → 抛「非法重定向地址」 | 只传 `Request`（无 `init`）时把它的语义摊进 init；跳转基准统一为字符串 URL。有 `init` 时按 fetch 规范由 init 覆盖，不改变既有语义 |
+
+> 报告标注为"潜在"（全仓当时 `grep 'new Request('` 无匹配）——但**Pack 与第三方代码用的是全局
+> fetch**，很容易踩；而且失败是静默的（服务端只看到一个空 GET）。故一并修掉。
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）
@@ -281,7 +290,7 @@ timeout 就是死区，期间**所有写方必然失败**——`cachestats` 会�
 | ~~P2-5~~ | ~~终端渲染~~ | ✅ **已修**（见 §3.1，`io.print` 统一过 `sanitizeKeepingSgr`） |
 | ~~P2-6~~ | ~~`sleeperAlive`~~ | ✅ **已修**（见 §3.8） |
 | P2-7 | 文件锁 | ✅ **部分已修**（陈旧判据与默认值，见 §3.10）；⚠️ `Atomics.wait` 阻塞面未解决 |
-| P2-8 | 出网闸门 | 包装 `fetch` 时丢失 `Request` 对象语义 |
+| ~~P2-8~~ | ~~出网闸门~~ | ✅ **已修**（见 §3.14） |
 | ~~P2-9~~ | ~~项目记忆~~ | ✅ **已修**（见 §3.2） |
 | P2-10 | `killTask` | 只发 SIGTERM 且立即改状态（Windows 无进程组语义） |
 | P2-11 | 调度 `runOnce` | 轮询期间不检查租约，最长空转 2 小时 |

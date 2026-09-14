@@ -6194,6 +6194,52 @@ if (process.platform !== 'win32') {
   ok('v0.6.2 P2-7：SSRF 逐跳复检单一来源（内网默认拒绝/显式允许/非 http(s) 重定向拒绝/跳数与大小上限 + 全仓无 redirect:follow）');
 }
 
+
+// ---------- 96. v0.6.2 自评 P2-8：出网闸门包装 fetch 必须保留 Request 语义 ----------
+// 原实现只取 Request 的 `.url`，method/body/headers/signal 全部丢失 →
+// `fetch(new Request(u, { method: 'POST', body }))` 实际发出的是**空 GET**，而且是静默的。
+// 全仓当时没有 `new Request(`，属潜在缺陷；但 Pack / 第三方代码用的是全局 fetch，很容易踩。
+{
+  const ng96 = await import(pathToFileURL(path.join(srcDir, 'net-guard.js')).href);
+  const http96 = await import('node:http');
+  const home96 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p96-'));
+  const prevHome96 = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = home96;
+  let seen96 = /** @type {any} */ (null);
+  const srv96 = http96.createServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => {
+      body += c;
+    });
+    req.on('end', () => {
+      seen96 = { method: req.method, body };
+      res.writeHead(200);
+      res.end('ok');
+    });
+  });
+  await new Promise((r) => srv96.listen(0, '127.0.0.1', r));
+  const url96 = `http://127.0.0.1:${srv96.address().port}/echo`;
+  try {
+    ng96.installEgressGate({ allow: ['127.0.0.1'], mode: 'warn' });
+    // 1) 只传 Request（无 init）—— 必须保留 POST 与正文
+    const r1 = await fetch(new Request(url96, { method: 'POST', body: 'hello-body' }));
+    assert.equal(r1.status, 200, '请求应成功');
+    assert.equal(seen96.method, 'POST', 'Request 的方法必须保留（否则被静默降级成 GET）：' + JSON.stringify(seen96));
+    assert.equal(seen96.body, 'hello-body', 'Request 的正文必须保留：' + JSON.stringify(seen96));
+    // 2) 普通字符串 + init 的既有路径不得回归
+    seen96 = null;
+    await fetch(url96, { method: 'POST', body: 'second-body' });
+    assert.equal(seen96.method, 'POST', '字符串 + init 路径不得回归');
+    assert.equal(seen96.body, 'second-body', '字符串 + init 的正文不得丢失');
+  } finally {
+    ng96.uninstallEgressGate();
+    srv96.close();
+    process.env.MINGDAO_HOME = prevHome96;
+    safeRmSync(home96, { recursive: true, force: true });
+  }
+  ok('v0.6.2 P2-8：出网闸门保留 Request 的方法与正文（不再静默降级为 GET）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });
