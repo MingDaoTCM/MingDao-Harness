@@ -39,6 +39,11 @@ GITCODE_TOKEN="${MINGDAO_GITCODE_TOKEN:-}"
 [ -n "$GITCODE_TOKEN" ] || { echo "缺少 MINGDAO_GITCODE_TOKEN"; exit 1; }
 
 TAG="v$V"
+# 本地暂存目录：默认 /tmp。Windows（Git Bash）下 Node 会把 "/tmp" 解析成 D:\tmp，
+# 而 bash 的 /tmp 在别处——两边指的不是同一个地方。给一个可覆盖的开关，
+# 测试与 Windows 用户都能指到真实存在、双方都看得见的目录。
+# 注意：远端路径仍固定 /tmp（内层脚本在 Linux 服务器上跑），不要跟着改。
+LOCAL_TMP="${MIRROR_TMP:-/tmp}"
 DL="/opt/1panel/www/sites/mingdao-site/downloads"
 FILES="mingdao-setup-$V-x64.exe mingdao-$V-amd64.deb mingdao-$V-arm64.dmg mingdao-$V-x64.dmg mingdao-$V-x86_64.AppImage mingdao-$V-arm64-mac.zip mingdao-$V-x64-mac.zip"
 
@@ -111,7 +116,7 @@ BODY="${NOTES:-RELEASE-NOTES-$V.md}"
 scp -q "$BODY" mingdao-server:/tmp/mirror-release-$V-body.md
 BODY="/tmp/mirror-release-$V-body.md"
 
-cat > /tmp/mirror-release-$V.sh <<'INNER'
+cat > "$LOCAL_TMP/mirror-release-$V.sh" <<'INNER'
 #!/bin/bash
 set -uo pipefail
 V="$1"; TAG="v$1"; BODY="$2"; NAME="$3"
@@ -195,7 +200,12 @@ PY
 done
 echo "MIRROR_RELEASE_DONE $TAG"
 INNER
-chmod +x /tmp/mirror-release-$V.sh
+chmod +x "$LOCAL_TMP/mirror-release-$V.sh"
+# 内层脚本必须**送到服务器**：此前只 scp 了发布文案，脚本本身留在本地，
+# 而回显的命令却让操作者去服务器上执行 /tmp/mirror-release-$V.sh —— 那一步其实跑不起来
+# （除非有人手工拷过，且从未写进清单）。一并补上，让回显的命令真的可用。
+scp -q "$LOCAL_TMP/mirror-release-$V.sh" "mingdao-server:/tmp/mirror-release-$V.sh"
+ssh mingdao-server "chmod +x /tmp/mirror-release-$V.sh"
 
 # 凭据经 **stdin** 送到服务器，落在 umask 077 的临时文件里；外层立即删掉本地副本。
 # 为什么不用 scp：scp 的权限继承依赖本地文件模式，容易被 umask 抹掉；ssh + `cat >` 配 umask 077
@@ -209,6 +219,6 @@ ssh mingdao-server "umask 077; cat > /tmp/mirror-release-$V.env" < "$ENVF_LOCAL"
 rm -f "$ENVF_LOCAL"   # 本地副本用完即删，不必等到退出
 ssh mingdao-server "chmod 600 /tmp/mirror-release-$V.env; ls -l /tmp/mirror-release-$V.env"
 
-echo "上传脚本已生成 /tmp/mirror-release-$V.sh —— 在服务器运行："
+echo "上传脚本已生成并送达服务器 /tmp/mirror-release-$V.sh —— 运行："
 echo "  ssh mingdao-server 'nohup bash /tmp/mirror-release-$V.sh \"$V\" \"$BODY\" \"$NAME\" > /tmp/mirror-release-$V.log 2>&1 &'"
 echo "  （凭据由 /tmp/mirror-release-$V.env 提供，脚本读取后立即删除；token 不经过命令行，也不出现在以上回显中）"

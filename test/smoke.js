@@ -6953,78 +6953,198 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
 //   ① 本地与服务器的 ps 都能看到 argv（附件上传要跑几小时，argv 就挂几小时）；
 //   ② 回显的那行会被复制进 shell 历史 / 聊天 / issue；
 //   ③ gitee 的 token 还写在 URL 里（?access_token=…）→ 进服务器上 curl 的 argv 与访问日志。
-// 这里用桩替掉 git/ssh/curl，喂金丝雀凭据，断言它**一次都不出现在 argv 或回显里**，
-// 并且确实是从 ssh 的 stdin 过去的。
+//
+// 分两层验证，理由与第 75 节同口径：
+//   · 静态守卫（全平台）：直接读脚本源码，钉住"凭据不经过 argv/URL/回显"这些**写法**；
+//   · 行为验证（仅在有 bash 的平台）：把 git/ssh/scp/curl 换成桩，喂金丝雀 token，
+//     断言它一次都不出现在任何 argv 与回显里，且确实经 ssh stdin 送达。
+//     Windows 跳过——那里的 /tmp 语义与 bash 不同（Node 的 "/tmp" 是 D:\tmp，bash 的不是），
+//     强行跑只会得到与实现无关的红灯。
 {
-  const dir104 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-rel104-'));
-  const SECRET_G = 'CANARY-GITEE-2f9c41d7';
-  const SECRET_C = 'CANARY-GITCODE-8b3e50aa';
-  const rec = path.join(dir104, 'argv.log');
-  const stdinLog = path.join(dir104, 'ssh-stdin.log');
-  const stub = path.join(dir104, 'bin');
-  fs.mkdirSync(stub, { recursive: true });
-  try {
-    // 桩：记录 argv + 让脚本关心的几条命令"成功"
-    const mk = (name, body) => {
-      fs.writeFileSync(path.join(stub, name), '#!/bin/bash\n' + body, { mode: 0o755 });
-    };
-    // \${name} 必须转义：否则会被 JS 模板字符串当成插值（这里要的是写进桩脚本的字面量）
-    const record = `printf '%s\\n' "\${name} $*" >> ${JSON.stringify(rec)}\n`;
-    mk('git', record +
-      `if [ "$1" = "remote" ]; then exit 0; fi\n` +
-      `if [ "$1" = "rev-parse" ]; then echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; exit 0; fi\n` +
-      // 必须用 printf：echo 不会解释 \t，输出字面反斜杠-t → cut -f1 切不开，对齐检查会误判为不一致
-      `if [ "$1" = "ls-remote" ]; then printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\trefs/heads/main\\n'; exit 0; fi\n` +
-      `exit 0\n`);
-    // ssh：记录 argv，并把 stdin 单独落盘（凭据必须从这里过）
-    mk('ssh', `printf '%s\\n' "ssh $*" >> ${JSON.stringify(rec)}\ncat >> ${JSON.stringify(stdinLog)}\nprintf '\\n---ssh-argv-end---\\n' >> ${JSON.stringify(stdinLog)}\nexit 0\n`);
-    mk('scp', record + `exit 0\n`);
-    mk('curl', record + `exit 0\n`);
+  const REL = path.join(srcDir, '..', 'scripts', 'publish-mirror-releases.sh');
+  const relSrc = fs.readFileSync(REL, 'utf8');
+  const relCode = relSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
 
-    const notes104 = path.join(dir104, 'notes.md');
-    fs.writeFileSync(notes104, '# v0.6.2 发布说明\n');
-    const r = spawnSync('bash', [path.join('scripts', 'publish-mirror-releases.sh'), '0.6.2', notes104], {
-      cwd: path.join(srcDir, '..'),
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        PATH: stub + path.delimiter + process.env.PATH,
-        MINGDAO_GITEE_TOKEN: SECRET_G,
-        MINGDAO_GITCODE_TOKEN: SECRET_C,
-      },
-    });
-    const combined = String(r.stdout || '') + String(r.stderr || '');
-    assert.equal(r.status, 0, `发版脚本应正常跑完（桩环境下），实际 status=${r.status}：${combined.slice(-500)}`);
-
-    // ① 金丝雀不得出现在任何被调用命令的 argv 里
-    const argvLog = fs.existsSync(rec) ? fs.readFileSync(rec, 'utf8') : '';
-    assert.ok(argvLog.length > 0, '桩必须记录到命令调用（否则这个测试什么都没测到）');
-    for (const [label, secret] of [['gitee', SECRET_G], ['gitcode', SECRET_C]]) {
-      assert.ok(!argvLog.includes(secret), `${label} token 不得出现在任何命令的 argv 里：\n${argvLog.split('\n').filter((l) => l.includes(secret)).join('\n')}`);
-      // ② 也不得出现在脚本自己的回显里（回显会被复制进 shell 历史/聊天）
-      assert.ok(!combined.includes(secret), `${label} token 不得出现在脚本输出里：\n${combined.split('\n').filter((l) => l.includes(secret)).join('\n')}`);
+  // ---- 静态守卫（全平台）----
+  // ① URL 里不得有凭据
+  const urlLines = relCode.split('\n').filter((l) => /https?:\/\//.test(l));
+  for (const l of urlLines) {
+    assert.ok(!/access_token=/.test(l), `URL 里不得出现 access_token（会进 curl 的 argv 与访问日志）：${l.trim()}`);
+  }
+  // ② gitcode 的 token 不得作为 python 的 argv
+  assert.ok(!/python3 - [^\n]*GITCODE_TOKEN/.test(relCode), 'python 不得从 argv 取 gitcode token');
+  assert.ok(/os\.environ\["GITCODE_TOKEN"\]/.test(relCode), 'python 应改从环境变量取 gitcode token');
+  // ③ 内层脚本：从凭据文件读、读到就删、不接受位置参数里的 token
+  assert.ok(/\.\s*"\$ENVF"/.test(relCode), '内层脚本应从凭据文件 source token');
+  assert.ok(/rm -f "\$ENVF"/.test(relCode), 'source 之后必须**立即删除**凭据文件（不要让 token 躺在磁盘上）');
+  assert.ok(!/_TOKEN="\$\d/.test(relCode), '内层脚本不得从任何位置参数取 token（argv 会出现在服务器的 ps 里）');
+  assert.ok(/Authorization: token \$GITEE_TOKEN/.test(relCode), 'gitee 必须改用 Authorization 头（已实测：真 token 200 / 假 token 401 / 匿名 401）');
+  // ④ 凭据只经 ssh **stdin** 传输，且远端文件用 umask 077 建立
+  assert.ok(/ssh mingdao-server "umask 077; cat > \/tmp\/mirror-release-\$V\.env" < "\$ENVF_LOCAL"/.test(relCode), '凭据必须经 ssh stdin 送达，且远端以 umask 077 建立');
+  // ⑤ 回显的运行命令里不得有 token 变量（回显会被复制进 shell 历史/聊天）
+  for (const line of relCode.split('\n')) {
+    if (/^\s*echo\s/.test(line) && /ssh mingdao-server/.test(line)) {
+      assert.ok(!/_TOKEN/.test(line), `回显的运行命令里不得出现 token 变量：${line.trim()}`);
     }
-    // ③ 凭据必须确实经 ssh stdin 传过去（不能只是"哪儿都没传"）
-    const stdinLog0 = fs.existsSync(stdinLog) ? fs.readFileSync(stdinLog, 'utf8') : '';
-    assert.ok(stdinLog0.includes(SECRET_G) && stdinLog0.includes(SECRET_C), '凭据必须经 ssh **stdin** 送达（这是替代 argv 的正道）');
-    // ④ 内层脚本：读到就删，且不再从位置参数取 token
-    const inner = fs.readFileSync('/tmp/mirror-release-0.6.2.sh', 'utf8');
-    // 覆盖**任意**位置参数：只挡 $3/$4 是不够的（实测过：把 token 挪到 $4 就能绕过）
-    assert.ok(!/_TOKEN="\$\d/.test(inner), '内层脚本不得从任何位置参数取 token（argv 会出现在服务器的 ps 里，且上传要跑几小时）');
-    assert.ok(/\.\s*"\$ENVF"/.test(inner), '内层脚本应从凭据文件 source token');
-    assert.ok(/rm -f "\$ENVF"/.test(inner), 'source 之后必须**立即删除**凭据文件（不要让 token 躺在磁盘上）');
-    assert.ok(!/access_token=/.test(inner.replace(/^#.*$/gm, '')), 'gitee 的 token 不得再写在 URL 查询串里');
-    assert.ok(/Authorization: token \$GITEE_TOKEN/.test(inner), 'gitee 必须改用 Authorization 头（已实测可用：真 token 200 / 假 token 401）');
-    assert.ok(/os\.environ\["GITCODE_TOKEN"\]/.test(inner), 'python 应从环境变量取 token，而不是 argv');
-    // ⑤ 本地凭据副本必须被清掉
-    assert.ok(!fs.existsSync('/tmp/mirror-release-0.6.2.env'), '本地凭据临时文件必须已被删除');
-  } finally {
-    safeRmSync(path.join('/tmp', 'mirror-release-0.6.2.sh'), { force: true });
-    safeRmSync(path.join('/tmp', 'mirror-release-0.6.2-body.md'), { force: true });
-    safeRmSync(path.join('/tmp', 'mirror-release-0.6.2.env'), { force: true });
-    safeRmSync(dir104, { recursive: true, force: true });
+  }
+
+  // ---- 行为验证（仅在有 bash 的平台）----
+  const hasBash104 = process.platform !== 'win32' && spawnSync('bash', ['-c', 'exit 0'], { encoding: 'utf8' }).status === 0;
+  if (!hasBash104) {
+    assert.ok(true, 'Windows 无可靠 bash/共享 /tmp 语义：本节的**行为**部分按第 75 节同口径跳过，静态守卫已全平台执行');
+  } else {
+    const dir104 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-rel104-'));
+    const SECRET_G = 'CANARY-GITEE-2f9c41d7';
+    const SECRET_C = 'CANARY-GITCODE-8b3e50aa';
+    const rec = path.join(dir104, 'argv.log');
+    const stdinLog = path.join(dir104, 'ssh-stdin.log');
+    // 传给 bash 的路径一律用正斜杠：Windows 上 path.join 给反斜杠，bash 会把 \U 之类当转义
+    const recSh = rec.split(path.sep).join('/');
+    const stdinSh = stdinLog.split(path.sep).join('/');
+    const dirSh = dir104.split(path.sep).join('/');
+    const stub = path.join(dir104, 'bin');
+    fs.mkdirSync(stub, { recursive: true });
+    try {
+      const mk = (name, body) => fs.writeFileSync(path.join(stub, name), '#!/bin/bash\n' + body, { mode: 0o755 });
+      // \${name} 必须转义：否则会被 JS 模板字符串当成插值（这里要的是写进桩脚本的字面量）
+      const record = `printf '%s\n' "\${name} $*" >> ${recSh}\n`;
+      mk('git', record +
+        `if [ "$1" = "remote" ]; then exit 0; fi\n` +
+        `if [ "$1" = "rev-parse" ]; then echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; exit 0; fi\n` +
+        // 必须用 printf：echo 不解释 \t，输出字面反斜杠-t → cut -f1 切不开，对齐检查会误判为不一致
+        `if [ "$1" = "ls-remote" ]; then printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/main\n'; exit 0; fi\n` +
+        `exit 0\n`);
+      mk('ssh', `printf '%s\n' "ssh $*" >> ${recSh}\ncat >> ${stdinSh}\nprintf '\n---ssh-argv-end---\n' >> ${stdinSh}\nexit 0\n`);
+      mk('scp', record + 'exit 0\n');
+      mk('curl', record + 'exit 0\n');
+
+      const notes104 = path.join(dir104, 'notes.md');
+      fs.writeFileSync(notes104, '# v0.6.2 发布说明\n');
+      const r = spawnSync('bash', ['scripts/publish-mirror-releases.sh', '0.6.2', notes104], {
+        cwd: path.join(srcDir, '..'),
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: stub + path.delimiter + process.env.PATH,
+          // 本地暂存目录必须显式指定：Windows 上 Node 把 "/tmp" 解析成 D:\tmp，
+          // 而 bash 的 /tmp 在别处——不指定的话读生成物会 ENOENT（实测 CI 就是这么红的）
+          MIRROR_TMP: dirSh,
+          MINGDAO_GITEE_TOKEN: SECRET_G,
+          MINGDAO_GITCODE_TOKEN: SECRET_C,
+        },
+      });
+      const combined = String(r.stdout || '') + String(r.stderr || '');
+      assert.equal(r.status, 0, `发版脚本应正常跑完（桩环境下），实际 status=${r.status}：${combined.slice(-500)}`);
+
+      const argvLog = fs.existsSync(rec) ? fs.readFileSync(rec, 'utf8') : '';
+      assert.ok(argvLog.length > 0, '桩必须记录到命令调用（否则这个测试什么都没测到）');
+      for (const [label, secret] of [['gitee', SECRET_G], ['gitcode', SECRET_C]]) {
+        assert.ok(!argvLog.includes(secret), `${label} token 不得出现在任何命令的 argv 里：${argvLog.split('\n').filter((l) => l.includes(secret)).join('')}`);
+        assert.ok(!combined.includes(secret), `${label} token 不得出现在脚本输出里：${combined.split('\n').filter((l) => l.includes(secret)).join('')}`);
+      }
+      const stdinLog0 = fs.existsSync(stdinLog) ? fs.readFileSync(stdinLog, 'utf8') : '';
+      assert.ok(stdinLog0.includes(SECRET_G) && stdinLog0.includes(SECRET_C), '凭据必须经 ssh **stdin** 送达（这是替代 argv 的正道）');
+      assert.ok(!fs.existsSync(path.join('/tmp', 'mirror-release-0.6.2.env')), '本地凭据临时文件必须已被删除');
+      // 内层脚本必须**真的被送到服务器**：此前只 scp 了发布文案，脚本留在本地，
+      // 而回显的命令却让操作者去服务器上执行它——那条命令其实跑不起来
+      assert.ok(/scp -q "\$LOCAL_TMP\/mirror-release-\$V\.sh" "mingdao-server:\/tmp\/mirror-release-\$V\.sh"/.test(relSrc), '内层脚本必须被 scp 到服务器（否则回显的运行命令无效）');
+    } finally {
+      safeRmSync(path.join(dir104, 'mirror-release-0.6.2.sh'), { force: true });
+      safeRmSync(path.join('/tmp', 'mirror-release-0.6.2-body.md'), { force: true });
+      safeRmSync(path.join('/tmp', 'mirror-release-0.6.2.env'), { force: true });
+      safeRmSync(dir104, { recursive: true, force: true });
+    }
   }
   ok('v0.6.2 发布链路凭据纪律：token 不进 argv / 不进 URL / 不回显，改走 ssh stdin + 读后即删（D-REL-1/2）');
+}
+
+// ---------- 105. v0.6.2：路径穿越（B-SR-1）普查结论落地为断言 ----------
+// 报告只给了代号 B-SR-1「路径穿越」，没有位置。逐个攻击面查下来，**每一处都已设防**；
+// 但"某处有守卫"这种结论如果不写成断言，下次重构就会被悄悄拆掉——
+// 尤其是技能名那一处：copySkillIntoUser 先用**未校验**的 meta.name 拼出 target，
+// 破坏性的 rmSync/mkdirSync 就在后面几行，全靠中间那次 validateSkillDir 拦住。
+{
+  const SL = await import(pathToFileURL(path.join(srcDir, 'skill-lib.js')).href);
+  const WS = await import(pathToFileURL(path.join(srcDir, 'workspace.js')).href);
+  const LED = await import(pathToFileURL(path.join(srcDir, 'ledger.js')).href);
+  const home105 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sr105-'));
+  // 金丝雀必须**正好落在穿越目标上**：userSkillsDir() = <home>/skills，
+  // path.join(<home>/skills, '../../X') = <parent-of-home>/X。放在别处的话，
+  // 即使守卫被拆掉，rmSync 也只是删了个不存在的东西 —— 断言照样通过（实测踩过这个假绿）。
+  const canaryName = 'CANARY-' + path.basename(home105);
+  const canary105 = path.join(home105, '..', canaryName);
+  const prevHome105 = process.env.MINGDAO_HOME;
+  try {
+    process.env.MINGDAO_HOME = home105;
+    fs.mkdirSync(path.join(home105, 'skills'), { recursive: true });
+    fs.mkdirSync(canary105, { recursive: true });
+    fs.writeFileSync(path.join(canary105, 'keep.txt'), '不能被动');
+
+    // ① 技能名白名单：'..'、'.'、含分隔符、含 '..' 一律拒绝
+    for (const bad of ['..', '.', '../x', 'a/b', 'a\\b', 'x..y', '', '   ', 'a'.repeat(65), 'a b']) {
+      assert.equal(SL.assertSafeSkillName(bad), null, `技能名 ${JSON.stringify(bad)} 必须被拒绝`);
+    }
+    assert.equal(SL.assertSafeSkillName('good-skill_1'), 'good-skill_1', '正常技能名应通过');
+
+    // ② frontmatter 里的 name 同样受约束（这是**下载来的**内容，属于外部输入）
+    // 恶意名字按金丝雀的实际位置生成，保证 rmSync 一旦先于校验执行就会真的删掉它
+    const evil = `---\nname: ../../${canaryName}\ndescription: 恶意技能\n---\n\n# x\n`;
+    const v = SL.validateSkillMarkdown(evil, 'test');
+    assert.ok(v.error && v.error.includes('frontmatter.name'), `恶意 frontmatter.name 必须被拒绝，实际 ${JSON.stringify(v)}`);
+
+    // ③ 端到端（最深的一条）：用**恶意名字**的目录安装技能，绝不能在 skills 目录之外动手脚。
+    //    copySkillIntoUser 会先 path.join(userSkillsDir(), name) 再 rmSync/mkdirSync——
+    //    中间那次 validateSkillDir 是唯一防线，这里把它钉住。
+    const evilDir = path.join(home105, 'evil-src');
+    fs.mkdirSync(evilDir, { recursive: true });
+    fs.writeFileSync(path.join(evilDir, 'SKILL.md'), evil);
+    const inst = SL.installFromDir(evilDir);
+    assert.ok(inst && inst.error, `恶意技能必须安装失败，实际 ${JSON.stringify(inst)}`);
+    assert.ok(fs.existsSync(path.join(canary105, 'keep.txt')), 'skills 目录之外的内容**不得**被删除（rmSync 越界）');
+    // 正常技能仍应能装进去（证明拒绝的是"恶意名"，不是"安装功能"）
+    const okDir = path.join(home105, 'ok-src');
+    fs.mkdirSync(okDir, { recursive: true });
+    fs.writeFileSync(path.join(okDir, 'SKILL.md'), '---\nname: ok-skill\ndescription: 正常技能\n---\n\n# ok\n');
+    const okInst = SL.installFromDir(okDir);
+    assert.equal(okInst.error, undefined, `正常技能应安装成功：${JSON.stringify(okInst)}`);
+    assert.ok(fs.existsSync(path.join(home105, 'skills', 'ok-skill', 'SKILL.md')), '正常技能应落到 <home>/skills/<name>/');
+
+    // ④ 账本 runId：直接拼进文件路径，必须按白名单校验（读/校验/导出三条路径）
+    // 不能只断言「读一个不存在的路径返回空」——那样守卫在不在都一样（实测假绿）。
+    // 要在**穿越目标位置真的放一个文件**，再看它会不会被读到。
+    fs.writeFileSync(path.join(home105, 'secret.jsonl'), '{"v":1,"type":"secret","seq":1,"prev":"0"}\n');
+    assert.deepEqual(LED.readRun('../secret'), [], '非法 runId 读取必须返回空——即使目标文件真的存在（不得穿越）');
+    assert.equal(LED.verifyRun('../secret').ok, false, '非法 runId 的校验必须失败（不得穿越）');
+    assert.deepEqual(LED.readRun('../../etc/passwd'), [], '非法 runId 读取必须返回空（不得穿越）');
+    assert.equal(LED.isValidRunId('../../etc/passwd'), false, '非法 runId 必须判为非法');
+    assert.equal(LED.isValidRunId('abc-012345'), true, '合法 runId 形态应通过');
+
+    // ⑤ 工作空间名：含路径分隔符一律拒绝（名称只作 JSON 键，但仍不该接受路径字符）
+    const good105 = path.join(home105, 'proj');
+    fs.mkdirSync(good105, { recursive: true });
+    assert.ok(WS.addWorkspace('a/b', good105).error, '工作空间名含 / 必须被拒绝');
+    assert.ok(WS.addWorkspace('a\\b', good105).error, '工作空间名含 \\ 必须被拒绝');
+    assert.equal(WS.addWorkspace('okname', good105).ok, true, '正常名字应可登记');
+
+    // ⑥ 会话文件参数：Web 路由一律 path.basename（结构性确认，避免以后有人图省事去掉）
+    for (const f of ['src/web/routes/domains/sessions.js', 'src/web/server.js']) {
+      const src = fs.readFileSync(path.join(srcDir, '..', f), 'utf8');
+      const joins = [...src.matchAll(/path\.join\([^)]*sessions[^)]*\)/g)].map((m) => m[0]);
+      assert.ok(joins.length > 0, `${f} 应存在会话路径拼接`);
+      for (const j of joins) {
+        // 两种正当写法都接受：① join 里当场 basename；② 变量在**同一文件上方**已由 path.basename 赋值
+        if (/basename/.test(j)) continue;
+        const lastArg = (j.match(/,\s*([A-Za-z_$][\w$]*)\s*\)$/) || [])[1];
+        const assigned = lastArg && new RegExp(`(const|let|var)\\s+${lastArg}\\s*=\\s*path\\.basename\\s*\\(`).test(src);
+        assert.ok(assigned, `${f} 里拼接会话路径必须先 path.basename（未在 join 内，也未找到 ${lastArg} 的 basename 赋值）：${j}`);
+      }
+    }
+  } finally {
+    process.env.MINGDAO_HOME = prevHome105;
+    safeRmSync(canary105, { recursive: true, force: true });
+    safeRmSync(home105, { recursive: true, force: true });
+  }
+  ok('v0.6.2 路径穿越普查：技能名/frontmatter/账本 runId/工作空间名/会话文件参数逐处设防且被钉住（B-SR-1）');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });
