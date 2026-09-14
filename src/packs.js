@@ -19,7 +19,7 @@ import { atomicWriteJsonSync } from './atomic-write.js';
 // 目录内容指纹复用技能的同一实现（同一套「逐文件 sha256 → 再哈希」口径），
 // 不另写一份——本仓已经有「同一逻辑多份副本」的教训（见 docs/AUDIT-v0.4.6.md）。
 import { skillDirHash } from './skill-lib.js';
-import { isValidPattern, PATTERN_KINDS, KINDS } from './constraints.js';
+import { isValidPattern, patternRejectionReason, PATTERN_KINDS, KINDS } from './constraints.js';
 import { registerTool } from './tools/index.js';
 
 /** 本内核支持的 Pack API 主版本 */
@@ -371,7 +371,9 @@ function validateConstraint(c, i) {
   // 这里与 engine 共用 isValidPattern（单一口径），并顺带拒掉「忘了写 pattern」——
   // 后者在运行时会变成 `new RegExp('')` 匹配一切，比作者本意严得多。
   if (PATTERN_KINDS.has(c.kind) && !isValidPattern(c.pattern)) {
-    return `${tag}（${c.kind}）需要 pattern 字段且必须是合法正则（当前：${JSON.stringify(c.pattern)}）`;
+    // 把**具体原因**透出来（缺字段 / 编译失败 / ReDoS 形状），否则作者只知道"不合法"却不知怎么改
+    const why = patternRejectionReason(c.pattern);
+    return `${tag}（${c.kind}）的 pattern 不可用：${why}（当前：${JSON.stringify(c.pattern)}）`;
   }
   return null;
 }

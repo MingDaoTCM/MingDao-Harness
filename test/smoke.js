@@ -6258,6 +6258,50 @@ if (process.platform !== 'win32') {
   ok('v0.6.2 B-CT-1：token 计数器按模型名缓存（identity 稳定，跨实例/跨回合的 token 缓存不再白算）');
 }
 
+
+// ---------- 98. v0.6.2 audit-report B-CON-1：约束 pattern 必须防灾难性回溯（ReDoS） ----------
+// 原 isValidPattern 只判「正则能否编译」，完全不防回溯。而 pattern 来自 **Pack 清单/用户配置**，
+// 匹配对象是**模型输出**（可被 fetch/read 引入的外部文本影响）。实测 `(a+)+$` 对 **29 字符**
+// 输入耗时 **4786ms** 且每多一字符翻倍——长输出是常态，一个 Pack 就能让内核永久卡死。
+{
+  const { isValidPattern, patternRejectionReason } = await import(pathToFileURL(path.join(srcDir, 'constraints.js')).href);
+  // 1) 危险形状必须拒绝，并给出**具体原因**（作者要知道怎么改）
+  for (const p of ['(a+)+$', '(a*)*', '(\\d+)*', '(x+){2,}']) {
+    assert.ok(!isValidPattern(p), `必须拒绝 ReDoS 形状：${p}`);
+    assert.ok(/嵌套量词/.test(String(patternRejectionReason(p))), `原因应指明嵌套量词：${p}`);
+  }
+  // 2) 正常写法**不得误伤**（刻意保守，只拦嵌套量词）
+  for (const p of ['(a|b)+', '(ab)+', '(a+)?', '^[a-z]+$', '\\d{4}-\\d{2}-\\d{2}', '结论|因此|所以']) {
+    assert.ok(isValidPattern(p), `不得误伤正常 pattern：${p}（原因：${patternRejectionReason(p)}）`);
+  }
+  // 3) 编译失败仍要给出具体原因（而不是笼统"不合法"）
+  assert.ok(/无法编译/.test(String(patternRejectionReason('['))), '编译失败应给出原因');
+  assert.ok(/非空字符串/.test(String(patternRejectionReason(''))), '空 pattern 应给出原因');
+
+  // 4) 端到端：Pack 在**装载校验**阶段就该被拒绝（而不是等运行时卡死）。
+  //    注意约束是**运行期由 pack.mjs 提供**的（manifest 里写 contributes.constraints: true），
+  //    所以必须走 loadPack——它 import pack.mjs 后校验 contributions.constraints。
+  const { loadPack } = await import(pathToFileURL(path.join(srcDir, 'packs.js')).href);
+  const d98 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-redos98-'));
+  try {
+    fs.writeFileSync(
+      path.join(d98, 'pack.json'),
+      JSON.stringify({ apiVersion: 1, name: 'redos98', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { constraints: true } })
+    );
+    fs.writeFileSync(
+      path.join(d98, 'pack.mjs'),
+      'export const apiVersion = 1;\n' +
+        'export function createPack() { return { constraints: [{ kind: "output-forbid", id: "x", pattern: "(a+)+$", reason: "r" }] }; }\n'
+    );
+    const r98 = await loadPack(d98, {});
+    assert.equal(r98.ok, false, '含 ReDoS 形状的约束必须在装载阶段被拒绝：' + JSON.stringify(r98).slice(0, 160));
+    assert.ok((r98.errors || []).join(' ').includes('嵌套量词'), '错误信息必须点明原因：' + JSON.stringify(r98.errors));
+  } finally {
+    safeRmSync(d98, { recursive: true, force: true });
+  }
+  ok('v0.6.2 B-CON-1：约束 pattern 防灾难性回溯（装载即拒绝嵌套量词 + 具体原因 + 正常写法零误伤）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

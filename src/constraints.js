@@ -67,15 +67,41 @@ export function toolMatches(c, toolName) {
  * 比作者本意严得多，且理由里会印出 `/undefined/`，看起来像引擎坏了。
  * @param {any} pattern
  */
-export function isValidPattern(/** @type {any} */ pattern) {
-  if (typeof pattern !== 'string' || pattern === '') return false;
+// 经典灾难性回溯形状：**被量词修饰的组，其内部也以量词结尾**——
+// `(a+)+`、`(a*)*`、`(\d+)*`、`(x+){2,}`。这类模式在最坏输入上指数级回溯。
+// 刻意保守：只拦嵌套量词，不动 `(a|b)+`、`(ab)+`、`(a+)?` 这些常见且安全的写法。
+const REDOS_NESTED_QUANT = /\([^()]*[+*]\)(?:[+*]|\{\d*,?\d*\})/;
+
+/**
+ * 约束 pattern 的拒绝原因（null = 可用）。
+ *
+ * v0.6.2（audit-report B-CON-1，**已实测复现**）：原 `isValidPattern` 只判「正则能否编译」，
+ * 完全不防灾难性回溯。而 pattern 来自 **Pack 清单 / 用户配置**，匹配对象是**模型输出**
+ * ——那是可被 fetch/read 引入的外部文本影响的内容。实测 `(a+)+$` 对 **29 字符**输入耗时
+ * **4786ms**，每多一个字符翻倍：一个 Pack 就能让内核在长输出上永久卡死（而长输出恰恰是常态）。
+ *
+ * 故在装载时就 fail-closed 拒绝（与"坏正则必须在装载时拒绝"的既有口径一致），
+ * 并把**具体原因**返回给调用方，让作者知道该怎么改——而不是只看到"不合法"。
+ * @param {any} pattern
+ * @returns {string|null} 拒绝原因；null 表示可用
+ */
+export function patternRejectionReason(/** @type {any} */ pattern) {
+  if (typeof pattern !== 'string' || pattern === '') return 'pattern 必须是非空字符串';
   try {
     // eslint-disable-next-line no-new
     new RegExp(pattern);
-    return true;
-  } catch {
-    return false;
+  } catch (/** @type {any} */ e) {
+    return `正则无法编译：${e?.message || e}`;
   }
+  if (REDOS_NESTED_QUANT.test(pattern)) {
+    return 'pattern 含嵌套量词（如 (a+)+、(\\d+)*），在长文本上会指数级回溯——实测 29 字符即耗时数秒；请改写为不含嵌套量词的形式';
+  }
+  return null;
+}
+
+/** @param {any} pattern */
+export function isValidPattern(/** @type {any} */ pattern) {
+  return patternRejectionReason(pattern) === null;
 }
 
 /**
