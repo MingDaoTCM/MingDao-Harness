@@ -67,13 +67,58 @@ function escapeRe(s) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// v0.6.2（第三方报告 B-TOK-1「词表永不重试」）：**实测确认**原实现是
+//   if (data || loadError) return data;
+// 于是**一次读失败就终生锁死**：之后每次计数都走启发式估算（本文件自己写明误差可达 ±2 倍），
+// 而用户**完全看不到**——预算裁剪、上下文压缩、费用估算全都悄悄偏了。
+// 同一个文件里 customTokenizerNames() 的注释明确写着「下次重试」，这条路径却违反了它。
+//
+// 现在按错误性质区分：
+//   · 词表文件**不存在**（ENOENT）：一次读不到就别每步都去 stat，latch 住不再重试；
+//   · 其余（EBUSY/EAGAIN/EMFILE/权限/瞬时 IO）：**允许重试**，并带一个冷却窗口避免每步重试；
+//   · 无论哪种，降级都**说出来一次**（含后果与修法），不再无声。
 /** @type {any} */
 let data = null;
 /** @type {any} */
 let loadError = null;
+let loadErrorCode = /** @type {string|null} */ (null);
+let lastAttemptAt = 0;
+let degradedWarned = false;
+/** 重试冷却（毫秒）：避免"每步都重试一次失败读盘"。
+ *  可用 MINGDAO_TOKENIZER_RETRY_MS 覆盖——诊断时可调小以便"修好后立刻自愈"，
+ *  也让测试能在秒级内验证「冷却过后**自动**重试」（60 秒的默认值没法测）。 */
+const RETRY_COOLDOWN_MS = (() => {
+  const v = Number(process.env.MINGDAO_TOKENIZER_RETRY_MS);
+  return Number.isFinite(v) && v >= 0 ? v : 60_000;
+})();
+
+/** 词表是否已降级为启发式估算（true 时预算/费用口径不精确）。 */
+export function tokenizerDegraded() {
+  return data === null;
+}
+/** 词表读取失败的原因（无则 null）。 */
+export function tokenizerLoadError() {
+  return loadError ? String(/** @type {any} */ (loadError)?.message ?? loadError) : null;
+}
+/**
+ * 强制重新从磁盘加载词表（清掉已加载数据、失败状态与冷却窗口）。
+ * 给「修好之后主动重试」用（`mingdao doctor` 之类）；也让测试能复现"加载失败→修复→恢复"整条链
+ * ——只清 error 不清 data 的话，一旦加载成功就再也触发不了失败路径。
+ */
+export function resetTokenizerState() {
+  data = null;
+  loadError = null;
+  loadErrorCode = null;
+  lastAttemptAt = 0;
+}
 
 function loadData() {
-  if (data || loadError) return data;
+  if (data) return data;
+  // 已判定"文件不存在"：不再重试（也没必要每步 stat 一次）
+  if (loadError && loadErrorCode === 'ENOENT') return data;
+  // 其它错误：冷却窗口内不重试，过了就再试一次
+  if (loadError && Date.now() - lastAttemptAt < RETRY_COOLDOWN_MS) return data;
+  lastAttemptAt = Date.now();
   try {
     const file = fileURLToPath(new URL('../assets/tokenizer-data.json.gz', import.meta.url));
     const raw = zlib.gunzipSync(fs.readFileSync(file)).toString('utf8');
@@ -88,8 +133,20 @@ function loadData() {
     // 一次 matchAll 定位所有特殊 token，把 O(文本长 × 818 个 indexOf) 降到 O(n)
     const addedRe = added.length ? new RegExp(added.map(escapeRe).join('|'), 'gu') : null;
     data = { mergeRank, added, addedRe };
+    loadError = null;
+    loadErrorCode = null;
   } catch (err) {
     loadError = err;
+    loadErrorCode = String(/** @type {any} */ (err)?.code ?? '') || null;
+    // 一次说清后果与修法；不刷新（冷却窗口内的重试失败不再重复打印）
+    if (!degradedWarned) {
+      degradedWarned = true;
+      console.warn(
+        `[MingDao] ⚠ 官方词表加载失败：${String(/** @type {any} */ (err)?.message ?? err)}\n` +
+          `  token 计数已回退为**启发式估算**（本文件校准值误差可达 ±2 倍）——上下文预算、自动压缩与费用估算都会偏。\n` +
+          `  修法：确认 assets/tokenizer-data.json.gz 存在且可读（重装或 npm i mingdao-harness 可修复）。`
+      );
+    }
   }
   return data;
 }

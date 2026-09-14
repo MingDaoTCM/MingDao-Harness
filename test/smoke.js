@@ -7267,6 +7267,96 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
   ok('v0.6.2 B-SR-1：registry 索引名不得拼进安装路径（"." / ".." 会递归删掉 skills 甚至整个 MINGDAO_HOME）');
 }
 
+
+// ---------- 107. v0.6.2：词表读失败不再"终生锁死"，降级可见（audit-report B-TOK-1「词表永不重试」） ----------
+// 原实现：`if (data || loadError) return data;` —— **一次读失败就终生锁死**，
+// 之后每次计数都走启发式估算（该文件自己写明误差可达 ±2 倍），而用户完全看不到：
+// 上下文预算、自动压缩、费用估算全都悄悄偏了。
+// 同一个文件里 customTokenizerNames() 的注释明确写着「下次重试」，这条路径却违反了它。
+//
+// 必须在**子进程**里测：词表在 smoke 主进程里早就被别处加载过了（data 非空），
+// 主进程里打桩 fs.readFileSync 根本走不到失败分支——第一版就是这么假绿的。
+{
+  const tokenizerUrl = JSON.stringify(pathToFileURL(path.join(srcDir, 'tokenizer.js')).href);
+  const probe = `
+    import fs from 'node:fs';
+    // 冷却窗口调小到 50ms：默认 60 秒没法在测试里验证「冷却过后**自动**重试」——
+    // 而那条才是本次修复的核心（原实现是终生锁死，永远没有第二次尝试）。
+    process.env.MINGDAO_TOKENIZER_RETRY_MS = '50';
+    const realRead = fs.readFileSync;
+    const warns = [];
+    const realWarn = console.warn;
+    let mode = 'busy'; // busy | enoent | ok
+    fs.readFileSync = (p, ...rest) => {
+      if (String(p).includes('tokenizer-data') && mode !== 'ok') {
+        const e = new Error(mode === 'enoent' ? 'ENOENT: 模拟词表缺失' : 'EBUSY: 模拟瞬时占用');
+        e.code = mode === 'enoent' ? 'ENOENT' : 'EBUSY';
+        throw e;
+      }
+      return realRead(p, ...rest);
+    };
+    console.warn = (m) => warns.push(String(m));
+    const TOK = await import(${tokenizerUrl});
+    TOK.resetTokenizerState();
+    const out = {};
+    out.n1 = TOK.countTokens('这是一段用来触发词表加载的中文文本', 'deepseek-flash');
+    out.degradedAfterTransient = TOK.tokenizerDegraded();
+    out.err1 = TOK.tokenizerLoadError();
+    out.warnCount = warns.length;
+    out.warnText = warns[0] || '';
+    // 冷却窗口内：不重试（避免每步都去读一次坏盘）
+    mode = 'ok';
+    TOK.countTokens('冷却窗口内不应重试', 'deepseek-flash');
+    out.degradedInCooldown = TOK.tokenizerDegraded();
+    // **决定性**：冷却过后即使**不做任何显式重置**，也必须自动重试并恢复。
+    // 原实现（if (data || loadError) return data）在这里永远是降级——这正是 B-TOK-1。
+    await new Promise((r) => setTimeout(r, 90));
+    TOK.countTokens('冷却过后应自动重试', 'deepseek-flash');
+    out.degradedAfterCooldown = TOK.tokenizerDegraded();
+    out.errAfterCooldown = TOK.tokenizerLoadError();
+    TOK.resetTokenizerState();
+    TOK.countTokens('显式重置后应恢复精确计数', 'deepseek-flash');
+    out.degradedAfterReset = TOK.tokenizerDegraded();
+    out.errAfterReset = TOK.tokenizerLoadError();
+    mode = 'enoent';
+    TOK.resetTokenizerState();
+    TOK.countTokens('触发一次 ENOENT', 'deepseek-flash');
+    out.degradedEnoent = TOK.tokenizerDegraded();
+    mode = 'ok';
+    TOK.countTokens('ENOENT 后不应自动重试', 'deepseek-flash');
+    out.degradedEnoentNoAutoRetry = TOK.tokenizerDegraded();
+    TOK.resetTokenizerState();
+    TOK.countTokens('显式重试后应恢复', 'deepseek-flash');
+    out.degradedAfterExplicitRetry = TOK.tokenizerDegraded();
+    fs.readFileSync = realRead;
+    console.warn = realWarn;
+    console.log('PROBE107 ' + JSON.stringify(out));
+  `;
+  const r107 = spawnSync(process.execPath, ['--input-type=module', '-e', probe], { encoding: 'utf8' });
+  const line107 = String(r107.stdout || '').split('\n').find((l) => l.startsWith('PROBE107 '));
+  assert.ok(line107, `子进程应打印探针结果，实际 stdout=${String(r107.stdout || '').slice(0, 200)} stderr=${String(r107.stderr || '').slice(0, 300)}`);
+  const o = JSON.parse(line107.slice('PROBE107 '.length));
+
+  // ① 瞬时失败：降级 + 一次告警（点明后果与修法），而不是无声算错
+  assert.ok(o.n1 > 0, '读不到词表也要给出估算值（不能抛）');
+  assert.equal(o.degradedAfterTransient, true, '词表读失败后必须标记为降级状态');
+  assert.ok(String(o.err1).includes('EBUSY'), '必须留下具体失败原因');
+  assert.equal(o.warnCount, 1, `降级只应告警一次，实际 ${o.warnCount} 次`);
+  assert.ok(o.warnText.includes('启发式'), `告警必须点明已回退为启发式估算：${o.warnText}`);
+  assert.ok(o.warnText.includes('偏'), '告警必须点明后果（预算/费用会偏）');
+  // ② 关键：故障消失后必须**能恢复**（原缺陷正是在这里永远恢复不了）
+  assert.equal(o.degradedInCooldown, true, '冷却窗口内不应每步都重试读盘');
+  assert.equal(o.degradedAfterCooldown, false, '冷却过后必须**自动**重试并恢复（原实现终生锁死，永远没有第二次尝试）');
+  assert.equal(o.errAfterCooldown, null, '自动恢复后不应再留下失败原因');
+  assert.equal(o.degradedAfterReset, false, '故障消失后必须能恢复精确计数（原实现这里永远是降级）');
+  assert.equal(o.errAfterReset, null, '恢复后不应再留下失败原因');
+  // ③ ENOENT（打包缺失）不自动重试，但显式 reset 仍可恢复
+  assert.equal(o.degradedEnoent, true, 'ENOENT 应进入降级');
+  assert.equal(o.degradedEnoentNoAutoRetry, true, 'ENOENT 表示打包缺失，不应每步重试（显式 reset 才重试）');
+  assert.equal(o.degradedAfterExplicitRetry, false, '显式 reset 后应能恢复');
+  ok('v0.6.2 B-TOK-1：词表读失败有界重试（瞬时错误可恢复 / 降级一次性说清后果），不再终生锁死');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });
