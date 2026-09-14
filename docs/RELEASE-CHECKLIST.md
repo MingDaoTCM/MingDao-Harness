@@ -346,6 +346,19 @@ bash deploy.sh
       版本历史表与功能展示区的旧版本锚点也是故意的。脚本每次会列出所有旧版本号位置供扫一眼。
 - [ ] `bash deploy.sh` 成功，线上页面可访问（`curl -s https://harness.mingdao.ai/ | grep 开放内核`）
 
+### 3.35 查 CI 必须带令牌（否则会把「限流」看成「还在排队」）
+
+查 Actions 运行状态时，**匿名调用有 60 次/小时的额度**。用完之后 `GET /actions/runs` 会返回
+空结果（不是报错），脚本里很容易被当成"没有该提交的运行"或"还在排队"——**得出"CI 还在跑"的
+错误结论**（本仓实测：轮询了 9 分钟一直显示"排队中"，实际那次运行早已 completed success）。
+
+```bash
+set -a && . ./.env && set +a          # 用 MINGDAO_GITHUB_TOKEN（已认证 = 5000 次/小时）
+curl -s -H "Authorization: Bearer $MINGDAO_GITHUB_TOKEN" \
+  "https://api.github.com/repos/MingDaoTCM/MingDao-Harness/actions/runs?per_page=3"
+curl -s "https://api.github.com/rate_limit"   # 自查额度：core.remaining 为 0 时上面的结果不可信
+```
+
 ### 3.4 四平台一致性验收（**最后一步，缺一不可**）
 
 ```bash
