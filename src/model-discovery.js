@@ -6,6 +6,7 @@
 //  - 未收录预设的线上模型走通用默认（Agent 有兜底参数），计价显示 n/a
 
 import fs from 'node:fs';
+import { safeFetchText } from './safe-fetch.js';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { PROVIDERS, MODELS } from './models.js';
@@ -78,13 +79,21 @@ export async function fetchProviderModels(/** @type {any} */ cfg, /** @type {any
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), 8000);
     try {
-      const res = await fetch(`${base}/models`, {
+      // v0.6.2（代码审计 P2-7 的普查）：这里也是 `redirect: 'follow'`——自动跟随且不逐跳复检。
+      // 迁到 safe-fetch 单一来源。allowPrivate: 服务商端点是**用户自己配置**的
+      // （本地 vLLM / Ollama 就是内网地址，这是产品明确支持的场景），与 CLI 显式输入 URL 同口径；
+      // 逐跳仍会做「非 http(s) 跳转拒绝 + 跳数上限 + 大小上限」这些与私网无关的防护。
+      const _r = await safeFetchText(`${base}/models`, {
+        timeoutMs: 8000,
+        maxBytes: 2 * 1024 * 1024,
+        allowPrivate: true,
         headers: { Authorization: `Bearer ${key}` },
-        signal: ctrl.signal,
-        redirect: 'follow',
       });
-      if (!res.ok) return { error: `HTTP ${res.status}` };
-      const j = /** @type {any} */ (await res.json().catch(() => null));
+      if (_r.error) return { error: _r.error };
+      let j = /** @type {any} */ (null);
+      try {
+        j = JSON.parse(String(_r.text ?? ''));
+      } catch {}
       const list = (j?.data || [])
         .map((/** @type {any} */ m) => String(m?.id || '').trim())
         .filter((/** @type {any} */ id) => id && isChatModel(id))

@@ -251,6 +251,20 @@ timeout 就是死区，期间**所有写方必然失败**——`cachestats` 会�
 > 现已两种形态都支持，并在 PACK-API 里写明。这个坑是写测试夹具时撞出来的：
 > 我按**文档**写夹具，测试失败——第一反应是夹具错了，实际是**实现与文档不一致**。
 
+## 3.13 已修复（第十四批：SSRF 逐跳复检单一来源）
+
+| 项 | 位置 | 问题 | 修复 |
+| --- | --- | --- | --- |
+| P2-7（代码审计报告） | `src/skill-registry.js`（+ 普查发现 `src/model-discovery.js`） | 同一件事**两份口径**：`skill-lib.js` 做了完整逐跳复检（`redirect:'manual'` + 每跳 `isPrivateHost` + DNS 复检 + 跳数上限），而 registry 只写 `redirect:'follow'`——自动跟随且**每一跳都不复检**，于是「线上技能库索引／技能文件」可被重定向到内网（云元数据 169.254.169.254 等）。**同一个安全判定有两套口径，等于最弱的那一套说了算** | 抽出单一来源 `src/safe-fetch.js`（`allowPrivate` 参数区分"用户显式配置"与"自动路径"），`skill-lib` / `skill-registry` / `model-discovery` **三处共用**；新增**结构守卫**：全仓不得再出现 `redirect:'follow'`（剥注释后判定） |
+
+> ⚠ 迁移时被测试立刻抓到一处**真实回归**：registry 测试跑在 `127.0.0.1` 上，被新判据当成内网拒绝——
+> 而「自建 registry 指向企业内网」是**文档明确支持**的场景。修法是按「是否用户显式配置」区分：
+> `MINGDAO_REGISTRY_URL` 显式设置的源 → `allowPrivate: true`（用户自担意图，与 CLI 显式输入 URL 同口径）；
+> 默认公网源保持严格，不允许被重定向到内网。
+>
+> `model-discovery` 同样迁入（它的端点是**用户配置的服务商地址**，本地 vLLM/Ollama 就是内网，
+> 故 `allowPrivate: true`），但逐跳的「非 http(s) 跳转拒绝 + 跳数上限 + 大小上限」仍然生效。
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）

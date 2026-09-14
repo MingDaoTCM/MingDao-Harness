@@ -6120,6 +6120,80 @@ if (process.platform !== 'win32') {
   ok('v0.6.2 P2-4/P2-11：pack list 读 config.packs / 只读子代理工具集从只读档派生（行为不变）');
 }
 
+
+// ---------- 95. v0.6.2 代码审计 P2-7：SSRF 逐跳复检必须单一来源 ----------
+// 同一件事此前两份口径：skill-lib 做了逐跳复检（redirect:'manual' + 每跳私网判定 + DNS 复检），
+// skill-registry 却只写 `redirect: 'follow'` 一把梭——自动跟随且**每跳都不复检**，
+// 于是「线上技能库索引/技能文件」这条路径可被重定向到内网（云元数据 169.254.169.254 等）。
+// 同一个安全判定有两套口径，等于最弱的那一套说了算。
+{
+  const { safeFetchText } = await import(pathToFileURL(path.join(srcDir, 'safe-fetch.js')).href);
+  const http95 = await import('node:http');
+  const srv95 = http95.createServer((req, res) => {
+    if (req.url === '/redir-file') {
+      res.writeHead(302, { Location: 'file:///etc/passwd' });
+      res.end();
+      return;
+    }
+    if (req.url === '/loop') {
+      res.writeHead(302, { Location: '/loop' });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('hello');
+  });
+  await new Promise((r) => srv95.listen(0, '127.0.0.1', r));
+  const base95 = `http://127.0.0.1:${srv95.address().port}`;
+  try {
+    // 1) 默认口径：内网/本机地址直接拒绝
+    const r1 = await safeFetchText(`${base95}/hello`);
+    assert.ok(r1.error && /内网\/本机/.test(r1.error), '默认必须拒绝内网地址：' + JSON.stringify(r1));
+    // 2) allowPrivate（用户显式配置的源）→ 正常取回
+    const r2 = await safeFetchText(`${base95}/hello`, { allowPrivate: true });
+    assert.equal(r2.text, 'hello', '用户显式允许时应能取回：' + JSON.stringify(r2));
+    // 3) 重定向到非 http(s) → 拒绝。
+    //    这一条同时证明**每一跳都被我们自己检查**（若交给 fetch 自动跟随，就不会有这道判定）
+    const r3 = await safeFetchText(`${base95}/redir-file`, { allowPrivate: true });
+    assert.ok(r3.error && /非 http\(s\)/.test(r3.error), '重定向到非 http(s) 必须拒绝：' + JSON.stringify(r3));
+    // 4) 跳数上限
+    const r4 = await safeFetchText(`${base95}/loop`, { allowPrivate: true, maxHops: 2 });
+    assert.ok(r4.error && /上限/.test(r4.error), '循环重定向必须被跳数上限拦住：' + JSON.stringify(r4));
+    // 5) 大小上限
+    const r5 = await safeFetchText(`${base95}/hello`, { allowPrivate: true, maxBytes: 2 });
+    assert.ok(r5.error && /大小上限/.test(r5.error), '超过大小上限必须拒绝：' + JSON.stringify(r5));
+  } finally {
+    srv95.close();
+  }
+
+  // 6) 结构守卫：全仓不得再出现 `redirect: 'follow'`——那正是 P2-7 的形态（自动跟随、不逐跳复检）
+  const jsFiles95 = [];
+  const walk95 = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const fp = path.join(d, e.name);
+      if (e.isDirectory()) walk95(fp);
+      else if (e.name.endsWith('.js')) jsFiles95.push(fp);
+    }
+  };
+  walk95(srcDir);
+  const followUsers = [];
+  for (const f of jsFiles95) {
+    const t = fs.readFileSync(f, 'utf8');
+    // 先剥注释再判：注释里正当地提到这个写法（解释"为什么不这么写"）不该被算作违规
+    const code = t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    if (/redirect:\s*'follow'/.test(code)) followUsers.push(path.relative(srcDir, f));
+  }
+  assert.deepEqual(followUsers, [], `不得再用 redirect:'follow'（自动跟随且不逐跳复检）：${followUsers.join(', ')}`);
+
+  // 7) 两条下载路径都必须走同一来源（否则又会各自演化）
+  for (const f of ['skill-lib.js', 'skill-registry.js']) {
+    const t = fs.readFileSync(path.join(srcDir, f), 'utf8');
+    assert.ok(/from '\.\/safe-fetch\.js'/.test(t), `${f} 必须共用 safe-fetch.js（单一来源）`);
+    assert.ok(!/\bfetch\(/.test(t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')), `${f} 不得再自己直接 fetch（除注释外）`);
+  }
+  ok('v0.6.2 P2-7：SSRF 逐跳复检单一来源（内网默认拒绝/显式允许/非 http(s) 重定向拒绝/跳数与大小上限 + 全仓无 redirect:follow）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

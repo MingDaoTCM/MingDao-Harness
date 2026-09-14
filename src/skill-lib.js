@@ -10,6 +10,7 @@
 //  - 安装后自动进入系统提示技能清单，Agent 按需用 skill 工具加载全文（渐进式披露）
 
 import fs from 'node:fs';
+import { safeFetchText } from './safe-fetch.js';
 import { spawnOpts } from './proc.js';
 import os from 'node:os';
 import path from 'node:path';
@@ -299,50 +300,15 @@ export async function installFromUrl(url, { allowPrivate = false } = {}) {
   }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 30000);
+  // v0.6.2（代码审计 P2-7）：这段逐跳 SSRF 复检原本是**内联**实现，而 skill-registry 另有一套
+  // （且是 redirect:'follow' 一把梭、不逐跳复检）。同一判定两套口径 = 最弱的那套说了算。
+  // 现抽成 src/safe-fetch.js 单一来源，两处共用；行为与原来的内联实现逐项一致。
   let text;
-  try {
-    // 审计 P2-1（v0.4.2）：SSRF 防护——与 fetch 工具/validateRemoteUrl 同口径：
-    // 初始与每一跳重定向都做私网/回环字面量判定 + DNS 复检（防域名重绑定），跳数上限 5。
+  {
     // allowPrivate（CLI 显式输入 URL 时开启）：本地用户自担意图，内网地址可安装；WebUI 默认拦截。
-    let cur = u;
-    let res = /** @type {any} */ (null);
-    for (let hop = 0; hop <= 5; hop++) {
-      const ch = String(cur.hostname || '').toLowerCase();
-      let blocked = !allowPrivate && isPrivateHost(ch);
-      if (!blocked && ch && ch !== 'localhost' && !/^\d{1,3}(\.\d{1,3}){3}$/.test(ch)) {
-        try {
-          const addrs = await lookup(ch, { all: true, verbatim: true });
-          blocked = !allowPrivate && addrs.some((/** @type {any} */ a) => isPrivateHost(a.address));
-        } catch {
-          // DNS 解析失败：放行，连接阶段会报错
-        }
-      }
-      if (blocked) return { error: `拒绝访问内网/本机地址（${ch}）——SSRF 防护。` };
-      res = await fetch(cur, { signal: ctrl.signal, redirect: 'manual' });
-      if (res.status >= 300 && res.status < 400) {
-        if (hop >= 5) return { error: '重定向次数超过上限（5 跳）。' };
-        const loc = res.headers.get('location');
-        if (!loc) break;
-        try {
-          cur = new URL(loc, cur);
-        } catch {
-          return { error: `非法重定向地址：${loc}` };
-        }
-        if (cur.protocol !== 'http:' && cur.protocol !== 'https:') {
-          return { error: '重定向到非 http(s) 地址，已拒绝。' };
-        }
-        continue;
-      }
-      break;
-    }
-    if (!res) return { error: '下载失败：无响应' };
-    if (!res.ok) return { error: `下载失败：HTTP ${res.status}` };
-    text = await res.text();
-    if (text.length > 512 * 1024) return { error: 'SKILL.md 超过 512KB 上限' };
-  } catch (/** @type {any} */ e) {
-    return { error: `下载失败：${e.name === 'AbortError' ? '30 秒超时' : e.message}` };
-  } finally {
-    clearTimeout(timer);
+    const r = await safeFetchText(u, { timeoutMs: 30000, maxBytes: 512 * 1024, allowPrivate });
+    if (r.error) return { error: r.error };
+    text = String(r.text ?? '');
   }
   const head = text.trim();
   if (!head.startsWith('---') && !head.startsWith('# ')) {

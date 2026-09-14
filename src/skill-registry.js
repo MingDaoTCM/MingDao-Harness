@@ -6,6 +6,7 @@
 //    （来源元数据 source=registry，mingdao skill update 可重装）
 
 import fs from 'node:fs';
+import { safeFetchText } from './safe-fetch.js';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -49,21 +50,14 @@ function saveCache(/** @type {any} */ data, /** @type {any} */ host) {
   } catch {}
 }
 
-async function fetchText(/** @type {any} */ url, timeoutMs = 20000, maxBytes = 2 * 1024 * 1024) {
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, { signal: ctrl.signal, redirect: 'follow' });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    // Content-Length 预检：超限直接拒绝，不再全量下载进内存
-    const len = Number(res.headers.get('content-length'));
-    if (Number.isFinite(len) && len > maxBytes) throw new Error('响应超过大小上限');
-    const text = await res.text();
-    if (text.length > maxBytes) throw new Error('响应超过大小上限');
-    return text;
-  } finally {
-    clearTimeout(timer);
-  }
+async function fetchText(/** @type {any} */ url, timeoutMs = 20000, maxBytes = 2 * 1024 * 1024, allowPrivate = false) {
+  // v0.6.2（代码审计 P2-7）：原来这里是 `fetch(url, { redirect: 'follow' })`——自动跟随重定向
+  // 且**每一跳都不做私网复检**，于是线上技能库这条路径可被重定向到内网（云元数据/内网服务）。
+  // 而隔壁 skill-lib 早就做了逐跳复检——同一判定两套口径，等于最弱的那套说了算。
+  // 现统一走 src/safe-fetch.js（单一来源）；这里保留"失败抛异常"的既有契约，调用方无需改动。
+  const r = await safeFetchText(url, { timeoutMs, maxBytes, allowPrivate });
+  if (r.error) throw new Error(r.error);
+  return String(r.text ?? ''); // 成功路径必有 text；显式收敛类型，避免调用方拿到 string|undefined
 }
 
 // 取远端索引（缓存优先；force 强制刷新；allowNetwork=false 时只读缓存，用于 WebUI 常规加载避免阻塞）
@@ -76,11 +70,14 @@ export async function fetchRegistryIndex({ force = false, allowNetwork = true } 
       return { error: '尚无线上技能库缓存（点击「刷新线上」拉取，或设置 MINGDAO_REGISTRY_URL 指向自建 registry）' };
     }
   }
-  const { hosts } = registryBase();
+  const { hosts, isCustom } = registryBase();
   let lastErr = null;
   for (const host of hosts) {
     try {
-      const text = await fetchText(`${host}/registry/index.json`, 8000);
+      // v0.6.2：用户**显式配置**的 registry（MINGDAO_REGISTRY_URL）允许内网地址——
+      // 「自建 registry 供企业内网使用」是文档明确支持的场景，与 CLI 显式输入 URL 同口径；
+      // 默认公网源保持严格（不允许被重定向到内网）。
+      const text = await fetchText(`${host}/registry/index.json`, 8000, 2 * 1024 * 1024, isCustom);
       const data = JSON.parse(text);
       if (!Array.isArray(data.skills)) throw new Error('索引缺少 skills 数组');
       saveCache(data, host);
@@ -118,7 +115,9 @@ export async function installFromRegistry(/** @type {any} */ name) {
   try {
     // 逐文件下载按镜像回退（审计：国内网络下 raw.githubusercontent 常超时/被断，
     // 此前只试首选主机 → 安装报「This operation was aborted」；gitee/gitcode 国内秒开）
-    const hosts = [r.host, ...registryBase().hosts.filter((h) => h !== r.host)];
+    const base = registryBase();
+    const hosts = [r.host, ...base.hosts.filter((h) => h !== r.host)];
+    const allowPrivate = base.isCustom; // 用户显式配置的源（可能是内网自建 registry）
     let verified = false; // 每个文件都必须通过 sha256 校验（缺哈希直接拒绝安装），成功即 true
     for (const f of entry.files) {
       const rel = String(f.path || '').replace(/\\/g, '/');
@@ -131,7 +130,7 @@ export async function installFromRegistry(/** @type {any} */ name) {
       let lastErr = '';
       for (const host of hosts) {
         try {
-          text = await fetchText(`${host}/skills-lib/${encodeURI(name)}/${rel.split('/').map(encodeURIComponent).join('/')}`, 30000, MAX_FILE);
+          text = await fetchText(`${host}/skills-lib/${encodeURI(name)}/${rel.split('/').map(encodeURIComponent).join('/')}`, 30000, MAX_FILE, allowPrivate);
           break;
         } catch (e) {
           const ee = /** @type {any} */ (e);
