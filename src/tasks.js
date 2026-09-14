@@ -247,11 +247,17 @@ export async function flushKillEscalation() {
 }
 
 export function killTask(/** @type {any} */ home, /** @type {any} */ id) {
-  if (!isValidTaskId(id)) return false;
-  // 质检 H3：读-改-写加锁（与 worker 自身的状态写互斥）
-  return withFileLockSync(path.join(tasksDir(home), '.lock'), () => killTaskInner(home, id));
-}
-function killTaskInner(/** @type {any} */ home, /** @type {any} */ id) {
+  // v0.6.2（P2-7 阻塞面）：进程操作全部移到锁**外**，临界区只剩状态读-改-写。
+  //
+  // 原实现把 killTaskInner 整个包在锁里，而它内部会：
+  //   · pidOwnedBy() —— 非 Linux 上回退到**同步** execFileSync('ps')；
+  //   · killTree()   —— Windows 上走**同步** spawnSync('taskkill')；
+  // 于是临界区里夹着外部进程调用，持锁时间从毫秒级变成百毫秒级，**每个等锁的人都被拖住**。
+  // 实测（本机）纯状态读-改-写约 0.13ms、最坏的 cache-stats 轮转也只有 6ms——
+  // 也就是说，锁被长时间持有完全是自己把慢操作放进去造成的。
+  //
+  // 语义不变：状态写回仍在锁内（与 worker 的终态写互斥），P3 T20 的「killed 优先」保护
+  // 仍在 patchTask 里；把进程操作提前到锁外不影响任何一条竞态路径的最终状态。
   const t = readTask(home, id);
   if (!t) return false;
   if (t.status === 'running' && t.pid) {
@@ -269,8 +275,14 @@ function killTaskInner(/** @type {any} */ home, /** @type {any} */ id) {
       pendingKill = escalateKill(t.pid);
     }
   }
-  patchTask(home, id, { status: 'killed', durationMs: t.durationMs ?? Date.now() - t.startedAt });
-  return true;
+  // 状态写回：仍在跨进程锁内（只做读-改-写，毫秒级）
+  return killTaskInner(home, id) !== null;
+}
+/** 临界区内的状态写回（进程部分见 killTask，已移到锁外） */
+function killTaskInner(/** @type {any} */ home, /** @type {any} */ id) {
+  const t = readTask(home, id);
+  if (!t) return null;
+  return patchTask(home, id, { status: 'killed', durationMs: t.durationMs ?? Date.now() - t.startedAt });
 }
 
 const MARK = { running: '▶', done: '✓', failed: '✖', killed: '■' };

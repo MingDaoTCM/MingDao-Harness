@@ -5954,12 +5954,14 @@ if (process.platform !== 'win32') {
     withFileLockSync(lock92, () => { ran92c = true; }, { timeoutMs: 2000, staleMs: 50 });
     assert.ok(ran92c, '内容损坏且超龄的锁应能回收（否则永远卡死）');
 
-    // 92d. 默认参数必须满足 timeoutMs > staleMs（否则又造出死区）
+    // 92d. 默认参数必须满足 timeoutMs > staleMs（否则又造出死区），且超时**有界**。
+    // 改成读导出值而不是 grep 源码文本：v0.6.2 把默认值换成命名常量后，
+    // 原来那句 `timeoutMs = (\d+)` 的正则直接匹配不到（源码断言一改就碎，而且碎得无声）。
     fs.writeFileSync(lock92, JSON.stringify({ pid: process.pid, at: Date.now() }));
-    const src92 = fs.readFileSync(path.join(srcDir, 'atomic-write.js'), 'utf8');
-    const m92 = src92.match(/timeoutMs = (\d+), staleMs = (\d+) \}/);
-    assert.ok(m92, '应能读到默认参数');
-    assert.ok(Number(m92[1]) > Number(m92[2]), `默认 timeoutMs(${m92[1]}) 必须大于 staleMs(${m92[2]})，否则等待方先超时而陈旧锁还没资格回收`);
+    const aw92 = await import(pathToFileURL(path.join(srcDir, 'atomic-write.js')).href);
+    const d92 = aw92.lockDefaults();
+    assert.ok(Number(d92.timeoutMs) > Number(d92.staleMs), `默认 timeoutMs(${d92.timeoutMs}) 必须大于 staleMs(${d92.staleMs})，否则等待方先超时而陈旧锁还没资格回收`);
+    assert.ok(Number(d92.timeoutMs) <= 5000, `同步锁的等待上限必须有界（实测最坏临界区 6ms，5 秒已是 800 倍），实际 ${d92.timeoutMs}ms——否则一次卡死的持有者会把事件循环冻住几十秒`);
   } finally {
     try {
       fs.unlinkSync(lock92);
@@ -7535,6 +7537,136 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
     assert.deepEqual(missing, [], `这些函数已是 async，调用点必须 await（漏了也不报错，只会让断言恒真）：\n${missing.join('\n')}`);
   }
   ok('v0.6.2 P2-7 阻塞面：异步锁不冻结事件循环（带同步对照组）+ 可重入按调用链限定 + 缺 await 常驻守卫');
+}
+
+
+// ---------- 109. v0.6.2：临界区里不得做外部进程调用 + 锁超时上限有界（P2-7 收尾）----------
+// 起因：killTask 把 killTaskInner **整个**包在锁里，而它内部会调
+//   pidOwnedBy()（非 Linux 回退到同步 execFileSync('ps')）与
+//   killTree()（Windows 上走同步 spawnSync('taskkill')）——
+//   等于把外部进程调用塞进临界区：持锁时间从毫秒级变百毫秒级，**每个等锁的人都被拖住**。
+// 实测（本机）：纯状态临界区极短——小文件读-改-写 0.13ms、最重的 cache-stats 轮转 6ms。
+// 也就是说长持锁完全是"自己把慢操作放进去"造成的。
+{
+  const AW109 = await import(pathToFileURL(path.join(srcDir, 'atomic-write.js')).href);
+  const T109 = await import(pathToFileURL(path.join(srcDir, 'tasks.js')).href);
+  const dir109 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-cs109-'));
+  const home109 = path.join(dir109, 'home');
+  fs.mkdirSync(home109, { recursive: true });
+  const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
+  try {
+    // ① 结构守卫：锁定区内（killTaskInner）不得出现进程操作
+    {
+      const src = fs.readFileSync(path.join(srcDir, 'tasks.js'), 'utf8');
+      // 剥注释：本次的注释里正当地提到了这些函数名（解释"为什么移出去"）
+      const code = src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      const iInner = code.indexOf('function killTaskInner(');
+      assert.ok(iInner > -1, '应存在 killTaskInner（锁内的状态写回体）');
+      const body = code.slice(iInner, code.indexOf('\n}', iInner) + 2);
+      for (const fn of ['pidOwnedBy(', 'killTree(', 'escalateKill(']) {
+        assert.ok(!body.includes(fn), `临界区（killTaskInner）内不得调用 ${fn}——它可能同步起外部进程（ps/taskkill），会把每个等锁的人也拖住`);
+      }
+      // 反向确认：这些操作确实还在（只是被移到了锁外），别把它们整个删掉
+      const iKill = code.indexOf('export function killTask(');
+      const killBody = code.slice(iKill, code.indexOf('\n}', code.indexOf('return killTaskInner', iKill)) + 2);
+      for (const fn of ['pidOwnedBy(', 'killTree(']) {
+        assert.ok(killBody.includes(fn), `killTask 里仍必须做 ${fn}（只是移到锁外）——不能顺手删掉`);
+      }
+    }
+
+    // ② 行为：killTask 仍然真的杀进程、置终态，且**锁被正常释放**
+    {
+      // 造一个真实存活、且命令行里带任务 id 的 worker（归属校验要求 argv 含 id）
+      const id = 'r9' + Date.now().toString(36);
+      const worker = spawn(process.execPath, ['--input-type=module', '-e',
+        `const id = process.argv[1]; setInterval(() => {}, 1000);`, id], { stdio: 'ignore' });
+      await sleep(150);
+      fs.mkdirSync(T109.tasksDir(home109), { recursive: true });
+      fs.writeFileSync(path.join(T109.tasksDir(home109), id + '.json'), JSON.stringify({
+        id, status: 'running', pid: worker.pid, startedAt: Date.now(), question: 'x',
+      }) + '\n');
+      const okKill = T109.killTask(home109, id);
+      assert.equal(okKill, true, 'killTask 应返回 true');
+      // 进程应被终止
+      let alive = true;
+      for (let i = 0; i < 40 && alive; i++) {
+        try { process.kill(worker.pid, 0); } catch { alive = false; }
+        if (alive) await sleep(50);
+      }
+      assert.equal(alive, false, 'worker 进程必须真的被终止（不只是改状态）');
+      const after = T109.readTask(home109, id);
+      assert.equal(after?.status, 'killed', '任务状态必须置为 killed');
+      // 锁必须已释放：再取一次不应等待
+      const t0 = Date.now();
+      AW109.withFileLockSync(path.join(T109.tasksDir(home109), '.lock'), () => {}, { timeoutMs: 1500 });
+      assert.ok(Date.now() - t0 < 500, `killTask 之后锁必须已释放，实际等了 ${Date.now() - t0}ms`);
+      try { worker.kill('SIGKILL'); } catch {}
+    }
+
+    // ③ 超时错误必须**可操作**（含锁文件位置与排查办法），而不是只丢一句"超时"
+    {
+      const lock = path.join(dir109, 'held.lock');
+      const code = `
+        import fs from 'node:fs';
+        const [lock] = process.argv.slice(1);
+        const fd = fs.openSync(lock, 'wx');
+        fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
+        fs.closeSync(fd);
+        setTimeout(() => { try { fs.unlinkSync(lock); } catch {} process.exit(0); }, 3000);
+      `;
+      const h = spawn(process.execPath, ['--input-type=module', '-e', code, lock], { stdio: 'ignore' });
+      for (let i = 0; i < 60 && !fs.existsSync(lock); i++) await sleep(20);
+      assert.ok(fs.existsSync(lock), '对照前提：持有者必须真的拿到锁');
+      let err = null;
+      try {
+        AW109.withFileLockSync(lock, () => {}, { timeoutMs: 200, staleMs: 5000 });
+      } catch (e) {
+        err = e;
+      }
+      assert.ok(err, '持有者活着且超时必须抛错（不得静默放行）');
+      const msg = String(err.message);
+      assert.ok(msg.includes(lock), `错误信息必须带上锁文件路径，实际：${msg}`);
+      assert.ok(/pid/.test(msg) && /删除|删掉/.test(msg), `错误信息必须说明怎么看持有者、怎么处理，实际：${msg}`);
+      h.kill('SIGKILL');
+      await sleep(50);
+    }
+
+    // ④ 同步锁调用点清单受审阅约束：剩余处数固定，**新增即失败**。
+    // 与"静默吞写白名单"同款做法——把残留变成清单，而不是靠人记。
+    {
+      const ALLOWED_SYNC_LOCKS = {
+        'cachestats.js': { n: 1, why: '锁只在 cache-stats 超过 4MB 触发轮转时取；追加本身不加锁' },
+        'schedule.js': { n: 12, why: '调度守护进程内部（阻塞只推迟定时任务，不冻结用户请求）；且这些函数是纯同步读-改-写链' },
+        'sync.js': { n: 1, why: 'CLI 一次性命令（进程很快就退出），且调用链全同步' },
+        'tasks.js': { n: 1, why: 'patchTask 的状态读-改-写（已把进程操作移出临界区，实测毫秒级）' },
+      };
+      const files = [];
+      (function walk(/** @type {string} */ d) {
+        for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+          const fp = path.join(d, e.name);
+          if (e.isDirectory()) walk(fp);
+          else if (e.name.endsWith('.js') && e.name !== 'atomic-write.js') files.push(fp);
+        }
+      })(srcDir);
+      /** @type {Record<string, number>} */
+      const found = {};
+      for (const f of files) {
+        const code = fs.readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+        const n = (code.match(/withFileLockSync\s*\(/g) || []).length;
+        if (n) found[path.relative(srcDir, f)] = n;
+      }
+      const problems = [];
+      for (const [f, n] of Object.entries(found)) {
+        if (!ALLOWED_SYNC_LOCKS[f]) problems.push(`${f}：新增 ${n} 处同步锁（不在已审阅清单内）——WebUI 请求路径请改用异步版 withFileLock`);
+        else if (ALLOWED_SYNC_LOCKS[f].n !== n) problems.push(`${f}：同步锁处数 ${ALLOWED_SYNC_LOCKS[f].n} → ${n}（实现变了，清单必须同步复核）`);
+      }
+      for (const f of Object.keys(ALLOWED_SYNC_LOCKS)) if (!found[f]) problems.push(`${f}：清单里的 ${ALLOWED_SYNC_LOCKS[f].n} 处已不存在（迁移完了就请从清单移除）`);
+      assert.deepEqual(problems, [], `同步锁调用点清单发生变化：\n${problems.join('\n')}\n当前：${JSON.stringify(found)}`);
+    }
+  } finally {
+    safeRmSync(dir109, { recursive: true, force: true });
+  }
+  ok('v0.6.2 P2-7 收尾：临界区不含外部进程调用 + 超时错误可操作 + 同步锁残留清单受审阅约束');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

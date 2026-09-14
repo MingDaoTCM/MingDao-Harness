@@ -123,7 +123,35 @@ function reclaimIfStale(lockPath, staleMs) {
   return true; // 无论是否回收成功都重试一次（若锁刚被他人更新则继续等待）
 }
 
-export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() => any} */ fn, { timeoutMs = 20000, staleMs = 15000 } = {}) {
+// 锁的两个时间参数（v0.6.2 依实测重新定过）：
+//
+// ① **必须 timeoutMs > staleMs**。曾是 5000/15000——等待方 5 秒就抛超时，而陈旧锁要 15 秒才
+//    允许回收，中间 10 秒是纯**死区**：持锁方一旦崩溃，这段内所有写方必然全部失败。
+// ② 现在取 **5000 / 4000**：死区没了，且**等锁的最坏冻结从 20 秒降到 5 秒**。
+//    依据是实测（本机）：纯状态的临界区极短——小文件读-改-写 **0.13ms**，
+//    连最重的 cache-stats 轮转（1.43MB / 2 万行解析 + 重写 1 万行）也只有 **6ms**。
+//    5 秒是实测最坏值的约 800 倍，正常争用绝不会误判超时；**只有**「持有者活着但卡死」
+//    或「锁内容读不出 pid 且超过 staleMs」才会等这么久。
+// ③ 两个值都可用环境变量覆盖，便于诊断与测试（例如调小 staleMs 以便立刻回收陈旧锁）。
+const ENV_TIMEOUT = Number(process.env.MINGDAO_LOCK_TIMEOUT_MS);
+const ENV_STALE = Number(process.env.MINGDAO_LOCK_STALE_MS);
+const DEFAULT_TIMEOUT_MS = Number.isFinite(ENV_TIMEOUT) && ENV_TIMEOUT > 0 ? ENV_TIMEOUT : 5000;
+const DEFAULT_STALE_MS = Number.isFinite(ENV_STALE) && ENV_STALE > 0 ? ENV_STALE : 4000;
+
+/**
+ * 锁超时的统一文案：**说清锁文件在哪、怎么看持有者、什么时候可以删**。
+ * 只报一句"获取文件锁超时"的话，用户除了重试什么也做不了。
+ * @param {string} lockPath @param {number} timeoutMs
+ */
+function lockTimeoutError(lockPath, timeoutMs) {
+  return new Error(
+    `获取文件锁超时（${(timeoutMs / 1000).toFixed(1)} 秒，${lockPath}）：可能有其他进程长时间占用或已卡死。\n` +
+      `  排查：查看该 .lock 文件内容（形如 {"pid":123,"at":…}），确认那个 pid 是否还活着；` +
+      `若不是活着的 mingdao 进程，删除该文件后重试即可（陈旧锁也会在 ${DEFAULT_STALE_MS / 1000} 秒后自动回收）。`
+  );
+}
+
+export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() => any} */ fn, { timeoutMs = DEFAULT_TIMEOUT_MS, staleMs = DEFAULT_STALE_MS } = {}) {
   return runWithHeld((held) => {
     // 可重入：同一条调用链内已持该锁 → 直接执行，不再二次抢锁
     if (held.has(lockPath)) return fn();
@@ -153,7 +181,7 @@ export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() =
         if (/** @type {any} */ (err).code !== 'EEXIST') throw err;
         if (reclaimIfStale(lockPath, staleMs)) continue;
         if (Date.now() - t0 > timeoutMs) {
-          throw new Error(`获取文件锁超时（${lockPath}），可能存在其他进程长时间占用`);
+          throw lockTimeoutError(lockPath, timeoutMs);
         }
         sleepMs(25);
       }
@@ -171,7 +199,7 @@ export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() =
  * 回归风险大于收益。做法是**逐个判断**：请求路径上的迁移，纯同步链保留同步版。
  * @param {string} lockPath @param {() => any} fn
  */
-export async function withFileLock(/** @type {string} */ lockPath, /** @type {() => any} */ fn, { timeoutMs = 20000, staleMs = 15000, pollMs = 25 } = {}) {
+export async function withFileLock(/** @type {string} */ lockPath, /** @type {() => any} */ fn, { timeoutMs = DEFAULT_TIMEOUT_MS, staleMs = DEFAULT_STALE_MS, pollMs = 25 } = {}) {
   return runWithHeld(async (held) => {
     if (held.has(lockPath)) return fn();
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
@@ -190,9 +218,14 @@ export async function withFileLock(/** @type {string} */ lockPath, /** @type {()
       }
       if (reclaimIfStale(lockPath, staleMs)) continue;
       if (Date.now() - t0 > timeoutMs) {
-        throw new Error(`获取文件锁超时（${lockPath}），可能存在其他进程长时间占用`);
+        throw lockTimeoutError(lockPath, timeoutMs);
       }
       await sleepAsync(pollMs);
     }
   });
+}
+
+/** 同步/异步锁的默认超时与陈旧阈值（导出供诊断与测试断言「上限有界」）。 */
+export function lockDefaults() {
+  return { timeoutMs: DEFAULT_TIMEOUT_MS, staleMs: DEFAULT_STALE_MS };
 }
