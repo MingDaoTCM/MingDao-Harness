@@ -7,6 +7,7 @@
 
 import fs from 'node:fs';
 import { safeFetchText } from './safe-fetch.js';
+import { assertSafeSkillName } from './skill-lib.js';
 import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -105,6 +106,12 @@ export async function searchRegistry(/** @type {any} */ kw, { force = false, all
 
 // 按索引安装（逐文件下载 + dry-run 校验）
 export async function installFromRegistry(/** @type {any} */ name) {
+  // v0.6.2（B-SR-1）：索引名先过技能名白名单。
+  // 此前只由 installSkill 的 /^[A-Za-z0-9_.-]+$/ 过滤，而那个字符集**允许 "." 与 ".."**——
+  // 索引是网络内容（自建 registry / 被篡改的镜像 / 未签名的第三方索引），
+  // 一条 {"name": ".."} 就能让后面的 rmSync(target, {recursive:true}) 删掉整个 MINGDAO_HOME。
+  const safeIndexName = assertSafeSkillName(name);
+  if (!safeIndexName) return { error: `技能名非法：${String(name)}` };
   const r = await fetchRegistryIndex();
   if (r.error) return { error: r.error };
   const entry = r.data.skills.find((/** @type {any} */ s) => s.name === name);
@@ -161,7 +168,16 @@ export async function installFromRegistry(/** @type {any} */ name) {
     }
     const check = validateSkillDir(tmp, name);
     if (check.error) return { error: check.error };
-    const target = path.join(userSkillsDir(), name);
+    // 安装目录用**校验过的 frontmatter 名字**，不用索引名。
+    // 索引名与技能自己声明的名字本来就是两个独立输入：前者只过字符集，后者过 validateSkillMarkdown
+    // 的完整格式校验。既然要落盘的是"这个技能"，目录名就该取它自己声明的那个——
+    // 顺带让"索引名与内容不符"这种可疑情况不会变成一次越界写入。
+    // 用 assertSafeSkillName 收口（而不是直接取 check.name）：既把类型收窄成 string，
+    // 又让"校验过的 frontmatter 名"再过一次白名单——万一 validateSkillMarkdown 的规则将来放宽，
+    // 这里仍然不会把 `.` / `..` 拼进路径。
+    const safeName = assertSafeSkillName(check.name);
+    if (!safeName) return { error: `技能 frontmatter.name 非法：${String(check.name)}` };
+    const target = path.join(userSkillsDir(), safeName);
     if (path.resolve(tmp) !== path.resolve(target)) {
       ensureHome();
       fs.rmSync(target, { recursive: true, force: true });
@@ -172,11 +188,11 @@ export async function installFromRegistry(/** @type {any} */ name) {
       source: 'registry',
       installedAt: Date.now(),
       host: r.host,
-      name,
+      name: safeName,
       sha256: skillDirHash(target), // 安装即记录指纹：加载时校验防本地篡改
       verified: Boolean(verified),
     });
-    return { name, dir: target, host: r.host, verified: Boolean(verified) };
+    return { name: safeName, dir: target, host: r.host, verified: Boolean(verified) };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

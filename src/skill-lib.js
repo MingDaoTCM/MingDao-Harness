@@ -247,12 +247,24 @@ export function validateSkillDir(dir, hint) {
  */
 function copySkillIntoUser(dir, name, source, extra) {
   ensureHome();
-  const target = path.join(userSkillsDir(), name);
+  // v0.6.2（B-SR-1，实测复现）：**在拼路径之前**校验名字。
+  // 这里紧接着就是 fs.rmSync(target, {recursive:true, force:true})，而 target 由入参 name 决定；
+  // 一旦某个调用方传来未经校验的 name（registry 的索引名就是），
+  // name='.' → target 等于整个 skills 目录 → 用户所有已装技能被递归删除；
+  // name='..' → target 等于整个 MINGDAO_HOME → config/凭据/会话/账本全没了。
+  // 这里加一道**与调用方无关**的兜底：谁把坏名字传进来都拦得住。
+  const safeName = assertSafeSkillName(name);
+  if (!safeName) {
+    // 措辞与 validateSkillMarkdown 对齐（都用「name 非法」），这样从两个入口进来看到的说法一致；
+    // 同时把允许的字符集写清楚，作者不用猜
+    return { error: `技能 frontmatter.name 非法：${String(name)}（允许字母/数字/点/连字符/下划线，1–64 位；不得为 "." 或 ".."）` };
+  }
+  const target = path.join(userSkillsDir(), safeName);
   if (path.resolve(dir) === path.resolve(target)) {
     // 源目录就是用户级安装位置：视为已安装，保持现状
-    return { name, dir: target };
+    return { name: safeName, dir: target };
   }
-  const check = validateSkillDir(dir, name);
+  const check = validateSkillDir(dir, safeName);
   if (check.error) return { error: check.error };
   fs.rmSync(target, { recursive: true, force: true });
   fs.mkdirSync(target, { recursive: true });

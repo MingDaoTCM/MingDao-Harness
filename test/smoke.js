@@ -7147,6 +7147,126 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
   ok('v0.6.2 路径穿越普查：技能名/frontmatter/账本 runId/工作空间名/会话文件参数逐处设防且被钉住（B-SR-1）');
 }
 
+
+// ---------- 106. v0.6.2：registry 索引名拼路径 → 递归删除用户目录（B-SR-1 **已实测复现**） ----------
+// 真实缺陷，不是推测。复现过程（修复前，本机实测）：
+//   自建 registry 的索引里放一条 {"name": "."}，SKILL.md 的 frontmatter 用合法名字
+//   → installFromRegistry('.') 走到 target = path.join(userSkillsDir(), '.') = **整个 skills 目录**
+//   → 紧接着的 rmSync(target, {recursive:true, force:true}) 把用户所有已装技能递归删除
+//   → 还返回 {"name":".", ...} 报成功。
+// 换成 {"name": ".."} 更狠：target 等于整个 MINGDAO_HOME，config / 凭据 / 会话 / 账本一起没。
+//
+// 根因：拼路径用的是**索引里的 name**，而校验的是**下载文件里的 frontmatter.name**——
+// 两个独立输入。入口那层 /^[A-Za-z0-9_.-]+$/ 看着像白名单，但它**允许 "." 与 ".."**。
+{
+  const SR = await import(pathToFileURL(path.join(srcDir, 'skill-registry.js')).href);
+  const home106 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sr106-'));
+  const prevHome106 = process.env.MINGDAO_HOME;
+  const prevReg106 = process.env.MINGDAO_REGISTRY_URL;
+  const crypto106 = await import('node:crypto');
+  const http106 = await import('node:http');
+  const makeskill = (/** @type {string} */ n) => `---\nname: ${n}\ndescription: 无害描述\n---\n\n# hello\n`;
+  /** @type {any} */
+  let indexBody = null;
+  /** @type {any} */
+  let fileBody = null;
+  const server106 = http106.createServer((/** @type {any} */ req, /** @type {any} */ res) => {
+    if (String(req.url) === '/registry/index.json') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify(indexBody));
+    }
+    // 模拟 nginx 的路径规范化：/skills-lib/../SKILL.md → /SKILL.md（否则 ".." 变体在下载阶段就 404）
+    if (String(req.url).endsWith('SKILL.md')) {
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      return res.end(fileBody);
+    }
+    res.writeHead(404).end('nope');
+  });
+  try {
+    await new Promise((r) => server106.listen(0, '127.0.0.1', r));
+    const port106 = server106.address().port;
+    process.env.MINGDAO_HOME = home106;
+    process.env.MINGDAO_REGISTRY_URL = `http://127.0.0.1:${port106}`;
+    // 金丝雀：一个"已安装"的技能，绝不该被**别人的**安装动作删掉
+    fs.mkdirSync(path.join(home106, 'skills', 'canary-skill'), { recursive: true });
+    fs.writeFileSync(path.join(home106, 'skills', 'canary-skill', 'SKILL.md'), makeskill('canary-skill'));
+    // 顺便放一个 home 级的金丝雀（".." 变体会连它一起删）
+    fs.writeFileSync(path.join(home106, 'config.json'), '{"model":"deepseek-flash"}\n');
+    const idx = (/** @type {string} */ name, /** @type {string} */ fmName) => {
+      const text = makeskill(fmName);
+      return {
+        updatedAt: new Date().toISOString(),
+        skills: [{ name, description: 'd', files: [{ path: 'SKILL.md', sha256: crypto106.createHash('sha256').update(text).digest('hex') }] }],
+      };
+    };
+    const tryInstall = async (/** @type {string} */ indexName, /** @type {string} */ fmName) => {
+      indexBody = idx(indexName, fmName);
+      fileBody = makeskill(fmName);
+      // 每次都要清掉 registry 索引缓存：TTL 一小时，否则第二次调用读的是上一轮的索引
+      // （实测踩过：换索引不生效，报"线上技能库中没有 alias-name"）
+      fs.rmSync(path.join(home106, 'skill-registry-cache.json'), { force: true });
+      return SR.installFromRegistry(indexName);
+    };
+
+    // ① 恶意索引名：必须被拒，且**一个文件都不能少**
+    for (const bad of ['.', '..']) {
+      const r = await tryInstall(bad, 'innocent-name');
+      assert.ok(r && r.error, `索引名 ${JSON.stringify(bad)} 必须被拒绝，实际 ${JSON.stringify(r)}`);
+      assert.ok(fs.existsSync(path.join(home106, 'skills', 'canary-skill', 'SKILL.md')), `索引名 ${JSON.stringify(bad)} 不得删掉已装技能（rmSync 越界）`);
+      assert.ok(fs.existsSync(path.join(home106, 'config.json')), `索引名 ${JSON.stringify(bad)} 不得删掉 MINGDAO_HOME（".." 会连 config 一起删）`);
+    }
+    // 含路径分隔符的索引名同样拒绝
+    for (const bad of ['a/b', 'x\\y', '.../x']) {
+      const r = await tryInstall(bad, 'innocent-name');
+      assert.ok(r && r.error, `索引名 ${JSON.stringify(bad)} 必须被拒绝`);
+    }
+
+    // ② 正常安装仍要能工作（拒绝的是恶意名，不是安装功能）
+    const okR = await tryInstall('good-skill', 'good-skill');
+    assert.equal(okR.error, undefined, `正常技能应安装成功：${JSON.stringify(okR)}`);
+    assert.equal(okR.name, 'good-skill', '安装结果应带技能名');
+    assert.ok(fs.existsSync(path.join(home106, 'skills', 'good-skill', 'SKILL.md')), '正常技能应落到 <home>/skills/<name>/');
+    assert.ok(fs.existsSync(path.join(home106, 'skills', 'canary-skill', 'SKILL.md')), '正常安装也不得动别人的技能');
+
+    // ③ 索引名与 frontmatter 名不一致时，安装目录取**技能自己声明的名字**（校验过的那个）
+    const aliasR = await tryInstall('alias-name', 'real-name');
+    assert.equal(aliasR.error, undefined, `索引名与声明名不同也应安装成功：${JSON.stringify(aliasR)}`);
+    assert.equal(aliasR.name, 'real-name', '安装目录必须取校验过的 frontmatter 名字，而不是索引名');
+    assert.ok(fs.existsSync(path.join(home106, 'skills', 'real-name', 'SKILL.md')), '应落到以声明名命名的目录');
+
+    // ④ 结构守卫：两层防线各自都要在**破坏性操作之前**
+    {
+      const libSrc = fs.readFileSync(path.join(srcDir, 'skill-lib.js'), 'utf8');
+      const iCopy = libSrc.indexOf('function copySkillIntoUser(');
+      assert.ok(iCopy > -1, '应存在 copySkillIntoUser');
+      // 先剥注释：本次的注释里正当地写着"rmSync 就在它后面几行"，不剥就会先命中注释里的那次
+      // （这是本项目第二次踩注释骗过扫描器：上一次是 redirect:'follow'）
+      const body = libSrc
+        .slice(iCopy, iCopy + 1200)
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      const iAssert = body.indexOf('assertSafeSkillName(name)');
+      const iRm = body.indexOf('fs.rmSync(target');
+      assert.ok(iAssert > -1, 'copySkillIntoUser 必须在拼路径前校验名字（rmSync 就在它后面几行，这里没有冗余防线）');
+      assert.ok(iRm === -1 || iAssert < iRm, '名字校验必须排在 rmSync 之前');
+      const regSrc = fs.readFileSync(path.join(srcDir, 'skill-registry.js'), 'utf8');
+      const iFn = regSrc.indexOf('export async function installFromRegistry(');
+      const head = regSrc.slice(iFn, iFn + 500);
+      assert.ok(/assertSafeSkillName\(name\)/.test(head), 'installFromRegistry 必须先校验索引名（否则白下载一轮才发现）');
+      assert.ok(head.indexOf('assertSafeSkillName') < head.indexOf('fetchRegistryIndex()'), '索引名校验必须排在网络请求之前');
+      // 安装目录必须取 check.name（校验过的 frontmatter 名）
+      assert.ok(/const target = path\.join\(userSkillsDir\(\), safeName\)/.test(regSrc), '安装目录必须用校验过的名字变量，而不是索引名');
+    }
+  } finally {
+    server106.close();
+    process.env.MINGDAO_HOME = prevHome106;
+    if (prevReg106 === undefined) delete process.env.MINGDAO_REGISTRY_URL;
+    else process.env.MINGDAO_REGISTRY_URL = prevReg106;
+    safeRmSync(home106, { recursive: true, force: true });
+  }
+  ok('v0.6.2 B-SR-1：registry 索引名不得拼进安装路径（"." / ".." 会递归删掉 skills 甚至整个 MINGDAO_HOME）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });
