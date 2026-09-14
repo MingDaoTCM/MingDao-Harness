@@ -42,14 +42,38 @@ function loadShard(shard) {
   }
 }
 
-/** @param {any} shard @param {any} idx */
+// v0.6.2（B-WS-1/2 第四处）：写失败不再完全无声。
+// 核实过的**真实后果比看上去轻**：syncSessionIndex 返回的 combined 用的是**内存里**刚更新的 idx，
+// 所以「本次检索仍然正确」；丢的是持久化 → 下次进程要重新扫描并分词，磁盘不可写时会**每次都重算**。
+// 因此这里是一句「能力静默降级」的提示，而不是「结果会缺失」的告警——措辞不能吓唬人。
+let shardWriteWarned = false;
+let lastShardWriteError = /** @type {string|null} */ (null);
+
+/** 会话索引最近一次写失败原因（无则 null）。 */
+export function shardWriteError() {
+  return lastShardWriteError;
+}
+
+/** @param {any} shard @param {any} idx @returns {{ok: boolean, error: string|null}} */
 function saveShard(shard, idx) {
   try {
     ensureHome();
     const dir = shardDir();
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     atomicWriteFileSync(shardFile(shard), JSON.stringify(idx) + '\n'); // 质检 H4：索引原子写
-  } catch {}
+    return { ok: true, error: null };
+  } catch (err) {
+    const msg = String(/** @type {any} */ (err)?.message ?? err);
+    lastShardWriteError = msg;
+    if (!shardWriteWarned) {
+      shardWriteWarned = true;
+      console.warn(
+        `[MingDao] ⚠ 会话索引写入失败：${msg}\n` +
+          `  本次检索仍可用（索引在内存里），但它无法持久化——下次检索要重新扫描并分词，会明显变慢。`
+      );
+    }
+    return { ok: false, error: msg };
+  }
 }
 
 // 一次性迁移：旧版单文件 sessions-index.json → 分片目录（迁移后删除旧文件）

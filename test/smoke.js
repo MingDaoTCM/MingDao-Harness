@@ -6499,8 +6499,19 @@ if (process.platform !== 'win32') {
     const hintSave = TS.checkpointHint(rSave, 'save');
     assert.ok(hintSave && hintSave.includes('不会'), `写失败提示必须点明「下次继续不会带上断点摘要」，实际：${hintSave}`);
     assert.ok(hintSave.includes('进度与已交付文件'), '提示必须告诉用户补救方式（把进度写进下一条消息）');
-    const rClear = TS.clearTaskState('s.jsonl');
-    assert.equal(rClear.ok, false, '清除失败（非 ENOENT）必须返回 ok:false');
+    // 清除失败要制造一个**可靠的非 ENOENT** 错误。不能用「父路径是文件」——
+    // Windows 对这种情况回报的正是 ENOENT（和"本来就没有"无法区分），于是这条断言在
+    // Windows 腿红（实测 CI：true !== false）。改用「目标是目录」：unlink 目录在
+    // POSIX 报 EISDIR、Windows 报 EPERM，两边都不是 ENOENT，判据才跨平台成立。
+    // 路径用 taskStateFile() 构造，不要手拼：它会在会话名后再补 ".json"，
+    // 手拼 's.jsonl' 实际指向 's.jsonl.json'——一个**根本不存在**的文件，
+    // 于是走 ENOENT 分支返回 ok，断言变成假绿（第一版就踩了这个坑）。
+    process.env.MINGDAO_HOME = home100;
+    fs.mkdirSync(TS.taskStateFile('s'), { recursive: true });
+    const rClear = TS.clearTaskState('s');
+    assert.equal(rClear.ok, false, `清除失败（非 ENOENT）必须返回 ok:false，实际 ${JSON.stringify(rClear)}`);
+    assert.ok(fs.existsSync(TS.taskStateFile('s')), '这一例里检查点文件应当确实还在（证明失败不是"本来就没有"）');
+    process.env.MINGDAO_HOME = badHome;
     const hintClear = TS.checkpointHint(rClear, 'clear');
     assert.ok(hintClear && hintClear.includes('续跑'), `清除失败提示必须点明「会被误判为未完成、下次会提示续跑」，实际：${hintClear}`);
     // merge 版本必须把结果透出来（否则调用点永远是 undefined.ok）
@@ -6557,6 +6568,72 @@ if (process.platform !== 'win32') {
     safeRmSync(home100, { recursive: true, force: true });
   }
   ok('v0.6.2 任务检查点：写失败可见 + 三个调用点全部消费结果 + banner 不再断言未发生的事（B-WS-1/2）');
+}
+
+
+// ---------- 101. v0.6.2：费用明细 / 会话索引的写失败不再无声（B-WS-1/2 第三、四处） ----------
+// 费用明细这一处最要紧：cache-stats.jsonl 是 todayCost() 与日费用护栏的**唯一数据源**。
+// 读侧早就做了「读不了就告警一次、返回 null 表示无法判断」，写侧却一直 catch {}——
+// 于是追加失败时文件不变 → 读侧 mtime 缓存继续命中旧值 → 护栏拿到偏小的「正常」数字，
+// 用户可能超支而毫不知情。**读侧会说真话、写侧不会**，这是本次要补的不对称。
+{
+  const CS = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+  const SI = await import(pathToFileURL(path.join(srcDir, 'session-index.js')).href);
+  const home101 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ws101-'));
+  const prevHome101 = process.env.MINGDAO_HOME;
+  const warns = [];
+  const realWarn = console.warn;
+  console.warn = (/** @type {any} */ m) => { warns.push(String(m)); };
+  try {
+    // ① 正常路径：返回 ok，且不产生任何告警
+    process.env.MINGDAO_HOME = home101;
+    const okRes = CS.recordCacheStats({ model: 'm', prompt: 10, completion: 5, cost: 0.001 });
+    assert.equal(okRes.ok, true, `正常写入应返回 ok，实际 ${JSON.stringify(okRes)}`);
+    assert.equal(okRes.phase, null, '成功时不应有 phase');
+    assert.equal(CS.cacheStatsWriteError(), null, '成功时不应留下失败原因');
+    assert.equal(warns.length, 0, `正常路径不得告警，实际：${warns.join(' | ')}`);
+
+    // ② 写失败：返回真实原因、留下可查痕迹、只告警一次（持续性问题不能每回合刷屏）
+    const badHome101 = path.join(home101, 'file-not-dir');
+    fs.writeFileSync(badHome101, 'x');
+    process.env.MINGDAO_HOME = badHome101;
+    const badRes = CS.recordCacheStats({ model: 'm', prompt: 1, completion: 1, cost: 0.002 });
+    assert.equal(badRes.ok, false, '写不进去必须返回 ok:false（旧实现是静默 void）');
+    assert.equal(badRes.phase, 'append', `失败应归因到 append 阶段，实际 ${badRes.phase}`);
+    assert.ok(String(badRes.error).length > 0, '必须带出具体原因');
+    assert.ok(CS.cacheStatsWriteError(), '必须留下可供诊断的失败原因');
+    // 关键：后面几次不能再次告警（一次提示足够，刷屏会让人忽略它）
+    CS.recordCacheStats({ model: 'm', prompt: 1, completion: 1, cost: 0.003 });
+    CS.recordCacheStats({ model: 'm', prompt: 1, completion: 1, cost: 0.004 });
+    assert.equal(warns.length, 1, `写失败只应告警一次，实际 ${warns.length} 次：${warns.join(' | ')}`);
+    assert.ok(warns[0].includes('护栏'), `告警必须点明后果（费用护栏会少计），实际：${warns[0]}`);
+    // recordUsage 是回合级费用的真正入口，必须把结果透出来
+    const uRes = CS.recordUsage('deepseek-flash', { prompt_tokens: 100, completion_tokens: 20 }, null);
+    assert.equal(uRes.ok, false, 'recordUsage 必须透出写入结果（否则上层无从察觉）');
+
+    // ③ 会话索引：写失败不许声称「结果会缺失」——真实后果是**重复索引**（内存索引仍然可用）
+    const homeIdx = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-idx101-'));
+    const sessDir = path.join(homeIdx, 'sessions');
+    fs.mkdirSync(sessDir, { recursive: true });
+    const sf = path.join(sessDir, 'a.jsonl');
+    fs.writeFileSync(sf, JSON.stringify({ role: 'user', content: '量子纠缠的实验验证' }) + '\n');
+    const st = fs.statSync(sf);
+    warns.length = 0;
+    process.env.MINGDAO_HOME = badHome101; // 索引分片写不进去
+    const combined = SI.syncSessionIndex(homeIdx, [{ name: 'a.jsonl', file: sf, mtime: st.mtimeMs }]);
+    assert.ok(combined.files['a.jsonl'], '写索引失败时，**本次检索仍必须有结果**（内存索引有效）');
+    assert.ok(combined.files['a.jsonl'].terms['量子'] > 0, '内存索引应含分词结果（后果是"慢"，不是"查不到"）');
+    assert.ok(SI.shardWriteError(), '索引写失败必须留下可查痕迹');
+    assert.equal(warns.filter((w) => w.includes('索引')).length, 1, `索引写失败只应告警一次，实际：${warns.join(' | ')}`);
+    assert.ok(warns.some((w) => w.includes('仍可用')), `措辞必须如实说明「检索仍可用」，不得吓唬成结果缺失：${warns.join(' | ')}`);
+    process.env.MINGDAO_HOME = home101;
+    safeRmSync(homeIdx, { recursive: true, force: true });
+  } finally {
+    console.warn = realWarn;
+    process.env.MINGDAO_HOME = prevHome101;
+    safeRmSync(home101, { recursive: true, force: true });
+  }
+  ok('v0.6.2 费用明细/会话索引写失败不再无声（一次告警 + 结果可查 + 措辞如实）');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

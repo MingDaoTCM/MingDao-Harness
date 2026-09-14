@@ -20,6 +20,26 @@ const MAX_LINES = 20000;
 const KEEP_LINES = 10000;
 const MAX_BYTES = 4 * 1024 * 1024; // 约合 20000 行
 
+// v0.6.2（第三方报告 B-WS-1/2 第三处）：写入失败**不再静默**。
+//
+// 为什么这一处特别要紧：cache-stats.jsonl 是 todayCost() 与日费用护栏（costGuard）的**唯一数据源**。
+// 读侧早就做了「读不了就告警一次、返回 null 表示无法判断」（见 cost-guard.js）——
+// 而写侧一直 `catch {}`：**追加失败时文件根本不变**，于是读侧的 mtime 缓存继续命中旧值，
+// 护栏拿到一个「看起来正常」的偏小数字，用户可能超支而毫不知情。
+// 读侧已经会说真话，写侧不会——这就是本次要补的不对称。
+let writeWarned = false;
+let rotateWarned = false;
+let lastWriteError = /** @type {string|null} */ (null);
+
+/** 费用明细最近一次写失败原因（无则 null）。给诊断与测试用，避免只能靠 console 观察。 */
+export function cacheStatsWriteError() {
+  return lastWriteError;
+}
+
+/**
+ * @param {any} entry
+ * @returns {{ok: boolean, error: string|null, phase: 'append'|'rotate'|null}}
+ */
 export function recordCacheStats(/** @type {any} */ entry) {
   try {
     ensureHome(); // 审计 B10：与 audit/journal 一致，目录缺失不静默丢统计
@@ -50,7 +70,21 @@ export function recordCacheStats(/** @type {any} */ entry) {
       auxReason: entry.auxReason ? String(entry.auxReason) : undefined,
     });
     fs.appendFileSync(cacheStatsFile(), line + '\n');
-  } catch {}
+  } catch (err) {
+    const msg = String(/** @type {any} */ (err)?.message ?? err);
+    lastWriteError = msg;
+    // 只提示一次：写不进去通常是持续性问题（磁盘满/权限），每回合刷屏反而让人忽略它
+    if (!writeWarned) {
+      writeWarned = true;
+      console.warn(
+        `[MingDao] ⚠ 费用明细写入失败：${msg}\n` +
+          `  今日费用护栏会**少计**这部分消费（可能超支而不知）；请检查 ${cacheStatsFile()} 的磁盘空间与权限。`
+      );
+    }
+    // 追加都失败了，后面的轮转毫无意义（statSync 也大概率抛错），直接返回真实原因，
+    // 不要让轮转分支的异常把 append 的原因覆盖掉
+    return { ok: false, error: msg, phase: 'append' };
+  }
   try {
     if (fs.statSync(cacheStatsFile()).size > MAX_BYTES) {
       // 审计 P2-3（v0.4.2）：轮转 read-modify-write 加跨进程锁——web/CLI/worker 多进程并发轮转时，
@@ -83,7 +117,17 @@ export function recordCacheStats(/** @type {any} */ entry) {
         }
       });
     }
-  } catch {}
+  } catch (err) {
+    // 轮转失败与追加失败是两件事：这里丢的不是账，而是文件会持续增长
+    const msg = String(/** @type {any} */ (err)?.message ?? err);
+    lastWriteError = msg;
+    if (!rotateWarned) {
+      rotateWarned = true;
+      console.warn(`[MingDao] ⚠ 费用明细轮转失败：${msg}\n  ${cacheStatsFile()} 会持续增长（不影响计费，但请检查磁盘空间/权限）。`);
+    }
+    return { ok: false, error: msg, phase: 'rotate' };
+  }
+  return { ok: true, error: null, phase: null };
 }
 
 // listCacheStats 读取缓存（审计：costGuard 每步 / WebUI 每 15s / /cost 命令都调用——
@@ -155,7 +199,7 @@ export function recordUsage(/** @type {any} */ modelName, /** @type {any} */ usa
     // 覆盖内置定价 + 外部定价 + config.pricing.overrides 三条来源，不再依赖 modelPreset 单一判断。
     cost = estimateCost(modelName, prompt, completion, null, priceAt);
   }
-  recordCacheStats({
+  return recordCacheStats({
     model: modelName,
     prompt,
     completion,
@@ -190,14 +234,14 @@ export function formatCacheSummary(/** @type {any} */ sum) {
  * @param {any} modelName @param {any} usage @param {string} [reason]
  */
 export function recordAuxUsage(modelName, usage, reason = 'aux') {
-  if (!usage) return;
+  if (!usage) return { ok: true, error: null, phase: null };
   try {
     const prompt = usage.prompt_tokens || 0;
     const completion = usage.completion_tokens || 0;
-    if (!prompt && !completion) return;
+    if (!prompt && !completion) return { ok: true, error: null, phase: null };
     const split = cacheSplit(usage);
     const cost = split ? estimateCost(modelName, prompt, completion, split) : estimateCost(modelName, prompt, completion, null);
-    recordCacheStats({
+    return recordCacheStats({
       model: modelName,
       prompt,
       completion,
@@ -208,7 +252,14 @@ export function recordAuxUsage(modelName, usage, reason = 'aux') {
       aux: true,
       auxReason: reason,
     });
-  } catch {}
+  } catch (err) {
+    // 辅助调用的计费同样不能静默丢（自动路由/标题/记忆提炼的费用也是钱）。
+    // 注意不在这里写 lastWriteError：本 try 也覆盖计价计算，真正的**写**失败已由
+    // recordCacheStats 自己记录，在此覆盖会把「计算失败」误报成「写入失败」。
+    const msg = String(/** @type {any} */ (err)?.message ?? err);
+    return { ok: false, error: msg, phase: null };
+  }
+  return { ok: true, error: null, phase: null };
 }
 
 /**
