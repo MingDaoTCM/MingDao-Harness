@@ -6946,6 +6946,87 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
   ok('v0.6.2 写失败不得报告成功（工作空间/守护 pidfile/记忆去重/审计）+ 全仓静默吞写清单受审阅约束');
 }
 
+
+// ---------- 104. v0.6.2：发布链路的凭据不进 argv / URL / 回显（audit-report D-REL-1/2） ----------
+// 原实现形如 `ssh mingdao-server 'bash /tmp/…sh "$V" "$BODY" "$GITEE_TOKEN" "$GITCODE_TOKEN" "$NAME"'`，
+// 而且脚本还把这一行**连同 token 明文一起 echo 出来**。三条泄露路径同时存在：
+//   ① 本地与服务器的 ps 都能看到 argv（附件上传要跑几小时，argv 就挂几小时）；
+//   ② 回显的那行会被复制进 shell 历史 / 聊天 / issue；
+//   ③ gitee 的 token 还写在 URL 里（?access_token=…）→ 进服务器上 curl 的 argv 与访问日志。
+// 这里用桩替掉 git/ssh/curl，喂金丝雀凭据，断言它**一次都不出现在 argv 或回显里**，
+// 并且确实是从 ssh 的 stdin 过去的。
+{
+  const dir104 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-rel104-'));
+  const SECRET_G = 'CANARY-GITEE-2f9c41d7';
+  const SECRET_C = 'CANARY-GITCODE-8b3e50aa';
+  const rec = path.join(dir104, 'argv.log');
+  const stdinLog = path.join(dir104, 'ssh-stdin.log');
+  const stub = path.join(dir104, 'bin');
+  fs.mkdirSync(stub, { recursive: true });
+  try {
+    // 桩：记录 argv + 让脚本关心的几条命令"成功"
+    const mk = (name, body) => {
+      fs.writeFileSync(path.join(stub, name), '#!/bin/bash\n' + body, { mode: 0o755 });
+    };
+    // \${name} 必须转义：否则会被 JS 模板字符串当成插值（这里要的是写进桩脚本的字面量）
+    const record = `printf '%s\\n' "\${name} $*" >> ${JSON.stringify(rec)}\n`;
+    mk('git', record +
+      `if [ "$1" = "remote" ]; then exit 0; fi\n` +
+      `if [ "$1" = "rev-parse" ]; then echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; exit 0; fi\n` +
+      // 必须用 printf：echo 不会解释 \t，输出字面反斜杠-t → cut -f1 切不开，对齐检查会误判为不一致
+      `if [ "$1" = "ls-remote" ]; then printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\trefs/heads/main\\n'; exit 0; fi\n` +
+      `exit 0\n`);
+    // ssh：记录 argv，并把 stdin 单独落盘（凭据必须从这里过）
+    mk('ssh', `printf '%s\\n' "ssh $*" >> ${JSON.stringify(rec)}\ncat >> ${JSON.stringify(stdinLog)}\nprintf '\\n---ssh-argv-end---\\n' >> ${JSON.stringify(stdinLog)}\nexit 0\n`);
+    mk('scp', record + `exit 0\n`);
+    mk('curl', record + `exit 0\n`);
+
+    const notes104 = path.join(dir104, 'notes.md');
+    fs.writeFileSync(notes104, '# v0.6.2 发布说明\n');
+    const r = spawnSync('bash', [path.join('scripts', 'publish-mirror-releases.sh'), '0.6.2', notes104], {
+      cwd: path.join(srcDir, '..'),
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: stub + path.delimiter + process.env.PATH,
+        MINGDAO_GITEE_TOKEN: SECRET_G,
+        MINGDAO_GITCODE_TOKEN: SECRET_C,
+      },
+    });
+    const combined = String(r.stdout || '') + String(r.stderr || '');
+    assert.equal(r.status, 0, `发版脚本应正常跑完（桩环境下），实际 status=${r.status}：${combined.slice(-500)}`);
+
+    // ① 金丝雀不得出现在任何被调用命令的 argv 里
+    const argvLog = fs.existsSync(rec) ? fs.readFileSync(rec, 'utf8') : '';
+    assert.ok(argvLog.length > 0, '桩必须记录到命令调用（否则这个测试什么都没测到）');
+    for (const [label, secret] of [['gitee', SECRET_G], ['gitcode', SECRET_C]]) {
+      assert.ok(!argvLog.includes(secret), `${label} token 不得出现在任何命令的 argv 里：\n${argvLog.split('\n').filter((l) => l.includes(secret)).join('\n')}`);
+      // ② 也不得出现在脚本自己的回显里（回显会被复制进 shell 历史/聊天）
+      assert.ok(!combined.includes(secret), `${label} token 不得出现在脚本输出里：\n${combined.split('\n').filter((l) => l.includes(secret)).join('\n')}`);
+    }
+    // ③ 凭据必须确实经 ssh stdin 传过去（不能只是"哪儿都没传"）
+    const stdinLog0 = fs.existsSync(stdinLog) ? fs.readFileSync(stdinLog, 'utf8') : '';
+    assert.ok(stdinLog0.includes(SECRET_G) && stdinLog0.includes(SECRET_C), '凭据必须经 ssh **stdin** 送达（这是替代 argv 的正道）');
+    // ④ 内层脚本：读到就删，且不再从位置参数取 token
+    const inner = fs.readFileSync('/tmp/mirror-release-0.6.2.sh', 'utf8');
+    // 覆盖**任意**位置参数：只挡 $3/$4 是不够的（实测过：把 token 挪到 $4 就能绕过）
+    assert.ok(!/_TOKEN="\$\d/.test(inner), '内层脚本不得从任何位置参数取 token（argv 会出现在服务器的 ps 里，且上传要跑几小时）');
+    assert.ok(/\.\s*"\$ENVF"/.test(inner), '内层脚本应从凭据文件 source token');
+    assert.ok(/rm -f "\$ENVF"/.test(inner), 'source 之后必须**立即删除**凭据文件（不要让 token 躺在磁盘上）');
+    assert.ok(!/access_token=/.test(inner.replace(/^#.*$/gm, '')), 'gitee 的 token 不得再写在 URL 查询串里');
+    assert.ok(/Authorization: token \$GITEE_TOKEN/.test(inner), 'gitee 必须改用 Authorization 头（已实测可用：真 token 200 / 假 token 401）');
+    assert.ok(/os\.environ\["GITCODE_TOKEN"\]/.test(inner), 'python 应从环境变量取 token，而不是 argv');
+    // ⑤ 本地凭据副本必须被清掉
+    assert.ok(!fs.existsSync('/tmp/mirror-release-0.6.2.env'), '本地凭据临时文件必须已被删除');
+  } finally {
+    safeRmSync(path.join('/tmp', 'mirror-release-0.6.2.sh'), { force: true });
+    safeRmSync(path.join('/tmp', 'mirror-release-0.6.2-body.md'), { force: true });
+    safeRmSync(path.join('/tmp', 'mirror-release-0.6.2.env'), { force: true });
+    safeRmSync(dir104, { recursive: true, force: true });
+  }
+  ok('v0.6.2 发布链路凭据纪律：token 不进 argv / 不进 URL / 不回显，改走 ssh stdin + 读后即删（D-REL-1/2）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

@@ -17,6 +17,17 @@
 #   2. gitee / gitcode 仓库已有对应 tag（本脚本会强制推送本地同名 tag，与 GitHub 发布 commit 对齐）
 #
 # 说明：token 只从环境变量读取，绝不写入仓库文件。上传限速约 50–100KB/s（gitee/服务器带宽），
+#
+# v0.6.2 凭据纪律（第三方报告 D-REL-1/2）：token **绝不经过命令行参数、URL 查询串、也不回显**。
+#   为什么改：原先的内层脚本形如
+#     ssh mingdao-server 'bash /tmp/…sh "$V" "$BODY" "$GITEE_TOKEN" "$GITCODE_TOKEN" "$NAME"'
+#   而脚本还把这一行**连同 token 明文一起 echo 出来**。三条泄露路径同时存在：
+#     ① 本地与服务器 `ps` 都能看到 argv（上传跑几小时，argv 就挂几小时）；
+#     ② 回显的那行会被复制进 shell 历史 / 聊天 / issue；
+#     ③ gitee 的 token 还写在 URL 里（`?access_token=…`）→ 出现在服务器上 curl 的 argv 与访问日志中。
+#   现在：凭据经 ssh **stdin** 落到服务器上一个 umask 077 的临时文件，脚本 source 之后**立即删除**；
+#   两个平台都改用 HTTP 头鉴权（gitee `Authorization: token …` 已实测：真 token 200 / 假 token 401 /
+#   匿名 401），URL 里不再有凭据。上传限速约 50–100KB/s（gitee/服务器带宽），
 # 7 个包约 640MB，两平台并行约需 3–5 小时，脚本在服务器后台运行：nohup ... & 并 tail /tmp/mirror-release-$V.log
 # 已知限制：gitee 附件单文件上限 100MB（AppImage 108.6MB 会被拒）——发布文案需自带官网直连链接兜底。
 set -euo pipefail
@@ -103,14 +114,23 @@ BODY="/tmp/mirror-release-$V-body.md"
 cat > /tmp/mirror-release-$V.sh <<'INNER'
 #!/bin/bash
 set -uo pipefail
-V="$1"; TAG="v$1"; BODY="$2"
-GITEE_TOKEN="$3"; GITCODE_TOKEN="$4"; NAME="$5"
+V="$1"; TAG="v$1"; BODY="$2"; NAME="$3"
+# 凭据来自独立文件（由外层脚本经 ssh stdin 写入，umask 077）：不进 argv、不进 URL。
+# 读入后**立刻删除**——凭据在磁盘上只存在"还没被读"的那一小段时间。
+ENVF="/tmp/mirror-release-$V.env"
+[ -f "$ENVF" ] || { echo "缺少凭据文件 $ENVF（应由 publish-mirror-releases.sh 传入）"; exit 1; }
+set -a
+# shellcheck disable=SC1090
+. "$ENVF"
+set +a
+rm -f "$ENVF"
+{ [ -n "${GITEE_TOKEN:-}" ] && [ -n "${GITCODE_TOKEN:-}" ]; } || { echo "凭据文件缺少 token"; exit 1; }
 DL="/opt/1panel/www/sites/mingdao-site/downloads"
 FILES="mingdao-setup-$V-x64.exe mingdao-$V-amd64.deb mingdao-$V-arm64.dmg mingdao-$V-x64.dmg mingdao-$V-x86_64.AppImage mingdao-$V-arm64-mac.zip mingdao-$V-x64-mac.zip"
 
 echo "== gitee release =="
-GID=$(curl -s -X POST "https://gitee.com/api/v5/repos/MingDaoTCM/MingDao-harness/releases?access_token=$GITEE_TOKEN" \
-  -H "Content-Type: application/json" \
+GID=$(curl -s -X POST "https://gitee.com/api/v5/repos/MingDaoTCM/MingDao-harness/releases" \
+  -H "Content-Type: application/json" -H "Authorization: token $GITEE_TOKEN" \
   -d "$(python3 -c 'import json,sys;print(json.dumps({"tag_name":sys.argv[1],"name":sys.argv[3],"body":open(sys.argv[2]).read(),"target_commitish":"main"}))' "$TAG" "$BODY" "$NAME")" \
   | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))')
 echo "gitee release id=$GID"
@@ -143,7 +163,8 @@ for f in $FILES; do
   fi
   echo "== gitee attach $f ($((sz/1024/1024))MB)"
   curl -s --connect-timeout 30 --max-time 3600 -X POST \
-    "https://gitee.com/api/v5/repos/MingDaoTCM/MingDao-harness/releases/$GID/attach_files?access_token=$GITEE_TOKEN" \
+    "https://gitee.com/api/v5/repos/MingDaoTCM/MingDao-harness/releases/$GID/attach_files" \
+    -H "Authorization: token $GITEE_TOKEN" \
     -F "file=@$DL/$f" -o /tmp/up.json -w "http=%{http_code} bytes=%{size_upload} time=%{time_total}s\n"
   head -c 150 /tmp/up.json; echo
 done
@@ -153,9 +174,11 @@ done
 for f in $FILES; do
   [ -f "$DL/$f" ] || { echo "== gitcode 跳过 $f（文件不存在）"; continue; }
   echo "== gitcode attach $f"
-  python3 - "$f" "$GITCODE_TOKEN" "$DL" "$TAG" <<'PY'
+  # token 走环境变量传给 python：写成 argv 同样会出现在服务器的 ps 里
+  GITCODE_TOKEN="$GITCODE_TOKEN" python3 - "$f" "$DL" "$TAG" <<'PY'
 import json, os, sys, urllib.request
-name, token, dl, tag = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+name, dl, tag = sys.argv[1], sys.argv[2], sys.argv[3]
+token = os.environ["GITCODE_TOKEN"]
 api = f"https://api.gitcode.com/api/v5/repos/MingDaoTCM/MingDao-Harness/releases/{tag}/upload_url"
 rq = urllib.request.Request(f"{api}?file_name={name}", headers={"private-token": token})
 with urllib.request.urlopen(rq, timeout=60) as r:
@@ -173,5 +196,19 @@ done
 echo "MIRROR_RELEASE_DONE $TAG"
 INNER
 chmod +x /tmp/mirror-release-$V.sh
+
+# 凭据经 **stdin** 送到服务器，落在 umask 077 的临时文件里；外层立即删掉本地副本。
+# 为什么不用 scp：scp 的权限继承依赖本地文件模式，容易被 umask 抹掉；ssh + `cat >` 配 umask 077
+# 能确保远端文件一定是 600。也不用 ssh argv / SendEnv（后者需要改服务器 sshd 配置）。
+ENVF_LOCAL="$(mktemp)"
+trap 'rm -f "$ENVF_LOCAL"' EXIT
+umask 077
+printf 'GITEE_TOKEN=%s\nGITCODE_TOKEN=%s\n' "$GITEE_TOKEN" "$GITCODE_TOKEN" > "$ENVF_LOCAL"
+chmod 600 "$ENVF_LOCAL"
+ssh mingdao-server "umask 077; cat > /tmp/mirror-release-$V.env" < "$ENVF_LOCAL"
+rm -f "$ENVF_LOCAL"   # 本地副本用完即删，不必等到退出
+ssh mingdao-server "chmod 600 /tmp/mirror-release-$V.env; ls -l /tmp/mirror-release-$V.env"
+
 echo "上传脚本已生成 /tmp/mirror-release-$V.sh —— 在服务器运行："
-echo "  ssh mingdao-server 'nohup bash /tmp/mirror-release-$V.sh \"$V\" \"$BODY\" \"$GITEE_TOKEN\" \"$GITCODE_TOKEN\" \"$NAME\" > /tmp/mirror-release-$V.log 2>&1 &'"
+echo "  ssh mingdao-server 'nohup bash /tmp/mirror-release-$V.sh \"$V\" \"$BODY\" \"$NAME\" > /tmp/mirror-release-$V.log 2>&1 &'"
+echo "  （凭据由 /tmp/mirror-release-$V.env 提供，脚本读取后立即删除；token 不经过命令行，也不出现在以上回显中）"

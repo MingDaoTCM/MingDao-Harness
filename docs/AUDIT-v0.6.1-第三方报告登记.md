@@ -411,6 +411,27 @@ Windows 对这种情况回报的正是 **ENOENT**，与"本来就没有检查点
 全部被拦。**"突变让测试失败"只有在"未突变时测试确实通过"的前提下才有意义**，
 这次差点又踩进去。
 
+## 3.22 已修复（第二十三批：发布链路的凭据不进 argv / URL / 回显）
+
+| 项 | 位置 | 核实结论 | 处理 |
+| --- | --- | --- | --- |
+| D-REL-1/2 | `scripts/publish-mirror-releases.sh` | **实测确认三条泄露路径同时存在**：① 内层脚本形如 `ssh mingdao-server 'bash /tmp/…sh "$V" "$BODY" "$GITEE_TOKEN" "$GITCODE_TOKEN" "$NAME"'`——本地与**服务器**的 `ps` 都能看到 argv，而附件上传要跑几小时，argv 就挂几小时；② 脚本还把这一行**连同 token 明文一起 `echo` 出来**，那行会被复制进 shell 历史 / 聊天 / issue；③ gitee 的 token 写在 URL 里（`?access_token=…`）→ 进服务器上 `curl` 的 argv 与访问日志。同一类问题本仓在 P2-6（`sync passwd` 经 argv 传密）已经修过一次，**发布链路是漏网的那一处** | 凭据改为经 **ssh stdin** 落到服务器上一个 `umask 077` 的临时文件，内层脚本 `source` 之后**立即 `rm`**；两个平台都改用 HTTP 头鉴权；传 python 的 token 也从 argv 改成环境变量；回显的命令里不再有 token |
+
+### gitee 头鉴权是**实测**过的，不是照猜
+`access_token` 查询串换 `Authorization: token …` 头之前先验证：`GET /api/v5/user`（需鉴权）
+用真 token 返回 **200**、用假 token 返回 **401**、匿名返回 **401**——三种对照齐了才动手。
+只测「公开仓库的 GET 返回 200」是不够的：那可能只是匿名可读，**证明不了头鉴权生效**。
+
+### 测试方式：桩替 + 金丝雀
+不能真去碰服务器，所以把 `git` / `ssh` / `scp` / `curl` 换成桩（记录 argv），喂两个金丝雀 token，
+断言它们**一次都不出现在任何 argv 或脚本回显里**，同时断言凭据**确实**经 ssh stdin 送达
+（否则"哪儿都没传"也能让前一条通过）。另加静态守卫：URL 里不得有 `access_token=`、
+内层脚本不得从**任何**位置参数取 token、`source` 之后必须立即 `rm`。
+5 个突变全部被预期断言捕获。
+
+> 又一处自我纠错：守卫第一版只挡 `GITEE_TOKEN="$3"`，而突变把 token 挪到 `$4` 就绕过去了
+> （**守卫漏了，实测发现**）。已改成 `_TOKEN="$<任意数字>"` 全挡。
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）
@@ -522,9 +543,9 @@ Windows 对这种情况回报的正是 **ENOENT**，与"本来就没有检查点
    另外实测本版 Node 下 `rl.question` 在 stdin EOF 时会正常回调（不会永久挂起），
    `askAutoStart` 那条路径不存在「泄漏 + 卡死」。**结论：非缺陷，如实登记为已核实。**
 5. **路径穿越**（B-SR-1）：报告未给位置，未定位。
-6. **词表永不重试**（B-TOK-1）、**临时目录**（B-SL-1）、**skill token**（B-CMD-4）、
-   **gitee token 发布链路**（D-REL-1/2）：均未定位（后两者本仓已有「凭据不进产物」核查，
-   见 `RELEASE-CHECKLIST` §1.2，但那是间接证据，不等于已核实报告所指的具体位置）。
+6. **词表永不重试**（B-TOK-1）、**临时目录**（B-SL-1）、**skill token**（B-CMD-4）：仍未定位
+   （报告只给代号不给位置）。~~gitee token 发布链路（D-REL-1/2）~~ ✅ **已修**（§3.22：
+   实测确认 argv/回显/URL 三条泄露路径，已改走 ssh stdin + HTTP 头）。
 7. **§4.3 `audit-report.md` 其余约 15 项**：该报告只给了 22 个**代号**、
    明细在**未提供**的 `30-defects/defect-register.md` 里，因此多数条目连位置都不知道。
    已核实的 4 条（B-CT-1 / B-CON-1 / B-HK-1 / A-LG-1）说明它**既有夸大也有真货**，
