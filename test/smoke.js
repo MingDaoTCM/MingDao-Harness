@@ -8058,11 +8058,16 @@ const isPosix111 = process.platform !== 'win32';
     const HK = await import(pathToFileURL(path.join(srcDir, 'hooks.js')).href);
     const homeH = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-hook113-'));
     try {
-      // 一个「不读 stdin 就退出」的 hook：写大载荷必然 EPIPE。
+      // 确定性触发：让 hook **自己关闭 fd 0** 并存活 300ms。
+      //   · 关闭 stdin → 父进程写入必然 EPIPE（不依赖"子进程已退出"的时序）；
+      //   · 存活 300ms  → 保证 stdin error 在 child close **之前**到达（第一版用
+      //     `process.exit(0)` 靠"进程已退出"来触发 EPIPE，那是竞态：Linux/Node18-20 上
+      //     close 先到，测试假绿/假红——CI 上实测两腿红）。
       // 修复前：stdin error 被静默吞掉 + 空输出被当作放行 → 工具照常执行（fail-open）。
       const big = 'x'.repeat(200 * 1024);
+      const closeStdinCmd = `${process.execPath} -e "require('node:fs').closeSync(0); setTimeout(()=>{}, 300)"`;
       const hooks = HK.createHooks(
-        { PreToolUse: [{ matcher: 'write', cmd: `${process.execPath} -e "process.exit(0)"` }] },
+        { PreToolUse: [{ matcher: 'write', cmd: closeStdinCmd }] },
         homeH,
         {}
       );
