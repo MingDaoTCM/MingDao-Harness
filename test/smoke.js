@@ -8857,6 +8857,103 @@ process.stdout.write('done');`
   ok('v0.6.3 批六 供应链：pack verify 默认静态（不执行被审代码）+ 未信任 Pack 不遮蔽 + 预设遮蔽可见 + git 安装器拒本地路径');
 }
 
+// ---------- 118. v0.6.3 批七：并发与长驻（进程不能死 / 任务不能卡死也不能双跑 / pid 复用） ----------
+{
+  const { withFileLockSync } = await import(pathToFileURL(path.join(srcDir, 'atomic-write.js')).href);
+  const prevHome118 = process.env.MINGDAO_HOME;
+  const home118 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-batch7-'));
+  process.env.MINGDAO_HOME = home118;
+  try {
+    // ① M-11：pid 复用不得让锁僵死——回收前必须校验"活着的这个 pid 还是不是原持有者"
+    {
+      const dir118 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-lock118-'));
+      const lock118 = path.join(dir118, '.lock');
+      const old118 = new Date(Date.now() - 60000);
+      try {
+        // (a) 锁里写的 pid **活着**，但那个 pid 现在跑的是**别的**程序（cmd 对不上）
+        //     → 这正是 pid 复用的形态：必须能回收，否则所有写方等到超时（死锁）
+        fs.writeFileSync(lock118, JSON.stringify({ pid: process.pid, at: Date.now() - 60000, cmd: '/definitely/not/this/process.js' }));
+        fs.utimesSync(lock118, old118, old118);
+        const t0 = Date.now();
+        let ran118 = false;
+        withFileLockSync(lock118, () => { ran118 = true; }, { timeoutMs: 3000, staleMs: 4000 });
+        const ms118 = Date.now() - t0;
+        assert.ok(ran118, 'pid 存活但**命令行归属不符**时必须能回收（原实现只看存活 → 永久僵死）');
+        assert.ok(ms118 < 1500, `pid 复用场景应较快回收，实测 ${ms118}ms`);
+
+        // (b) 反向：锁里写的 pid 活着**且**命令行就是本进程 → 绝不能回收（互斥必须保住）
+        // 凭据用 basename：实现写的就是 basename（`ps` 显示的是"输入时的形态"，
+        // 而 Node 把 argv[1] 解析成绝对路径——第一版测试写绝对路径，于是它自己把活锁抢走了）
+        const selfCmd = path.basename(process.argv[1] || process.execPath);
+        fs.writeFileSync(lock118, JSON.stringify({ pid: process.pid, at: Date.now() - 60000, cmd: selfCmd }));
+        fs.utimesSync(lock118, old118, old118);
+        let stolen = false;
+        let timedOut = false;
+        try {
+          withFileLockSync(lock118, () => { stolen = true; }, { timeoutMs: 300, staleMs: 4000 });
+        } catch {
+          timedOut = true;
+        }
+        assert.ok(!stolen, '持有者确实还是本进程时**绝不能**回收（否则互斥失效、并发写同一文件）');
+        assert.ok(timedOut, '这种情况应当等待到超时并抛出，而不是抢锁');
+      } finally {
+        safeRmSync(dir118, { recursive: true, force: true });
+      }
+    }
+
+    // ② P0-4 / M-13 / P1-5：这三处是长驻进程里的时序缺陷，全部落在**命令层/守护层**，
+    //    单进程单测无法端到端触发（要真的杀掉 daemon、真的让写盘失败）。
+    //    因此这里用**源码级守卫**钉住修复点，并在登记里如实说明它们的验证层级。
+    {
+      const syncSrc = fs.readFileSync(path.join(srcDir, 'sync-server.js'), 'utf8');
+      // P0-4：withWriteLock 是 async，任何一处"调用但不 await/return"都会让 rejected promise
+      // 变成 unhandledRejection → 同步服务进程直接退出（所有在线设备一起掉线）
+      const bare = [];
+      for (const line of syncSrc.split('\n')) {
+        const t = line.trim();
+        if (!t.includes('withWriteLock(')) continue;
+        if (/^(async function|function|\/\/|\*)/.test(t)) continue;
+        if (/^await\s+withWriteLock\(/.test(t) || /^return\s+withWriteLock\(/.test(t) || /^const\s+\w+\s*=\s*await\s+withWriteLock\(/.test(t)) continue;
+        bare.push(t.slice(0, 90));
+      }
+      assert.deepEqual(bare, [], `sync-server.js 里存在未 await 的 withWriteLock（P0-4 会让整个同步服务退出）：\n${bare.join('\n')}`);
+      assert.ok(/await withWriteLock\(\(\) => \{[\s\S]{0,200}lastSeen|try \{\n\s+await withWriteLock/.test(syncSrc), 'lastSeen 的写锁必须被 await（并包 try/catch 留痕）');
+      assert.ok(/await doChangePassword\(/.test(syncSrc), 'doChangePassword 改为持锁执行后，调用点必须 await');
+      assert.ok(/async function doChangePassword[\s\S]{0,400}?return withWriteLock\(/.test(syncSrc), '改密（吊销全部设备）必须与设备表写互斥');
+      // 现象 B：锁内**重读** shares/accepted，而不是把锁外快照写回去
+      assert.ok(/const shares2 = readJson\(sharesFile\(\), \{\}\);/.test(syncSrc), 'doShareAccept 必须在锁内重读 shares');
+      assert.ok(/if \(!shares2\[shareId\]\) return \{ notFound/.test(syncSrc), '锁内重读后发现分享已被并发撤销 → 必须拒绝，而不是把已删除的 shareId 写回');
+
+      const schedSrc = fs.readFileSync(path.join(srcDir, 'schedule.js'), 'utf8');
+      // M-13：避峰长等待必须切片并在每片复查租约
+      assert.ok(/const waitGuarded = async/.test(schedSrc), 'M-13：避峰等待必须有带租约检查的切片等待器');
+      assert.ok(/Math\.min\(left, 60000\)/.test(schedSrc), 'M-13：单片不得超过 60s');
+      assert.ok(/if \(shouldStop\(\)\) return 'aborted';/.test(schedSrc), 'M-13：每片醒来都要复查租约');
+      assert.ok(
+        /if \(\(await waitGuarded\(defer\.getTime\(\) - Date.now\(\) \+ 2000\)\) === 'aborted'\) return 'aborted';/.test(schedSrc),
+        'M-13：避峰分支必须走切片等待（原实现是一整段可能长达数小时的 sleep）'
+      );
+
+      const cliSrc = fs.readFileSync(path.join(srcDir, 'cli.js'), 'utf8');
+      // P1-5：宿主即自己 → 不能死等；worker 还活着 → 不能重排（会并发跑第二个）
+      assert.ok(/const runnerIsSelf = Number\(j\.runnerPid\) === process\.pid;/.test(cliSrc), 'P1-5：恢复分支必须识别"宿主就是自己"');
+      assert.ok(/if \(!runnerIsSelf && procAlive\(j\.runnerPid\)\) continue;/.test(cliSrc), 'P1-5：只有"别的宿主还活着"才继续等');
+      // 必须钉**整行**：只匹配 `taskWorkerAlive(t)) continue;` 的话，把条件短接成
+      // `if (false && … && taskWorkerAlive(t)) continue;` 的变异仍然"通过"（变异验证当场发现）
+      assert.ok(
+        /if \(t && t\.status === 'running' && taskWorkerAlive\(t\)\) continue;/.test(cliSrc),
+        'P1-5：worker 仍活着时不得重排（否则同一任务跑两遍）'
+      );
+      assert.ok(/调度协程异常（任务/.test(cliSrc), 'P1-5：协程异常必须留痕（原来 .catch(() => {}) 静默吞掉 → 任务永久卡 running）');
+    }
+  } finally {
+    if (prevHome118 === undefined) delete process.env.MINGDAO_HOME;
+    else process.env.MINGDAO_HOME = prevHome118;
+    safeRmSync(home118, { recursive: true, force: true });
+  }
+  ok('v0.6.3 批七 并发与长驻：pid 复用可回收但持锁者仍受保护 + 同步服务写锁全 await + 避峰切片 + 调度恢复不自锁不双跑');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

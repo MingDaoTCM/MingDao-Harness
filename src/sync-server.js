@@ -408,24 +408,29 @@ function doDelete(username, name) {
  * @param {any} username
  * @param {any} body
  */
-function doChangePassword(username, body) {
+async function doChangePassword(username, body) {
   const oldPassword = String(body.oldPassword || '');
   const newPassword = String(body.newPassword || '');
   if (newPassword.length < 8) return { error: '新密码至少 8 位' };
-  const users = readJson(usersFile(), {});
-  const u = users[username];
-  if (!u) return { unauthorized: '用户不存在' };
-  if (!verifyPassword(oldPassword, u.salt, u.hash)) return { unauthorized: '旧密码错误' };
-  const salt = crypto.randomBytes(12).toString('hex');
-  users[username] = { ...u, salt, hash: hashPassword(newPassword, salt), updatedAt: Date.now() };
-  writeJson(usersFile(), users);
-  // 改密吊销既有设备 token：密码可能已泄露，旧 token 一律失效（当前设备也需重新登录）
-  const devices = readJson(devicesFile(), {});
-  delete devices[username];
-  writeJson(devicesFile(), devices);
-  invalidateDeviceCache();
-  log('password-changed', username, '（全部设备已吊销）');
-  return { ok: true, note: '密码已修改，所有设备需重新登录' };
+  return withWriteLock(() => {
+    // v0.6.3（P0-4）：改密会 `delete devices[username]`（吊销全部设备 token），而设备表另有
+    // 一把 registerLock/写锁——此前这里是**锁外**读改写，于是"吊销"可以被一次并发的 pair
+    // 写回覆盖，已吊销的旧 token 复活。改密与设备表写必须互斥。
+    const users = readJson(usersFile(), {});
+    const u = users[username];
+    if (!u) return { unauthorized: '用户不存在' };
+    if (!verifyPassword(oldPassword, u.salt, u.hash)) return { unauthorized: '旧密码错误' };
+    const salt = crypto.randomBytes(12).toString('hex');
+    users[username] = { ...u, salt, hash: hashPassword(newPassword, salt), updatedAt: Date.now() };
+    writeJson(usersFile(), users);
+    // 改密吊销既有设备 token：密码可能已泄露，旧 token 一律失效（当前设备也需重新登录）
+    const devices = readJson(devicesFile(), {});
+    delete devices[username];
+    writeJson(devicesFile(), devices);
+    invalidateDeviceCache();
+    log('password-changed', username, '（全部设备已吊销）');
+    return { ok: true, note: '密码已修改，所有设备需重新登录' };
+  });
 }
 
 // ---------- 会话分享 ----------
@@ -518,14 +523,20 @@ function doShareAccept(username, shareId) {
     atomicWriteFileSync(target, content, { mode: 0o600 }); // 质检 H4
   }
   return withWriteLock(() => {
+    // v0.6.3（P0-4）：**锁内重读**。此前 shares/accepted 是在锁**外**读的，写回的是陈旧快照——
+    // 于是"revoke 之后的一次并发 accept"会把已删除的 shareId 写回去（分享复活），
+    // 同理也会覆盖并发的 pulls/accepted 更新。这里重新读取并再次校验存在性。
+    const shares2 = readJson(sharesFile(), {});
+    if (!shares2[shareId]) return { notFound: '分享不存在（可能已被并发撤销）' };
+    const accepted2 = readJson(acceptedFile(), {});
     const meta = readJson(metaFile(username), {});
     meta[savedAs] = { mtime: Date.now(), size: Buffer.byteLength(content) };
     writeJson(metaFile(username), meta);
-    accepted[username] = accepted[username] || {};
-    accepted[username][shareId] = { owner: s.owner, name: s.name, savedAs, acceptedAt: Date.now(), copyHash: sha(content) };
-    writeJson(acceptedFile(), accepted);
-    shares[shareId].pulls = (shares[shareId].pulls || 0) + 1;
-    writeJson(sharesFile(), shares);
+    accepted2[username] = accepted2[username] || {};
+    accepted2[username][shareId] = { owner: s.owner, name: s.name, savedAs, acceptedAt: Date.now(), copyHash: sha(content) };
+    writeJson(acceptedFile(), accepted2);
+    shares2[shareId].pulls = (shares2[shareId].pulls || 0) + 1;
+    writeJson(sharesFile(), shares2);
     log('share-accept', username, shareId, savedAs, conflict ? '(conflict-copy)' : '(refresh)');
     return {
       ok: true,
@@ -583,13 +594,21 @@ async function handle(req, res) {
     if (nowSeen - (dev.device.lastSeen || 0) > 60000) {
       dev.device.lastSeen = nowSeen;
       // 质检 A1：与 pair 的 devices 写入互斥（60s 节流只降频，不消除竞态——加锁消除）
-      withWriteLock(() => {
-        const devices = readJson(devicesFile(), {});
-        if (devices[dev.username]?.[dev.deviceId]) {
-          devices[dev.username][dev.deviceId] = dev.device;
-          writeJson(devicesFile(), devices);
-        }
-      });
+      // v0.6.3（P0-4）：**必须 await**。withWriteLock 是 async：临界区里任何 I/O 异常
+      // （ENOSPC/EACCES/ENOENT）都会让返回的 promise reject，而无人处理 → Node 15+ 默认
+      // `--unhandled-rejections=throw` → **整个同步服务进程退出**（所有在线设备一起掉线）。
+      try {
+        await withWriteLock(() => {
+          const devices = readJson(devicesFile(), {});
+          if (devices[dev.username]?.[dev.deviceId]) {
+            devices[dev.username][dev.deviceId] = dev.device;
+            writeJson(devicesFile(), devices);
+          }
+        });
+      } catch (/** @type {any} */ e) {
+        // lastSeen 写失败不影响本次请求的语义（它只是"最近在线"标记），但必须留痕而不是崩掉进程
+        log('lastSeen-write-failed', dev.username, String(e?.message || e));
+      }
     }
 
     if (req.method === 'POST' && p === '/api/devices') {
@@ -627,7 +646,7 @@ async function handle(req, res) {
     if (req.method === 'POST' && p === '/api/password') {
       if (rateLimited(req, 10)) return json(res, 429, { error: '尝试过于频繁，请稍后再试' });
       const body = await parseBody(req);
-      const r = doChangePassword(dev.username, body);
+      const r = await doChangePassword(dev.username, body); // v0.6.3（P0-4）：改为持锁执行，必须 await
       if (r.error) return json(res, 400, r);
       if (r.unauthorized) return json(res, 401, r);
       return json(res, 200, r);

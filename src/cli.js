@@ -231,7 +231,7 @@ async function main() {
   if (opts.prompt[0] === 'schedule-daemon') {
     const home0 = ensureHome();
     const { listSchedules, runSleeper, sleeperAlive, procAlive, daemonPidFile, writeSchedule } = await import('./schedule.js');
-    const { readTask } = await import('./tasks.js');
+    const { readTask, taskWorkerAlive } = await import('./tasks.js');
     const handled = new Set();
     const supervising = new Set(); // 本 daemon 正在监督的任务（防崩溃恢复误判正在执行的任务）
     const nonce = String(opts.prompt[1] || '');
@@ -261,7 +261,16 @@ async function main() {
             // v0.4.7（P2 T15）：先看「跑这个任务的宿主进程」是否仍存活。存活说明它正在跑
             // （可能还没写 lastTaskId），**等它**——否则「本 daemon 刚接管 + 旧 daemon 在途」
             // 会被当成崩溃残留 → 重置 pending → 并发重跑同一任务。
-            if (procAlive(j.runnerPid)) continue;
+            //
+            // v0.6.3（P1-5）：但「宿主就是自己」时必须例外——markRunning 写的 runnerPid 就是
+            // 本 daemon 的 pid，于是 `procAlive(自己)` 恒真 → `continue` → 这条 job **永久跳过**：
+            // 面板一直转圈、既不重跑也不收尾，用户只能 daemon stop + 删 pidfile 自愈。
+            // 同理：宿主只是"标记"，真正在跑的是 detached worker，绝不能凭宿主死活就重排。
+            const runnerIsSelf = Number(j.runnerPid) === process.pid;
+            if (!runnerIsSelf && procAlive(j.runnerPid)) continue;
+            // worker 仍活着（宿主被 SIGKILL 但 detached worker 还在跑）→ **绝不重排**，
+            // 否则同一个任务会跑第二遍；等它收尾，下一轮恢复会走「t.status !== running」的定案分支。
+            if (t && t.status === 'running' && taskWorkerAlive(t)) continue;
             if (!t) {
               await writeSchedule(home0, { ...j, status: 'pending' });
               continue;
@@ -292,7 +301,14 @@ async function main() {
           handled.add(j.id);
           supervising.add(j.id);
           runSleeper(home0, j.id, { shouldStop: () => leaseLost })
-            .catch(() => {})
+            // v0.6.3（P1-5）：不能静默吞。协程一次异常（锁超时/写盘失败）此前**无痕**消失，
+            // 于是 job 停在 running、下一轮恢复又因 runnerPid 指向自己而跳过 → 永久卡住。
+            // 现在至少留一条可诊断的日志（用户能在 daemon 日志里看到"为什么没跑"）。
+            .catch((/** @type {any} */ e) => {
+              try {
+                console.error(`[MingDao] ⚠ 调度协程异常（任务 ${j.id}）：${e?.message || e}`);
+              } catch {}
+            })
             .finally(() => {
               handled.delete(j.id);
               supervising.delete(j.id);

@@ -19,6 +19,7 @@
 // 零依赖：仅 node:fs / node:path / node:crypto / node:async_hooks / Atomics.wait / timers/promises。
 
 import fs from 'node:fs';
+import { pidOwnedBy } from './proc.js';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -107,7 +108,19 @@ function tryAcquire(lockPath) {
     throw err;
   }
   try {
-    fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now() }));
+    // v0.6.3（M-11）：锁内容额外记下本进程的**入口脚本**，作为 pid 的身份凭据。
+    // 起因：陈旧回收只看「持有者 pid 是否存活」，而 pid 会被复用——复用给一个活进程后
+    // `procAlive` 恒真，这把锁**永不回收**，所有写方等到超时失败（死锁）。
+    // 有了 cmd（argv[1]），回收方可以用既有的 pidOwnedBy() 校验"活着的这个 pid 还是不是原来那个进程"。
+    // v0.6.3（M-11）：锁内容额外记下入口脚本的**文件名**作为 pid 的身份凭据。
+    // 起因：陈旧回收只看「持有者 pid 是否存活」，而 pid 会被复用——复用给一个活进程后
+    // `procAlive` 恒真，这把锁**永不回收**，所有写方等到超时失败（死锁）。
+    //
+    // 为什么是 basename 而不是 argv[1]：`ps` 显示的是**输入时的形态**，而 Node 把 argv[1]
+    // 解析成绝对路径——`node test/smoke.js` 在 ps 里就是 `node test/smoke.js`。
+    // 第一版存 argv[1]，于是"同进程内的并发任务"也被判成 pid 复用 → **把活锁抢走**，
+    // 既有的并发串行断言当场抓到（3 次自增只剩 1）。basename 在两种形态下都出现，是稳妥的交集。
+    fs.writeSync(fd, JSON.stringify({ pid: process.pid, at: Date.now(), cmd: path.basename(process.argv[1] || process.execPath) }));
   } finally {
     fs.closeSync(fd);
   }
@@ -140,10 +153,22 @@ function reclaimIfStale(lockPath, staleMs) {
     return true; // 锁文件刚被释放：立刻重试
   }
   let holderPid = 0;
+  let holderCmd = '';
   try {
-    holderPid = Number(JSON.parse(fs.readFileSync(lockPath, 'utf8'))?.pid) || 0;
+    const meta = JSON.parse(fs.readFileSync(lockPath, 'utf8'));
+    holderPid = Number(meta?.pid) || 0;
+    holderCmd = String(meta?.cmd || '');
   } catch {}
-  const holderAlive = holderPid > 0 ? procAlive(holderPid) : null;
+  let holderAlive = holderPid > 0 ? procAlive(holderPid) : null;
+  // M-11：pid 存活 ≠ 原持有者还活着。用命令行归属校验识破 pid 复用：
+  //   · pidOwnedBy 返回 false → 这个 pid 现在跑的是**别的**程序 → 原持有者已死，可以回收；
+  //   · 返回 true（同一入口脚本，可能是也可能不是原进程）或 null（Windows/取不到命令行）→ 保持"活着"。
+  // 这一层是**严格改进**：原先这种情况一律不回收，现在只有"能确证不是原进程"时才回收。
+  if (holderAlive === true && holderCmd) {
+    try {
+      if (pidOwnedBy(holderPid, holderCmd) === false) holderAlive = false;
+    } catch {}
+  }
   const reclaimable = holderAlive === false || (holderAlive === null && Date.now() - st.mtimeMs > staleMs);
   if (!reclaimable) return false;
   // TOCTOU 防护（OfficeACE 报告）：unlink 前读锁内容并二次 stat 比对，

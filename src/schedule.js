@@ -438,6 +438,23 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
   const shouldStop = typeof opts.shouldStop === 'function' ? opts.shouldStop : () => false;
 
   const wait = (/** @type {any} */ ms) => new Promise((r) => setTimeout(r, ms));
+  /**
+   * v0.6.3（M-13）：**带租约检查的长等待**。避峰等待可能长达数小时，此前是一整段 sleep——
+   * 期间 daemon 被接管/停止，旧协程仍持有 job 视图一路睡到底，醒来再与新 daemon 交错执行同一任务。
+   * 现在切成 ≤60s 的片，每片醒来都问一次 shouldStop()，失去租约即刻返回 'aborted'。
+   * @param {number} ms
+   * @returns {Promise<'ok'|'aborted'>}
+   */
+  const waitGuarded = async (/** @type {number} */ ms) => {
+    let left = Math.max(0, Number(ms) || 0);
+    while (left > 0) {
+      const slice = Math.min(left, 60000);
+      await wait(slice);
+      left -= slice;
+      if (shouldStop()) return 'aborted';
+    }
+    return 'ok';
+  };
 
   // P1-15（v0.4.5）：标记 running 前加锁并复查 paused——此前锁外 writeSchedule({...cur,'running'})
   // 与 pauseSchedule 锁内写 paused 交错时，running 会覆盖 pause（任务继续触发，pause 语义失效）。
@@ -478,7 +495,8 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
         const curN = readSchedule(home, id);
         if (curN && curN.status !== 'paused') writeSchedule(home, { ...curN, note: `避峰等待至北京时间 ${defer.toISOString().slice(11, 16)}（闲时起执行）` });
       });
-      await wait(defer.getTime() - Date.now() + 2000);
+      // M-13：切片等待，每片都复查租约（原来是一整段可能长达数小时的 sleep）
+      if ((await waitGuarded(defer.getTime() - Date.now() + 2000)) === 'aborted') return 'aborted';
       if (shouldStop()) return 'aborted'; // 睡醒后若已失去租约，直接放弃（避免接管方并跑）
     }
     if (job.after?.length) {
