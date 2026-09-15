@@ -13,6 +13,8 @@ const MIN_DROP_TOKENS = 2000; // 被裁段落 token 数低于此值不值得一�
 // B1/B2（评估建议）：达到预算 80% 即提前压缩、压到 60%——滞回缓冲带避免在预算线附近
 // 反复触发裁剪/压缩，让摘要成为稳定前缀、后续轮次全程缓存命中；压缩触发频率也大幅下降。
 const DEFAULT_TRIGGER_RATIO = 0.8;
+/** v0.6.3（BUG-036）：triggerRatio 越界只告警一次，避免每回合刷屏 */
+let triggerWarned = false;
 const TARGET_RATIO = 0.6;
 const SUMMARY_MAX_CHARS = 1600; // 摘要上限（约几百 token，远小于被裁段落）
 const INPUT_MAX_CHARS = 30000; // 摘要输入上限（防超长工具输出撑爆摘要请求）
@@ -69,7 +71,19 @@ export async function compactConversation(/** @type {any} */ { messages, budget,
   // boundary 保持 messages.length，于是除 system 外整段会话（含最新用户指令）被全部压成摘要，
   // 且 WebUI 的 onCompact 会把结果 rewriteSession 永久写回会话文件（真·失忆）。
   // config.compactTrigger 是文档化的 0–1 可调项，「想更早压缩」的自然用法正好命中。
-  const trigger = Number.isFinite(Number(triggerRatio)) ? Math.max(Number(triggerRatio), TARGET_RATIO) : DEFAULT_TRIGGER_RATIO;
+  // v0.6.3（BUG-036）：**上限也要夹**。原实现只 `Math.max(..., TARGET_RATIO)`，于是
+  // `config.compactTrigger` 配成 >1（或手滑多打一个 0）时，`total <= budget*trigger` 恒真 →
+  // 自动压缩**永久失效**（force 分支之外永不触发）→ 长会话一路涨到窗口上限才由服务端报错。
+  // 上限定在 1（= 用满预算才压）并**明确告警**，而不是静默失效。
+  let triggerIn = Number(triggerRatio);
+  if (Number.isFinite(triggerIn) && triggerIn > 1) {
+    if (!triggerWarned) {
+      triggerWarned = true;
+      console.warn(`[MingDao] ⚠ compactTrigger=${triggerIn} 超出有效范围（0–1），已按 1 处理——否则自动压缩永不触发，长会话会一直涨到窗口上限。`);
+    }
+    triggerIn = 1;
+  }
+  const trigger = Number.isFinite(triggerIn) ? Math.max(triggerIn, TARGET_RATIO) : DEFAULT_TRIGGER_RATIO;
   // force（v0.3.2 边缘检测）：逼近窗口时即便启发式计数低估（total 未达触发线）也强制压缩——
   // 非 DeepSeek 模型启发式计数误差可达 ±2 倍，等它越过触发线时真实 prompt 可能已到窗口边缘。
   if (total <= budget * trigger && !force) return null;

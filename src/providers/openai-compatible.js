@@ -81,8 +81,25 @@ export async function chat(/** @type {any} */ { baseUrl, apiKey, model, messages
 
   const contentType = res.headers.get('content-type') || '';
   if (!contentType.includes('text/event-stream')) {
-    const json = await res.json().catch(() => null);
-    if (!json) throw new Error(`[${model}] 响应解析失败。`);
+    // v0.6.3（M-17）：**不能只看 content-type**。反代/网关把 SSE 标成 application/json 是常见做法，
+    // 此时 res.json() 必然失败 → 整段正文丢失（用户看到"空回复"，且没有任何提示）。
+    // 读成文本后按内容嗅探：以 `data:` 开头的行就是 SSE 帧，走流式解析；否则按 JSON 解析。
+    const raw = await res.text().catch(() => '');
+    const looksSse = /^\s*data:/m.test(raw);
+    if (looksSse) {
+      return parseStream(new Response(raw).body, onDelta, onActivity);
+    }
+    let json = null;
+    try {
+      json = JSON.parse(raw);
+    } catch {
+      /* 落到下面的统一错误 */
+    }
+    if (!json) {
+      throw new Error(
+        `[${model}] 响应解析失败（content-type=${contentType || '（无）'}，且正文既不是 JSON 也不像 SSE 帧；前 120 字：${raw.slice(0, 120)}）`
+      );
+    }
     return parseNonStream(json, onDelta);
   }
   return parseStream(res.body, onDelta, onActivity);
@@ -229,5 +246,9 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
     }))
     .filter((c) => c.function.name);
 
-  return { text: content, reasoning, toolCalls: toolCalls.length ? toolCalls : null, usage, finish };
+  // v0.6.3（M-16）：网关**提前关流**（既没 [DONE] 也没 finish_reason）此前被当成正常完成，
+  // 半个回答被当完整交付、无任何告警——空完成与真完成在账本/界面上完全一样。
+  // 判据：既没拿到 [DONE]（doneFlag），也没有 finish_reason，却已经有正文/工具调用。
+  const truncated = !doneFlag && finish == null && (content.length > 0 || reasoning.length > 0 || calls.size > 0);
+  return { text: content, reasoning, toolCalls: toolCalls.length ? toolCalls : null, usage, finish, truncated };
 }

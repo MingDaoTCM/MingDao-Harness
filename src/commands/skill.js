@@ -6,6 +6,7 @@ import { loadConfig, saveConfig, ensureHome } from '../config.js';
 import { searchSessions, relativeTime } from '../session.js';
 import { runWebServer } from '../web/server.js';
 import readline from 'node:readline';
+import fs from 'node:fs'; // v0.6.3（BUG-015）：--auth-token=- 从 stdin 读
 
 // 首次运行询问「是否自动后台启动 WebUI」（交互终端才问；管道/脚本下默认否）
 function askAutoStart() {
@@ -179,8 +180,29 @@ export async function handleWeb(/** @type {any} */ cmd, /** @type {any} */ args)
   if (atIdx !== -1) {
     const raw = args[atIdx];
     authToken = raw.includes('=') ? raw.slice(raw.indexOf('=') + 1) : args[atIdx + 1];
+    // v0.6.3（BUG-015）：`--auth-token <令牌>` 会把令牌留在 **argv** 里 —— `ps aux` 与 shell 历史
+    // 都能看到（本仓发布链路早就把"token 不进 argv"定为纪律，这里此前是漏网的一处）。
+    // 现在支持 `--auth-token=-` 从 **stdin** 读（脚本里 `printf %s "$TOK" | mingdao web --auth-token=-`），
+    // 直接用字面量时给出明确告警而不是默默泄露。
+    if (authToken === '-') {
+      try {
+        authToken = fs.readFileSync(0, 'utf8').trim();
+      } catch {
+        authToken = '';
+      }
+      if (!authToken) {
+        console.log('[错误] --auth-token=- 需要从 stdin 读入令牌（例如：printf %s "$MINGDAO_WEB_TOKEN" | mingdao web --auth-token=-）');
+        process.exitCode = 1;
+        return true;
+      }
+    } else if (authToken) {
+      console.warn(
+        '[MingDao] ⚠ 令牌写在命令行里会留在 argv 与 shell 历史中（ps aux 可见）。\n' +
+          '  建议改用：环境变量 MINGDAO_WEB_TOKEN、config.json 的 web.token，或 `--auth-token=-` 从 stdin 读入。'
+      );
+    }
     if (!authToken) {
-      console.log('用法：mingdao web [端口] [--auth-token <令牌>]');
+      console.log('用法：mingdao web [端口] [--auth-token <令牌>|--auth-token=-]');
       process.exitCode = 1;
       return true;
     }

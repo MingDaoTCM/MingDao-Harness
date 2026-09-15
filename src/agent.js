@@ -380,6 +380,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   async function runTurn(/** @type {any} */ messages) {
     let steps = 0;
     let finish = null;
+    /** v0.6.3（M-16）：本回合是否出现过"上游提前关流"（回答可能不完整）。
+     * 刻意不叫 truncated——既有 `truncated` 的含义是"步数兜底总结也失败了"，两者必须分开。 */
+    let upstreamTruncated = false;
     // v0.3.1 自动续跑（长程执行）：跑满 stepLimit 步后不再直接中断，而是注入进度摘要再续跑，
     // 最多 maxRounds 轮（默认 3，可用 cfg.maxRounds 调）；审计/重构等大任务不再「一步中断」。
     const maxRounds = Math.max(1, Number(cfg.maxRounds) || 3);
@@ -766,6 +769,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       }
 
       finish = res.finish ?? finish;
+      // v0.6.3（M-16）：上游**提前关流**（没有 [DONE]、也没有 finish_reason）说明这次回答很可能是半截的。
+      // 此前它与正常结束完全无法区分：用户拿到半句、账本记 done、也没有任何告警。
+      // 这里至少做到"说出来"——置标记并在界面上提示，让人知道该复核输出而不是直接采信。
+      if (res.truncated) {
+        upstreamTruncated = true;
+        try {
+          io.print(style('⚠ 上游提前结束响应（未收到结束标记），本次回答可能不完整——请复核输出后再采用。', C.yellow));
+        } catch {}
+      }
       // v0.6.0 C1：模型轮次事件（耗时/首 token/用量/完成原因）——「这一步花了多少钱、等了多久」的最小依据
       turnLedger.modelRound({
         round,
@@ -774,6 +786,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         firstTokenMs: firstTokenAt ? firstTokenAt - llmT0 : null,
         requestStartAt: lastRequestStartAt,
         finish: res.finish ?? null,
+        // 提前关流是"这次回答不可信"的事实，必须进账本（否则事后无法区分它和正常完成）
+        ...(res.truncated ? { truncated: true } : {}),
         usage: res.usage ?? null,
       });
       // 省钱 B1：只读阶段中模型文字明确表达写意图 → 下一轮注入全量工具（多一轮，几乎无感）
@@ -808,7 +822,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (res.text) {
             const ap = await applyOutputConstraints(res.text, { messages, provider, activeModel, temperature, maxOutput, usage, signal: currentAc?.signal });
             messages.push({ role: 'assistant', content: ap.text });
-            return { text: ap.text, reasoning: res.reasoning || '', usage, steps, finish, truncated: false, aborted: false, note: ap.note || undefined, durationMs: Date.now() - startedAt, perf: perf() };
+            return { text: ap.text, reasoning: res.reasoning || '', usage, steps, finish, truncated: false, aborted: false, upstreamTruncated, note: ap.note || undefined, durationMs: Date.now() - startedAt, perf: perf() };
           }
           break;
         }
@@ -1334,10 +1348,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       if (turnLedger) {
         try {
           const costDate = lastRequestStartAt ? new Date(lastRequestStartAt) : new Date();
-          const yuan = estimateCost(modelName, usage.prompt_tokens, usage.completion_tokens, cacheSplit(usage), costDate);
+          // v0.6.3（BUG-024）：计价必须用**本回合实际使用**的模型。
+          // 此前用 modelName（用户配置的模型），而成本护栏降级后请求实际发给 activeModel——
+          // 两者单价不同（flash 便宜数倍），于是账本与日费用护栏系统性偏移，
+          // 而"降级省钱"恰恰是靠这里体现的。
+          const yuan = estimateCost(activeModel, usage.prompt_tokens, usage.completion_tokens, cacheSplit(usage), costDate);
           const priced = typeof yuan === 'number' && Number.isFinite(yuan);
           turnLedger.cost({
-            model: modelName,
+            // BUG-024：归属同样要用实际计费的模型（run.start 里已记过"用户请求的模型"，
+            // 这里再写 modelName 会让"花了钱的那次调用"归属到一个没被调用的模型）
+            model: activeModel,
             usage,
             yuan: priced ? yuan : null,
             priced,

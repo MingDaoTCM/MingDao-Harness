@@ -327,16 +327,21 @@ export async function installFromUrl(url, { allowPrivate = false } = {}) {
     return { error: '内容不是合法的 SKILL.md（需 frontmatter 或 # 标题开头）' };
   }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-'));
-  fs.writeFileSync(path.join(tmp, 'SKILL.md'), text);
-  const check = validateSkillDir(tmp, url);
-  if (check.error) {
-    fs.rmSync(tmp, { recursive: true, force: true });
-    return { error: check.error };
+  // v0.6.3（BUG-010）：**临时目录必须走 finally**。原实现只在"校验失败"这一条早退路径上
+  // 显式删除，一旦中途抛异常（readSkillMeta 返回 null 会让 meta.name 直接抛 TypeError、
+  // 或 copySkillIntoUser 里的 I/O 错误）就会**留下整个临时目录**——反复安装失败即持续吃磁盘。
+  try {
+    fs.writeFileSync(path.join(tmp, 'SKILL.md'), text);
+    const check = validateSkillDir(tmp, url);
+    if (check.error) return { error: check.error };
+    const meta = readSkillMeta(tmp);
+    if (!meta || !meta.name) return { error: '技能缺少可解析的 frontmatter.name，已拒绝安装' };
+    return copySkillIntoUser(tmp, meta.name, 'url', { url });
+  } finally {
+    try {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    } catch {}
   }
-  const meta = readSkillMeta(tmp);
-  const r = copySkillIntoUser(tmp, meta.name, 'url', { url });
-  fs.rmSync(tmp, { recursive: true, force: true });
-  return r;
 }
 
 /** 异步 spawn（审计 P1-3）：child_process.spawn + Promise，返回 { error?, code, signal }。 */
@@ -386,6 +391,8 @@ export async function installFromGit(gitUrl) {
     return { error: `git clone 失败：${r.error?.message || (r.signal ? `超时/被终止（${r.signal}）` : `退出码 ${r.code}`)}` };
   }
   const found = [];
+  // v0.6.3（BUG-010）：整段（扫描 + 安装）收进 try/finally —— 任何一条抛出路径都不能漏掉临时目录
+  try {
   const stack = [tmp];
   while (stack.length && found.length < 20) {
     const dir = /** @type {any} */ (stack.pop());
@@ -404,24 +411,29 @@ export async function installFromGit(gitUrl) {
       if (e.isDirectory() && e.name !== '.git') stack.push(path.join(dir, e.name));
     }
   }
-  if (!found.length) {
-    fs.rmSync(tmp, { recursive: true, force: true });
-    return { error: '仓库中未找到含 SKILL.md 的技能目录' };
-  }
+  if (!found.length) return { error: '仓库中未找到含 SKILL.md 的技能目录' };
   ensureHome();
   const installed = [];
   const skipped = [];
   for (const d of found) {
     const meta = readSkillMeta(d);
+    if (!meta || !meta.name) {
+      skipped.push(`${path.basename(d)}：缺少可解析的 frontmatter.name`);
+      continue;
+    }
     const r = copySkillIntoUser(d, meta.name, 'git', { url: gitUrl });
     if (r.error) skipped.push(`${meta.name}：${r.error}`);
     else installed.push(r);
   }
-  fs.rmSync(tmp, { recursive: true, force: true });
   if (!installed.length) {
     return { error: `仓库中的技能均未通过校验${skipped.length ? '（' + skipped.join('；') + '）' : ''}` };
   }
   return { names: installed.map((i) => i.name), dirs: installed.map((i) => i.dir), skipped };
+  } finally {
+    try {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    } catch {}
+  }
 }
 
 /**

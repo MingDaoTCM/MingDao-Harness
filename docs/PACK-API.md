@@ -341,6 +341,10 @@ manifest 可声明 `budget.dailyYuan` + `budget.action`。超限时 `ctx.llm()` 
 
 **下游义务**：在 `pack.json` 声明 `apiVersion` 与 `engines.mingdao`，并把 `mingdao pack verify` 放进 CI。
 
+> v0.6.3 更正：此前帮助文本写的是"只做静态校验"，实现却会 `import pack.mjs` —— 于是按文档把
+> `pack verify` 当 CI 门禁，等于**在 CI 上执行被审仓库的任意 Node 代码**（且不经 `pack trust` 信任门）。
+> 现在默认确实是静态的；约束与提示词段的合法性由代码产出，静态阶段无法校验，需要那种覆盖请显式加 `--runtime`。
+
 **上游义务**：任何 Pack API 变更必须同步更新本文 + 兼容性矩阵 + `docs/CHANGELOG-PACK.md`。
 
 ---
@@ -349,7 +353,8 @@ manifest 可声明 `budget.dailyYuan` + `budget.action`。超限时 `ctx.llm()` 
 
 ```bash
 mingdao pack list                 # 已加载 Pack / 来源 / 版本 / 兼容状态
-mingdao pack verify <dir>         # 静态校验 manifest + 文件齐全 + 约束合法性（下游 CI 门禁）
+mingdao pack verify <dir>         # **静态**校验（manifest + 文件齐全 + pack.mjs 存在性）——**不执行 Pack 代码**，下游 CI 门禁用这个
+mingdao pack verify <dir> --runtime  # 额外 import pack.mjs 验证运行时契约（会以完整 Node 权限执行 Pack 代码，仅在你审过代码时用）
 mingdao pack new <name>           # 脚手架
 mingdao pack info <name>          # 贡献面：工具/约束/提示词段/权限/费用统计
 mingdao pack test <name>          # 跑内置反例样本（约束 + 工具契约）

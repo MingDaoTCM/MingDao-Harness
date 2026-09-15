@@ -167,7 +167,23 @@ export async function resolveVisionSupport(cfg, modelName) {
   }
 }
 
-const sleep = (/** @type {any} */ ms) => new Promise((r) => setTimeout(r, ms));
+const sleep = (/** @type {any} */ ms, /** @type {any} */ signal) =>
+  // v0.6.3（BUG-030）：退避等待必须可被用户 Ctrl+C 打断（此前最长要干等 30s）
+  new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason ?? new Error('已中断'));
+      return;
+    }
+    const t = setTimeout(() => {
+      signal?.removeEventListener?.('abort', onAbort);
+      resolve(undefined);
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(t);
+      reject(signal?.reason ?? new Error('已中断'));
+    };
+    signal?.addEventListener?.('abort', onAbort, { once: true });
+  });
 
 function isTransient(/** @type {any} */ err) {
   const status = err?.status;
@@ -222,6 +238,12 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
         } catch {}
       }, totalMs);
       for (;;) {
+        // v0.6.3（BUG-029）：**循环头**必须复查总量护栏。原实现只在 catch 里判 transient 时看
+        // totalExpired，于是"总量计时器在退避 sleep 期间触发"这条路径会照常发起新 attempt
+        // （重试序列最坏比声明的总时长更久，且用户按了中断也还可能再发一次）。
+        if (totalExpired) {
+          throw new Error(`请求总时长超限（${Math.round(totalMs / 1000)}s），已中断（不再重试）`);
+        }
         const ac = new AbortController();
         currentAc = ac;
         let timedOut = false; // 审计 P2-6：用标志而非 name/字符串匹配识别内部超时（首 token/流式空闲）
@@ -240,6 +262,7 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
           }, streamIdleMs);
         };
         const onActivity = () => {
+          sawFrame = true;
           if (firstTokenTimer) {
             clearTimeout(firstTokenTimer);
             firstTokenTimer = null;
@@ -251,6 +274,11 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
         if (opts.signal?.aborted) onUserAbort();
         else opts.signal?.addEventListener('abort', onUserAbort, { once: true });
         let leaving = true; // 本次 attempt 是否退出（成功/不再重试）；将重试则置 false，总量计时器保留覆盖下一 attempt
+        // v0.6.3（BUG-028）：**收到过任何一帧就不再重试**。chat 是**非幂等**的 POST：
+        // 上游一旦开始生成按量计费，重试等于再买一次（用户只看到一份回答、账本却计两次）。
+        // 判据取"有没有帧到达"而不是"有没有正文"——usage-only/角色帧同样说明请求已被受理。
+        // 代价如实说明：流式空闲超时（已开始输出）不再重试，失败以错误形式回到用户手里，而不是悄悄多花一份钱。
+        let sawFrame = false;
         try {
           return await openaiChat({
             ...opts,
@@ -263,7 +291,7 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
         } catch (err) {
           // 内部超时经 abort 抛出，用标志识别（审计 P2-6）；用户 Ctrl+C 的中断不算超时、不重试。
           // 总量超时（totalExpired）覆盖整个序列，超了直接抛不再重试。
-          const transient = !totalExpired && ((timedOut && !opts.signal?.aborted) || isTransient(err));
+          const transient = !totalExpired && !sawFrame && ((timedOut && !opts.signal?.aborted) || isTransient(err));
           if (!transient || attempt >= retries) throw err;
           leaving = false; // 将重试：本次不退出，总量计时器继续覆盖下一 attempt
           attempt += 1;
@@ -273,7 +301,7 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
           const ra = Number((/** @type {any} */ (err))?.headers?.get?.('retry-after'));
           if (Number.isFinite(ra) && ra > 0) backoff = Math.max(backoff, ra * 1000);
           backoff = Math.min(backoff, 30000);
-          await sleep(backoff);
+          await sleep(backoff, opts.signal); // BUG-030：可被 Ctrl+C 打断
         } finally {
           if (leaving) clearTimeout(totalTimer); // 成功/最终失败即清——避免悬挂 totalMs 计时器（每请求一个）
           if (firstTokenTimer) clearTimeout(firstTokenTimer);

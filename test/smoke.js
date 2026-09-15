@@ -6889,6 +6889,7 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
       'net-guard.js': { n: 1, why: '出网日志写入失败：返回值本身已如实反映判定结果，且账本另有 net.egress 事件' },
       'session-index.js': { n: 2, why: '分词失败时从索引移除该条（"不索引坏文件"的正确降级）/ 空分片文件删除（只占空间）' },
       'skill-registry.js': { n: 1, why: '技能源索引缓存写入失败：缓存可按需重建' },
+      'skill-lib.js': { n: 2, why: 'v0.6.3（BUG-010）：两处都是 finally 里的临时目录清理——清理失败只影响磁盘占用，安装结果/错误已由返回值如实体现' },
     };
     const files103 = [];
     (function walk(/** @type {string} */ d) {
@@ -8869,17 +8870,27 @@ process.stdout.write('done');`
       const dir118 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-lock118-'));
       const lock118 = path.join(dir118, '.lock');
       const old118 = new Date(Date.now() - 60000);
+      // 平台边界（**如实说明**，不是"碰巧跳过"）：Windows 既无 /proc 也没有 ps，
+      // `readCmdline` 返回 null → claim 无法校验"活着的这个 pid 还是不是原持有者" →
+      // 按设计维持"存活即不回收"。因此 pid 复用可回收这一半只在 Linux/macOS 可验（CI 上就是 ubuntu/macos 腿）。
+      const PROC118 = await import(pathToFileURL(path.join(srcDir, 'proc.js')).href);
+      const canVerifyOwnership118 = PROC118.readCmdline(process.pid) !== null;
       try {
+        if (!canVerifyOwnership118) {
+          assert.equal(process.platform, 'win32', '拿不到命令行只应发生在 Windows（其它平台返回 null 说明回归了）');
+        }
         // (a) 锁里写的 pid **活着**，但那个 pid 现在跑的是**别的**程序（cmd 对不上）
         //     → 这正是 pid 复用的形态：必须能回收，否则所有写方等到超时（死锁）
-        fs.writeFileSync(lock118, JSON.stringify({ pid: process.pid, at: Date.now() - 60000, cmd: '/definitely/not/this/process.js' }));
-        fs.utimesSync(lock118, old118, old118);
-        const t0 = Date.now();
-        let ran118 = false;
-        withFileLockSync(lock118, () => { ran118 = true; }, { timeoutMs: 3000, staleMs: 4000 });
-        const ms118 = Date.now() - t0;
-        assert.ok(ran118, 'pid 存活但**命令行归属不符**时必须能回收（原实现只看存活 → 永久僵死）');
-        assert.ok(ms118 < 1500, `pid 复用场景应较快回收，实测 ${ms118}ms`);
+        if (canVerifyOwnership118) {
+          fs.writeFileSync(lock118, JSON.stringify({ pid: process.pid, at: Date.now() - 60000, cmd: '/definitely/not/this/process.js' }));
+          fs.utimesSync(lock118, old118, old118);
+          const t0 = Date.now();
+          let ran118 = false;
+          withFileLockSync(lock118, () => { ran118 = true; }, { timeoutMs: 3000, staleMs: 4000 });
+          const ms118 = Date.now() - t0;
+          assert.ok(ran118, 'pid 存活但**命令行归属不符**时必须能回收（原实现只看存活 → 永久僵死）');
+          assert.ok(ms118 < 1500, `pid 复用场景应较快回收，实测 ${ms118}ms`);
+        }
 
         // (b) 反向：锁里写的 pid 活着**且**命令行就是本进程 → 绝不能回收（互斥必须保住）
         // 凭据用 basename：实现写的就是 basename（`ps` 显示的是"输入时的形态"，
@@ -8952,6 +8963,300 @@ process.stdout.write('done');`
     safeRmSync(home118, { recursive: true, force: true });
   }
   ok('v0.6.3 批七 并发与长驻：pid 复用可回收但持锁者仍受保护 + 同步服务写锁全 await + 避峰切片 + 调度恢复不自锁不双跑');
+}
+
+// ---------- 119. v0.6.3 批八：计费与可用性（重复计费 / 半截回答 / 压缩失效 / 归属错模型） ----------
+{
+  const http119 = await import('node:http');
+  const OC119 = await import(pathToFileURL(path.join(srcDir, 'providers', 'openai-compatible.js')).href);
+  const PROV119 = await import(pathToFileURL(path.join(srcDir, 'providers', 'index.js')).href);
+  const COMPACT119 = await import(pathToFileURL(path.join(srcDir, 'compact.js')).href);
+
+  // 一个可编程的假上游：记录请求次数，行为由 queued 数组决定
+  const makeStub119 = () => {
+    const hits = [];
+    /** @type {any[]} */
+    const queued = [];
+    const server = http119.createServer((req, res) => {
+      let body = '';
+      req.on('data', (d) => (body += d));
+      req.on('end', () => {
+        hits.push({ url: req.url, body });
+        const how = queued.length ? queued.shift() : 'ok';
+        if (how === '500') {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: { message: 'stub 500' } }));
+          return;
+        }
+        if (how === 'midstream') {
+          // 已经产出内容 → 之后直接掐断连接（模拟网关中途断流）
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.write('data: {"choices":[{"delta":{"content":"半截回答"}}]}\n\n');
+          setTimeout(() => res.destroy(), 20);
+          return;
+        }
+        if (how === 'idleAfterFrame') {
+          // 先给一帧正文，然后**保持连接不再发数据**（流式空闲超时 → timedOut，属"可重试"的瞬态）
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.write('data: {"choices":[{"delta":{"content":"已经开始生成"}}]}\n\n');
+          return; // 不 end、不 destroy：让上层空闲计时器触发
+        }
+        if (how === 'noDone') {
+          // M-16：有正文、没有 finish_reason、也不发 [DONE]（网关提前关流）
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.write('data: {"choices":[{"delta":{"content":"只说了一半"}}]}\n\n');
+          res.end();
+          return;
+        }
+        if (how === 'wrongCT') {
+          // M-17：SSE 正文被网关标成 application/json
+          const payload =
+            'data: {"choices":[{"delta":{"content":"内容被标成 json 也要能解析"}}]}\n\n' +
+            'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n' +
+            'data: [DONE]\n\n';
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(payload);
+          return;
+        }
+        const payload =
+          'data: {"choices":[{"delta":{"content":"正常回答"}}]}\n\n' +
+          'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2}}\n\n' +
+          'data: [DONE]\n\n';
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.end(payload);
+      });
+    });
+    return { server, hits, queued };
+  };
+  const listen119 = (stub) => new Promise((resolve) => stub.server.listen(0, '127.0.0.1', () => resolve(stub.server.address().port)));
+  const close119 = (stub) => new Promise((r) => stub.server.close(r));
+
+  try {
+    // ① M-17：content-type 被改写成 application/json 时，正文不得整段丢失
+    {
+      const stub = makeStub119();
+      stub.queued.push('wrongCT');
+      const port = await listen119(stub);
+      try {
+        const r = await OC119.chat({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'k', model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+        assert.ok(String(r.text).includes('内容被标成 json 也要能解析'), `网关改写 content-type 时正文不得丢失（M-17），实际：${JSON.stringify(r.text)}`);
+        assert.equal(r.truncated, false, '有 finish_reason 的正常流不得标记截断');
+      } finally {
+        await close119(stub);
+      }
+    }
+
+    // ② M-16：没有 [DONE]、没有 finish_reason 的"提前关流"必须被标成 truncated
+    {
+      const stub = makeStub119();
+      stub.queued.push('noDone');
+      const port = await listen119(stub);
+      try {
+        const r = await OC119.chat({ baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'k', model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+        assert.ok(String(r.text).includes('只说了一半'), '正文仍要带回（不能因为没有结束标记就丢内容）');
+        assert.equal(r.truncated, true, '提前关流必须标 truncated（原实现记 done，半截回答被当完整交付）');
+      } finally {
+        await close119(stub);
+      }
+    }
+
+    // ③ BUG-028：chunk 是**非幂等** POST——收到过帧就绝不重试（否则上游按量计费两次）
+    //    用「流式空闲超时」这条路径来验：它既有帧（说明已经开始计费），又**属于可重试的瞬态**
+    //    （timedOut），正是原实现会重试的情形。
+    //    第一版用"中途掐断连接"来测，但那个错误没被 isTransient 归为瞬态 → 两种实现都不重试，
+    //    断言恒真（变异验证当场指出"抓不到"）。故改用可控的空闲超时。
+    {
+      const stub = makeStub119();
+      stub.queued.push('idleAfterFrame', 'ok', 'ok'); // 若发生重试就会命中后面的 ok
+      const port = await listen119(stub);
+      try {
+        const provider = await PROV119.createProvider(
+          { provider: 'deepseek', model: 'deepseek-v4-flash', baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'k', timeout: { streamIdleMs: 400, totalMs: 20000 } },
+          'deepseek-v4-flash'
+        );
+        let threw = null;
+        try {
+          await provider.chat({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }] });
+        } catch (/** @type {any} */ e) {
+          threw = String(e?.message || e);
+        }
+        assert.ok(threw, '空闲超时必须把错误抛回用户（而不是靠重试悄悄再买一份）');
+        assert.equal(stub.hits.length, 1, `收到过帧之后**绝不能重试**（否则重复生成+重复计费），实际请求 ${stub.hits.length} 次`);
+      } finally {
+        await close119(stub);
+      }
+    }
+
+    // ④ 反向：什么都没收到时**必须**重试（修复不能把正常重试一起关掉）
+    {
+      const stub = makeStub119();
+      stub.queued.push('500', '500', 'ok');
+      const port = await listen119(stub);
+      try {
+        const provider = await PROV119.createProvider({ provider: 'deepseek', model: 'deepseek-v4-flash', baseUrl: `http://127.0.0.1:${port}/v1`, apiKey: 'k' }, 'deepseek-v4-flash');
+        const r = await provider.chat({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }] });
+        assert.ok(String(r.text).includes('正常回答'), '两次 500 之后应重试成功');
+        assert.equal(stub.hits.length, 3, `未收到任何数据时的瞬态失败仍应重试（2 次失败 + 1 次成功），实际 ${stub.hits.length} 次`);
+      } finally {
+        await close119(stub);
+      }
+    }
+
+    // ⑤ BUG-036：compactTrigger > 1 不得让自动压缩永久失效（夹上限并告警）
+    {
+      const sumProvider = { async chat() { return { text: '{"summary":"摘要"}', usage: { prompt_tokens: 5, completion_tokens: 2 } }; } };
+      const big = '长'.repeat(400);
+      const msgs = [
+        { role: 'system', content: '系统' },
+        ...Array.from({ length: 12 }, (_, i) => [
+          { role: 'user', content: big + i },
+          { role: 'assistant', content: big + i },
+        ]).flat(),
+      ];
+      const warns119 = [];
+      const origWarn119 = console.warn;
+      console.warn = (...a) => warns119.push(a.join(' '));
+      let r119 = null;
+      try {
+        // budget 取小值：正常配置下必然触发压缩
+        r119 = await COMPACT119.compactConversation({ messages: msgs, budget: 500, count: () => 4000, provider: sumProvider, executorModel: 'deepseek-v4-flash', triggerRatio: 2 });
+      } finally {
+        console.warn = origWarn119;
+      }
+      assert.ok(r119 && r119.messages, 'triggerRatio=2（越界）时自动压缩不得永久失效——原实现只夹下限，>1 会让它永不触发');
+      assert.ok(warns119.some((w) => w.includes('compactTrigger')), `越界值必须告警（静默失效正是本条缺陷的要害），实际：${JSON.stringify(warns119)}`);
+    }
+
+    // ⑥ BUG-029 / BUG-030：这两条是重试循环里的时序细节，端到端要凑出"总量计时器恰好在退避期间触发"
+    //    才能复现，成本不划算；用源码级守卫钉住（并如实登记它们的验证层级）。
+    {
+      const provSrc119 = fs.readFileSync(path.join(srcDir, 'providers', 'index.js'), 'utf8');
+      assert.ok(
+        /for \(;;\) \{\n\s+\/\/[^\n]*BUG-029[\s\S]{0,400}?if \(totalExpired\) \{/.test(provSrc119),
+        'BUG-029：重试循环**头部**必须复查总量护栏（原实现只在 catch 里看，退避期间超时仍会再发一次）'
+      );
+      assert.ok(/await sleep\(backoff, opts\.signal\)/.test(provSrc119), 'BUG-030：退避等待必须接信号（否则 Ctrl+C 后最长干等 30s）');
+    }
+
+    // ⑦ BUG-024：账本计价与归属都必须用"本回合实际使用的模型"
+    {
+      const agentSrc119 = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+      // 必须连同**账本那一行特有**的参数一起匹配：只匹配 `estimateCost(activeModel, usage.prompt_tokens`
+      // 会被同文件里 `inFlightCost()` 的同形调用命中，于是变异（把这行改回 modelName）照样"通过"
+      // ——变异验证当场指出这条断言是假绿。
+      assert.ok(
+        /estimateCost\(activeModel, usage\.prompt_tokens, usage\.completion_tokens, cacheSplit\(usage\), costDate\)/.test(agentSrc119),
+        '账本计价必须用 activeModel（降级后 modelName 与实际调用不是同一个模型）'
+      );
+      assert.ok(/turnLedger\.cost\(\{[\s\S]{0,200}?model: activeModel,/.test(agentSrc119), '账本 cost 事件的 model 也必须是 activeModel');
+    }
+  } finally {
+    /* 所有 stub 已在各自 finally 关闭 */
+  }
+  ok('v0.6.3 批八 计费与可用性：SSE 被改写仍解析 + 提前关流可检出 + 非幂等不重试 + 未收数据仍重试 + 压缩触发线夹上限 + 归属用实际模型');
+}
+
+// ---------- 120. v0.6.3 批九：上游能力与文档（临时目录 / 检查点路径穿越 / 令牌进 argv / 文档漂移） ----------
+{
+  const http120 = await import('node:http');
+  const LIB120 = await import(pathToFileURL(path.join(srcDir, 'skill-lib.js')).href);
+  const TS120 = await import(pathToFileURL(path.join(srcDir, 'task-state.js')).href);
+  const prevHome120 = process.env.MINGDAO_HOME;
+  const home120 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-batch9-'));
+  const tmpPrefix120 = 'mingdao-skill-';
+  const leftovers120 = () => fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith(tmpPrefix120));
+  try {
+    // ① BUG-010：安装器的临时目录必须**任何路径**都能清掉（原来只在"校验失败"这一条早退上删）
+    {
+      const srv120 = http120.createServer((req, res) => {
+        res.writeHead(200, { 'Content-Type': 'text/markdown' });
+        res.end('---\nname: probe120\ndescription: 批九探针\n---\n\n# 探针\n内容');
+      });
+      await new Promise((r) => srv120.listen(0, '127.0.0.1', r));
+      const port120 = srv120.address().port;
+      const url120 = `http://127.0.0.1:${port120}/SKILL.md`;
+      const before120 = leftovers120();
+      try {
+        // 让安装中途抛出：把 MINGDAO_HOME 指到"父级是文件"的路径，ensureHome() 必失败
+        const blk = path.join(home120, 'not-a-dir');
+        fs.writeFileSync(blk, 'x');
+        process.env.MINGDAO_HOME = path.join(blk, 'sub');
+        let threw120 = false;
+        try {
+          await LIB120.installFromUrl(url120, { allowPrivate: true });
+        } catch {
+          threw120 = true;
+        }
+        assert.ok(threw120, '前置：坏 MINGDAO_HOME 应让安装中途失败（用来验证失败路径的清理）');
+        const after120 = leftovers120().filter((f) => !before120.includes(f));
+        assert.deepEqual(after120, [], `安装中途失败后**不得留下临时目录**（BUG-010：原来只有校验失败那条路会删）实际：${after120.join(', ')}`);
+        process.env.MINGDAO_HOME = home120;
+      } finally {
+        srv120.close();
+      }
+      // 早退路径（内容不合法）：同样不得留下临时目录
+      const before2 = leftovers120();
+      const rBad = await LIB120.installFromUrl('http://93.184.216.34/none.md', { allowPrivate: true }).catch((e) => ({ error: String(e?.message || e) }));
+      assert.ok(rBad && (rBad.error || rBad.name), '前置：这次调用应失败或成功（仅用于清理验证）');
+      const after2 = leftovers120().filter((f) => !before2.includes(f));
+      assert.deepEqual(after2, [], `任何失败路径都不得留下临时目录，实际：${after2.join(', ')}`);
+      // 源码级：两个安装器的清理都必须在 finally 里
+      const libSrc120 = fs.readFileSync(path.join(srcDir, 'skill-lib.js'), 'utf8');
+      const finallyCleanups = (libSrc120.match(/finally \{\n\s+try \{\n\s+fs\.rmSync\(tmp/g) || []).length;
+      assert.equal(finallyCleanups, 2, `installFromUrl 与 installFromGit 都必须用 finally 清理临时目录，实际 ${finallyCleanups} 处`);
+      assert.ok(/if \(!meta \|\| !meta\.name\) return \{ error: '技能缺少可解析的 frontmatter\.name/.test(libSrc120), 'readSkillMeta 返回 null 时不得再去读 meta.name（那会抛 TypeError 并留下临时目录）');
+    }
+
+    // ② BUG-067：检查点文件名不得穿越目录
+    {
+      assert.ok(TS120.taskStateFile('s1.jsonl').startsWith(path.join(home120, 'taskstates')), '正常会话名应落在 taskstates/ 内');
+      let rejected = false;
+      try {
+        TS120.taskStateFile('../../evil');
+      } catch {
+        rejected = true;
+      }
+      assert.ok(rejected, 'taskStateFile 必须拒绝会越出检查点目录的会话名（原实现直接拼 `${name}.json`）');
+      const save = TS120.saveTaskState('../../evil', { goal: 'x' });
+      assert.equal(save.ok, false, '写检查点遇到非法会话名必须如实返回失败，而不是写到目录之外');
+      assert.ok(!fs.existsSync(path.join(path.dirname(home120), 'evil.json')), '绝不能真的在上级目录落盘');
+      // 正常路径仍然可用
+      assert.equal(TS120.saveTaskState('ok-session', { goal: 'g', status: 'running' }).ok, true, '正常会话名必须照常可写');
+      assert.equal(TS120.loadTaskState('ok-session')?.goal, 'g', '正常会话名必须照常可读');
+    }
+
+    // ③ BUG-015：`--auth-token` 写在 argv 里会进 ps / shell 历史 → 告警 + 支持从 stdin 读
+    {
+      const cli120 = path.join(srcDir, 'cli.js');
+      const rEmpty = spawnSync(process.execPath, [cli120, 'web', '0', '--auth-token=-'], {
+        encoding: 'utf8',
+        input: '',
+        env: { ...process.env, MINGDAO_HOME: home120 },
+      });
+      assert.equal(rEmpty.status, 1, `--auth-token=- 且 stdin 为空时必须报错退出（而不是拿空令牌起服务），实际 ${rEmpty.status}`);
+      assert.ok(/stdin/.test(String(rEmpty.stdout)), `提示应指明从 stdin 读入，实际：${String(rEmpty.stdout).slice(0, 120)}`);
+      // 注意：web 子命令的处理函数在 commands/skill.js（历史原因），不在 cli.js
+      const webCmdSrc120 = fs.readFileSync(path.join(srcDir, 'commands', 'skill.js'), 'utf8');
+      assert.ok(/令牌写在命令行里会留在 argv 与 shell 历史中/.test(webCmdSrc120), '字面量令牌必须给出"会进 argv/历史"的告警');
+      assert.ok(/MINGDAO_WEB_TOKEN/.test(webCmdSrc120), '告警里要给出更安全的替代方式（环境变量）');
+    }
+
+    // ④ P3 文档漂移：本轮改掉的行为必须在文档里跟上（否则"文档说 A、实现做 B"会立刻复发）
+    {
+      const packApi120 = fs.readFileSync(path.join(srcDir, '..', 'docs', 'PACK-API.md'), 'utf8');
+      assert.ok(/--runtime/.test(packApi120), 'PACK-API 必须写明 pack verify 默认静态、要执行代码需 --runtime');
+      assert.ok(/已执行|未执行 Pack 代码|不执行 Pack 代码/.test(packApi120), 'PACK-API 必须写清"默认不执行 Pack 代码"');
+      const cfgDoc120 = fs.readFileSync(path.join(srcDir, '..', 'docs', 'CONFIG.md'), 'utf8');
+      assert.ok(/realpath|符号链接/.test(cfgDoc120), 'CONFIG.md 必须写明目录围栏按真实路径判定（符号链接不再是逃生通道）');
+      assert.ok(/Sec-Fetch-Site/.test(cfgDoc120), 'CONFIG.md 必须写明跨站浏览器请求一律拒绝');
+      assert.ok(/auth-token=-/.test(cfgDoc120), 'CONFIG.md 必须写明 --auth-token=- 从 stdin 读、字面量会进 argv');
+    }
+  } finally {
+    if (prevHome120 === undefined) delete process.env.MINGDAO_HOME;
+    else process.env.MINGDAO_HOME = prevHome120;
+    safeRmSync(home120, { recursive: true, force: true });
+  }
+  ok('v0.6.3 批九 上游能力与文档：安装器临时目录 finally 清理 + 检查点路径穿越设防 + 令牌不进 argv + 文档跟上实现');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

@@ -15,7 +15,16 @@ function taskStateDir() {
 
 /** @param {any} sessionName */
 export function taskStateFile(sessionName) {
-  return path.join(taskStateDir(), `${String(sessionName)}.json`);
+  const dir = taskStateDir();
+  const file = path.join(dir, `${String(sessionName)}.json`);
+  // v0.6.3（BUG-067）：**包含性检查**。sessionName 直接来自调用方（会话文件名/CLI 参数），
+  // 此前不校验：`../../x` 会把检查点写到仓库之外（读写任意 .json）。
+  // 判据用 path.relative 而不是"过滤 ../"——后者挡不住绝对路径、Windows 盘符与符号链接归一后的形态。
+  const rel = path.relative(dir, file);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) {
+    throw new Error(`会话名非法（会越出检查点目录）：${String(sessionName)}`);
+  }
+  return file;
 }
 
 /** @param {any} sessionName */

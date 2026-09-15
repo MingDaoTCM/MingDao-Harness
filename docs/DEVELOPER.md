@@ -90,7 +90,7 @@ Preset 定制的是「提示词 + 工具白名单 + 权限」；**Pack 定制的
 
 ```bash
 mingdao pack new tcm             # 脚手架：pack.json + pack.mjs + prompts/domain.md
-mingdao pack verify ./packs/tcm  # 契约校验（下游 CI 门禁：非 0 退出即失败）
+mingdao pack verify ./packs/tcm  # 静态契约校验（下游 CI 门禁：非 0 退出即失败；**不执行 Pack 代码**）
 ```
 
 最小 `pack.mjs`：
