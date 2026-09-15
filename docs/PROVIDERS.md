@@ -80,6 +80,28 @@ export async function createProvider(cfg) {
 
 规则：`provider` 名不在内置预设中且存在同名模块文件时，优先加载该模块；否则按 OpenAI 兼容方式使用 `baseUrl`。
 
+### 声明能力（可选，v0.6.3 起）
+
+模块可以**静态声明**能力，内核据此决定界面行为（目前用于图片输入门控）：
+
+```js
+// ~/.mingdao/providers/dify.mjs
+export const supportsVision = true;        // 或 export const capabilities = { vision: true }
+export async function createProvider(cfg) { /* … */ }
+```
+
+- 只读**静态导出**，不调用 `createProvider()`（后者可能有副作用：起进程、建连接）；按文件 mtime 缓存。
+- 声明缺失时该 Provider 视为不支持图片——**门控保守**，不会把图发给看不懂的端点。
+- 为什么需要它：**为了打开图片门控而往 `config.customModels` 里加条目，会改变"请求发给谁"**。
+  自 v0.6.3 起 `customModels` 的条目分两类，只有写了传输字段的才算自定义端点：
+
+  | 条目内容 | 含义 | 效果 |
+  | --- | --- | --- |
+  | 含 `baseUrl` / `apiKey` / `envKey` / `headers` / `path` / `kind` | **声明式端点** | 走 `custom:<模型名>` 的 OpenAI 兼容直连（优先于内置预设，原行为） |
+  | 只含 `vision` / `tokenizer` / `contextWindow` / `maxOutputTokens` / `local` / `provider` | **纯能力覆盖** | **不改变 transport**；`provider` 字段只作路由提示（可指向你的自定义模块） |
+
+  也就是说：「打开一个能力开关」不再改变「请求发给谁」。
+
 ## 模型预设（src/models.js）
 
 每个模型预设定义：`provider` / `contextWindow` / `budgetTokens`（默认注入预算）/ `maxOutputTokens` / `temperature` / `supportsReasoning`。自定义模型名没有预设时使用安全默认值（预算 128k、输出 8k、温度 0.6），都可以在 `config.json` 用 `contextBudget` / `maxOutputTokens` / `temperature` 覆盖。

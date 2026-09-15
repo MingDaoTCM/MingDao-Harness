@@ -17,10 +17,30 @@ import { mingdaoHome } from '../config.js';
 import { resolveApiKey, getStoredKey } from '../credentials.js';
 import { isLocalBaseUrl } from '../model-caps.js';
 
+// v0.6.3（下游 Dify 工作流反馈）：`customModels` 的条目其实是**两种东西**，此前混为一谈——
+//   · **声明式端点**：写了 baseUrl / envKey / apiKey / headers 等传输字段 → 确实是"自定义
+//     OpenAI 兼容端点"，优先于内置预设（原行为，不变）；
+//   · **纯能力覆盖**：只写 vision / tokenizer / contextWindow / maxOutputTokens / local，
+//     或只给一个 provider 路由提示 → 它只是给**已有模型**补能力声明，
+//     **不该劫持 transport**。
+// 为什么必须区分：下游为了让图片能发出去，只能往 customModels 里加一条 `vision: true`；
+// 而原实现只要 cm 存在就返回 `custom:{name}` + openai-compatible，
+// 于是把他们的**自定义 Provider 模块整个绕开**（请求发到 baseUrl 而不是他们的 Dify 适配器）。
+// 换句话说：「打开一个能力开关」不该改变「请求发给谁」。
+const CM_TRANSPORT_KEYS = ['baseUrl', 'apiKey', 'envKey', 'headers', 'path', 'kind'];
+/** @param {any} cm */
+function isEndpointDeclaration(cm) {
+  if (!cm || typeof cm !== 'object') return false;
+  return CM_TRANSPORT_KEYS.some((k) => {
+    const v = cm[k];
+    return v !== undefined && v !== null && !(typeof v === 'string' && v.trim() === '');
+  });
+}
+
 export function resolveProviderConfig(/** @type {any} */ cfg, /** @type {any} */ modelName) {
   // 自定义模型（config.customModels，WebUI 可增删改）：优先于内置预设
   const cm = cfg?.customModels?.[modelName];
-  if (cm) {
+  if (cm && isEndpointDeclaration(cm)) {
     // P1 修复（v0.4.6）：自定义模型的密钥解析不得成为「任意环境变量外泄」通道。
     // 此前 envKeys = [cm.envKey, 'MINGDAO_API_KEY']，而 envKey 与 baseUrl 都完全由调用方指定
     // （WebUI 的 addCustom 接受任意输入）——于是任何能加一个自定义模型的人，都能把宿主环境里的
@@ -55,7 +75,9 @@ export function resolveProviderConfig(/** @type {any} */ cfg, /** @type {any} */
     };
   }
   const preset = modelPreset(modelName);
-  const name = preset?.provider || cfg?.provider || 'deepseek';
+  // 纯能力覆盖里可以给一个**路由提示**：customModels.<name>.provider = 'dify'
+  // → 走那个 provider（自定义模块会在 createProvider 里被加载），而不是退到默认 provider。
+  const name = (cm && typeof cm.provider === 'string' && cm.provider.trim()) || preset?.provider || cfg?.provider || 'deepseek';
   const pp = providerPreset(name) || { kind: 'openai-compatible' };
   const baseUrl = cfg?.baseUrl || pp.baseUrl || '';
   const apiKey = resolveApiKey(cfg, name, pp.envKey);
@@ -67,6 +89,52 @@ export function resolveProviderConfig(/** @type {any} */ cfg, /** @type {any} */
     envHint: pp.envKey || 'MINGDAO_API_KEY',
     isCustom: !providerPreset(name),
   };
+}
+
+// ---------------------------------------------------------------------------
+// 视觉能力解析（v0.6.3，下游 Dify 工作流反馈）
+//
+// 原门控只看「内置预设 supportsVision」或「customModels.<name>.vision」，
+// 于是**自定义 Provider**（自己的 Dify/网关适配器）永远被判为不支持图片——
+// 而那些 Provider 明明支持视觉。现在把自定义 Provider 模块的**静态声明**也算进来。
+//
+// 声明方式（任选其一，写在 ~/.mingdao/providers/<name>.mjs 里）：
+//     export const supportsVision = true;
+//     export const capabilities = { vision: true };
+// 只读**静态导出**，不调用 createProvider()——后者可能有副作用（起进程/建连接）。
+// 结果按文件 mtime 缓存，避免每轮都 import。
+// ---------------------------------------------------------------------------
+/** @type {Map<string, {mtimeMs: number, vision: boolean}>} */
+const visionProbeCache = new Map();
+
+/**
+ * 该模型是否支持图片输入。顺序：显式声明 > 内置预设 > 自定义 Provider 的静态声明。
+ * @param {any} cfg @param {any} modelName
+ * @returns {Promise<boolean>}
+ */
+export async function resolveVisionSupport(cfg, modelName) {
+  const cm = cfg?.customModels?.[modelName];
+  // ① 显式声明优先（true/false 都算数——写 false 就是明确关闭）
+  if (cm && typeof cm.vision === 'boolean') return cm.vision;
+  // ② 内置预设
+  if (modelPreset(modelName)?.supportsVision === true) return true;
+  // ③ 自定义 Provider 模块的静态声明
+  try {
+    const pc = resolveProviderConfig(cfg, modelName);
+    if (!pc.isCustom || pc.name.includes(':')) return false;
+    const file = path.join(mingdaoHome(), 'providers', pc.name + '.mjs');
+    if (!fs.existsSync(file)) return false;
+    const mtimeMs = fs.statSync(file).mtimeMs;
+    const hit = visionProbeCache.get(pc.name);
+    if (hit && hit.mtimeMs === mtimeMs) return hit.vision;
+    const mod = await import(pathToFileURL(file).href + `?v=${mtimeMs}`);
+    const vision = mod?.supportsVision === true || mod?.capabilities?.vision === true;
+    visionProbeCache.set(pc.name, { mtimeMs, vision });
+    return vision;
+  } catch {
+    // 探不动就当不支持（门控是"能不能发图"，宁可保守）；但**不抛**——不能因为探测失败让整轮崩
+    return false;
+  }
 }
 
 const sleep = (/** @type {any} */ ms) => new Promise((r) => setTimeout(r, ms));

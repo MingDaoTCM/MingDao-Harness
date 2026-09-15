@@ -22,7 +22,7 @@ import { createApiDispatch } from './routes/api.js';
 import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
 import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credentials.js';
 import { availableModels, fetchProviderModels, providerHasKey } from '../model-discovery.js';
-import { createProvider, resolveProviderConfig, helperProvider } from '../providers/index.js';
+import { createProvider, resolveProviderConfig, helperProvider, resolveVisionSupport } from '../providers/index.js';
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { routeTask, routingConfig } from '../routing.js';
 import { buildUserContent } from './attachments.js';
@@ -393,7 +393,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     }, 5000);
     const userMessage = String(body.message ?? '').trim();
     entry.message = (userMessage || '[附件]').slice(0, 40);
-    const visionSupported = Boolean(modelPreset(modelName)?.supportsVision || cfg.customModels?.[modelName]?.vision);
+    // v0.6.3（下游 Dify 工作流反馈）：门控必须**也咨询自定义 Provider**。
+    // 原式只看内置预设与 customModels，于是自定义 Provider（Dify/网关适配器）永远被判不支持图片；
+    // 而为了让门控通过去写 customModels，又会把 provider 解析劫持到 openai-compatible 直连
+    // （见 providers/index.js 的 isEndpointDeclaration 注释）。现在统一走 resolveVisionSupport。
+    const visionSupported = await resolveVisionSupport(cfg, modelName);
     const built = buildUserContent(userMessage, body.attachments, visionSupported);
     if (built.error) {
       entry.status = 'failed';

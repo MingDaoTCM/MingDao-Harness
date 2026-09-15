@@ -7775,6 +7775,80 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
   ok('v0.6.3 下游卡点：只读档判定反转（域内名词如「回访」不再被挡）+ Pack 旁路 + bash 输出 UTF-8/GBK 跨块解码');
 }
 
+
+// ---------- 111. v0.6.3：vision 门控应咨询自定义 Provider；能力开关不得劫持 provider 解析 ----------
+// 下游（Dify 工作流模型，已支持视觉）反馈：给上游的图发不出去，因为门控只看内置预设与
+// customModels；而为了让门控通过去写 customModels，又会把 provider 解析劫持到
+// `custom:<模型名>` 的 OpenAI 兼容直连——**他们的自定义 Provider 模块被整个绕开**。
+// 一句话概括修法：「打开一个能力开关」不该改变「请求发给谁」。
+{
+  const PV = await import(pathToFileURL(path.join(srcDir, 'providers', 'index.js')).href);
+  const home111 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-vis111-'));
+  const prevHome111 = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = home111;
+  try {
+    // ① 纯能力覆盖（只写 vision）**不得**劫持 transport
+    {
+      const cfg = { provider: 'dify', customModels: { 'dify-vl': { vision: true } } };
+      const pc = PV.resolveProviderConfig(cfg, 'dify-vl');
+      assert.equal(pc.name, 'dify', `只写 vision 时 provider 必须仍是配置里的那个（原实现会变成 custom:dify-vl → 绕开自定义模块），实际 ${pc.name}`);
+      assert.ok(!String(pc.name).includes(':'), 'provider 名不得被改写成 custom: 直连');
+      assert.equal(pc.isCustom, true, '非内置预设的 provider 仍应标为自定义（供 createProvider 去加载模块）');
+    }
+    // ② 真·端点声明（含 baseUrl）仍走原路径（回归保护：不能为了修 ① 破坏既有行为）
+    {
+      const cfg = { customModels: { 'my-gw': { baseUrl: 'https://gw.example/v1', vision: true } } };
+      const pc = PV.resolveProviderConfig(cfg, 'my-gw');
+      assert.equal(pc.name, 'custom:my-gw', '写了 baseUrl 的条目仍应走 OpenAI 兼容直连');
+      assert.equal(pc.baseUrl, 'https://gw.example/v1', '端点声明的 baseUrl 必须生效');
+    }
+    // ③ 纯能力覆盖里的 provider 字段是**路由提示**（指向自定义模块）
+    {
+      const cfg = { customModels: { 'vision-model': { vision: true, provider: 'my-vendor' } } };
+      assert.equal(PV.resolveProviderConfig(cfg, 'vision-model').name, 'my-vendor', 'provider 提示应被采纳为路由目标');
+    }
+    // ④ 门控：自定义 Provider 模块静态声明 supportsVision → 支持
+    {
+      fs.mkdirSync(path.join(home111, 'providers'), { recursive: true });
+      const modFile = path.join(home111, 'providers', 'dify.mjs');
+      fs.writeFileSync(modFile, 'export const supportsVision = true;\nexport async function createProvider() { return { chat: async () => ({ text: "x" }) }; }\n');
+      const cfg = { provider: 'dify' };
+      assert.equal(await PV.resolveVisionSupport(cfg, 'dify-vl'), true, '自定义 Provider 声明 supportsVision:true 时门控必须放行（下游场景）');
+      // capabilities.vision 等价写法
+      fs.writeFileSync(modFile, 'export const capabilities = { vision: true };\nexport async function createProvider() { return { chat: async () => ({ text: "x" }) }; }\n');
+      assert.equal(await PV.resolveVisionSupport(cfg, 'dify-vl'), true, 'capabilities.vision:true 必须等效');
+      // 未声明 → 保守判不支持（不能把图发给看不懂的端点）
+      fs.writeFileSync(modFile, 'export async function createProvider() { return { chat: async () => ({ text: "x" }) }; }\n');
+      assert.equal(await PV.resolveVisionSupport(cfg, 'dify-vl'), false, '未声明能力的自定义 Provider 应保守判为不支持图片');
+    }
+    // ⑤ 显式 vision 覆盖一切（写 false 就是明确关闭；true 优先于预设）
+    {
+      assert.equal(await PV.resolveVisionSupport({ provider: 'dify', customModels: { x: { vision: false } } }, 'x'), false, '显式 false 必须覆盖');
+      assert.equal(await PV.resolveVisionSupport({ customModels: { 'deepseek-flash': { vision: true } } }, 'deepseek-flash'), true, '显式 true 必须优先于内置预设');
+    }
+    // ⑥ 内置预设与普通文本模型
+    {
+      assert.equal(await PV.resolveVisionSupport({}, 'deepseek-v4-flash-vision-exp'), true, '内置视觉模型必须放行');
+      assert.equal(await PV.resolveVisionSupport({}, 'deepseek-flash'), false, '纯文本模型必须拒绝');
+    }
+    // ⑦ 拒绝文案要给出**三条**正确做法（用户得知道怎么开）
+    {
+      const attSrc = fs.readFileSync(path.join(srcDir, 'web', 'attachments.js'), 'utf8');
+      assert.ok(attSrc.includes('customModels'), '拒绝文案应说明可用 customModels.<名>.vision 声明');
+      assert.ok(attSrc.includes('supportsVision'), '拒绝文案应说明自定义 Provider 可声明 supportsVision');
+    }
+    // ⑧ 结构守卫：WebUI 门控必须走 resolveVisionSupport（不得退回只看预设的两项判断）
+    {
+      const srvSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+      assert.ok(/await resolveVisionSupport\(/.test(srvSrc), 'WebUI 门控必须调用 resolveVisionSupport（否则自定义 Provider 又被漏掉）');
+    }
+  } finally {
+    process.env.MINGDAO_HOME = prevHome111;
+    safeRmSync(home111, { recursive: true, force: true });
+  }
+  ok('v0.6.3 vision 门控：咨询自定义 Provider 静态声明 + 能力覆盖不劫持 provider 解析（下游 Dify 反馈）');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

@@ -23,7 +23,13 @@ export function buildUserContent(/** @type {any} */ message, /** @type {any} */ 
         return { error: `图片过大：${a.name || '未命名'}（单张 ≤5MB）` };
       }
       if (!visionSupported) {
-        return { error: '当前模型不支持图片输入（请切换到 deepseek-v4-flash-vision-exp 或支持视觉的自定义模型）' };
+        return {
+          error:
+            '当前模型不支持图片输入。三种开启方式：' +
+            '① 切换到支持视觉的内置模型（deepseek-v4-flash-vision-exp）；' +
+            '② 在 config.customModels.<模型名>.vision = true 显式声明（纯能力声明，不会改变请求发往哪里）；' +
+            '③ 自定义 Provider 模块（~/.mingdao/providers/<provider>.mjs）里 export const supportsVision = true。',
+        };
       }
       imageParts.push({ type: 'image_url', image_url: { url: dataUrl } });
       persistParts.push(`[图片：${a.name || '未命名'}]`);
