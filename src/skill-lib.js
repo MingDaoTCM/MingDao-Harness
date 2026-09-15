@@ -355,6 +355,23 @@ export async function installFromGit(gitUrl) {
   if (typeof gitUrl !== 'string' || gitUrl.trim().startsWith('-')) {
     return { error: 'git 地址不能以 - 开头（防选项注入）' };
   }
+  // v0.6.3（BUG-056）：**协议/形态白名单**。原实现只挡了 `-` 开头的选项注入，
+  // 于是 `mingdao skill install git <file:///etc>` 或直接给一个本地路径都能让 git 去 clone 本地目录
+  // ——技能安装器是"把远端内容取回来"的入口，本地路径不在语义内，但它能被用来读任意本地目录
+  // （配合后面的 SKILL.md 扫描，等于把本地文件内容当技能读走）。
+  const rawGit = String(gitUrl).trim();
+  const okForm =
+    /^https?:\/\//i.test(rawGit) || // 常见：https://github.com/o/r(.git)
+    /^ssh:\/\//i.test(rawGit) ||
+    /^git:\/\//i.test(rawGit) ||
+    /^git@[A-Za-z0-9._-]+:[^\s]+$/.test(rawGit); // scp 形态：git@github.com:o/r.git
+  if (!okForm) {
+    return {
+      error:
+        `git 地址形态不受支持：${rawGit.slice(0, 80)}。只接受 https:// · ssh:// · git:// · git@host:path` +
+        `（不接受 file:// 与本地路径——安装器的语义是从远端取回内容，本地路径可被用来读取本机目录）。`,
+    };
+  }
   // 审计 P1-3（v0.4.2）：spawnSync 最长阻塞 120s 冻结整个 Node 事件循环（WebUI 全部并发会话/
   // 权限确认/SSE 流无响应）。改异步 spawn，与 v0.4.1 mountConfigTools 修复同口径。
   const check = await runSpawn('git', ['--version']);

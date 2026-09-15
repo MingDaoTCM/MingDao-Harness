@@ -8627,10 +8627,15 @@ process.stdout.write('done');`
         assert.equal(addEscaped.status, 400, '登记工作空间同样不得接受符号链接逃逸（否则 Agent 的工具会整体跑到围栏外）');
         // 目录里指向围栏外的**条目**不该被列出来
         fs.mkdirSync(path.join(normal, 'real'), { recursive: true });
-        // 注意必须指向**所有允许根之外**：os.homedir() 本身就是允许根，指它不算逃逸
-        // （第一版就是这么写的，变异验证直接指出"该断言抓不到这个变异"）。
+        // 注意必须指向**所有允许根之外且真实存在**的目录：
+        //   · 指 os.homedir() 不算逃逸——它本身就是允许根（第一版就是这么写的，
+        //     变异验证直接指出"该断言抓不到这个变异"）；
+        //   · 指一个**不存在**的路径也不行——Windows 上 `\usr` 不存在，realpathDeep 会回退到
+        //     最近的存在祖先（也就是 normal 自己）→ 围栏判定通过、statSync 才报 ENOENT → 400 而非 403。
+        //     CI 上就是这么红的（ubuntu/macOS 绿、windows 红）。
+        const outsideTarget = process.platform === 'win32' ? process.env.SystemRoot || 'C:\\Windows' : path.sep + 'usr';
         try {
-          fs.symlinkSync(path.sep + 'usr', path.join(normal, 'link-out'), 'dir');
+          fs.symlinkSync(outsideTarget, path.join(normal, 'link-out'), 'dir');
         } catch {}
         const listed = await jreq116('/api/fs-browse?dir=' + encodeURIComponent(normal));
         assert.equal(listed.status, 200, 'normal 目录仍可浏览');
@@ -8718,6 +8723,138 @@ process.stdout.write('done');`
     safeRmSync(home116, { recursive: true, force: true });
   }
   ok('v0.6.3 批五 Web 安全：realpath 围栏（符号链接逃逸）+ 元数据端点无条件拒绝 + 跨站盲打拒绝 + Provider 名白名单');
+}
+
+// ---------- 117. v0.6.3 批六：供应链（CI 里不执行被审代码 / 遮蔽不可静默 / 本地路径不进安装器） ----------
+{
+  const PACKS117 = await import(pathToFileURL(path.join(srcDir, 'packs.js')).href);
+  const PRESETS117 = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
+  const SKILLLIB117 = await import(pathToFileURL(path.join(srcDir, 'skill-lib.js')).href);
+  const prevHome117 = process.env.MINGDAO_HOME;
+  const home117 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-batch6-'));
+  process.env.MINGDAO_HOME = home117;
+  try {
+    // ① H-9：`pack verify` 默认**不得执行**被审 Pack 的代码（下游 CI 拿它当门禁，一执行就等于
+    //    在 CI 上跑被审仓库的任意 Node 代码），要执行必须显式 --runtime
+    {
+      const dir117 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-pack117-'));
+      const marker117 = path.join(dir117, 'EXECUTED.txt');
+      fs.writeFileSync(
+        path.join(dir117, 'pack.json'),
+        JSON.stringify({ apiVersion: 1, name: 'probe117', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { constraints: true } })
+      );
+      fs.writeFileSync(
+        path.join(dir117, 'pack.mjs'),
+        `import fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(marker117)}, 'executed');\nexport function createPack() { return { constraints: [] }; }\n`
+      );
+      // 静态校验：应当通过，但**绝不能执行**代码
+      const st = PACKS117.loadPackStatic(dir117, { coreVersion: '0.6.3' });
+      assert.equal(st.ok, true, `静态校验应通过（manifest 合法、pack.mjs 存在），实际 ${JSON.stringify(st.errors)}`);
+      assert.ok(!fs.existsSync(marker117), 'loadPackStatic 绝不能 import pack.mjs（它是 CI 门禁的静态路径）');
+      const cli117 = path.join(srcDir, 'cli.js');
+      const rv = spawnSync(process.execPath, [cli117, 'pack', 'verify', dir117], { encoding: 'utf8', env: { ...process.env, MINGDAO_HOME: home117 } });
+      assert.equal(rv.status, 0, `pack verify 静态校验应通过，实际 status=${rv.status} ${String(rv.stdout).slice(0, 200)}`);
+      assert.ok(!fs.existsSync(marker117), '`pack verify` 默认绝不能执行 Pack 代码（H-9：否则 CI 门禁 = 在 CI 上执行被审仓库的代码）');
+      assert.ok(/未执行/.test(String(rv.stdout)), `输出必须明确说明"未执行 Pack 代码"，实际：${String(rv.stdout).slice(0, 200)}`);
+      // 显式 --runtime 才执行，并明确警告
+      const rr = spawnSync(process.execPath, [cli117, 'pack', 'verify', dir117, '--runtime'], { encoding: 'utf8', env: { ...process.env, MINGDAO_HOME: home117 } });
+      assert.equal(rr.status, 0, `--runtime 应通过，实际 ${String(rr.stdout).slice(0, 200)}`);
+      assert.ok(fs.existsSync(marker117), '--runtime 是显式要求，此时才执行 pack.mjs');
+      assert.ok(/完整 Node 权限执行/.test(String(rr.stdout)), '--runtime 必须先警告"会以完整 Node 权限执行"');
+      safeRmSync(dir117, { recursive: true, force: true });
+    }
+
+    // ② M-5：未信任的项目级 Pack **不得**把同名内置/用户级 Pack 顶掉（原实现按名后写覆盖 →
+    //    内置 Pack 的 constraints/promptSections 静默消失，而项目版本又不挂载 = 两边都没生效）
+    {
+      const proj117 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-shadow117-'));
+      // 用户级放一个同名 Pack（受信任、会真的挂载）
+      const userDir = path.join(home117, 'packs', 'shadowprobe');
+      fs.mkdirSync(userDir, { recursive: true });
+      fs.writeFileSync(path.join(userDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'shadowprobe', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { constraints: true } }));
+      fs.writeFileSync(path.join(userDir, 'pack.mjs'), 'export function createPack() { return { constraints: [{ id: "user-line", kind: "tool-deny", tool: "bash" }] }; }\n');
+      // 项目级放一个同名 Pack（**未信任**）
+      const projDir = path.join(proj117, '.mingdao', 'packs', 'shadowprobe');
+      fs.mkdirSync(projDir, { recursive: true });
+      fs.writeFileSync(path.join(projDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'shadowprobe', version: '9.9.9', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { constraints: true } }));
+      fs.writeFileSync(path.join(projDir, 'pack.mjs'), 'export function createPack() { return { constraints: [{ id: "evil-line", kind: "tool-deny", tool: "bash" }] }; }\n');
+      const listed = PACKS117.listPacks({}, proj117);
+      const hit117 = listed.find((x) => x.name === 'shadowprobe');
+      assert.ok(hit117, '同名 Pack 应出现在列表里');
+      assert.notEqual(hit117.source, 'project', '未信任的项目级版本**不得**成为生效条目（它根本不会被挂载）');
+      assert.equal(hit117.version, '1.0.0', `生效的应是用户级版本，实际 ${JSON.stringify({ source: hit117.source, version: hit117.version })}`);
+      assert.ok(/不挂载/.test(String(hit117.warning || '')), `列表里必须写明同名冲突与"项目版本不挂载"，实际：${hit117.warning}`);
+      // 端到端：真的挂载一次，生效的约束必须来自用户级版本
+      PACKS117.resetPacksForTest();
+      const ctx117 = await PACKS117.mountPacks({}, { cwd: proj117 });
+      assert.ok(
+        ctx117.constraints.some((c) => c.id === 'user-line'),
+        '被挂载的必须是用户级版本的约束'
+      );
+      assert.ok(!ctx117.constraints.some((c) => c.id === 'evil-line'), '未信任的项目级约束绝不能生效');
+      assert.ok(ctx117.warnings.some((w) => w.includes('shadowprobe')), '启动告警里必须能看到这处同名冲突');
+      PACKS117.resetPacksForTest();
+      safeRmSync(proj117, { recursive: true, force: true });
+      safeRmSync(path.join(home117, 'packs'), { recursive: true, force: true });
+    }
+
+    // ③ M-8：项目级预设按名遮蔽内置/用户级预设时，必须**可见**（它可注入 systemPrompt/tools）
+    {
+      const projP = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-preset117-'));
+      fs.mkdirSync(path.join(home117, 'presets'), { recursive: true });
+      fs.writeFileSync(path.join(home117, 'presets', 'reviewer117.json'), JSON.stringify({ name: 'reviewer117', label: '用户版', systemPrompt: 'USER-PROMPT' }));
+      fs.mkdirSync(path.join(projP, '.mingdao', 'presets'), { recursive: true });
+      fs.writeFileSync(
+        path.join(projP, '.mingdao', 'presets', 'anything.json'),
+        JSON.stringify({ name: 'reviewer117', label: '项目版', systemPrompt: 'PROJECT-INJECTED', tools: ['bash'] })
+      );
+      const entry117 = PRESETS117.listPresets(projP).find((x) => x.name === 'reviewer117');
+      assert.equal(entry117.source, 'project', '项目级同名预设按文档是遮蔽者（先发现者胜）');
+      assert.ok(Array.isArray(entry117.shadowed) && entry117.shadowed.some((x) => x.source === 'user'), '必须记录"它遮蔽了用户级版本"');
+      const warns117 = [];
+      const origWarn117 = console.warn;
+      console.warn = (...a) => warns117.push(a.join(' '));
+      let loaded117 = null;
+      try {
+        loaded117 = PRESETS117.loadPreset(projP, 'reviewer117');
+      } finally {
+        console.warn = origWarn117;
+      }
+      assert.equal(loaded117.systemPrompt, 'PROJECT-INJECTED', '生效的是项目级版本（遮蔽行为本身不变）');
+      assert.ok(
+        warns117.some((w) => w.includes('reviewer117') && w.includes('项目目录') && w.includes('遮蔽')),
+        `遮蔽必须告警并指出两边路径（静默遮蔽 = 注入面），实际：${JSON.stringify(warns117)}`
+      );
+      safeRmSync(projP, { recursive: true, force: true });
+      safeRmSync(path.join(home117, 'presets'), { recursive: true, force: true });
+    }
+
+    // ④ BUG-056：git 安装器不得接受 file:// 与本地路径（否则等于"读本机任意目录"）
+    {
+      const forms = [
+        ['file:///etc', false],
+        ['/etc', false],
+        ['./relative', false],
+        ['https://github.com/a/b.git', true],
+        ['git@github.com:a/b.git', true],
+        ['ssh://git@host/x.git', true],
+      ];
+      for (const [u, shouldPass] of forms) {
+        const r = await SKILLLIB117.installFromGit(u).catch((e) => ({ error: String(e?.message || e) }));
+        const blocked = /形态不受支持/.test(String(r.error || ''));
+        if (shouldPass) {
+          assert.ok(!blocked, `${u} 是合法的远端形态，不应被形态校验拦下（实际：${r.error}）`);
+        } else {
+          assert.ok(blocked, `${u} 必须被形态校验拦下（file:// 与本地路径可读本机目录），实际：${JSON.stringify(r).slice(0, 160)}`);
+        }
+      }
+    }
+  } finally {
+    if (prevHome117 === undefined) delete process.env.MINGDAO_HOME;
+    else process.env.MINGDAO_HOME = prevHome117;
+    safeRmSync(home117, { recursive: true, force: true });
+  }
+  ok('v0.6.3 批六 供应链：pack verify 默认静态（不执行被审代码）+ 未信任 Pack 不遮蔽 + 预设遮蔽可见 + git 安装器拒本地路径');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

@@ -310,8 +310,20 @@ export function listPacks(cfg, projectDir, opts = {}) {
         continue;
       }
       const v = validateManifest(manifest, opts);
-      seen.set(manifest?.name || (e.name === '.' ? path.basename(tier.dir) : e.name), {
-        name: manifest?.name || (e.name === '.' ? path.basename(tier.dir) : e.name),
+      const key = manifest?.name || (e.name === '.' ? path.basename(tier.dir) : e.name);
+      const prev = seen.get(key);
+      // v0.6.3（M-5）：**未信任的 tier 不参与遮蔽**。
+      // 原实现按 name 后写覆盖，tier 顺序是 builtin < user < project——于是"clone 一个仓库、
+      // 在里面放一个同名 Pack"就能让内置 Pack 的 constraints/promptSections **静默失效**：
+      // 项目级条目因为带 gate 不会被挂载，而被它顶掉的内置版本也回不来了（两边都没生效）。
+      if (tier.gate && prev) {
+        prev.warning =
+          `Pack「${key}」存在同名冲突：项目级未信任版本（${dir}）**不挂载**，` +
+          `因此当前生效的仍是 ${prev.source} 版本（${prev.dir}）。如需改用项目内版本，请先 mingdao pack trust。`;
+        continue;
+      }
+      const entry = {
+        name: key,
         displayName: manifest?.displayName || '',
         version: manifest?.version || '',
         apiVersion: manifest?.apiVersion,
@@ -321,7 +333,11 @@ export function listPacks(cfg, projectDir, opts = {}) {
         ...(tier.gate ? { gate: tier.gate, gateDir: tier.dir } : {}),
         manifest,
         error: v.ok ? null : v.errors.join('；'),
-      });
+      };
+      // 已信任的高优先级版本遮蔽低优先级同名版本：这是设计行为，但必须**可见**
+      // （下游 `pack list` / 启动告警都要能看到"哪个版本真的生效"）
+      if (prev) entry.shadowed = { name: key, dir: prev.dir, source: prev.source };
+      seen.set(key, entry);
     }
   }
   return [...seen.values()].sort((a, b) => String(a.name).localeCompare(String(b.name)));
@@ -395,7 +411,7 @@ let activeCtx = /** @type {any} */ (null);
  * @param {string} dir @param {{ coreVersion?: string }} [opts]
  * @returns {Promise<any>} { ok: true, manifest, contributions, dir } | { ok: false, errors: string[] }
  */
-export async function loadPack(dir, opts = {}) {
+export function loadPackStatic(dir, opts = {}) {
   const mf = path.join(dir, 'pack.json');
   if (!fs.existsSync(mf)) return { ok: false, errors: [`缺少 pack.json（${dir}）`] };
   let manifest;
@@ -423,7 +439,26 @@ export async function loadPack(dir, opts = {}) {
     }
   }
   if (errors.length) return { ok: false, errors };
+  // 声明了代码贡献就必须有 pack.mjs（存在性检查，**不加载**）
+  const hasCode = contributes.tools === true || contributes.constraints !== undefined || contributes.promptSections !== undefined || contributes.memorySchema !== undefined;
+  if (hasCode && !fs.existsSync(path.join(dir, 'pack.mjs'))) {
+    return { ok: false, errors: [`manifest 声明了代码贡献，但缺少 pack.mjs（${dir}）`] };
+  }
+  return { ok: true, manifest };
+}
 
+/**
+ * 加载单个 Pack 目录：静态校验 + import pack.mjs（**会执行 Pack 代码**）。
+ * `pack verify` 默认只做静态校验（见 loadPackStatic），因为下游 CI 里被审仓库的代码不该被执行。
+ * @param {string} dir @param {{ coreVersion?: string }} [opts]
+ * @returns {Promise<any>} { ok: true, manifest, contributions, dir } | { ok: false, errors: string[] }
+ */
+export async function loadPack(dir, opts = {}) {
+  const st = loadPackStatic(dir, opts);
+  if (!st.ok) return st;
+  const manifest = st.manifest;
+  const contributes = manifest.contributes || {};
+  const errors = [];
   /** @type {string[]} */
   const warnings = [];
   let contributions = /** @type {any} */ ({});
@@ -518,6 +553,14 @@ export async function mountPacks(cfg, opts = {}) {
   const constraints = [];
   const projectDir = opts.cwd || process.cwd();
   for (const info of listPacks(cfg, projectDir, opts)) {
+    // v0.6.3（M-5）：同名遮蔽/冲突必须**可见**——否则"哪个版本真的生效"只能靠猜
+    if (info.warning) warnings.push(info.warning);
+    if (info.shadowed) {
+      warnings.push(
+        `Pack「${info.name}」被同名高优先级版本遮蔽：生效的是 ${info.source} 版本（${info.dir}），` +
+          `${info.shadowed.source} 版本（${info.shadowed.dir}）不再生效。`
+      );
+    }
     // 项目级 Pack 未信任 → 不挂载。这里**必须把「为什么 + 怎么办」讲清楚**：
     // 原缺陷的另一半正是「静默执行 / 静默跳过」都让人不知道发生了什么。
     if (info.gate) {

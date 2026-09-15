@@ -101,14 +101,33 @@ export function listPresets(/** @type {any} */ workingDir) {
       const key = String(obj.name);
       if (seen.has(key)) continue; // 同名遮蔽：项目 → 用户 → 内置（先发现者胜）
       seen.set(key, { obj, source, file });
+      // v0.6.3（M-8）：记录"这个名字是否把更低优先级来源遮蔽了"——静默遮蔽是注入面
+      // （项目级预设可以按名顶掉内置预设，同时注入自己的 systemPrompt/tools）
+      const shadowedFrom = [];
+      // 只统计**比当前来源更低**优先级的目录（发现顺序即优先级：项目 → 用户 → 内置）。
+      // 第一版写成"遇到自己就 break"，结果是项目级永远统计不到（自己就是第一个）——断言当场发现。
+      const locs = presetLocations(workingDir);
+      const selfAt = locs.findIndex((/** @type {any} */ l) => l.source === source);
+      for (const { dir: d2, source: s2 } of (selfAt >= 0 ? locs.slice(selfAt + 1) : [])) {
+        try {
+          for (const f2 of fs.readdirSync(d2).filter((/** @type {any} */ x) => x.endsWith('.json'))) {
+            try {
+              const o2 = JSON.parse(fs.readFileSync(path.join(d2, f2), 'utf8'));
+              if (String(o2?.name) === key) shadowedFrom.push({ source: s2, file: path.join(d2, f2) });
+            } catch {}
+          }
+        } catch {}
+      }
+      if (shadowedFrom.length) seen.get(key).shadowed = shadowedFrom;
     }
   }
-  return [...seen.values()].map(({ obj, source, file }) => ({
+  return [...seen.values()].map(({ obj, source, file, shadowed }) => ({
     name: String(obj.name),
     label: String(obj.label || obj.name),
     description: String(obj.description || ''),
     source,
     file,
+    ...(shadowed ? { shadowed } : {}),
     ...(obj.systemPrompt ? { systemPrompt: obj.systemPrompt } : {}),
     ...(Array.isArray(obj.tools) ? { tools: obj.tools } : {}),
     ...(obj.permission ? { permission: String(obj.permission) } : {}),
@@ -120,10 +139,26 @@ export function listPresets(/** @type {any} */ workingDir) {
  * 按名解析单个预设（含全部字段），找不到返回 null。
  * @param {any} workingDir @param {any} name
  */
+const shadowWarned = new Set();
 export function loadPreset(/** @type {any} */ workingDir, /** @type {any} */ name) {
   const all = listPresets(workingDir);
   const hit = all.find((/** @type {any} */ p) => p.name === name || path.basename(String(p.file), '.json') === name);
   if (!hit) return null;
+  // v0.6.3（M-8）：项目级预设按名遮蔽内置/用户级预设时**必须说出来**。
+  // 场景：clone 一个仓库 → cd 进去 → `mingdao --preset reviewer`：拿到的是仓库里那份
+  // systemPrompt/tools，而用户以为是自己熟悉的那个预设（静默注入面）。
+  // 这里不阻断（遮蔽本身是文档化行为），但把"生效的是哪一份、被顶掉的是哪一份"打出来。
+  if (hit.source === 'project' && Array.isArray(hit.shadowed) && hit.shadowed.length) {
+    const key = `${workingDir}|${hit.name}`;
+    if (!shadowWarned.has(key)) {
+      shadowWarned.add(key);
+      const beaten = hit.shadowed.map((/** @type {any} */ x) => `${x.source}（${x.file}）`).join('、');
+      console.warn(
+        `[MingDao] ⚠ 预设「${hit.name}」来自**项目目录**（${hit.file}），它遮蔽了：${beaten}。\n` +
+          `  项目级预设可以定义 systemPrompt / 工具白名单——请确认这份是你信任的内容（不需要它时删掉该文件即可）。`
+      );
+    }
+  }
   try {
     return JSON.parse(fs.readFileSync(hit.file, 'utf8'));
   } catch {

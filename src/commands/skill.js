@@ -53,6 +53,13 @@ export async function handleSkill(/** @type {any} */ cmd, /** @type {any} */ arg
       const rn = /** @type {any} */ (r);
       const srcLabel = rn.host ? '（线上 registry）' : '';
       console.log(`✓ 已安装技能 ${rn.name}${srcLabel} → ~/.mingdao/skills/${rn.name}/（可编辑/删除，下次会话生效）`);
+      if (rn.host) {
+        // v0.6.3（M-6）：**如实说明这条校验的边界**。
+        // sha256 来自索引本身（文件与哈希同源），所以它能挡住传输损坏与第三方镜像篡改，
+        // 但**挡不住索引被投毒**——投毒者会同时下发恶意正文与与之匹配的哈希，校验必然通过。
+        // 结论：它是完整性检查，不是来源可信性证明。用户有权知道这个区别。
+        console.log('  说明：完整性校验（sha256）与索引同源，只防传输损坏/镜像篡改，不防**索引本身被投毒**。');
+      }
     }
     return true;
   }

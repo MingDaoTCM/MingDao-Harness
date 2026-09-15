@@ -1,14 +1,16 @@
 // `mingdao pack` 命令族（v0.5.0 阶段 A）：垂域 Pack 的查看 / 校验 / 脚手架。
-// 下游 CI 门禁入口是 `mingdao pack verify <dir>`——它只做静态校验（不 import Pack 代码），
-// 因此可以在没有内核运行时的环境里安全执行。
+// 下游 CI 门禁入口是 `mingdao pack verify <dir>`——**默认只做静态校验，不 import Pack 代码**
+// （v0.6.3 / H-9：此前帮助文案这么写、实现却无条件 loadPack → 等于在 CI 上执行被审仓库的任意代码，
+// 且不经 pack trust 信任门。现在默认静态、要执行须显式 --runtime）。
 import fs from 'node:fs';
 import path from 'node:path';
-import { listPacks, loadPack, validateManifest, coreVersionOf, SUPPORTED_PACK_API, CONSTRAINT_KINDS, packedDirsForHelp, packTrustState, trustPack, untrustPack } from '../packs.js';
+import { listPacks, loadPack, loadPackStatic, validateManifest, coreVersionOf, SUPPORTED_PACK_API, CONSTRAINT_KINDS, packedDirsForHelp, packTrustState, trustPack, untrustPack } from '../packs.js';
 import { loadConfig } from '../config.js';
 
 const HELP = `用法：
   mingdao pack list                 已发现的 Pack（名/版本/来源/兼容状态）
-  mingdao pack verify <目录>        静态校验 manifest + 文件齐全 + 约束合法（下游 CI 门禁）
+  mingdao pack verify <目录>        静态校验 manifest + 文件齐全（**不执行 pack.mjs**，下游 CI 门禁用这个）
+  mingdao pack verify <目录> --runtime  额外 import pack.mjs 验证运行时契约（会执行 Pack 代码，慎用）
   mingdao pack new <名字>           生成最小可用 Pack 脚手架
   mingdao pack info <名字>          单个 Pack 的贡献面明细
   mingdao pack trust <项目目录>     信任该项目的 .mingdao/packs（未信任则**不挂载**）
@@ -133,7 +135,22 @@ export async function handlePack(cmd, args) {
       process.exitCode = 1;
       return true;
     }
-    // 再走一次完整加载（会 import pack.mjs，验证运行时契约）
+    // v0.6.3（H-9）：默认**静态**收口——`verify` 是给 CI 审第三方 Pack 用的，不能顺手执行它的代码。
+    const runtime = args.includes('--runtime');
+    if (!runtime) {
+      const st2 = loadPackStatic(abs);
+      if (!st2.ok) {
+        console.log(`[失败] ${manifest.name} 静态校验未通过：`);
+        st2.errors.forEach((/** @type {any} */ e, /** @type {number} */ i) => console.log(`  ${i + 1}. ${e}`));
+        process.exitCode = 1;
+        return true;
+      }
+      console.log(`[通过·静态] ${manifest.name} v${manifest.version}（apiVersion ${manifest.apiVersion}，内核窗口 ${manifest.engines?.mingdao}）`);
+      console.log('  已校验：manifest 字段 / 兼容窗口 / 声明文件齐全 / pack.mjs 存在性。**未执行 Pack 代码。**');
+      console.log('  约束与提示词段的合法性由代码在装载时产出，静态阶段无法校验；需要时请加 --runtime（会执行代码）。');
+      return true;
+    }
+    console.log('  ⚠ --runtime：即将 import pack.mjs——它会在**本进程内以完整 Node 权限执行**。');
     const res = await loadPack(abs);
     if (!res.ok) {
       console.log(`[失败] ${manifest.name} 加载校验未通过：`);
@@ -142,7 +159,7 @@ export async function handlePack(cmd, args) {
       return true;
     }
     const c = res.contributions;
-    console.log(`[通过] ${manifest.name} v${manifest.version}（apiVersion ${manifest.apiVersion}，内核窗口 ${manifest.engines?.mingdao}）`);
+    console.log(`[通过·运行时] ${manifest.name} v${manifest.version}（apiVersion ${manifest.apiVersion}，内核窗口 ${manifest.engines?.mingdao}）`);
     console.log(`  工具 ${Array.isArray(c.tools) ? c.tools.length : 0} 个 · 约束 ${Array.isArray(c.constraints) ? c.constraints.length : 0} 条 · 提示词段 ${Array.isArray(c.promptSections) ? c.promptSections.length : 0} 段`);
     for (const w of Array.isArray(res.warnings) ? res.warnings : []) console.log(`  ⚠ ${w}`);
     return true;
