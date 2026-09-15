@@ -26,6 +26,34 @@ export const PATTERN_KINDS = new Set(['arg-forbid', 'output-forbid', 'result-for
 /** 作用域限于「某个工具」的 kind：其 pattern 坏掉时可以精确 fail-closed（只拦这个工具） */
 const SCOPED_PATTERN_KINDS = new Set(['arg-forbid', 'result-forbid']);
 
+// v0.6.3（审计 BUG-040）：completeness（必填项校验）的「缺失」哨兵**不能只认中文**。
+//
+// 原实现硬编码 `String(v).trim() === '未提及'`：英文/多语种会话里模型会写
+// "not mentioned" / "N/A" / "unknown" —— 判定不中，于是"必填项缺失"这条红线
+// **因为语言而静默停止生效**（合规约束里最不该出现的一种失效）。
+// 保守取一组明确的"未提供"措辞；**刻意不含 `无` / `none`**——医疗等域里
+// 「过敏史: 无」是**有效数据**，把它当缺失会误拒。域内若另有约定，
+// 由约束自己声明 `missingValues: [...]` 扩展。
+const MISSING_VALUE_SENTINELS = new Set([
+  'null', 'undefined', 'n/a', 'na', 'not mentioned', 'not provided', 'not available',
+  'not recorded', 'unknown', 'tbd', '未提及', '未提供', '未采集', '未填写', '未记录',
+  '不详', '未知', '待补充', '待采集', '待确认',
+]);
+/**
+ * 该字段值是否应判为「缺失」。
+ * @param {any} c 约束（可带 missingValues 扩展）
+ * @param {any} v 字段值
+ */
+function isMissingFieldValue(/** @type {any} */ c, /** @type {any} */ v) {
+  if (v === undefined || v === null) return true;
+  const t = String(v).trim();
+  if (t === '') return true;
+  const lower = t.toLowerCase();
+  if (MISSING_VALUE_SENTINELS.has(lower)) return true;
+  const extra = Array.isArray(c?.missingValues) ? c.missingValues : [];
+  return extra.some((/** @type {any} */ x) => String(x).trim().toLowerCase() === lower);
+}
+
 /** 预编译的正则缓存：pattern → RegExp（非法正则返回 null，由调用方 fail-closed） */
 const reCache = new Map();
 /** @param {any} pattern */
@@ -285,10 +313,7 @@ export function checkPostTool(compiled, toolName, result) {
           event: event(c, 'post-tool', { action: 'reject', reason: 'no-data' }),
         };
       }
-      const missing = (Array.isArray(c.fields) ? c.fields : []).filter((/** @type {any} */ f) => {
-        const v = data[f];
-        return v === undefined || v === null || String(v).trim() === '' || String(v).trim() === '未提及';
-      });
+      const missing = (Array.isArray(c.fields) ? c.fields : []).filter((/** @type {any} */ f) => isMissingFieldValue(c, data[f]));
       if (missing.length) {
         return {
           rejected: true,

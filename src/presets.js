@@ -172,6 +172,16 @@ export function presetPermissionOverride(/** @type {any} */ preset, /** @type {a
     // 提权：忽略预设值，保持当前更保守的权限（对象形态保留其 allow/deny）
     return { permission: curMode in PERM_RANK ? currentPermission : cur, escalated: true };
   }
+  // v0.6.3（审计 P1-3）：**未提权分支也必须保留对象形态**。
+  //
+  // 原实现返回裸字符串 `want`，于是配置对象里的 `allow`/`deny` 被整体丢弃——
+  // 而 `deny` 是用户自己写的禁令：`{mode:'auto', deny:['fetch:*']}` 遇到预设
+  // permission:'readonly' 时，这条禁令会**静默消失**（只读档下 fetch 照样可用）。
+  // 方向是**放宽权限**，与该函数"只能收紧不能放松"的意图正好相反。
+  // 现在：对象进 → 对象出（只改 mode，保留 allow/deny）；字符串进 → 字符串出。
+  if (currentPermission && typeof currentPermission === 'object') {
+    return { permission: { ...currentPermission, mode: want }, escalated: false };
+  }
   return { permission: want, escalated: false };
 }
 

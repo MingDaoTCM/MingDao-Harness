@@ -92,19 +92,37 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
       // cmd:'true' / echo 形式的策略脚本）且载荷超过管道缓冲（约 64KB，write 大文件时必然发生），
       // write 的 EPIPE 会作为异步 error 事件抛出——无人监听即未捕获异常，整个进程崩溃
       // （WebUI 场景下所有并发会话一起死）。write() 本身的 try/catch 捕不到异步事件。
-      child.stdin.on('error', () => {});
+      //
+      // v0.6.3（审计 BUG-042）：**但不能只吞不报**。载荷没送到时 hook 的判定不可信，
+      // 而本模块把「空输出」当作**放行**——于是 v0.4.6 这个"防崩溃"的监听顺带造成 fail-open：
+      // 一次本该拦截的策略因为没收到载荷而被静默通过。现在记下失败，在 close 时收口。
+      /** @type {string|null} */
+      let stdinFailed = null;
+      child.stdin.on('error', (e) => {
+        stdinFailed = String(/** @type {any} */ (e)?.message ?? e);
+      });
       child.on('error', (e) => {
         clearTimeout(timer);
         finish({ ok: false, error: `hook 启动失败：${e.message}` });
       });
       child.on('close', (code) => {
         clearTimeout(timer);
+        // 载荷没送进去、且 hook 也没给出任何判定 → 这次运行**不可信**，按 hook 失败处理
+        // （调用方 !ok → block，fail-closed）。若 hook 仍给出了输出，说明它本就没打算读 stdin
+        // （例如 `echo '{"decision":"approve"}'`），那种情况下尊重它的判定，避免误伤既有策略。
+        if (stdinFailed && !String(out).trim()) {
+          finish({ ok: false, error: `hook 输入写入失败（子进程可能未读取 stdin 就退出）：${stdinFailed}` });
+          return;
+        }
         finish({ ok: true, exitCode: code, output: out, stderr: err });
       });
       try {
         child.stdin.write(JSON.stringify(payload));
         child.stdin.end();
-      } catch {}
+      } catch (e) {
+        // 同步抛出与异步 error 同源，统一交给 close 收口（不在这里 finish，避免重复结算）
+        stdinFailed = String(/** @type {any} */ (e)?.message ?? e);
+      }
     });
   }
 

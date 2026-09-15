@@ -8008,6 +8008,126 @@ const isPosix111 = process.platform !== 'win32';
   ok('v0.6.3 批一 凭据暴露面：脱敏器补 PEM/JWT/赋值式 + 私有文件 0600 自愈 + 凭证损坏拒绝写 + registry 强制 TLS');
 }
 
+
+// ---------- 113. v0.6.3 批二：安全 fail-open（防护看起来在、实际被绕过） ----------
+{
+  const PRE = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
+  const CON = await import(pathToFileURL(path.join(srcDir, 'constraints.js')).href);
+  const PERM = await import(pathToFileURL(path.join(srcDir, 'permissions.js')).href);
+
+  // ① P1-3：预设「未提权」分支不得丢掉 allow/deny（丢了 = 放宽权限）
+  {
+    const cur = { mode: 'auto', allow: ['bash'], deny: ['fetch:*'] };
+    const same = PRE.presetPermissionOverride({ permission: 'auto' }, cur);
+    assert.ok(same.permission && typeof same.permission === 'object', '对象进必须对象出（原实现返回裸字符串，allow/deny 全丢）');
+    assert.deepEqual(same.permission.deny, ['fetch:*'], 'deny 必须保留：它是用户自己写的禁令');
+    const tight = PRE.presetPermissionOverride({ permission: 'readonly' }, cur);
+    assert.equal(tight.permission.mode, 'readonly', '更保守的模式应被采纳');
+    assert.deepEqual(tight.permission.deny, ['fetch:*'], '**收紧模式时同样不能丢 deny**（原缺陷正是这一支：只读档下 fetch 禁令静默消失）');
+    const up = PRE.presetPermissionOverride({ permission: 'auto' }, { mode: 'readonly', deny: ['write'] });
+    assert.equal(up.escalated, true, '提权必须被拦下');
+    assert.equal(up.permission.mode, 'readonly', '提权时保持更保守的当前模式');
+    assert.equal(PRE.presetPermissionOverride({ permission: 'auto' }, 'auto').permission, 'auto', '字符串形态仍应返回字符串（不引入类型回归）');
+  }
+
+  // ② BUG-040：completeness 的「缺失」哨兵不能只认中文
+  {
+    const fields = ['随访日期'];
+    const mk = (v, extra = {}) => ({ kind: 'completeness', id: 'c', tool: 'write', fields, ...extra });
+    // 注意：checkPostTool 无违规时返回 **null**（不是 {rejected:false}），断言要按这个语义写
+    const rejected = (v, c = mk(v)) => {
+      const compiled = CON.compileConstraints([{ ...c, pack: 'p' }]);
+      return CON.checkPostTool(compiled, 'write', { ok: true, data: { 随访日期: v } })?.rejected === true;
+    };
+    assert.ok(rejected(''), '空串必须判缺失');
+    assert.ok(rejected('未提及'), '中文"未提及"必须判缺失（原有行为）');
+    assert.ok(rejected('not mentioned'), '英文 "not mentioned" 也必须判缺失（原实现漏，红线因语言静默失效）');
+    assert.ok(rejected('N/A'), '"N/A" 必须判缺失');
+    assert.ok(rejected('unknown'), '"unknown" 必须判缺失');
+    assert.ok(!rejected('2026-03-01'), '正常值不得误判');
+    // 刻意不把 无/none 当缺失：医疗等域里「过敏史: 无」是有效数据
+    assert.ok(!rejected('无'), '「无」不得判缺失（域内有效数据的典型形态）');
+    assert.ok(!rejected('none'), '"none" 同上');
+    // 域内可自行扩展
+    assert.ok(rejected('未见异常', mk('未见异常', { missingValues: ['未见异常'] })), '约束可声明 missingValues 扩展（域内约定）');
+    assert.ok(!rejected('未见异常'), '未声明时「未见异常」不该被当缺失');
+  }
+
+  // ③ BUG-042：hook 载荷写失败不得被当成"空输出=放行"
+  {
+    const HK = await import(pathToFileURL(path.join(srcDir, 'hooks.js')).href);
+    const homeH = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-hook113-'));
+    try {
+      // 一个「不读 stdin 就退出」的 hook：写大载荷必然 EPIPE。
+      // 修复前：stdin error 被静默吞掉 + 空输出被当作放行 → 工具照常执行（fail-open）。
+      const big = 'x'.repeat(200 * 1024);
+      const hooks = HK.createHooks(
+        { PreToolUse: [{ matcher: 'write', cmd: `${process.execPath} -e "process.exit(0)"` }] },
+        homeH,
+        {}
+      );
+      const r = await hooks.pre('write', { path: 'a.txt', content: big });
+      assert.equal(r.decision, 'block', `载荷送不进去且 hook 没给判定时必须阻止（原实现会放行），实际 ${JSON.stringify(r)}`);
+      assert.ok(/输入写入失败/.test(String(r.reason)), `原因应点明是输入写入失败，实际：${r.reason}`);
+      // 对照：hook 明确给出 approve 时仍应尊重（它本就没打算读 stdin，不能误伤）
+      const hooks2 = HK.createHooks(
+        { PreToolUse: [{ matcher: 'write', cmd: `${process.execPath} -e "process.stdout.write('{\\"decision\\":\\"approve\\"}')"` }] },
+        homeH,
+        {}
+      );
+      const r2 = await hooks2.pre('write', { path: 'a.txt', content: big });
+      assert.equal(r2.decision, 'approve', `hook 明确 approve 时应尊重其判定（避免误伤既有策略），实际 ${JSON.stringify(r2)}`);
+      // 对照：正常情况下 hook 能收到载荷（小载荷 + 读 stdin 的 hook 应拿到内容）
+      const hooks3 = HK.createHooks(
+        { PreToolUse: [{ matcher: 'write', cmd: `${process.execPath} -e "let s='';process.stdin.on('data',d=>s+=d);process.stdin.on('end',()=>process.stdout.write(s.includes('payload-marker')?'{\\"decision\\":\\"approve\\"}':'{\\"decision\\":\\"block\\"}'))"` }] },
+        homeH,
+        {}
+      );
+      const r3 = await hooks3.pre('write', { path: 'payload-marker' });
+      assert.equal(r3.decision, 'approve', `hook 正常收到载荷时应按其判定，实际 ${JSON.stringify(r3)}`);
+    } finally {
+      safeRmSync(homeH, { recursive: true, force: true });
+    }
+  }
+
+  // ④ H-11：deny 的硬拦截是**显式选项**，默认行为与文档一致（可放行但点名规则）
+  {
+    const ioYes = { async ask() { return 'y'; }, print() {} };
+    const denyCfg = { mode: 'auto', deny: ['bash:rm *'] };
+    const def = PERM.createPermission(denyCfg, ioYes);
+    assert.equal(await def.check('bash', { command: 'rm -rf /x' }), true, '默认：同意即放行（docs/CONFIG.md 明确记载，本批不推翻）');
+    const strict = PERM.createPermission({ ...denyCfg, denyStrict: true }, ioYes);
+    assert.equal(await strict.check('bash', { command: 'rm -rf /x' }), false, 'denyStrict:true 时必须硬拦截（即便用户按了 y）');
+    // 事件里带出命中规则与严格标记（审计/账本可回答"被哪条规则拦的"）
+    const ev = PERM.evaluatePermission({ ...denyCfg, denyStrict: true }, 'bash', { command: 'rm -rf /x' });
+    assert.equal(ev.rule, 'bash:rm *', '事件必须带出命中的规则名');
+    assert.equal(ev.denyStrict, true, '事件必须带出 denyStrict 标记');
+    // denyStrict 不得影响未命中 deny 的判定。
+    // 注意必须让 **allow 规则真的命中**：只写 `{mode:'auto', deny:[…], denyStrict:true}` 时
+    // allow 列表为空，根本走不到 allow 分支——第一版就是这么漏过"影响面过大"那个突变的。
+    const other = PERM.createPermission({ mode: 'ask', allow: ['read'], deny: [], denyStrict: true }, ioYes);
+    assert.equal(await other.check('read', {}), true, 'denyStrict 只作用于 deny 命中：命中 allow 规则时仍应放行（否则它把白名单也一起废了）');
+    const autoOther = PERM.createPermission({ ...denyCfg, denyStrict: true }, ioYes);
+    assert.equal(await autoOther.check('read', {}), true, 'denyStrict 不应改变 auto 档对普通工具的放行');
+    // readonly 写操作的放行保持（同样是文档化行为）
+    assert.equal(await PERM.createPermission('readonly', ioYes).check('write', {}), true, 'readonly 写操作同意即放行保持（文档记载）');
+    // 管道/worker 场景：交互通道不可用 → 拒绝（fail-closed）
+    const pipeIo = { async ask() { throw new Error('EOF'); }, print() {} };
+    assert.equal(await PERM.createPermission(denyCfg, pipeIo).check('bash', { command: 'rm -rf /x' }), false, '交互通道不可用时必须拒绝（fail-closed）');
+  }
+
+  // ⑤ BUG-051：mcpEnvFilter=false 会把**全部**环境变量交给每个 MCP 服务器 → 必须可见
+  {
+    const src = fs.readFileSync(path.join(srcDir, 'mcp.js'), 'utf8');
+    assert.ok(/mcpEnvWarned/.test(src), 'mcp.js 必须有"全量透传"的告警（一次性）');
+    assert.ok(/mcpEnvKeep/.test(src) && /完整环境变量/.test(src), '告警应点明后果并指向更窄的替代方案 mcpEnvKeep');
+    // 默认（未显式配置）必须仍是过滤——这是最关键的一半
+    assert.ok(/const envFilterOff = topCfg\?\.mcpEnvFilter === false;/.test(src), '默认必须是"过滤"（只有显式 false 才全量透传）');
+    assert.ok(/envFilterOff \? process\.env : filteredProcessEnv\(keep\)/.test(src), '全量透传必须只在显式 false 时发生');
+  }
+  ok('v0.6.3 批二 安全 fail-open：预设不丢 deny + 缺失哨兵多语种 + hook 写失败 fail-closed + denyStrict + MCP 环境可见');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

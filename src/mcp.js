@@ -13,6 +13,13 @@ import { isSensitiveEnv } from './tools/bash.js';
 
 // 评估 6.2（v0.4.3）：MCP 子进程不再继承完整 process.env（含 API Key）——与 bash/hooks 同口径
 // 默认过滤敏感变量；config.mcpEnvKeep 按名放行、config.mcpEnvFilter=false 整体关闭。
+//
+// v0.6.3（审计 BUG-051）：`mcpEnvFilter=false` 是**显式**逃生口（默认是过滤，已核实无默认关闭路径），
+// 但它会把这台机器上**全部**凭据交给**每一个**已配置的 MCP 服务器（多数是 npx 拉来的第三方进程）。
+// 不改显式配置（那会破坏用户按需放行的合法用法），但必须**说出来**——只做一次告警，
+// 并指向更窄的替代方案 mcpEnvKeep。
+let mcpEnvWarned = false;
+
 function filteredProcessEnv(/** @type {Set<string>} */ keepSet) {
   const out = /** @type {any} */ ({});
   for (const [k, v] of Object.entries(process.env)) {
@@ -236,7 +243,18 @@ export class McpClient {
 // topCfg 为顶层 config.json（提供 mcpEnvKeep/mcpEnvFilter 环境过滤口径，与 bash/hooks 一致）
 export async function startMcpServers(/** @type {any} */ mcpCfg, /** @type {any} */ workingDir, /** @type {any} */ topCfg = {}) {
   const keep = new Set((topCfg?.mcpEnvKeep || []).map(String));
-  const baseEnv = topCfg?.mcpEnvFilter === false ? process.env : filteredProcessEnv(keep);
+  const envFilterOff = topCfg?.mcpEnvFilter === false;
+  const baseEnv = envFilterOff ? process.env : filteredProcessEnv(keep);
+  if (envFilterOff && !mcpEnvWarned) {
+    mcpEnvWarned = true;
+    const names = Object.keys(mcpCfg || {});
+    if (names.length) {
+      console.warn(
+        `[MingDao] ⚠ config.mcpEnvFilter=false：${names.length} 个 MCP 服务器（${names.slice(0, 3).join('、')}${names.length > 3 ? ' 等' : ''}）` +
+          `将继承**完整环境变量**（含 API Key / Token）。若只是个别变量需要，请改用 config.mcpEnvKeep: ["VAR_NAME"]。`
+      );
+    }
+  }
   const clients = new Map();
   const entries = Object.entries(mcpCfg || {});
   await Promise.all(

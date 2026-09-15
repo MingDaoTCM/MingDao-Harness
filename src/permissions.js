@@ -59,8 +59,12 @@ function ruleMatches(rule, name, args, forDeny = false) {
     if (forDeny && name === 'bash') {
       // v0.6.2（自评报告 P2-2）：deny 必须**按 shell 分隔符拆段后逐段判**。
       // 原实现只拿整条命令的前缀去比：`deny:['bash:rm *']` 拦得住 `rm -rf /x`，
-      // 却放过 `cd /tmp && rm -rf /x`（开头不是 rm）——而 auto 档下 deny 是**唯一防线**，
-      // 失配就等于这条规则不存在。v0.4.6 只修了元字符失配那一半，链式仍可绕过。
+      // 却放过 `cd /tmp && rm -rf /x`（开头不是 rm）——而 auto 档下不会对每条命令发问，
+      // deny 失配就等于这条规则**形同不存在**。v0.4.6 只修了元字符失配那一半，链式仍可绕过。
+      //
+      // v0.6.3：措辞订正。原注释写「auto 档下 deny 是唯一防线」，容易被读成"不可越过的硬拦截"，
+      // 而 docs/CONFIG.md 明确记载「被 deny 拦截会弹窗询问、同意即放行」——**能越过**。
+      // 要真正的硬拦截请显式开 `denyStrict: true`（见 normalizePermission 注释）。
       // 方向是 fail-closed：宁可多拦（多问一次），不可漏拦。
       const segs = splitShellSegments(have);
       return segs.some((seg) => (want.endsWith('*') ? seg.startsWith(want.slice(0, -1)) : seg === want));
@@ -74,21 +78,26 @@ function ruleMatches(rule, name, args, forDeny = false) {
 /**
  * 归一化权限配置（v0.6.0 C2：从 check() 中抽出，供**纯函数**判定复用）。
  * @param {any} rawMode
- * @returns {{mode: string, allow: any[], deny: any[]}}
+ * @returns {{mode: string, allow: any[], deny: any[], denyStrict: boolean}}
  */
 export function normalizePermission(/** @type {any} */ rawMode) {
   let mode = 'ask';
   let allow = [];
   let deny = [];
+  // v0.6.3（审计 H-11）：`denyStrict` = 把 deny 升级为**不可临时放行**的硬拦截。
+  // 默认 false 保持既有行为（docs/CONFIG.md 明确记载「被 deny 拦截会弹窗询问，同意即放行」，
+  // 那是 v0.4.6 有意加的"不再静默拦截"）；需要硬拦截的场景（无人值守/强合规）显式打开。
+  let denyStrict = false;
   if (typeof rawMode === 'string') {
     mode = rawMode;
   } else if (rawMode && typeof rawMode === 'object') {
     mode = rawMode.mode ?? 'ask';
     allow = rawMode.allow ?? [];
     deny = rawMode.deny ?? [];
+    denyStrict = rawMode.denyStrict === true;
   }
   if (!['ask', 'auto', 'readonly'].includes(mode)) mode = 'ask';
-  return { mode, allow, deny };
+  return { mode, allow, deny, denyStrict };
 }
 
 /**
@@ -104,12 +113,12 @@ export function normalizePermission(/** @type {any} */ rawMode) {
  * @param {any} rawMode
  * @param {any} name
  * @param {any} args
- * @returns {{decision: 'allow'|'deny'|'ask', reason: string, rule: string|null}}
+ * @returns {{decision: 'allow'|'deny'|'ask', reason: string, rule: string|null, denyStrict?: boolean}}
  */
 export function evaluatePermission(/** @type {any} */ rawMode, /** @type {any} */ name, /** @type {any} */ args = {}) {
-  const { mode, allow, deny } = normalizePermission(rawMode);
+  const { mode, allow, deny, denyStrict } = normalizePermission(rawMode);
   const hitDeny = deny.find((/** @type {any} */ r) => ruleMatches(r, name, args, true));
-  if (hitDeny) return { decision: 'deny', reason: 'rule-deny', rule: hitDeny };
+  if (hitDeny) return { decision: 'deny', reason: 'rule-deny', rule: hitDeny, denyStrict };
   const hitAllow = allow.find((/** @type {any} */ r) => ruleMatches(r, name, args));
   if (hitAllow) return { decision: 'allow', reason: 'rule-allow', rule: hitAllow };
   if (mode === 'auto') return { decision: 'allow', reason: 'mode-auto', rule: null };
@@ -137,9 +146,26 @@ export function createPermission(rawMode, io) {
       // 判定只此一份（evaluatePermission）；这里只负责「需要用户点头时怎么问」。
       const v = evaluatePermission(rawMode, name, args);
       if (v.decision === 'allow') return true;
-      // 1) 被 deny 规则拦截 → 询问是否本次强制放行，而不是静默拒绝
+      // 1) 被 deny 规则拦截。
+      //    默认（与 docs/CONFIG.md 一致）：询问是否本次强制放行，而不是静默拒绝。
+      //    但 `denyStrict: true` 时**不给放行入口**——那是用户显式要求的硬拦截。
       if (v.decision === 'deny') {
-        return askOverride(`规则拦截了 ${name}${summarize(name, args)}，是否本次强制放行？[y/N] `);
+        if (v.denyStrict) {
+          try {
+            io.print(
+              style(
+                `⛔ 已拒绝：${name}${summarize(name, args)} 命中 deny 规则「${v.rule}」` +
+                  `（config.permission.denyStrict=true：deny 为硬拦截，不提供本次放行）。`,
+                C.red
+              )
+            );
+          } catch {}
+          return false;
+        }
+        // 知情同意：点名命中的规则与来源，而不是笼统的"规则拦截了"
+        return askOverride(
+          `⚠ ${name}${summarize(name, args)} 命中你配置的 deny 规则「${v.rule}」——是否本次强制放行？（这会绕过你自己写的禁令）[y/N] `
+        );
       }
       // 2) 只读模式下的写操作 → 询问是否本次放行
       if (v.reason === 'readonly-write') {
