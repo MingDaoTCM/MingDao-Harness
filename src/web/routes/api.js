@@ -40,10 +40,33 @@ export function createApiDispatch(deps) {
       return json(res, 403, { error: 'Host 校验失败：请通过绑定地址访问（DNS rebinding 防护）' });
     }
 
-    // CSRF 防护：跨源请求一律拒绝；POST 仅接受 JSON（拦截表单/纯文本跨站盲提交）。
+    // v0.6.3（H-5 / H-6）：**跨站浏览器请求一律拒绝**。
+    //
+    // 威胁模型：默认 `mingdao web`（回环且未配置令牌）不校验令牌，靠"本机信任"。但浏览器的
+    // 同源策略**不保护本机端口**：任意网页都能用 `<img>` / `fetch(...,{mode:'no-cors'})` 发起
+    // 盲打请求（读不到响应，但副作用已经发生），而这类请求不带 Origin、也无法靠 Content-Type
+    // 拦截——这正是 H-6 里"读取即删除的 GET /api/draft""带外呼的 GET /api/sync?refresh"的真实入口。
+    //
+    // `Sec-Fetch-Site` 是浏览器强制附加的**元数据头**，页面脚本无法伪造（属于 forbidden header）：
+    //   · same-origin —— SPA 自己的请求（正常路径）
+    //   · none        —— 地址栏直接访问 / 书签（正常路径）
+    //   · cross-site  —— 其它站点发起的请求，**含 img/no-cors 盲打**
+    //   · same-site   —— 同站但跨源（如子域）：同样按跨站处理
+    // 因此拒绝 cross-site/same-site 就等于一次性关掉整条浏览器攻击面，且不改任何既有 UX。
+    // 老浏览器不发这个头 → 缺失时按既有策略处理（不引入新的硬依赖）。
+    const site = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+    const isStaticShell = p === '/' || p === '/index.html' || p === '/app.js' || p === '/favicon.ico' || p === '/icon.svg' || p === '/manifest.webmanifest' || p === '/sw.js';
+    const isNavigation = (method === 'GET' || method === 'HEAD') && isStaticShell;
+    if ((site === 'cross-site' || site === 'same-site') && !isNavigation) {
+      return json(res, 403, { error: '跨站请求被拒绝（Sec-Fetch-Site）。请从本机打开 WebUI 地址，不要从其它网页发起请求。' });
+    }
+
+    // CSRF 防护：Origin 校验覆盖**所有方法**（原先只覆盖非 GET）。同源 GET 不带 Origin，
+    // 所以这条扩展不会误伤正常页面；它拦的是"带 Origin 的跨源 GET"（另一种盲打形态）。
+    // POST 另需 JSON Content-Type（拦截表单/纯文本跨站盲提交）。
     // v0.4.7（T21）：HEAD 是安全方法（无请求体），此前落入「必须带 JSON Content-Type」分支 →
     // 对 /api/state 等做 HEAD 探活会拿到 415，破坏监控/反代脚本。与 GET 同等对待。
-    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
+    {
       const origin = req.headers.origin;
       if (origin) {
         try {
@@ -52,6 +75,8 @@ export function createApiDispatch(deps) {
           return json(res, 403, { error: '非法 Origin' });
         }
       }
+    }
+    if (method !== 'GET' && method !== 'HEAD' && method !== 'OPTIONS') {
       const ct = String(req.headers['content-type'] || '');
       if (!ct.includes('application/json') && !ct.includes('text/plain')) {
         return json(res, 415, { error: '仅接受 JSON 请求体' });

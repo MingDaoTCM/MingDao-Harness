@@ -92,6 +92,36 @@ export function resolveProviderConfig(/** @type {any} */ cfg, /** @type {any} */
 }
 
 // ---------------------------------------------------------------------------
+// 自定义 Provider 名 → 模块路径（v0.6.3 / R4：名字必须过白名单，且结果必须落在 providers/ 内）
+//
+// 原实现直接 `path.join(mingdaoHome(), 'providers', pc.name + '.mjs')` 再 import —— 而
+// `pc.name` 来自 `customModels.<模型名>.provider`（config.json，**并且可经 WebUI 的
+// /api/models-config addCustom 写入**）。于是 `provider: '../../../../tmp/evil'` 会 import 出
+// 目录之外的 .mjs：与本仓 v0.4.6 修掉的"环境变量外泄"是同一类孪生通道（读+执行任意本地模块）。
+//
+// 两层防护（白名单 + 包含性检查）：白名单挡住绝大多数形态，包含性检查兜住"以后有人改了拼接方式"。
+const PROVIDER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** @param {any} name */
+export function isSafeProviderName(name) {
+  const n = String(name || '');
+  if (!PROVIDER_NAME_RE.test(n)) return false;
+  if (n === '.' || n === '..' || n.includes('..')) return false;
+  return true;
+}
+/**
+ * 解析自定义 Provider 模块路径；名不合法或路径越界时返回 null（调用方按"没有自定义模块"处理）。
+ * @param {any} name
+ */
+export function customProviderFile(name) {
+  if (!isSafeProviderName(name)) return null;
+  const dir = path.join(mingdaoHome(), 'providers');
+  const file = path.join(dir, `${String(name)}.mjs`);
+  const rel = path.relative(dir, file);
+  if (!rel || rel.startsWith('..') || path.isAbsolute(rel)) return null;
+  return file;
+}
+
+// ---------------------------------------------------------------------------
 // 视觉能力解析（v0.6.3，下游 Dify 工作流反馈）
 //
 // 原门控只看「内置预设 supportsVision」或「customModels.<name>.vision」，
@@ -122,8 +152,8 @@ export async function resolveVisionSupport(cfg, modelName) {
   try {
     const pc = resolveProviderConfig(cfg, modelName);
     if (!pc.isCustom || pc.name.includes(':')) return false;
-    const file = path.join(mingdaoHome(), 'providers', pc.name + '.mjs');
-    if (!fs.existsSync(file)) return false;
+    const file = customProviderFile(pc.name); // R4：名字不合法/越界 → null（当作没有自定义模块）
+    if (!file || !fs.existsSync(file)) return false;
     const mtimeMs = fs.statSync(file).mtimeMs;
     const hit = visionProbeCache.get(pc.name);
     if (hit && hit.mtimeMs === mtimeMs) return hit.vision;
@@ -150,8 +180,8 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
   const pc = resolveProviderConfig(cfg, modelName);
 
   // 自定义 Provider 模块优先（仅普通自定义端点；custom:<模型名> 走 OpenAI 兼容直连）
-  const customFile = path.join(mingdaoHome(), 'providers', pc.name + '.mjs');
-  if (pc.isCustom && !pc.name.includes(':') && fs.existsSync(customFile)) {
+  const customFile = customProviderFile(pc.name); // R4：见上方说明（白名单 + 包含性检查）
+  if (customFile && pc.isCustom && !pc.name.includes(':') && fs.existsSync(customFile)) {
     const mod = await import(pathToFileURL(customFile).href + `?v=${Date.now()}`);
     if (typeof mod.createProvider !== 'function') {
       throw new Error(`自定义 Provider 模块 ${customFile} 未导出 createProvider(cfg)。`);

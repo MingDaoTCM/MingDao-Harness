@@ -8577,6 +8577,149 @@ process.stdout.write('done');`
   ok('v0.6.3 批四 静默数据损失：配置损坏先备份 + /compact 改重写 + 压缩清读取缓存 + 追加与轮转同锁 + 日志改名式轮转');
 }
 
+// ---------- 116. v0.6.3 批五：Web 安全（符号链接逃逸 / 元数据 SSRF / 跨站盲打 / Provider 名穿越） ----------
+{
+  const { runWebServer } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
+  const { saveConfig } = await import(pathToFileURL(path.join(srcDir, 'config.js')).href);
+  const PROV = await import(pathToFileURL(path.join(srcDir, 'providers', 'index.js')).href);
+  const FETCHTOOL = await import(pathToFileURL(path.join(srcDir, 'tools', 'fetch.js')).href);
+  const SAFE = await import(pathToFileURL(path.join(srcDir, 'safe-fetch.js')).href);
+  const prevHome116 = process.env.MINGDAO_HOME;
+  const home116 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-batch5-'));
+  process.env.MINGDAO_HOME = home116;
+  saveConfig({ provider: 'deepseek', model: 'deepseek-v4-flash', permission: 'ask', sandbox: 'off', contextBudget: 128000 });
+  const PORT116 = 45974;
+  const base116 = `http://127.0.0.1:${PORT116}`;
+  const srv116 = await runWebServer({ host: '127.0.0.1', port: PORT116, authToken: null });
+  const req116 = (p, opts = {}) => fetch(base116 + p, opts);
+  const jreq116 = async (p, opts) => {
+    const r = await req116(p, opts);
+    return { status: r.status, j: await r.json().catch(() => ({})) };
+  };
+  const post116 = (p, body) => jreq116(p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  try {
+    // ① P0-3：目录围栏必须按 realpath 判定，符号链接不能成为逃生通道
+    {
+      // 允许根是 home 与 os.tmpdir()，而 home116 建在 tmpdir 下 → 它自己是合法浏览根
+      const okInside = await jreq116('/api/fs-browse?dir=' + encodeURIComponent(home116));
+      assert.equal(okInside.status, 200, `允许根内的目录必须可浏览（修复不能把正常路径一起挡掉），实际 ${okInside.status}`);
+      const normal = path.join(home116, 'normal');
+      fs.mkdirSync(path.join(normal, 'sub'), { recursive: true });
+      const inner = await jreq116('/api/fs-browse?dir=' + encodeURIComponent(normal));
+      assert.equal(inner.status, 200, '普通子目录应可浏览');
+      assert.ok(inner.j.entries.some((e) => e.name === 'sub'), '应列出真实子目录');
+
+      // 符号链接逃逸：<home>/escape -> /
+      let canSymlink = true;
+      try {
+        fs.symlinkSync(path.sep, path.join(home116, 'escape'), 'dir');
+      } catch {
+        canSymlink = false; // Windows 无权限创建符号链接：跳过这一支，其余断言照跑
+      }
+      if (canSymlink) {
+        const escaped = await jreq116('/api/fs-browse?dir=' + encodeURIComponent(path.join(home116, 'escape')));
+        assert.equal(
+          escaped.status,
+          403,
+          `指向 / 的符号链接必须被拒（原实现只做 path.resolve 前缀比较，statSync 会跟随链接 → 任意目录枚举），实际 ${escaped.status}`
+        );
+        const addEscaped = await post116('/api/workspaces', { action: 'add', name: '逃逸空间', dir: path.join(home116, 'escape') });
+        assert.equal(addEscaped.status, 400, '登记工作空间同样不得接受符号链接逃逸（否则 Agent 的工具会整体跑到围栏外）');
+        // 目录里指向围栏外的**条目**不该被列出来
+        fs.mkdirSync(path.join(normal, 'real'), { recursive: true });
+        // 注意必须指向**所有允许根之外**：os.homedir() 本身就是允许根，指它不算逃逸
+        // （第一版就是这么写的，变异验证直接指出"该断言抓不到这个变异"）。
+        try {
+          fs.symlinkSync(path.sep + 'usr', path.join(normal, 'link-out'), 'dir');
+        } catch {}
+        const listed = await jreq116('/api/fs-browse?dir=' + encodeURIComponent(normal));
+        assert.equal(listed.status, 200, 'normal 目录仍可浏览');
+        assert.ok(listed.j.entries.some((e) => e.name === 'real'), '真实目录要列出来');
+        // 链接条目不会被列出——但**不把它当防线**：Dirent.isDirectory() 对符号链接本就是 false，
+        // 这条即使去掉过滤也成立（实测确认）。真正要钉住的是"直接访问链接路径也必须 403"：
+        const viaLink = await jreq116('/api/fs-browse?dir=' + encodeURIComponent(path.join(normal, 'link-out')));
+        assert.equal(viaLink.status, 403, '把符号链接路径直接喂进来同样必须 403（realpath 落在允许根之外）');
+      }
+    }
+
+    // ② P1-8：云元数据端点**无条件**拒绝（回环绑定与 allowPrivateEndpoints 都不放行），
+    //         而"本机模型服务"这一既有场景必须继续可用（否则就是拿安全换掉可用性）
+    {
+      const meta = await post116('/api/models-config', { action: 'addCustom', name: 'meta-probe', baseUrl: 'http://169.254.169.254/latest/meta-data' });
+      assert.equal(meta.status, 400, `回环绑定下也必须拒绝云元数据端点（原实现整段跳过 SSRF 校验），实际 ${meta.status}`);
+      assert.ok(/元数据/.test(String(meta.j.error)), `拒绝理由要点明元数据，实际：${meta.j.error}`);
+      const meta2 = await post116('/api/sync', { action: 'login', url: 'http://100.100.100.200/latest/meta-data', username: 'u', password: 'p' });
+      assert.equal(meta2.status, 400, '同步登录同样不得指向元数据端点');
+      const local = await post116('/api/models-config', { action: 'addCustom', name: 'local-probe', baseUrl: 'http://127.0.0.1:11434/v1' });
+      assert.equal(local.status, 200, `回环绑定下必须仍能配置本机模型服务（Ollama 等），实际 ${local.status} ${JSON.stringify(local.j)}`);
+      // 单一来源：清单在 tools/fetch.js，且 allowPrivate 也不放行
+      assert.equal(FETCHTOOL.isMetadataHost('169.254.169.254'), true, 'isMetadataHost 必须认得 AWS/GCP/Azure 元数据地址');
+      assert.equal(FETCHTOOL.isMetadataHost('100.100.100.200'), true, '阿里云元数据地址（落在 CGNAT 段内）必须认得');
+      assert.equal(FETCHTOOL.isMetadataHost('example.com'), false, '普通域名不得误判');
+      const sf = await SAFE.safeFetchText('http://169.254.169.254/latest/meta-data/', { allowPrivate: true });
+      assert.ok(/元数据/.test(String(sf.error)), `allowPrivate=true 也不得放行元数据端点（它不是"用户自担意图的内网服务"），实际：${JSON.stringify(sf)}`);
+    }
+
+    // ③ H-5 / H-6：跨站浏览器请求一律拒绝（含 <img>/no-cors 盲打），且**不误伤**正常访问
+    {
+      const cross = await jreq116('/api/state', { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+      assert.equal(cross.status, 403, '跨站请求必须被拒（同源策略不保护本机端口，任意网页都能盲打）');
+      const sameSite = await jreq116('/api/state', { headers: { 'Sec-Fetch-Site': 'same-site' } });
+      assert.equal(sameSite.status, 403, 'same-site（子域等跨源）同样按跨站处理');
+      const sameOrigin = await jreq116('/api/state', { headers: { 'Sec-Fetch-Site': 'same-origin' } });
+      assert.equal(sameOrigin.status, 200, 'SPA 自己的请求（same-origin）必须放行');
+      const noHeader = await jreq116('/api/state');
+      assert.equal(noHeader.status, 200, '不发该头的客户端（老浏览器/curl）按既有策略处理——不引入新的硬依赖');
+      const nav = await jreq116('/', { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+      assert.equal(nav.status, 200, '从其它站点**导航**到壳页面仍允许（页内子资源是 same-origin，拿不到数据）');
+      // Origin 校验覆盖所有方法
+      const badOrigin = await jreq116('/api/state', { headers: { Origin: 'http://evil.example' } });
+      assert.equal(badOrigin.status, 403, '带外部 Origin 的 GET 也必须拒绝（原实现只校验非 GET）');
+      const goodOrigin = await jreq116('/api/state', { headers: { Origin: base116 } });
+      assert.equal(goodOrigin.status, 200, '同源 Origin 必须放行');
+      // H-6 的实际危害：GET /api/draft 是"读取即删除"，盲打一次就把草稿吃掉
+      const put = await post116('/api/draft', { file: 'p5', text: '不可丢失的草稿' });
+      assert.equal(put.status, 200, '草稿写入应成功');
+      const blind = await jreq116('/api/draft?file=p5', { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+      assert.equal(blind.status, 403, '跨站 GET 不得读走草稿');
+      const normalRead = await jreq116('/api/draft?file=p5');
+      assert.equal(normalRead.status, 200, '正常读取应成功');
+      assert.equal(normalRead.j.text, '不可丢失的草稿', '草稿必须还在——被跨站盲打吃掉正是 H-6 的实际危害');
+    }
+
+    // ④ R4：自定义 Provider 名不得穿越目录去 import 外部 .mjs
+    {
+      assert.equal(PROV.isSafeProviderName('../../x'), false, '含路径分隔的名字必须判非法');
+      assert.equal(PROV.isSafeProviderName('..'), false, '.. 必须判非法');
+      assert.equal(PROV.isSafeProviderName('dify'), true, '正常名字必须放行（不能把功能一起挡掉）');
+      assert.equal(PROV.customProviderFile('../../x'), null, '非法名字不得解析出任何路径');
+      const inside = PROV.customProviderFile('dify');
+      assert.ok(inside && inside.includes(`${path.sep}providers${path.sep}`), `合法名字必须落在 providers/ 内，实际 ${inside}`);
+      // 端到端：把恶意模块放在 providers/ 之外，配置指向它 —— 绝不能被执行
+      const marker = path.join(home116, 'PWNED-116.txt');
+      fs.writeFileSync(
+        path.join(home116, 'evil.mjs'),
+        `import fs from 'node:fs';\nfs.writeFileSync(${JSON.stringify(marker)}, 'pwned');\nexport function createProvider() { return { chat: async () => ({ text: 'evil' }) }; }\n`
+      );
+      const cfgEvil = { provider: 'deepseek', model: 'm116', permission: 'auto', customModels: { m116: { baseUrl: '', provider: '../evil' } } };
+      let threw = null;
+      try {
+        await PROV.createProvider(cfgEvil, 'm116');
+      } catch (/** @type {any} */ e) {
+        threw = String(e?.message || e);
+      }
+      assert.ok(!fs.existsSync(marker), '目录之外的 .mjs 绝不能被 import（名字穿越 = 读+执行任意本地模块）');
+      assert.ok(threw && /baseUrl/.test(threw), `非法 provider 名应退化为"普通自定义端点"（从而报缺 baseUrl），实际：${threw}`);
+    }
+  } finally {
+    await new Promise((r) => srv116.close(r));
+    if (prevHome116 === undefined) delete process.env.MINGDAO_HOME;
+    else process.env.MINGDAO_HOME = prevHome116;
+    safeRmSync(home116, { recursive: true, force: true });
+  }
+  ok('v0.6.3 批五 Web 安全：realpath 围栏（符号链接逃逸）+ 元数据端点无条件拒绝 + 跨站盲打拒绝 + Provider 名白名单');
+}
+
 safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });

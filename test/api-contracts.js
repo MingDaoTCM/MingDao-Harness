@@ -180,7 +180,8 @@ const post = async (p, body, opts) => {
   assert.equal(add.status, 200, add.j.error || '');
   const dup = await post('/api/workspaces', { action: 'add', name: '契约空间', dir: path.join(home, 'ws2') });
   assert.equal(dup.status, 200, '重名登记 = 更新目录（200）');
-  assert.equal(path.resolve(dup.j.dir), path.resolve(path.join(home, 'ws2')), '重名后目录应更新');
+  // v0.6.3（P0-3）：返回 realpath 归一化后的规范路径（围栏按真实路径判定，返回同口径）
+  assert.equal(path.resolve(dup.j.dir), fs.realpathSync(path.join(home, 'ws2')), '重名后目录应更新（规范路径）');
   const badName = await post('/api/workspaces', { action: 'add', name: 'a/b', dir: path.join(home, 'ws3') });
   assert.equal(badName.status, 400, '含路径分隔符的名称应 400');
   const rel = await get('/api/fs-browse?dir=relative/path');

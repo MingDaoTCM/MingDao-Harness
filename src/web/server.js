@@ -29,7 +29,7 @@ import { buildUserContent } from './attachments.js';
 import { MAX_CONCURRENT, SECURITY_HEADERS } from './constants.js';
 import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
-import { isPrivateHost as sharedIsPrivateHost } from '../tools/fetch.js';
+import { isPrivateHost as sharedIsPrivateHost, isMetadataHost } from '../tools/fetch.js';
 import { buildSystemPrompt } from '../prompts.js';
 import { loadProjectMemory, loadProjectMemoryEntries, retrieveRelevant, extractAndAppendProjectMemory } from '../memory.js';
 import { saveTaskStateMerge, clearTaskState, loadTaskState, resumePrompt, checkpointHint } from '../task-state.js';
@@ -315,6 +315,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       return { error: '地址必须是合法的 http(s) URL' };
     }
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return { error: '仅支持 http/https 地址' };
+    // v0.6.3（P1-8）：云元数据端点**无条件拒绝**——它不在"本机可信模型服务"那一类里，
+    // 因此回环绑定与 web.allowPrivateEndpoints 都不放行（原实现把整段校验都跳过了）。
+    if (isMetadataHost(String(u.hostname || ''))) {
+      return { error: `拒绝访问云元数据端点（${u.hostname}）——SSRF 防护，此地址无任何放行开关` };
+    }
     // 威胁模型：本机回环绑定时（默认/桌面版），本机模型服务（如 Ollama）属可信场景，放行；
     // 对外监听（0.0.0.0）时拒绝私网目标——除非显式 allowPrivateEndpoints。
     // 域名目标：DNS 解析后逐条校验（2026-09-02 加固，防 DNS 重绑定把域名指向内网绕过字面量检查）。
@@ -800,6 +805,14 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       // 质检 L6：实际 trustedHost 白名单只放行回环 Host（远程浏览器带 LAN IP 的 Host 会 403），
       // 文案按真实行为修正——非浏览器客户端/伪造 Host 仍可达，务必启用令牌
       console.warn('  ⚠ 警告：当前监听 ' + host + '（非本机回环）且未启用令牌，浏览器直接访问会被拒绝（Host 白名单），但非浏览器客户端仍可直连。强烈建议：mingdao web --auth-token <令牌>。');
+    } else {
+      // v0.6.3（H-5）：回环 + 未配置令牌时**把"本机信任"这个决定说出来**。
+      // 静默无认证的危险不在于它一定被利用，而在于用户不知道自己处在这个模式里：
+      //   · 跨站浏览器请求（含 <img>/no-cors 盲打）已在 api.js 用 Sec-Fetch-Site 一律拒绝；
+      //   · 但**同机的其它进程/其它用户**仍可直连 API（多用户机器、共享 CI runner 上尤其要注意）。
+      // 一句话给出两个可选动作，而不是替用户决定（改默认会打断"浏览器直接打开 127.0.0.1"的日常用法）。
+      console.log('  ℹ 本机信任模式：未配置访问令牌，本机其它进程可直接访问 /api/*。');
+      console.log('    多用户机器 / 共享 CI 上建议启用令牌：mingdao web --auth-token <令牌>，或 config.json 的 web.token。');
     }
     console.log(`  模型: ${modelName} · 权限: ${cfg.permission ?? 'ask'} · 工作目录: ${workingDir}`);
     if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) console.log('  MCP:  后台连接中，/api/state 可查看状态');

@@ -10,7 +10,7 @@
 //
 // 现在两处都走这里。新增下载路径也必须走这里——不要再写第二份。
 import { lookup } from 'node:dns/promises';
-import { isPrivateHost } from './tools/fetch.js';
+import { isPrivateHost, isMetadataHost } from './tools/fetch.js';
 
 /**
  * 下载文本，逐跳做私网/回环判定（含 DNS 复检，防域名重绑定）。
@@ -36,11 +36,17 @@ export async function safeFetchText(/** @type {any} */ url, opts = {}) {
     for (let hop = 0; hop <= maxHops; hop += 1) {
       // 每一跳都要判定：初始地址与**每一个**重定向目标
       const ch = String(cur.hostname || '').toLowerCase();
+      // v0.6.3（P1-8）：云元数据端点**无条件**拒绝——allowPrivate 是给"用户自己输入的内网地址"用的，
+      // 而元数据端点放的是实例凭据，不该被任何开关放行。单独判一次是为了给出**准确的理由**
+      // （否则它会先命中"内网地址"那条，用户看不出这是元数据这一特殊类别）。
+      if (isMetadataHost(ch)) return { error: `拒绝访问云元数据端点（${ch}）——SSRF 防护，此地址无任何放行开关。` };
       let blocked = !allowPrivate && isPrivateHost(ch);
       if (!blocked && ch && ch !== 'localhost' && !/^\d{1,3}(\.\d{1,3}){3}$/.test(ch)) {
         try {
           const addrs = await lookup(ch, { all: true, verbatim: true });
-          blocked = !allowPrivate && addrs.some((/** @type {any} */ a) => isPrivateHost(a.address));
+          blocked =
+            addrs.some((/** @type {any} */ a) => isMetadataHost(a.address)) ||
+            (!allowPrivate && addrs.some((/** @type {any} */ a) => isPrivateHost(a.address)));
         } catch {
           // DNS 解析失败：放行，连接阶段会报错（不要因为解析失败就拒绝，那会误伤正常域名）
         }

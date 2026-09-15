@@ -63,6 +63,28 @@ export function isPrivateHost(/** @type {string} */ hostname) {
   return a === 10 || a === 127 || a === 0 || a >= 224 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
 }
 
+// v0.6.3（P1-8）：**云元数据端点无条件拒绝**——它不属于"内网可信服务"那一类，
+// 任何开关（web.allowPrivateEndpoints / allowPrivate）都不该放行：那里放的是实例凭据。
+// 各家元数据的明文地址（AWS/GCP/Azure/Oracle 169.254.169.254、腾讯 169.254.0.23、
+// 阿里 100.100.100.200、ECS 任务元数据 169.254.170.2、IPv6 fd00:ec2::254）与
+// Google 的 DNS 名。放在这里而不是各调用点，是因为"单一来源"正是这条防线此前的失守方式。
+const METADATA_HOSTS = new Set([
+  '169.254.169.254',
+  '169.254.0.23',
+  '169.254.170.2',
+  '100.100.100.200',
+  'fd00:ec2::254',
+  'metadata.google.internal',
+  'metadata.goog',
+]);
+/** @param {string} hostname */
+export function isMetadataHost(hostname) {
+  const h = String(hostname || '')
+    .toLowerCase()
+    .replace(/^\[|\]$/g, '');
+  return METADATA_HOSTS.has(h);
+}
+
 // IP 字面量判定（含 IPv6）：用于跳过 DNS 复检分支（此前只认点分 IPv4，导致带方括号的 IPv6
 // 字面量被送进 lookup 失败后「放行」）。
 /** @param {string} h */
@@ -81,6 +103,7 @@ export async function runFetch(/** @type {any} */ args, /** @type {any} */ _ctx)
   }
   if (u.protocol !== 'http:' && u.protocol !== 'https:') return { ok: false, error: '仅支持 http/https 地址。' };
   const host = String(u.hostname || '').toLowerCase();
+  if (isMetadataHost(host)) return { ok: false, error: `拒绝访问云元数据端点（${host}）——SSRF 防护，此地址无任何放行开关。` };
   let blocked = isPrivateHost(host);
   if (!blocked && host && host !== 'localhost' && !isIpLiteral(host)) {
     try {
@@ -100,6 +123,7 @@ export async function runFetch(/** @type {any} */ args, /** @type {any} */ _ctx)
     let res = /** @type {any} */ (null);
     for (let hop = 0; hop <= 5; hop++) {
       const ch = String(cur.hostname || '').toLowerCase();
+      if (isMetadataHost(ch)) return { ok: false, error: `拒绝访问云元数据端点（${ch}）——SSRF 重定向防护。` };
       let hopBlocked = isPrivateHost(ch);
       if (!hopBlocked && ch && ch !== 'localhost' && !isIpLiteral(ch)) {
         try {

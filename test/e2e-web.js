@@ -629,14 +629,17 @@ let base = await startWeb(work1);
   assert.ok(fs.existsSync(newDir), '不存在的目录应自动创建');
   const set = await (await fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'set', name: '自动创建测试' }) })).json();
   assert.equal(set.ok, true, set.error);
-  assert.equal(set.dir, newDir);
+  // v0.6.3（P0-3）：工作空间登记/切换返回的是 **realpath 归一化后的规范路径**——
+  // 围栏按真实路径判定，返回同一个口径，避免"检查的是 A、用的是 B"。
+  // macOS 上 os.tmpdir() 本身就是符号链接（/var/… → /private/var/…），故这里比较规范路径。
+  assert.equal(set.dir, fs.realpathSync(newDir));
   const st = await (await fetch(base + '/api/state')).json();
   assert.equal(st.workspace, '自动创建测试', 'state 应显示当前工作空间');
-  assert.equal(st.workingDir, newDir, '服务端 workingDir 应跟随切换');
+  assert.equal(st.workingDir, fs.realpathSync(newDir), '服务端 workingDir 应跟随切换（同为规范路径）');
   const back = await (await fetch(base + '/api/workspaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'set', name: '原空间' }) })).json();
   assert.equal(back.ok, true, back.error);
   const st2 = await (await fetch(base + '/api/state')).json();
-  assert.equal(st2.workingDir, work1, '应能切回原目录');
+  assert.equal(st2.workingDir, fs.realpathSync(work1), '应能切回原目录（同为规范路径）');
   const html = await (await fetch(base + '/')).text();
   assert.ok(html.includes('wsSel'), '前端应包含工作空间下拉');
   safeRm(newDir, { recursive: true, force: true });
