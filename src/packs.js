@@ -281,6 +281,7 @@ export function packDirs(cfg, projectDir) {
  * @param {any} [cfg] @param {any} [projectDir]
  */
 export function listPacks(cfg, projectDir, opts = {}) {
+  /** @type {Map<string, any>} */
   const seen = new Map(); // name -> entry
   for (const tier of packDirs(cfg, projectDir).sort((a, b) => a.priority - b.priority)) {
     // v0.6.2（代码审计 P2-4 的连带发现）：`config.packs` 的**文档写法是直接指向 Pack 目录**
@@ -336,7 +337,7 @@ export function listPacks(cfg, projectDir, opts = {}) {
       };
       // 已信任的高优先级版本遮蔽低优先级同名版本：这是设计行为，但必须**可见**
       // （下游 `pack list` / 启动告警都要能看到"哪个版本真的生效"）
-      if (prev) entry.shadowed = { name: key, dir: prev.dir, source: prev.source };
+      if (prev) /** @type {any} */ (entry).shadowed = { name: key, dir: prev.dir, source: prev.source };
       seen.set(key, entry);
     }
   }
@@ -406,10 +407,11 @@ let mountedTools = 0;
 let activeCtx = /** @type {any} */ (null);
 
 /**
- * 加载单个 Pack 目录：校验 manifest + 文件齐全 + import pack.mjs。
- * 只做「能不能用」的判定，不改全局状态（mount 才改）。
+ * **静态**校验单个 Pack 目录：manifest 字段 / 兼容窗口 / 声明文件齐全 / pack.mjs 存在性。
+ * **绝不 import pack.mjs**——`pack verify`（下游 CI 门禁）走这条路径，被审仓库的代码不该在 CI 上执行。
+ * 因此它拿不到"代码产出的约束"（那种校验只能靠 loadPack）。
  * @param {string} dir @param {{ coreVersion?: string }} [opts]
- * @returns {Promise<any>} { ok: true, manifest, contributions, dir } | { ok: false, errors: string[] }
+ * @returns {any} { ok: true, manifest } | { ok: false, errors: string[] }
  */
 export function loadPackStatic(dir, opts = {}) {
   const mf = path.join(dir, 'pack.json');
@@ -431,6 +433,7 @@ export function loadPackStatic(dir, opts = {}) {
     ['skills', 'skills'],
     ['commands', 'commands'],
   ];
+  /** @type {string[]} */
   const errors = [];
   for (const [field, sub] of fileChecks) {
     for (const rel of Array.isArray(contributes[sub]) ? contributes[sub] : []) {
@@ -458,6 +461,7 @@ export async function loadPack(dir, opts = {}) {
   if (!st.ok) return st;
   const manifest = st.manifest;
   const contributes = manifest.contributes || {};
+  /** @type {string[]} */
   const errors = [];
   /** @type {string[]} */
   const warnings = [];
