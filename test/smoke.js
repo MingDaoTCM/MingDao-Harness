@@ -8059,11 +8059,14 @@ const isPosix111 = process.platform !== 'win32';
     const homeH = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-hook113-'));
     try {
       // 确定性触发：让 hook **自己关闭 fd 0** 并存活 300ms。
-      //   · 关闭 stdin → 父进程写入必然 EPIPE（不依赖"子进程已退出"的时序）；
-      //   · 存活 300ms  → 保证 stdin error 在 child close **之前**到达（第一版用
-      //     `process.exit(0)` 靠"进程已退出"来触发 EPIPE，那是竞态：Linux/Node18-20 上
-      //     close 先到，测试假绿/假红——CI 上实测两腿红）。
-      // 修复前：stdin error 被静默吞掉 + 空输出被当作放行 → 工具照常执行（fail-open）。
+      //   · 关闭 stdin → 父进程的写入永远无法完成（'finish' 不会触发）；
+      //   · 存活 300ms  → 保证「载荷没写完」在 child close 时已经成立。
+      // 判据必须是**可完成的写入**，而不是 stdin 'error' 的到达时机：Linux 上 libuv 会 dup
+      // fd 0，关闭 fd 0 不会立刻产生 EPIPE，要等子进程退出回收重复描述符后才送达——于是
+      // child 'close' 与 stdin 'error' 谁先到就成了竞态（macOS 上 error 先到，本地 5/5 通过；
+      // ubuntu Node 18/20 上 close 先到 → 空输出被当成放行，CI 两腿红）。第一版 `process.exit(0)`
+      // 与第二版 closeSync+300ms 栽的是同一个竞态。
+      // 修复前：载荷没送到 + 空输出 = 放行 → 工具照常执行（fail-open）。
       const big = 'x'.repeat(200 * 1024);
       const closeStdinCmd = `${process.execPath} -e "require('node:fs').closeSync(0); setTimeout(()=>{}, 300)"`;
       const hooks = HK.createHooks(
@@ -8074,7 +8077,13 @@ const isPosix111 = process.platform !== 'win32';
       const r = await hooks.pre('write', { path: 'a.txt', content: big });
       assert.equal(r.decision, 'block', `载荷送不进去且 hook 没给判定时必须阻止（原实现会放行），实际 ${JSON.stringify(r)}`);
       assert.ok(/输入写入失败/.test(String(r.reason)), `原因应点明是输入写入失败，实际：${r.reason}`);
-      // 对照：hook 明确给出 approve 时仍应尊重（它本就没打算读 stdin，不能误伤）
+      // 对照 A（防**过度**阻断）：hook 把载荷读完、但没有意见（空输出）→ 必须仍按「放行」。
+      // 这是上一条的对偶：只加「没写完就阻断」而不确认「写完就放行」，会把所有无意见的策略脚本误伤。
+      const readAllCmd = `${process.execPath} -e "let n=0;process.stdin.on('data',d=>{n+=d.length});process.stdin.on('end',()=>process.exit(0))"`;
+      const hooksRead = HK.createHooks({ PreToolUse: [{ matcher: 'write', cmd: readAllCmd }] }, homeH, {});
+      const rRead = await hooksRead.pre('write', { path: 'a.txt', content: big });
+      assert.equal(rRead.decision, 'approve', `hook 读完全部载荷但没给判定时必须放行，实际 ${JSON.stringify(rRead)}`);
+      // 对照 B：hook 明确给出 approve 时仍应尊重（它本就没打算读 stdin，不能误伤）
       const hooks2 = HK.createHooks(
         { PreToolUse: [{ matcher: 'write', cmd: `${process.execPath} -e "process.stdout.write('{\\"decision\\":\\"approve\\"}')"` }] },
         homeH,

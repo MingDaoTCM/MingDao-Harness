@@ -98,6 +98,22 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
       // 一次本该拦截的策略因为没收到载荷而被静默通过。现在记下失败，在 close 时收口。
       /** @type {string|null} */
       let stdinFailed = null;
+      // v0.6.3（BUG-042 第二版修复）：**不能依赖 error 事件的到达时机**。
+      //
+      // 第一版只看 `stdinFailed`（stdin 'error'）。它在 Linux 上是竞态：子进程若 `dup` 过
+      // fd 0（libuv 对 stdin 的常见处理），关闭 fd 0 并不会让父进程立刻拿到 EPIPE——
+      // 要等子进程真正退出、内核回收重复描述符之后才会送达。于是 child 'close' 与
+      // stdin 'error' 谁先到取决于调度：macOS 上 error 先到（本地 5/5 通过），
+      // ubuntu Node 18/20 上 close 先到 → 空输出被当成「放行」，用例在 CI 上红。
+      //
+      // 改成看**可完成的写入**：`end()` 之后 'finish' 表示载荷已全部交给内核（对端读过），
+      // 'error' 表示失败，两者都不发生就说明载荷**从未送达**。这个判据不依赖事件先后：
+      //   · 读了 stdin 的 hook → finish 必然在它退出前触发（数据在它读走时就进了内核）；
+      //   · 没读 stdin 的 hook → finish 永不触发，close 时按「未送达」处理。
+      let stdinFlushed = false;
+      child.stdin.on('finish', () => {
+        stdinFlushed = true;
+      });
       child.stdin.on('error', (e) => {
         stdinFailed = String(/** @type {any} */ (e)?.message ?? e);
       });
@@ -110,8 +126,9 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
         // 载荷没送进去、且 hook 也没给出任何判定 → 这次运行**不可信**，按 hook 失败处理
         // （调用方 !ok → block，fail-closed）。若 hook 仍给出了输出，说明它本就没打算读 stdin
         // （例如 `echo '{"decision":"approve"}'`），那种情况下尊重它的判定，避免误伤既有策略。
-        if (stdinFailed && !String(out).trim()) {
-          finish({ ok: false, error: `hook 输入写入失败（子进程可能未读取 stdin 就退出）：${stdinFailed}` });
+        if (!String(out).trim() && (stdinFailed || !stdinFlushed)) {
+          const why = stdinFailed ?? '载荷未写完（子进程可能未读取 stdin 就退出）';
+          finish({ ok: false, error: `hook 输入写入失败：${why}` });
           return;
         }
         finish({ ok: true, exitCode: code, output: out, stderr: err });
