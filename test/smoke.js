@@ -471,11 +471,16 @@ const ctx = { cwd: tmp };
     workingDir: tmp,
     cfg: { permission: 'auto' },
   });
-  await agent.runTurn([{ role: 'user', content: '帮我诊断一下这个报错的原因' }]);
+  // v0.6.3：这里的用户消息必须是**真正的纯提问**——只读档的判定方向已经反转：
+  // 原实现"没命中写意图关键词就只读"，于是域内名词（回访/排班/盘点…）整回合拿不到工具
+  // （下游 Deyi-TCM 随访实测）。现在只有"看起来是纯提问且无写意图"才进只读档。
+  // 原用例的消息是「帮我诊断一下这个报错的原因」——那是**任务**不是提问，按新契约就该给全量工具。
+  await agent.runTurn([{ role: 'user', content: '这个报错可能是什么原因？' }]);
   assert.equal(round, 2, '应跑两轮（第二轮是注入后的续轮）');
   // v0.4.4：task 加入只读档——审计/调研长任务需要能派只读子代理（readOnly 子代理只读，权限引擎仍门控写）
   const tier = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch', 'task']);
-  assert.ok(seen[0].every((n) => tier.has(n)), `只读阶段应只发只读工具，实际 ${seen[0]}`);
+  assert.ok(seen[0].every((n) => tier.has(n)), `纯提问的首轮应只发只读工具，实际 ${seen[0]}`);
+  assert.ok(seen[1].some((n) => n === 'write' || n === 'edit' || n === 'bash'), '模型表达写意图后必须注入全量工具（含 write/edit/bash）');
   assert.ok(seen[0].includes('read') && seen[0].includes('grep'), '只读阶段含核心只读工具');
   assert.equal(seen[1].length, 13, '模型表达写意图后应注入全量 13 个工具');
   assert.ok(seen[1].includes('write') && seen[1].includes('bash'), '注入后含写类工具');
@@ -7667,6 +7672,95 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
     safeRmSync(dir109, { recursive: true, force: true });
   }
   ok('v0.6.2 P2-7 收尾：临界区不含外部进程调用 + 超时错误可操作 + 同步锁残留清单受审阅约束');
+}
+
+
+// ---------- 110. v0.6.3：下游卡点（只读档让域内名词指令拿不到工具）+ 桌面版 bash 输出乱码 ----------
+// 两条都是**下游/桌面版实测**报上来的，不是推测。
+{
+  // ① 只读档判定：下游 Deyi-TCM 随访的高频入口「回访」必须能用。
+  //    原实现要命中写意图关键词才给全量工具，而域内动词/名词是**开集**，枚举不完。
+  const AG110 = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
+  const ro = AG110.startsInReadOnlyPhase;
+  const downstream = [
+    ['回访', false, '下游随访高频入口：域内名词，必须给全量工具（原实现进了只读档 → 工具不可见）'],
+    ['排班', false, '同类域内名词'],
+    ['盘点', false, '同类域内名词'],
+    ['请生成回访看板', false, '命中写意图（原实现也能过，作为对照）'],
+    ['把上个月的随访记录汇总一下', false, '域内任务陈述句'],
+    ['做一下这批患者的随访', false, '域内任务陈述句'],
+  ];
+  for (const [text, expect, why] of downstream) {
+    assert.equal(ro({}, text, false), expect, `${JSON.stringify(text)} → 只读档应为 ${expect}（${why}）`);
+  }
+  const realQuestions = [
+    ['什么是随访规范？', '纯提问应保持只读档（省 token 的初衷不变）'],
+    ['回访和随访有什么区别', '纯提问'],
+    ['今天天气怎么样', '闲聊'],
+  ];
+  for (const [text, why] of realQuestions) {
+    assert.equal(ro({}, text, false), true, `${JSON.stringify(text)} → 应保持只读档（${why}）`);
+  }
+  // 域内 Pack 在场 → 永不进只读档（域内词开集，不能靠关键词）
+  assert.equal(ro({}, '什么是随访规范？', true), false, '域内 Pack 在场时不得进只读档（这类部署要的是"任务能做"）');
+  assert.equal(ro({}, '回访？', true), false, '域内 Pack 在场时连"域内名词+问号"也要给全量工具（正是下游最容易踩的形态）');
+  assert.equal(ro({ schemaTier: false }, '什么是随访规范？', false), false, 'schemaTier=false 必须整体关掉只读档');
+
+  // ② bash 输出解码：两类乱码都必须解对。
+  //    根因一：逐块 toString() → 中文被管道切成两半时两半各自解出 U+FFFD；
+  //    根因二：Windows 上本工具走 cmd.exe，输出是 OEM 代码页（中文 = GBK/936），按 UTF-8 解是花屏。
+  const BASH110 = await import(pathToFileURL(path.join(srcDir, 'tools', 'bash.js')).href);
+  const dec = BASH110.decodeProcessOutput;
+  assert.equal(dec(Buffer.from('回访看板', 'utf8')), '回访看板', 'UTF-8 中文必须原样解出');
+  assert.equal(dec(Buffer.from([0xbb, 0xd8, 0xb7, 0xc3, 0xbf, 0xb4, 0xb0, 0xe5])), '回访看板', 'GBK 字节必须回退解对（Windows cmd 场景）');
+  {
+    // 模拟管道把 3 字节汉字切成两半——原实现（逐块 toString）在这里会得到 U+FFFD
+    const b = Buffer.from('回访看板', 'utf8');
+    const split = [b.subarray(0, 2), b.subarray(2, 7), b.subarray(7)];
+    assert.equal(dec(Buffer.concat(split)), '回访看板', '跨块拼接后一次解码必须完整（原实现逐块解码会出 U+FFFD）');
+    const naive = split.map((x) => x.toString('utf8')).join('');
+    assert.ok(naive.includes('\uFFFD'), '对照：逐块解码确实会产生替换字符（证明这个回归有意义）');
+  }
+  assert.equal(dec(Buffer.alloc(0)), '', '空输入返回空串');
+  // 用**采集原语**做确定性切块测试：端到端跑大输出测不准——输出上限（≈60KB）比一个管道块
+  // （64KB）还小，保留的尾部常落在单块内，跨块解码的缺陷照样通过（第一版回归就这么假绿了）。
+  {
+    const b = Buffer.from('回访看板数据', 'utf8');
+    const cap = BASH110.createOutputCapture(1024);
+    // 故意把第一个汉字切成 1 字节 + 2 字节两块（模拟管道在字符中间断开）
+    cap.push(b.subarray(0, 1));
+    cap.push(b.subarray(1, 4));
+    cap.push(b.subarray(4));
+    assert.equal(cap.text(), '回访看板数据', '人工切块跨块拼接必须完整（逐块解码会得到 U+FFFD）');
+    // 超限裁剪后仍要能解码（裁到字符中间会让严格 UTF-8 失败 → 误走 GBK → 花屏）
+    const big = Buffer.from('回访看板数据'.repeat(500), 'utf8');
+    const cap2 = BASH110.createOutputCapture(1000);
+    cap2.push(big);
+    const t2 = cap2.text();
+    assert.ok(!t2.includes('\uFFFD'), '裁剪后不得出现替换字符（裁剪必须对齐字符边界）');
+    assert.equal(t2, '回访看板数据'.repeat(500).slice(-Math.floor(1000 / 3)), '裁剪后应是完整字符的尾部');
+  }
+
+  // ③ 端到端：大段中文输出经 runBash 采集后不得出现替换字符
+  {
+    const home110 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-bash110-'));
+    const prevHome110 = process.env.MINGDAO_HOME;
+    process.env.MINGDAO_HOME = home110;
+    try {
+      const n110 = 120000; // 360KB 中文 → 必然跨越多个 pipe chunk
+      const r = await BASH110.runBash(
+        { command: `node -e "process.stdout.write('回访看板数据'.repeat(${n110}))"` },
+        { cwd: home110, cfg: { sandbox: 'off', bashEnvFilter: true } }
+      );
+      assert.equal(r.ok, true, `runBash 应成功：${JSON.stringify(r).slice(0, 160)}`);
+      assert.ok(!String(r.stdout).includes('\uFFFD'), '大段中文输出不得出现替换字符（跨块解码）');
+      assert.ok(String(r.stdout).includes('回访看板数据'), '中文内容必须完整可读');
+    } finally {
+      process.env.MINGDAO_HOME = prevHome110;
+      safeRmSync(home110, { recursive: true, force: true });
+    }
+  }
+  ok('v0.6.3 下游卡点：只读档判定反转（域内名词如「回访」不再被挡）+ Pack 旁路 + bash 输出 UTF-8/GBK 跨块解码');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

@@ -86,9 +86,89 @@ function foldRepeats(/** @type {any} */ s) {
   }
   return out.join('\n');
 }
+/**
+ * 子进程输出解码：**一次**解整段字节，而不是逐块 `toString()`。
+ *
+ * 两处乱码根因（v0.6.3，桌面版实测）：
+ *   ① 逐块解码：中文 3 字节被管道切成两半 → 两半各自解出 U+FFFD；
+ *   ② Windows 上本工具走 `cmd.exe /d /s /c`，输出是 OEM 代码页（中文 = GBK/CP936），
+ *      按 UTF-8 解就是花屏。故严格 UTF-8 失败时用 GBK 再解一次。
+ * 导出的目的是让这两类乱码能被**确定性**测到——②只在 Windows 出现，CI 上跑不出真环境。
+ * @param {Buffer} buf
+ */
+export function decodeProcessOutput(buf) {
+  if (!buf || !buf.length) return '';
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  } catch {
+    try {
+      return new TextDecoder('gbk').decode(buf);
+    } catch {
+      return buf.toString('utf8');
+    }
+  }
+}
+
+/**
+ * 子进程输出采集器（**导出以便确定性测试**）。
+ *
+ * 为什么单独成一个原语：乱码的两个根因都藏在这里，而"端到端跑一个大输出"根本测不准——
+ * 输出上限（约 60KB）比一个管道块（64KB）还小，保留的尾部常常落在**单块之内**，
+ * 跨块解码的缺陷于是照样通过（第一版回归就是这么假绿的，靠变异验证才发现）。
+ * 把 push/text 暴露出来，测试就能**人工把汉字切成两半**喂进去。
+ *
+ * @param {number} maxBytes 只保留尾部这么多字节（超出丢弃头部）
+ */
+export function createOutputCapture(maxBytes) {
+  /** @type {{chunks: Buffer[], bytes: number}} */
+  const st = { chunks: [], bytes: 0 };
+  const snapBoundary = () => {
+    // **对齐到字符边界**：按字节裁会把 UTF-8 从字符中间切断，于是"整段严格解码"必然失败
+    // → 误触发 GBK 回退 → 反而解成花屏（本修复第一版的真实缺陷，被单测抓出来的）。
+    // UTF-8 的续字节形如 10xxxxxx，丢掉它们即可让缓冲区从**前导字节**开始。
+    while (st.chunks.length && st.chunks[0].length && (st.chunks[0][0] & 0xc0) === 0x80) {
+      st.chunks[0] = st.chunks[0].subarray(1);
+      st.bytes -= 1;
+      if (!st.chunks[0].length) st.chunks.shift();
+    }
+  };
+  return {
+    /** @param {Buffer} d */
+    push(d) {
+      st.chunks.push(d);
+      st.bytes += d.length;
+      while (st.bytes > maxBytes && st.chunks.length) {
+        const first = st.chunks[0];
+        const drop = Math.min(first.length, st.bytes - maxBytes);
+        if (drop >= first.length) {
+          st.chunks.shift();
+          st.bytes -= first.length;
+        } else {
+          st.chunks[0] = first.subarray(drop);
+          st.bytes -= drop;
+        }
+      }
+      snapBoundary();
+    },
+    /** 结束时**一次**解码整段字节（绝不能逐块 toString：会把汉字劈成 U+FFFD） */
+    text() {
+      return st.chunks.length ? decodeProcessOutput(Buffer.concat(st.chunks)) : '';
+    },
+    get bytes() {
+      return st.bytes;
+    },
+  };
+}
+
 function tail(/** @type {any} */ s, /** @type {any} */ n) {
   const folded = foldRepeats(stripAnsi(s));
-  return folded.length > n ? `…[输出过长，已截断头部]\n${folded.slice(-n)}` : folded;
+  if (folded.length <= n) return folded;
+  let t = folded.slice(-n);
+  // 不要把**代理对**劈成两半：BMP 以外的字符（emoji 等）被切一半会渲染成 U+FFFD。
+  // 与 context.js 的同类问题同源（登记簿 BUG-079）。
+  const c0 = t.charCodeAt(0);
+  if (c0 >= 0xdc00 && c0 <= 0xdfff) t = t.slice(1);
+  return `…[输出过长，已截断头部]\n${t}`;
 }
 
 export function runBash(/** @type {any} */ args, /** @type {any} */ ctx) {
@@ -140,15 +220,17 @@ export function runBash(/** @type {any} */ args, /** @type {any} */ ctx) {
       detached: true, // POSIX：自成进程组，超时/结束可整组清理，孙进程不成孤儿
       ...spawnOpts({ piped: true }), // Windows：不 detach + 隐藏控制台（否则每次命令弹一个终端）
     });
-    let out = '';
-    let err = '';
+    // v0.6.3（桌面版 bash 输出乱码，两处根因）：
+    //   ① **不能逐块 `toString()`**：中文 3 字节，被管道切成两半时两半各自解出 U+FFFD（乱码）。
+    //      改为按 **Buffer** 累积、结束时**一次**解码。
+    //   ② **Windows 上这里走的是 `cmd.exe /d /s /c`**，其输出是 OEM 代码页（中文 = GBK/CP936），
+    //      按 UTF-8 解就是花屏（"回访"→"»Ø·Ã"）。故严格 UTF-8 解失败时用 GBK 再解一次。
+    //      Node 官方构建带 full-icu，`new TextDecoder('gbk')` 可用；不支持时退回非严格 UTF-8。
+    const MAX_BYTES = MAX_OUTPUT * 2; // 按字节预留（中文 1 字 ≈ 3 字节）
+    const outCap = createOutputCapture(MAX_BYTES);
+    const errCap = createOutputCapture(MAX_BYTES);
     let done = false;
     let timedOut = false;
-    // 输出增量截断：超长输出只保留尾部，避免内存无限累积
-    const cap = (/** @type {any} */ s, /** @type {any} */ d) => {
-      const t = s + d;
-      return t.length > MAX_OUTPUT * 2 ? t.slice(-MAX_OUTPUT * 2) : t;
-    };
     const killGroup = (/** @type {any} */ sig) => {
       try {
         process.kill(-(/** @type {any} */ (child)).pid, sig);
@@ -175,17 +257,13 @@ export function runBash(/** @type {any} */ args, /** @type {any} */ ctx) {
         timedOut,
         sandbox,
         note: timedOut ? '命令超时，已强杀进程组' : '输出管道未释放，已清理子进程组',
-        stdout: tail(out, MAX_OUTPUT),
-        stderr: tail(err, MAX_OUTPUT),
+        stdout: tail(outCap.text(), MAX_OUTPUT),
+        stderr: tail(errCap.text(), MAX_OUTPUT),
       });
     }, timeoutSec * 1000 + 3000);
 
-    child.stdout.on('data', (d) => {
-      out = cap(out, d);
-    });
-    child.stderr.on('data', (d) => {
-      err = cap(err, d);
-    });
+    child.stdout.on('data', (d) => outCap.push(d));
+    child.stderr.on('data', (d) => errCap.push(d));
     child.on('error', (e) => {
       if (done) return;
       done = true;
@@ -204,8 +282,8 @@ export function runBash(/** @type {any} */ args, /** @type {any} */ ctx) {
         timedOut,
         sandbox,
         note: note || undefined,
-        stdout: tail(out, MAX_OUTPUT),
-        stderr: tail(err, MAX_OUTPUT),
+        stdout: tail(outCap.text(), MAX_OUTPUT),
+        stderr: tail(errCap.text(), MAX_OUTPUT),
       });
     });
   });

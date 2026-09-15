@@ -68,7 +68,10 @@ const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.error('  �
     },
   };
   const agent = createAgent({ provider: stub, permission: { async check() { return true; } }, io, modelName: 'deepseek-v4-flash', workingDir: home, cfg: { permission: 'auto' } });
-  await agent.runTurn([{ role: 'user', content: '帮我分析一下这个目录' }]);
+  // v0.6.3：只读档判定方向已反转——**只有纯提问**才进只读档，任务态直接给全量工具
+  // （域内名词如「回访」曾因未命中写意图关键词而整回合拿不到工具，见 smoke §110）。
+  // 这里要测"只读档 → 写意图注入全量档"的切换，所以首条必须是纯提问。
+  await agent.runTurn([{ role: 'user', content: '这个目录里都有些什么？' }]);
   const distinctTurn1 = new Set(payloads);
   ok(distinctTurn1.size <= 2, `回合 1 应至多 2 个 payload（实际 ${distinctTurn1.size}）`);
   ok(payloads[0] !== payloads[1], '只读档 → 全量档（写意图注入）应切换一次');

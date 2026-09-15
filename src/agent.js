@@ -33,6 +33,57 @@ const SUBAGENT_MAX_STEPS = 24;
 // 导致基准测的不是真实只读档。导出后基准与实现共用同一集合。
 export const READONLY_TIER_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch', 'task']);
 
+// ---------------------------------------------------------------------------
+// 写意图 / 疑问句 / 未达成意图的判定（v0.6.3）
+//
+// 这几个判定决定「本回合暴露哪些工具」，因此**放到模块级并导出**：判定错一次，
+// 用户看到的就是"模型说做不到"而完全不知道原因（下游 Deyi-TCM 随访的「回访」正是如此）。
+// ---------------------------------------------------------------------------
+const WRITE_INTENT_RE = /写|建|创|改|修|删|装|加|添|增|补|换|移|部署|执行|运行|实现|重构|生成|迁移|安装|更新|升级|发布|调整|优化|修复|提交|推送|打包|编译|测试|implement|fix|create|modify|update|delete|deploy|build|make|generate|install|write|refactor|migrate|test|run|commit|push|remove|add|change|patch/i;
+const hasWriteIntent = (/** @type {any} */ text) => WRITE_INTENT_RE.test(String(text || ''));
+// v0.6.3（下游 Deyi-TCM 随访实测的上游缺口）：只读档的**判定方向必须反过来**。
+//
+// 原逻辑：命中写意图关键词 → 给全量工具；否则整回合只读（write/edit/bash 对模型**不可见**）。
+// 但域内任务用的是**域内动词/名词**——「回访」「排班」「盘点」「对账」「随访」「归档」……
+// 这是**开集**，永远枚举不完。下游实测：「请生成回访看板」命中"生成"→✅ 能用；
+// 而「回访」不命中任何关键词 → 只读档 → 工具不可见 → ❌ 高频入口直接废掉。
+//
+// 现在改为：**只有"看起来是纯提问、且不含写意图"才进只读档**，其余一律给全量工具。
+// 省 token 的初衷不变（真正的问答仍然是只读档），但默认从"任务态"出发——
+// 少省一点 token 远好过"任务做不了且用户看不出原因"。
+const QUESTION_RE = /[?？]|什么|怎么|怎样|如何|为何|为什么|是否|能否|可否|多少|几个|哪些|哪个|哪里|哪个|谁|何时|吗$|吗[。！!]|呢[。！!]?$/i;
+const QUESTION_RE_EN = /\b(what|how|why|is|are|does|do|can|could|should|when|where|which|who)\b/i;
+const looksLikeQuestion = (/** @type {any} */ text) => {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  return QUESTION_RE.test(t) || QUESTION_RE_EN.test(t);
+};
+// 自愈信号：只读档下模型"想做但做不了 / 要用户来做"时的典型措辞（中英）。
+const UNMET_INTENT_RE = /无法|不能|没法|做不到|没有权限|未提供|需要你|需要先|请先|建议你|请确认|请提供|如需|无法直接|不能直接|请告知|需要我|我可以帮你|unable to|can'?t|cannot|need you|need to know|please confirm|please provide/i;
+const looksLikeUnmetIntent = (/** @type {any} */ text) => UNMET_INTENT_RE.test(String(text || ''));
+
+/**
+ * 本回合是否从「只读档」起步。
+ *
+ * **判定方向是故意反的**：原实现要命中写意图关键词才给全量工具，而域内任务用的是
+ * **开集**动词/名词——「回访」「排班」「盘点」「对账」……永远枚举不完。下游实测：
+ * 「请生成回访看板」命中"生成"→能用；「回访」不命中→只读档→write/edit/bash 不可见→废掉。
+ * 现在只有"看起来是纯提问且不含写意图"才进只读档（真正的问答照样省 token），其余一律全量。
+ *
+ * 另外两条防线（都写在这里，保证判定只有一处）：
+ *   · **域内 Pack 在场时不进只读档**：这类部署的价值在"任务能做"，不在省 schema token；
+ *   · 只读档若以纯文本收尾且透出"做不到/需要…"，`runTurn` 会**自愈**放开一次（与词表无关）。
+ *
+ * @param {any} cfg @param {any} lastUserText @param {boolean} packActive
+ * @returns {boolean}
+ */
+export function startsInReadOnlyPhase(cfg, lastUserText, packActive) {
+  if (cfg?.schemaTier === false) return false;
+  if (packActive) return false;
+  const t = lastUserText;
+  return !hasWriteIntent(t) && looksLikeQuestion(t);
+}
+
 /**
  * 创建 Agent 循环（调用方只需传 provider/permission/io/modelName/workingDir，其余可选）
  * @param {{ provider: any, permission: any, io: any, modelName: any, workingDir: any,
@@ -121,8 +172,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // （readOnly 子代理只读，权限引擎仍门控写操作，无越权）。
   // 只读档工具集：单一来源见模块顶部导出的 READONLY_TIER_SET
   // 中英双语写意图（CodeArts 报告：纯中文正则让英文会话整回合只读死锁）
-  const WRITE_INTENT_RE = /写|建|创|改|修|删|装|加|添|增|补|换|移|部署|执行|运行|实现|重构|生成|迁移|安装|更新|升级|发布|调整|优化|修复|提交|推送|打包|编译|测试|implement|fix|create|modify|update|delete|deploy|build|make|generate|install|write|refactor|migrate|test|run|commit|push|remove|add|change|patch/i;
-  const hasWriteIntent = (/** @type {any} */ text) => WRITE_INTENT_RE.test(String(text || ''));
+
   // A1（前缀稳定）：剥描述集合按「回合冻结快照」——回合内恒定（至多两态：只读档/全量档），
   // 新使用的工具只在下一回合才进入剥描述集合；回合边界本身就有新 user 消息，schema 变化免费。
   // v0.4.0 Agent Preset：cfg.presetTools 白名单恒生效（在只读档过滤之后收紧——预设只减不增）。
@@ -401,11 +451,14 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     // 省钱 B1：本回合只读阶段判定——最新用户消息无写意图则先只发只读工具，
     // 模型明确表达写意图后（下一轮）注入全量。cfg.schemaTier=false 可关。
     let readOnlyPhase = true;
-    if (cfg.schemaTier !== false) {
+    // 自愈只允许一次（否则与 stepLimit 形成"放开→再收起"的循环）
+    let readOnlyHealed = false;
+    {
       const lastUser = [...messages].reverse().find((m) => m?.role === 'user');
-      readOnlyPhase = !hasWriteIntent(lastUser?.content);
-    } else {
-      readOnlyPhase = false;
+      // 域内 Pack 在场时**不进只读档**（域内词是开集，靠关键词判定必然漏）
+      const packCtx0 = getActivePackContext();
+      const packActive = Array.isArray(packCtx0?.mounted) && packCtx0.mounted.length > 0;
+      readOnlyPhase = startsInReadOnlyPhase(cfg, String(lastUser?.content ?? ''), packActive);
     }
     // A1：本回合的剥描述冻结快照（会话级 usedToolNames 的副本）——回合内 schema 字节不变
     const turnStrippedSet = new Set(usedToolNames);
@@ -1097,6 +1150,23 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           messages.push({
             role: 'user',
             content: '（系统提示）你刚才没有输出任何正文就结束了。请继续完成用户的任务，给出实际内容。',
+          });
+          continue;
+        }
+        // v0.6.3 自愈：只读档下 write/edit/bash 不可见，域内任务只会收到一段
+        // "我做不到/需要你提供…"的文字，而**根本不会进第二轮**——原释放条件
+        // （模型文字里出现写意图）因此永远等不到。这里补一条与词表无关的兜底。
+        if (readOnlyPhase && !readOnlyHealed && looksLikeUnmetIntent(finalText)) {
+          readOnlyHealed = true;
+          readOnlyPhase = false;
+          try {
+            io.print(style('⚠ 上一轮处于只读档、未暴露写入类工具；已放开工具集并重试一次', C.dim));
+          } catch {}
+          messages.push({
+            role: 'user',
+            content:
+              '（系统提示）你上一轮可能因为没有可用的写入/执行工具而未能完成任务。' +
+              '现在工具集已放开：如果用户的要求需要写文件或执行命令，**请直接调用相应工具去做**，不要只描述计划或让用户自己完成。',
           });
           continue;
         }
