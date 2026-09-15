@@ -52,7 +52,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     if (body.action === 'push') {
       const r = /** @type {any} */ (await syncPush(body.name));
       if (r.error) return json(res, 400, { error: r.error });
-      return json(res, 200, { ok: true, pushed: r.pushed.length, conflicts: r.conflicts });
+      // v0.6.3（审计 H-2）：把"上传前已脱敏"的会话数透给前端，避免用户以为远端是原文
+      return json(res, 200, { ok: true, pushed: r.pushed.length, conflicts: r.conflicts, redacted: (r.redacted || []).length });
     }
     if (body.action === 'pull') {
       const r = /** @type {any} */ (await syncPull(body.name));

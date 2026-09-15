@@ -20,7 +20,7 @@ function isRunningTask(/** @type {any} */ home, /** @type {any} */ taskId) {
 const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url));
 
 import { isPeakHour, deferToOffpeak } from './pricing.js';
-import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
+import { atomicWriteFileSync, atomicWritePrivateSync, withFileLockSync } from './atomic-write.js';
 
 export function scheduleDir(/** @type {any} */ home) {
   return path.join(home, 'schedule');
@@ -90,9 +90,9 @@ export function readSchedule(/** @type {any} */ home, /** @type {any} */ id) {
 
 export function writeSchedule(/** @type {any} */ home, /** @type {any} */ job) {
   if (!isValidScheduleId(job?.id)) return null;
-  fs.mkdirSync(scheduleDir(home), { recursive: true });
+  fs.mkdirSync(scheduleDir(home), { recursive: true, mode: 0o700 });
   const target = path.join(scheduleDir(home), job.id + '.json');
-  atomicWriteFileSync(target, JSON.stringify(job, null, 2) + '\n'); // 质检 H4：tmp 名含 pid+随机，杜绝跨进程共名
+  atomicWritePrivateSync(target, JSON.stringify(job, null, 2) + '\n'); // 质检 H4：tmp 名含 pid+随机；0600（含任务正文与备注）
   return job;
 }
 

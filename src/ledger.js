@@ -18,7 +18,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { atomicWriteFileSync } from './atomic-write.js';
+import { atomicWriteFileSync, appendFilePrivateSync } from './atomic-write.js';
 import { mingdaoHome, ensureHome } from './config.js';
 import { redactSecrets, redactSensitive } from './redact.js';
 
@@ -119,10 +119,10 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
     if (!alive) return null;
     try {
       ensureHome();
-      fs.mkdirSync(ledgerDir(), { recursive: true });
+      fs.mkdirSync(ledgerDir(), { recursive: true, mode: 0o700 });
       const event = { v: LEDGER_VERSION, runId, seq: seq + 1, at: now(), type, prev, ...redactDeep(payload) };
       const line = JSON.stringify(event);
-      fs.appendFileSync(runFile(runId), line + '\n');
+      appendFilePrivateSync(runFile(runId), line + '\n');
       try {
         fs.chmodSync(runFile(runId), 0o600);
       } catch {}

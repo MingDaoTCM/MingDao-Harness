@@ -280,6 +280,13 @@ export async function handleSync(/** @type {any} */ cmd, /** @type {any} */ args
       return true;
     }
     console.log(`✓ 已推送 ${r.pushed.length} 个会话${r.skipped?.length ? `（跳过 ${r.skipped.length} 个空会话）` : ''}${r.conflicts.length ? `，远端 ${r.conflicts.length} 个不同版本已备份为 .server-*（本地覆盖远端）` : ''}`);
+    // v0.6.3（审计 H-2）：上传前脱敏必须让用户知道——否则他以为远端存的是原文
+    if (r.redacted?.length) {
+      console.log(
+        `ℹ ${r.redacted.length} 个会话在上传前已脱敏（疑似密钥被掩码）：${r.redacted.slice(0, 3).join('、')}${r.redacted.length > 3 ? ' 等' : ''}\n` +
+          '  本地文件保持原样；远端与其它设备拿到的是掩码版。会话原文仍建议不要粘贴长期凭据。'
+      );
+    }
     return true;
   }
   if (sub === 'pull') {

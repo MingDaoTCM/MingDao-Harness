@@ -23,10 +23,37 @@ const DEFAULT_HOSTS = [
 const TTL_MS = 60 * 60 * 1000;
 const MAX_FILE = 512 * 1024;
 
+// 回环/本机地址：本地开发与内网自建 registry 的常见形态，允许明文 http
+function isLoopbackHost(/** @type {string} */ host) {
+  return /^(127\.0\.0\.1|localhost|\[::1\]|::1)(:\d+)?$/i.test(host);
+}
+
 function registryBase() {
   const env = process.env.MINGDAO_REGISTRY_URL;
   if (env) {
-    const u = String(env).replace(/\/index\.json$/, '').replace(/\/+$/, '');
+    const raw = String(env).trim();
+    const u = raw.replace(/\/index\.json$/, '').replace(/\/+$/, '');
+    // v0.6.3（审计 M-7）：自建 registry **拒绝明文 http**（回环除外）。
+    //
+    // 为什么必须拒：自定义源的内容会直接决定"装进用户机器里的技能正文"，
+    // 而 registry 索引里的 sha256 是**自证**的（正文与哈希同在索引里，见 M-6）——
+    // 明文 http 下内网中间人可同时替换正文与哈希，校验必然通过。
+    // 也就是说 TLS 是这条链上**唯一**的外部信任锚，不能默认放弃。
+    // 回环地址（127.0.0.1/localhost/[::1]）不经过网络，允许明文以便本地开发。
+    const scheme = (u.match(/^([a-z][a-z0-9+.-]*):\/\//i) || [])[1];
+    if (scheme && scheme.toLowerCase() !== 'https' && scheme.toLowerCase() !== 'http') {
+      return { hosts: [], isCustom: true, error: `MINGDAO_REGISTRY_URL 的协议不支持：${scheme}://（只支持 https，或回环地址上的 http）` };
+    }
+    if (scheme && scheme.toLowerCase() === 'http' && !isLoopbackHost(u.replace(/^https?:\/\//i, ''))) {
+      return {
+        hosts: [],
+        isCustom: true,
+        error:
+          `MINGDAO_REGISTRY_URL 使用明文 http（${u}）已被拒绝：技能正文与该索引里的 sha256 同源，` +
+          '明文链路下中间人可同时替换两者，校验必然通过——TLS 是这条链上唯一的外部信任锚。' +
+          '请改用 https；若确为本机开发，请用 127.0.0.1/localhost。',
+      };
+    }
     return { hosts: [u], isCustom: true };
   }
   return { hosts: DEFAULT_HOSTS, isCustom: false };
@@ -71,7 +98,8 @@ export async function fetchRegistryIndex({ force = false, allowNetwork = true } 
       return { error: '尚无线上技能库缓存（点击「刷新线上」拉取，或设置 MINGDAO_REGISTRY_URL 指向自建 registry）' };
     }
   }
-  const { hosts, isCustom } = registryBase();
+  const { hosts, isCustom, error: baseError } = registryBase();
+  if (baseError) return { error: baseError };
   let lastErr = null;
   for (const host of hosts) {
     try {
@@ -123,6 +151,7 @@ export async function installFromRegistry(/** @type {any} */ name) {
     // 逐文件下载按镜像回退（审计：国内网络下 raw.githubusercontent 常超时/被断，
     // 此前只试首选主机 → 安装报「This operation was aborted」；gitee/gitcode 国内秒开）
     const base = registryBase();
+    if (base.error) return { error: base.error };
     const hosts = [r.host, ...base.hosts.filter((h) => h !== r.host)];
     const allowPrivate = base.isCustom; // 用户显式配置的源（可能是内网自建 registry）
     let verified = false; // 每个文件都必须通过 sha256 校验（缺哈希直接拒绝安装），成功即 true

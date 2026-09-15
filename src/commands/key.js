@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import { createIO, style, C } from '../ui.js';
 import { ensureHome } from '../config.js';
-import { setStoredKey, removeStoredKey, credentialsPath, loadCredentials, maskKey } from '../credentials.js';
+import { setStoredKey, removeStoredKey, credentialsPath, loadCredentials, readCredentialsStrict, maskKey } from '../credentials.js';
 import { PROVIDERS } from '../models.js';
 
 export async function handleKey(/** @type {any} */ cmd, /** @type {any} */ args) {
@@ -10,6 +10,25 @@ export async function handleKey(/** @type {any} */ cmd, /** @type {any} */ args)
   try {
     const sub = args[0] || 'status';
     const target = args[1];
+    // v0.6.3（审计 H-8）：**写路径前置守卫**——凭证库存在但读不出来时，绝不进入
+    // 「读→改→全量重写」这一步：那会把其余凭据静默清空（实测复现）。
+    // 读路径（status）不受影响：它只需要知道"有哪些 key"，损坏时显示空即可。
+    if (sub === 'set' || sub === 'remove' || sub === 'import') {
+      const st = readCredentialsStrict();
+      if (!st.ok) {
+        io.print(style(`✗ 凭证库无法读取，已拒绝写入：${st.error}`, C.red));
+        io.print(style(`  文件：${credentialsPath()}`, C.dim));
+        io.print(
+          style(
+            '  继续写会**清空其余全部凭据**，所以这里选择拒绝。请先人工检查/修复该文件；' +
+              '若内容已不可恢复，把它改名备份（如 credentials.json.bak）后重试，届时会当作全新凭证库。',
+            C.dim
+          )
+        );
+        process.exitCode = 1;
+        return true;
+      }
+    }
     if (sub === 'status') {
       ensureHome();
       io.print(style(`本地凭证库：${credentialsPath()}`, C.bold));

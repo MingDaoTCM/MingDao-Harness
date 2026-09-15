@@ -15,13 +15,44 @@ export function credentialsPath() {
   return path.join(mingdaoHome(), 'credentials.json');
 }
 
-export function loadCredentials() {
+// v0.6.3（审计 H-8）：**必须区分「文件不存在」与「内容损坏」**。
+//
+// 原实现把两者都 `catch → {}`，而 key set/remove/import 的写路径是
+// 「loadCredentials() → 改一个键 → saveCredentials() 全量重写」——
+// 于是 credentials.json 一旦损坏（手改/中断写入），执行任意一次 key 写操作就会
+// **把其余全部凭据静默清空并打印成功**（实测复现）。
+//
+// 读路径（getStoredKey / key status）保持宽松语义不变；写路径必须用严格读并**拒绝写**。
+/**
+ * 严格读凭证库。
+ * @returns {{ok: boolean, missing: boolean, data: Record<string, any>, error: string|null}}
+ *   ok=false 且 missing=false 表示「文件存在但读不出来/解析失败」——**此时绝不能写**。
+ */
+export function readCredentialsStrict() {
+  let raw;
   try {
-    const data = JSON.parse(fs.readFileSync(credentialsPath(), 'utf8'));
-    return data && typeof data === 'object' ? data : {};
-  } catch {
-    return {};
+    raw = fs.readFileSync(credentialsPath(), 'utf8');
+  } catch (err) {
+    if (/** @type {any} */ (err)?.code === 'ENOENT') return { ok: true, missing: true, data: {}, error: null };
+    return { ok: false, missing: false, data: {}, error: String(/** @type {any} */ (err)?.message ?? err) };
   }
+  try {
+    // 容错 BOM：Windows 上 PowerShell 的 `Set-Content -Encoding UTF8` 会写出 BOM，
+    // 那是**可解析**的内容，不该被当成损坏而拒绝服务（否则用户改一次配置就永远写不进去）。
+    const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+    const data = JSON.parse(text);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return { ok: false, missing: false, data: {}, error: '顶层不是 JSON 对象' };
+    }
+    return { ok: true, missing: false, data, error: null };
+  } catch (err) {
+    return { ok: false, missing: false, data: {}, error: String(/** @type {any} */ (err)?.message ?? err) };
+  }
+}
+
+export function loadCredentials() {
+  // 宽松读（读路径）：读不出来就当空——调用方只想知道「有哪些 key」
+  return readCredentialsStrict().data;
 }
 
 /** @param {any} creds */

@@ -19,7 +19,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
-import { atomicWriteFileSync, withFileLock } from './atomic-write.js';
+import { atomicWriteFileSync, atomicWritePrivateSync, withFileLock } from './atomic-write.js';
 
 export function workspacesFile() {
   return path.join(mingdaoHome(), 'workspaces.json');
@@ -46,7 +46,7 @@ export function saveWorkspaces(/** @type {any} */ ws) {
   try {
     ensureHome();
     // 原子写（评估 6.6）：随机 tmp 名 + rename，避免崩溃冲空与跨进程共名 tmp 串扰
-    atomicWriteFileSync(workspacesFile(), JSON.stringify(ws, null, 2) + '\n');
+    atomicWritePrivateSync(workspacesFile(), JSON.stringify(ws, null, 2) + '\n');
     return { ok: true, error: null };
   } catch (err) {
     return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
@@ -173,7 +173,7 @@ export function saveSessionWorkspaces(/** @type {any} */ map) {
   try {
     ensureHome();
     // 原子写（评估 6.6）：随机 tmp 名 + rename
-    atomicWriteFileSync(sessionWorkspacesFile(), JSON.stringify(map, null, 2) + '\n', { mode: 0o600 });
+    atomicWritePrivateSync(sessionWorkspacesFile(), JSON.stringify(map, null, 2) + '\n');
     return { ok: true, error: null };
   } catch (err) {
     const msg = String(/** @type {any} */ (err)?.message ?? err);

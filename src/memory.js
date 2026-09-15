@@ -9,7 +9,7 @@ import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { beijingParts } from './pricing.js';
 import { tokenize } from './session-index.js';
-import { atomicWriteFileSync } from './atomic-write.js';
+import { atomicWriteFileSync, appendFilePrivateSync, atomicWritePrivateSync } from './atomic-write.js';
 import { recordAuxUsage } from './cachestats.js';
 
 export function memoryFile() {
@@ -35,7 +35,7 @@ export function appendMemory(/** @type {any} */ lines) {
   // 审计 B9 + 质检 M8：与费用统计同口径，用配置时区（默认北京时间）自然日做记忆日期戳
   const bp = beijingParts(new Date());
   const date = `${bp.year}-${String(bp.month).padStart(2, '0')}-${String(bp.day).padStart(2, '0')}`;
-  fs.appendFileSync(memoryFile(), add.map((/** @type {any} */ l) => (l.startsWith('-') ? `- [${date}] ${l.slice(1).trim()}` : `- [${date}] ${l}`)).join('\n') + '\n');
+  appendFilePrivateSync(memoryFile(), add.map((/** @type {any} */ l) => (l.startsWith('-') ? `- [${date}] ${l.slice(1).trim()}` : `- [${date}] ${l}`)).join('\n') + '\n');
   return add.length;
 }
 
@@ -49,7 +49,7 @@ function backupMemory() {
 export function writeMemory(/** @type {any} */ content) {
   backupMemory();
   ensureHome();
-  atomicWriteFileSync(memoryFile(), String(content ?? ''));
+  atomicWritePrivateSync(memoryFile(), String(content ?? ''));
 }
 
 // 去重：忽略日期前缀后内容相同的条目只保留第一条
@@ -72,7 +72,7 @@ export function dedupeMemory() {
   }
   if (removed > 0) {
     backupMemory();
-    atomicWriteFileSync(memoryFile(), kept.join('\n') + '\n');
+    atomicWritePrivateSync(memoryFile(), kept.join('\n') + '\n');
   }
   return removed;
 }
@@ -97,7 +97,7 @@ export function removeMemoryLines(/** @type {any} */ keyword) {
     // 少了它，文件结尾与下一次 append 的内容会拼成同一行
     // （`- [date] 旧条目- [date] 新条目`），整条记忆既解析不出来也读不懂。
     // 隔壁 dedupeMemory 一直是带 `+ '\n'` 的，这里漏了。
-    atomicWriteFileSync(memoryFile(), kept.length ? kept.join('\n') + '\n' : '');
+    atomicWritePrivateSync(memoryFile(), kept.length ? kept.join('\n') + '\n' : '');
   }
   return removed;
 }
@@ -115,7 +115,7 @@ export function appendJournal(/** @type {any} */ home, /** @type {any} */ entry)
     // 「D:\a\D:\b」式非法路径——Windows 上 mkdir 抛错被静默吞掉，journal 整体失效（评估 D1）。
     fs.mkdirSync(path.dirname(journalFile()), { recursive: true });
     // 纯追加：并发会话收尾互不覆盖；崩溃最多丢最后一行
-    fs.appendFileSync(journalFile(), JSON.stringify(entry) + '\n');
+    appendFilePrivateSync(journalFile(), JSON.stringify(entry) + '\n');
   } catch (err) {
     // 静默吞错面收窄（评估建议 3）：调试开关可见原因，正常使用仍零打扰
     if (process.env.MINGDAO_DEBUG) console.warn('[MingDao] journal 写入失败：' + ((/** @type {any} */ (err))?.message || err));
@@ -126,7 +126,7 @@ export function appendJournal(/** @type {any} */ home, /** @type {any} */ entry)
     if (fs.statSync(journalFile()).size > JOURNAL_MAX_BYTES) {
       const lines = fs.readFileSync(journalFile(), 'utf8').split('\n').filter(Boolean);
       if (lines.length > JOURNAL_KEEP_LINES) {
-        atomicWriteFileSync(journalFile(), lines.slice(-JOURNAL_KEEP_LINES).join('\n') + '\n');
+        atomicWritePrivateSync(journalFile(), lines.slice(-JOURNAL_KEEP_LINES).join('\n') + '\n');
       }
     }
   } catch {}
@@ -321,7 +321,7 @@ export function dedupeProjectMemory(/** @type {any} */ workingDir) {
   }
   if (removed > 0) {
     try {
-      atomicWriteFileSync(projectMemoryFile(workingDir), kept.join('\n') + '\n');
+      atomicWritePrivateSync(projectMemoryFile(workingDir), kept.join('\n') + '\n');
     } catch (err) {
       // v0.6.2（B-WS-1/2 第七处）：算出了重复条数但**写不回去**，就不能报告「已去重 N 条」——
       // 文件里那些重复行一条都没少。返回 0 是唯一诚实的答案（WebUI/CLI 都按这个数报给用户）。

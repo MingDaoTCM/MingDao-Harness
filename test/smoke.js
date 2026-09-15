@@ -6871,10 +6871,13 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
   // 「修一个漏九个」的根因不是不仔细，而是**没有穷举的手段**。这里把它穷举出来并钉住：
   // 白名单里的每一处都经过审阅（并写明为什么可以吞），新增或数量变化立即失败。
   {
-    const WRITE = /\b(writeFileSync|appendFileSync|renameSync|unlinkSync|rmSync|rmdirSync|mkdirSync|copyFileSync|createWriteStream|atomicWriteFileSync|atomicWriteJsonSync|truncateSync|writeSync|chmodSync|symlinkSync|linkSync|utimesSync|writeFile)\s*\(/;
+    // v0.6.3：把本仓自己的私有写助手也算「写操作」——它们是 appendFileSync/atomicWriteFileSync 的
+    // 包装，漏了它们会让扫描器**看不见**真实存在的写（本批 H-1 把 8 处直写换成助手后，
+    // memory.js 的计数就从 2 掉到 1，属于"把守卫弄瞎"而不是"问题消失了"）。
+    const WRITE = /\b(writeFileSync|appendFileSync|renameSync|unlinkSync|rmSync|rmdirSync|mkdirSync|copyFileSync|createWriteStream|atomicWriteFileSync|atomicWriteJsonSync|atomicWritePrivateSync|appendFilePrivateSync|truncateSync|writeSync|chmodSync|symlinkSync|linkSync|utimesSync|writeFile)\s*\(/;
     // 已审阅白名单：键 = 文件名，值 = {n: 该文件处数, why: 为什么可以静默}
     const ALLOWED = {
-      'atomic-write.js': { n: 1, why: '原子写失败后的临时文件清理（原错误仍会重抛）；锁的释放与陈旧回收走独立函数，失败不影响正确性（pid 判据会回收）' },
+      'atomic-write.js': { n: 3, why: '原子写失败后的临时文件清理（原错误仍重抛）+ 两处 chmod 收权自愈（private 写助手，权限收紧属尽力而为、失败不影响数据）；锁释放与陈旧回收走独立函数' },
       'audit.js': { n: 1, why: 'audit.jsonl **轮转**失败（只导致文件增长）；写入失败本身已由 auditWriteFailures() 记录并告警' },
       'cli.js': { n: 1, why: '守护进程退出时删除 pidfile：只在仍指向自己时才删，删不掉不影响正确性' },
       'config.js': { n: 1, why: '原子写之后的 chmod 收权：创建时已带 0600，收权失败不影响内容' },
@@ -7847,6 +7850,162 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
     safeRmSync(home111, { recursive: true, force: true });
   }
   ok('v0.6.3 vision 门控：咨询自定义 Provider 静态声明 + 能力覆盖不劫持 provider 解析（下游 Dify 反馈）');
+}
+
+
+// ---------- 112. v0.6.3 批一：凭据暴露面（审计 H-1 / H-2 / H-8 / M-7） ----------
+// 四项都是**实测复现**过的：
+//   H-1 会话文件 0644 且原文含明文密钥（同机可读；而账本/审计/凭据早已 0600）；
+//   H-2 会话原文**不脱敏**就上传云同步（自动同步默认开）；
+//   H-8 凭证库损坏后一次 key set 把**其余全部凭据静默清空**并打印成功；
+//   M-7 自建 registry 允许明文 http（而索引里的 sha256 是自证的，TLS 是唯一外部信任锚）。
+const isPosix111 = process.platform !== 'win32';
+{
+  const RED = await import(pathToFileURL(path.join(srcDir, 'redact.js')).href);
+  const AWS = await import(pathToFileURL(path.join(srcDir, 'atomic-write.js')).href);
+  const home112 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-cred112-'));
+  const prevHome112 = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = home112;
+  try {
+    // ① 脱敏器自身的覆盖（上层接得再牢，脱敏器不认也白搭——本批先补基础）
+    {
+      // 夹具的构造纪律：**源码里不得出现完整的凭据字形**。
+      // 本批实测被 GitHub push protection 拦下过一次——它把测试里的字面量
+      // `glpat-<20+位>` 判成真实 token 并**拒绝推送**。改为运行时用低熵片段拼出：
+      // 形状足够触发规则，但任何一段都不是一个可用的凭据。
+      const fakeJwt = ['eyJ' + 'hbGciOiJIUzI1NiJ9', 'eyJ' + 'zdWIiOiIxIn0', 'c2lnbmF0dXJlMTIzNDU2'].join('.');
+      const fakeAwsSecret = 'wJalr'.repeat(8); // 40 位、低熵
+      const fakeGlpat = 'glpat-' + 'AbCdEf1234567890'.repeat(2); // 前缀 + 32 位低熵
+      const mustMask = [
+        ['PEM 私钥块', '-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\n-----END RSA PRIVATE KEY-----', '私钥块'],
+        ['JWT', fakeJwt, 'JWT'],
+        ['AWS 赋值式', 'AWS_SECRET_ACCESS_KEY=' + fakeAwsSecret, '赋值式（词在中间段）'],
+        ['GitLab PAT', fakeGlpat, 'glpat- 前缀'],
+        ['带后缀的变量名', 'MY_TOKEN_V2=abc123def456', '词在前段带后缀'],
+        ['x-api-key 头', 'x-api-key: abcdef1234567890', '复合名'],
+      ];
+      assert.ok(fakeJwt.split('.').length === 3 && fakeGlpat.length > 20, '对照：夹具必须仍是"形状正确"的凭据（否则测的就不是真形态）');
+      for (const [label, text, why] of mustMask) {
+        assert.notEqual(RED.redactSecrets(text), text, `${label} 必须被脱敏（${why}）`);
+      }
+      // 反向：正常文本/配置不得误伤（否则日志与账本会被掩得没法看）
+      const mustNotMask = [
+        ['普通中文', '这是一段普通的中文文本，讲的是回访流程与排班规则。'],
+        ['数值配置', 'max_tokens: 4096'],
+        ['JSON 配置', '{"model": "deepseek-flash", "temperature": 0.7}'],
+        ['含 key 子串的词', 'monkey=abcdefgh'],
+      ];
+      for (const [label, text] of mustNotMask) {
+        assert.equal(RED.redactSecrets(text), text, `${label} 不该被脱敏（误伤会让日志与账本不可读）`);
+      }
+      // 认证方案名保留（只掩 token），否则审计行退化成 `Authorization: *** ***`
+      const bearer = RED.redactSecrets('Authorization: Bearer abcdef1234567890abcdef');
+      assert.ok(bearer.startsWith('Authorization: Bearer '), `方案名应保留，实际：${bearer}`);
+      assert.ok(!bearer.includes('abcdef1234567890abcdef'), 'token 仍必须被掩');
+    }
+
+    // ② H-1：私有文件写入助手（创建即 0600 + 对已存在文件收权自愈）
+    if (isPosix111) {
+      const f = path.join(home112, 'new.jsonl');
+      AWS.appendFilePrivateSync(f, '{"a":1}\n');
+      assert.equal(fs.statSync(f).mode & 0o777, 0o600, '新建的私有文件必须是 0600（会话/记忆/任务都走这个助手）');
+      fs.chmodSync(f, 0o644); // 模拟旧版本留下的宽权限
+      AWS.appendFilePrivateSync(f, '{"b":2}\n');
+      assert.equal(fs.statSync(f).mode & 0o777, 0o600, '对已存在的宽权限文件必须收权自愈（mode 只在创建时生效）');
+      const f2 = path.join(home112, 'atomic.json');
+      AWS.atomicWritePrivateSync(f2, '{}');
+      assert.equal(fs.statSync(f2).mode & 0o777, 0o600, '原子写私有文件必须是 0600');
+    }
+
+    // ③ H-1 端到端：会话/记忆/工作空间/任务/调度落盘都必须是 0600
+    if (isPosix111) {
+      const S112 = await import(pathToFileURL(path.join(srcDir, 'session.js')).href);
+      const M112 = await import(pathToFileURL(path.join(srcDir, 'memory.js')).href);
+      const W112 = await import(pathToFileURL(path.join(srcDir, 'workspace.js')).href);
+      const T112 = await import(pathToFileURL(path.join(srcDir, 'tasks.js')).href);
+      const SC112 = await import(pathToFileURL(path.join(srcDir, 'schedule.js')).href);
+      const sessFile = path.join(home112, 'sessions', 's.jsonl');
+      fs.mkdirSync(path.dirname(sessFile), { recursive: true });
+      S112.appendMessages(sessFile, [{ role: 'user', content: '我的 key 是 sk-LEAKME1234567890' }]);
+      assert.equal(fs.statSync(sessFile).mode & 0o777, 0o600, '会话文件必须 0600（原文会记录用户粘贴的密钥）');
+      M112.appendMemory(['- 记住我偏好简短回答']);
+      assert.equal(fs.statSync(M112.memoryFile()).mode & 0o777, 0o600, '用户记忆必须 0600');
+      const proj = path.join(home112, 'proj');
+      fs.mkdirSync(proj, { recursive: true });
+      await W112.addWorkspace('w', proj);
+      assert.equal(fs.statSync(W112.workspacesFile()).mode & 0o777, 0o600, '工作空间注册表必须 0600');
+      T112.writeTask(home112, { id: 'abc123', status: 'running' });
+      assert.equal(fs.statSync(path.join(T112.tasksDir(home112), 'abc123.json')).mode & 0o777, 0o600, '任务文件必须 0600（含提问原文）');
+      SC112.writeSchedule(home112, { id: 'abc123', kind: 'every', status: 'pending' });
+      assert.equal(fs.statSync(path.join(SC112.scheduleDir(home112), 'abc123.json')).mode & 0o777, 0o600, '调度文件必须 0600（含任务正文）');
+    }
+
+    // ④ H-8：凭证库损坏 → 严格读失败（写路径据此拒绝），BOM 仍可解析
+    {
+      const CR = await import(pathToFileURL(path.join(srcDir, 'credentials.js')).href);
+      const cf = CR.credentialsPath();
+      fs.mkdirSync(path.dirname(cf), { recursive: true });
+      fs.writeFileSync(cf, '{"a": "sk-A", "b": "sk-B"}', { mode: 0o600 });
+      assert.equal(CR.readCredentialsStrict().ok, true, '正常文件严格读应通过');
+      fs.writeFileSync(cf, '{"a": "sk-A", "b": "sk-B"', { mode: 0o600 }); // 截断损坏
+      const bad = CR.readCredentialsStrict();
+      assert.equal(bad.ok, false, '损坏的凭证库严格读必须失败（写路径据此拒绝，否则会清空其余凭据）');
+      assert.ok(String(bad.error).length > 0, '必须带出解析错误原因');
+      fs.writeFileSync(cf, '\uFEFF' + JSON.stringify({ a: 'sk-A' }), { mode: 0o600 }); // PowerShell 写的 BOM
+      assert.equal(CR.readCredentialsStrict().ok, true, '带 BOM 但可解析的文件必须通过（否则用户改一次配置就永远写不进去）');
+      assert.equal(CR.loadCredentials().a, 'sk-A', '宽容读仍应给出内容');
+    }
+
+    // ⑤ H-8 端到端：损坏时 `key set` 必须以非 0 退出且**不动**文件
+    {
+      const home2 = path.join(home112, 'cli-home');
+      fs.mkdirSync(home2, { recursive: true });
+      const cf2 = path.join(home2, 'credentials.json');
+      const corrupt = '{"deepseek": "sk-keep-AAA", "custom:gw": "sk-keep-BBB"';
+      fs.writeFileSync(cf2, corrupt, { mode: 0o600 });
+      const r = spawnSync(process.execPath, [path.join(srcDir, 'cli.js'), 'key', 'set', 'openai', 'sk-new-CCC'], {
+        encoding: 'utf8',
+        env: { ...process.env, MINGDAO_HOME: home2 },
+      });
+      assert.equal(r.status, 1, `凭证库损坏时 key set 必须退 1（否则会清空其余凭据并打印成功），实际 ${r.status}：${r.stdout}`);
+      assert.ok(String(r.stdout).includes('拒绝写入'), `应明确说明拒绝写入，实际：${r.stdout}`);
+      assert.equal(fs.readFileSync(cf2, 'utf8'), corrupt, '损坏的凭证库必须**原样保留**（用户还能人工抢救）');
+    }
+
+    // ⑥ M-7：自建 registry 协议白名单
+    {
+      const SR = await import(pathToFileURL(path.join(srcDir, 'skill-registry.js')).href);
+      const prev = process.env.MINGDAO_REGISTRY_URL;
+      const probe = async (u) => {
+        process.env.MINGDAO_REGISTRY_URL = u;
+        const r = await SR.fetchRegistryIndex({ force: true, allowNetwork: false }).catch((e) => ({ error: String(e?.message || e) }));
+        return String(r?.error || '');
+      };
+      try {
+        assert.ok((await probe('http://registry.evil.example')).includes('明文 http'), '非回环的明文 http registry 必须被拒绝（TLS 是这条链上唯一的外部信任锚）');
+        assert.ok((await probe('ftp://x.example')).includes('协议不支持'), '非 http(s) 协议必须被拒绝');
+        assert.ok(!(await probe('https://registry.example')).includes('拒绝'), 'https registry 必须放行');
+        assert.ok(!(await probe('http://127.0.0.1:9')).includes('明文 http'), '回环地址允许明文（本地开发/内网自建）');
+      } finally {
+        if (prev === undefined) delete process.env.MINGDAO_REGISTRY_URL;
+        else process.env.MINGDAO_REGISTRY_URL = prev;
+      }
+    }
+
+    // ⑦ H-2 结构守卫：云同步上传前必须过 redactSecrets
+    {
+      const syncSrc = fs.readFileSync(path.join(srcDir, 'sync.js'), 'utf8');
+      const code = syncSrc.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      assert.ok(/const content = redactSecrets\(rawContent\);/.test(code), 'sync.js 推送前必须对会话原文脱敏（否则明文凭据上传服务器）');
+      assert.ok(/content[,}]/.test(code), '推送体必须使用脱敏后的 content');
+      const cliSync = fs.readFileSync(path.join(srcDir, 'commands', 'sync.js'), 'utf8');
+      assert.ok(cliSync.includes('r.redacted'), 'CLI 必须把「上传前已脱敏」告知用户（否则他以为远端存的是原文）');
+    }
+  } finally {
+    process.env.MINGDAO_HOME = prevHome112;
+    safeRmSync(home112, { recursive: true, force: true });
+  }
+  ok('v0.6.3 批一 凭据暴露面：脱敏器补 PEM/JWT/赋值式 + 私有文件 0600 自愈 + 凭证损坏拒绝写 + registry 强制 TLS');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

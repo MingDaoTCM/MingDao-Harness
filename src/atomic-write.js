@@ -39,6 +39,41 @@ export function atomicWriteFileSync(/** @type {string} */ target, /** @type {str
   }
 }
 
+// ---------------------------------------------------------------------------
+// 「私有文件」写入（v0.6.3，审计 H-1）
+//
+// 背景：会话/记忆/任务/调度/工作空间/索引这些文件此前直接 appendFileSync / 原子写**不带 mode**，
+// 默认 umask 下是 0644——而会话原文会原样记录用户粘贴的 sk-*、PEM、JWT，同机其它用户可读。
+// 同仓的账本/审计/凭据早已 0600，属于「同模块两套口径」。
+//
+// 两条纪律：
+//   ① 创建时带 mode: 0o600；
+//   ② **每次写都补一次 chmod 自愈**——mode 只在创建时生效，对旧版本留下的 0644 文件不起作用
+//      （凭据/审计早已这么做，这里收敛成共享助手，避免八处各写一遍再漂移）。
+// ---------------------------------------------------------------------------
+
+/**
+ * 追加写入并保证 0600（对已存在文件收权自愈）。
+ * @param {string} file @param {string|Buffer} data
+ */
+export function appendFilePrivateSync(file, data) {
+  fs.appendFileSync(file, data, { mode: 0o600 });
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {}
+}
+
+/**
+ * 原子写入并保证 0600（对已存在文件收权自愈）。
+ * @param {string} file @param {string|Buffer} data
+ */
+export function atomicWritePrivateSync(file, data) {
+  atomicWriteFileSync(file, data, { mode: 0o600 });
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {}
+}
+
 export function atomicWriteJsonSync(/** @type {string} */ target, /** @type {any} */ value, { mode = 0o600 } = {}) {
   atomicWriteFileSync(target, JSON.stringify(value, null, 2) + '\n', { mode });
 }

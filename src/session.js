@@ -53,7 +53,7 @@ export function createSession(home) {
 export function appendMessages(file, messages) {
   if (!messages?.length) return;
   const lines = messages.map((/** @type {any} */ m) => JSON.stringify(m)).join('\n') + '\n';
-  fs.appendFileSync(file, lines);
+  appendFilePrivateSync(file, lines);
 }
 
 // 整文件原子重写：自动压缩后把会话文件同步为压缩形态（否则每次加载历史都会重新触发压缩）
@@ -111,7 +111,7 @@ export function relativeTime(mtime) {
 // 全文检索历史会话（P3-2 索引化）：增量词表倒排 + AND 匹配（中文 bigram），
 // 只对命中的少数文件读原文生成片段；未命中/无关键词时回退列表。
 import { syncSessionIndex, tokenize, extractSessionText } from './session-index.js';
-import { atomicWriteFileSync } from './atomic-write.js';
+import { atomicWriteFileSync, appendFilePrivateSync } from './atomic-write.js';
 
 /** @param {any} home @param {any} keyword */
 export function searchSessions(home, keyword, { limit = 20 } = {}) {

@@ -7,7 +7,7 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { relativeTime } from './session.js';
-import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
+import { atomicWriteFileSync, atomicWritePrivateSync, withFileLockSync } from './atomic-write.js';
 import { procAlive, pidOwnedBy, spawnOpts } from './proc.js';
 
 const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url));
@@ -55,10 +55,10 @@ export function readTask(/** @type {any} */ home, /** @type {any} */ id) {
 }
 
 export function writeTask(/** @type {any} */ home, /** @type {any} */ task) {
-  fs.mkdirSync(tasksDir(home), { recursive: true });
+  fs.mkdirSync(tasksDir(home), { recursive: true, mode: 0o700 });
   // 原子写：先临时文件再改名，避免崩溃留下半截 JSON
   const target = path.join(tasksDir(home), task.id + '.json');
-  atomicWriteFileSync(target, JSON.stringify(task, null, 2) + '\n'); // 质检 H4：tmp 名含 pid+随机
+  atomicWritePrivateSync(target, JSON.stringify(task, null, 2) + '\n'); // 质检 H4：tmp 名含 pid+随机；0600（含提问原文）
 }
 
 export function isValidTaskId(/** @type {any} */ id) {

@@ -11,7 +11,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { mingdaoHome, ensureHome } from './config.js';
-import { atomicWriteFileSync } from './atomic-write.js';
+import { atomicWritePrivateSync } from './atomic-write.js';
 
 const INDEX_MAX_FILE = 8 * 1024 * 1024;
 const SHARD_HEX = 2; // sha1 前 2 个十六进制位 → 256 片
@@ -60,7 +60,7 @@ function saveShard(shard, idx) {
     ensureHome();
     const dir = shardDir();
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    atomicWriteFileSync(shardFile(shard), JSON.stringify(idx) + '\n'); // 质检 H4：索引原子写
+    atomicWritePrivateSync(shardFile(shard), JSON.stringify(idx) + '\n'); // 质检 H4：索引原子写 + 0600（会话标题即内容）
     return { ok: true, error: null };
   } catch (err) {
     const msg = String(/** @type {any} */ (err)?.message ?? err);

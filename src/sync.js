@@ -17,6 +17,7 @@ import { loadCredentials, saveCredentials } from './credentials.js';
 import { listSessions, CONFLICT_BACKUP_RE } from './session.js';
 import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
 import { decideEgress, currentPolicy } from './net-guard.js';
+import { redactSecrets } from './redact.js';
 
 const TIMEOUT_MS = 20000;
 // 自签证书（--insecure）只影响同步请求本身，不再改写进程级 NODE_TLS_REJECT_UNAUTHORIZED
@@ -287,6 +288,7 @@ export async function syncPush(name) {
   /** @type {Record<string, any>} */
   const delta = {}; // 本次真正变更的状态键（T19：末尾按增量合并）
   const pushed = [];
+  const redactedSessions = []; // 上传前被脱敏的会话（调用方据此提示用户）
   const conflicts = [];
   const skipped = [];
   for (const s of locals) {
@@ -303,11 +305,23 @@ export async function syncPush(name) {
       skipped.push(s.name);
       continue;
     }
-    const content = fs.readFileSync(s.file, 'utf8');
-    if (!content.trim()) {
+    const rawContent = fs.readFileSync(s.file, 'utf8');
+    if (!rawContent.trim()) {
       skipped.push(s.name); // 空会话文件（刚创建未写消息）不推送
       continue;
     }
+    // v0.6.3（审计 H-2）：**上传前必须脱敏**。
+    //
+    // 会话原文会原样记录用户粘贴的 `sk-*`、PEM、JWT、`AWS_SECRET_ACCESS_KEY=…`；
+    // 而账本与审计日志都做到了「写入即脱敏」，唯独**信息量最大的会话原文两边都不脱敏**，
+    // 且自动同步默认开启——于是用户配置过同步/配对后，这些凭据会以**明文上传到同步服务器**。
+    //
+    // 本地文件保持原样（用户自己的会话不该被改写），只在**出网前**这一层脱敏：
+    // 远端拿到的是掩码版，其它设备拉回来也是掩码版——这正是我们要的语义。
+    // 冲突判定仍用脱敏后的文本（与远端同一口径），否则每次同步都会被判成"内容不同"。
+    const content = redactSecrets(rawContent);
+    const redacted = content !== rawContent;
+    if (redacted) redactedSessions.push(s.name);
     if (Buffer.byteLength(content) > 19 * 1024 * 1024) {
       return { error: `${s.name} 超过 20MB 上限，跳过同步` };
     }
@@ -337,7 +351,7 @@ export async function syncPush(name) {
     }
   }
   commitState(delta);
-  return { ok: true, pushed, conflicts, skipped };
+  return { ok: true, pushed, conflicts, skipped, redacted: redactedSessions };
 }
 
 // 拉取单个/全部会话。本地有不同内容时保留本地，远端写入 .remote- 副本。

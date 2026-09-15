@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { estimateCost, cacheSplit, beijingDayStart, beijingParts } from './pricing.js';
-import { withFileLockSync, atomicWriteFileSync } from './atomic-write.js';
+import { withFileLockSync, atomicWriteFileSync, appendFilePrivateSync } from './atomic-write.js';
 
 export function cacheStatsFile() {
   return path.join(mingdaoHome(), 'cache-stats.jsonl');
@@ -69,7 +69,7 @@ export function recordCacheStats(/** @type {any} */ entry) {
       aux: entry.aux === true ? true : undefined,
       auxReason: entry.auxReason ? String(entry.auxReason) : undefined,
     });
-    fs.appendFileSync(cacheStatsFile(), line + '\n');
+    appendFilePrivateSync(cacheStatsFile(), line + '\n');
   } catch (err) {
     const msg = String(/** @type {any} */ (err)?.message ?? err);
     lastWriteError = msg;
