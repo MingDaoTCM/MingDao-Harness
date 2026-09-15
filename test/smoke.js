@@ -8058,15 +8058,16 @@ const isPosix111 = process.platform !== 'win32';
     const HK = await import(pathToFileURL(path.join(srcDir, 'hooks.js')).href);
     const homeH = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-hook113-'));
     try {
-      // 确定性触发：让 hook **自己关闭 fd 0** 并存活 300ms。
+      // 确定性触发：让 hook **自己关闭 fd 0** 并存活 300ms，载荷取 **4MB**。
       //   · 关闭 stdin → 父进程的写入永远无法完成（'finish' 不会触发）；
-      //   · 存活 300ms  → 保证「载荷没写完」在 child close 时已经成立。
-      // 判据必须是**可完成的写入**，而不是 stdin 'error' 的到达时机：Linux 上 libuv 会 dup
-      // fd 0，关闭 fd 0 不会立刻产生 EPIPE，要等子进程退出回收重复描述符后才送达——于是
-      // child 'close' 与 stdin 'error' 谁先到就成了竞态（macOS 上 error 先到，本地 5/5 通过；
-      // ubuntu Node 18/20 上 close 先到 → 空输出被当成放行，CI 两腿红）。第一版 `process.exit(0)`
-      // 与第二版 closeSync+300ms 栽的是同一个竞态。
-      // 修复前：载荷没送到 + 空输出 = 放行 → 工具照常执行（fail-open）。
+      //   · 存活 300ms  → 保证「载荷没写完」在 child close 时已经成立；
+      //   · 4MB         → 必须**大于任何平台的 socket 发送缓冲**。
+      // 3f73a04 在 CI 上仍红（ubuntu 18/20，且是确定性的 approve）：判据没错，是载荷不够大。
+      // Node 在 POSIX 上用 socketpair 做 stdio，Linux 的 AF_UNIX 发送缓冲默认约 208KB
+      // （net.core.wmem_default）——200KB 能**整个塞进内核缓冲**，于是父进程的写入全部完成、
+      // stdin 'finish' 照常触发；macOS 的缓冲小得多，所以先撞 EPIPE 而表现为"通过"。
+      // 「写不完」这个事实只有把载荷做到缓冲之上才会稳定暴露出来。
+      const huge = 'x'.repeat(4 * 1024 * 1024);
       const big = 'x'.repeat(200 * 1024);
       const closeStdinCmd = `${process.execPath} -e "require('node:fs').closeSync(0); setTimeout(()=>{}, 300)"`;
       const hooks = HK.createHooks(
@@ -8074,7 +8075,7 @@ const isPosix111 = process.platform !== 'win32';
         homeH,
         {}
       );
-      const r = await hooks.pre('write', { path: 'a.txt', content: big });
+      const r = await hooks.pre('write', { path: 'a.txt', content: huge });
       assert.equal(r.decision, 'block', `载荷送不进去且 hook 没给判定时必须阻止（原实现会放行），实际 ${JSON.stringify(r)}`);
       assert.ok(/输入写入失败/.test(String(r.reason)), `原因应点明是输入写入失败，实际：${r.reason}`);
       // 对照 A（防**过度**阻断）：hook 把载荷读完、但没有意见（空输出）→ 必须仍按「放行」。
@@ -8140,6 +8141,200 @@ const isPosix111 = process.platform !== 'win32';
     assert.ok(/envFilterOff \? process\.env : filteredProcessEnv\(keep\)/.test(src), '全量透传必须只在显式 false 时发生');
   }
   ok('v0.6.3 批二 安全 fail-open：预设不丢 deny + 缺失哨兵多语种 + hook 写失败 fail-closed + denyStrict + MCP 环境可见');
+}
+
+// ---------- 114. v0.6.3 批三：合规静默失效（红线在，但没被求值 / 没被记录 / 没被看见） ----------
+{
+  const CON = await import(pathToFileURL(path.join(srcDir, 'constraints.js')).href);
+  const REPLAY = await import(pathToFileURL(path.join(srcDir, 'replay.js')).href);
+  const LED = await import(pathToFileURL(path.join(srcDir, 'ledger.js')).href);
+  const PACKS = await import(pathToFileURL(path.join(srcDir, 'packs.js')).href);
+  const cli114 = path.join(srcDir, 'cli.js');
+  const prevHome114 = process.env.MINGDAO_HOME;
+  const home114 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-batch3-'));
+  const runCli114 = (argv, env = {}) =>
+    spawnSync(process.execPath, [cli114, ...argv], { encoding: 'utf8', cwd: home114, env: { ...process.env, MINGDAO_HOME: home114, ...env } });
+  try {
+    // 账本要写到本组自己的临时 home（子进程通过 env 继承同一个），否则进程内写的账本
+    // 与子进程读的目录不是同一个——第一版就栽在这里：子进程报「没有找到账本」。
+    process.env.MINGDAO_HOME = home114;
+
+    // ① P1-1：约束事件必须带 `id`——账本与回放**两个**消费方都读它，而 event() 此前只产出 `constraint`
+    //    → 「是哪条红线拦的」在账本/回放里恒为 null（不报错、只输出 null，任何断言都不会失败）。
+    {
+      const compiled = CON.compileConstraints([{ id: 'no-rm-rf', kind: 'tool-deny', tool: 'bash', pack: 'tcm' }]);
+      const cv = CON.checkPreTool(compiled, 'bash', { command: 'rm -rf /' });
+      assert.equal(cv.event.id, 'no-rm-rf', '事件必须带 id（两个消费方都读它；原实现只有 constraint → 账本恒 null）');
+      assert.equal(cv.event.constraint, 'no-rm-rf', 'constraint 字段保留（兼容历史账本与既有消费者）');
+      assert.equal(cv.event.kind, 'tool-deny', 'id 之外 kind/stage 不得被挤掉');
+    }
+
+    // ② P1-12 + P1-1 + M-12（CLI 端到端）：CLI 的命令分发发生在 cli.js mountPacks **之前**，
+    //    于是 `ledger replay` 拿到的 constraints 恒为 []、compiled.active 恒 false，
+    //    回放永远输出「当前没有任何生效的领域约束」——把它当 CI 门禁就是**静默假阴性**。
+    //    这里放一个**用户级** Pack（`<home>/packs/…`，默认受信任，不需要 pack trust），
+    //    并让 config.json **不含** constraints，强制走 mountPacks 这条路。
+    {
+      fs.writeFileSync(
+        path.join(home114, 'config.json'),
+        JSON.stringify({ provider: 'deepseek', model: 'deepseek-v4-flash', permission: 'auto', sandbox: 'off', contextBudget: 128000 }, null, 2)
+      );
+      const packDir = path.join(home114, 'packs', 'batch3probe');
+      fs.mkdirSync(packDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(packDir, 'pack.json'),
+        JSON.stringify(
+          {
+            apiVersion: 1,
+            name: 'batch3probe',
+            displayName: '批三回归探针',
+            version: '1.0.0',
+            engines: { mingdao: '>=0.4.6 <0.7' },
+            description: '仅用于测试：贡献一条 tool-deny，验证 ledger replay 在 CLI 下能挂载到 Pack 约束。',
+            license: 'MIT',
+            contributes: { constraints: true },
+          },
+          null,
+          2
+        )
+      );
+      fs.writeFileSync(
+        path.join(packDir, 'pack.mjs'),
+        'export const apiVersion = 1;\nexport function createPack() {\n  return { constraints: [{ id: "no-fetch-internal", kind: "tool-deny", tool: "fetch" }] };\n}\n'
+      );
+
+      // 账本：一次**当时放行**的 fetch 调用（constraint 为 null）——正是回放最该抓出来的那类
+      const id114 = LED.newRunId();
+      const led114 = LED.createLedger(id114);
+      led114.runStart({ model: 'deepseek-v4-flash', permission: 'auto' });
+      led114.toolCall({ callId: 'c1', name: 'fetch', args: { url: 'http://10.0.0.9/x' }, rawArgs: { url: 'http://10.0.0.9/x' }, permission: { decision: 'allow' } });
+      led114.toolResult({ callId: 'c1', name: 'fetch', ok: true, ms: 12, result: { ok: true, output: 'x' } });
+      led114.runEnd({ status: 'done' });
+
+      // 直连引擎（显式传约束）→ 只考 P1-1：constraintId 必须非空
+      const direct114 = REPLAY.replayRun(id114, { constraints: [{ id: 'no-fetch-internal', kind: 'tool-deny', tool: 'fetch' }], permission: 'auto' });
+      assert.equal(direct114.steps[0].now.constraintId, 'no-fetch-internal', '回放的 constraintId 不得为 null（原实现读 event.id 而 event() 不产出 id）');
+      assert.equal(direct114.steps[0].kind, 'now-blocked', '当时放行、今天被红线拦住 → 应归为 now-blocked');
+      assert.equal(direct114.summary.nowBlocked, 1, 'nowBlocked 计数应为 1');
+
+      // CLI（M-12：`--json` 写在末尾必须真的输出 JSON；P1-12：CLI 必须先挂 Pack 才能看到红线）
+      const rJson114 = runCli114(['ledger', 'replay', id114, '--json']);
+      let parsed114 = null;
+      try {
+        parsed114 = JSON.parse(rJson114.stdout);
+      } catch {}
+      assert.ok(parsed114 && parsed114.summary, `ledger replay --json 必须输出可解析 JSON（M-12 原实现恒走人读分支）。实际 stdout：${String(rJson114.stdout).slice(0, 160)}`);
+      assert.equal(parsed114.steps[0].now.constraintId, 'no-fetch-internal', 'CLI 回放必须看到用户级 Pack 的约束（P1-12：原实现 constraints 恒空）');
+      assert.equal(parsed114.summary.nowBlocked, 1, 'CLI 回放必须判出「今天会被红线拦住」这一条');
+      assert.equal(rJson114.status, 1, '有步骤今天会被红线拦住时退出码必须为 1（门禁语义）');
+
+      // 同一份账本，人读输出也必须出现红线（--json 是分支，不是替代）
+      const rText114 = runCli114(['ledger', 'replay', id114]);
+      assert.ok(/no-fetch-internal|今天会被红线拦住/.test(rText114.stdout), `人读回放必须点出被拦与红线 id，实际：${String(rText114.stdout).slice(0, 200)}`);
+    }
+
+    // ③ P1-2：confirm 是合法 kind，但引擎从不求值 → 红线静默消失
+    {
+      const mk = (list) => CON.compileConstraints(list.map((c) => ({ pack: 'p', ...c })));
+      const hit = CON.checkPreTool(mk([{ id: 'need-human', kind: 'confirm', tool: 'write' }]), 'write', { path: 'a.txt' });
+      assert.equal(hit?.needsConfirm, true, 'confirm 命中时必须声明「需要人工确认」（原实现：落到 output 桶后被 `kind !== output-forbid` 跳过，永不求值）');
+      assert.equal(hit?.blocked, false, 'confirm 不是直接阻断——要留出「问到人再决定」的机会');
+      assert.ok(/need-human/.test(String(hit?.reason)), '理由必须点明是哪条约束在要求确认');
+      assert.equal(CON.checkPreTool(mk([{ id: 'need-human', kind: 'confirm', tool: 'write' }]), 'read', {}), null, '不匹配的工具不得要求确认');
+      // 顺序陷阱：confirm 声明在 tool-deny 之前时**绝不能**把 deny 遮住
+      const ordered = CON.checkPreTool(mk([{ id: 'z-confirm', kind: 'confirm', tool: 'bash' }, { id: 'a-deny', kind: 'tool-deny', tool: 'bash' }]), 'bash', {});
+      assert.equal(ordered?.blocked, true, 'confirm 必须排在阻断类之后求值：否则「confirm 写在 tool-deny 前面」等于给红线开后门');
+      assert.equal(ordered?.event?.id, 'a-deny', '应当由 tool-deny 给出结论');
+      // 装载校验：confirm 缺 tool 时 toolMatches 恒 false（红线静默不存在）→ 必须装载即拒绝
+      const badPack = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-badpack114-'));
+      try {
+        fs.writeFileSync(
+          path.join(badPack, 'pack.json'),
+          JSON.stringify({ apiVersion: 1, name: 'badpack114', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.7' }, contributes: { constraints: true } })
+        );
+        fs.writeFileSync(
+          path.join(badPack, 'pack.mjs'),
+          'export const apiVersion = 1;\nexport function createPack() {\n  return { constraints: [{ id: "c-no-tool", kind: "confirm" }] };\n}\n'
+        );
+        const loaded = await PACKS.loadPack(badPack, { coreVersion: '0.6.3' });
+        assert.equal(loaded.ok, false, 'confirm 缺 tool 必须装载失败（否则它是一条永不命中的红线）');
+        assert.ok(loaded.errors.join(' ').includes('tool'), `拒绝理由要点明缺 tool，实际：${JSON.stringify(loaded.errors)}`);
+      } finally {
+        safeRmSync(badPack, { recursive: true, force: true });
+      }
+      // 端到端：权限放行之后仍要人工确认；答否 → 不执行；答允 → 执行
+      const dir114 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-confirm114-'));
+      try {
+        const mkAgent = (answer) => {
+          // 每个 agent 一个**独立**的回合计数：共用计数会让第二次运行直接走到收尾，
+          // 于是「答允后应执行」这条断言与 confirm 行为无关地失败（第一版就这么写的）。
+          let call114 = 0;
+          const fake114 = {
+            async chat() {
+              call114 += 1;
+              if (call114 === 1) {
+                return { text: '', toolCalls: [{ id: 'w1', type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: 'confirmed.txt', content: 'ok' }) } }], usage: { prompt_tokens: 3, completion_tokens: 2 }, finish: 'tool_calls' };
+              }
+              return { text: '完成', toolCalls: null, usage: { prompt_tokens: 3, completion_tokens: 2 }, finish: 'stop' };
+            },
+          };
+          const io = createIO({ quiet: true });
+          let asked = 0;
+          io.confirm = async () => {
+            asked += 1;
+            return answer;
+          };
+          return {
+            asked: () => asked,
+            agent: createAgent({
+              provider: fake114,
+              permission: { async check() { return true; } }, // auto 档：权限已放行
+              io,
+              modelName: 'deepseek-v4-flash',
+              workingDir: dir114,
+              cfg: { permission: 'auto' },
+              constraints: [{ id: 'need-human', kind: 'confirm', tool: 'write' }],
+              maxSteps: 5,
+            }),
+          };
+        };
+        const deny114 = mkAgent(false);
+        await deny114.agent.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: '写文件' }]);
+        assert.equal(deny114.asked(), 1, 'confirm 约束必须在权限放行之后仍然问一次（auto 档也要问）');
+        assert.ok(!fs.existsSync(path.join(dir114, 'confirmed.txt')), '未获确认时**绝不执行**（fail-closed）');
+        const allow114 = mkAgent(true);
+        await allow114.agent.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: '写文件' }]);
+        assert.ok(fs.existsSync(path.join(dir114, 'confirmed.txt')), '确认后应正常执行（不能把 confirm 变成一律阻断）');
+      } finally {
+        safeRmSync(dir114, { recursive: true, force: true });
+      }
+    }
+
+    // ④ M-21：失败路径的退出码。打印一行错误却退 0，脚本/CI 会把失败读成成功。
+    {
+      const cases = [
+        [['ledger', 'verify', '../../etc/passwd'], 'ledger verify 非法 runId'],
+        [['ledger', 'bogus-sub'], 'ledger 未知子命令'],
+        [['key', 'bogus-sub'], 'key 未知子命令'],
+        [['net', 'bogus-sub'], 'net 未知子命令'],
+      ];
+      for (const [argv, label] of cases) {
+        const r = runCli114(argv);
+        assert.equal(r.status, 1, `${label} 必须退 1（原实现打印用法/错误后退 0），实际 status=${r.status} stdout=${String(r.stdout).slice(0, 120)}`);
+      }
+      // 诊断包生成失败（把 MINGDAO_HOME 指到一个「父级是文件」的路径 → mkdir 必失败）
+      const blockedParent = path.join(home114, 'not-a-dir');
+      fs.writeFileSync(blockedParent, 'x');
+      const rDiag = runCli114(['diagnose'], { MINGDAO_HOME: path.join(blockedParent, 'sub') });
+      assert.equal(rDiag.status, 1, `诊断包写不出来时必须退 1（原实现打印 [错误] 后退 0），实际 status=${rDiag.status} stdout=${String(rDiag.stdout).slice(0, 120)}`);
+      assert.ok(/错误/.test(String(rDiag.stdout)), '应仍然打印可读的错误信息');
+    }
+  } finally {
+    if (prevHome114 === undefined) delete process.env.MINGDAO_HOME;
+    else process.env.MINGDAO_HOME = prevHome114;
+    safeRmSync(home114, { recursive: true, force: true });
+  }
+  ok('v0.6.3 批三 合规静默失效：约束事件带 id + confirm 真正求值 + replay 挂 Pack 与 --json + 失败退出码');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

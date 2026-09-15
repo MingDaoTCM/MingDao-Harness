@@ -904,6 +904,25 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           // v0.5.0 A3 ①：领域约束（PreToolUse）——权限放行之后、执行之前强制。
           // 与权限引擎的分工：权限回答「用户是否允许」，约束回答「领域是否允许」；两者都通过才执行。
           const cv = checkPreTool(constraints, name, args);
+          // v0.6.3（P1-2）：confirm 类约束——权限放行之后**仍要人工确认**。
+          // 它存在的意义正是「权限档位是 auto 时也要问一次」；拿不到确认通道（非交互：
+          // -p / 调度 / 子 Agent）或用户答否，一律按阻断处理，与权限引擎在同一情形下的
+          // 「按拒绝处理」保持同一口径（fail-closed，见下方 permission.check 的 catch）。
+          let confirmFailure = /** @type {string|null} */ (null);
+          if (cv?.needsConfirm) {
+            let granted = false;
+            try {
+              granted = await io.confirm(`【领域约束】${cv.reason}。是否继续执行？(y/N)`);
+            } catch {
+              granted = false;
+            }
+            if (granted) {
+              if (auditOn) auditEntry({ confirmRequired: true, granted: true, reason: cv.reason });
+              turnLedger.permission({ name, mode: permission?.mode ?? cfg.permission ?? null, decision: 'confirm-granted', source: 'constraint.confirm', rule: cv.event?.id ?? null });
+            } else {
+              confirmFailure = `领域约束「${cv.event?.id ?? ''}」要求人工确认，未获确认（拒绝或当前环境无法交互）——已按 fail-closed 阻止执行`;
+            }
+          }
           // v0.6.0 C1：工具调用事件——参数留「脱敏明细 + 原文指纹」两份，指纹用于比对/防篡改；
           // 权限与约束**两者都记**：受监管场景要能回答「权限放行了，但领域红线拦住了」这类问题。
           turnLedger.toolCall({
@@ -913,15 +932,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             rawArgs: args,
             args,
             permission: { decision: 'allow', source: 'permission.check' },
-            constraint: cv?.blocked ? { blocked: true, id: cv.event?.id ?? null, kind: cv.event?.kind ?? null } : null,
+            constraint: cv?.blocked || confirmFailure ? { blocked: true, id: cv?.event?.id ?? null, kind: cv?.event?.kind ?? null } : null,
           });
-          if (cv?.blocked) {
-            io.renderToolDenied(name, args, cv.reason);
-            if (auditOn) auditEntry({ denied: true, reason: cv.reason });
-            auditConstraint(cv.event);
+          if (cv?.blocked || confirmFailure) {
+            const reason = confirmFailure ?? cv?.reason ?? '领域约束拦截';
+            io.renderToolDenied(name, args, reason);
+            if (auditOn) auditEntry({ denied: true, reason });
+            if (cv?.event) auditConstraint(cv.event);
             // 被约束拦下的调用不会有 tool.result，这里补一条终态，避免账本出现「只有调用没有结果」的悬空步
             turnLedger.toolResult({ callId: tc.id, name, ok: false, blocked: true, ms: 0, error: '领域约束拦截' });
-            messages.push({ role: 'tool', tool_call_id: tc.id, content: `【领域约束】${cv.reason}` });
+            messages.push({ role: 'tool', tool_call_id: tc.id, content: `【领域约束】${reason}` });
             return null;
           }
           return { tc, name, args, isMcp };

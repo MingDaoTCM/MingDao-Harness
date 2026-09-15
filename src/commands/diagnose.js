@@ -112,6 +112,9 @@ export async function handleDiagnose(/** @type {any} */ _cmd, /** @type {any} */
     io.print(style('请把该文件内容贴到反馈渠道排查；密钥/token/私网路径已脱敏。', C.dim));
   } catch (/** @type {any} */ err) {
     io.print(style('[错误] ' + (err?.message || err), C.red));
+    // v0.6.3（M-21）：诊断包生成失败必须体现在退出码上——脚本化收集诊断信息时
+    // 「打印了错误但退 0」会让调用方以为拿到了报告。
+    process.exitCode = 1;
   } finally {
     io.close();
   }

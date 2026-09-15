@@ -14,17 +14,33 @@ import { createIO, style, C } from '../ui.js';
 import { listRuns, readRun, verifyRun, exportRun, isValidRunId, ledgerDir } from '../ledger.js';
 import { replayRun, renderReplay, KIND } from '../replay.js';
 import { loadConfig } from '../config.js';
-import { getActivePackContext } from '../packs.js';
+import { getActivePackContext, mountPacks } from '../packs.js';
+
+/** 用法串：未知子命令与用法提示共用一份，避免两处漂移 */
+const USAGE = '用法：mingdao ledger list [数量] | show <runId> | export <runId> [--format json|md] [--out 文件] | verify <runId> | replay <runId> [--json]';
+const KNOWN_SUBS = new Set(['list', 'show', 'verify', 'replay', 'export']);
 
 /** @param {any} cmd @param {any} args */
 export async function handleLedger(cmd, args) {
   const io = createIO();
   const sub = args[0] || 'list';
   const rest = args.slice(1);
+  // v0.6.3（M-21）：未知子命令此前会一路走到函数末尾「打印用法并退 0」，脚本/CI 无法与
+  // 「命令成功」区分。这里**先**判子命令——顺序很重要：放在 runId 解析之后会被
+  // 「runId 格式不合法」分支抢先命中，于是同样的输入有时退 1、有时退 0。
+  if (!KNOWN_SUBS.has(sub)) {
+    io.print(USAGE);
+    process.exitCode = 1;
+    return true;
+  }
   const flag = (/** @type {string} */ name, /** @type {any} */ dflt = null) => {
     const i = rest.indexOf(name);
     return i >= 0 && rest[i + 1] ? rest[i + 1] : dflt;
   };
+  // v0.6.3（M-12）：布尔开关必须与「取值型参数」分开解析。
+  // 原实现只有上面的取值型 `flag()`：`--json` 写在末尾时取不到「下一个值」→ 返回 null →
+  // `ledger replay <id> --json` 恒走人读分支，`| jq` 直接失败（而且失败得很安静）。
+  const boolFlag = (/** @type {string} */ name) => rest.includes(name);
   // 位置参数：排除掉 --xxx 及其取值
   const positional = rest.filter((/** @type {any} */ a, /** @type {number} */ i) => !String(a).startsWith('--') && !String(rest[i - 1] || '').startsWith('--'));
 
@@ -54,11 +70,15 @@ export async function handleLedger(cmd, args) {
   }
   if (!isValidRunId(runId)) {
     io.print(`runId 格式不合法：${runId}（形如 mtx16g3y-628443）`);
+    // v0.6.3（M-21）：凡是「用户要求的事没做成」，退出码必须是 1。
+    // 此前 `ledger verify <乱写的 id>` 会打印一行错误然后退 0，CI 拿它当门禁即假通过。
+    process.exitCode = 1;
     return true;
   }
   const events = readRun(runId);
   if (!events.length) {
     io.print(`没有找到账本 ${runId}。用 mingdao ledger list 查看现有账本。`);
+    process.exitCode = 1;
     return true;
   }
 
@@ -92,7 +112,20 @@ export async function handleLedger(cmd, args) {
     // 当前规则栈：显式配置的 constraints 优先，否则取进程级已挂载的 Pack 约束；
     // 权限取 config.permission（缺省 ask）。回放**不联网、无副作用**。
     const cfg = loadConfig() || {};
+    // v0.6.3（P1-12）：CLI 的命令分发发生在 cli.js 的 mountPacks **之前**，因此
+    // `getActivePackContext()` 在这里恒为 null → constraints=[] → compiled.active=false →
+    // 回放恒输出「当前没有任何生效的领域约束」，**恒通过**。把它当 CI 门禁时是静默假阴性。
+    // 与启动路径同口径地挂一次 Pack（幂等），让「新红线能不能拦住历史操作」这个问题
+    // 在 CLI 下真正有答案。
+    if (!Array.isArray(cfg.constraints) && !getActivePackContext()) {
+      try {
+        await mountPacks(cfg, { cwd: process.cwd() });
+      } catch (/** @type {any} */ e) {
+        io.print(style(`⚠ Pack 挂载失败，本次回放将看不到 Pack 约束：${e?.message || e}`, C.yellow));
+      }
+    }
     const currentConstraints = Array.isArray(cfg.constraints) ? cfg.constraints : getActivePackContext()?.constraints ?? [];
+    const asJson = boolFlag('--json');
     const r = replayRun(runId, { constraints: currentConstraints, permission: cfg.permission ?? 'ask' });
     if (r.error || !r.summary) {
       io.print(String(r.error ?? '回放失败'));
@@ -100,7 +133,7 @@ export async function handleLedger(cmd, args) {
       return true;
     }
     const summary = r.summary;
-    if (flag('--json')) {
+    if (asJson) {
       io.print(JSON.stringify({ runId: r.runId, summary, steps: r.steps, notes: r.notes }, null, 2));
     } else {
       io.print(renderReplay(r).trimEnd());
@@ -108,7 +141,7 @@ export async function handleLedger(cmd, args) {
     // 非零退出码让它能当门禁用：CI 里「新红线必须能拦住历史上那批操作」就是这个断言
     if (summary.nowBlocked > 0) {
       process.exitCode = 1;
-      if (!flag('--json')) io.print(style(`\n↑ 有 ${summary.nowBlocked} 步今天会被红线拦住：若这正是新红线的目的，回放通过；否则说明规则收得过紧。`, C.yellow));
+      if (!asJson) io.print(style(`\n↑ 有 ${summary.nowBlocked} 步今天会被红线拦住：若这正是新红线的目的，回放通过；否则说明规则收得过紧。`, C.yellow));
     }
     return true;
   }
@@ -117,11 +150,13 @@ export async function handleLedger(cmd, args) {
     const format = String(flag('--format', 'json'));
     if (format !== 'json' && format !== 'md') {
       io.print('--format 只支持 json 或 md');
+      process.exitCode = 1;
       return true;
     }
     const r = exportRun(runId, { format });
     if (r.error) {
       io.print(r.error);
+      process.exitCode = 1;
       return true;
     }
     const out = flag('--out');
@@ -140,6 +175,9 @@ export async function handleLedger(cmd, args) {
     return true;
   }
 
+  // v0.6.3（M-21）：未知子命令此前静默落到「打印用法并退 0」——CI/脚本无法区分
+  // 「用法提示」与「命令成功」。这是退出码语义的静默失效，明确退 1。
   io.print('用法：mingdao ledger list [数量] | show <runId> | export <runId> [--format json|md] [--out 文件] | verify <runId> | replay <runId> [--json]');
+  process.exitCode = 1;
   return true;
 }

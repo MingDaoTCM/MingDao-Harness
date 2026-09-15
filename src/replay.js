@@ -24,6 +24,7 @@ const KIND = {
   NOW_DENIED: 'now-denied', // 当时允许、今天的权限规则会拒
   STILL_BLOCKED: 'still-blocked', // 当时被拦、今天仍被拦
   RELAXED: 'relaxed', // 当时被拦、今天放行（规则放宽，同样值得复核）
+  CONFIRM: 'confirm-required', // v0.6.3：今天的 confirm 红线要求人工确认——回放没有交互通道，只能如实报告
   UNCHANGED: 'unchanged',
 };
 
@@ -46,6 +47,9 @@ export function replayRun(/** @type {any} */ runId, { constraints = [], permissi
     // 今天的约束判定（零约束时 compiled.active=false，checkPreTool 直接返回空 —— 不制造假结论）
     const cv = compiled.active ? checkPreTool(compiled, e.name, args) : null;
     const nowBlocked = cv?.blocked === true;
+    // v0.6.3（P1-2）：confirm 类红线在回放里**答不了**（回放无副作用、无交互通道），
+    // 因此既不算 blocked 也不算放行：单列一类如实报告，避免「今天要人工确认」被静默读成「今天通过」。
+    const needsConfirm = cv?.needsConfirm === true;
     const pv = evaluatePermission(permission, e.name, args);
     const nowDenied = pv.decision === 'deny';
 
@@ -54,6 +58,7 @@ export function replayRun(/** @type {any} */ runId, { constraints = [], permissi
     else if (nowDenied && !wasDenied) kind = KIND.NOW_DENIED;
     else if (nowBlocked && wasBlocked) kind = KIND.STILL_BLOCKED;
     else if (!nowBlocked && wasBlocked) kind = KIND.RELAXED;
+    else if (needsConfirm) kind = KIND.CONFIRM;
 
     return {
       index: i + 1,
@@ -62,7 +67,7 @@ export function replayRun(/** @type {any} */ runId, { constraints = [], permissi
       pack: e.pack ?? null,
       argsDigest: e.argsDigest ?? null,
       then: { permission: e.permission?.decision ?? null, blocked: wasBlocked, constraintId: e.constraint?.id ?? null },
-      now: { permission: pv.decision, permissionReason: pv.reason, permissionRule: pv.rule, blocked: nowBlocked, constraintId: cv?.event?.id ?? null, constraintReason: cv?.reason ?? null },
+      now: { permission: pv.decision, permissionReason: pv.reason, permissionRule: pv.rule, blocked: nowBlocked, needsConfirm, constraintId: cv?.event?.id ?? null, constraintReason: cv?.reason ?? null },
       kind,
     };
   });
@@ -74,12 +79,16 @@ export function replayRun(/** @type {any} */ runId, { constraints = [], permissi
     nowDenied: count(KIND.NOW_DENIED),
     stillBlocked: count(KIND.STILL_BLOCKED),
     relaxed: count(KIND.RELAXED),
+    needsConfirm: count(KIND.CONFIRM),
     unchanged: count(KIND.UNCHANGED),
   };
 
   const notes = [];
   if (!compiled.active) {
     notes.push('当前没有任何生效的领域约束（未挂载 Pack 或未配置 constraints）——因此不可能出现「被红线拦住」的结果，本次回放只能证明这一点。');
+  }
+  if (summary.needsConfirm > 0) {
+    notes.push(`${summary.needsConfirm} 步今天落在 confirm 类红线上：这类约束要求**人工确认**，回放没有交互通道，因此既不算「被拦」也不算「通过」——请人工复核这些步骤（退出码不会因它变化）。`);
   }
   if (steps.length && start?.permission && start.permission !== (typeof permission === 'string' ? permission : permission?.mode)) {
     notes.push(`账本记录的是 ${start.permission} 档权限，本次按 ${typeof permission === 'string' ? permission : permission?.mode} 档重判——差异可能来自权限档位变化，而不只是规则变化。`);
@@ -99,13 +108,14 @@ export function renderReplay(/** @type {any} */ r) {
     [KIND.NOW_DENIED]: '🔑 今天的权限规则会拒',
     [KIND.STILL_BLOCKED]: '⛔ 当时与今天都被拦',
     [KIND.RELAXED]: '⚠ 当时被拦、今天放行',
+    [KIND.CONFIRM]: '✋ 今天需人工确认',
     [KIND.UNCHANGED]: '· 无变化',
   };
   lines.push(`# 决策回放 ${r.runId}`);
   lines.push('');
   lines.push(`- 记录时的模型：${r.recordedModel ?? '—'}`);
   lines.push(`- 工具调用：${r.summary.total} 步`);
-  lines.push(`- 差异：今天会被红线拦住 ${r.summary.nowBlocked} · 今天会被权限拒绝 ${r.summary.nowDenied} · 仍被拦 ${r.summary.stillBlocked} · 放宽 ${r.summary.relaxed} · 无变化 ${r.summary.unchanged}`);
+  lines.push(`- 差异：今天会被红线拦住 ${r.summary.nowBlocked} · 今天会被权限拒绝 ${r.summary.nowDenied} · 仍被拦 ${r.summary.stillBlocked} · 放宽 ${r.summary.relaxed} · 需人工确认 ${r.summary.needsConfirm ?? 0} · 无变化 ${r.summary.unchanged}`);
   lines.push('');
   lines.push('| # | 工具 | 当时 | 今天 | 结论 |');
   lines.push('| --- | --- | --- | --- | --- |');
@@ -121,7 +131,9 @@ export function renderReplay(/** @type {any} */ r) {
       ? s.now.constraintReason
       : s.kind === KIND.NOW_DENIED
         ? `权限判定：${s.now.permission}（${s.now.permissionReason}${s.now.permissionRule ? '，规则 ' + s.now.permissionRule : ''}）`
-        : '当时被拦，今天的规则下会放行';
+        : s.kind === KIND.CONFIRM
+          ? `${s.now.constraintReason}——回放无法代替人工确认，请人工复核该步骤`
+          : '当时被拦，今天的规则下会放行';
     lines.push(`- 第 ${s.index} 步 ${s.name}：${detail ?? ''}`);
   }
   lines.push('');

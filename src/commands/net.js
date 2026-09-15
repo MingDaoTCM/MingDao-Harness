@@ -24,7 +24,9 @@ function parseSince(/** @type {any} */ v) {
 /** @param {any} cmd @param {any} args */
 export async function handleNet(cmd, args) {
   const io = createIO();
-  const sub = args[0] || 'report';
+  // `mingdao net --json` 这类「只给开关、没给子命令」的调用此前会把 `--json` 当成子命令，
+  // 于是一个合法调用反而落到用法提示；以 `-` 开头的参数一律视为 report 的开关。
+  const sub = args[0] && !String(args[0]).startsWith('-') ? args[0] : 'report';
   const cfg = loadConfig() || {};
 
   if (sub === 'policy') {
@@ -81,6 +83,8 @@ export async function handleNet(cmd, args) {
     return true;
   }
 
+  // v0.6.3（M-21）：未知子命令此前打印用法后**退 0**，脚本/CI 无法与「成功」区分。
   io.print('用法：mingdao net report [--since 7d|24h|90m] [--json] | mingdao net policy');
+  process.exitCode = 1;
   return true;
 }

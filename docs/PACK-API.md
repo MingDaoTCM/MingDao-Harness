@@ -219,17 +219,34 @@ export function createPack(ctx) {
 
 | 时机 | 可用的 kind | 行为 |
 | --- | --- | --- |
-| PreToolUse | `tool-deny`、`tool-arg-require`、`arg-forbid` | 命中即阻止执行，回填工具错误给模型，写审计 |
+| PreToolUse | `tool-deny`、`tool-arg-require`、`arg-forbid`、`confirm` | 前三个命中即阻止执行，回填工具错误给模型，写审计；`confirm` 见下方说明 |
 | PostToolUse | `completeness`、`result-forbid` | `completeness` 缺项 → 拒绝该工具结果，要求模型补采；`result-forbid` → 屏蔽结果并提示 |
 | 输出前 | `output-forbid`、`require-citation` | 命中 → 按 `action` 处理：`block`（改为固定合规文案）/ `block-and-rewrite`（再请求一次修正）/ `warn`（放行并标注） |
+
+**`confirm`（v0.6.3 起真正求值）**：即使在 `auto` 权限档位下，命中的工具调用也**必须**先得到人工确认才执行
+——它的存在意义正是「权限已经放行，领域还要再问一次」。两种情形一律按 fail-closed 阻止：
+
+- 用户答否；
+- 当前环境**无法交互**（`-p` 单次提问、调度任务、子 Agent 等）——拿不到确认即不执行，
+  与权限引擎在同类情形下「按拒绝处理」保持同一口径。
+
+求值顺序上，`tool-deny` / `tool-arg-require` / `arg-forbid` **永远先于** `confirm`，
+因此把 `confirm` 写在 `tool-deny` 之前不会遮住后者。
+
+> `confirm` 在 v0.5.0–v0.6.2 之间是 `KINDS` 里的一个字符串：能通过装载校验、会被计入约束条数
+> （于是 `active=true`），但引擎里没有任何一处求值它——作者以为「这条工具要人工确认」，实际零效果。
+> 这是「红线静默消失」，与本文档的 fail-closed 声明相反；v0.6.3 补齐实现并补了回归断言。
 
 约束事件统一结构（进执行账本）：
 
 ```jsonc
-{ "at": 1757…, "pack": "tcm", "constraint": "no-diagnosis-conclusion",
+{ "at": 1757…, "id": "no-diagnosis-conclusion", "pack": "tcm", "constraint": "no-diagnosis-conclusion",
   "kind": "output-forbid", "stage": "pre-output", "action": "block-and-rewrite",
   "matched": "好转", "session": "…", "model": "deepseek-v4-flash" }
 ```
+
+> `id` 自 v0.6.3 起写入事件。此前事件只有 `constraint` 字段，而账本与回放两处消费方都读 `id`，
+> 于是「是哪条红线拦的」在账本里恒为 `null`——不报错、只输出 null，任何断言都不会失败。
 
 **字段要求（v0.6.0 起在装载时强制校验，写错不会静默失效）**
 
@@ -241,6 +258,7 @@ export function createPack(ctx) {
 | `output-forbid` | `pattern`、`action` | 同上 |
 | `result-forbid` | `tool`、`pattern` | 同上 |
 | `completeness` | `tool`、`fields[]` | |
+| `confirm` | `tool` | 无 `tool` 的 `confirm` 在 `toolMatches` 里恒不命中，等于红线不存在，故装载即拒绝 |
 
 **pattern 写错会怎样（这一条值得单独读）**：v0.5.0 的行为是**静默放行**——
 `arg-forbid` 给一个非法正则时求值失败、`re` 为 null，红线**永不命中**且不进 `invalid` 列表，

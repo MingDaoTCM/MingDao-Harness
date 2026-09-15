@@ -105,7 +105,10 @@ export async function handleKey(/** @type {any} */ cmd, /** @type {any} */ args)
       }
       if (!count) io.print('没有可导入的环境变量（如 DEEPSEEK_API_KEY）。');
     } else {
+      // v0.6.3（M-21）：未知子命令此前打印用法后**退 0**——`mingdao key setx …` 会被
+      // 脚本当成「设置成功」。用法提示与失败同码是退出码语义的静默失效。
       io.print('用法：mingdao key [status|set <服务商> [key]|remove <服务商>|import]');
+      process.exitCode = 1;
     }
   } finally {
     io.close();

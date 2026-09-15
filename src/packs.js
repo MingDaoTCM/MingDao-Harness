@@ -350,7 +350,9 @@ function validateConstraint(c, i) {
   if (!c || typeof c !== 'object' || Array.isArray(c)) return `${tag} 必须是对象`;
   if (typeof c.id !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(c.id)) return `${tag}.id 非法（需 [A-Za-z0-9_-]，≤64）`;
   if (!CONSTRAINT_KINDS.has(c.kind)) return `${tag}.kind 非法（允许：${[...CONSTRAINT_KINDS].join(' / ')}）`;
-  if (c.kind === 'tool-deny' || c.kind === 'tool-arg-require' || c.kind === 'arg-forbid' || c.kind === 'completeness') {
+  if (c.kind === 'tool-deny' || c.kind === 'tool-arg-require' || c.kind === 'arg-forbid' || c.kind === 'completeness' || c.kind === 'confirm') {
+    // confirm 也必须带 tool：engine 的 toolMatches 对「无 tool」返回 false，
+    // 于是「忘了写 tool 的 confirm」会变成一条永不命中的红线——正是本仓反复强调的静默失效。
     if (typeof c.tool !== 'string' || !c.tool.trim()) return `${tag}（${c.kind}）需要 tool 字段`;
   }
   if (c.kind === 'tool-arg-require' && (typeof c.requireArg !== 'string' || !c.requireArg.trim())) {

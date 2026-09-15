@@ -5,6 +5,8 @@
 // 而 prompt 是建议不是强制——模型越界一次就是事故。本模块提供三个执行时机：
 //
 //   ① PreToolUse  —— tool-deny / tool-arg-require / arg-forbid：阻止执行并回填错误给模型
+//                    confirm：**即使权限档位是 auto 也要人工确认**（v0.6.3 起真正求值，
+//                    此前它只是 KINDS 里的一个字符串，永远不会被求值——红线静默消失）
 //   ② PostToolUse —— completeness / result-forbid：拒绝工具结果并要求补采
 //   ③ 输出前       —— output-forbid：按 action（block / block-and-rewrite / warn）处理
 //
@@ -180,7 +182,7 @@ export function compileConstraints(list) {
       continue;
     }
     n += 1;
-    if (c.kind === 'tool-deny' || c.kind === 'tool-arg-require' || c.kind === 'arg-forbid') pre.push(c);
+    if (c.kind === 'tool-deny' || c.kind === 'tool-arg-require' || c.kind === 'arg-forbid' || c.kind === 'confirm') pre.push(c);
     else if (c.kind === 'completeness' || c.kind === 'result-forbid') post.push(c);
     else output.push(c);
   }
@@ -205,6 +207,11 @@ export function compileConstraints(list) {
  */
 function event(c, stage, extra = {}) {
   return {
+    // v0.6.3（P1-1）：事件必须自带 `id`。此前只有 `constraint`，而**两个**消费方都读 `id`
+    // （agent.js 的账本 `tool.call.constraint.id`、replay.js 的 `constraintId`），
+    // 于是每次被红线拦下，账本里「是哪条红线拦的」恒为 null——不报错、只输出 null，
+    // 任何断言都不会失败。`constraint` 保留，兼容既有事件消费方与历史账本。
+    id: c?.id || null,
     pack: c?.pack || null,
     constraint: c?.id || null,
     kind: c?.kind || null,
@@ -216,12 +223,15 @@ function event(c, stage, extra = {}) {
 /**
  * ① PreToolUse：工具与参数层面的红线。
  * @param {any} compiled @param {any} toolName @param {any} args
- * @returns {{ blocked: boolean, reason: string, event: any } | null}
+ * @returns {{ blocked: boolean, needsConfirm?: boolean, reason: string, event: any } | null}
  */
 export function checkPreTool(compiled, toolName, args) {
   if (!compiled?.active) return null;
   try {
+    // 第一遍：**阻断类**。confirm 必须留到第二遍——否则「confirm 声明在 tool-deny 之前」
+    // 会让 confirm 先返回、后面的 deny 再也走不到，等于给红线开了后门（fail-open）。
     for (const c of compiled.pre) {
+      if (c.kind === 'confirm') continue;
       if (!toolMatches(c, toolName)) continue;
       if (c.kind === 'tool-deny') {
         return { blocked: true, reason: `领域约束「${c.id}」禁止调用 ${c.tool}`, event: event(c, 'pre-tool', { action: 'block' }) };
@@ -256,6 +266,20 @@ export function checkPreTool(compiled, toolName, args) {
           };
         }
       }
+    }
+    // 第二遍：confirm（v0.6.3 / P1-2）。本函数是纯函数、拿不到 IO，因此只**声明**
+    // 「这次调用需要人工确认」，由调用方（agent.js）去问；问不到/答否一律按阻断处理。
+    // 返回 `blocked:false` 而非 `blocked:true`，是为了让调用方能区分
+    // 「规则直接禁止」与「规则要求先确认」两种情况，回填给模型的措辞也不同。
+    for (const c of compiled.pre) {
+      if (c.kind !== 'confirm') continue;
+      if (!toolMatches(c, toolName)) continue;
+      return {
+        blocked: false,
+        needsConfirm: true,
+        reason: `领域约束「${c.id}」要求人工确认后才可调用 ${c.tool}`,
+        event: event(c, 'pre-tool', { action: 'confirm' }),
+      };
     }
     return null;
   } catch (/** @type {any} */ err) {
