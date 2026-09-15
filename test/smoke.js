@@ -6883,7 +6883,7 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
       'config.js': { n: 1, why: '原子写之后的 chmod 收权：创建时已带 0600，收权失败不影响内容' },
       'credentials.js': { n: 1, why: '同上：密钥文件创建时即 0600，chmod 失败不影响内容与权限' },
       'ledger.js': { n: 1, why: '账本 chmod 收权 / 轮转删除旧文件：失败只影响权限或占用空间，不产生错误数据' },
-      'log-writer.js': { n: 3, why: '日志是 best-effort（设计如此，绝不抛错）+ 两处 chmod 收权' },
+      'log-writer.js': { n: 4, why: '日志是 best-effort（设计如此，绝不抛错）+ 两处 chmod 收权 + 改名式轮转后用 wx 建空文件（并发写入者可能已先建好，EEXIST 属正常竞争，不该让整次日志写入失败）' },
       'memory.js': { n: 2, why: '备份复制失败（主写入仍在，失败会如实返回 0）/ journal 轮转失败（只增长）' },
       'model-discovery.js': { n: 1, why: '模型列表缓存写入失败：缓存可按需重建，不是权威数据' },
       'net-guard.js': { n: 1, why: '出网日志写入失败：返回值本身已如实反映判定结果，且账本另有 net.egress 事件' },
@@ -7643,7 +7643,8 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
     // 与"静默吞写白名单"同款做法——把残留变成清单，而不是靠人记。
     {
       const ALLOWED_SYNC_LOCKS = {
-        'cachestats.js': { n: 1, why: '锁只在 cache-stats 超过 4MB 触发轮转时取；追加本身不加锁' },
+        'cachestats.js': { n: 1, why: 'v0.6.3（BUG-009）起追加与轮转在同一把锁内（原为锁外追加，B 的行会被 A 的轮转覆盖）；写入频率是"每回合一条"，不在请求热路径上' },
+        'audit.js': { n: 1, why: 'v0.6.3（M-20）起追加与轮转在同一把锁内——审计是合规证据，丢一行等于证据链有洞；写入频率是"每工具调用一条"' },
         'schedule.js': { n: 12, why: '调度守护进程内部（阻塞只推迟定时任务，不冻结用户请求）；且这些函数是纯同步读-改-写链' },
         'sync.js': { n: 1, why: 'CLI 一次性命令（进程很快就退出），且调用链全同步' },
         'tasks.js': { n: 1, why: 'patchTask 的状态读-改-写（已把进程操作移出临界区，实测毫秒级）' },
@@ -8335,6 +8336,245 @@ const isPosix111 = process.platform !== 'win32';
     safeRmSync(home114, { recursive: true, force: true });
   }
   ok('v0.6.3 批三 合规静默失效：约束事件带 id + confirm 真正求值 + replay 挂 Pack 与 --json + 失败退出码');
+}
+
+// ---------- 115. v0.6.3 批四：静默数据损失（写下去了，但别人那一行没了 / 覆盖了用户的配置） ----------
+{
+  const CFG = await import(pathToFileURL(path.join(srcDir, 'config.js')).href);
+  const SESS = await import(pathToFileURL(path.join(srcDir, 'session.js')).href);
+  const CACHE = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+  const AUDIT = await import(pathToFileURL(path.join(srcDir, 'audit.js')).href);
+  const { spawn } = await import('node:child_process');
+  const atomicUrl = pathToFileURL(path.join(srcDir, 'atomic-write.js')).href;
+  const prevHome115 = process.env.MINGDAO_HOME;
+  const home115 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-batch4-'));
+  process.env.MINGDAO_HOME = home115;
+
+  // 起一个"持锁不放"的子进程，用来证明**追加确实在锁内**：
+  //   · 修好后：父进程的追加会等锁（实测等待 ≥ 数百毫秒）；
+  //   · 修好前（锁外追加）：追加立刻成功、等待 ≈0 —— 正是丢失窗口的来源。
+  // 用真实子进程而不是同进程模拟，是因为要验的恰好是**跨进程**互斥。
+  const holdLockFor = (lockPath, ms) =>
+    new Promise((resolve, reject) => {
+      const script = `import { withFileLockSync } from ${JSON.stringify(atomicUrl)};
+withFileLockSync(${JSON.stringify(lockPath)}, () => {
+  process.stdout.write('held\\n');
+  const t = Date.now();
+  while (Date.now() - t < ${Number(ms)}) {}
+});`;
+      const child = spawn(process.execPath, ['--input-type=module', '-e', script], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+      let out = '';
+      let err = '';
+      child.stdout.on('data', (d) => {
+        out += String(d);
+        if (out.includes('held')) resolve(child);
+      });
+      child.stderr.on('data', (d) => (err += String(d)));
+      child.on('error', reject);
+      child.on('close', (code) => {
+        if (!out.includes('held')) reject(new Error(`持锁子进程未拿到锁（exit=${code}）：${err.slice(0, 300)}`));
+      });
+      setTimeout(() => reject(new Error(`持锁子进程 ${ms}ms 内没有回 'held'：${err.slice(0, 300)}`)), ms + 15000).unref?.();
+    });
+  const waitClose = (child) => new Promise((res) => child.on('close', res));
+
+  try {
+    // ① H-7：配置「不存在」与「损坏」必须可区分，且损坏时**先备份再写**，不许静默整文件覆盖
+    {
+      const cfgFile = path.join(home115, 'config.json');
+      // (a) BOM：内容完全合法的 JSON + 文件头 BOM，此前被 JSON.parse 判为"损坏=不存在"
+      fs.writeFileSync(cfgFile, '\uFEFF' + JSON.stringify({ provider: 'deepseek', model: 'x', customModels: { local: {} }, mcpServers: { a: {} } }, null, 2));
+      const bom = CFG.readConfigStrict();
+      assert.equal(bom.ok, true, 'BOM 只是编码前缀，内容合法就必须读出来（否则会被当成首次运行而整文件覆盖）');
+      assert.ok(bom.data && bom.data.customModels && bom.data.mcpServers, 'BOM 场景下用户字段必须完整保留');
+      assert.deepEqual(CFG.loadConfig()?.mcpServers, { a: {} }, 'loadConfig 也应能读到带 BOM 的配置');
+      // (b) 真损坏：区分 exists / ok，并给出可操作原因
+      fs.writeFileSync(cfgFile, '{ "customModels": { "local": {} }, "mcpServers": ');
+      const bad = CFG.readConfigStrict();
+      assert.equal(bad.ok, false, '截断的 JSON 必须判为读不出来');
+      assert.equal(bad.exists, true, '必须区分「文件不存在」与「文件读不出来」——原实现都是 null');
+      assert.ok(/解析失败/.test(String(bad.error)), `原因应点明解析失败，实际：${bad.error}`);
+      assert.equal(CFG.loadConfig(), null, 'loadConfig 的既有语义（读不出来 → null）保持不变');
+      // (c) 顶层不是对象
+      fs.writeFileSync(cfgFile, '[1,2,3]');
+      assert.equal(CFG.readConfigStrict().ok, false, '数组不是合法配置对象');
+      // (d) 隔离：改名备份而不是覆盖，原始内容一个字节都不能丢
+      const original = '{ 坏掉的配置 "keepme": 42';
+      fs.writeFileSync(cfgFile, original);
+      const backup = CFG.quarantineCorruptConfig('测试用原因');
+      assert.ok(backup && fs.existsSync(backup), '必须留下 .corrupt-* 备份');
+      assert.equal(fs.readFileSync(backup, 'utf8'), original, '备份必须是**原始内容**（一个字节都不能变）');
+      assert.ok(!fs.existsSync(cfgFile), '备份用改名：原文件必须已经不在原位（否则后续写入会覆盖它）');
+      // (e) 桌面/首启路径：有损坏配置时也要先备份、再建最小配置
+      // 注意要比较**增量**：上面 (d) 已经留下过一个备份，只数"有没有 .corrupt-*"会变成假绿
+      const backupsBefore = fs.readdirSync(home115).filter((f) => f.startsWith('config.json.corrupt-')).length;
+      fs.writeFileSync(cfgFile, '{{{ 坏');
+      const warns = [];
+      const origWarn = console.warn;
+      console.warn = (...a) => warns.push(a.join(' '));
+      let minimal = null;
+      try {
+        minimal = CFG.ensureMinimalConfig();
+      } finally {
+        console.warn = origWarn;
+      }
+      assert.ok(minimal && minimal.model, '损坏配置下仍应能给出最小可用配置（否则桌面版起不来）');
+      const backups = fs.readdirSync(home115).filter((f) => f.startsWith('config.json.corrupt-'));
+      assert.ok(backups.length > backupsBefore, 'ensureMinimalConfig 必须**自己**也留一份备份，而不是被最小配置静默覆盖');
+      assert.ok(
+        backups.some((f) => fs.readFileSync(path.join(home115, f), 'utf8').includes('坏')),
+        '备份里应当能找到用户原来的内容'
+      );
+      assert.ok(warns.some((w) => w.includes('备份')), '必须**明确告警**（静默覆盖正是本缺陷的核心）');
+      // (f) CLI 向导路径同样先隔离（源码级：向导前的调用不可丢）
+      const cliSrc = fs.readFileSync(path.join(srcDir, 'cli.js'), 'utf8');
+      const wizIdx = cliSrc.indexOf('if (!cfg || opts.init) {');
+      const qIdx = cliSrc.indexOf('quarantineCorruptConfig(');
+      assert.ok(qIdx >= 0 && qIdx < wizIdx, 'cli.js 必须在进入首次运行向导**之前**隔离损坏配置（否则向导会用全新对象覆盖它）');
+    }
+
+    // ② H-4：手动 /compact 必须**重写**会话文件（原实现用追加 + "压缩点"标记 → 文件近乎翻倍、
+    //    恢复后历史重复）。这里既验会话层的重写语义，也钉住 repl 的 /compact 分支。
+    {
+      const sf = path.join(home115, 's.jsonl');
+      const msgs = [{ role: 'system', content: 's' }, { role: 'user', content: 'u1' }, { role: 'assistant', content: 'a1' }, { role: 'user', content: 'u2' }];
+      SESS.rewriteSession(sf, msgs);
+      assert.deepEqual(SESS.loadSession(sf).messages.map((m) => m.content), ['s', 'u1', 'a1', 'u2'], '重写后应恰好是这 4 条（不残留、不重复）');
+      SESS.rewriteSession(sf, [msgs[0], { role: 'user', content: '汇总' }]);
+      assert.deepEqual(SESS.loadSession(sf).messages.map((m) => m.content), ['s', '汇总'], '重写是真替换：旧消息不得残留');
+      const replSrc = fs.readFileSync(path.join(srcDir, 'commands', 'repl.js'), 'utf8');
+      const branch = replSrc.slice(replSrc.indexOf("cmd === '/compact'"), replSrc.indexOf("cmd === '/init'"));
+      assert.ok(/rewriteSession\(session\.file, messages\)/.test(branch), '/compact 必须用 rewriteSession（与自动压缩同口径）');
+      assert.ok(!/appendMessages\(session\.file/.test(branch), '/compact 不得再用追加落盘（这正是文件膨胀与恢复重复的根因）');
+      assert.ok(/agent\.clearReadCache\?\.\(\)/.test(branch), '/compact 后必须让读取去重缓存失效（见 M-1）');
+      const clearBranch = replSrc.slice(replSrc.indexOf("cmd === '/clear'"), replSrc.indexOf("cmd === '/preset'"));
+      assert.ok(/agent\.clearReadCache\?\.\(\)/.test(clearBranch), '/clear 同样要让读取去重缓存失效');
+    }
+
+    // ③ M-1：压缩把文件正文换成摘要后，"这个文件你看过"的记忆必须一起失效
+    {
+      const dirM1 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-m1-'));
+      try {
+        const marker = 'MARKER-CONTENT-115';
+        fs.writeFileSync(path.join(dirM1, 'a.txt'), marker + '\n' + 'x'.repeat(50));
+        const { read } = await import(pathToFileURL(path.join(srcDir, 'tools', 'fs-tools.js')).href);
+        const cache = new Map();
+        const ctx = { workingDir: dirM1, readCache: cache };
+        const first = read({ path: 'a.txt' }, ctx);
+        assert.ok(first.ok && String(first.output).includes(marker), '首次读取应返回正文');
+        const second = read({ path: 'a.txt' }, ctx);
+        assert.ok(/内容与上次读取一致/.test(String(second.output)), '未变化时应返回占位串（省 token 的设计保持不变）');
+        cache.clear();
+        const third = read({ path: 'a.txt' }, ctx);
+        assert.ok(String(third.output).includes(marker), '清缓存后必须重新给出正文——否则模型在"正文已被压缩掉"的情况下只会拿到一句占位串');
+        // agent 必须暴露同一个开关，且自动压缩路径要调用它
+        const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+        const compactIdx = agentSrc.indexOf('onCompact?.(messages)');
+        assert.ok(compactIdx > 0, 'agent.js 应有 onCompact 调用点');
+        assert.ok(
+          /agentReadCache\.clear\(\);[\s\S]{0,400}onCompact\?\.\(messages\)/.test(agentSrc),
+          '自动压缩成功路径必须先清读取缓存再回调 onCompact'
+        );
+        assert.ok(/clearReadCache:\s*\(\)\s*=>\s*agentReadCache\.clear\(\)/.test(agentSrc), 'agent 必须对外暴露 clearReadCache');
+      } finally {
+        safeRmSync(dirM1, { recursive: true, force: true });
+      }
+    }
+
+    // ④ BUG-009 / M-20：追加必须与轮转在同一把锁内。
+    // 观测方式：让**另一个进程**持锁不放，再看"追加方"在阻塞期间有没有先把行写下去。
+    //   · 修好后：追加在锁内 → 阻塞期间文件里**不该**出现这一行，锁释放后才出现；
+    //   · 修好前（锁外追加）：行会立刻落盘 —— 这正是"别人的轮转把你的行覆盖掉"的那个窗口。
+    // 只测"整次调用耗时"是不够的：把 append 挪到 lock 之前，耗时同样包含等锁时间，看不见区别
+    // （第一版就是这么写的，变异验证直接指出它抓不到 —— 已改为观测写入**时机**）。
+    {
+      const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+      const probeByChild = (script) =>
+        spawn(process.execPath, ['--input-type=module', '-e', script], { env: process.env, stdio: ['ignore', 'pipe', 'pipe'] });
+
+      // (a) 费用明细
+      const cacheFile = CACHE.cacheStatsFile();
+      const cacheBefore = fs.existsSync(cacheFile) ? fs.readFileSync(cacheFile, 'utf8') : '';
+      assert.ok(!cacheBefore.includes('probe-115-cache'), '前置：探针行此前不该存在');
+      const holder1 = await holdLockFor(cacheFile + '.lock', 1500);
+      const w1 = probeByChild(
+        `import { recordCacheStats } from ${JSON.stringify(pathToFileURL(path.join(srcDir, 'cachestats.js')).href)};
+const r = recordCacheStats({ model: 'probe-115-cache', prompt: 1, completion: 1 });
+process.stdout.write(JSON.stringify(r));`
+      );
+      let w1out = '';
+      w1.stdout.on('data', (d) => (w1out += String(d)));
+      await sleep(700); // 追加方此时应当正卡在锁上
+      const mid1 = fs.existsSync(cacheFile) ? fs.readFileSync(cacheFile, 'utf8') : '';
+      assert.ok(
+        !mid1.includes('probe-115-cache'),
+        '费用明细的追加必须在锁内：另一个进程仍持锁时，这一行**不该**已经落盘（锁外追加会立刻写下去 —— BUG-009 的丢失窗口）'
+      );
+      await waitClose(holder1);
+      await waitClose(w1);
+      assert.ok(w1out.includes('"ok":true'), `锁释放后追加应成功，子进程输出：${w1out.slice(0, 200)}`);
+      assert.ok(fs.readFileSync(cacheFile, 'utf8').includes('probe-115-cache'), '锁释放后这一行必须落盘');
+
+      // (b) 审计（合规证据，同款要求）
+      const auditFile115 = AUDIT.auditFile();
+      const auditBefore = fs.existsSync(auditFile115) ? fs.readFileSync(auditFile115, 'utf8') : '';
+      assert.ok(!auditBefore.includes('probe-115-audit'), '前置：审计探针行此前不该存在');
+      const failsBefore = AUDIT.auditWriteFailures(); // 前面几组可能故意制造过失败，这里只看增量
+      const holder2 = await holdLockFor(auditFile115 + '.lock', 1500);
+      const w2 = probeByChild(
+        `import { writeAudit } from ${JSON.stringify(pathToFileURL(path.join(srcDir, 'audit.js')).href)};
+writeAudit({ tool: 'probe-115-audit', at: Date.now() });
+process.stdout.write('done');`
+      );
+      await sleep(700);
+      const mid2 = fs.existsSync(auditFile115) ? fs.readFileSync(auditFile115, 'utf8') : '';
+      assert.ok(!mid2.includes('probe-115-audit'), '审计的追加必须在锁内：持锁期间不该已经落盘（否则并发轮转读到的快照会把它覆盖掉）');
+      await waitClose(holder2);
+      await waitClose(w2);
+      assert.ok(fs.readFileSync(auditFile115, 'utf8').includes('probe-115-audit'), '锁释放后审计行必须落盘');
+      assert.equal(AUDIT.auditWriteFailures(), failsBefore, '这条审计不该以失败收场');
+    }
+
+    // ⑤ M-20（日志）：轮转必须是"改名式"——把整文件挪走，不丢任何已写入的行
+    {
+      const { createLogWriter } = await import(pathToFileURL(path.join(srcDir, 'log-writer.js')).href);
+      const dirL = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-log115-'));
+      try {
+        const lf = path.join(dirL, 'x.log');
+        const write = createLogWriter(lf, { maxBytes: 600 });
+        const words = [];
+        for (let i = 0; i < 60; i += 1) {
+          const w = 'LINE-' + i;
+          words.push(w);
+          write(w);
+        }
+        assert.ok(fs.existsSync(lf + '.1'), '超过上限后必须产生轮转文件 <file>.1（整文件挪走，而不是读改写）');
+        const all = (fs.readFileSync(lf + '.1', 'utf8') + fs.readFileSync(lf, 'utf8')).split('\n').filter(Boolean);
+        // 严格不变式：两份文件并起来 = 写下序列的一个**连续后缀**。
+        // 缺一行 → 出现空洞（丢数据）；重排/重复 → 序列不等于后缀；轮转把窗口整个丢掉 → all 为空。
+        const idx = all.map((l) => Number(/LINE-(\d+)/.exec(l)?.[1] ?? -1));
+        const last = words.length - 1;
+        const expectedTail = Array.from({ length: idx.length }, (_, k) => last - idx.length + 1 + k);
+        assert.deepEqual(idx, expectedTail, `两份文件并起来必须是连续后缀（无缺行/无重排/无重复），实际 ${JSON.stringify(idx)}`);
+        assert.ok(idx.length >= 2, `轮转后应至少保留一行（否则等于把日志整个丢了），实际 ${idx.length} 行`);
+        // 磁盘有界：不超过"两份文件"
+        const overs = fs.readdirSync(dirL).filter((f) => f.startsWith('x.log'));
+        assert.deepEqual(overs.sort(), ['x.log', 'x.log.1'], `轮转文件必须只有一个固定名（否则会无限堆积），实际 ${overs.join(',')}`);
+        if (process.platform !== 'win32') {
+          assert.equal(fs.statSync(lf).mode & 0o777, 0o600, 'logrotate 的 create 语义：轮转后新建的日志必须仍是 0600');
+        }
+        // 不该再有 .tmp（读改写式轮转的遗迹）
+        assert.ok(!fs.readdirSync(dirL).some((f) => f.endsWith('.tmp')), '不得留下 .tmp（改名式轮转没有中间文件）');
+      } finally {
+        safeRmSync(dirL, { recursive: true, force: true });
+      }
+    }
+  } finally {
+    if (prevHome115 === undefined) delete process.env.MINGDAO_HOME;
+    else process.env.MINGDAO_HOME = prevHome115;
+    safeRmSync(home115, { recursive: true, force: true });
+  }
+  ok('v0.6.3 批四 静默数据损失：配置损坏先备份 + /compact 改重写 + 压缩清读取缓存 + 追加与轮转同锁 + 日志改名式轮转');
 }
 
 safeRmSync(tmp, { recursive: true, force: true });

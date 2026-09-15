@@ -24,21 +24,86 @@ export function configPath() {
   return path.join(mingdaoHome(), 'config.json');
 }
 
-/** 读取配置对象（不存在/损坏返回 null）；返回值为用户可编辑的任意 JSON 配置，类型不定
- * @returns {any} */
-export function loadConfig() {
+/**
+ * 严格读取配置：区分「不存在」与「存在但读不出来」。v0.6.3（H-7）。
+ *
+ * 原实现 `catch { return null }` 把 ENOENT 与「JSON 解析失败 / 权限不足 / 不是对象」抹平成同一件事，
+ * 而所有调用点对 null 的处理都是**当作首次运行**——于是改坏一个字符（或存成带 BOM 的 UTF-8）
+ * 之后跑 `mingdao init` / 桌面版首启，`customModels`/`mcpServers`/`sync`/`net`/`costGuard`
+ * 会被一个全新对象**整文件覆盖**，且不备份、不告警。BOM 这一支尤其冤：内容完全合法，
+ * 只是 JSON.parse 不认 BOM。
+ *
+ * @returns {{ok: boolean, exists: boolean, data: any, error: string|null}}
+ */
+export function readConfigStrict() {
+  const file = configPath();
+  let raw;
   try {
-    return JSON.parse(fs.readFileSync(configPath(), 'utf8'));
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (/** @type {any} */ err) {
+    if (err?.code === 'ENOENT') return { ok: true, exists: false, data: null, error: null };
+    return { ok: false, exists: true, data: null, error: `无法读取 ${file}：${err?.message || err}` };
+  }
+  // BOM：合法的 JSON 内容 + 文件头 BOM = JSON.parse 直接抛（Excel/记事本另存为的常见产物）
+  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  if (!text.trim()) return { ok: false, exists: true, data: null, error: `${file} 是空文件` };
+  try {
+    const data = JSON.parse(text);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      return { ok: false, exists: true, data: null, error: `${file} 的内容不是 JSON 对象（实际是 ${Array.isArray(data) ? '数组' : typeof data}）` };
+    }
+    return { ok: true, exists: true, data, error: null };
+  } catch (/** @type {any} */ err) {
+    return { ok: false, exists: true, data: null, error: `${file} 解析失败：${err?.message || err}` };
+  }
+}
+
+/**
+ * 把「读不出来的 config.json」**改名**成 `config.json.corrupt-<时间戳>`。
+ * 用改名而不是复制：后续任何「写全新配置」都不会再压到用户的原始数据上。
+ * @param {string} reason
+ * @returns {string|null} 备份路径（无需备份时 null）
+ */
+export function quarantineCorruptConfig(reason) {
+  const file = configPath();
+  if (!fs.existsSync(file)) return null;
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  // 同一秒内发生两次损坏时，rename 会**覆盖**上一份备份（POSIX rename 是覆盖语义）——
+  // 而备份的意义正是"一份都不许丢"。故重名时顺延编号。
+  let dest = `${file}.corrupt-${stamp}`;
+  for (let k = 1; fs.existsSync(dest); k += 1) dest = `${file}.corrupt-${stamp}-${k}`;
+  try {
+    fs.renameSync(file, dest);
   } catch {
     return null;
   }
+  console.warn(
+    `[MingDao] ⚠ 配置文件读不出来，已**改名备份**而不是覆盖它：\n` +
+      `  原因：${reason}\n` +
+      `  备份：${dest}\n` +
+      `  接下来会按全新配置继续（首次运行向导 / 最小可用配置）。请从备份里把\n` +
+      `  customModels / mcpServers / sync / net / costGuard 等字段手动并回新的 config.json。`
+  );
+  return dest;
+}
+
+/** 读取配置对象（不存在/损坏返回 null）；返回值为用户可编辑的任意 JSON 配置，类型不定
+ *
+ * 注意（v0.6.3 / H-7）：null **同时**表示「不存在」与「读不出来」。凡是要**写**配置的调用点，
+ * 必须先用 `readConfigStrict()` 区分这两件事，否则会把损坏配置静默覆盖掉。
+ * @returns {any} */
+export function loadConfig() {
+  const r = readConfigStrict();
+  return r.ok ? r.data : null;
 }
 
 /** 桌面版首次运行：无配置时自动创建最小可用配置（引导在 WebUI 内完成，
  * 不再要求先去终端跑 mingdao init）。CLI 的 mingdao init 向导不受影响。 */
 export function ensureMinimalConfig() {
-  const existing = loadConfig();
-  if (existing) return existing;
+  const strict = readConfigStrict();
+  if (strict.ok && strict.data) return strict.data;
+  // v0.6.3（H-7）：存在但读不出来 → 先备份再写，绝不让"首启自动建配置"吃掉用户配置
+  if (strict.exists && !strict.ok) quarantineCorruptConfig(strict.error || '未知原因');
   ensureHome();
   const pp = PROVIDERS['deepseek'] || Object.values(PROVIDERS)[0];
   const model = modelPreset(DEFAULT_MODEL) ? DEFAULT_MODEL : pp.models[0];

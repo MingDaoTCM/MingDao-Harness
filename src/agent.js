@@ -588,6 +588,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               windowPressure = false;
               pressureWarned = false;
             }
+            // v0.6.3（M-1）：压缩把早期消息（含文件正文）换成了摘要，但**读取去重缓存**还记着
+            // "这个文件你看过（mtime+size 未变）"——模型随后再读同一文件只会拿到「内容与上次读取一致」
+            // 的占位串，而正文已经不在上下文里了，于是它可能凭残缺信息继续改文件。
+            // 压缩是"上下文被替换"的事件，缓存必须跟着失效（代价只是重新读一次文件）。
+            agentReadCache.clear();
             try {
               onCompact?.(messages);
             } catch {}
@@ -1388,5 +1393,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     runTurn,
     spawnTask: (/** @type {any} */ prompt, /** @type {any} */ opts) => spawnTask(prompt, opts),
     getTodos: () => todos.slice(),
+    // v0.6.3（M-1）：凡是"上下文被整体替换"的地方（/compact、/clear、手动重写历史）都要能
+    // 让读取去重缓存一起失效，否则模型会被"你已读过"的占位串误导。
+    clearReadCache: () => agentReadCache.clear(),
   };
 }

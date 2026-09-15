@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { redactSecrets } from './redact.js';
-import { atomicWriteFileSync } from './atomic-write.js';
+import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
 
 // v0.6.2（第三方代码审计 P2-2）：截断触发改为看**文件大小**。
 // 原判据 `auditCount > 20000` 是**进程内**计数：CLI 每次会话只 append 几次、进程结束即归零，
@@ -40,10 +40,28 @@ export function writeAudit(/** @type {any} */ entry) {
   try {
     ensureHome();
     const file = auditFile();
-    fs.appendFileSync(file, JSON.stringify(entry) + '\n');
-    try {
-      fs.chmodSync(file, 0o600);
-    } catch {}
+    // v0.6.3（M-20）：**追加与轮转必须在同一把锁里**。原实现是「锁外追加 + 锁外读改写轮转」，
+    // 丢失窗口很实在：A 追加 → B 追加 → A 读到含 A 的快照 → A 原子写回 → B 那一行消失。
+    // 审计是合规证据，"少一行"等于证据链有洞，而且不报错。锁的范围含 append：代价是每次
+    // 工具调用多一次毫秒级文件锁（审计本就每工具调用一条，不在热路径上）。
+    let appended = false;
+    withFileLockSync(file + '.lock', () => {
+      fs.appendFileSync(file, JSON.stringify(entry) + '\n');
+      appended = true;
+      try {
+        fs.chmodSync(file, 0o600);
+      } catch {}
+      // 低频截断：statSync 廉价，只有真的超过阈值才整文件读一次并重写
+      if (fs.statSync(file).size > MAX_BYTES) {
+        const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+        if (lines.length > KEEP_LINES) {
+          // v0.6.2（P2-3）：**原子写**——原先直接 writeFileSync，截断过程中崩溃会留下半截
+          // audit.jsonl（审计证据丢事件）。atomicWriteFileSync 的 tmp 名含 pid+随机后缀，
+          // 写完 rename 原子替换，读者永远看到完整文件；mode 保持 0600。
+          atomicWriteFileSync(file, lines.slice(-KEEP_LINES).join('\n') + '\n', { mode: 0o600 });
+        }
+      }
+    });
 
   } catch (err) {
     // v0.6.2（B-WS-1/2 第八处）：仍然「不影响会话」（审计不能反过来打断用户干活），
@@ -60,19 +78,6 @@ export function writeAudit(/** @type {any} */ entry) {
     }
     return;
   }
-  // 低频截断：statSync 廉价，只有真的超过阈值才整文件读一次并重写
-  try {
-    const f = auditFile(); // 上面 try 里的 file 是块内作用域，这里单独取一次
-    if (fs.statSync(f).size > MAX_BYTES) {
-      const lines = fs.readFileSync(f, 'utf8').split('\n').filter(Boolean);
-      if (lines.length > KEEP_LINES) {
-        // v0.6.2（P2-3）：**原子写**——原先直接 writeFileSync，截断过程中崩溃会留下半截
-        // audit.jsonl（审计证据丢事件）。atomicWriteFileSync 的 tmp 名含 pid+随机后缀，
-        // 写完 rename 原子替换，读者永远看到完整文件；mode 保持 0600。
-        atomicWriteFileSync(f, lines.slice(-KEEP_LINES).join('\n') + '\n', { mode: 0o600 });
-      }
-    }
-  } catch {}
 }
 
 export function listAudit(limit = 20) {

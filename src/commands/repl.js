@@ -271,6 +271,8 @@ export async function runRepl(ctx) {
           rewriteSession(session.file, messages);
         } catch {}
         tuiState.persisted = messages.length;
+        // 同上：上下文被清空后，"这个文件你看过"的记忆也必须一起清掉
+        agent.clearReadCache?.();
         io.print('已清空上下文（会话文件已同步重置）。');
       } else if (cmd === '/preset') {
         // v0.4.0 Agent Preset：列出/切换声明式智能体预设（工具白名单/权限/参数 + 系统提示定制段）
@@ -391,8 +393,14 @@ export async function runRepl(ctx) {
           continue;
         }
         messages = compacted.messages;
-        appendMessages(session.file, [{ role: 'system', content: '── /compact 压缩点 ──' }, ...messages.slice(1)]);
+        // v0.6.3（H-4）：手动 /compact 此前用**追加**落盘（再补一条"压缩点"标记），而压缩前的历史
+        // 早已在文件里 → 每次 /compact 文件近乎翻倍，`-c/--continue` 恢复后历史重复并立刻再次触发压缩。
+        // 自动压缩走的是 rewriteSession（原子重写）——两处写盘口径不一致，这里统一到重写。
+        rewriteSession(session.file, messages);
         tuiState.persisted = messages.length;
+        // v0.6.3（M-1）：压缩把早期消息（含文件正文）换成了摘要，但读取去重缓存仍记着"这个文件你看过"
+        // → 模型再读同一文件只会拿到「内容与上次读取一致」的占位串，而正文已不在上下文里。
+        agent.clearReadCache?.();
         io.print(style(`✓ 已压缩上下文：${compacted.droppedCount} 条早期消息 → 摘要（回收约 ${compacted.droppedTokens} tokens）`, C.green));
       } else if (cmd === '/init') {
         const target = path.join(workingDir, 'AGENTS.md');

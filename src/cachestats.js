@@ -69,63 +69,73 @@ export function recordCacheStats(/** @type {any} */ entry) {
       aux: entry.aux === true ? true : undefined,
       auxReason: entry.auxReason ? String(entry.auxReason) : undefined,
     });
-    appendFilePrivateSync(cacheStatsFile(), line + '\n');
-  } catch (err) {
-    const msg = String(/** @type {any} */ (err)?.message ?? err);
-    lastWriteError = msg;
-    // 只提示一次：写不进去通常是持续性问题（磁盘满/权限），每回合刷屏反而让人忽略它
-    if (!writeWarned) {
-      writeWarned = true;
-      console.warn(
-        `[MingDao] ⚠ 费用明细写入失败：${msg}\n` +
-          `  今日费用护栏会**少计**这部分消费（可能超支而不知）；请检查 ${cacheStatsFile()} 的磁盘空间与权限。`
-      );
-    }
-    // 追加都失败了，后面的轮转毫无意义（statSync 也大概率抛错），直接返回真实原因，
-    // 不要让轮转分支的异常把 append 的原因覆盖掉
-    return { ok: false, error: msg, phase: 'append' };
-  }
-  try {
-    if (fs.statSync(cacheStatsFile()).size > MAX_BYTES) {
-      // 审计 P2-3（v0.4.2）：轮转 read-modify-write 加跨进程锁——web/CLI/worker 多进程并发轮转时，
-      // 读与写之间他人追加的行会被覆写丢失；锁内重读再瘦身，写用原子替换。
+    // v0.6.3（BUG-009）：**追加与轮转共用同一把锁**。
+    // 原实现是「锁外追加 + 锁内轮转」，仍留有丢失窗口：A 追加 → B 追加 → A 进锁读整文件、
+    // 算出瘦身结果、原子替换 —— B 那一行若落在 A 的「读」与「写」之间，就被整文件替换覆盖掉。
+    // 丢的是费用明细，而费用明细正是日费用护栏的依据（少计 → 超支而不自知）。
+    let appended = false;
+    try {
       withFileLockSync(cacheStatsFile() + '.lock', () => {
-        const raw = fs.readFileSync(cacheStatsFile(), 'utf8');
-        const lines = raw.split('\n').filter(Boolean);
-        if (lines.length > MAX_LINES) {
-          // v0.4.6 P2 修复：轮转必须保留**当天全部**记录。此前只保留最后 KEEP_LINES 行——
+        appendFilePrivateSync(cacheStatsFile(), line + '\n');
+        appended = true;
+        if (fs.statSync(cacheStatsFile()).size > MAX_BYTES) {
+          // 审计 P2-3（v0.4.2）：轮转的 read-modify-write 同样有并发窗口，现在它与追加在同一锁内。
+          // v0.4.6 P2：轮转必须保留**当天全部**记录。此前只保留最后 KEEP_LINES 行——
           // 单进程写满 2 万条后，当天早先的费用会被裁掉，todayCost() 随之变小，
           // 日费用护栏被静默重置（用户可再次超支而不自知）。当天行（最多 MAX_LINES 条）
           // 与最近 KEEP_LINES 行取并集，去重且保持原顺序。
-          const dayStart = beijingDayStart().getTime();
-          const todayLines = lines.filter((/** @type {string} */ l) => {
-            try {
-              return (JSON.parse(l).at || 0) >= dayStart;
-            } catch {
-              return false;
-            }
-          });
-          const tail = lines.slice(-KEEP_LINES);
-          const tailSet = new Set(tail);
-          const todayCapped = todayLines.length > MAX_LINES ? todayLines.slice(-MAX_LINES) : todayLines;
-          const todaySet = new Set(todayCapped);
-          const merged = [...todayCapped, ...tail.filter((l) => !todaySet.has(l))];
-          // 顺序按原文件恢复（避免打乱 byDay 折线的时间序）
-          const order = new Map(lines.map((l, i) => [l, i]));
-          merged.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
-          atomicWriteFileSync(cacheStatsFile(), merged.join('\n') + '\n');
+          const raw = fs.readFileSync(cacheStatsFile(), 'utf8');
+          const rows = raw.split('\n').filter(Boolean);
+          if (rows.length > MAX_LINES) {
+            const dayStart = beijingDayStart().getTime();
+            const todayLines = rows.filter((/** @type {string} */ l) => {
+              try {
+                return (JSON.parse(l).at || 0) >= dayStart;
+              } catch {
+                return false;
+              }
+            });
+            const tail = rows.slice(-KEEP_LINES);
+            const tailSet = new Set(tail);
+            const todayCapped = todayLines.length > MAX_LINES ? todayLines.slice(-MAX_LINES) : todayLines;
+            const todaySet = new Set(todayCapped);
+            const merged = [...todayCapped, ...tail.filter((l) => !todaySet.has(l))];
+            // 顺序按原文件恢复（避免打乱 byDay 折线的时间序）
+            const order = new Map(rows.map((l, k) => [l, k]));
+            merged.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+            atomicWriteFileSync(cacheStatsFile(), merged.join('\n') + '\n');
+          }
         }
       });
+    } catch (err) {
+      const msg = String(/** @type {any} */ (err)?.message ?? err);
+      lastWriteError = msg;
+      if (!appended) {
+        // 只提示一次：写不进去通常是持续性问题（磁盘满/权限），每回合刷屏反而让人忽略它
+        if (!writeWarned) {
+          writeWarned = true;
+          console.warn(
+            `[MingDao] ⚠ 费用明细写入失败：${msg}\n` +
+              `  今日费用护栏会**少计**这部分消费（可能超支而不知）；请检查 ${cacheStatsFile()} 的磁盘空间与权限。`
+          );
+        }
+        return { ok: false, error: msg, phase: 'append' };
+      }
+      // 追加已成功、只有轮转失败：丢的不是账，而是文件会持续增长
+      if (!rotateWarned) {
+        rotateWarned = true;
+        console.warn(`[MingDao] ⚠ 费用明细轮转失败：${msg}\n  ${cacheStatsFile()} 会持续增长（不影响计费，但请检查磁盘空间/权限）。`);
+      }
+      return { ok: false, error: msg, phase: 'rotate' };
     }
   } catch (err) {
-    // 轮转失败与追加失败是两件事：这里丢的不是账，而是文件会持续增长
     const msg = String(/** @type {any} */ (err)?.message ?? err);
     lastWriteError = msg;
-    if (!rotateWarned) {
-      rotateWarned = true;
-      console.warn(`[MingDao] ⚠ 费用明细轮转失败：${msg}\n  ${cacheStatsFile()} 会持续增长（不影响计费，但请检查磁盘空间/权限）。`);
+    if (!writeWarned) {
+      writeWarned = true;
+      console.warn(`[MingDao] ⚠ 费用明细写入失败：${msg}\n  今日费用护栏会**少计**这部分消费（可能超支而不知）；请检查 ${cacheStatsFile()} 的磁盘空间与权限。`);
     }
-    return { ok: false, error: msg, phase: 'rotate' };
+    return { ok: false, error: msg, phase: 'append' };
   }
   return { ok: true, error: null, phase: null };
 }

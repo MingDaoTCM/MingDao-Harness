@@ -7,7 +7,7 @@ import fs from 'node:fs';
 import { DEFAULT_MODEL } from './models.js';
 import path from 'node:path';
 import readline from 'node:readline';
-import { loadConfig, saveConfig, runWizard, ensureHome, mingdaoHome } from './config.js';
+import { loadConfig, saveConfig, runWizard, ensureHome, mingdaoHome, readConfigStrict, quarantineCorruptConfig } from './config.js';
 import { helpLines } from './help.js';
 import { modelPreset, PROVIDERS } from './models.js';
 import { maskKey, getStoredKey } from './credentials.js';
@@ -341,6 +341,11 @@ async function main() {
     return;
   }
   const home = ensureHome();
+  // v0.6.3（H-7）：进向导**之前**先分清「没有配置」与「配置读不出来」。
+  // 后者若被当成首次运行，向导会用全新对象整文件覆盖掉用户配置（customModels/mcpServers/
+  // sync/net/costGuard 全丢）且不备份。这里先把损坏文件改名备份并告警，再继续走首次向导。
+  const cfgStrict = readConfigStrict();
+  if (cfgStrict.exists && !cfgStrict.ok) quarantineCorruptConfig(cfgStrict.error || '未知原因');
   let cfg = loadConfig();
   if (!cfg || opts.init) {
     const wio = createIO();
