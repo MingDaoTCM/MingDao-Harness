@@ -8928,7 +8928,7 @@ process.stdout.write('done');`
         bare.push(t.slice(0, 90));
       }
       assert.deepEqual(bare, [], `sync-server.js 里存在未 await 的 withWriteLock（P0-4 会让整个同步服务退出）：\n${bare.join('\n')}`);
-      assert.ok(/await withWriteLock\(\(\) => \{[\s\S]{0,200}lastSeen|try \{\n\s+await withWriteLock/.test(syncSrc), 'lastSeen 的写锁必须被 await（并包 try/catch 留痕）');
+      assert.ok(/await withWriteLock\(\(\) => \{[\s\S]{0,200}lastSeen|try \{\r?\n\s+await withWriteLock/.test(syncSrc), 'lastSeen 的写锁必须被 await（并包 try/catch 留痕）');
       assert.ok(/await doChangePassword\(/.test(syncSrc), 'doChangePassword 改为持锁执行后，调用点必须 await');
       assert.ok(/async function doChangePassword[\s\S]{0,400}?return withWriteLock\(/.test(syncSrc), '改密（吊销全部设备）必须与设备表写互斥');
       // 现象 B：锁内**重读** shares/accepted，而不是把锁外快照写回去
@@ -9132,7 +9132,7 @@ process.stdout.write('done');`
     {
       const provSrc119 = fs.readFileSync(path.join(srcDir, 'providers', 'index.js'), 'utf8');
       assert.ok(
-        /for \(;;\) \{\n\s+\/\/[^\n]*BUG-029[\s\S]{0,400}?if \(totalExpired\) \{/.test(provSrc119),
+        /for \(;;\) \{\r?\n\s+\/\/[^\n]*BUG-029[\s\S]{0,400}?if \(totalExpired\) \{/.test(provSrc119),
         'BUG-029：重试循环**头部**必须复查总量护栏（原实现只在 catch 里看，退避期间超时仍会再发一次）'
       );
       assert.ok(/await sleep\(backoff, opts\.signal\)/.test(provSrc119), 'BUG-030：退避等待必须接信号（否则 Ctrl+C 后最长干等 30s）');
@@ -9202,7 +9202,7 @@ process.stdout.write('done');`
       assert.deepEqual(after2, [], `任何失败路径都不得留下临时目录，实际：${after2.join(', ')}`);
       // 源码级：两个安装器的清理都必须在 finally 里
       const libSrc120 = fs.readFileSync(path.join(srcDir, 'skill-lib.js'), 'utf8');
-      const finallyCleanups = (libSrc120.match(/finally \{\n\s+try \{\n\s+fs\.rmSync\(tmp/g) || []).length;
+      const finallyCleanups = (libSrc120.match(/finally \{\r?\n\s+try \{\r?\n\s+fs\.rmSync\(tmp/g) || []).length;
       assert.equal(finallyCleanups, 2, `installFromUrl 与 installFromGit 都必须用 finally 清理临时目录，实际 ${finallyCleanups} 处`);
       assert.ok(/if \(!meta \|\| !meta\.name\) return \{ error: '技能缺少可解析的 frontmatter\.name/.test(libSrc120), 'readSkillMeta 返回 null 时不得再去读 meta.name（那会抛 TypeError 并留下临时目录）');
     }
