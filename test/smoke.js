@@ -7747,9 +7747,13 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
     const prevHome110 = process.env.MINGDAO_HOME;
     process.env.MINGDAO_HOME = home110;
     try {
-      const n110 = 120000; // 360KB 中文 → 必然跨越多个 pipe chunk
+      const n110 = 120000; // 约 2MB 中文 → 必然跨越多个 pipe chunk
+      // **不要把中文写进 shell 命令行**：Windows 上 bash 工具走 cmd.exe，命令行会被按当前
+      // 控制台代码页转换，非 ASCII 字面量可能被吃成 '?'（英文代码页的 CI runner 上实测如此）——
+      // 那是测试夹具的平台问题，与被测的解码逻辑无关。改为在子进程里用码点生成同样的中文。
+      const cps = [...'回访看板数据'].map((c) => '0x' + c.codePointAt(0).toString(16).toUpperCase()).join(',');
       const r = await BASH110.runBash(
-        { command: `node -e "process.stdout.write('回访看板数据'.repeat(${n110}))"` },
+        { command: `node -e "process.stdout.write(String.fromCharCode(${cps}).repeat(${n110}))"` },
         { cwd: home110, cfg: { sandbox: 'off', bashEnvFilter: true } }
       );
       assert.equal(r.ok, true, `runBash 应成功：${JSON.stringify(r).slice(0, 160)}`);
