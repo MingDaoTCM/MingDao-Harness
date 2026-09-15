@@ -388,7 +388,7 @@ async function send(){
       else if(ev.type==='reasoning'){ if(!reason){ reason=addReasoning(msg); reason.dataset.full=''; } if(!reason.parentElement.open) reason.parentElement.open=true; reason.parentElement.querySelector('summary').classList.add('live'); reason.dataset.full+=ev.delta; const full=reason.dataset.full; reason.textContent=(full.length>9000?full.slice(-9000)+'\n…（思考内容较长，仅显示末尾；已 '+full.length+' 字符）':full); reason.scrollTop=reason.scrollHeight; scroll(); }
       else if(ev.type==='turnStart'){ stepsCount+=1; curSteps+=1; msg._steps=curSteps; curPhase='模型推理中'; msg._traj.push({kind:'turn', t:Date.now()}); showThink(); think.textContent='💭 第 '+msg._steps+' 回合：模型推理中…'; renderWorkStatus(); scroll(); }
       else if(ev.type==='turnEnd'){ curPhase='回合完成，进入下一回合'; showThink(); think.textContent='⏸ 第 '+msg._steps+' 回合完成（累计 '+(ev.toolSteps||0)+' 工具步）· 进入下一回合…'; renderWorkStatus(); }
-      else if(ev.type==='toolStart'){ stepsCount+=1; curSteps+=1; curPhase=ev.name==='task'?'子代理执行中':'执行工具中'; msg._steps=curSteps; msg._traj.push({kind:'tool', seq:ev.seq, name:ev.name, args:ev.args, t:Date.now(), done:false}); onActivity(); update(); renderToolStartEvent(ev); renderWorkStatus(); }
+      else if(ev.type==='toolStart'){ stepsCount+=1; curSteps+=1; curPhase=ev.name==='task'?'子 Agent 执行中':'执行工具中'; msg._steps=curSteps; msg._traj.push({kind:'tool', seq:ev.seq, name:ev.name, args:ev.args, t:Date.now(), done:false}); onActivity(); update(); renderToolStartEvent(ev); renderWorkStatus(); }
       else if(ev.type==='code'){ onActivity(); const pre=document.createElement('pre'); pre.innerHTML='<code>'+highlight(ev.code,ev.lang)+'</code>'; insertBeforeActiveMsg(pre); scroll(); }
       else if(ev.type==='tool'){ onActivity(); update(); const pending=runningTools.get(ev.seq); if(pending){ pending.remove(); runningTools.delete(ev.seq); } const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.result=ev.result; tj.durationMs=ev.durationMs; tj.card=pending||null; } if(ev.name==='task'){ sessionSubs.push({seq:ev.seq, question:String(ev.args?.question||ev.args?.prompt||''), result:ev.result, durationMs:ev.durationMs, msg}); renderSubPanel(); } renderToolEvent(ev); }
       else if(ev.type==='toolDenied'){ onActivity(); const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.denied=ev.reason||'未授权'; } const d=document.createElement('div'); d.className='errline'; d.textContent='✖ '+(ev.reason==='未授权'||!ev.reason?'未授权':ev.reason)+'：'+ev.name; msg.appendChild(d); scroll(); }
@@ -422,7 +422,7 @@ function renderWorkStatus(){
   let tip='';
   if(generating){
     const secs=curWorkT0?Math.round((Date.now()-curWorkT0)/1000):0;
-    html='<span class="ws-busy"><span class="spinner"></span><span class="ws-phase">'+esc(curPhase)+'</span><span>⏳ 第 '+curSteps+' 步 · '+Math.floor(secs/60)+' 分 '+Math.round(secs%60)+' 秒 · '+curTools+' 工具步'+(curTasks>0?' · '+curTasks+' 个子代理':'')+'</span></span>';
+    html='<span class="ws-busy"><span class="spinner"></span><span class="ws-phase">'+esc(curPhase)+'</span><span>⏳ 第 '+curSteps+' 步 · '+Math.floor(secs/60)+' 分 '+Math.round(secs%60)+' 秒 · '+curTools+' 工具步'+(curTasks>0?' · '+curTasks+' 个子 Agent':'')+'</span></span>';
   } else if(bgRunning>0){
     // 后台任务 chip（非顶部，位于输入框上方）：计数 + 最新任务 + 悬浮详情 tooltip，点击打开详情面板
     const running=bgTasks.filter((/** @type {any} */ t)=>t.status==='running');
@@ -441,7 +441,7 @@ function renderLiveBar(){
   const secs=curWorkT0?Math.round((Date.now()-curWorkT0)/1000):0;
   el.style.display='flex';
   el.innerHTML='<span class="spinner"></span><span class="lb-phase">正在执行：'+esc(curPhase)+'</span>'+
-    '<span class="lb-stat">第 '+curSteps+' 步 · 已 '+Math.floor(secs/60)+' 分 '+Math.round(secs%60)+' 秒 · '+curTools+' 工具步'+(curTasks>0?' · '+curTasks+' 个子代理':'')+'</span>';
+    '<span class="lb-stat">第 '+curSteps+' 步 · 已 '+Math.floor(secs/60)+' 分 '+Math.round(secs%60)+' 秒 · '+curTools+' 工具步'+(curTasks>0?' · '+curTasks+' 个子 Agent':'')+'</span>';
 }
 // 轨迹元行：任务完成后附在本轮消息顶部（步数/子代理数，点击打开轨迹面板）
 function attachTrajMeta(msg){
@@ -450,7 +450,7 @@ function attachTrajMeta(msg){
   const subs=tools.filter(x=>x.name==='task');
   const meta=document.createElement('div'); meta.className='msg-meta';
   const b=document.createElement('button'); b.className='trajBtn';
-  b.textContent='🧭 轨迹：'+(msg._steps||tools.length)+' 步 · '+subs.length+' 个子代理';
+  b.textContent='🧭 轨迹：'+(msg._steps||tools.length)+' 步 · '+subs.length+' 个子 Agent';
   b.onclick=()=>openTraj(msg);
   meta.appendChild(b);
   msg.insertBefore(meta, msg.firstChild);
@@ -459,7 +459,7 @@ function openTraj(msg){
   const list=$('#tjList'); list.innerHTML='';
   const tools=msg._traj.filter(x=>x.kind==='tool');
   const subs=tools.filter(x=>x.name==='task');
-  $('#tjSummary').textContent='（'+(msg._steps||tools.length)+' 步 · '+subs.length+' 个子代理）';
+  $('#tjSummary').textContent='（'+(msg._steps||tools.length)+' 步 · '+subs.length+' 个子 Agent）';
   let turnN=0;
   for(const e of msg._traj){
     if(e.kind==='turn'){ turnN+=1;
@@ -470,7 +470,7 @@ function openTraj(msg){
     const ico={'read':'📄','write':'✏️','edit':'✎','bash':'⚙','grep':'🔎','glob':'🔎','ls':'📁','task':'🤖','skill':'🧩','todo':'☑','undo':'↩'}[e.name]||'🔌';
     const args = e.name==='bash' ? (e.args&&e.args.command) : (e.args&&(e.args.path||e.args.pattern||e.args.name||e.args.question||''))||'';
     const div=document.createElement('div'); div.className='tj-item'+(isSub?' tj-sub':'');
-    const subLabel=isSub?'子代理：':'';
+    const subLabel=isSub?'子 Agent：':'';
     div.innerHTML='<div class="tj-head"><span>'+ico+'</span><span style="white-space:nowrap">'+esc(subLabel+e.name)+'</span><span class="tj-args">'+esc(String(args).slice(0,80))+'</span><span style="margin-left:auto;color:var(--faint)">'+(e.done?(e.denied?'✖ '+esc(e.denied):'✓'+(e.durationMs!=null?' '+e.durationMs+'ms':'')):'执行中…')+'</span></div>';
     const body=document.createElement('div'); body.className='tj-body';
     if(isSub){
@@ -534,7 +534,7 @@ function renderSubPanel(){
     div.onclick=(e)=>{ if(e.target.closest('.sb-body')) return; div.classList.toggle('open'); };
     list.appendChild(div);
   }
-  if(!count) list.innerHTML='<div class="empty" style="color:var(--faint);font-size:12px;padding:10px">本会话还没有子代理（task 工具会派生子代理）</div>';
+  if(!count) list.innerHTML='<div class="empty" style="color:var(--faint);font-size:12px;padding:10px">本会话还没有子 Agent（task 工具会派生子 Agent）</div>';
 }
 const toggleSubPanel=()=>{
   const p=$('#subPanel');
