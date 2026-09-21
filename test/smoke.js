@@ -8984,7 +8984,9 @@ process.stdout.write('done');`
       // 改密函数体里必须仍有 `return withWriteLock(`（互斥本身没变）；**不再限制距离**——
       // v0.6.5（BUG-064）把 ~18ms 的 scrypt 挪到了拿锁之前，函数体自然变长，按"前 400 字"匹配
       // 是在测"代码排版"而不是"是否互斥"。
-      const dcpBody = (syncSrc.match(/async function doChangePassword[\s\S]*?\n}\n/) || [''])[0];
+      // 注意用 \\r?\\n：Windows 的 actions/checkout 会把 LF 转成 CRLF，写死 \\n 会让这段匹配不到
+      // （本仓 §3.32 记过同款教训：在「文本」上断言，就要按各平台的文本形态写）
+      const dcpBody = (syncSrc.match(/async function doChangePassword[\s\S]*?\r?\n}\r?\n/) || [''])[0];
       assert.ok(dcpBody.includes('return withWriteLock('), '改密（吊销全部设备）必须与设备表写互斥');
       assert.ok(/await verifyPassword\(/.test(dcpBody), '改密必须在锁外 await 校验旧密码（BUG-064：同步 scrypt 会阻塞事件循环）');
       assert.ok(!/scryptSync\(/.test(syncSrc), 'BUG-064：sync-server.js 不得再出现同步 scrypt');
