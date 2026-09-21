@@ -745,6 +745,130 @@ Windows 腿红。本批的三条守卫（sync-server 写锁、BUG-029 循环头�
 > BUG-015 是**行为 + 源码级**（空 stdin 真的退 1；告警文案由源码守卫钉住）；
 > 文档一致性是**文本级**。**如实登记，不把文本级说成行为级。**
 
+## 3.35 高级缺陷 22 项**逐条对账**（2026-09-21，v0.6.4 已发版后）
+
+`defect-register.md` 的「一、高级缺陷」按 8 字段逐条登记了 BUG-001 ~ BUG-022。此前各批是**按主题**修的
+（§3.16 / §3.17 / §3.20 / §3.22 / §3.24 / §3.25 / §3.34 …），**从未按这 22 个编号逐条对账**——
+于是「高级缺陷还剩几条」在这份文件里查不到答案。本批**只做对账**（已修的不再动代码），
+结论一律以**当前代码 + 实跑**为准，不看登记簿里那句「状态：未修复」（那是审计当时的状态）。
+
+| BUG | 审计描述 | 结论 | 依据（当前代码 / 实测） |
+| --- | --- | --- | --- |
+| 001 | `constraints` 的 pattern 直接 `new RegExp` → ReDoS | ✅ 已修 | `src/constraints.js:100-127`：拒绝**嵌套量词**形状（`(a+)+`、`(\d+)*`、`(x+){2,}`），并从**装载期**就判（不是等匹配时）；注释里留着实测（29 字符即数秒）——见 §3.16 |
+| 002 | `hooks.js` 的 `spawn(cmd,{shell:true})` → 任意命令执行 | 🟡 **非缺陷（设计取舍）** | `src/hooks.js:56` 仍是 `shell: true`，但 hooks 只来自**用户自己的 config**，Pack **无法**贡献 hook 命令（§3.16 核实）。**残留风险如实写在这里**：拿到 config.json 写权限等于拿到命令执行——这是「配置即代码」的固有面，不是可修的缺陷 |
+| 003 | registry 索引名 `..` → `rmSync` 删掉整个 `MINGDAO_HOME` | ✅ 已修 | `src/skill-registry.js:143` 先过 `assertSafeSkillName()`（`.`/`..`/分隔符一律拒），注释直接点名这条攻击链——见 §3.24 |
+| 004 | 「公网端点必须 Key」无客户端强制 | ✅ 已修 | `src/cli.js:412`：`if (!pc0.apiKey && !isLocalBaseUrl(pc0.baseUrl))` → 明确报错退 1；内网/本机端点按 C4 豁免（`src/model-caps.js:57`） |
+| 005 | 账本哈希链**末行盲区 + 尾部截断**不可检出 | ✅ 已修 | `src/ledger.js`：`run.end` 额外写**封条侧车** `sealFile()`（`*.seal.json`），截断/删尾即被 `verify` 判为「完整性未知」并退 1——见 §3.17 |
+| 006 | 消息级 token 缓存「永远 miss、每步全量 BPE」 | ❌ **不成立** | 实测「永远 miss」不存在（同计数器 200 次调用 0.0ms）；真问题是**计数器 identity**，已按模型名缓存（`src/tokenizer.js:379-388` 带 LRU 上限）。`src/context.js:33-40` 的 WeakMap 仍以 `hit.fn === count` 为键，但同一回合内计数器稳定 → 命中——见 §3.15 |
+| 007 | 词表 `loadData` 一次失败**终生**不重试 | ✅ 已修 | `src/tokenizer.js:70-101`：区分 ENOENT（latch，不再 stat）与瞬时错误（**有界重试 + 冷却窗口**），失败原因可读——见 §3.25 |
+| 008 | `SharedArrayBuffer`/`Atomics` 在**模块顶层**执行 | 🟡 **已知边界（Node-only）** | `src/atomic-write.js:84-85` 仍在顶层建 `Int32Array(new SharedArrayBuffer(4))`。本项目 `engines.node>=18.17`、零依赖 Node，主进程/CLI 均可用；**嵌进没有 SAB 的环境（浏览器/渲染进程）会整模块加载失败**。不假装已解决——如实登记为边界 |
+| 009 | `cachestats` 追加在锁外、轮转在锁内 → 丢行 | ✅ 已修 | `src/cachestats.js:72` 起**追加与轮转同锁**（批四）——见 §3.29 |
+| 010 | 安装器临时目录只在「校验失败」一条路上删 | ✅ 已修 | `src/skill-lib.js`：`installFromUrl`/`installFromGit` 的清理都进 `finally`，并补 `meta` 为 null 的显式判定——见 §3.34 |
+| 011 | `stdout.write` 无 EPIPE 处理 → `\| head` 崩 | ✅ 已修 | `src/proc.js:147-178` `installPipeGuards()`（CLI `exitOnEpipe`，库模式不退出），`src/cli.js:128` 安装；实测 `node src/cli.js --help \| head -1` → 退出码 0、无堆栈——见 §3.20 |
+| 012 | `workspace` 写失败被 `catch {}` 吞（假成功） | ✅ 已修 | `src/workspace.js`：`saveWorkspaces()` / `saveSessionWorkspaces()` 改为**返回 `{ok,error}`**，会话映射另有一次性告警与 `sessionWorkspaceWriteError()` 出口——见 §3.18–§3.21 |
+| 013 | `createIO()` 未 close → readline 泄漏、进程挂起 | ❌ **不成立** | readline 是**懒创建**（`src/ui.js` 的 `ensureRl()` 只在需要交互输入时建），`ledger`/`net` 命令从不走交互输入。实测 `ledger list` / `net policy` / `net report` / `pack list` 均 **~50ms 正常退出**（exit 0）——见 §3.20 附 |
+| 014 | `sync passwd` 新密码走命令行参数 | ✅ 已修 | `src/commands/sync.js:123-136`：**拒绝位置参数**（明确提示会进 ps/shell history），只走隐藏输入——见 §3.1 |
+| 015 | `--auth-token` 字面量进 argv | ✅ 已修 | 新增 `--auth-token=-` 从 stdin 读，字面量给告警并指向 `MINGDAO_WEB_TOKEN`——见 §3.34 |
+| 016 | 顶层错误处理与 REPL 主循环无 EPIPE 处理 | ✅ 已修 | 同 011：`installPipeGuards` 同时挂 stdout/stderr，CLI 侧 EPIPE 静默退 0、非 EPIPE 重抛保持可见 |
+| 017 | 发布脚本把 token 经 **ssh argv** 传到服务器 | ✅ 已修 | `scripts/publish-mirror-releases.sh`：凭据经 **ssh stdin** 落到 `umask 077` 的 600 临时文件，读后即删——见 §3.22 |
+| 018 | Gitee token 拼在 **URL query** 里 | ✅ 已修 | 同上：两平台改 **HTTP 头鉴权**（gitee `Authorization: token`），URL 里不再有凭据 |
+| 019 | 同 008（`Atomics.wait` 顶层） | 🟡 已知边界 | 与 008 同根，按同一条登记 |
+| 020 | Web 路由域的 workspace 静默吞写 | ✅ 已修 | 与 012 同一实现（`src/workspace.js`），Web 路由复用它 |
+| 021 | `main().catch` 里 `console.error` 再抛 EPIPE | ✅ 已修 | `src/proc.js:170-178` 的兜底**同时覆盖 stdout 与 stderr**，并在 `cli.js:128` 早于业务代码安装 |
+| 022 | REPL 主循环 `io.print` 无 EPIPE 处理 | ✅ 已修 | 同上（`src/proc.js` 的监听装在 `process.stdout` 上，REPL 与一次性提问共用） |
+
+**对账结果**：22 项 = **已修 17** + **不成立 2**（006、013）+ **已知边界/设计取舍 3**（002、008、019）。
+**没有一项处于「待修」**——审计报告 §5.2 路线图里「v0.6.2：P0 全修复（高级问题=0）」这一格，可以据此打勾。
+
+> 两点自我约束：
+> ① 008/019 我**不**写成「已修」——顶层 `SharedArrayBuffer` 还在，只是本项目承诺的运行环境里可用；
+> ② 002 我**不**写成「已修」——`shell:true` 还在，只是触发前提是「用户的 config 被改」，
+> 按「配置即代码」记为固有面。把这两类写成「已修」会让后面的人失去警惕。
+
+## 3.36 已修复（第三十六批「批十」：中级缺陷收口 —— 先对账，再修）
+
+**这一批的起点不是「挑几条好修的」**：登记簿的「状态：未修复」停在 v0.6.1，而 v0.6.2~v0.6.4 已按**主题**
+修掉一大批——不逐条核对就分不清「还剩什么」。做法是四个**只读**核查子代理各领一组（BUG-023~083），
+每条都要在 HEAD 上给出四选一的结论（仍成立 / 已修 / 不成立 / 设计取舍）与证据；
+「仍成立」的必须附**最小复现 + 实际输出**，涉及性能的必须给**实测数字**（不接受复杂度推断）。
+
+### 36.1 本批修复（13 条，全部带回归断言）
+
+| BUG | 位置 | 核实结论（HEAD） | 修法 |
+| --- | --- | --- | --- |
+| 023 / 035 | `src/agent.js:677` | **成立**：外层条件 `guard.downgrade && !downgraded` 让「本回合刚降过一次」之后的每一步**两个分支都不进**——既不切也不拦，静默继续用 flash 发请求继续计费（实测同回合发出 2 次；而「开局就在 flash 上」那条路径本来就会拦，两条路径结论相反） | 判据改为「超限 + 已在最便宜模型」→ 一律 block（与开局即 flash 同源） |
+| 025 | `src/agent.js` 工具批次循环 | **成立**：SIGINT 只把 `aborted` 置真，工具执行后**没有任何收敛点**（实测中断后仍发出下一次请求） | 轮首 + 工具批次循环各加一处收敛，如实返回 `aborted:true` |
+| 026 | `src/model-discovery.js:134` | **成立**（审计原话「越权使用模型」**夸大**：校验通过后路由仍去该名字真正的服务商）：`isDiscoveredModel` 遍历**所有**服务商缓存 → A 家拉到的名字能让 B 家的切换校验放行 | 加 `providerName` 形参，调用点传目标服务商 |
+| 027 | `src/pricing.js:113` | **成立**：非法时区时峰谷回退**本机墙钟**，而日界/费用护栏回退 `Asia/Shanghai`（实测 TZ=America/New_York 下同一时刻峰谷按纽约判、日界按上海算，差 8~13 小时） | 抽 `peakWallClock()`，回退统一走 `activeTimezone()` |
+| 034 | `src/net-guard.js:203` | **成立**（成因与审计描述不同：warn 模式白名单放行是**有意**的；真洞在逐跳跟随重定向时**从不剥凭据头**——实测第二跳 `attacker.example` 仍带 `Bearer sk-…`） | 跨 origin 跳转剥 `authorization`/`cookie`/`proxy-authorization`，与 fetch 规范对齐 |
+| 037 | `src/compact.js:43,50` | **成立**：两个摘要函数**连 signal 形参都没有**，压缩期间 Ctrl+C 只能干等（单次最长 `totalMs`，重试叠加；「30 分钟全程不可中断」是夸大——中断会在摘要返回后生效） | 加 `signal` 形参并透传；已中断则不再发第二次尝试 |
+| 038 | `src/providers/openai-compatible.js:186` | **成立**：`name` 用「保留最长的那片」，网关分片下发时得到 `weather`（应为 `get_weather`），而同一网关的 `arguments` 走 `+=` 是对的 | 与 `arguments` 对称拼接：分片接上 / 重复下发忽略 / 后到的完整名取它 |
+| 041 | `src/hooks.js:71` | **成立，且真实后果比审计描述的更重**：stdout 截断用 `slice(-MAX)` 截的是**头**。审计写的是「解析失败 → 误 block」，实测更常见的是**截出来的尾部只剩空白** → `trim()` 为空 → 走「空输出 = 放行」那条路 —— **hook 说了 block 却被静默忽略**（fail-open，比误拦危险得多） | 改保留**前缀** + 把「截断」如实带进提示（原因不再是"无法解析"） |
+| 043 | `src/routing.js:134` | **成立**：淘汰用 `keys().next()`（最旧**插入**）而注释自称 LRU（实测：用过的条目照样被淘汰，白调一次分类器） | 命中时 `delete` + `set` 做真 LRU |
+| 044 | `src/routing.js:98,142` | **成立**：两处空 `catch`，分类器挂掉时用户只看到「回退执行模型」，console 输出 0 条 | 一次性告警 + 把失败原因带进 `reason` |
+| 046 | `src/tokenizer.js:378` | **成立**：`>50000` 字符**整条绕过缓存**（实测 CJK 20 万字符 = 128ms/回合；`context.js` 的 WeakMap 只兜住"同一 msg 对象"） | 用**内容哈希**当缓存键：保留按内容命中，又只存 40 字节键。刻意**不**按 50k 分块相加——那会让跨块 BPE 合并丢失、token 数被动变大（改口径换性能不是这里该做的事） |
+| 047 | `src/atomic-write.js:242` | **成立**（审计原话「忙等无 sleep」**不准**：主竞争路径早有 `sleepMs(25)`）：回收分支的 `continue` **绕过超时闸**，陈旧锁删不掉时（只读目录/EPERM/EIO）99% CPU 无限自旋、5s 超时失效 | 回收分支同样过超时闸后再 sleep；同步版与异步版都改 |
+| 048 | `src/cachestats.js:253` | **成立**：`recordAuxUsage` 漏传 `priceAt`（同文件 `recordUsage` 传了）→ 按**落账时刻**选峰谷价（实测同一笔调用 0.48 vs 0.24，边界上正好差一倍） | 加 `perf` 形参，5 个调用点（routing/titles×2/memory×2）带上 `requestStartAt` |
+
+**顺带**：BUG-045（tokenizer 注释自称 LRU、实现是 FIFO）在同一处一并改掉。
+
+### 36.2 其余条目的对账结论（不改代码，但要留结论）
+
+| 结论 | 条目 | 依据摘要 |
+| --- | --- | --- |
+| ✅ 已修（本轮复核） | 033、049、058、059、081 | 033 改按**文件大小**触发轮转（实测跨进程首次写入即轮转）；049 轮转判据与追加同锁、`cacheStatsCount` 全仓已无；058 缺/错 sha256 一律拒装；059 走 `safe-fetch` 逐跳复检 + 元数据无条件拒绝；081 `assertSafeSkillName` + 安装来源白名单（实测 `..`/`file://`/`a/b` 全拒） |
+| 🟡 设计取舍（附残留风险） | 031、032、039、045、054、055、076、078、082 | 031 `*_API_KEY` 仍可被点名是**有意的可用性取舍**（SECRET/TOKEN/PASSWORD 已排除）；032 「环境变量 > 凭证库 > config.json」是文件头明示的口径；039 全清 500 条 pattern 实测仅 0.48ms；045 见上；054 `-y` 跳过的确认在 stdio 管道下**无人能答**（同意点在 `mcp preset add`）；055 Pack 同进程执行已由 v0.6.2 的信任门覆盖「clone 即执行」，用户级仍是裸执行（文档明写）；076 当前无「起了 start 不走 finish」的可达路径；078 写路径本就是 `mode 0600` + rename（chmod 只是自愈遗留文件）；082 token 在地址栏只存在一瞬，CSP `connect-src 'self'` 堵住外发，日志已打码 |
+| ❌ 不成立（审计前提读错） | 060、062、065、066、069、074、080 | 060 macOS 走 `ps` 回退可校验归属（实测真 SIGTERM 掉 sleeper）；062 请求级 Agent `keepAlive=false`（实测 `Connection: close`、残留连接 0）；065 6 个临界区**全是同步体**且 finally 必 release（30 并发全响应）；066 Node 超限是 accept 后立即 close（实测 handler 未执行）；069 killTask 3.0s 内杀死避峰等待中的 worker 并落 killed；074 三个 `setInterval` 是模块顶层一次性注册、回调只重写固定文本；080 `appendMessages` 是追加语义（实测不覆盖，碰撞只混写） |
+
+> **口径说明**：「设计取舍」与「不成立」都**不是**"不用管"——取舍项各自写了残留风险，
+> 不成立项写了为什么（多数是审计读了注释或按最坏情况外推）。这样下一个人不必再核一遍。
+
+### 36.3 验证
+
+- **回归断言**：`test/smoke.js` 新增第 121 组（12 个子断言，覆盖上表 13 条；其中 034 补在既有的
+  「74e 重定向逐跳判定」用例里，与它同源）。断言全部是**行为级或子进程级**，不接受只看源码文本：
+  - 023/035、025 用真 `createAgent` + 桩 provider 数请求次数；026/046 直接调函数；027/047 起**子进程**
+    （前者强制 `TZ=America/New_York` 让回退差异可观测，后者用 8 秒 `spawnSync` 超时兜住"旧实现会挂死"）；
+    038 起本地 SSE 桩服务器；041 用真 hook 进程输出 70KB；043/044 连打 100+ 次路由；048 读落盘账目比对峰谷价。
+  - **变异验证**（`mutate-batch10.sh`，把每处修复改回旧写法后串行跑 smoke）：**6/6 全部被抓住** ——
+    023/035（`实际 2 次`）、025（`实际 1 次`）、038（`实际 weather`）、041（`实际 approve`）、
+    043（`after=102 / afterInsert=101`）、047（`status=null`，即旧行为会挂死到 8 秒超时）。
+- 全门禁：`tsc` / strict 棘轮 / smoke（149 组）/ e2e-local / e2e-web / e2e-schedule / api-contracts / bench。
+
+### 36.4 三条自我纠错（**第一轮变异验证里有 3 个变异没被抓住**）
+
+第一轮跑完，6 个变异里有 **3 个仍然全绿**——正好是这套流程存在的意义。逐条查明并改断言后重验：
+
+| 变异 | 为什么第一版抓不到 | 改法 |
+| --- | --- | --- |
+| 025（去掉工具循环里的收敛点） | 用例只覆盖了"轮首"那条收敛路径：一次响应里只有一个工具调用时，工具循环只跑一轮，去掉内层检查仍会被轮首检查兜住 —— 断言**分不出这两处检查** | 加第二个场景：在"已决定要调工具、但还没执行"时中断，断言**权限校验一次都没走到**（一个工具都不许执行） |
+| 041（hook 截断改回 `slice(-N)`） | 第一版填充只有 5 万字节，**根本没超过 64KB 上限**，两个实现都不截断 → 断言恒真。更早那版用 `approve` + 7 万空格，看似有牙，其实两条路径都返回 `approve`（旧实现是"空输出=放行"，新实现是"解析成功"）——**结果相同、原因不同**，正是最难发现的那种假绿 | 改成"hook 说 **block** + 8 万字节空白"：新实现解出 block，旧实现截出空白 → 当放行。断言 `decision === 'block'` 且 `reason` 就是 hook 给的那句 |
+| 043（去掉 LRU touch） | 在**进程内**测：`routeCache` 是模块级状态，前面各节已塞过未知数量的条目，于是"缓存是否恰好满、会不会轮到淘汰 T1"都不确定 → 两个实现碰巧都不触发淘汰 | 挪到**全新子进程**里测（缓存必为空）：先恰好填满 100 条，再 touch、再插入第 101 条，最后重问第一条——旧实现必然多调一次分类器 |
+
+> 顺带更正审计对 BUG-041 的定性：真实后果不是"误 block"，而是**静默忽略 hook 的 block 决定**
+> （fail-open）。这与本文件反复出现的那类教训同源：**"结果看起来对"不等于"走的是对的那条路"**。
+
+## 3.37 下一批（**已核实、待修**的中级条目）
+
+四个核查子代理把「仍成立但本批未改」的条目也逐条留了证据与最小修法，按此接续即可（**不需要重新复核**）：
+
+| BUG | 位置 | 影响 | 最小修法（复核时已给出） |
+| --- | --- | --- | --- |
+| 052 | `src/mcp.js:70` | 父进程**异常**退出（含 SIGKILL）时 MCP 子进程成孤儿（实测 PPID=1 存活） | 模块级 `live` 集合 + `process.on('exit')` 杀整组；CLI 挂 SIGINT/SIGTERM |
+| 053 | `src/mcp-presets.js:45` | `@playwright/mcp@latest` 每次按 dist-tag 解析 → 版本漂移/上游投毒无锁定 | 预设钉具体版本并在 `presetList()` 显示 |
+| 057 | `src/safe-fetch.js:55` | SSRF 的 **TOCTOU**：check 用 `lookup()`、连接再解析一次（rebinding 窗口）；且 `lookup` 抛错即放行 | 用 `Agent({connect:{lookup}})` 把已校验 IP **钉**给连接层；lookup 失败 fail-closed |
+| 061 | `src/schedule.js:101` | 任务 id 用 `Math.random()` 且无存在性检查（实测同毫秒碰撞会**静默覆盖**前一个任务） | `crypto.randomUUID()` + 写前 `existsSync` 重生成 |
+| 064 | `src/sync-server.js:112` | `scryptSync` 阻塞事件循环（实测 10 并发 pair 期间 `/healthz` 最大延迟 87ms） | 改异步 `scrypt`（调用点都是 async）；注意改密在写锁内，需评估锁内 await 语义 |
+| 068 | `src/task-state.js:104` | `saveTaskStateMerge` 读-改-写**无锁**（实测 12 进程并发只剩 3 条 artifact） | 用既有 `withFileLockSync` 包住 load+写（与 cachestats/audit 同款） |
+| 070 | `src/batch.js:32,69,90` | 三处裸 `fetch` 无超时（桩服务端不回包 → 批次永久挂起） | 传 `signal`，用 `AbortSignal.any([signal, AbortSignal.timeout(N)])` |
+| 071 | `src/batch.js:90` | `res.text()` 无大小上限（实测 240MB 响应体 → OOM，exit 134） | 先看 `content-length`，超限即 abort；或边读边累计字节数 |
+| 072 | `src/ui.js:783` | `close()` 未调 `stopSpinner()`（实测 close 后定时器仍写 3 帧） | `close()` 里先 stopSpinner |
+| 073 | `src/ui.js:687` | `onSigint` 每次注册新监听且不摘旧的（实测 17 次触发 MaxListenersExceededWarning；agent 侧 finally 已削弱影响） | 进入时先 `removeListener` 上一个（语义改为"替换"） |
+| 075 | `src/web/app.js:396` | 权限应答 POST 失败被吞、服务端 `pendingAsk` 无超时（实测 1.5s 仍未 settle） | 失败提示 + 重发；服务端加超时按 deny 处理并落事件 |
+| 077 | `src/sync.js:171` 等 | H-7 只覆盖 init 两条写路径；`loadConfig()||{}` + saveConfig 实测把损坏配置**静默覆盖**且无 `.corrupt-*` 备份 | 统一走 `readConfigStrict()`，损坏先隔离再写 |
+| 079 | `src/context.js:105` | 回收摘要按 UTF-16 单元 `slice` → 可切断代理对（实测孤立代理项 @[198,199]） | 码点安全截断（两处共用一个 helper） |
+| 083 | `desktop/main.js:457` | 打包版下载完成即上报 `{os,ver}`，全仓无隐私说明、无 opt-in 开关 | README/官网补一段隐私说明，或读 `MINGDAO_NO_TELEMETRY`/config 开关 |
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）
@@ -873,6 +997,13 @@ Windows 腿红。本批的三条守卫（sync-server 写锁、BUG-029 循环头�
   **路径穿越实测复现并修复**（§3.24 B-SR-1）、**stdout EPIPE 崩溃**（§3.20）
 - **发布纪律固化**：四平台（GitHub + Gitee + GitCode + npm）一致性由
   `scripts/verify-release.mjs` 在发版最后一步自动校验；v0.6.2 已按该流程发布（四渠道校验退出 0）
+- **高级缺陷按编号对账**（§3.35）：`defect-register.md` 的 BUG-001~022 逐条给结论
+  （已修 17 / 不成立 2 / 已知边界 3），「高级还剩几条」这个问题第一次能在文件里查到答案
+- **中级缺陷对账 + 批十修复**（§3.36）：先把 BUG-023~083 逐条对账（四组只读核查，各带复现证据），
+  再修掉其中 13 条（护栏降级后续步骤、工具执行期间中断、跨服务商模型名校验、峰谷回退同源、
+  跨 origin 重定向带凭据、压缩无 signal、tool name 分片、hook 输出截断误 block、路由缓存 FIFO、
+  分类器失败静默、超长文本绕过缓存、锁回收绕过超时闸、辅助调用峰谷价）
+- **下一批已就绪**（§3.37）：14 条「已核实仍成立」的中级条目附位置、影响与最小修法，可直接接续
 
 **未闭合（如实登记，不假装完成）**：
 

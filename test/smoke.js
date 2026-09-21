@@ -4795,6 +4795,35 @@ console.log(JSON.stringify({ okOn, xml }));`;
       assert.equal(ok74.status, 200, '白名单内重定向应正常跟随到最终响应');
       assert.equal(calls74.length, 2, `应逐跳发出两次请求，实际 ${calls74.length}`);
       assert.ok(calls74.every((c) => c.redirect === 'manual'), '自行跟随时应使用 manual 逐跳判定');
+      // 74e-2（审计 BUG-034，实测复现）：跨 **origin** 跳转必须剥掉凭据头。
+      // 旧实现把 curInit 原样复用，实测 warn 模式下第二跳 `https://attacker.example/steal`
+      // 仍带着第一跳的 `Authorization: Bearer sk-…` —— 与 mode 无关，warn 放行的是"出网"，
+      // 不该顺手把凭据送出去。这里把两个主机都放进白名单，把"拦截"这条排除掉，只看凭据有没有跟过去。
+      calls74 = [];
+      // 顺序要紧：先卸下闸门（它会把自己捕获的那份 fetch 还回 globalThis），再装桩，最后重新装闸门
+      // ——否则闸门内部捕获的仍是上一段的桩，这段的重定向根本走不到我们的桩上。
+      ng.uninstallEgressGate();
+      globalThis.fetch = async (/** @type {any} */ input, /** @type {any} */ init) => {
+        const u = typeof input === 'string' ? input : input.url;
+        const h = new Headers(init?.headers || {});
+        calls74.push({ url: u, auth: h.get('authorization') });
+        if (u.startsWith('https://allowed.example/auth')) return mkRes74(302, { location: 'https://other.example/steal' });
+        return mkRes74(200);
+      };
+      ng.installEgressGate({ allow: ['allowed.example', 'other.example'], mode: 'warn' });
+      await fetch('https://allowed.example/auth', { headers: { Authorization: 'Bearer sk-SECRET' } });
+      assert.equal(calls74.length, 2, `跨主机重定向应逐跳发出两次请求，实际 ${calls74.length}`);
+      assert.equal(calls74[0].auth, 'Bearer sk-SECRET', '第一跳（同源发起）必须带凭据');
+      assert.equal(calls74[1].auth, null, '跨 origin 的第二跳**不得**携带 Authorization（BUG-034）');
+      ng.uninstallEgressGate();
+      // 恢复 74e 原来的桩，后续"显式 manual"断言仍在同一前提下运行
+      globalThis.fetch = async (/** @type {any} */ input, /** @type {any} */ init) => {
+        const u = typeof input === 'string' ? input : input.url;
+        calls74.push({ url: u, redirect: init?.redirect ?? '(默认)' });
+        if (u.startsWith('https://allowed.example/start')) return mkRes74(302, { location: 'https://evil.example/steal' });
+        if (u.startsWith('https://allowed.example/ok')) return mkRes74(302, { location: 'https://allowed.example/final' });
+        return mkRes74(200);
+      };
       // 调用方显式 redirect:manual → 闸门不介入，保持既有语义
       calls74 = [];
       await fetch('https://allowed.example/start', { redirect: 'manual' });
@@ -9272,6 +9301,401 @@ process.stdout.write('done');`
 }
 
 safeRmSync(tmp, { recursive: true, force: true });
+// ---------- 121. v0.6.5 批十：中级缺陷收口（审计 BUG-023/025/026/027/037/038/041/043/044/046/047/048） ----------
+{
+  // 121a. BUG-026：动态模型名单必须按**服务商**校验（此前遍历所有服务商缓存 → 校验面跨家泄漏）
+  {
+    const MD = await import(pathToFileURL(path.join(srcDir, 'model-discovery.js')).href);
+    const home121a = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b10a-'));
+    const prevHome121a = process.env.MINGDAO_HOME;
+    process.env.MINGDAO_HOME = home121a;
+    try {
+      fs.mkdirSync(path.dirname(MD.modelCacheFile()), { recursive: true });
+      fs.writeFileSync(MD.modelCacheFile(), JSON.stringify({ openai: { models: ['gpt-5-probe'], at: Date.now() } }));
+      assert.equal(MD.isDiscoveredModel('gpt-5-probe', 'openai'), true, '本服务商名单里的模型必须放行');
+      assert.equal(MD.isDiscoveredModel('gpt-5-probe', 'deepseek'), false, 'A 家拉到的名字不得让 B 家的切换校验放行（BUG-026）');
+      const route121 = fs.readFileSync(path.join(srcDir, 'web', 'routes', 'domains', 'config.js'), 'utf8');
+      assert.ok(
+        /isDiscoveredModel\(target,\s*resolveProviderConfig\(cfg, target\)\.name\)/.test(route121),
+        '切换模型的调用点必须把目标服务商传进去（否则守卫会被悄悄改回跨家放行）'
+      );
+    } finally {
+      process.env.MINGDAO_HOME = prevHome121a;
+      safeRmSync(home121a, { recursive: true, force: true });
+    }
+  }
+
+  // 121b. BUG-027：非法时区时，峰谷判定必须与日界/护栏走**同一个**回退（Asia/Shanghai），不是本机墙钟
+  {
+    const home121b = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b10b-'));
+    fs.writeFileSync(path.join(home121b, 'config.json'), JSON.stringify({ pricing: { timezone: 'Not/AZone' } }));
+    const probe121b = `
+      process.env.MINGDAO_HOME = ${JSON.stringify(home121b)};
+      const { isPeakHour } = await import(${JSON.stringify(pathToFileURL(path.join(srcDir, 'pricing.js')).href)});
+      const at = new Date('2026-09-22T02:00:00Z');
+      console.log(isPeakHour(at) ? 'peak' : 'off');
+    `;
+    const out121b = spawnSync(process.execPath, ['--input-type=module', '-e', probe121b], {
+      encoding: 'utf8',
+      env: { ...process.env, TZ: 'America/New_York' }, // 该时刻：上海 10:00（高峰）/ 纽约 22:00（闲时）—— 断言因此才有牙
+    });
+    assert.equal(
+      String(out121b.stdout).trim(),
+      'peak',
+      `非法时区下峰谷判定必须回退到 Asia/Shanghai（BUG-027），实际 ${String(out121b.stdout).trim()} / ${String(out121b.stderr).slice(0, 120)}`
+    );
+    safeRmSync(home121b, { recursive: true, force: true });
+  }
+
+  // 121c. BUG-023/035：降级之后**下一步**必须按 block 停下（旧实现两个分支都不进 → 静默继续计费）
+  {
+    const home121c = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b10c-'));
+    const prevHome121c = process.env.MINGDAO_HOME;
+    process.env.MINGDAO_HOME = home121c;
+    try {
+      saveConfig({ provider: 'deepseek', model: 'deepseek-v4-pro', permission: 'auto', costGuard: { dailyLimitYuan: 0.001, action: 'downgrade', downgradeModel: 'deepseek-v4-flash' } });
+      const { recordUsage } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+      recordUsage('deepseek-v4-pro', { prompt_tokens: 1000000, completion_tokens: 100 }); // 预置今日费用远超上限
+      let chats121c = 0;
+      const stub121c = {
+        async chat() {
+          chats121c += 1;
+          if (chats121c === 1) {
+            return { text: '', toolCalls: [{ id: 'c1', name: 'read', args: { path: 'a.txt' } }], usage: { prompt_tokens: 5, completion_tokens: 3 }, finish: 'tool_calls' };
+          }
+          return { text: '第二步不该被发出去', toolCalls: null, usage: { prompt_tokens: 5, completion_tokens: 3 }, finish: 'stop' };
+        },
+      };
+      const agent121c = createAgent({
+        provider: stub121c,
+        permission: { async check() { return true; } },
+        io: createIO({ quiet: true }),
+        modelName: 'deepseek-v4-pro',
+        workingDir: fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b10c-wd-')),
+        cfg: { permission: 'auto', costGuard: { dailyLimitYuan: 0.001, action: 'downgrade' } },
+      });
+      const res121c = await agent121c.runTurn([{ role: 'user', content: '读一下 a.txt' }]);
+      assert.equal(chats121c, 1, `降级之后不得再发出下一次请求（BUG-023/035：旧实现在降级后的下一步静默放行），实际 ${chats121c} 次`);
+      assert.equal(res121c.text, null, '超限且已在最便宜模型上 → 必须按 block 停下');
+      assert.ok(String(res121c.note || '').includes('最便宜模型'), `应给出"已在最便宜模型上"的暂停说明，实际：${res121c.note}`);
+    } finally {
+      process.env.MINGDAO_HOME = prevHome121c;
+      safeRmSync(home121c, { recursive: true, force: true });
+    }
+  }
+
+  // 121d. BUG-025：工具执行期间按 Ctrl+C 必须收敛（旧实现仍会发出下一次请求）
+  {
+    const home121d = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b10d-'));
+    const prevHome121d = process.env.MINGDAO_HOME;
+    process.env.MINGDAO_HOME = home121d;
+    try {
+      let caughtSigint = null;
+      const io121d = createIO({ quiet: true });
+      const realOnSigint121d = io121d.onSigint.bind(io121d);
+      io121d.onSigint = (/** @type {any} */ fn) => {
+        caughtSigint = fn;
+        return realOnSigint121d(fn);
+      };
+      let chats121d = 0;
+      const stub121d = {
+        async chat() {
+          chats121d += 1;
+          // 第二步不该被发出；若真发出，这里会回一个终止回合的纯文本（断言仍会先看到 chats=2 而失败）
+          if (chats121d > 1) return { text: '第二步不该被发出去', toolCalls: null, usage: { prompt_tokens: 5, completion_tokens: 3 }, finish: 'stop' };
+          return { text: '', toolCalls: [{ id: 'c1', name: 'bash', args: { command: 'echo ok' } }], usage: { prompt_tokens: 5, completion_tokens: 3 }, finish: 'tool_calls' };
+        },
+      };
+      // 在**工具执行期间**打断：权限校验正是工具执行路径上的一步，用它触发是确定性的
+      // （用 `sleep 0.4` 靠时序不可靠——真实工具可能立刻返回，实测 61ms 就跑完了 6 步）
+      let fired121d = false;
+      const agent121d = createAgent({
+        provider: stub121d,
+        permission: {
+          async check() {
+            if (!fired121d && caughtSigint) {
+              fired121d = true;
+              caughtSigint(); // = 用户在这个回合的工具执行期间按了 Ctrl+C
+            }
+            return true;
+          },
+        },
+        io: io121d,
+        modelName: 'deepseek-v4-flash',
+        workingDir: fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b10d-wd-')),
+        cfg: { permission: 'auto' },
+      });
+      const res121d = await agent121d.runTurn([{ role: 'user', content: '跑一条 echo' }]);
+      assert.ok(fired121d, '前置：中断必须在工具执行期间被触发');
+      assert.equal(chats121d, 1, `工具执行期间的中断必须收敛，不得再发下一次请求（BUG-025），实际 ${chats121d} 次`);
+      assert.equal(res121d.aborted, true, '被中断的回合必须如实标 aborted');
+    } finally {
+      process.env.MINGDAO_HOME = prevHome121d;
+      safeRmSync(home121d, { recursive: true, force: true });
+    }
+  }
+
+  // 121d-2. BUG-025 的第二处收敛点：中断发生在"拿到工具调用之后、工具执行之前"时，
+  // **一个工具都不许执行**（旧实现会照常把这一轮工具跑完）。
+  {
+    const home121d2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b10d2-'));
+    const prevHome121d2 = process.env.MINGDAO_HOME;
+    process.env.MINGDAO_HOME = home121d2;
+    try {
+      let caughtSigint121d2 = null;
+      const io121d2 = createIO({ quiet: true });
+      const realOnSigint121d2 = io121d2.onSigint.bind(io121d2);
+      io121d2.onSigint = (/** @type {any} */ fn) => {
+        caughtSigint121d2 = fn;
+        return realOnSigint121d2(fn);
+      };
+      let permChecks121d2 = 0;
+      let chats121d2 = 0;
+      const stub121d2 = {
+        async chat() {
+          chats121d2 += 1;
+          // 在"已决定要调工具"之后立刻模拟用户按 Ctrl+C
+          if (caughtSigint121d2) caughtSigint121d2();
+          return { text: '', toolCalls: [{ id: 'c1', name: 'bash', args: { command: 'echo 不该被执行' } }], usage: { prompt_tokens: 5, completion_tokens: 3 }, finish: 'tool_calls' };
+        },
+      };
+      const agent121d2 = createAgent({
+        provider: stub121d2,
+        permission: {
+          async check() {
+            permChecks121d2 += 1;
+            return true;
+          },
+        },
+        io: io121d2,
+        modelName: 'deepseek-v4-flash',
+        workingDir: fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b10d2-wd-')),
+        cfg: { permission: 'auto' },
+      });
+      const res121d2 = await agent121d2.runTurn([{ role: 'user', content: '跑一条 echo' }]);
+      assert.equal(permChecks121d2, 0, `中断后**一个工具都不该执行**（连权限校验都不该走到，BUG-025 的第二处收敛点），实际 ${permChecks121d2} 次`);
+      assert.equal(res121d2.aborted, true, '被中断的回合必须如实标 aborted');
+    } finally {
+      process.env.MINGDAO_HOME = prevHome121d2;
+      safeRmSync(home121d2, { recursive: true, force: true });
+    }
+  }
+
+  // 121e. BUG-037：压缩链路必须接 signal（旧实现两个函数都没有形参，Ctrl+C 只能干等摘要返回）
+  {
+    const { compactConversation } = await import(pathToFileURL(path.join(srcDir, 'compact.js')).href);
+    const msgs121e = [
+      { role: 'system', content: '系统' },
+      ...Array.from({ length: 12 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: '长内容填充'.repeat(300) + ' #' + i })),
+    ];
+    const seenSignals121e = [];
+    const ctrl121e = new AbortController();
+    const okProvider121e = {
+      async chat(/** @type {any} */ opts) {
+        seenSignals121e.push(opts?.signal ?? null);
+        return { text: '{"summary":"摘要"}', usage: { prompt_tokens: 1, completion_tokens: 1 } };
+      },
+    };
+    await compactConversation({ messages: msgs121e, budget: 400, count: approxTokens, provider: okProvider121e, executorModel: 'deepseek-v4-flash', triggerRatio: 0, force: true, signal: ctrl121e.signal });
+    assert.ok(seenSignals121e.length >= 1, '应发生一次摘要请求（前置：确实走到压缩）');
+    assert.equal(seenSignals121e[0], ctrl121e.signal, '摘要请求必须带上调用方的 signal（BUG-037）');
+    // 已中断：不得再发第二次（那次也必然被 abort，纯属浪费一次上游调用）
+    const aborted121e = new AbortController();
+    aborted121e.abort();
+    const seenSignals121e2 = [];
+    const failProvider121e = {
+      async chat() {
+        seenSignals121e2.push(1);
+        throw new Error('已中断');
+      },
+    };
+    await compactConversation({ messages: msgs121e, budget: 400, count: approxTokens, provider: failProvider121e, executorModel: 'deepseek-v4-flash', triggerRatio: 0, force: true, signal: aborted121e.signal });
+    assert.equal(seenSignals121e2.length, 1, '已中断时不得再发起第二次摘要请求');
+  }
+
+  // 121f. BUG-038：tool_calls 的 name **分片**必须与 arguments 对称拼接
+  {
+    const http121f = await import('node:http');
+    const OC121f = await import(pathToFileURL(path.join(srcDir, 'providers', 'openai-compatible.js')).href);
+    const srv121f = http121f.createServer((/** @type {any} */ req, /** @type {any} */ res) => {
+      req.on('data', () => {});
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        const frame = (/** @type {any} */ o) => res.write('data: ' + JSON.stringify(o) + '\n\n');
+        frame({ choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_1', function: { name: 'get_', arguments: '{"ci' } }] } }] });
+        frame({ choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'weather', arguments: 'ty":"SF"}' } }] } }] });
+        frame({ choices: [{ delta: {}, finish_reason: 'tool_calls' }] });
+        res.write('data: [DONE]\n\n');
+        res.end();
+      });
+    });
+    await new Promise((r) => srv121f.listen(0, '127.0.0.1', r));
+    const port121f = /** @type {any} */ (srv121f.address()).port;
+    try {
+      const out121f = await OC121f.chat({
+        baseUrl: `http://127.0.0.1:${port121f}/v1`,
+        apiKey: 'k',
+        model: 'm',
+        messages: [{ role: 'user', content: 'hi' }],
+        tools: [{ type: 'function', function: { name: 'get_weather', parameters: { type: 'object', properties: {} } } }],
+      });
+      assert.equal(
+        out121f.toolCalls?.[0]?.function?.name,
+        'get_weather',
+        `分片下发的 tool name 必须拼成完整名（BUG-038：旧实现保留较长的那片 → weather），实际 ${out121f.toolCalls?.[0]?.function?.name}`
+      );
+      assert.equal(out121f.toolCalls?.[0]?.function?.arguments, '{"city":"SF"}', 'arguments 的分片拼接本来就是对的（对照组）');
+    } finally {
+      srv121f.close();
+    }
+  }
+
+  // 121g. BUG-041：hook 输出 >64KB 时不得丢掉它的判定
+  // 旧实现 `slice(-MAX)` 保留的是**结尾**：超长输出里开头那段 JSON 被切掉，截出来的尾部
+  // 往往只有空白 → `trim()` 后为空 → 走「空输出 = 放行」那条路 —— 也就是说
+  // **hook 说了 block，却被静默当成放行**（比"误 block"更危险，因为 fail-open）。
+  {
+    const { createHooks } = await import(pathToFileURL(path.join(srcDir, 'hooks.js')).href);
+    // 合法 JSON 在前 + 8 万字节空白填充（总量 ~80KB > 64KB 上限，确实触发截断；
+    // JSON.parse 容忍尾部空白 → 新实现应解出 block）
+    const bigCmd121g = `node -e "process.stdout.write(JSON.stringify({decision:'block',reason:'超长日志也要拦住'}) + ' '.repeat(80000))"`;
+    const hooks121g = createHooks({ PreToolUse: [{ matcher: '*', cmd: bigCmd121g }] }, fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b10g-wd-')));
+    const pre121g = await hooks121g.pre('bash', {});
+    assert.equal(
+      pre121g.decision,
+      'block',
+      `超 64KB 的 hook 输出必须仍按 hook 自己的判定走（BUG-041：旧实现保住尾部、丢掉开头的 JSON → 空输出被当放行 → **block 被静默忽略**），实际 ${pre121g.decision} / ${pre121g.reason}`
+    );
+    assert.ok(String(pre121g.reason).includes('超长日志也要拦住'), `必须用 hook 给的 reason，实际：${pre121g.reason}`);
+  }
+
+  // 121h. BUG-043/044：路由缓存真 LRU（旧实现是 FIFO）+ 分类器失败必须可见（旧实现空 catch）
+  {
+    // 043 必须在**全新进程**里跑：routeCache 是模块级状态，前面各节已经塞过条目，
+    // 在进程内测就无法确定"缓存是否恰好满"，断言会失去分辨力（第一版就是这么被抓出来的假绿）。
+    const probe121h = `
+      process.env.MINGDAO_HOME = ${JSON.stringify(fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b10h-')))};
+      const { routeTask } = await import(${JSON.stringify(pathToFileURL(path.join(srcDir, 'routing.js')).href)});
+      let calls = 0;
+      const provider = { async chat() { calls += 1; return { text: '{"verdict":"execute"}', usage: { prompt_tokens: 3, completion_tokens: 2 } }; } };
+      const cfg = { routing: { enabled: true } };
+      const long = (i) => '这是一段用于路由缓存测试的中性文本，编号 ' + i + '，' + '内容填充以超过启发式阈值。'.repeat(12);
+      const ask = (t) => routeTask({ cfg, provider, currentModel: 'deepseek-v4-pro', text: long(t) });
+      await ask('T1');
+      for (let i = 0; i < 99; i += 1) await ask('N' + i); // 连同 T1 恰好 100 条 → 正好填满，尚无淘汰
+      const afterFill = calls;
+      await ask('T1'); // LRU touch：命中（FIFO 下这行没有任何作用）
+      const afterTouch = calls;
+      await ask('X1'); // 第 101 条 → FIFO 淘汰 T1 / LRU 淘汰 T2
+      const afterInsert = calls;
+      await ask('T1'); // LRU：命中 / FIFO：未命中（多调一次分类器）
+      console.log(JSON.stringify({ afterFill, afterTouch, afterInsert, after: calls }));
+    `;
+    const out121h = spawnSync(process.execPath, ['--input-type=module', '-e', probe121h], { encoding: 'utf8', timeout: 20000 });
+    assert.equal(out121h.status, 0, `路由 LRU 探针应正常退出，实际 ${out121h.status} / ${String(out121h.stderr).slice(0, 200)}`);
+    const p121h = JSON.parse(String(out121h.stdout).trim().split('\n').pop());
+    assert.equal(p121h.afterFill, 100, `前置：填满 100 条应产生 100 次分类器调用，实际 ${p121h.afterFill}`);
+    assert.equal(p121h.afterTouch, 100, `前置：再次问同一条必须命中缓存，实际 ${p121h.afterTouch}`);
+    assert.equal(
+      p121h.after,
+      p121h.afterInsert,
+      `LRU 下"刚用过的条目"不得被随后的插入淘汰（BUG-043：旧实现淘汰最旧**插入** → 这里会多一次分类器调用），实际 after=${p121h.after} / afterInsert=${p121h.afterInsert}`
+    );
+
+    // 044：分类器抛错时必须如实说明 + 至少告警一次
+    const ROUTE121h = await import(pathToFileURL(path.join(srcDir, 'routing.js')).href);
+    const long121h = (/** @type {any} */ i) => `这是一段用于路由错误路径测试的中性文本，编号 ${i}，` + '内容填充以超过启发式阈值。'.repeat(12);
+    const failProvider121h = {
+      async chat() {
+        throw new Error('分类器 500');
+      },
+    };
+    let warned121h = 0;
+    const origWarn121h = console.warn;
+    console.warn = () => {
+      warned121h += 1;
+    };
+    let r121h = null;
+    try {
+      r121h = await ROUTE121h.routeTask({ cfg: { routing: { enabled: true } }, provider: failProvider121h, currentModel: 'deepseek-v4-pro', text: long121h('FAIL-1') });
+    } finally {
+      console.warn = origWarn121h;
+    }
+    assert.ok(String(r121h?.reason || '').includes('分类器失败'), `分类器抛错时 reason 必须如实说明（BUG-044），实际：${r121h?.reason}`);
+    assert.ok(warned121h >= 1, '分类器失败必须至少告警一次（旧实现空 catch，console 输出 0 条）');
+  }
+
+  // 121i. BUG-046：超长文本也要享受内容级缓存（旧实现 >50000 字符直接绕过缓存）
+  {
+    const { countTokens } = await import(pathToFileURL(path.join(srcDir, 'tokenizer.js')).href);
+    const big121i = '中文测试内容用于超长文本缓存验证'.repeat(4000); // 约 6.4 万字符，超过 50000 阈值
+    const t0 = Date.now();
+    const n1 = countTokens(big121i, 'deepseek-v4-flash');
+    const first121i = Date.now() - t0;
+    const t1 = Date.now();
+    const n2 = countTokens(big121i, 'deepseek-v4-flash');
+    const second121i = Date.now() - t1;
+    assert.equal(n1, n2, '同一文本两次计数必须一致');
+    assert.ok(
+      second121i * 10 < first121i + 5,
+      `超长文本第二次必须走内容缓存（BUG-046：旧实现直接绕过缓存，每次全量 BPE），实测首次 ${first121i}ms / 二次 ${second121i}ms`
+    );
+  }
+
+  // 121j. BUG-047：回收陈旧锁的分支不得绕过超时闸（旧实现 99% CPU 无限自旋、超时失效）
+  {
+    const home121j = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b10j-'));
+    const lockDir121j = path.join(home121j, 'spin.lock');
+    fs.mkdirSync(lockDir121j, { recursive: true }); // 用目录当锁：unlinkSync 必失败 → 回收分支永远"看起来成功"
+    const old121j = new Date(Date.now() - 60000);
+    fs.utimesSync(lockDir121j, old121j, old121j);
+    const probe121j = `
+      const { withFileLockSync } = await import(${JSON.stringify(pathToFileURL(path.join(srcDir, 'atomic-write.js')).href)});
+      const t0 = Date.now();
+      let threw = '';
+      try { withFileLockSync(${JSON.stringify(lockDir121j)}, () => {}, { timeoutMs: 400, staleMs: 50 }); } catch (e) { threw = String((e && e.message) || e); }
+      console.log(JSON.stringify({ ms: Date.now() - t0, threw }));
+    `;
+    const out121j = spawnSync(process.execPath, ['--input-type=module', '-e', probe121j], { encoding: 'utf8', timeout: 8000 });
+    assert.equal(out121j.status, 0, `锁回收分支不得无限自旋（BUG-047）：子进程应正常返回，实际 status=${out121j.status}（null=超时，即旧行为）`);
+    const parsed121j = JSON.parse(String(out121j.stdout).trim().split('\n').pop());
+    assert.ok(String(parsed121j.threw).includes('超时'), `删不掉的陈旧锁必须在超时后如实报错，实际：${parsed121j.threw}`);
+    assert.ok(parsed121j.ms < 3000, `超时应按 timeoutMs(400ms) 生效，实际 ${parsed121j.ms}ms`);
+    safeRmSync(home121j, { recursive: true, force: true });
+  }
+
+  // 121k. BUG-048：辅助调用的峰谷价必须按**请求发起时刻**（旧实现漏传 priceAt → 按落账时刻）
+  {
+    const home121k = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b10k-'));
+    const prevHome121k = process.env.MINGDAO_HOME;
+    process.env.MINGDAO_HOME = home121k;
+    try {
+      const { recordAuxUsage } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+      const usage121k = { prompt_tokens: 1000, completion_tokens: 100 };
+      const peakAt121k = Date.parse('2026-09-22T02:00:00Z'); // 北京 10:00 → 高峰
+      const offAt121k = Date.parse('2026-09-22T05:00:00Z'); // 北京 13:00 → 闲时
+      recordAuxUsage('deepseek-v4-pro', usage121k, 'probe', { requestStartAt: peakAt121k });
+      recordAuxUsage('deepseek-v4-pro', usage121k, 'probe', { requestStartAt: offAt121k });
+      const lines121k = fs
+        .readFileSync(path.join(home121k, 'cache-stats.jsonl'), 'utf8')
+        .trim()
+        .split('\n')
+        .map((l) => JSON.parse(l));
+      const costs121k = lines121k.slice(-2).map((l) => l.cost);
+      assert.ok(costs121k[0] != null && costs121k[1] != null, `两条辅助调用都应落账并计价，实际 ${JSON.stringify(costs121k)}`);
+      assert.ok(
+        Math.abs(costs121k[0] - 2 * costs121k[1]) < 1e-12,
+        `高峰价必须是闲时的 2 倍（BUG-048：旧实现按落账时刻选价），实测 ${costs121k[0]} vs ${costs121k[1]}`
+      );
+    } finally {
+      process.env.MINGDAO_HOME = prevHome121k;
+      safeRmSync(home121k, { recursive: true, force: true });
+    }
+  }
+
+  ok('v0.6.5 批十：中级缺陷收口（护栏降级/中断收敛/时区同源/重定向剥凭据/压缩 signal/分片工具名/hook 截断/LRU/分类器可见/超长文本缓存/锁超时/辅助计价）');
+}
+
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);

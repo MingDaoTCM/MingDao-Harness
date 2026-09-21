@@ -66,10 +66,22 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
       let out = '';
       let err = '';
       const MAX_HOOK_OUT = 64 * 1024;
-      const cap = (/** @type {any} */ acc, /** @type {any} */ d) => {
+      // 审计 BUG-041（实测复现）：原实现 `t.slice(-MAX_HOOK_OUT)` 保留的是**结尾**，
+      // 于是 70000 字节的合法输出 `{"decision":"block","reason":"…"}` 头部被切掉、JSON.parse
+      // 必失败，再被下面的 fail-closed 升格成 block —— 一次**误**拦（hook 明明说了话）。
+      // 改成保留**前缀**（JSON 头完整），并把「发生过截断」如实带出去，让提示说的是真原因。
+      let outTruncated = false;
+      const capOut = (/** @type {any} */ acc, /** @type {any} */ d) => {
+        if (acc.length >= MAX_HOOK_OUT) {
+          outTruncated = true;
+          return acc;
+        }
         const t = acc + d;
-        return t.length > MAX_HOOK_OUT ? t.slice(-MAX_HOOK_OUT) : t;
+        if (t.length <= MAX_HOOK_OUT) return t;
+        outTruncated = true;
+        return t.slice(0, MAX_HOOK_OUT);
       };
+      const capErr = (/** @type {any} */ acc, /** @type {any} */ d) => (acc + d).slice(-MAX_HOOK_OUT); // stderr 只用于展示，留尾部
       let settled = false;
       const finish = (/** @type {any} */ result) => {
         if (settled) return;
@@ -86,8 +98,8 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
         }
         finish({ ok: false, error: 'hook 执行超时（10s）' });
       }, 10000);
-      child.stdout.on('data', (d) => (out = cap(out, d)));
-      child.stderr.on('data', (d) => (err = cap(err, d)));
+      child.stdout.on('data', (d) => (out = capOut(out, d)));
+      child.stderr.on('data', (d) => (err = capErr(err, d)));
       // P1 修复（v0.4.6）：stdin 必须有 error 监听。hook 若「不读 stdin 就退出」（如
       // cmd:'true' / echo 形式的策略脚本）且载荷超过管道缓冲（约 64KB，write 大文件时必然发生），
       // write 的 EPIPE 会作为异步 error 事件抛出——无人监听即未捕获异常，整个进程崩溃
@@ -131,7 +143,7 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
           finish({ ok: false, error: `hook 输入写入失败：${why}` });
           return;
         }
-        finish({ ok: true, exitCode: code, output: out, stderr: err });
+        finish({ ok: true, exitCode: code, output: out, stderr: err, truncated: outTruncated });
       });
       try {
         child.stdin.write(JSON.stringify(payload));
@@ -165,9 +177,12 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
             break;
           }
         } catch {
-          // fail-closed：输出不是合法 JSON（日志/报错混入）时按阻止处理，避免策略被静默绕过
+          // fail-closed：输出不是合法 JSON（日志/报错混入）时按阻止处理，避免策略被静默绕过。
+          // 审计 BUG-041：截断与「真解析不了」必须分开说——前者的提示要指向真正的原因。
           decision = 'block';
-          reason = `PreToolUse 钩子输出无法解析（前 80 字）：${out.slice(0, 80)}`;
+          reason = r.truncated
+            ? `PreToolUse 钩子输出超过 64KB 被截断，无法据其判定（按 fail-closed 阻止）——请让 hook 只输出一行 JSON decision，或把判断逻辑放进 hook 内部。`
+            : `PreToolUse 钩子输出无法解析（前 80 字）：${out.slice(0, 80)}`;
           break;
         }
       }

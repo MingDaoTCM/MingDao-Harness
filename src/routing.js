@@ -20,6 +20,15 @@ export function routingConfig(/** @type {any} */ cfg) {
   return { planner, executor };
 }
 
+// 分类器失败的告警只打一次（避免每轮刷屏），但**不能不打**（审计 BUG-044）：
+// 此前 `catch {}` 全吞，用户只看到「回退执行模型」，分不清「分类器说不确定」和「分类器 500 挂了」。
+let routeWarned = false;
+function routeWarn(/** @type {string} */ msg) {
+  if (routeWarned) return;
+  routeWarned = true;
+  console.warn(`[MingDao] ⚠ ${msg}\n  路由仍可用（已回退执行模型），但这**不是**「分类器说不确定」——请检查分类器服务商的配置与额度。`);
+}
+
 const PLAN_HINTS =
   /设计|架构|重构|审查|规划|分析|方案|评估|优化|排查|疑难|报错|怎么修|修复|设计模式|选型|技术债|roadmap|review|design|refactor|plan|architecture|方案设计|评审|fix|analyze|analyse|evaluate|audit|optimize|bug|issue|error|performance/i;
 
@@ -79,10 +88,14 @@ export async function routeTask(/** @type {any} */ { cfg, provider, currentModel
       : { model: rc.executor, reason: '会话粘滞：执行类' };
   }
 
-  // 分类缓存
+  // 分类缓存（审计 BUG-043：**命中时要把它移到队尾**，否则这里是 FIFO——
+  // 实测「先问过的那条」在填满 100 条后被淘汰、再次命中要重调分类器，
+  // 而文件头注释一直自称 LRU；每次未命中都是一次真实的 LLM 调用）
   const key = crypto.createHash('sha256').update(String(text).slice(0, 4000)).digest('hex');
   const cached = routeCache.get(key);
   if (cached) {
+    routeCache.delete(key);
+    routeCache.set(key, cached); // LRU touch
     const m = cached === 'plan' ? rc.planner : rc.executor;
     return m === currentModel ? { model: currentModel, reason: null } : { model: m, reason: cached === 'plan' ? '分类器判定：规划类（缓存）' : '分类器判定：执行类（缓存）' };
   }
@@ -95,7 +108,12 @@ export async function routeTask(/** @type {any} */ { cfg, provider, currentModel
     const curPc = resolveProviderConfig(cfg, currentModel);
     const execPc = resolveProviderConfig(cfg, rc.executor);
     if (curPc.name !== execPc.name) classifierProvider = await createProvider(cfg, rc.executor);
-  } catch {}
+  } catch (/** @type {any} */ e) {
+    // 审计 BUG-044：此前是 `catch {}`，构建分类器 provider 失败时静默用当前 provider，
+    // 用户只看得到「回退执行模型」，查不出是配置还是额度问题。
+    routeWarn(`分类器 provider 构建失败（继续用当前 provider）：${String(e?.message ?? e).slice(0, 120)}`);
+  }
+  const classifyStartAt = Date.now(); // 审计 BUG-048：峰谷价锚点 = 请求发起时刻
   try {
     const res = await classifierProvider.chat({
       model: rc.executor,
@@ -113,7 +131,7 @@ export async function routeTask(/** @type {any} */ { cfg, provider, currentModel
       reasoningEffort: 'low',
       responseFormat: { type: 'json_object' },
     });
-    recordAuxUsage(rc.executor, res?.usage, 'route-classify'); // v0.4.7：分类器消耗入账（此前从不记录）
+    recordAuxUsage(rc.executor, res?.usage, 'route-classify', { requestStartAt: classifyStartAt }); // v0.4.7：分类器消耗入账
     let verdict = null;
     try {
       const j = JSON.parse(String(res.text || '').trim());
@@ -139,8 +157,14 @@ export async function routeTask(/** @type {any} */ { cfg, provider, currentModel
       const m = verdict === 'plan' ? rc.planner : rc.executor;
       return m === currentModel ? { model: currentModel, reason: null } : { model: m, reason: verdict === 'plan' ? '分类器判定：规划类' : '分类器判定：执行类' };
     }
-  } catch {
-    // 分类失败回退执行模型
+  } catch (/** @type {any} */ err) {
+    // 分类失败回退执行模型（审计 BUG-044）：把失败原因带进 `reason`，
+    // 否则调用方无法区分「分类器不确定」与「分类器调用失败」（实测后者 console 输出 0 条）。
+    const why = String(err?.message ?? err).slice(0, 120);
+    routeWarn(`路由分类器调用失败，回退执行模型：${why}`);
+    return rc.executor === currentModel
+      ? { model: currentModel, reason: `分类器失败：${why}` }
+      : { model: rc.executor, reason: `回退执行模型（分类器失败：${why}）` };
   }
   return rc.executor === currentModel ? { model: currentModel, reason: null } : { model: rc.executor, reason: '回退执行模型' };
 }

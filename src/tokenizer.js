@@ -7,6 +7,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import { fileURLToPath } from 'node:url';
 import { mingdaoHome } from './config.js';
@@ -375,17 +376,27 @@ export function countTokens(text, modelName) {
   if (!text) return 0;
   const s = String(text);
   if (!isTokenizable(modelName)) return heuristicTokens(s);
-  if (s.length > TOKEN_CACHE_MAX_LEN) return countDeepseek(s);
+  // 审计 BUG-046：超长文本此前**整条绕过缓存**（实测 CJK 20 万字符 = 128ms，每回合至少付一次）。
+  // 当时绕过的理由是「不想把 20 万字符的原文当 Map 键长期占内存」。这里改用**内容哈希**当键：
+  // 既保留按内容命中的能力（长会话里同一段工具输出会反复出现），又只存 40 字节的键。
+  // 刻意不做「按 50k 分块再相加」——那会让跨块边界的 BPE 合并丢失，token 数被动变大，
+  // 预算估计跟着偏（改口径去换性能不是这里该做的事）。
+  const cacheKey = s.length > TOKEN_CACHE_MAX_LEN ? 'h:' + crypto.createHash('sha1').update(s).digest('hex') : s;
   let byModel = tokenCache.get(modelName);
   if (!byModel) {
     byModel = new Map();
     tokenCache.set(modelName, byModel);
   }
-  const hit = byModel.get(s);
-  if (hit !== undefined) return hit;
+  const hit = byModel.get(cacheKey);
+  if (hit !== undefined) {
+    // 命中即移到队尾：Map 迭代序 + 「满了删第一个」才是 LRU（审计 BUG-045 的注释漂移一并纠正）
+    byModel.delete(cacheKey);
+    byModel.set(cacheKey, hit);
+    return hit;
+  }
   const n = countDeepseek(s);
-  if (byModel.size >= TOKEN_CACHE_MAX_ENTRIES) byModel.delete(byModel.keys().next().value); // LRU：删最旧（Map 迭代序）
-  byModel.set(s, n);
+  if (byModel.size >= TOKEN_CACHE_MAX_ENTRIES) byModel.delete(byModel.keys().next().value); // 删最久未用
+  byModel.set(cacheKey, n);
   return n;
 }
 

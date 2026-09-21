@@ -186,9 +186,10 @@ export async function extractMemory(/** @type {any} */ provider, /** @type {any}
       { role: 'user', content: convo.slice(0, 8000) },
     ];
     // 结构化输出（评估 4.2-4）：json_object，maxTokens 300→200，解析零失败；网关不支持时回退纯文本
+    const memStartAt = Date.now(); // 审计 BUG-048：峰谷价锚点 = 请求发起时刻（不是落账时刻）
     try {
       const res = await provider.chat({ model, messages: msgs, tools: [], temperature: 0.2, maxTokens: 200, reasoningEffort: 'low', responseFormat: { type: 'json_object' } });
-      recordAuxUsage(model, res?.usage, 'memory-extract'); // v0.4.7：记忆提炼消耗入账
+      recordAuxUsage(model, res?.usage, 'memory-extract', { requestStartAt: memStartAt }); // v0.4.7：记忆提炼消耗入账
       const j = JSON.parse(String(res.text || '').trim());
       const items = Array.isArray(j?.items) ? j.items : [];
       const clean = items
@@ -355,9 +356,10 @@ export async function extractProjectMemory(/** @type {any} */ provider, /** @typ
       },
       { role: 'user', content: convo.slice(0, 8000) },
     ];
+    const projMemStartAt = Date.now(); // 审计 BUG-048：峰谷价锚点 = 请求发起时刻
     try {
       const res = await provider.chat({ model, messages: msgs, tools: [], temperature: 0.2, maxTokens: 250, reasoningEffort: 'low', responseFormat: { type: 'json_object' } });
-      recordAuxUsage(model, res?.usage, 'project-memory-extract'); // v0.4.7
+      recordAuxUsage(model, res?.usage, 'project-memory-extract', { requestStartAt: projMemStartAt }); // v0.4.7
       const j = JSON.parse(String(res.text || '').trim());
       const items = Array.isArray(j?.items) ? j.items : [];
       const clean = items

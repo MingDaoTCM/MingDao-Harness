@@ -25,7 +25,7 @@ const SUMMARY_SYSTEM =
   '保留用户目标与关键要求、已完成的步骤与结论、修改/创建的文件、未完成事项、重要约定与决策；' +
   '省略已完成的中间过程与细节。只输出 JSON：{"summary": "摘要内容"}。';
 
-export async function summarizeConversation(/** @type {any} */ provider, /** @type {any} */ model, /** @type {any} */ convoText) {
+export async function summarizeConversation(/** @type {any} */ provider, /** @type {any} */ model, /** @type {any} */ convoText, /** @type {any} */ signal) {
   const base = {
     model,
     messages: [
@@ -35,19 +35,23 @@ export async function summarizeConversation(/** @type {any} */ provider, /** @ty
     tools: [],
     temperature: 0.2,
   };
+  const withSignal = signal ? { signal } : {};
   // 结构化输出（审计 MiniMax §3.3-D）：压缩是 30K 输入 × pro 价的大开销，与标题/记忆/路由
   // 一致改 json_object + maxTokens 2048→1024（1600 字摘要足够）；网关不支持时回退纯文本。
+  // v0.6.5（审计 BUG-037）：摘要请求接 signal —— 压缩是链路里**最慢的一次真实请求**
+  // （总超时远程 600s / 本地 1800s），此前完全没有中断通道，Ctrl+C 只能干等它返回。
   let text = '';
   let usage = null;
   try {
-    const res = await provider.chat({ ...base, maxTokens: 1024, responseFormat: { type: 'json_object' } });
+    const res = await provider.chat({ ...base, ...withSignal, maxTokens: 1024, responseFormat: { type: 'json_object' } });
     const j = JSON.parse(String(res?.text || '').trim());
     text = String(j?.summary || '').trim();
     usage = res?.usage || null;
   } catch {}
+  if (signal?.aborted) return { text: null, usage }; // 已中断：不再发起第二次（那次也必然被 abort）
   if (!text) {
     try {
-      const res = await provider.chat({ ...base, maxTokens: 1024 });
+      const res = await provider.chat({ ...base, ...withSignal, maxTokens: 1024 });
       text = String(res?.text || '').trim();
       usage = res?.usage || null;
     } catch {}
@@ -56,7 +60,7 @@ export async function summarizeConversation(/** @type {any} */ provider, /** @ty
   return { text: text.slice(0, SUMMARY_MAX_CHARS), usage };
 }
 
-export async function compactConversation(/** @type {any} */ { messages, budget, count, provider, executorModel, triggerRatio, force = false }) {
+export async function compactConversation(/** @type {any} */ { messages, budget, count, provider, executorModel, triggerRatio, force = false, signal }) {
   if (!messages.length) return null;
   // 各消息 token 与总量；低于触发线（默认预算 80%）无需压缩
   const sizes = [];
@@ -157,7 +161,8 @@ export async function compactConversation(/** @type {any} */ { messages, budget,
       const r = await summarizeConversation(
         provider,
         executorModel,
-        `【既有摘要】\n${oldSummary.slice(0, SUMMARY_MAX_CHARS)}\n\n【新增对话记录】\n${newText}`
+        `【既有摘要】\n${oldSummary.slice(0, SUMMARY_MAX_CHARS)}\n\n【新增对话记录】\n${newText}`,
+        signal
       );
       summary = r.text;
       usage = r.usage;
@@ -167,7 +172,7 @@ export async function compactConversation(/** @type {any} */ { messages, budget,
     if (!summary) return null;
   } else {
     try {
-      const r = await summarizeConversation(provider, executorModel, convoText);
+      const r = await summarizeConversation(provider, executorModel, convoText, signal);
       summary = r.text;
       usage = r.usage;
     } catch {

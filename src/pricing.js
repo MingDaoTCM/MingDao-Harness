@@ -95,24 +95,41 @@ function peakCfg() {
   return tzCache;
 }
 
+/** 取某时刻在指定时区的「星期 + 小时」（h23）。时区非法时 Intl 会抛，由调用方决定回退。 */
+function peakWallClock(/** @type {Date} */ date, /** @type {string} */ timezone) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    weekday: 'short',
+    hour: 'numeric',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const weekday = parts.find((p) => p.type === 'weekday')?.value;
+  const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+  return { weekday, hour };
+}
+
 export function isPeakHour(date = new Date()) {
   const { timezone, peakWindows } = peakCfg();
+  let weekday;
+  let hour;
   try {
-    const parts = new Intl.DateTimeFormat('en-US', {
-      timeZone: timezone,
-      weekday: 'short',
-      hour: 'numeric',
-      hourCycle: 'h23',
-    }).formatToParts(date);
-    const weekday = parts.find((p) => p.type === 'weekday')?.value;
-    // 周末全天按闲时计价
-    if (weekday === 'Sat' || weekday === 'Sun') return false;
-    const hour = Number(parts.find((p) => p.type === 'hour')?.value);
-    return peakWindows.some(([s, e]) => hour >= s && hour < e);
+    ({ weekday, hour } = peakWallClock(date, timezone));
   } catch {
-    const h = date.getHours();
-    return peakWindows.some(([s, e]) => h >= s && h < e); // 非法时区回退本机
+    // 非法时区（审计 BUG-027）：回退必须与**日界/费用护栏**同一个来源（`activeTimezone()`
+    // → Asia/Shanghai），此前这里回退的是**本机墙钟**，于是同一笔 usage 的峰谷单价
+    // 与按日累计窗口能差 8~13 小时（实测 TZ=America/New_York + 非法 timezone 时，
+    // 峰谷按纽约 09:30 判、日界却按上海 22:30 算）。
+    try {
+      ({ weekday, hour } = peakWallClock(date, activeTimezone()));
+    } catch {
+      // 连回退时区都不可用（极小 ICU 构建）：最后才用本机墙钟，且只用于峰谷判定
+      weekday = undefined;
+      hour = date.getHours();
+    }
   }
+  // 周末全天按闲时计价
+  if (weekday === 'Sat' || weekday === 'Sun') return false;
+  return peakWindows.some(([s, e]) => hour >= s && hour < e);
 }
 
 // —— 计价时区墙钟工具（避峰调度/费用护栏按天统计用，零依赖 Intl） ——

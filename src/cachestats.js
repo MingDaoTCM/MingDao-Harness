@@ -242,15 +242,24 @@ export function formatCacheSummary(/** @type {any} */ sum) {
  * 这些调用各自独立 `provider.chat`，不在 agent 回合的 usage 里，因此单独入账不会重复计费。
  * 此前它们从不入账：「自动路由省钱」在本框架自己的账本里无法验证，日费用护栏也少计这部分消费。
  * @param {any} modelName @param {any} usage @param {string} [reason]
+ * @param {{requestStartAt?: number}|null} [perf] 峰谷价锚点（请求发起时刻）；缺省时退回落账时刻
  */
-export function recordAuxUsage(modelName, usage, reason = 'aux') {
+export function recordAuxUsage(modelName, usage, reason = 'aux', /** @type {{requestStartAt?: number}|null} */ perf = null) {
   if (!usage) return { ok: true, error: null, phase: null };
   try {
     const prompt = usage.prompt_tokens || 0;
     const completion = usage.completion_tokens || 0;
     if (!prompt && !completion) return { ok: true, error: null, phase: null };
     const split = cacheSplit(usage);
-    const cost = split ? estimateCost(modelName, prompt, completion, split) : estimateCost(modelName, prompt, completion, null);
+    // 审计 BUG-048（实测复现）：辅助调用（路由分类/标题/记忆抽取）此前**漏传 priceAt**，
+    // 于是 estimateCost 的第 5 参走默认 `new Date()` —— 按**落账时刻**选峰谷价，
+    // 与 recordUsage 的「按请求发起时刻」两套口径（实测同一笔调用 0.48 元 vs 0.24 元，
+    // 在 09:00/12:00/14:00/18:00 边界上正好差一倍）。这里与 recordUsage 对齐。
+    const startAt = Number(perf?.requestStartAt) || 0;
+    const priceAt = startAt > 0 ? new Date(startAt) : undefined;
+    const cost = split
+      ? estimateCost(modelName, prompt, completion, split, priceAt)
+      : estimateCost(modelName, prompt, completion, null, priceAt);
     return recordCacheStats({
       model: modelName,
       prompt,

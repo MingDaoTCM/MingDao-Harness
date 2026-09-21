@@ -558,6 +558,22 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       const roundUsageStart = { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens || 0, prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens || 0 };
       while (steps < stepLimit) {
       steps += 1;
+      // v0.6.5（审计 BUG-025，实测复现）：Ctrl+C 落在**工具执行期间**时，此前只把 `aborted`
+      // 置真、却没有任何收敛点——工具跑完仍会走回这里发出**下一次请求**（实测：SIGINT 之后
+      // chat 仍被调用 2 次）。这里与工具循环里的检查一起把它收口成「立刻停止、如实回报 aborted」。
+      if (aborted) {
+        stripOrphanCalls();
+        return {
+          text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: true,
+          note: '已按 Ctrl+C 中断（工具执行期间收到中断信号），本回合未再发出请求。',
+          durationMs: Date.now() - startedAt, perf: perf(),
+        };
+      }
+      // 本轮的 AbortController 提到压缩之前创建（审计 BUG-037）：压缩是一次**大开销的真实请求**
+      // （30K 输入 × executor 模型），此前它在 `ac` 创建之前发生、拿不到任何 signal，
+      // 于是压缩期间 Ctrl+C 只能等它返回（远程 600s / 本地 1800s，且还有一次重试）。
+      const ac = new AbortController();
+      currentAc = ac;
       // 自动压缩（P3-1）：预算不足、静默裁剪即将丢弃早期段落时，先用 executor 模型
       // 把被裁段落压成摘要注入，替代「失忆」；失败/不值得时回退普通裁剪。
       if (cfg.autoCompact !== false) {
@@ -572,6 +588,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             // 等到 80% 再压时上下文已累积过多、prefill 与内存双高（v0.4.2 本地模型 507 修复）
             triggerRatio: Number(cfg.compactTrigger) > 0 ? cfg.compactTrigger : (caps.isLocal ? 0.6 : undefined),
             force: windowPressure, // v0.3.2：逼近窗口时强制压缩（忽略最小阈值门槛）
+            // v0.6.5（审计 BUG-037）：摘要请求也要能被打断（此前压缩链路完全没有 signal）
+            signal: ac.signal,
           });
           if (compacted) {
             messages.splice(0, messages.length, ...compacted.messages);
@@ -674,8 +692,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               perf: perf(),
             };
           }
-          if (guard.downgrade && !downgraded) {
-            if (guard.downgradeModel !== activeModel) {
+          if (guard.downgrade) {
+            if (!downgraded && guard.downgradeModel !== activeModel) {
               // MiniMax P0：降级目标零校验会崩溃——必须与当前模型同服务商且已有 Key，
               // 否则 provider.chat 必然 400；校验失败按 block 处理并给修复指引。
               const curPc = resolveProviderConfig(cfg, activeModel);
@@ -694,7 +712,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
                 };
               }
             } else {
-              // 已经是降级目标模型：无法再降，按 block 处理
+              // 已经在降级目标模型上：无法再降，按 block 处理。
+              // v0.6.5（审计 BUG-023/035，实测复现）：此前的外层条件是 `guard.downgrade && !downgraded`，
+              // 于是**本回合刚降过一次**之后（downgraded=true），下一步会落到「两个分支都不进」——
+              // 既不切换也不再拦，静默继续用 flash 发请求继续计费。判据必须是「超限 + 已在最便宜模型」，
+              // 与「一开局就是 flash」那条路径完全同源（那条本来就会拦，两条路径此前结论相反）。
               stripOrphanCalls();
               return {
                 text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
@@ -702,14 +724,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
                 durationMs: Date.now() - startedAt, perf: perf(),
               };
             }
-          } else if (!guard.downgrade) {
+          } else {
             io.print(style(guard.message, C.yellow));
           }
         }
       }
 
-      const ac = new AbortController();
-      currentAc = ac;
       io.beginTurn();
       io.startSpinner('正在思考…');
 
@@ -1072,6 +1092,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
 
         let i = 0;
         while (i < res.toolCalls.length) {
+          // v0.6.5（审计 BUG-025）：工具执行期间用户按了 Ctrl+C → 立刻停止，不再执行后续批次
+          // （此前没有任何检查点，长工具序列会把中断信号拖到整串跑完）
+          if (aborted) {
+            stripOrphanCalls();
+            return {
+              text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: true,
+              note: '已按 Ctrl+C 中断（工具执行期间收到中断信号），本回合未再发出请求。',
+              durationMs: Date.now() - startedAt, perf: perf(),
+            };
+          }
           // 收集批次：连续且可并行的只读工具成批；首个非并行项（写入类/被拒/MCP）结束批次
           const batch = []; // {prep, batchable}
           while (i < res.toolCalls.length) {

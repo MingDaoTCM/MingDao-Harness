@@ -182,8 +182,19 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
           calls.set(key, cur);
         }
         if (tc.id) cur.id = tc.id;
-        // 部分网关会重复下发完整 name：保留最长版本，避免重复拼接
-        if (tc.function?.name && tc.function.name.length > cur.name.length) cur.name = tc.function.name;
+        // tool_calls 的 `name` 必须与 `arguments` **对称**地拼接（审计 BUG-038，实测复现）。
+        // 此前是「保留最长的那个」，于是把**分片下发**的 name（`get_` + `weather`）当成两个
+        // 完整候选，保留较长的 `weather` —— 名字错了就查不到 schema，工具调用必失败
+        // （而同一个网关的分片 arguments 走 `+=`，所以只有 name 这一半是坏的）。
+        // 规则同时覆盖三种下发形态：分片拼接 / 重复下发完整名（跳过）/ 后到的完整名更长（取它）。
+        const nm = tc.function?.name;
+        if (nm) {
+          if (!cur.name) cur.name = nm;
+          else if (nm === cur.name || cur.name.endsWith(nm)) {
+            // 重复下发同一个名字（或它的尾部）：忽略
+          } else if (nm.startsWith(cur.name)) cur.name = nm; // 后到的是完整名
+          else cur.name += nm; // 分片：接上
+        }
         if (tc.function?.arguments) cur.args += tc.function.arguments;
       }
     }

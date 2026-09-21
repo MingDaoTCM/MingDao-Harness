@@ -129,12 +129,23 @@ export async function fetchProviderModels(/** @type {any} */ cfg, /** @type {any
  * 判据用「服务商自己返回的名单」：它仍是有界集合（`/models` 结果、已按 isChatModel 过滤、
  * 上限 200），因此既不放过任意字符串（v0.4.7 加这条校验就是为了拦 `{model:12345}`），
  * 又能让**厂家改名/上新**这一类正常演进立刻可用，不必等内核发版。
- * @param {any} name
+ *
+ * `providerName`（审计 BUG-026）：**只认该模型所属服务商自己的名单**。此前遍历缓存里的
+ * **所有**服务商条目，于是 A 家拉到的名字能让 B 家的切换校验放行——校验面跨服务商泄漏
+ * （实测：缓存里只有 openai 的 `gpt-5` 时，`cfg.provider=deepseek` 的校验也返回 true）。
+ * 按审计原话「越权使用模型」是**夸大**：校验通过后 `resolveProviderConfig` 仍会把请求路由到
+ * 该名字真正的服务商，不会「借」别家的模型跑；但校验面确实不该跨家。
+ * 不传 `providerName` 时保持旧行为（兼容既有调用）。
+ * @param {any} name @param {string} [providerName]
  */
-export function isDiscoveredModel(/** @type {any} */ name) {
+export function isDiscoveredModel(/** @type {any} */ name, /** @type {string} */ providerName) {
   const target = String(name || '').trim();
   if (!target) return false;
   const cache = loadCache();
+  if (providerName) {
+    const models = /** @type {any} */ (cache || {})?.[providerName]?.models;
+    return Array.isArray(models) && models.includes(target);
+  }
   for (const entry of Object.values(cache || {})) {
     const models = /** @type {any} */ (entry)?.models;
     if (Array.isArray(models) && models.includes(target)) return true;

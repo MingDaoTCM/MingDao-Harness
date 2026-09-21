@@ -239,11 +239,16 @@ export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() =
       } catch (err) {
         if (!acquiring) throw err; // fn 自身的异常绝不进入锁重试
         if (/** @type {any} */ (err).code !== 'EEXIST') throw err;
-        if (reclaimIfStale(lockPath, staleMs)) continue;
+        // 审计 BUG-047（实测复现）：回收陈旧锁的分支原先直接 `continue`，**跳过了下面的超时判断**——
+        // 当陈旧锁删不掉（只读目录 / EPERM / EIO；实测 chmod 555 即可复现）时 reclaimIfStale
+        // 永远返回 true，于是无限空转：99% CPU、5 秒超时失效、进程不返回。
+        // 「回收过」不构成「可以不计时地重试」，两条路径都必须过超时闸。
+        const reclaimed = reclaimIfStale(lockPath, staleMs);
         if (Date.now() - t0 > timeoutMs) {
           throw lockTimeoutError(lockPath, timeoutMs);
         }
         sleepMs(25);
+        if (reclaimed) continue; // 回收后立刻重试；否则同样按 25ms 节流再试
       }
     }
   });
@@ -276,11 +281,13 @@ export async function withFileLock(/** @type {string} */ lockPath, /** @type {()
           releaseLock(lockPath);
         }
       }
-      if (reclaimIfStale(lockPath, staleMs)) continue;
+      // 与同步版同一条修正（审计 BUG-047）：回收分支不得绕过超时闸，否则陈旧锁删不掉时永远自旋
+      const reclaimed = reclaimIfStale(lockPath, staleMs);
       if (Date.now() - t0 > timeoutMs) {
         throw lockTimeoutError(lockPath, timeoutMs);
       }
       await sleepAsync(pollMs);
+      if (reclaimed) continue;
     }
   });
 }

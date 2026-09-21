@@ -26,6 +26,8 @@ export async function generateTitle(/** @type {any} */ provider, /** @type {any}
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(new Error('标题生成超时')), timeoutMs);
   const user = { role: 'user', content: String(firstUserText).slice(0, 300) };
+  // 审计 BUG-048：峰谷价锚点 = **请求发起时刻**（与 recordUsage 同口径），不是落账时刻
+  const titleStartAt = Date.now();
   try {
     // 结构化输出（评估 4.2-4）：json_object，maxTokens 120→50，解析零失败；网关不支持时回退纯文本
     try {
@@ -42,7 +44,7 @@ export async function generateTitle(/** @type {any} */ provider, /** @type {any}
         responseFormat: { type: 'json_object' },
         signal: ctrl.signal,
       });
-      recordAuxUsage(model, res?.usage, 'auto-title'); // v0.4.7：标题生成消耗入账
+      recordAuxUsage(model, res?.usage, 'auto-title', { requestStartAt: titleStartAt }); // v0.4.7：标题生成消耗入账
       const j = JSON.parse(String(res.text || '').trim());
       const t = cleanTitle(j?.title);
       if (t) return t;
@@ -57,7 +59,7 @@ export async function generateTitle(/** @type {any} */ provider, /** @type {any}
         reasoningEffort: 'low',
         signal: ctrl.signal,
       });
-      recordAuxUsage(model, res?.usage, 'auto-title-fallback'); // v0.4.7
+      recordAuxUsage(model, res?.usage, 'auto-title-fallback', { requestStartAt: titleStartAt }); // v0.4.7
       const t = cleanTitle(res.text);
       return t || null;
     } catch {

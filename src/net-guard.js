@@ -203,6 +203,18 @@ export function installEgressGate(/** @type {any} */ rawNet) {
           const { body, ...rest } = curInit || {};
           curInit = { ...rest, method: 'GET' };
         }
+        // 跨 origin 跳转必须**剥掉凭据头**（审计 BUG-034，实测复现）：
+        // 手动跟随重定向时 `curInit` 原样复用，而 undici 在 `redirect:'manual'` 下不会替你做
+        // 同源剥离——实测 warn 模式的第二跳 `https://attacker.example/steal` 仍带着第一跳的
+        // `Authorization: Bearer sk-…`。与 mode 无关：warn 放行的是「出网」，不该顺手把凭据送出去。
+        // 与 fetch 规范对齐：只有同源（scheme+host+port 全同）才保留这些头。
+        try {
+          if (new URL(next).origin !== new URL(String(current)).origin && curInit?.headers) {
+            const h = new Headers(curInit.headers);
+            for (const k of ['authorization', 'cookie', 'proxy-authorization']) h.delete(k);
+            curInit = { ...curInit, headers: h };
+          }
+        } catch {}
         try {
           await res.body?.cancel(); // 释放上一跳的连接，避免重定向链堆积
         } catch {}

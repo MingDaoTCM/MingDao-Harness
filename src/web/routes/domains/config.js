@@ -86,7 +86,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
           // 于是「应用自己列出来的模型选不了」。DeepSeek 官方把 deepseek-v4-flash
           // 改名成 deepseek-flash 后，用户一点就报「未知模型」并弹回旧模型——
           // 厂家改名/上新不该等内核发版才能用。判据仍是有界集合（服务商 /models 的返回）。
-          isDiscoveredModel(target);
+          // 审计 BUG-026：只认**该模型所属服务商**的名单，不再跨服务商放行。
+          isDiscoveredModel(target, resolveProviderConfig(cfg, target).name);
         if (!known) {
           return json(res, 400, { error: `未知模型 "${target}"——请先在 ⚙ 设置里选择内置模型，或添加自定义模型后再切换。` });
         }
