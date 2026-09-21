@@ -7,7 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome } from './config.js';
-import { atomicWriteFileSync } from './atomic-write.js';
+import { atomicWriteFileSync, withFileLockSync, withFileLock } from './atomic-write.js';
 
 function taskStateDir() {
   return path.join(mingdaoHome(), 'taskstates');
@@ -100,11 +100,11 @@ export function checkpointHint(res, kind = 'save') {
 
 // 合并落盘（v0.3.1 P2-3 修复）：续跑再中断时保留原始 goal、合并 artifacts，只更新 progress/status。
 // 避免「第二次续跑」时把 goal 覆盖成「继续」、把已交付文件清单清零。
-/** @param {any} sessionName @param {any} ts */
-export function saveTaskStateMerge(sessionName, ts) {
-  const prev = loadTaskState(sessionName);
+/** 合并规则（纯函数）：两处分发（同步版 / 异步版）共用，避免"两条路径两套合并语义"。
+ * @param {any} prev @param {any} ts */
+function mergeTaskState(prev, ts) {
   const prevUnfinished = prev && (prev.status === 'cap' || prev.status === 'interrupted');
-  const merged = prevUnfinished
+  return prevUnfinished
     ? {
         goal: prev.goal || ts.goal,
         artifacts: [...new Set([...(Array.isArray(prev.artifacts) ? prev.artifacts : []), ...(Array.isArray(ts.artifacts) ? ts.artifacts : [])])],
@@ -113,7 +113,46 @@ export function saveTaskStateMerge(sessionName, ts) {
         updatedAt: ts.updatedAt,
       }
     : ts;
-  return saveTaskState(sessionName, merged);
+}
+
+/** 同步版：**CLI / REPL**（一次性命令与本地交互，不在 WebUI 请求路径上）。
+ * @param {any} sessionName @param {any} ts */
+export function saveTaskStateMerge(sessionName, ts) {
+  // 审计 BUG-068（实测复现：12 个进程并发合并写同一会话，最终只剩 3 条 artifact）：
+  // 原实现是「读 → 合并 → 整份写」，读与写之间没有互斥，后写者拿着**陈旧快照**覆盖前者。
+  // `atomicWriteFileSync` 只保证"不写半截"，不保证"不丢更新"。本仓已有跨进程锁原语，
+  // 这里直接复用（与 cachestats / audit 的追加-轮转同锁同款）。
+  let file;
+  try {
+    file = taskStateFile(sessionName); // 非法会话名在这里抛 → 如实转成 {ok:false}（不写到目录之外）
+  } catch (err) {
+    return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
+  }
+  try {
+    return withFileLockSync(file + '.lock', () => saveTaskState(sessionName, mergeTaskState(loadTaskState(sessionName), ts)));
+  } catch (err) {
+    return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
+  }
+}
+
+/**
+ * 异步版：**WebUI 请求路径**用它（§3.27 的既定口径：请求路径上的锁要等待时让出事件循环，
+ * 否则极端争用下会把整个 WebUI 冻住）。合并语义与同步版逐字相同（共用 `mergeTaskState`）。
+ * @param {any} sessionName @param {any} ts
+ * @returns {Promise<{ok: boolean, error: string|null}>}
+ */
+export async function saveTaskStateMergeAsync(sessionName, ts) {
+  let file;
+  try {
+    file = taskStateFile(sessionName);
+  } catch (err) {
+    return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
+  }
+  try {
+    return await withFileLock(file + '.lock', () => saveTaskState(sessionName, mergeTaskState(loadTaskState(sessionName), ts)));
+  } catch (err) {
+    return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
+  }
 }
 
 // 续跑提示：注入到消息历史，让模型先核对现状（已完成文件不重做）、再做未完成部分。

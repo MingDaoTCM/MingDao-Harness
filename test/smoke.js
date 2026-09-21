@@ -5622,7 +5622,9 @@ console.log(JSON.stringify({ okOn, xml }));`;
   const ws88 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-mcp88-'));
   try {
     assert.equal(buildPreset('filesystem', undefined, ws88).config.args.at(-1), ws88, '目录类缺参应默认 cwd');
-    assert.equal(buildPreset('git', undefined, ws88).config.args.at(-1), ws88, '目录类缺参应默认 cwd');
+    // v0.6.5（BUG-053）：`git` 预设指向的 npm 包已被安全保留（0.0.1-security），改成断言"明确拒绝"
+    const gitPreset = buildPreset('git', undefined, ws88);
+    assert.ok(gitPreset.error && gitPreset.error.includes('不可用'), '上游包已下架的预设必须明确拒绝而不是写进配置：' + JSON.stringify(gitPreset));
 
     const noArg = buildPreset('sqlite', undefined, ws88);
     assert.ok(noArg.error && noArg.error.includes('需要参数'), '文件类预设缺参必须报错：' + JSON.stringify(noArg));
@@ -6576,7 +6578,8 @@ if (process.platform !== 'win32') {
           .readFileSync(fp, 'utf8')
           .replace(/\/\*[\s\S]*?\*\//g, '')
           .replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-        const re = /(saveTaskStateMerge|clearTaskState)\(/g;
+        // v0.6.5：WebUI 请求路径改用异步版（saveTaskStateMergeAsync），守卫必须一并认它
+        const re = /(saveTaskStateMergeAsync|saveTaskStateMerge|clearTaskState)\(/g;
         let m;
         while ((m = re.exec(src))) {
           const before = src.slice(Math.max(0, m.index - 80), m.index);
@@ -7678,6 +7681,7 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
         'schedule.js': { n: 12, why: '调度守护进程内部（阻塞只推迟定时任务，不冻结用户请求）；且这些函数是纯同步读-改-写链' },
         'sync.js': { n: 1, why: 'CLI 一次性命令（进程很快就退出），且调用链全同步' },
         'tasks.js': { n: 1, why: 'patchTask 的状态读-改-写（已把进程操作移出临界区，实测毫秒级）' },
+        'task-state.js': { n: 1, why: 'v0.6.5（BUG-068）起检查点合并写加锁防丢更新；**WebUI 请求路径已改走异步版** saveTaskStateMergeAsync，这里剩的同步版只服务 CLI/REPL（一次性命令与本地交互），临界区是"读一个小 JSON + 原子写"' },
       };
       const files = [];
       (function walk(/** @type {string} */ d) {
@@ -8027,7 +8031,13 @@ const isPosix111 = process.platform !== 'win32';
       try {
         assert.ok((await probe('http://registry.evil.example')).includes('明文 http'), '非回环的明文 http registry 必须被拒绝（TLS 是这条链上唯一的外部信任锚）');
         assert.ok((await probe('ftp://x.example')).includes('协议不支持'), '非 http(s) 协议必须被拒绝');
-        assert.ok(!(await probe('https://registry.example')).includes('拒绝'), 'https registry 必须放行');
+        // 注意：这条断言查的是**协议这一层**是否放行。v0.6.5（BUG-057）起，解析失败会 fail-closed
+        // 拒绝——所以「https 通过协议校验」与「这个域名能解析」是两件事，不能再用『不含"拒绝"』来判。
+        const httpsErr = await probe('https://registry.example');
+        assert.ok(
+          !httpsErr.includes('明文 http') && !httpsErr.includes('协议不支持'),
+          `https registry 必须通过协议校验（域名解析失败属于另一层，且自 v0.6.5 起 fail-closed），实际：${httpsErr}`
+        );
         assert.ok(!(await probe('http://127.0.0.1:9')).includes('明文 http'), '回环地址允许明文（本地开发/内网自建）');
       } finally {
         if (prev === undefined) delete process.env.MINGDAO_REGISTRY_URL;
@@ -8971,7 +8981,13 @@ process.stdout.write('done');`
       assert.deepEqual(bare, [], `sync-server.js 里存在未 await 的 withWriteLock（P0-4 会让整个同步服务退出）：\n${bare.join('\n')}`);
       assert.ok(/await withWriteLock\(\(\) => \{[\s\S]{0,200}lastSeen|try \{\r?\n\s+await withWriteLock/.test(syncSrc), 'lastSeen 的写锁必须被 await（并包 try/catch 留痕）');
       assert.ok(/await doChangePassword\(/.test(syncSrc), 'doChangePassword 改为持锁执行后，调用点必须 await');
-      assert.ok(/async function doChangePassword[\s\S]{0,400}?return withWriteLock\(/.test(syncSrc), '改密（吊销全部设备）必须与设备表写互斥');
+      // 改密函数体里必须仍有 `return withWriteLock(`（互斥本身没变）；**不再限制距离**——
+      // v0.6.5（BUG-064）把 ~18ms 的 scrypt 挪到了拿锁之前，函数体自然变长，按"前 400 字"匹配
+      // 是在测"代码排版"而不是"是否互斥"。
+      const dcpBody = (syncSrc.match(/async function doChangePassword[\s\S]*?\n}\n/) || [''])[0];
+      assert.ok(dcpBody.includes('return withWriteLock('), '改密（吊销全部设备）必须与设备表写互斥');
+      assert.ok(/await verifyPassword\(/.test(dcpBody), '改密必须在锁外 await 校验旧密码（BUG-064：同步 scrypt 会阻塞事件循环）');
+      assert.ok(!/scryptSync\(/.test(syncSrc), 'BUG-064：sync-server.js 不得再出现同步 scrypt');
       // 现象 B：锁内**重读** shares/accepted，而不是把锁外快照写回去
       assert.ok(/const shares2 = readJson\(sharesFile\(\), \{\}\);/.test(syncSrc), 'doShareAccept 必须在锁内重读 shares');
       assert.ok(/if \(!shares2\[shareId\]\) return \{ notFound/.test(syncSrc), '锁内重读后发现分享已被并发撤销 → 必须拒绝，而不是把已删除的 shareId 写回');
@@ -9694,6 +9710,335 @@ safeRmSync(tmp, { recursive: true, force: true });
   }
 
   ok('v0.6.5 批十：中级缺陷收口（护栏降级/中断收敛/时区同源/重定向剥凭据/压缩 signal/分片工具名/hook 截断/LRU/分类器可见/超长文本缓存/锁超时/辅助计价）');
+}
+
+// ---------- 122. v0.6.5 批十一：中级缺陷收口（审计 BUG-052/053/057/061/064/068/070/071/072/073/075/077/079/083） ----------
+{
+  // 122a. BUG-061：任务 id 必须唯一（旧实现用 Math.random 3 位 base36，同毫秒碰撞会**静默覆盖**）
+  {
+    const home122a = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b11a-'));
+    const nodeCrypto122a = (await import('node:crypto')).default;
+    const { addSchedule, listSchedules } = await import(pathToFileURL(path.join(srcDir, 'schedule.js')).href);
+    const origUuid = nodeCrypto122a.randomUUID;
+    const origRandom = Math.random;
+    const origNow = Date.now;
+    try {
+      // 冻结"随机性"与时钟：这正是旧实现会碰撞的条件
+      nodeCrypto122a.randomUUID = () => 'ffffffff-ffff-ffff-ffff-ffffffffffff';
+      Math.random = () => 0.5;
+      Date.now = () => 1750000000000;
+      addSchedule(home122a, '任务A', { every: '1h' });
+      addSchedule(home122a, '任务B', { every: '1h' });
+      const list = listSchedules(home122a);
+      assert.equal(list.length, 2, `同毫秒 + 随机源退化时也必须保住两个任务（BUG-061：旧实现会覆盖），实际只剩 ${list.length} 个`);
+      assert.notEqual(list[0].id, list[1].id, '两个任务的 id 必须不同');
+    } finally {
+      nodeCrypto122a.randomUUID = origUuid;
+      Math.random = origRandom;
+      Date.now = origNow;
+      safeRmSync(home122a, { recursive: true, force: true });
+    }
+  }
+
+  // 122b. BUG-072 / BUG-073：close() 必须停掉 spinner；onSigint 不得累积监听器
+  {
+    const io122b = createIO({ quiet: false });
+    const origWrite = process.stdout.write.bind(process.stdout);
+    const origIsTTY122b = process.stdout.isTTY;
+    // spinner 在非 TTY 下直接 return（那是给管道用的正确行为）——测它就得先把 stdout 伪装成 TTY
+    Object.defineProperty(process.stdout, 'isTTY', { value: true, configurable: true });
+    let writes122b = 0;
+    /** @type {any} */
+    let spinnerAfterClose = 0;
+    try {
+      process.stdout.write = (/** @type {any} */ chunk, ...rest) => {
+        writes122b += 1;
+        return origWrite(chunk, ...rest);
+      };
+      // 073：连注册 5 次，监听器数不得累积（旧实现每次 +1）
+      const before122b = process.listenerCount('SIGINT');
+      const offs = [];
+      for (let i = 0; i < 5; i += 1) offs.push(io122b.onSigint(() => {}));
+      const after122b = process.listenerCount('SIGINT');
+      assert.ok(after122b - before122b <= 1, `onSigint 重复注册不得累积监听器（BUG-073），实际 +${after122b - before122b}`);
+      offs.forEach((f) => f());
+      // 072：startSpinner 后 close，等 300ms 不得再有输出
+      io122b.startSpinner?.('测试中…');
+      await new Promise((r) => setTimeout(r, 120));
+      io122b.close();
+      const afterCloseStart = writes122b;
+      await new Promise((r) => setTimeout(r, 300));
+      spinnerAfterClose = writes122b - afterCloseStart;
+      assert.equal(spinnerAfterClose, 0, `close() 之后 spinner 不得再写（BUG-072），实际又写了 ${spinnerAfterClose} 次`);
+    } finally {
+      process.stdout.write = origWrite;
+      Object.defineProperty(process.stdout, 'isTTY', { value: origIsTTY122b, configurable: true });
+    }
+  }
+
+  // 122c. BUG-079：回收摘要的截断必须按码点（旧实现按 UTF-16 单元切，会切出孤立代理项）
+  {
+    const { trimMessages } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
+    const splitPoint = 'a' + '𝕏'.repeat(150); // 让第 200 个 UTF-16 单元正好落在代理对中间
+    const msgs = [
+      { role: 'system', content: '系统' },
+      { role: 'assistant', content: splitPoint },
+      { role: 'user', content: 'x' },
+    ];
+    // 预算要**刚好**让"回收后的那条"留在尾部窗口里：太大就不触发回收，太小连回收结果都留不下
+    const out = trimMessages(msgs, 230);
+    const reclaimed = out.filter((/** @type {any} */ m) => String(m.content).includes('已回收'));
+    assert.ok(reclaimed.length >= 1, '前置：应至少产生一条回收摘要');
+    const loneHigh = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/;
+    const loneLow = /(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/;
+    for (const m of reclaimed) {
+      assert.ok(!loneHigh.test(m.content) && !loneLow.test(m.content), `回收摘要不得留下孤立代理项（BUG-079）：${JSON.stringify(String(m.content).slice(0, 60))}`);
+    }
+  }
+
+  // 122d. BUG-077：损坏的 config.json 在"读来写回"路径上必须先备份，不得静默覆盖
+  {
+    const home122d = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b11d-'));
+    const prevHome122d = process.env.MINGDAO_HOME;
+    process.env.MINGDAO_HOME = home122d;
+    try {
+      const cfgFile122d = path.join(home122d, 'config.json');
+      fs.writeFileSync(cfgFile122d, '{ "model": "deepseek-flash", 坏掉的 JSON');
+      const { loadConfigForWrite, saveConfig } = await import(pathToFileURL(path.join(srcDir, 'config.js')).href);
+      const origWarn122d = console.warn;
+      console.warn = () => {};
+      let cfg122d;
+      try {
+        cfg122d = loadConfigForWrite('smoke 用例');
+      } finally {
+        console.warn = origWarn122d;
+      }
+      const backups = fs.readdirSync(home122d).filter((f) => f.startsWith('config.json.corrupt-'));
+      assert.equal(backups.length, 1, `损坏的配置必须先改名备份（BUG-077），实际备份 ${backups.length} 份`);
+      assert.ok(String(fs.readFileSync(path.join(home122d, backups[0]), 'utf8')).includes('坏掉的 JSON'), '备份里必须是用户原始内容');
+      saveConfig({ ...cfg122d, sync: { url: 'https://x' } });
+      assert.ok(fs.readFileSync(cfgFile122d, 'utf8').includes('"sync"'), '备份之后应能正常写入新配置');
+    } finally {
+      process.env.MINGDAO_HOME = prevHome122d;
+      safeRmSync(home122d, { recursive: true, force: true });
+    }
+  }
+
+  // 122e. BUG-068：并发 merge 写检查点不得丢更新（旧实现读-改-写无锁）
+  {
+    const home122e = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b11e-'));
+    const N122e = 8;
+    const child122e = (/** @type {number} */ i) =>
+      new Promise((resolve) => {
+        const p = spawn(process.execPath, ['--input-type=module', '-e', `
+          process.env.MINGDAO_HOME = ${JSON.stringify(home122e)};
+          const TS = await import(${JSON.stringify(pathToFileURL(path.join(srcDir, 'task-state.js')).href)});
+          TS.saveTaskStateMerge('s1', { goal: 'g', artifacts: ['/tmp/a-${i}'], progress: 'p', status: 'interrupted', updatedAt: Date.now() });
+        `], { stdio: 'ignore' });
+        p.on('exit', () => resolve(null));
+      });
+    const prevHome122e = process.env.MINGDAO_HOME;
+    try {
+      await Promise.all(Array.from({ length: N122e }, (_, i) => child122e(i)));
+      // 读回时必须切到**同一个 home**（子进程各自设了 MINGDAO_HOME，父进程默认还停在上一个用例的 home）
+      process.env.MINGDAO_HOME = home122e;
+      const { loadTaskState } = await import(pathToFileURL(path.join(srcDir, 'task-state.js')).href);
+      const ts122e = loadTaskState('s1');
+      const arts = Array.isArray(ts122e?.artifacts) ? ts122e.artifacts : [];
+      assert.equal(arts.length, N122e, `并发合并写必须保住全部 artifacts（BUG-068：旧实现丢更新，实测 12 进程只剩 3），实际 ${arts.length}/${N122e}`);
+    } finally {
+      process.env.MINGDAO_HOME = prevHome122e;
+      safeRmSync(home122e, { recursive: true, force: true });
+    }
+  }
+
+  // 122f. BUG-052：父进程退出时 MCP 子进程必须被清理（旧实现留孤儿）
+  {
+    const home122f = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b11f-'));
+    const pidFile122f = path.join(home122f, 'mcp-child.pid');
+    const script122f = `
+      process.env.MINGDAO_HOME = ${JSON.stringify(home122f)};
+      const { startMcpServers } = await import(${JSON.stringify(pathToFileURL(path.join(srcDir, 'mcp.js')).href)});
+      const child = "require('node:fs').writeFileSync(" + ${JSON.stringify(JSON.stringify(pidFile122f))} + ", String(process.pid)); setInterval(() => {}, 1000);";
+      startMcpServers({ stub: { command: 'node', args: ['-e', child] } }, ${JSON.stringify(home122f)}, {}); // 不 await：只要 spawn 发生
+      setTimeout(() => process.exit(0), 400);
+    `;
+    const childProc122f = spawnSync(process.execPath, ['--input-type=module', '-e', script122f], { encoding: 'utf8', timeout: 15000, env: { ...process.env, MINGDAO_HOME: home122f } });
+    assert.equal(childProc122f.status, 0, `前置：父进程应正常退出，实际 ${childProc122f.status} / ${String(childProc122f.stderr).slice(0, 200)}`);
+    assert.ok(fs.existsSync(pidFile122f), `前置：MCP 子进程应已启动并写下 pid（stderr：${String(childProc122f.stderr).slice(0, 200)}）`);
+    const mcpPid122f = Number(fs.readFileSync(pidFile122f, 'utf8'));
+    let alive122f = true;
+    for (let i = 0; i < 30 && alive122f; i += 1) {
+      try {
+        process.kill(mcpPid122f, 0);
+        await new Promise((r) => setTimeout(r, 100));
+      } catch {
+        alive122f = false;
+      }
+    }
+    if (alive122f) {
+      try {
+        process.kill(mcpPid122f, 'SIGKILL');
+      } catch {}
+    }
+    assert.equal(alive122f, false, `父进程退出后 MCP 子进程必须被清理（BUG-052：旧实现留成 PPID=1 的孤儿），pid ${mcpPid122f} 仍存活`);
+    safeRmSync(home122f, { recursive: true, force: true });
+  }
+
+  // 122g. BUG-053：预设必须钉版本；上游包已不可安装的必须**明确拒绝**
+  {
+    const { presetList, buildPreset } = await import(pathToFileURL(path.join(srcDir, 'mcp-presets.js')).href);
+    const list122g = presetList();
+    const fs122g = list122g.find((/** @type {any} */ p) => p.name === 'filesystem');
+    assert.ok(fs122g?.version && fs122g.args.some((/** @type {any} */ a) => a === `${fs122g.pkg}@${fs122g.version}`), `预设必须钉死版本（BUG-053），实际 ${JSON.stringify(fs122g?.args)}`);
+    const pw122g = list122g.find((/** @type {any} */ p) => p.name === 'playwright');
+    assert.ok(!String(pw122g?.args || '').includes('@latest'), 'playwright 预设不得再用 @latest');
+    assert.ok(pw122g?.version, 'playwright 预设应显示确切版本');
+    const dead122g = buildPreset('git', undefined, tmp);
+    assert.ok(dead122g.error && dead122g.error.includes('不可用'), '上游包已被安全保留的预设必须在 add 的一刻说清楚');
+    const ok122g = buildPreset('filesystem', undefined, tmp);
+    assert.ok(ok122g.config && ok122g.config.args.at(-1) === tmp, '可用预设仍应正常工作');
+  }
+
+  // 122h. BUG-057：DNS 解析失败必须 fail-closed（旧实现"放行，连接阶段再说"）
+  {
+    const { safeFetchText } = await import(pathToFileURL(path.join(srcDir, 'safe-fetch.js')).href);
+    const r122h = await safeFetchText(`http://no-such-host-${Date.now()}.invalid/x`);
+    assert.ok(r122h.error && r122h.error.includes('fail-closed'), `解析失败不得放行（BUG-057），实际：${JSON.stringify(r122h)}`);
+    const src122h = fs.readFileSync(path.join(srcDir, 'safe-fetch.js'), 'utf8');
+    assert.ok(/options\.lookup\s*=/.test(src122h), '必须把已校验的 IP **钉**给连接层（源码守卫：查到 lookup 钩子）');
+    // 先剥注释：文件头正是在解释"为什么不能用 fetch"，那不是调用点（本仓的源码守卫都按这个口径）
+    const code122h = src122h.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    assert.ok(!/[^.\w]fetch\(/.test(code122h), 'safe-fetch 不得再用全局 fetch（它不接受自定义 lookup，钉不住 IP）');
+  }
+
+  // 122i. BUG-064：scrypt 必须异步（旧实现 scryptSync 阻塞事件循环，实测 /healthz 延迟 87ms）
+  {
+    const home122i = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b11i-'));
+    const { runSyncServer } = await import(pathToFileURL(path.join(srcDir, 'sync-server.js')).href);
+    const srv122i = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: home122i });
+    await new Promise((r) => srv122i.once('listening', r));
+    const port122i = srv122i.address().port;
+    const post122i = (/** @type {string} */ pathName, /** @type {any} */ body) =>
+      fetch(`http://127.0.0.1:${port122i}${pathName}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(() => null);
+    /** @type {any} */
+    let probe122i = null;
+    try {
+      let maxLatency122i = 0;
+      probe122i = setInterval(async () => {
+        const t0 = Date.now();
+        await fetch(`http://127.0.0.1:${port122i}/healthz`).catch(() => null);
+        maxLatency122i = Math.max(maxLatency122i, Date.now() - t0);
+      }, 5);
+      // 6 个并发注册（每个都要做一次 scrypt）；同步版会把事件循环按住 6×18ms
+      await Promise.all(Array.from({ length: 6 }, (_, i) => post122i('/api/register', { username: `u${i}`, password: 'password123' })));
+      clearInterval(probe122i);
+      probe122i = null;
+      assert.ok(
+        maxLatency122i < 30,
+        `scrypt 必须异步：并发注册期间 /healthz 延迟应远小于一次 scrypt（实测阈值 30ms），实际最大 ${maxLatency122i}ms（BUG-064：旧实现 87ms）`
+      );
+    } finally {
+      if (probe122i) clearInterval(probe122i);
+      srv122i.close();
+      safeRmSync(home122i, { recursive: true, force: true });
+    }
+  }
+
+  // 122j. BUG-070 / BUG-071：批处理的请求必须有超时、结果必须有大小上限
+  {
+    const http122j = await import('node:http');
+    // 070：服务端**永不回包**
+    const hang122j = http122j.createServer(() => {});
+    await new Promise((r) => hang122j.listen(0, '127.0.0.1', r));
+    const hangPort122j = /** @type {any} */ (hang122j.address()).port;
+    const home122j = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b11j-'));
+    const prevHome122j = process.env.MINGDAO_HOME;
+    process.env.MINGDAO_HOME = home122j;
+    process.env.MINGDAO_BATCH_TIMEOUT_MS = '600';
+    try {
+      const { runBatch } = await import(pathToFileURL(path.join(srcDir, 'batch.js')).href);
+      fs.writeFileSync(path.join(home122j, 'config.json'), JSON.stringify({ provider: 'custom', model: 'deepseek-v4-flash', baseUrl: `http://127.0.0.1:${hangPort122j}/v1` }));
+      fs.writeFileSync(path.join(home122j, 'credentials.json'), JSON.stringify({ deepseek: 'sk-batch-timeout-test' }));
+      const t0122j = Date.now();
+      const r122j = await runBatch({ cfg: { provider: 'custom', model: 'deepseek-v4-flash', baseUrl: `http://127.0.0.1:${hangPort122j}/v1` }, model: 'deepseek-v4-flash', questions: ['问题'], onStatus: () => {} });
+      const ms122j = Date.now() - t0122j;
+      assert.ok(r122j.error, '上游不响应必须报错而不是永久挂起（BUG-070）');
+      assert.ok(ms122j < 5000, `超时（600ms）必须真正生效，实际耗时 ${ms122j}ms（旧实现会永久挂起）`);
+    } finally {
+      hang122j.close();
+      delete process.env.MINGDAO_BATCH_TIMEOUT_MS;
+      process.env.MINGDAO_HOME = prevHome122j;
+      safeRmSync(home122j, { recursive: true, force: true });
+    }
+  }
+  {
+    const http122k = await import('node:http');
+    // 071：结果体远超上限
+    const big122k = http122k.createServer((/** @type {any} */ req, /** @type {any} */ res) => {
+      const u = new URL(req.url, 'http://127.0.0.1');
+      req.on('data', () => {});
+      req.on('end', () => {
+        if (req.method === 'POST' && u.pathname === '/files') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ id: 'file-1' }));
+          return;
+        }
+        if (req.method === 'POST' && u.pathname === '/batches') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ id: 'batch-1', status: 'in_progress' }));
+          return;
+        }
+        if (u.pathname === '/batches/batch-1') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ id: 'batch-1', status: 'completed' }));
+          return;
+        }
+        if (u.pathname === '/batches/batch-1/files/result') {
+          res.writeHead(200, { 'Content-Type': 'application/x-jsonlines' });
+          res.end('x'.repeat(2 * 1024 * 1024)); // 2MB，远超下面设定的 4KB 上限
+          return;
+        }
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end('{}');
+      });
+    });
+    await new Promise((r) => big122k.listen(0, '127.0.0.1', r));
+    const bigPort122k = /** @type {any} */ (big122k.address()).port;
+    const home122k = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b11k-'));
+    const prevHome122k = process.env.MINGDAO_HOME;
+    process.env.MINGDAO_HOME = home122k;
+    process.env.MINGDAO_BATCH_MAX_BYTES = '4096';
+    process.env.MINGDAO_BATCH_POLL_MS = '10';
+    try {
+      const { runBatch } = await import(pathToFileURL(path.join(srcDir, 'batch.js')).href);
+      fs.writeFileSync(path.join(home122k, 'config.json'), JSON.stringify({ provider: 'custom', model: 'deepseek-v4-flash', baseUrl: `http://127.0.0.1:${bigPort122k}/v1` }));
+      fs.writeFileSync(path.join(home122k, 'credentials.json'), JSON.stringify({ deepseek: 'sk-batch-size-test' }));
+      const r122k = await runBatch({ cfg: { provider: 'custom', model: 'deepseek-v4-flash', baseUrl: `http://127.0.0.1:${bigPort122k}/v1` }, model: 'deepseek-v4-flash', questions: ['问题'], onStatus: () => {} });
+      assert.ok(r122k.error && r122k.error.includes('上限'), `超大结果体必须被上限拦住（BUG-071：旧实现 OOM），实际：${JSON.stringify(r122k).slice(0, 160)}`);
+    } finally {
+      big122k.close();
+      delete process.env.MINGDAO_BATCH_MAX_BYTES;
+      delete process.env.MINGDAO_BATCH_POLL_MS;
+      process.env.MINGDAO_HOME = prevHome122k;
+      safeRmSync(home122k, { recursive: true, force: true });
+    }
+  }
+
+  // 122l. BUG-075 / BUG-083：两处"必须说出来"的守卫（源码级——行为级分别需要完整 WebUI 往返与
+  // Electron 打包环境，如实标注层级，不把源码级说成行为级）
+  {
+    const srv122l = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+    assert.ok(/ASK_TIMEOUT_MS/.test(srv122l) && /权限确认超时/.test(srv122l), '权限确认必须有超时并按拒绝处理（BUG-075）');
+    const app122l = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+    assert.ok(/权限应答没能送达服务端/.test(app122l), '前端权限应答失败必须提示而不是静默吞掉（BUG-075）');
+    const desk122l = fs.readFileSync(path.join(srcDir, '..', 'desktop', 'main.js'), 'utf8');
+    assert.ok(/telemetryDisabled\(\)/.test(desk122l) && /MINGDAO_NO_TELEMETRY/.test(desk122l), '更新遥测必须有显式退出开关（BUG-083）');
+    const readme122l = fs.readFileSync(path.join(srcDir, '..', 'README.md'), 'utf8');
+    assert.ok(/MINGDAO_NO_TELEMETRY/.test(readme122l) && /遥测/.test(readme122l), 'README 必须声明遥测内容与关闭方式（BUG-083）');
+  }
+
+  ok('v0.6.5 批十一：中级缺陷收口（MCP 孤儿/预设钉版本/SSRF 钉 IP/任务 id/异步 scrypt/检查点锁/批处理超时与上限/spinner/SIGINT 监听/权限超时/配置写回/代理对截断/遥测开关）');
 }
 
 delete process.env.MINGDAO_HOME;

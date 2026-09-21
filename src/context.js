@@ -5,6 +5,20 @@ import { heuristicTokens } from './tokenizer.js';
 
 export const TOOL_RESULT_LIMIT = 20000;
 
+/**
+ * 码点安全的前缀截断。
+ *
+ * 审计 BUG-079（实测复现）：`String.prototype.slice` 按 **UTF-16 单元**切，切点落在代理对中间时
+ * 会留下一个孤立代理项（如 `\uD835`），渲染成 `�`，且发给上游时是非法 Unicode。
+ * emoji / 增补平面汉字（𝕏、𠮷 等）都会命中。
+ * @param {any} s @param {number} n
+ */
+function safeHead(s, n) {
+  const head = String(s).slice(0, n);
+  // 结尾是高代理（\uD800-\uDBFF）说明它后面的低代理被切掉了 → 去掉这个半个字符
+  return /[\uD800-\uDBFF]$/.test(head) ? head.slice(0, -1) : head;
+}
+
 // 兼容旧接口的启发式估算（英文≈4 字符/token，CJK≈1 字符/token）
 export function approxTokens(/** @type {any} */ text) {
   return heuristicTokens(text);
@@ -101,9 +115,9 @@ export function trimMessages(/** @type {any} */ messages, /** @type {any} */ bud
       // 截断逻辑确定（同输入同输出），字节稳定，不会逐轮嵌套重截（审计 v0.4.1 确认的死代码已移除）。
       let next = null;
       if (m.role === 'tool' && c.length > 40) {
-        next = { ...m, content: `[工具 ${m.tool_call_id || ''} 结果摘要：${c.slice(0, 40).replace(/\n/g, ' ')}…（已回收，原 ${c.length} 字）]` };
+        next = { ...m, content: `[工具 ${m.tool_call_id || ''} 结果摘要：${safeHead(c, 40).replace(/\n/g, ' ')}…（已回收，原 ${c.length} 字）]` };
       } else if (m.role === 'assistant' && c.length > 200) {
-        next = { ...m, content: c.slice(0, 200) + ` …[已回收，原 ${c.length} 字]` };
+        next = { ...m, content: safeHead(c, 200) + ` …[已回收，原 ${c.length} 字]` };
       }
       if (next) {
         const oldT = messageTokens(m, count);

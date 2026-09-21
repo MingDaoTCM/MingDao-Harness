@@ -16,6 +16,59 @@ import { approxTokens } from './context.js';
 
 const DEFAULT_WINDOW = '24h';
 const DEFAULT_ENDPOINT = '/v1/chat/completions';
+// 审计 BUG-070/071：批处理链路上的三次 fetch 原先**既没有超时、也没有大小上限**——
+// 上游挂起会让 runBatch 永久不返回（实测桩服务端不回包 → 8 秒仍未返回）；
+// 结果文件无上限则会把整份 JSONL 读进内存（实测 240MB 响应体在 256MB 堆下 OOM）。
+// 注意：这两个值**在调用时读**（而不是模块加载时）——否则测试无法逐用例调整，
+// 而"环境变量在 import 之后才设"是调用方最容易踩的坑。
+const batchFetchTimeoutMs = () => Number(process.env.MINGDAO_BATCH_TIMEOUT_MS) || 120000;
+const batchResultMaxBytes = () => Number(process.env.MINGDAO_BATCH_MAX_BYTES) || 32 * 1024 * 1024;
+
+/**
+ * 把调用方的 signal 与一个超时 signal 合成（Node 18 没有 AbortSignal.any，这里手动桥接）。
+ * @param {any} signal @param {number} ms
+ */
+function withTimeoutSignal(signal, ms) {
+  const t = typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(ms) : null;
+  if (!signal) return t;
+  if (!t) return signal;
+  if (typeof AbortSignal.any === 'function') return AbortSignal.any([signal, t]);
+  const ctrl = new AbortController();
+  const onAbort = () => ctrl.abort(signal.reason);
+  signal.addEventListener('abort', onAbort, { once: true });
+  t.addEventListener('abort', () => ctrl.abort(t.reason), { once: true });
+  return ctrl.signal;
+}
+
+/**
+ * 带上限地读响应体（审计 BUG-071）。超限返回 null，由调用方给出明确错误。
+ * 用流式累计而不是 `res.text()`：后者会先把整份内容读进内存，上限再判就晚了。
+ * @param {any} res @param {number} maxBytes @returns {Promise<string|null>}
+ */
+async function readCapped(res, maxBytes) {
+  const body = res.body;
+  if (!body || typeof body.getReader !== 'function') {
+    const t = await res.text();
+    return t.length > maxBytes ? null : t;
+  }
+  const reader = body.getReader();
+  let n = 0;
+  /** @type {any[]} */
+  const chunks = [];
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    n += value?.length || 0;
+    if (n > maxBytes) {
+      try {
+        await reader.cancel();
+      } catch {}
+      return null;
+    }
+    chunks.push(Buffer.from(value));
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
 
 // 批处理端点基址：config.batchBaseUrl 优先；否则取当前服务商 baseUrl 去掉 /v1 后缀
 function batchBase(/** @type {any} */ cfg, /** @type {any} */ model) {
@@ -28,11 +81,12 @@ function batchBase(/** @type {any} */ cfg, /** @type {any} */ model) {
 }
 
 /** @returns {Promise<any>} */
-async function api(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type {any} */ methodPath, /** @type {any} */ payload, httpMethod = 'POST') {
+async function api(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type {any} */ methodPath, /** @type {any} */ payload, httpMethod = 'POST', /** @type {any} */ signal = null) {
   const res = await fetch(base + methodPath, {
     method: httpMethod,
     headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
     body: payload === undefined ? undefined : JSON.stringify(payload),
+    signal: withTimeoutSignal(signal, batchFetchTimeoutMs()), // 审计 BUG-070：不再无限挂起
   });
   const j = /** @type {any} */ (await res.json().catch(() => ({})));
   if (!res.ok) {
@@ -55,14 +109,16 @@ async function api(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type
  */
 async function cancelServerBatch(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type {any} */ id) {
   try {
-    await api(base, apiKey, `/batches/${id}/cancel`, {}, 'POST');
+    // 注意：取消请求**不能**带上调用方的 abort signal —— 它是"用户已中止之后"才发出的清理请求，
+    // 复用那个已 abort 的 signal 会让它当场失败，服务端永远收不到取消（既有用例当场抓到）。
+    await api(base, apiKey, `/batches/${id}/cancel`, {}, 'POST', null);
     return true;
   } catch {
     return false;
   }
 }
 
-async function uploadFile(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type {any} */ jsonl) {
+async function uploadFile(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type {any} */ jsonl, /** @type {any} */ signal = null) {
   const form = new FormData();
   form.append('file', new Blob([jsonl], { type: 'application/jsonl' }), 'mingdao-batch.jsonl');
   form.append('purpose', 'batch');
@@ -70,6 +126,7 @@ async function uploadFile(/** @type {any} */ base, /** @type {any} */ apiKey, /*
     method: 'POST',
     headers: { Authorization: `Bearer ${apiKey}` },
     body: form,
+    signal: withTimeoutSignal(signal, batchFetchTimeoutMs()), // 审计 BUG-070
   });
   const j = /** @type {any} */ (await res.json().catch(() => ({})));
   if (!res.ok) {
@@ -80,16 +137,30 @@ async function uploadFile(/** @type {any} */ base, /** @type {any} */ apiKey, /*
   return j.id;
 }
 
-async function downloadResults(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type {any} */ batch) {
+async function downloadResults(/** @type {any} */ base, /** @type {any} */ apiKey, /** @type {any} */ batch, /** @type {any} */ signal = null) {
   // DeepSeek 风格：直接取结果文件；回退 OpenAI 风格：按 output_file_id 取内容
   const attempts = [
     `/batches/${batch.id}/files/result`,
     ...(batch.output_file_id ? [`/files/${batch.output_file_id}/content`] : []),
   ];
   for (const m of attempts) {
-    const res = await fetch(base + m, { headers: { Authorization: `Bearer ${apiKey}` } });
+    const res = await fetch(base + m, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: withTimeoutSignal(signal, batchFetchTimeoutMs()), // 审计 BUG-070
+    });
     if (!res.ok) continue;
-    const text = await res.text();
+    // 审计 BUG-071：**先看声明长度**，再**边读边累计**——两道闸都不依赖上游说实话。
+    // 此前 `res.text()` 无上限，实测 240MB 结果体在 256MB 堆下直接 OOM（下游 clampText 只在
+    // 解析完之后截断，拦不住内存峰值）。
+    const len = Number(res.headers.get('content-length'));
+    if (Number.isFinite(len) && len > batchResultMaxBytes()) {
+      try {
+        await res.body?.cancel();
+      } catch {}
+      throw new Error(`批处理结果超过大小上限（${Math.round(len / 1024 / 1024)}MB > ${Math.round(batchResultMaxBytes() / 1024 / 1024)}MB），已中止下载`);
+    }
+    const text = await readCapped(res, batchResultMaxBytes());
+    if (text == null) throw new Error(`批处理结果超过大小上限（>${Math.round(batchResultMaxBytes() / 1024 / 1024)}MB），已中止下载`);
     return text
       .split('\n')
       .filter(Boolean)
@@ -195,13 +266,13 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
 
   try {
     onStatus?.('上传输入文件…');
-    const fileId = await uploadFile(base, apiKey, jsonl);
+    const fileId = await uploadFile(base, apiKey, jsonl, signal);
     onStatus?.('创建批处理任务…');
     const batch = await api(base, apiKey, '/batches', {
       input_file_id: fileId,
       endpoint: cfg?.batchEndpoint || DEFAULT_ENDPOINT,
       completion_window: cfg?.batchWindow || DEFAULT_WINDOW,
-    });
+    }, 'POST', signal);
     onStatus?.(`任务已创建：${batch.id}`);
     // 轮询：指数退避（审计 workbuddy P3-3）——基础间隔 5s（MINGDAO_BATCH_POLL_MS 可覆盖，测试用），
     // ×1.5 逐次翻倍、30s 封顶：24h 窗口内轮询请求量从 ~1.7 万次降到 ~3 千次；
@@ -234,7 +305,7 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
       }
       let j = null;
       try {
-        j = await api(base, apiKey, `/batches/${batch.id}`, undefined, 'GET');
+        j = await api(base, apiKey, `/batches/${batch.id}`, undefined, 'GET', signal);
         failures = 0;
       } catch (err) {
         failures += 1;
@@ -258,7 +329,7 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
       await new Promise((r) => setTimeout(r, Math.min(baseInterval * 1.5 ** polls, 30000)));
     }
     onStatus?.('下载结果…');
-    const results = await downloadResults(base, apiKey, batch);
+    const results = await downloadResults(base, apiKey, batch, signal);
     // 汇总 usage 与费用（batch 半价）；结果按 custom_id 回填到全部重复位置（省钱 B2）
     let prompt = 0;
     let completion = 0;

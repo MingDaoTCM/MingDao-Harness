@@ -12,7 +12,7 @@ import path from 'node:path';
 import os from 'node:os';
 import http from 'node:http';
 import https from 'node:https';
-import { loadConfig, saveConfig, mingdaoHome, ensureHome } from './config.js';
+import { loadConfig, loadConfigForWrite, saveConfig, mingdaoHome, ensureHome } from './config.js';
 import { loadCredentials, saveCredentials } from './credentials.js';
 import { listSessions, CONFLICT_BACKUP_RE } from './session.js';
 import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
@@ -168,7 +168,9 @@ export async function syncLogin({ url, username, password, deviceName, insecure 
     }
     if (!pair.ok || !pair.token) return { error: pair.error || '配对失败' };
     // 保存：config 只存非秘密，token 进凭证库
-    const cfg = loadConfig() || {};
+    // 审计 BUG-077：写回配置前必须区分「文件不存在」与「读不出来」——原实现 `loadConfig() || {}`
+    // 会把损坏的 config.json 当成首次运行，用全新对象整份覆盖且不留备份（实测复现）。
+    const cfg = loadConfigForWrite('mingdao sync login');
     cfg.sync = { url: base, username: name, deviceName: dev, auto: cfg.sync?.auto !== false, insecure: loginInsecure };
     saveConfig(cfg);
     const creds = loadCredentials();

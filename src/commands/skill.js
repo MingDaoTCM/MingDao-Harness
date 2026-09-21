@@ -2,7 +2,7 @@
 import { listSkills, tamperedSkillNames } from '../skills.js';
 import { libraryList, searchLibrary, installSkill, uninstallSkill, reinstallSkill, trustSkill } from '../skill-lib.js';
 import { searchRegistry } from '../skill-registry.js';
-import { loadConfig, saveConfig, ensureHome } from '../config.js';
+import { loadConfigForWrite, saveConfig, ensureHome } from '../config.js';
 import { searchSessions, relativeTime } from '../session.js';
 import { runWebServer } from '../web/server.js';
 import readline from 'node:readline';
@@ -155,7 +155,8 @@ export async function handleWeb(/** @type {any} */ cmd, /** @type {any} */ args)
     }
     return false;
   }
-  const cfg0 = loadConfig();
+  // 审计 BUG-077：这条路径会 saveConfig，必须走「写回安全」的读取（损坏时先备份再继续）
+  const cfg0 = loadConfigForWrite('mingdao web（自动启动开关）');
   // 自动启动开关（先落盘再起服务，服务失败也保留用户选择）
   if (autoChoice !== undefined) {
     const c = cfg0 ? { ...cfg0, web: { ...(cfg0.web || {}), autoStart: autoChoice } } : { web: { autoStart: autoChoice } };

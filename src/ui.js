@@ -365,6 +365,8 @@ export function createIO({ quiet = false } = {}) {
   /** @type {any} */
   let sigintHandler = null; // TTY 下 rl 'SIGINT' 事件转发目标
   /** @type {any} */
+  let prevSigintListener = null; // 上一次 onSigint 注册到 process 上的监听器（BUG-073：注册前先摘掉）
+  /** @type {any} */
   let ttyPending = null;
   let closed = false;
 
@@ -685,14 +687,21 @@ export function createIO({ quiet = false } = {}) {
     // 非 TTY/其他来源走 process 级 SIGINT；两层都注册，保证任何路径都能中断
     /** @param {any} fn */
     onSigint(fn) {
+      // 审计 BUG-073（实测：连调 5 次 → 5 个监听器，17 次触发 MaxListenersExceededWarning 警告）：
+      // 原实现每次调用都 `process.on('SIGINT')` 且**不摘上一个**，监听器只增不减。
+      // agent 侧每回合有 finally 兜底，所以正常路径不累积；但任何非 finally 路径（或将来新增的
+      // 调用点不复用返回值）都会累积。语义改成「替换」：同一时刻只保留最近注册的那一个。
+      if (prevSigintListener) process.removeListener('SIGINT', prevSigintListener);
       const h = () => {
         try {
           fn();
         } catch {}
       };
+      prevSigintListener = h;
       sigintHandler = h;
       process.on('SIGINT', h);
       return () => {
+        if (prevSigintListener === h) prevSigintListener = null;
         sigintHandler = null;
         process.removeListener('SIGINT', h);
       };
@@ -781,6 +790,10 @@ export function createIO({ quiet = false } = {}) {
     },
 
     close() {
+      // 审计 BUG-072（实测：close() 后 300ms 内 spinner 仍写了 3 帧 —— 定时器还在跑）：
+      // 关闭 UI 必须先把 spinner 停掉，否则它的 interval 会一直往已关闭的输出上写。
+      // 与 endTurn 同口径。
+      io.stopSpinner();
       if (rl) {
         rl.close();
         rl = null;

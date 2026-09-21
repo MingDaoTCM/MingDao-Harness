@@ -262,6 +262,13 @@ mingdao cost --by pack          # 垂域费用分账
   Linux 读 `/proc/<pid>/cmdline`、macOS 走 `ps`，两者都能精确校验；**Windows 两者皆无**
   （不为这一处判定引入 PowerShell/WMI 依赖），此时退回 best-effort 按存活处理，并把限制写在这里。
   需要精确校验的场景请部署在 Linux / macOS 上
+- **遥测：只有桌面版的一条更新计数，且可一键关闭**（v0.6.5 明确）：
+  桌面版在**新版本下载完成**后，向 `https://harness.mingdao.ai/updok` 发一次 POST，
+  内容是 `{kind:'update', os, ver}`——**只有平台名与版本号，不含任何用户标识、会话或代码内容**。
+  它是官网「桌面自动更新次数」的唯一数据源（安装包的下载次数无法区分"人点的"与"更新器拉的"，见
+  `site-stats.mjs` 的口径说明）。**关闭方式（任一即可）**：环境变量 `MINGDAO_NO_TELEMETRY=1`，
+  或 `config.json` 里写 `"telemetry": false`；关闭后不影响自动更新的下载与安装，只是不再计数。
+  CLI 与 WebUI 本身**不发送任何遥测**；`mingdao net report` 可以把本机出网目标逐条列出来自证。
 
 ## 配置与扩展
 

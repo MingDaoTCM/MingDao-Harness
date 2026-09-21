@@ -19,6 +19,7 @@ import https from 'node:https';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { promisify } from 'node:util';
 import { atomicWriteFileSync } from './atomic-write.js';
 
 const DEFAULT_DATA_DIR = process.env.SYNC_DATA_DIR || '/var/lib/mingdao-sync';
@@ -104,22 +105,30 @@ function safeEqualHex(a, b) {
   }
 }
 // 密码存储用 scrypt（带盐 KDF）；旧数据兼容：verify 时 sha256 回退
+//
+// 审计 BUG-064（实测：单次 scryptSync ≈18ms；10 并发 pair 期间 /healthz 最大延迟 87ms）：
+// `scryptSync` 是**同步** CPU 密集调用，会把整个事件循环按住 —— 表现为所有在线设备的请求
+// 出现延迟尖峰（限流只压住了单 IP 的频率，多 IP/NAT/CI 出口仍能切片占用）。
+// 改用异步 `crypto.scrypt`（libuv 线程池），事件循环不再被阻塞。
+// 注意：调用点**都不在写锁内 await** —— 注册/改密所需的新盐与新哈希都在拿锁**之前**算好，
+// 免得"锁内 await"把临界区拉长（v0.6.3 P0-4 刚把锁外读改写收进锁内，不能又把它撑开）。
+const scryptAsync = promisify(crypto.scrypt);
 /**
  * @param {any} password
  * @param {any} salt
  */
-function hashPassword(password, salt) {
-  return crypto.scryptSync(String(password), String(salt), 32).toString('hex');
+async function hashPassword(password, salt) {
+  return (await scryptAsync(String(password), String(salt), 32)).toString('hex');
 }
 /**
  * @param {any} password
  * @param {any} salt
  * @param {any} hash
  */
-function verifyPassword(password, salt, hash) {
+async function verifyPassword(password, salt, hash) {
   if (!hash) return false;
   try {
-    if (safeEqualHex(hash, crypto.scryptSync(String(password), String(salt), 32).toString('hex'))) return true;
+    if (safeEqualHex(hash, (await scryptAsync(String(password), String(salt), 32)).toString('hex'))) return true;
   } catch {}
   // 兼容早期 sha256 存储
   return safeEqualHex(hash, sha(`${salt}:${password}`));
@@ -289,10 +298,12 @@ async function doRegister(body) {
   });
   await prev;
   try {
+    // 审计 BUG-064：盐与哈希（~18ms 的 CPU 活）在**拿锁之前**算好，锁内只剩纯同步的读改写
+    const salt = crypto.randomBytes(12).toString('hex');
+    const hash = await hashPassword(password, salt);
     const users = readJson(usersFile(), {});
     if (users[username]) return { conflict: '用户名已存在' };
-    const salt = crypto.randomBytes(12).toString('hex');
-    users[username] = { salt, hash: hashPassword(password, salt), createdAt: Date.now() };
+    users[username] = { salt, hash, createdAt: Date.now() };
     writeJson(usersFile(), users);
     log('register', username);
     return { ok: true, username };
@@ -309,7 +320,7 @@ async function doPair(body) {
   const users = readJson(usersFile(), {});
   const u = users[username];
   if (!u) return { notFound: '用户不存在（请先注册）' };
-  if (!verifyPassword(password, u.salt, u.hash)) return { unauthorized: '密码错误' };
+  if (!(await verifyPassword(password, u.salt, u.hash))) return { unauthorized: '密码错误' };
   return withWriteLock(() => {
     const deviceId = crypto.randomBytes(8).toString('hex');
     const token = crypto.randomBytes(24).toString('hex');
@@ -412,6 +423,14 @@ async function doChangePassword(username, body) {
   const oldPassword = String(body.oldPassword || '');
   const newPassword = String(body.newPassword || '');
   if (newPassword.length < 8) return { error: '新密码至少 8 位' };
+  // 审计 BUG-064：校验旧密码与新密码的哈希都是 ~18ms 的 CPU 活，放在**锁外** await；
+  // 锁内只剩纯同步的读改写（这样既不再阻塞事件循环，也不会把写锁撑长）。
+  const usersBefore = readJson(usersFile(), {});
+  const uBefore = usersBefore[username];
+  if (!uBefore) return { unauthorized: '用户不存在' };
+  if (!(await verifyPassword(oldPassword, uBefore.salt, uBefore.hash))) return { unauthorized: '旧密码错误' };
+  const newSalt = crypto.randomBytes(12).toString('hex');
+  const newHash = await hashPassword(newPassword, newSalt);
   return withWriteLock(() => {
     // v0.6.3（P0-4）：改密会 `delete devices[username]`（吊销全部设备 token），而设备表另有
     // 一把 registerLock/写锁——此前这里是**锁外**读改写，于是"吊销"可以被一次并发的 pair
@@ -419,9 +438,7 @@ async function doChangePassword(username, body) {
     const users = readJson(usersFile(), {});
     const u = users[username];
     if (!u) return { unauthorized: '用户不存在' };
-    if (!verifyPassword(oldPassword, u.salt, u.hash)) return { unauthorized: '旧密码错误' };
-    const salt = crypto.randomBytes(12).toString('hex');
-    users[username] = { ...u, salt, hash: hashPassword(newPassword, salt), updatedAt: Date.now() };
+    users[username] = { ...u, salt: newSalt, hash: newHash, updatedAt: Date.now() };
     writeJson(usersFile(), users);
     // 改密吊销既有设备 token：密码可能已泄露，旧 token 一律失效（当前设备也需重新登录）
     const devices = readJson(devicesFile(), {});

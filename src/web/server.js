@@ -17,6 +17,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+// 审计 BUG-075：权限确认的等待上限（可用 MINGDAO_ASK_TIMEOUT_MS 覆盖，测试用）
+const ASK_TIMEOUT_MS = Number(process.env.MINGDAO_ASK_TIMEOUT_MS) || 120000;
 import { createLogWriter } from '../log-writer.js';
 import { createApiDispatch } from './routes/api.js';
 import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
@@ -32,7 +34,7 @@ import { createPermission } from '../permissions.js';
 import { isPrivateHost as sharedIsPrivateHost, isMetadataHost } from '../tools/fetch.js';
 import { buildSystemPrompt } from '../prompts.js';
 import { loadProjectMemory, loadProjectMemoryEntries, retrieveRelevant, extractAndAppendProjectMemory } from '../memory.js';
-import { saveTaskStateMerge, clearTaskState, loadTaskState, resumePrompt, checkpointHint } from '../task-state.js';
+import { saveTaskStateMergeAsync, clearTaskState, loadTaskState, resumePrompt, checkpointHint } from '../task-state.js';
 import { createWebIO } from './web-io.js';
 import { installPipeGuards } from '../proc.js';
 import { startMcpServers } from '../mcp.js';
@@ -556,7 +558,20 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         // API 的一方（局域网共享 token、或回环下的本机进程）只要知道可枚举的 taskId，
         // 就能替他人的挂起确认直接答「允许」，把默认 ask 档这道唯一的人工闸门整个绕过。
         const id = crypto.randomBytes(16).toString('hex');
-        entry.pendingAsk = { id, options: options || null, resolve };
+        // 审计 BUG-075：挂起的确认**必须有超时**。此前前端 POST /api/permission 失败（网络抖动、
+        // 页面被关、事件丢包）时 `entry.pendingAsk` 会一直挂着，回合永久停在"等待权限确认"，
+        // 用户既看不到错误也无法继续（实测 1.5s 仍未 settle，且没有任何超时机制）。
+        // 超时按 **拒绝** 处理（绝不因超时而放行），并清掉挂起项 + 明确告知。
+        const askTimer = setTimeout(() => {
+          if (entry.pendingAsk?.id !== id) return; // 已被应答/已中止：什么都不做
+          entry.pendingAsk = null;
+          send({ type: 'error', message: '权限确认超时（120 秒未收到应答），本次操作按「拒绝」处理。请重新发送上一条消息。' });
+          resolve('');
+        }, ASK_TIMEOUT_MS);
+        entry.pendingAsk = { id, options: options || null, resolve: (/** @type {any} */ v) => {
+          clearTimeout(askTimer);
+          resolve(v);
+        } };
         send({
           type: 'ask',
           id,
@@ -690,7 +705,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       // v0.6.2：检查点写入结果必须被检查。WebUI 用 warn 横幅（io.print 走同一通道，
       // 但这里显式带 warn 让前端按告警样式呈现）
       if (r.capHit || r.aborted) {
-        const hint = checkpointHint(saveTaskStateMerge(finalSessionName, {
+        const hint = checkpointHint(await saveTaskStateMergeAsync(finalSessionName, {
           goal: built.persistText,
           progress: r.text || '',
           artifacts: io.stats().deliverables,

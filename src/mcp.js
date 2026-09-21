@@ -20,6 +20,36 @@ import { isSensitiveEnv } from './tools/bash.js';
 // 并指向更窄的替代方案 mcpEnvKeep。
 let mcpEnvWarned = false;
 
+// 审计 BUG-052（实测复现）：MCP 子进程以 `detached: true` 自成进程组，正常路径都会 stop()
+// （CLI/REPL/WebUI 各自的收尾），但**异常退出没有兜底**——`main().catch → process.exit(1)` 不 stop，
+// SIGKILL 更不可能。实测：kill -9 父进程后子进程 PPID=1 继续存活（npx 系的孙进程尤其明显）。
+// 这里登记所有活着的子进程，并在 process 'exit' 时**整组**清理（'exit' 里只能做同步操作，
+// 所以用 process.kill(-pid) 而不是 child.kill 的异步封装）。
+// 已知残留（如实说明）：SIGKILL 父进程时本钩子不会执行——那种情况只能靠子进程自身看门狗，
+// 不在本仓可控范围内。
+/** @type {Set<any>} */
+const liveMcpChildren = new Set();
+let mcpExitHookInstalled = false;
+/** @param {any} child */
+function trackMcpChild(child) {
+  liveMcpChildren.add(child);
+  child.once('exit', () => liveMcpChildren.delete(child));
+  if (mcpExitHookInstalled) return;
+  mcpExitHookInstalled = true;
+  process.on('exit', () => {
+    for (const c of liveMcpChildren) {
+      try {
+        if (process.platform === 'win32') c.kill('SIGKILL');
+        else process.kill(-c.pid, 'SIGKILL'); // POSIX：杀整个进程组（含 npx 拉起的孙进程）
+      } catch {
+        try {
+          c.kill('SIGKILL');
+        } catch {}
+      }
+    }
+  });
+}
+
 function filteredProcessEnv(/** @type {Set<string>} */ keepSet) {
   const out = /** @type {any} */ ({});
   for (const [k, v] of Object.entries(process.env)) {
@@ -70,6 +100,7 @@ export class McpClient {
       detached: true, // POSIX：自成进程组，stop 时整组清理（npx 孙进程不成孤儿）
       ...spawnOpts({ piped: true }), // Windows：不 detach + 隐藏控制台
     });
+    trackMcpChild(this.child); // 审计 BUG-052：登记进"活着的 MCP 子进程"，进程退出时整组清理
     this.child.stdout.on('data', (d) => this._onData(d));
     this.child.stderr.on('data', (d) => {
       this.stderrTail = (this.stderrTail + d.toString()).slice(-2000);

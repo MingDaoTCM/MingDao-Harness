@@ -7,6 +7,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { startTask, readTask, killTask, patchTask, taskWorkerAlive } from './tasks.js';
@@ -98,7 +99,22 @@ export function writeSchedule(/** @type {any} */ home, /** @type {any} */ job) {
 
 /** 新建调度任务；after: 依赖的任务 ID（全部成功后才启动，任一失败则跳过） */
 export function addSchedule(/** @type {any} */ home, /** @type {any} */ question, /** @type {any} */ { at, every, after, permission, model, cwd, anchor, offpeak }) {
-  const id = 'sc' + Date.now().toString(36) + Math.random().toString(36).slice(2, 5);
+  // 审计 BUG-061（实测复现）：原实现用 `Date.now() + Math.random().slice(2,5)` ——
+  // ① `Math.random()` 不是密码学安全的；② 3 位 base36 只有约 4.7 万空间，同一毫秒内可碰撞；
+  // 而 `writeSchedule` 直接写 `<id>.json`，碰撞即**静默覆盖**前一个任务（实测固定 Date.now 与
+  // Math.random 时，后建任务把前一个顶掉，用户只会发现"任务不见了"）。
+  // 改用 `crypto.randomUUID()`，并做**存在性检查**：撞了就重生成（不再依赖随机性保证唯一）。
+  let id = '';
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const cand = 'sc' + crypto.randomUUID().replace(/-/g, '').slice(0, 12);
+    if (!fs.existsSync(path.join(scheduleDir(home), cand + '.json'))) {
+      id = cand;
+      break;
+    }
+    // 极端情况（RNG 被替换 / 退化）：**也绝不覆盖已有任务**——加序号后缀保证唯一。
+    // 只靠"随机不会撞"是不行的：本用例就是把 randomness 冻住来验证这一点。
+    id = `${cand}${attempt}`;
+  }
   const interval = every != null ? parseInterval(every) : null;
   const afterList = Array.isArray(after) ? after.filter(Boolean).map(String) : after ? String(after).split(',').map((x) => x.trim()).filter(Boolean) : [];
   const hasAfter = afterList.length > 0 || (after !== undefined && after !== null);

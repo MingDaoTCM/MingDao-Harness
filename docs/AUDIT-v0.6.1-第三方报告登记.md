@@ -869,6 +869,84 @@ Windows 腿红。本批的三条守卫（sync-server 写锁、BUG-029 循环头�
 | 079 | `src/context.js:105` | 回收摘要按 UTF-16 单元 `slice` → 可切断代理对（实测孤立代理项 @[198,199]） | 码点安全截断（两处共用一个 helper） |
 | 083 | `desktop/main.js:457` | 打包版下载完成即上报 `{os,ver}`，全仓无隐私说明、无 opt-in 开关 | README/官网补一段隐私说明，或读 `MINGDAO_NO_TELEMETRY`/config 开关 |
 
+## 3.38 已修复（第三十七批「批十一」：中级缺陷收口（续）——§3.37 清单落地）
+
+上批把「已核实、待修」的 14 条连同最小修法写进了 §3.37；这一批把它们全部落地。
+
+| BUG | 位置 | 影响（复核结论） | 修法 |
+| --- | --- | --- | --- |
+| 052 | `src/mcp.js` | 父进程**异常**退出（含 `process.exit(1)`）时 MCP 子进程成孤儿（实测 `kill -9` 后 PPID=1 存活） | 模块级 `liveMcpChildren` 登记 + `process.on('exit')` **整组**清理（`process.kill(-pid)`）；非正常路径也有兜底 |
+| 053 | `src/mcp-presets.js` | 预设一律不带版本（`@playwright/mcp@latest` 更显式）→ npx 每次按 dist-tag 解析，上游发新版即在本机执行 | 每个可用预设**钉死版本**并由 `presetList()` 显示确切 `pkg@version`；升级改为有意动作 |
+| 057 | `src/safe-fetch.js` | SSRF 的 **TOCTOU**：check 用 `lookup()`、连接再解析一次（rebinding 窗口）；且 `lookup` 抛错即**放行** | 改用 `node:http(s).request` 并把**已校验的那组 IP 钉给连接层**（`options.lookup`）；解析失败 fail-closed |
+| 061 | `src/schedule.js` | 任务 id 用 `Math.random()`（3 位 base36）且无存在性检查 → 同毫秒碰撞**静默覆盖**前一个任务 | `crypto.randomUUID()` + 写前存在性检查；碰撞时加序号后缀，**绝不覆盖** |
+| 064 | `src/sync-server.js` | `scryptSync` 阻塞事件循环（实测 10 并发 pair 期间 `/healthz` 最大延迟 87ms） | 改异步 `scrypt`；盐与哈希在**拿锁之前**算好，锁内仍是纯同步读改写 |
+| 068 | `src/task-state.js` | `saveTaskStateMerge` 读-改-写**无锁**（实测 12 进程并发只剩 3 条 artifact） | 加锁（同步版给 CLI/REPL + **异步版给 WebUI 请求路径**，两者共用同一个纯合并函数） |
+| 070 | `src/batch.js` | 三处裸 `fetch` 无超时（桩服务端不回包 → 批次永久挂起） | 三条请求都接 `signal` + 超时；**取消请求刻意不带**调用方 signal（见下"自我纠错"） |
+| 071 | `src/batch.js` | `res.text()` 无大小上限（实测 240MB 响应体 → OOM） | 先看 `content-length`，再**边读边累计**超限即中止 |
+| 072 | `src/ui.js` | `close()` 未调 `stopSpinner()`（实测 close 后 300ms 仍写 3 帧） | `close()` 里先 `stopSpinner()`（与 `endTurn` 同口径） |
+| 073 | `src/ui.js` | `onSigint` 每次注册新监听且不摘旧的（17 次触发 `MaxListenersExceededWarning`） | 注册前先摘掉上一个，语义改为"替换" |
+| 075 | `src/web/server.js`、`src/web/app.js` | 权限应答 POST 失败被前端 `catch(()=>{})` 吞掉；服务端 `pendingAsk` 无超时（实测永久挂起） | 服务端 120s 超时**按拒绝处理**并明确告知；前端失败时给出可见提示 |
+| 077 | `src/config.js` + 两处写回点 | H-7 只覆盖 init 两条路径；`loadConfig()||{}` 会把损坏配置当首次运行**静默覆盖**且无备份 | 新增 `loadConfigForWrite()`（区分"不存在/读不出来"，后者先改名备份）；`sync login` 与 `mingdao web` 的写回改走它 |
+| 079 | `src/context.js` | 回收摘要按 UTF-16 单元 `slice` → 切断代理对（实测孤立代理项） | 抽 `safeHead()` 做码点安全截断（tool 40 字与 assistant 200 字两处共用） |
+| 083 | `desktop/main.js` + `README.md` | 打包版下载完成即上报 `{os,ver}`，全仓无隐私说明、无退出开关 | 加 `telemetryDisabled()`（`MINGDAO_NO_TELEMETRY=1` 或 `config.telemetry=false`）；README「安全」节写明上报内容、目的与关闭方式 |
+
+### 38.1 顺带查实：**4 个 MCP 预设指向的包已经装不上**（不是"版本漂移"，是"根本装不上"）
+
+钉版本时逐个 `npm view` 才发现（2026-09-21）：
+
+| 预设 | 包 | npm 返回 |
+| --- | --- | --- |
+| fetch | `mcp-server-fetch` | `0.0.1-security`（包名被安全保留） |
+| git | `mcp-server-git` | `0.0.1-security`（同上） |
+| time | `@modelcontextprotocol/server-time` | **404**（该名字不可安装） |
+| sqlite | `mcp-server-sqlite` | `0.0.2`（仍在，但上游停更 → 钉住这个"最后可用"版本） |
+
+处理：前三条在目录里标 `unavailableReason` 并在 `mcp preset add` 的一刻**明确拒绝**（附替代建议），
+而不是写进 `config.mcpServers` 后在 MCP 握手里莫名失败；`presetList()`/WebUI 也会显示原因。
+**行为变更如实登记**：`mingdao mcp preset add fetch|git|time` 从"看起来成功、实际起不来"变成"当场报错并说明"。
+
+### 38.2 验证
+
+- **回归断言**：`test/smoke.js` 新增第 122 组（12 个用例覆盖上表 14 条）。层级如实标注：
+  - **行为级**：052（起子进程 → 父进程退出 → 断言孙进程被清理）、053、057（解析失败 fail-closed）、
+    061（**冻结 `crypto.randomUUID` 与 `Math.random`** 后仍必须保住两个任务）、064（起真同步服务 +
+    并发注册期间探 `/healthz` 延迟 < 30ms）、068（8 个子进程并发合并写）、070（桩服务端不回包，
+    断言 5 秒内报错）、071（2MB 结果体 + 4KB 上限 → 必须报"超过上限"）、072（伪装 TTY 后 close，
+    断言 300ms 内 0 次输出）、073（连注册 5 次，监听器净增 ≤1）、077（损坏配置 → 备份存在且内容原样）、
+    079（代理对被切断的构造输入 → 断言无孤立代理项）。
+  - **源码级**（如实标注，不充作行为级）：075 的前端提示与服务端超时、083 的遥测开关与 README 声明
+    —— 行为级验证分别需要完整 WebUI 权限往返与 Electron 打包环境。
+- **变异验证**（`mutate-batch11.sh`，8 个变异串行 + 240s 看门狗）：**8/8 全部被抓住** ——
+  · 052 孤儿仍存活（`pid … 仍存活`）
+  · 057 解析失败被放行（`getaddrinfo ENOTFOUND …`）
+  · 061 同毫秒覆盖（`实际只剩 1 个`）
+  · 064 同步 scrypt（被源码守卫 `不得再出现同步 scrypt` 抓住）
+  · 068 去掉锁（被**同步锁受审阅清单**守卫抓住——这条是"清单即防线"的直接体现；
+    并发丢失本身的行为断言仍保留在第 122e 组）
+  · 070 无超时 → 批次永久挂起（看门狗 240s 杀掉，正是旧行为）
+  · 073 监听器 `+5`
+  · 079 孤立代理项（`\ud835`）
+- 全门禁：`tsc` / strict 棘轮 / smoke（150 组）/ e2e-local / e2e-web / e2e-schedule / api-contracts / bench。
+
+### 38.3 本批的自我纠错（**改产品代码时踩到既有守卫，改测试时踩到自己的断言**）
+
+这一批的摩擦几乎都发生在"既有守卫/既有断言"上，逐条记下来，因为每一条都是真实的机制在起作用：
+
+| # | 现象 | 根因 | 处理 |
+| --- | --- | --- | --- |
+| 1 | `node test/smoke.js` 报「中止时必须请求服务端取消」失败 | 我给 batch 的三条请求都接了调用方 `signal`，**取消请求**也因此继承了"已 abort"的 signal → 当场失败，服务端永远收不到取消 | 取消请求显式传 `null`（它是"用户已中止之后"的清理请求），并在注释里写清理由 |
+| 2 | 报「task-state.js：新增 1 处同步锁（不在已审阅清单内）」 | BUG-068 的锁是新调用点，撞上既有的**同步锁受审阅清单**守卫 | 登记进清单并写明理由；同时把 **WebUI 请求路径**改走异步版 `saveTaskStateMergeAsync`（§3.27 的既定口径） |
+| 3 | 报「检查点调用点应为 6 处，实际 5」 | 改用异步版后，守卫的正则只认 `saveTaskStateMerge(`，认不出 `saveTaskStateMergeAsync(` | 正则补上异步名（守卫跟着实现走，而不是反过来） |
+| 4 | 报「改密必须与设备表写互斥」 | 该守卫用「函数开头 400 字内必须出现 `return withWriteLock(`」来钉互斥；BUG-064 把 scrypt 挪到拿锁之前，函数体变长 → **它在测代码排版，不是在测互斥** | 改为"取函数体、断言体内含 `return withWriteLock(`"，并补两条 BUG-064 的守卫（体内 `await verifyPassword`、全文件无 `scryptSync`） |
+| 5 | 报「https registry 必须放行」 | 该断言用「错误信息不含『拒绝』」判断协议层放行，而 fail-closed 的新文案里正好有"拒绝" | 断言改为只查**协议层**（不含"明文 http"/"协议不支持"），并在注释里写明这是两件事 |
+| 6 | 报「safe-fetch 不得再用全局 fetch」 | 源码守卫扫到了**文件头注释**里的 `fetch(url, …)` 示例 | 守卫先剥注释再扫（本仓既有守卫的统一口径） |
+| 7 | 122e「并发合并写必须保住全部 artifacts」实际 0/8 | 子进程各自设了 `MINGDAO_HOME`，而**父进程**读回时还停在上一个用例的 home | 读回前切到同一个 home，并在 finally 里恢复 |
+| 8 | 122c「应至少产生一条回收摘要」不成立 | 预算取得太小：回收后的消息虽然存在，但**留不进尾部窗口**；太大又根本不触发回收 | 按"刚好让回收结果留在尾部"重新定预算（230），并实测确认 |
+| 9 | 122i `ReferenceError: probe122i` | 句柄声明在 `try` 里、`finally` 里引用 → 块级作用域 | 声明提到 `try` 之前 |
+
+> 9 条里有 6 条是**既有守卫/既有断言**先发现的——"改一处代码要连着看一眼守卫"这件事，
+> 在这批里被反复证明是省时间的，而不是挡路的。
+
 ## 4. 其余登记项（**第三方结论，我未逐条复核**）
 
 ### 4.1 自评报告（`MingDao-harness-v0.6.1-技术评估报告.md`）
@@ -1004,6 +1082,10 @@ Windows 腿红。本批的三条守卫（sync-server 写锁、BUG-029 循环头�
   跨 origin 重定向带凭据、压缩无 signal、tool name 分片、hook 输出截断误 block、路由缓存 FIFO、
   分类器失败静默、超长文本绕过缓存、锁回收绕过超时闸、辅助调用峰谷价）
 - **下一批已就绪**（§3.37）：14 条「已核实仍成立」的中级条目附位置、影响与最小修法，可直接接续
+- **§3.37 清单全部落地**（§3.38 批十一）：MCP 孤儿进程 / 预设钉版本（并查出 4 个预设指向的包
+  **已装不上**）/ SSRF 把已校验 IP 钉给连接层 / 任务 id 唯一 / 异步 scrypt / 检查点合并写加锁 /
+  批处理超时与结果上限 / spinner 与 SIGINT 监听 / 权限确认超时 / 配置写回先备份 / 代理对安全截断 /
+  更新遥测可关闭且已声明
 
 **未闭合（如实登记，不假装完成）**：
 

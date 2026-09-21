@@ -10,6 +10,22 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+/**
+ * 更新遥测是否被显式关闭（审计 BUG-083）。
+ * 任一方式即可退出：`MINGDAO_NO_TELEMETRY=1` 环境变量，或 `config.json` 里 `telemetry: false`。
+ * 只读本地配置，失败（文件缺失/损坏）按"未关闭"处理——不因读配置失败而改变用户的选择。
+ */
+function telemetryDisabled() {
+  if (String(process.env.MINGDAO_NO_TELEMETRY || '') === '1') return true;
+  try {
+    const home = process.env.MINGDAO_HOME || path.join(app.getPath('home'), '.mingdao');
+    const cfg = JSON.parse(fs.readFileSync(path.join(home, 'config.json'), 'utf8'));
+    return cfg?.telemetry === false;
+  } catch {
+    return false;
+  }
+}
+
 // Linux 桌面渲染加固（审计：deepin 等合成器下 Electron 窗口「只有菜单、内容黑屏」的通用修复）：
 // 1) 强制 X11/XWayland 合成路径（规避 Wayland/DDE 合成器黑屏）；2) 默认禁用 GPU 硬件加速
 // （本应用是文本界面，软渲染足够）。需要时 MINGDAO_GPU=1 / MINGDAO_WAYLAND=1 可恢复默认行为。
@@ -460,7 +476,12 @@ function setupAutoUpdate() {
         appLog('updater 下载完成 ' + v);
         // 官网下载统计信标：下载完成上报一次（按次精确计数，不受 Range 分片影响）。
         // 仅打包版上报；fire-and-forget，失败不影响更新流程。
-        if (app.isPackaged) {
+        //
+        // 审计 BUG-083：这里上报 {os, ver}（**不含任何用户标识**），但此前既没有隐私说明、
+        // 也没有退出开关。现在两样都补上：① 显式退出（环境变量或 config.telemetry=false）；
+        // ② README「隐私」一节点明上报内容、目的与关闭方式。默认仍上报——它是官网
+        //    "桌面自动更新次数"的唯一数据源，关掉就等于该指标永远为 0。
+        if (app.isPackaged && !telemetryDisabled()) {
           fetch('https://harness.mingdao.ai/updok', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },

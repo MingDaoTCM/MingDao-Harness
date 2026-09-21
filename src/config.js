@@ -97,6 +97,26 @@ export function loadConfig() {
   return r.ok ? r.data : null;
 }
 
+/**
+ * 「读配置以便写回」的统一入口（审计 BUG-077）。
+ *
+ * H-7 只覆盖了 `init` / `ensureMinimalConfig` 两条写路径，其余写路径仍在用
+ * `loadConfig() || {}` —— 而 `null` **同时**表示「不存在」与「读不出来」，于是：
+ *   用户把 config.json 改坏一个字符 → 某个命令（如 `sync login`）读成 null → 当首次运行
+ *   用一个全新对象 saveConfig → **原始配置被静默覆盖，且没有 .corrupt-* 备份**（实测复现）。
+ * 这里把那条判据收成单一来源：写回之前必须区分「不存在」与「读不出来」，
+ * 后者先**改名备份**再继续（用户可以随后手工把字段并回去）。
+ *
+ * @param {string} [why] 出现在告警里的用途说明（便于定位是谁触发的）
+ * @returns {any} 可安全写回的配置对象（读不出来时返回空对象，但已留下备份与告警）
+ */
+export function loadConfigForWrite(why = '某个写配置的命令') {
+  const r = readConfigStrict();
+  if (r.ok) return r.data || {};
+  quarantineCorruptConfig(`${why} 需要写回配置，但读不出来：${r.error}`);
+  return {};
+}
+
 /** 桌面版首次运行：无配置时自动创建最小可用配置（引导在 WebUI 内完成，
  * 不再要求先去终端跑 mingdao init）。CLI 的 mingdao init 向导不受影响。 */
 export function ensureMinimalConfig() {
