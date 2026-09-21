@@ -9942,6 +9942,7 @@ safeRmSync(tmp, { recursive: true, force: true });
       );
     } finally {
       if (probe122i) clearInterval(probe122i);
+      srv122i.closeAllConnections?.(); // fetch 的 keep-alive 连接会让 close() 迟迟不返回
       srv122i.close();
       safeRmSync(home122i, { recursive: true, force: true });
     }
@@ -9953,6 +9954,10 @@ safeRmSync(tmp, { recursive: true, force: true });
     // 070：服务端**永不回包**
     const hang122j = http122j.createServer(() => {});
     await new Promise((r) => hang122j.listen(0, '127.0.0.1', r));
+    // 这个桩**故意永不回包**：被测代码超时中止后，连接可能仍半开着。unref 让"服务端句柄"
+    // 不阻塞进程退出——否则断言全过、进程却不退出（CI 上表现为 smoke 步骤永远 in_progress：
+    // ubuntu/macos + Node 20 实测卡住，Node 18/22/Windows 因为 socket 拆得更快才侥幸通过）。
+    hang122j.unref?.();
     const hangPort122j = /** @type {any} */ (hang122j.address()).port;
     const home122j = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b11j-'));
     const prevHome122j = process.env.MINGDAO_HOME;
@@ -9968,6 +9973,7 @@ safeRmSync(tmp, { recursive: true, force: true });
       assert.ok(r122j.error, '上游不响应必须报错而不是永久挂起（BUG-070）');
       assert.ok(ms122j < 5000, `超时（600ms）必须真正生效，实际耗时 ${ms122j}ms（旧实现会永久挂起）`);
     } finally {
+      hang122j.closeAllConnections?.(); // 先掐掉半开连接，close() 才真的能收尾
       hang122j.close();
       delete process.env.MINGDAO_BATCH_TIMEOUT_MS;
       process.env.MINGDAO_HOME = prevHome122j;
@@ -10006,6 +10012,7 @@ safeRmSync(tmp, { recursive: true, force: true });
       });
     });
     await new Promise((r) => big122k.listen(0, '127.0.0.1', r));
+    big122k.unref?.(); // 同上：2MB 响应体会被上限中途掐断，连接可能半开
     const bigPort122k = /** @type {any} */ (big122k.address()).port;
     const home122k = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b11k-'));
     const prevHome122k = process.env.MINGDAO_HOME;
@@ -10019,6 +10026,7 @@ safeRmSync(tmp, { recursive: true, force: true });
       const r122k = await runBatch({ cfg: { provider: 'custom', model: 'deepseek-v4-flash', baseUrl: `http://127.0.0.1:${bigPort122k}/v1` }, model: 'deepseek-v4-flash', questions: ['问题'], onStatus: () => {} });
       assert.ok(r122k.error && r122k.error.includes('上限'), `超大结果体必须被上限拦住（BUG-071：旧实现 OOM），实际：${JSON.stringify(r122k).slice(0, 160)}`);
     } finally {
+      big122k.closeAllConnections?.();
       big122k.close();
       delete process.env.MINGDAO_BATCH_MAX_BYTES;
       delete process.env.MINGDAO_BATCH_POLL_MS;
@@ -10046,3 +10054,9 @@ safeRmSync(tmp, { recursive: true, force: true });
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);
+// 显式收尾退出（v0.6.5）：本套件里有若干**故意造成半开连接**的桩服务端（例如批处理超时用例里
+// "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket
+// —— 实测 ubuntu/macOS + Node 20 上"断言全过、进程却不退出"，CI 里表现为冒烟步骤永远 in_progress
+// （Node 18/22/Windows 因为拆连接更快而侥幸通过）。这里显式退出，断言本身不受影响；
+// 断言失败仍会在抛错处非 0 退出。
+process.exit(0);
