@@ -223,7 +223,7 @@ export function createPack(ctx) {
 | PostToolUse | `completeness`、`result-forbid` | `completeness` 缺项 → 拒绝该工具结果，要求模型补采；`result-forbid` → 屏蔽结果并提示 |
 | 输出前 | `output-forbid`、`require-citation` | 命中 → 按 `action` 处理：`block`（改为固定合规文案）/ `block-and-rewrite`（再请求一次修正）/ `warn`（放行并标注） |
 
-**`confirm`（v0.6.3 起真正求值）**：即使在 `auto` 权限档位下，命中的工具调用也**必须**先得到人工确认才执行
+**`confirm`（v0.6.4 起真正求值）**：即使在 `auto` 权限档位下，命中的工具调用也**必须**先得到人工确认才执行
 ——它的存在意义正是「权限已经放行，领域还要再问一次」。两种情形一律按 fail-closed 阻止：
 
 - 用户答否；
@@ -235,7 +235,7 @@ export function createPack(ctx) {
 
 > `confirm` 在 v0.5.0–v0.6.2 之间是 `KINDS` 里的一个字符串：能通过装载校验、会被计入约束条数
 > （于是 `active=true`），但引擎里没有任何一处求值它——作者以为「这条工具要人工确认」，实际零效果。
-> 这是「红线静默消失」，与本文档的 fail-closed 声明相反；v0.6.3 补齐实现并补了回归断言。
+> 这是「红线静默消失」，与本文档的 fail-closed 声明相反；v0.6.4 补齐实现并补了回归断言。
 
 约束事件统一结构（进执行账本）：
 
@@ -245,7 +245,7 @@ export function createPack(ctx) {
   "matched": "好转", "session": "…", "model": "deepseek-v4-flash" }
 ```
 
-> `id` 自 v0.6.3 起写入事件。此前事件只有 `constraint` 字段，而账本与回放两处消费方都读 `id`，
+> `id` 自 v0.6.4 起写入事件。此前事件只有 `constraint` 字段，而账本与回放两处消费方都读 `id`，
 > 于是「是哪条红线拦的」在账本里恒为 `null`——不报错、只输出 null，任何断言都不会失败。
 
 **字段要求（v0.6.0 起在装载时强制校验，写错不会静默失效）**
@@ -341,7 +341,7 @@ manifest 可声明 `budget.dailyYuan` + `budget.action`。超限时 `ctx.llm()` 
 
 **下游义务**：在 `pack.json` 声明 `apiVersion` 与 `engines.mingdao`，并把 `mingdao pack verify` 放进 CI。
 
-> v0.6.3 更正：此前帮助文本写的是"只做静态校验"，实现却会 `import pack.mjs` —— 于是按文档把
+> v0.6.4 更正：此前帮助文本写的是"只做静态校验"，实现却会 `import pack.mjs` —— 于是按文档把
 > `pack verify` 当 CI 门禁，等于**在 CI 上执行被审仓库的任意 Node 代码**（且不经 `pack trust` 信任门）。
 > 现在默认确实是静态的；约束与提示词段的合法性由代码产出，静态阶段无法校验，需要那种覆盖请显式加 `--runtime`。
 
