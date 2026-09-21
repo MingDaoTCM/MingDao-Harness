@@ -84,6 +84,21 @@ node src/cli.js diagnose             # 自检报告（脱敏）
 v0.6.0 C4 起 windows 腿连续 **5 个提交**变红而无人发现——本地是 macOS，跑不到 Windows 分支；
 而我没有在推送后查看结果，于是红了一个多小时才被这轮梳理发现。
 
+#### 1.1.1 日常提交也要推三平台（2026-09-21 负责人报障）
+
+**每一次推 main 都要推三个平台，不是只在发版时推。** 这次的现象是：GitHub 的 main 到了 `5dc7739`，
+而 gitee/gitcode 还停在 `b0c872c`（上一个发布提交）——镜像上克隆到的是**过期代码**，
+而「`publish-mirror-releases.sh` 会推分支」只在**发版那一刻**成立，发版之后的日常提交没人管。
+这与 §3.0 ② 记的是同一类问题（那时也是"文档写了要求、脚本没落实"）。
+
+```bash
+# 用脚本推，别手敲三个 remote：推完会逐个核对远端 main 的 SHA，不一致即非 0 退出
+bash scripts/push-all.sh              # 推 main 到 origin / gitee / gitcode
+bash scripts/push-all.sh v0.6.5       # 额外推一个 tag（仍是三平台）
+```
+
+**验收**：输出末尾必须是 `✓ 三平台 main 已对齐 <sha>`；任一平台不一致就是**没推完**，别当成推完了。
+
 ```bash
 # 查最近一次运行的五条腿（含 windows）
 curl -s "https://api.github.com/repos/MingDaoTCM/MingDao-Harness/commits/<sha>/check-runs" \
