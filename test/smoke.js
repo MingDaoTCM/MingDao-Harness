@@ -7816,14 +7816,26 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
     {
       fs.mkdirSync(path.join(home111, 'providers'), { recursive: true });
       const modFile = path.join(home111, 'providers', 'dify.mjs');
-      fs.writeFileSync(modFile, 'export const supportsVision = true;\nexport async function createProvider() { return { chat: async () => ({ text: "x" }) }; }\n');
       const cfg = { provider: 'dify' };
+      // Windows CI（node 20）上踩到的坑：连续改写同一个文件时 `statSync().mtimeMs` 可能**拿到同一个值**
+      // （三次写入落在同一毫秒刻度内），而门控的失效判据正是 mtimeMs、模块 URL 也是 `?v=<mtimeMs>`
+      // → 探针缓存与 Node 模块缓存**双双命中**，第三段读到的是第二段的 `capabilities.vision=true`
+      // → 「未声明应保守判 false」变成 true，Windows 腿假红（macOS/Linux 的 mtime 有更细的刻度，所以本地看不出来）。
+      // 修法是让用例**显式**给每次写入一个递增 mtime：utimes 是确定性的，不依赖文件系统的时钟粒度。
+      // （产品侧「同 mtime 下内容变了」的健壮性另记一条待办，不在这版里改已发版的 src/。）
+      let stamp = Date.now() / 1000;
+      const writeProvider = (src) => {
+        fs.writeFileSync(modFile, src);
+        stamp += 5;
+        fs.utimesSync(modFile, stamp, stamp);
+      };
+      writeProvider('export const supportsVision = true;\nexport async function createProvider() { return { chat: async () => ({ text: "x" }) }; }\n');
       assert.equal(await PV.resolveVisionSupport(cfg, 'dify-vl'), true, '自定义 Provider 声明 supportsVision:true 时门控必须放行（下游场景）');
       // capabilities.vision 等价写法
-      fs.writeFileSync(modFile, 'export const capabilities = { vision: true };\nexport async function createProvider() { return { chat: async () => ({ text: "x" }) }; }\n');
+      writeProvider('export const capabilities = { vision: true };\nexport async function createProvider() { return { chat: async () => ({ text: "x" }) }; }\n');
       assert.equal(await PV.resolveVisionSupport(cfg, 'dify-vl'), true, 'capabilities.vision:true 必须等效');
       // 未声明 → 保守判不支持（不能把图发给看不懂的端点）
-      fs.writeFileSync(modFile, 'export async function createProvider() { return { chat: async () => ({ text: "x" }) }; }\n');
+      writeProvider('export async function createProvider() { return { chat: async () => ({ text: "x" }) }; }\n');
       assert.equal(await PV.resolveVisionSupport(cfg, 'dify-vl'), false, '未声明能力的自定义 Provider 应保守判为不支持图片');
     }
     // ⑤ 显式 vision 覆盖一切（写 false 就是明确关闭；true 优先于预设）
