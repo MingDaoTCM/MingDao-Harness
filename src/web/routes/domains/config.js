@@ -1,6 +1,7 @@
 // 配置域（Phase C C1）：/api/state /api/config /api/models-config
 // 服务商 Key 管理、自定义模型增删改、API 地址覆盖、系统状态快照。
 import fs from 'node:fs';
+import crypto from 'node:crypto';
 import { DEFAULT_MODEL, DEFAULT_EXECUTOR_MODEL } from '../../../models.js';
 import path from 'node:path';
 import { loadConfig, saveConfig } from '../../../config.js';
@@ -13,6 +14,42 @@ import { enableAutostart, disableAutostart, autostartStatus } from '../../../aut
 import { PRICE_DATA_AS_OF } from '../../../pricing.js';
 import { listSessions, relativeTime, sessionPreview } from '../../../session.js';
 import { currentWorkspace } from '../../../workspace.js';
+
+/**
+ * 取 origin（协议 + 主机 + 端口）。非法或空地址返回空串。
+ * @param {any} u
+ * @returns {string}
+ */
+function originOf(u) {
+  try {
+    return new URL(String(u || '')).origin;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * v0.6.5（独立审计 P1-20；主审已复现）：**改「出网目的地」＝改「已存储的 Key 交给谁」**，
+ * 属于**凭证级操作**，必须在同一请求里重新提交该 Key 才放行。
+ *
+ * 为什么不靠"弹窗确认"：WebUI 默认是无令牌的回环服务（本机信任模式），调用方可能是
+ * **同机任意进程**（也可能来自被跨站带上的请求），弹窗只约束"看得见界面的那个人"。
+ * 所以判据必须落在服务端：`current`（生效中的 provider 配置）与 `next`（本次改动后）的
+ * 目的地不同、且 `current.apiKey` 非空时，要求提交与已存 Key 等价的 apiKey。
+ *
+ * @param {{apiKey?: any, baseUrl?: any}} current 改动前的 provider 配置
+ * @param {{apiKey?: any, baseUrl?: any}} next 改动后的 provider 配置
+ * @param {any} submitted 本次请求提交的 apiKey（明文）
+ * @returns {string} 空串表示放行；否则为拒绝理由
+ */
+function endpointChangeGuard(current, next, submitted) {
+  if (!current?.apiKey || originOf(next?.baseUrl) === originOf(current?.baseUrl)) return '';
+  const given = String(submitted || '');
+  /** 摘要化后再比对：两个秘密不进入同一条比较分支（顺带常数时间化）。 */
+  const digest = (/** @type {any} */ s) => crypto.createHash('sha256').update(String(s)).digest('hex');
+  if (given && digest(given) === digest(current.apiKey)) return '';
+  return '改 API 地址会把已存储的 Key 发往新地址，属于凭证级操作——请重新输入该服务商的 API Key 以确认。';
+}
 
 /**
  * 配置域路由。命中返回 true，未命中返回 false。
@@ -271,6 +308,16 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (action === 'updateCustom' && !(cfg.customModels || {})[name]) {
         return json(res, 400, { error: `自定义模型 ${name} 不存在（如需新增请用「添加」）` });
       }
+      // v0.6.5：同一类越权链的**第二个入口**，随 P1-20 一并收口（主审用打桩端点复现）——
+      // 「修改」一个**已有**自定义模型时把 baseUrl 改到别处，同样会把该模型已存储的 Key
+      // 发往新地址：`updateCustom` → 清 provider 缓存 → 一次对话，攻击者端点即收到
+      // `Bearer sk-victim-CUSTOM-KEY-…`。addCustom 不需要这道门：它的 Key 来自同一请求，
+      // 没有"已存储的秘密"可被劫持。必须在**改写 cfg 之前**判定，否则 400 会留下内存态脏数据。
+      if (action === 'updateCustom') {
+        const curPc = resolveProviderConfig(cfg, name) || {};
+        const denied = endpointChangeGuard(curPc, { ...curPc, baseUrl }, body.apiKey || body.key);
+        if (denied) return json(res, 400, { needKey: true, error: denied });
+      }
       cfg.customModels = cfg.customModels || {};
       // 修改时保留未提交字段（tokenizer/contextWindow/maxOutputTokens/vision）——
       // 前端「修改」只发 baseUrl+label，整体替换会丢这些声明，导致本地模型窗口回退兜底
@@ -336,6 +383,21 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         const vurl = await shared.validateRemoteUrl(baseUrl); // 质检 S1：SSRF 防护
         if (vurl.error) return json(res, 400, { error: vurl.error });
       }
+      // v0.6.5（独立审计 P1-20；主审已复现）：**改「出网目的地」是凭证级操作**（判据见
+      // endpointChangeGuard）。此前任意调用方（回环绑定且未设令牌时＝同机任意进程）三步就能把
+      // **已存储的完整 API Key** 骗到自己的端点：① POST setBaseUrl 指向
+      // `http://127.0.0.1:<攻击者端口>/v1`（回环绑定下 validateRemoteUrl 的私网限制整段跳过）
+      // ② 任意一次 /api/config 清 provider 缓存 ③ 触发一次对话。
+      // 实测攻击者端点收到 `Bearer sk-victim-FULL-SECRET-…`；而 `GET /api/models-config` 只回
+      // 脱敏 Key、凭证文件 0600 —— 这两层保护全被绕过。同地址重设（含只换路径）不受影响。
+      const modelForCfg = state.modelName || cfg.model || DEFAULT_MODEL;
+      const curPc = resolveProviderConfig(cfg, modelForCfg) || {};
+      const nextCfg = { ...cfg };
+      if (baseUrl) nextCfg.baseUrl = baseUrl;
+      else delete nextCfg.baseUrl;
+      const nextPc = resolveProviderConfig(nextCfg, modelForCfg) || {};
+      const denied = endpointChangeGuard(curPc, nextPc, body.apiKey);
+      if (denied) return json(res, 400, { needKey: true, error: denied });
       cfg.baseUrl = baseUrl || undefined;
       if (cfg.baseUrl === undefined) delete cfg.baseUrl;
       saveConfig(cfg);

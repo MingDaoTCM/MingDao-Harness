@@ -245,6 +245,21 @@ export function createPack(ctx) {
       process.exitCode = 1;
       return true;
     }
+    // v0.6.5（独立审计 P0-2）：**信任门必须在这里也生效**。
+    // `loadPack` 会 `import pack.mjs` —— 也就是以完整 Node 权限执行该目录里的代码；
+    // 而未信任的项目级 Pack 恰恰是「clone 一个仓库就带进来」的第三方代码。
+    // v0.6.2 修「clone 即执行」时只把门加在了 mountPacks 这条路径上（`pack list` 也会正确显示
+    // 「⛔ 未信任（不挂载）」），但 `info` 直接 loadPack —— 于是"换个子命令就能执行"。
+    // 与 `pack verify` 同口径：默认不执行代码，要执行必须显式确认（先 trust）。
+    if (found.gate) {
+      const root = found.gateDir || found.dir;
+      console.log(`[错误] ${name} 未信任，拒绝加载（不执行其代码）。`);
+      console.log(`  原因：项目内的 pack.mjs 会以**完整 Node 权限在本进程内执行**，不受 permission 模式约束。`);
+      console.log(`  ${found.gate === 'changed' ? '该目录内容在信任后发生过变化，需重新确认。' : '确认这个目录是你信任的代码后，执行：'}`);
+      console.log(`    mingdao pack trust ${root}`);
+      process.exitCode = 1;
+      return true;
+    }
     const res = await loadPack(found.dir);
     if (!res.ok) {
       console.log(`[错误] ${name} 加载失败：${res.errors.join('；')}`);

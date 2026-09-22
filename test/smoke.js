@@ -10051,6 +10051,226 @@ safeRmSync(tmp, { recursive: true, force: true });
   ok('v0.6.5 批十一：中级缺陷收口（MCP 孤儿/预设钉版本/SSRF 钉 IP/任务 id/异步 scrypt/检查点锁/批处理超时与上限/spinner/SIGINT 监听/权限超时/配置写回/代理对截断/遥测开关）');
 }
 
+// ---------- 123. v0.6.5 补丁版：三条越权链收口 ----------
+// 独立审计（58 项）里唯三的"越权/任意执行"链，全部由主审在本机复现后才修：
+//   ① P0-1 悬空软链把写操作送出工作目录围栏
+//   ② P0-2 `pack info` 在未信任时执行项目级 pack.mjs（信任门可被"换个子命令"绕过）
+//   ③ P1-20 `setBaseUrl` 把**已存储的完整 API Key** 外带到攻击者端点（凭证级操作无凭证校验）
+{
+  // ① P0-1：realpathSync 对**悬空**软链抛 ENOENT，旧实现于是回退到"只做字符串前缀比较"，
+  //    判定"落在工作目录内"并放行 —— 但真正的写操作会跟随链接，把文件建到围栏之外。
+  {
+    const root123 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p1fs-root-'));
+    const out123 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p1fs-out-'));
+    let canLink123 = true;
+    const escapedTarget = path.join(out123, 'created-by-escape.txt');
+    try {
+      fs.symlinkSync(escapedTarget, path.join(root123, 'dangling-out.txt'));
+    } catch {
+      canLink123 = false; // Windows 无权限建软链：跳过本支，其余断言照跑
+    }
+    if (canLink123) {
+      assert.equal(fs.existsSync(escapedTarget), false, '（前置）悬空链接的目标此刻必须不存在，否则测不到回退分支');
+      const wOut = await dispatch('write', { path: 'dangling-out.txt', content: 'escaped' }, { cwd: root123, cfg: {} });
+      assert.equal(wOut.ok, false, `经悬空软链写到围栏外必须拒绝，实际 ${JSON.stringify(wOut)}`);
+      assert.ok(String(wOut.error || '').includes('越界'), `拒绝理由应说明越界，实际：${wOut.error}`);
+      assert.equal(fs.existsSync(escapedTarget), false, '围栏外的文件绝不能被创建（这是"写越权"的实锤）');
+      // 反例保护：**指向围栏内**的悬空链接必须照常可写 —— 修复不能退化成"凡悬空链接一律拒绝"，
+      // 否则本地模型/脚本常用的"先建链接、后建目标"工作流会被误伤。
+      const insideTarget = path.join(root123, 'inside-target.txt');
+      fs.symlinkSync(insideTarget, path.join(root123, 'dangling-in.txt'));
+      const wIn = await dispatch('write', { path: 'dangling-in.txt', content: 'ok-inside' }, { cwd: root123, cfg: {} });
+      assert.equal(wIn.ok, true, `指向围栏内的悬空链接应照常可写，实际 ${JSON.stringify(wIn)}`);
+      assert.equal(fs.readFileSync(insideTarget, 'utf8'), 'ok-inside', '内容应真正落到链接目标（围栏内）');
+      // 链接成环：必须**有界返回**（旧实现的递归解析若无深度上限会栈溢出/挂死）
+      fs.symlinkSync(path.join(root123, 'loop-b.txt'), path.join(root123, 'loop-a.txt'));
+      fs.symlinkSync(path.join(root123, 'loop-a.txt'), path.join(root123, 'loop-b.txt'));
+      const wLoop = await dispatch('write', { path: 'loop-a.txt', content: 'x' }, { cwd: root123, cfg: {} });
+      assert.equal(wLoop.ok, false, '软链成环必须被判为越界/不可解析并返回，而不是无限解析');
+    }
+    safeRmSync(root123, { recursive: true, force: true });
+    safeRmSync(out123, { recursive: true, force: true });
+  }
+
+  // ② P0-2：`pack info` 曾经无条件 loadPack → import pack.mjs = 完整 Node 权限执行代码。
+  //    未信任的项目级 Pack 恰恰来自"clone 一个仓库"，所以这是"clone 即执行"的侧门。
+  {
+    const prevHome123 = process.env.MINGDAO_HOME;
+    const home123 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p1pack-home-'));
+    const proj123 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p1pack-proj-'));
+    const packDir123 = path.join(proj123, '.mingdao', 'packs', 'evil');
+    fs.mkdirSync(packDir123, { recursive: true });
+    // 必须是一份**校验通过**的 manifest：`pack info` 里"校验未通过"分支排在信任门之前，
+    // 若 manifest 本身不合法（例如漏了 engines.mingdao），测到的就是另一个分支——
+    // 第一版这里就是这么写的，变异验证/实跑直接指出"该断言抓不到信任门"。
+    const { coreVersionOf } = await import(pathToFileURL(path.join(srcDir, 'packs.js')).href);
+    fs.writeFileSync(
+      path.join(packDir123, 'pack.json'),
+      JSON.stringify({
+        apiVersion: 1,
+        name: 'evil',
+        version: '1.0.0',
+        engines: { mingdao: `>=${coreVersionOf()} <999.0.0` },
+        description: 'audit probe',
+        contributes: { tools: true },
+      })
+    );
+    const marker123 = path.join(proj123, 'PACK-CODE-RAN.txt');
+    // 顶层的 writeFileSync = "import 即执行"；createPack 只为满足运行时契约（hasCode 时必须存在）
+    const packSrc123 = (extra) =>
+      `import fs from 'node:fs';\n` +
+      `fs.writeFileSync(${JSON.stringify(marker123)}, 'EXECUTED');\n` +
+      `export const apiVersion = 1;\n` +
+      `export function createPack() { return {}; }\n` +
+      extra;
+    fs.writeFileSync(path.join(packDir123, 'pack.mjs'), packSrc123(''));
+    const cli123 = path.join(srcDir, 'cli.js');
+    const run123 = (argv) => spawnSync(process.execPath, [cli123, ...argv], { cwd: proj123, encoding: 'utf8', env: { ...process.env, MINGDAO_HOME: home123 } });
+    try {
+      const rInfo = run123(['pack', 'info', 'evil']);
+      assert.notEqual(rInfo.status, 0, `未信任的项目级 Pack：pack info 必须以非 0 退出（实际 ${rInfo.status}）`);
+      assert.ok(/未信任/.test(String(rInfo.stdout || '') + String(rInfo.stderr || '')), `拒绝理由必须点明"未信任"，实际：${rInfo.stdout}${rInfo.stderr}`);
+      assert.ok(/pack trust/.test(String(rInfo.stdout || '')), '必须告诉用户出路（mingdao pack trust <目录>）');
+      assert.equal(fs.existsSync(marker123), false, '未信任时 pack info 绝不能执行 pack.mjs（否则信任门形同虚设）');
+      // 正向：显式信任后必须恢复可用 —— 门挂在"信任状态"上，不是"永远拒绝"
+      const rTrust = run123(['pack', 'trust', proj123]);
+      assert.equal(rTrust.status, 0, `pack trust 应成功：${rTrust.stdout}${rTrust.stderr}`);
+      const rInfo2 = run123(['pack', 'info', 'evil']);
+      assert.equal(rInfo2.status, 0, `信任后 pack info 应正常输出：${rInfo2.stdout}${rInfo2.stderr}`);
+      assert.ok(/evil v1\.0\.0/.test(rInfo2.stdout || ''), `信任后应打印贡献面明细（证明真的走了 loadPack 分支）：${rInfo2.stdout}`);
+      assert.equal(fs.existsSync(marker123), true, '信任之后 info 才会 import pack.mjs（证明拦的是"未信任"而不是"info"）');
+      // 内容一变信任自动失效：改一个字节后必须重新确认（既有语义，顺手钉住不被回退）
+      fs.writeFileSync(path.join(packDir123, 'pack.mjs'), packSrc123('// tampered\n'));
+      const rInfo3 = run123(['pack', 'info', 'evil']);
+      assert.notEqual(rInfo3.status, 0, '信任后内容发生变化必须重新确认（指纹失效）');
+    } finally {
+      if (prevHome123 === undefined) delete process.env.MINGDAO_HOME;
+      else process.env.MINGDAO_HOME = prevHome123;
+      safeRmSync(home123, { recursive: true, force: true });
+      safeRmSync(proj123, { recursive: true, force: true });
+    }
+  }
+
+  // ③ P1-20：`setBaseUrl` 是"改出网目的地"，等价于"把已存储的 Key 交给谁"——属于凭证级操作。
+  //    旧实现下三步即可外带：① 改地址指向攻击者端点（回环绑定下私网校验整段跳过）
+  //    ② 清 provider 缓存 ③ 触发一次对话。实测攻击者端点收到 `Bearer sk-victim-FULL-…`。
+  //    （完整链路的行为级复现见 /tmp 审计脚本；此处钉住"被拒 + 配置未变 + 攻击者端点 0 次访问"。）
+  {
+    const { runWebServer } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
+    const { setStoredKey } = await import(pathToFileURL(path.join(srcDir, 'credentials.js')).href);
+    const http123 = await import('node:http');
+    const prevHome123c = process.env.MINGDAO_HOME;
+    const home123c = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p1key-home-'));
+    process.env.MINGDAO_HOME = home123c;
+    saveConfig({ provider: 'deepseek', model: 'deepseek-flash', permission: 'auto' });
+    const VICTIM_KEY = 'sk-audit-victim-KEY-0987654321';
+    setStoredKey('deepseek', VICTIM_KEY);
+    // 攻击者端点：只统计"有没有人来、有没有带 Authorization"
+    let evilHits = 0;
+    let evilAuth = null;
+    const evilSrv = http123.createServer((req, res) => {
+      evilHits += 1;
+      evilAuth = evilAuth || req.headers.authorization || '(无)';
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n');
+      res.end('data: [DONE]\n\n');
+    });
+    await new Promise((r) => evilSrv.listen(0, '127.0.0.1', r));
+    const evilPort = evilSrv.address().port;
+    // 正常端点：自定义模型的"原本目的地"，用来证明**正常时这条链是通的**（否则"没外带"可能只是链坏了）
+    let benignHits = 0;
+    let benignAuth = null;
+    const benignSrv = http123.createServer((req, res) => {
+      benignHits += 1;
+      benignAuth = benignAuth || req.headers.authorization || '(无)';
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n');
+      res.end('data: [DONE]\n\n');
+    });
+    await new Promise((r) => benignSrv.listen(0, '127.0.0.1', r));
+    const benignPort = benignSrv.address().port;
+    const PORT123 = 45974; // 与 116 同端口（两段串行执行、各自 close）
+    const srv123 = await runWebServer({ host: '127.0.0.1', port: PORT123, authToken: null });
+    const base123 = `http://127.0.0.1:${PORT123}`;
+    const post123 = async (p, body) => {
+      const r = await fetch(base123 + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      return { status: r.status, j: await r.json().catch(() => ({})) };
+    };
+    try {
+      const evilUrl = `http://127.0.0.1:${evilPort}/v1`;
+      const r1 = await post123('/api/models-config', { action: 'setBaseUrl', baseUrl: evilUrl });
+      assert.equal(r1.status, 400, `已存 Key 时改出网目的地必须先确认凭证，实际 ${r1.status} ${JSON.stringify(r1.j)}`);
+      assert.equal(r1.j.needKey, true, '必须回 needKey 标志（前端据此提示补输，否则功能变成死路）');
+      const r2 = await post123('/api/models-config', { action: 'setBaseUrl', baseUrl: evilUrl, apiKey: 'sk-wrong-guess' });
+      assert.equal(r2.status, 400, 'Key 不对同样拒绝（否则"随便填一个"就能过）');
+      assert.equal(r2.j.needKey, true, 'Key 不对仍要 needKey（让前端可以重试而不是只能放弃）');
+      assert.equal(loadConfig().baseUrl, undefined, '被拒 = 什么都没发生：配置文件里的 baseUrl 必须原封不动');
+      // 正向：真的知道 Key 的人必须能改（安全不能拿掉功能）
+      const r3 = await post123('/api/models-config', { action: 'setBaseUrl', baseUrl: evilUrl, apiKey: VICTIM_KEY });
+      assert.equal(r3.status, 200, `重新提交正确 Key 后应放行，实际 ${r3.status} ${JSON.stringify(r3.j)}`);
+      assert.equal(loadConfig().baseUrl, evilUrl, '放行后 baseUrl 必须真的生效');
+      // 同 origin 换路径（本机模型 /v1 → /v2）不该要求重输：判据是"目的地变了"，不是"字符串变了"
+      const r4 = await post123('/api/models-config', { action: 'setBaseUrl', baseUrl: `http://127.0.0.1:${evilPort}/v2` });
+      assert.equal(r4.status, 200, `同 origin 改路径不得要求重输 Key（可用性），实际 ${r4.status} ${JSON.stringify(r4.j)}`);
+      // 该服务商本来就没有 Key 时不该被拦（没有可外带的秘密）
+      await post123('/api/models-config', { action: 'removeProviderKey', provider: 'deepseek' });
+      const r5 = await post123('/api/models-config', { action: 'setBaseUrl', baseUrl: 'http://127.0.0.1:9/v1' });
+      assert.equal(r5.status, 200, `该服务商无已存 Key 时不应被拦，实际 ${r5.status} ${JSON.stringify(r5.j)}`);
+
+      // ③b 同类第二个入口：`updateCustom` 改**已有**自定义模型的地址（主审已用它复现同一条外带链）。
+      //     这里做完整链路的行为级验证：先确认正常时这条链**真的会发 Key**（否则"没外带"可能只是链坏了），
+      //     再把目的地换成攻击者端点 —— 必须被拒，且攻击者端点一次都收不到。
+      const CUSTOM_KEY = 'sk-audit-custom-KEY-1122334455';
+      const waitFor123 = async (cond, ms = 5000) => {
+        const t0 = Date.now();
+        while (Date.now() - t0 < ms) {
+          if (cond()) return true;
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        return cond();
+      };
+      const add123 = await post123('/api/models-config', { action: 'addCustom', name: 'up8', label: 'up8', baseUrl: `http://127.0.0.1:${benignPort}/v1`, key: CUSTOM_KEY });
+      assert.equal(add123.status, 200, `自定义模型应能添加，实际 ${add123.status} ${JSON.stringify(add123.j)}`);
+      const sw123 = await post123('/api/config', { model: 'up8' });
+      assert.equal(sw123.status, 200, `应能切换到自定义模型，实际 ${sw123.status}`);
+      await post123('/api/chat', { message: 'hello' });
+      assert.ok(await waitFor123(() => benignHits >= 1), '（前置）正常端点必须收到这次对话，否则下面的"没外带"不成立');
+      assert.ok(String(benignAuth || '').includes(CUSTOM_KEY), `正常端点应收到该模型的已存 Key（证明这条链平时是通的），实际 ${benignAuth}`);
+      const evilCustomUrl = `http://127.0.0.1:${evilPort}/v1`;
+      const u1 = await post123('/api/models-config', { action: 'updateCustom', name: 'up8', label: 'up8', baseUrl: evilCustomUrl });
+      assert.equal(u1.status, 400, `改已有自定义模型的地址同样必须先确认凭证，实际 ${u1.status} ${JSON.stringify(u1.j)}`);
+      assert.equal(u1.j.needKey, true, 'updateCustom 也必须回 needKey');
+      const u2 = await post123('/api/models-config', { action: 'updateCustom', name: 'up8', label: 'up8', baseUrl: evilCustomUrl, apiKey: 'sk-wrong-guess' });
+      assert.equal(u2.status, 400, 'updateCustom：Key 不对同样拒绝');
+      assert.equal(loadConfig().customModels.up8.baseUrl, `http://127.0.0.1:${benignPort}/v1`, '被拒后配置里的 baseUrl 必须原封不动');
+      // 再聊一次：目的地没被改掉 → 仍然只发给正常端点，攻击者端点 0 次访问
+      await post123('/api/chat', { message: 'hello again' });
+      assert.ok(await waitFor123(() => benignHits >= 2), '被拒后仍应正常发往原端点（不能把功能一起挡掉）');
+      assert.equal(evilHits, 0, `updateCustom 被拒后攻击者端点一次都不该被访问（实际 ${evilHits} 次，Authorization=${evilAuth}）`);
+      // 正向：提交正确 Key 后放行
+      const u3 = await post123('/api/models-config', { action: 'updateCustom', name: 'up8', label: 'up8', baseUrl: evilCustomUrl, apiKey: CUSTOM_KEY });
+      assert.equal(u3.status, 200, `提交正确 Key 后 updateCustom 应放行，实际 ${u3.status} ${JSON.stringify(u3.j)}`);
+      assert.equal(loadConfig().customModels.up8.baseUrl, evilCustomUrl, '放行后新地址必须真的生效');
+
+      assert.equal(evilHits, 0, `攻击者端点全程不得被访问（实际 ${evilHits} 次，Authorization=${evilAuth}）`);
+      // 源码级（无浏览器环境，UI 交互无法行为验证——如实标注层级）：前端必须处理 needKey 并补输 Key
+      const appjs123 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+      assert.ok(/needKey/.test(appjs123), '前端必须识别 needKey 并提示补输 Key（源码级）');
+    } finally {
+      await new Promise((r) => srv123.close(r));
+      for (const s of [evilSrv, benignSrv]) {
+        s.closeAllConnections?.();
+        await new Promise((r) => s.close(r)).catch(() => {});
+      }
+      if (prevHome123c === undefined) delete process.env.MINGDAO_HOME;
+      else process.env.MINGDAO_HOME = prevHome123c;
+      safeRmSync(home123c, { recursive: true, force: true });
+    }
+  }
+
+  ok('v0.6.5 补丁版越权链：悬空软链写不出围栏（含环状链接有界返回）+ 未信任 Pack 的 pack info 不执行代码 + 改 API 地址必须重交 Key（凭证级操作）');
+}
+
 delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);

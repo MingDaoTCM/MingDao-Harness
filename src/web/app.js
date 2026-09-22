@@ -985,7 +985,12 @@ async function refreshModelsCfg(){
     const sk=document.createElement('button'); sk.textContent='设Key'; sk.style.cssText='padding:1px 8px;font-size:11px'; sk.onclick=async()=>{ const k=await uiPrompt('API Key（'+c.name+'）：', null, {hidden:true}); if(k===null) return; fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setCustomKey',name:c.name,key:k})}).then(rr=>rr.json()).then(jj=>{ if(jj.ok) refreshModelsCfg(); else uiAlert(jj.error||'设置失败'); }); };
     const test=document.createElement('button'); test.textContent='测试'; test.style.cssText='padding:1px 8px;font-size:11px'; test.onclick=async()=>{ test.disabled=true; test.textContent='测试中…'; try{ const rr=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'testCustom',name:c.name})}); const jj=await rr.json().catch(()=>({error:'请求失败'})); if(jj.ok){ await uiAlert('✅ 连接成功（'+jj.latencyMs+'ms）：'+esc(jj.reply||'空回复')); } else { await uiAlert('✖ 连接失败：'+esc(jj.error||'未知错误')); } } finally { test.disabled=false; test.textContent='测试'; } };
     const ed=document.createElement('button'); ed.textContent='修改'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=async()=>{ const u=await uiPrompt('API 地址：', c.baseUrl); if(u===null) return; const l=await uiPrompt('标签：', c.label); if(l===null) return; // v0.4.1：本地模型上下文窗口/最大输出可在设置里直接改（此前只能改 baseUrl+label，本地模型补 contextWindow 需手改 config.json）
-    const cw=await uiPrompt('上下文窗口 tokens（本地模型必填，如 131072；留空=不变）', c.contextWindow||''); if(cw===null) return; const mo=await uiPrompt('最大输出 tokens（可选，如 8192；留空=不变）', c.maxOutputTokens||''); if(mo===null) return; fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'updateCustom',name:c.name,baseUrl:u,label:l,contextWindow:Number(cw)||undefined,maxOutputTokens:Number(mo)||undefined})}).then(rr=>rr.json()).then(jj=>{ if(jj.ok){ refreshModelsCfg(); reloadModels(); } else uiAlert(jj.error||'修改失败'); }); };
+    const cw=await uiPrompt('上下文窗口 tokens（本地模型必填，如 131072；留空=不变）', c.contextWindow||''); if(cw===null) return; const mo=await uiPrompt('最大输出 tokens（可选，如 8192；留空=不变）', c.maxOutputTokens||''); if(mo===null) return;     // v0.6.5（审计 P1-20 同类第二入口）：改已有自定义模型的 API 地址会把它的已存 Key 发往新地址，
+    // 服务端返回 {needKey:true} → 补输该模型的 Key 后重试一次（与"设Key"同款隐藏输入）。
+    const sendEd=(extra)=>fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'updateCustom',name:c.name,baseUrl:u,label:l,contextWindow:Number(cw)||undefined,maxOutputTokens:Number(mo)||undefined,...extra})}).then(rr=>rr.json()).catch(()=>({error:'请求失败'}));
+    let jjEd=await sendEd({});
+    if(jjEd&&jjEd.needKey){ const k=await uiPrompt('改 API 地址会把该模型已存储的 Key 发往新地址，请输入它的 API Key 以确认：',null,{hidden:true}); if(k===null||!k) return; jjEd=await sendEd({apiKey:k}); }
+    if(jjEd&&jjEd.ok){ refreshModelsCfg(); reloadModels(); } else uiAlert((jjEd&&jjEd.error)||'修改失败'); };
     const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!await uiConfirm('删除自定义模型 '+c.name+'？')) return; const rr=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'removeCustom',name:c.name})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshModelsCfg(); reloadModels(); } else uiAlert(jj.error||'删除失败'); };
     div.appendChild(sk); div.appendChild(test); div.appendChild(ed); div.appendChild(rm); cl.appendChild(div);
   }
@@ -1000,9 +1005,17 @@ $('#cmAdd').onclick=async ()=>{
   if(j.ok){ $('#cmName').value=''; $('#cmLabel').value=''; $('#cmUrl').value=''; $('#cmKey').value=''; $('#cmCtx').value=''; $('#cmMaxOut').value=''; refreshModelsCfg(); reloadModels(); } else uiAlert(j.error||'添加失败');
 };
 $('#baseUrlSave').onclick=async ()=>{
-  const r=await fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setBaseUrl',baseUrl:$('#baseUrlOverride').value.trim()})});
-  const j=await r.json().catch(()=>({error:'请求失败'}));
-  if(j.ok) uiAlert('✓ API 地址已保存（立即生效）'); else uiAlert(j.error||'保存失败');
+  // v0.6.5（独立审计 P1）：改 API 地址＝把已存储的 Key 发往新目的地，属凭证级操作。
+  // 服务端在「该服务商已有 Key 且目的地 origin 变了」时返回 {needKey:true}，这里补输 Key 后重试一次。
+  const baseUrl=$('#baseUrlOverride').value.trim();
+  const post=(extra)=>fetch('/api/models-config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'setBaseUrl',baseUrl,...extra})}).then(r=>r.json()).catch(()=>({error:'请求失败'}));
+  let j=await post({});
+  if(j&&j.needKey){
+    const k=await uiPrompt('改 API 地址会把已存储的 Key 发往新地址，请输入该服务商的 API Key 以确认：',null,{hidden:true});
+    if(k===null||!k) return;
+    j=await post({apiKey:k});
+  }
+  if(j&&j.ok) uiAlert('✓ API 地址已保存（立即生效）'); else uiAlert((j&&j.error)||'保存失败');
 };
 // —— 云同步 ——
 async function refreshSyncUI(){

@@ -35,13 +35,38 @@ function realPathOrNull(/** @type {any} */ p) {
 }
 // 判断 target 是否在 root 内：对 target 逐级向上找最近的已存在祖先 realpath，再与 root realpath 比较。
 // （write 新文件时父目录可能尚不存在，逐级向上即可正确处理；软链接已被 realpath 展开。）
-function withinRoot(/** @type {any} */ root, /** @type {any} */ target) {
+//
+// v0.6.5（独立审计 P0-1）：**悬空符号链接**此前是逃生通道——`realpathSync` 对悬空链接抛错，
+// 于是逐级上跳到**父目录**（在根内）就判"合法"，而 `fs.writeFileSync` 会**跟随链接**写到根外。
+// 实测：`ln -s <根外>/target.txt <工作区>/danglink` 后 `write({path:'danglink'})` 返回 ok 并在根外建出文件，
+// 而同一条路径的 `read` 反而被拦（判定不一致 ⇒ 是缺陷不是取舍）。
+// 现在遇到"realpath 失败"时先 `lstat` 区分两种情况：
+//   · 真的不存在 → 正常上跳（新建文件的合法路径）；
+//   · 存在且是符号链接（悬空）→ 读出链接目标、**递归判定目标**（目标不存在也照样判），
+//     这样"悬空但指向根内"仍然放行，指向根外/链接成环则拒绝。
+function withinRoot(/** @type {any} */ root, /** @type {any} */ target, /** @type {number} */ depth = 0) {
+  if (depth > 16) return false; // 链接成环：fail-closed，不再递归
   const rr = realPathOrNull(root);
   if (!rr) return false;
   let cur = target;
   for (let i = 0; i < 64; i++) {
     const rp = realPathOrNull(cur);
     if (rp) return rp === rr || rp.startsWith(rr + path.sep);
+    let lst = null;
+    try {
+      lst = fs.lstatSync(cur);
+    } catch {
+      lst = null;
+    }
+    if (lst && lst.isSymbolicLink()) {
+      let dest = null;
+      try {
+        dest = fs.readlinkSync(cur);
+      } catch {
+        return false;
+      }
+      return withinRoot(root, path.resolve(path.dirname(cur), String(dest)), depth + 1);
+    }
     const parent = path.dirname(cur);
     if (parent === cur) return false;
     cur = parent;
