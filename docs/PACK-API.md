@@ -356,10 +356,15 @@ mingdao pack list                 # 已加载 Pack / 来源 / 版本 / 兼容状
 mingdao pack verify <dir>         # **静态**校验（manifest + 文件齐全 + pack.mjs 存在性）——**不执行 Pack 代码**，下游 CI 门禁用这个
 mingdao pack verify <dir> --runtime  # 额外 import pack.mjs 验证运行时契约（会以完整 Node 权限执行 Pack 代码，仅在你审过代码时用）
 mingdao pack new <name>           # 脚手架
-mingdao pack info <name>          # 贡献面：工具/约束/提示词段/权限/费用统计
+mingdao pack info <name>          # 贡献面：工具/约束/提示词段/权限/费用统计（未信任的项目级 Pack 拒绝加载，见下）
 mingdao pack test <name>          # 跑内置反例样本（约束 + 工具契约）
 mingdao constraint test <name>    # 单独跑约束反例
 ```
+
+> v0.6.5 更正：`pack info` 会 `import pack.mjs`（＝执行 Pack 代码），但此前**没有**经过 `pack trust`
+> 信任门——于是"clone 一个仓库 → `pack list` 明明写着 ⛔ 未信任 → 换个 `pack info` 就执行了"。
+> 现在它与挂载路径同口径：**未信任则拒绝加载**并给出 `mingdao pack trust <目录>` 指引、退出码非 0；
+> 这与 `pack verify` 默认静态是同一个原则——**"看一眼"不该等于"执行它"**。
 
 ---
 

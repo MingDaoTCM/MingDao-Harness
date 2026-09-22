@@ -61,7 +61,7 @@ export MINGDAO_HOME=$(mktemp -d)     # 绝不动真实 ~/.mingdao
 
 npm run typecheck                    # 期望 0 错误
 npm run typecheck:strict             # 期望 当前 0 / 基线 0
-node test/smoke.js                   # 期望 全部通过（当前 98 组断言）
+node test/smoke.js                   # 期望 全部通过（当前 151 组断言）
 node test/e2e-local.js               # 期望 全通过
 node test/e2e-web.js                 # 期望 全通过
 node test/e2e-schedule.js            # 期望 全通过
