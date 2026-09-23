@@ -139,14 +139,25 @@ async function checkGitHosts() {
 
 async function checkReleases() {
   // GitHub
-  const gh = await api(`https://api.github.com/repos/${REPO.owner}/${REPO.name}/releases/tags/${TAG}`, token.github ? { Authorization: `Bearer ${token.github}` } : {});
+  // v0.6.6 实战教训：`releases/tags/<tag>` 会被 GitHub 的 CDN **缓存住**——Release 刚由 desktop
+  // 工作流创建、附件已上传（`releases/<id>/assets` 能列出全部）时，这个端点仍可能返回创建瞬间的
+  // 空 `assets`。而本脚本正是"防半发布"的最后一道闸：它若把"15 个附件"读成"0 个"，
+  // 就会把一个**无法收割/无法下载**的 Release 报成 ✓（本次实测就是这样）。
+  // 现在：加 cache-buster；附件为空时按 id 直连 assets 端点复核；复核后仍为空则判**失败**。
+  const gh = await api(`https://api.github.com/repos/${REPO.owner}/${REPO.name}/releases/tags/${TAG}?ts=${Date.now()}`, token.github ? { Authorization: `Bearer ${token.github}` } : {});
   const ghExists = gh.ok && gh.body && typeof gh.body === 'object' && Boolean(gh.body.tag_name);
+  let ghAssets = ghExists ? ((gh.body.assets || []).length) : 0;
+  if (ghExists && ghAssets === 0 && gh.body.id) {
+    const alt = await api(`https://api.github.com/repos/${REPO.owner}/${REPO.name}/releases/${gh.body.id}/assets?per_page=100&ts=${Date.now()}`, token.github ? { Authorization: `Bearer ${token.github}` } : {});
+    if (alt.ok && Array.isArray(alt.body)) ghAssets = alt.body.length;
+  }
   checks.push({
     platform: 'GitHub',
     item: 'Release',
-    expected: '存在',
-    actual: ghExists ? `存在（附件 ${(gh.body.assets || []).length} 个）` : `HTTP ${gh.status}`,
-    ok: ghExists,
+    expected: '存在且带安装包附件',
+    // 0 个附件＝下载页与官网收割都会失败（Gitee/GitCode 按政策不附附件，故只对 GitHub 判）
+    actual: ghExists ? `存在（附件 ${ghAssets} 个）${ghAssets === 0 ? ' ← 附件为空：无法收割/下载' : ''}` : `HTTP ${gh.status}`,
+    ok: ghExists && ghAssets > 0,
   });
   // Gitee（token 走 query）
   const giteeQ = token.gitee ? `?access_token=${token.gitee}` : '';
