@@ -1191,3 +1191,17 @@ run-all 的 shell、run-all 的 try/catch、调度切片（源码级）、调度
   第 7 节路线图列的多为已完成项。报告的这条批评**成立**。
 - P2 各项（Pack 沙箱档、成本归因下钻、降级目标自动选择、JSDoc 治理）与报告 §六 横向对比结论，
   仅作输入，不逐条排期。
+
+### 3.40.1 发版现场另外发现的两处发布链路缺陷（v0.6.6 一并修）
+
+这两条不在第三方报告里，是本次发版实操踩出来的，都属于"**门禁自己被骗**"这一形态：
+
+| 位置 | 现象 | 根因 | 处置 |
+| --- | --- | --- | --- |
+| `MingDao-Harness-Site/scripts/harvest-release.mjs`、`scripts/update-downloads.mjs` | Release 附件明明已齐（`releases/<id>/assets` 列出 14 个），脚本却报「没有可采集的附件（是不是构建还没跑完？）」/「缺少安装包」 | `releases/tags/<tag>` 被 GitHub 的 **CDN 缓存**成"创建瞬间的空 assets"（Release 由工作流刚创建时） | 加 cache-buster；为空时按 release id 直连 assets 端点复核 |
+| `scripts/verify-release.mjs`（"防半发布"最后一道闸） | 打出 `✓ GitHub/Release 存在（附件 0 个）`——把一个无法下载、无法收割的 Release 判成通过 | 同上（读了被缓存的空 assets），且**附件数为 0 不影响判定** | 同上修复，并把「GitHub 附件为 0」改判**失败**（Gitee/GitCode 按政策不附附件，故只对 GitHub 判） |
+| `MingDao-Harness-Site/scripts/harvest-release.mjs` | 线上 `/downloads/latest.yml` 自 v0.6.1 起再没更新过（v0.6.4/0.6.5 依次"跳过"，无人察觉） | `latest*.yml` 是**不带版本号的指针文件**、体积都是几百字节，而幂等判据是"已存在且体积一致就跳过" | 指针类文件（`latest(-linux).yml`）一律覆盖——代价几百字节 |
+
+**教训**：这一批四个问题（含第三方的三处）全是"**验证逻辑自身的判据太宽**"——只判"抛不抛错"、
+只判"体积一致"、只判"Release 存在"。**判据要对着"我们真正在意的那件事"写**：
+在意的不是"文件在不在"，而是"它是这一个版本的、且能被下载"。
