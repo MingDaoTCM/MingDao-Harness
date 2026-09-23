@@ -23,11 +23,26 @@ const only = args.find((a) => a.startsWith('--suite='))?.split('=')[1];
 
 function run(cmd, cmdArgs, suite) {
   return new Promise((resolve) => {
-    const child = spawn(cmd, cmdArgs, {
-      cwd: root,
-      stdio: 'pipe',
-      env: coverage ? { ...process.env, NODE_V8_COVERAGE: path.join(root, '.coverage') } : process.env,
-    });
+    // Windows 上 npm 是 npm.cmd，而 Node ≥18.20.2 / 20.12.2（CVE-2024-27980 那批修复）起
+    // **spawn .cmd/.bat 未开 shell 会同步抛 EINVAL**——此时 ChildProcess 根本没被创建，
+    // 下面的 child.on('error') 永远收不到，Promise 直接 reject → 汇总器崩溃，
+    // 前面套件的失败详情与汇总表全部丢失（bench 的 214 条断言就此在 Windows 上静默空转）。
+    // 所以两手都要：Windows 加 shell，且同步启动路径也 try/catch（记为套件失败，不崩汇总器）。
+    // （第三方评估 v0.6.5 报告 §4.3 实测；CI 未暴露是因为覆盖率步骤只在 Linux + Node 20 上跑
+    //   `npm run coverage`——run-all 在 Windows 腿上从不执行。）
+    let child;
+    try {
+      child = spawn(cmd, cmdArgs, {
+        cwd: root,
+        stdio: 'pipe',
+        shell: process.platform === 'win32',
+        env: coverage ? { ...process.env, NODE_V8_COVERAGE: path.join(root, '.coverage') } : process.env,
+      });
+    } catch (/** @type {any} */ err) {
+      console.log(`❌ ${suite}（进程启动失败：${err?.message || err}）`);
+      resolve({ suite, ok: false, out: String(err?.message || err) });
+      return;
+    }
     let out = '';
     child.stdout.on('data', (d) => (out += d));
     child.stderr.on('data', (d) => (out += d));

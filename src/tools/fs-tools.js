@@ -26,9 +26,13 @@ function resolvePath(cwd, p) {
 function normCmp(/** @type {any} */ p) {
   return process.platform === 'win32' ? String(p).toLowerCase() : String(p);
 }
-function realPathOrNull(/** @type {any} */ p) {
+/**
+ * @param {any} p
+ * @param {any} [io] fs 实现（默认 node:fs；测试可注入桩）
+ */
+function realPathOrNull(/** @type {any} */ p, /** @type {any} */ io = fs) {
   try {
-    return normCmp(fs.realpathSync(p));
+    return normCmp(io.realpathSync(p));
   } catch {
     return null;
   }
@@ -44,28 +48,38 @@ function realPathOrNull(/** @type {any} */ p) {
 //   · 真的不存在 → 正常上跳（新建文件的合法路径）；
 //   · 存在且是符号链接（悬空）→ 读出链接目标、**递归判定目标**（目标不存在也照样判），
 //     这样"悬空但指向根内"仍然放行，指向根外/链接成环则拒绝。
-function withinRoot(/** @type {any} */ root, /** @type {any} */ target, /** @type {number} */ depth = 0) {
+//
+// v0.6.6（第三方评估 §4.1）：**导出 + 允许注入 fs 实现**。理由是这条围栏是安全边界，
+// 而"能不能建出真符号链接"取决于机器（Windows 非管理员/未开开发者模式时建不出；
+// 某些沙箱文件系统甚至会把建链请求降级成普通文件）——只在能建软链的机器上被测到，
+// 等于这条边界在开发机上从没被验证过。有了 `io` 注入口，可以用桩 fs 在任何平台上
+// 覆盖：悬空指向根外（拒）/ 悬空指向根内（放行）/ 成环（有界拒）/ 目标不存在（上跳）。
+/**
+ * @param {any} root @param {any} target @param {number} [depth] @param {any} [io]
+ * @returns {boolean}
+ */
+export function withinRoot(/** @type {any} */ root, /** @type {any} */ target, /** @type {number} */ depth = 0, /** @type {any} */ io = fs) {
   if (depth > 16) return false; // 链接成环：fail-closed，不再递归
-  const rr = realPathOrNull(root);
+  const rr = realPathOrNull(root, io);
   if (!rr) return false;
   let cur = target;
   for (let i = 0; i < 64; i++) {
-    const rp = realPathOrNull(cur);
+    const rp = realPathOrNull(cur, io);
     if (rp) return rp === rr || rp.startsWith(rr + path.sep);
     let lst = null;
     try {
-      lst = fs.lstatSync(cur);
+      lst = io.lstatSync(cur);
     } catch {
       lst = null;
     }
     if (lst && lst.isSymbolicLink()) {
       let dest = null;
       try {
-        dest = fs.readlinkSync(cur);
+        dest = io.readlinkSync(cur);
       } catch {
         return false;
       }
-      return withinRoot(root, path.resolve(path.dirname(cur), String(dest)), depth + 1);
+      return withinRoot(root, path.resolve(path.dirname(cur), String(dest)), depth + 1, io);
     }
     const parent = path.dirname(cur);
     if (parent === cur) return false;

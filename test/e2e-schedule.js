@@ -349,10 +349,28 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
     } catch { return null; }
   }, 15000);
   assert.ok(pidLine, 'daemon 应存活且 pidfile 格式正确');
+  // 1b) **等 sleeper 真的进入等待片**再篡改租约。
+  //     这一步是确定性关键（v0.6.6 补）：监督循环 2s 一轮，若在它把协程拉起来之前就篡改，
+  //     旧 daemon 往往"还没来得及睡"就退出了——用例于是偶然通过，掩盖了 §4.2 的 60s 等待。
+  //     预热 5s（> 监督轮询 2s）保证此刻协程处于 every 的等待中：修复前要等完整个 ~25s 残余片，
+  //     修复后 ≤ 一个 3s 片 + 2s 轮询。实测：修复前 >40s 仍存活、修复后 4.0s 退出。
+  await sleep(5000);
   // 2) 租约自退：篡改 pidfile 指向别的进程 → 真 daemon 进程应在数秒内自行退出
+  //    v0.6.6（第三方评估 §4.2，主审复现）：此前 every/once 的等待是**一整段最长 60s** 的 sleep，
+  //    期间不查租约 → 接管后旧 daemon 最长 60s 才退（实测 >40s 仍存活），而本用例只等 20s，
+  //    在标准 Windows 账户上确定性失败。现在等待切成 ≤3s 的片逐片复查租约（最坏 = 监督轮询 2s +
+  //    一个等待片 3s ≈ 5s）。这里除了"等得到"，还**把延迟本身钉住**（≤12s），
+  //    否则将来有人把切片改回 60s，这条断言又会退化成偶然通过。
   fs.writeFileSync(daemonPidFile(home), '99999999 someone-else');
+  const tLease = Date.now();
   const selfExited = await waitFor(() => (aliveCheck(pidLine.pid) ? null : true), 20000);
+  const leaseExitMs = Date.now() - tLease;
   assert.ok(selfExited, '租约被改写后 daemon 应自退（防双 daemon 重复执行）');
+  assert.ok(
+    leaseExitMs <= 12000,
+    `接管延迟必须被切片等待限制在 ~5s 量级（监督轮询 2s + 等待片 3s），实际 ${leaseExitMs}ms——` +
+      '若接近 60s，说明 every/once 的等待又变回不可中断的长 sleep'
+  );
   // 3a) 归属匹配：受害进程 cmdline 带上 nonce（模拟真 daemon）→ stopDaemon 应真正终止它
   //     （v0.4.7 起 stopDaemon 会先校验 PID 归属；node 的 argv 尾部带上 nonce 即视为「是我们的人」）
   const proc7 = await import(pathToFileURL(path.join(root, 'src', 'proc.js')).href);

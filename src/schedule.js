@@ -459,12 +459,14 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
    * 期间 daemon 被接管/停止，旧协程仍持有 job 视图一路睡到底，醒来再与新 daemon 交错执行同一任务。
    * 现在切成 ≤60s 的片，每片醒来都问一次 shouldStop()，失去租约即刻返回 'aborted'。
    * @param {number} ms
+   * @param {number} [sliceMs] 单片长度（默认 60s；every/once 的等待传 3000，
+   *   把"被接管后的最坏退出延迟"从 ≤60s 压到 ≈5s —— 见 v0.6.6 注释）
    * @returns {Promise<'ok'|'aborted'>}
    */
-  const waitGuarded = async (/** @type {number} */ ms) => {
+  const waitGuarded = async (/** @type {number} */ ms, /** @type {number} */ sliceMs = 60000) => {
     let left = Math.max(0, Number(ms) || 0);
     while (left > 0) {
-      const slice = Math.min(left, 60000);
+      const slice = Math.min(left, sliceMs);
       await wait(slice);
       left -= slice;
       if (shouldStop()) return 'aborted';
@@ -611,7 +613,13 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
     const now = Date.now();
     if (cur.kind === 'every') {
       if (!cur.nextRunAt || cur.nextRunAt > now) {
-        await wait(Math.min(Math.max((cur.nextRunAt || now) - now, 1000), 60000));
+        // v0.6.6（第三方评估 §4.2，主审复现）：此前这里是一整段最长 60s 的 sleep，期间不查租约——
+        // 实测「篡改租约后旧 daemon 仍存活 >40s」，即"防双 daemon 重复执行"的最坏退出延迟达 60s，
+        // 期间旧 daemon 继续与新 daemon 交错操作同一批调度状态（e2e-schedule 的租约用例因此在
+        // 标准 Windows 账户上确定性失败：用例只等 20s）。改成 ≤3s 的片、逐片复查租约：
+        // 最坏接管延迟 = 监督循环轮询 2s + 一个等待片 3s ≈ 5s，语义不变（睡够才继续）。
+        const need = Math.min(Math.max((cur.nextRunAt || now) - now, 1000), 60000);
+        if ((await waitGuarded(need, 3000)) === 'aborted') return;
         continue;
       }
       if (!markRunning()) return; // P1-15：标记 running 前复查 paused（被暂停则直接退出）
@@ -629,7 +637,8 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
       if (nextState.status === 'failed') return; // 熔断后退出主循环（与旧行为一致）
     } else if (cur.kind === 'once') {
       if (cur.nextRunAt && cur.nextRunAt > now) {
-        await wait(Math.min(cur.nextRunAt - now, 60000));
+        // 同 every 分支（v0.6.6 / 评估 §4.2）：once 的等待同样可能长达 60s，也切片刻并逐片查租约
+        if ((await waitGuarded(Math.min(cur.nextRunAt - now, 60000), 3000)) === 'aborted') return;
         continue;
       }
       if (!markRunning()) return; // P1-15：标记 running 前复查 paused

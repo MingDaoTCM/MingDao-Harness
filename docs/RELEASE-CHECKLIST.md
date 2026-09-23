@@ -61,7 +61,7 @@ export MINGDAO_HOME=$(mktemp -d)     # 绝不动真实 ~/.mingdao
 
 npm run typecheck                    # 期望 0 错误
 npm run typecheck:strict             # 期望 当前 0 / 基线 0
-node test/smoke.js                   # 期望 全部通过（当前 151 组断言）
+node test/smoke.js                   # 期望 全部通过（当前 153 组断言）
 node test/e2e-local.js               # 期望 全通过
 node test/e2e-web.js                 # 期望 全通过
 node test/e2e-schedule.js            # 期望 全通过
@@ -75,6 +75,34 @@ node src/cli.js diagnose             # 自检报告（脱敏）
 - [ ] `RELEASE-NOTES-<版本>.md` 已写好（三平台正文共用）
 - [ ] `node src/cli.js --version` 与版本号一致
 - [ ] 工作区干净（`git status` 无未提交改动），且已推到 `origin/main`
+- [ ] **在标准 Windows 账户（未开 Developer Mode / 非管理员）上 `npm test` 全绿**（见 §1.3）
+
+---
+
+### 1.3 Windows 实机验收（必做，2026-09-23 新增）
+
+**CI 五腿全绿 ≠ Windows 上真的能跑。** 两次真实事故都源于"CI runner 的权限/环境掩盖平台差异"：
+
+| 事故 | 现象 | CI 为什么是绿的 |
+| --- | --- | --- |
+| v0.2.5 报告（e2e-web 红灯） | `%TEMP%` ⊂ `%USERPROFILE%` 导致工作目录围栏误判 | runner 的临时目录与家目录关系与普通账户不同（还叠了 8.3 短名侥幸） |
+| v0.6.5 第三方评估 §4.1 / §4.3 | 标准账户下 `smoke` 崩在软链用例、`run-all` 因 `spawn('.cmd')` 同步抛 EINVAL 而崩溃（bench 的 214 条断言**从不执行**） | runner 以管理员运行，能建真符号链接；且 `npm run coverage`（run-all 的唯一入口）**只在 Linux + Node 20 那条腿上跑** |
+
+因此把下面这条列进验收（**光靠 CI 绿不足以证明**）：
+
+```powershell
+# 在 Windows 11 的**普通账户**（未开 Developer Mode）上，仓库根目录：
+npm ci
+npm test            # = node test/run-all.mjs：六套套件 + 汇总表，必须全绿且有汇总表
+npm run typecheck   # 0 错误
+```
+
+要点：
+- `npm test` 会跑 **bench 五套（214 断言，含省钱基准回归）**——这条在 Windows 上曾经是静默空转的；
+- 软链相关用例在标准账户上应**显式打印「⚠ 跳过」**而不是崩溃（能力探测见 `test/smoke.js` 的
+  `makeRealSymlink`；围栏判据本身由 `test/smoke.js` §124 的**桩 fs 单测**覆盖，与平台权限解耦）；
+- 若出现红色，先看是不是"平台能力差异被当成失败"，但**不要**用"加个 catch 跳过"了事：
+  与安全边界相关的（围栏、路径、凭据）必须补平台无关的桩测试，见 §124 的做法。
 
 ---
 

@@ -47,6 +47,35 @@ function safeRmSync(p, opts) {
   } catch {}
 }
 
+// 建一个**真正的**符号链接，返回是否真的建成了。
+//
+// v0.6.6（第三方评估 §4.1）：不能只 `try { symlinkSync() } catch {}`——"没抛错"并不等于
+// "建出了链接"。Windows 上非管理员/未开开发者模式时建不出符号链接（Node 通常抛 EPERM，
+// 某些沙箱/文件系统则会把建链请求降级成一个**普通空文件**），此时用例实际测的是
+// "读工作目录内一个空文件"，断言必然失败（CI runner 有管理员权限能建真链 → 绿；
+// 开发机红——平台能力差异被 CI 环境掩盖）。安全边界不能被"机器有没有开开发者模式"静默架空：
+// 建不成就在调用点显式 SKIP 并打印，绝不假装测过。围栏逻辑本身另有桩 fs 单测覆盖（§124）。
+/**
+ * @param {string} target @param {string} linkPath @param {'file'|'dir'|'junction'} [type]
+ * @param {any} [io] fs 实现（默认 node:fs；可注入桩以复现"不抛错也没建链接"的降级环境）
+ * @returns {boolean}
+ */
+function makeRealSymlink(target, linkPath, type, io = fs) {
+  try {
+    io.symlinkSync(target, linkPath, /** @type {any} */ (type));
+    // 关键：**不能**直接 `return true` ——"没抛错"不等于"建出了链接"。某些环境（沙箱文件系统、
+    // 受限的 Windows 账户）会把建链请求静默降级成普通文件，必须用 lstat 复核；
+    // 这条判据本身也有桩注入测试（§124⑨），否则"探测器自己失灵"没人发现。
+    return io.lstatSync(linkPath).isSymbolicLink();
+  } catch {
+    return false;
+  }
+}
+/** 统一的 SKIP 提示（明确写出"这条没被验证"，避免与"通过"混淆） */
+function skipNote(what) {
+  console.log(`  ⚠ 跳过：${what}（本机建不出真正的符号链接：Windows 需开发者模式/管理员；已用桩 fs 单测覆盖该围栏，见 §124）`);
+}
+
 // ---------- 1. token 估算与上下文裁剪 ----------
 {
   const en = approxTokens('hello world hello world');
@@ -210,10 +239,16 @@ const ctx = { cwd: tmp };
   const rRel = await dispatch('read', { path: '../' + path.basename(outside) + '/secret.txt' }, ctxIn);
   assert.equal(rRel.ok, false, '相对路径 ../ 穿越应拒绝');
   // 软链接逃逸：root 内建软链指向 outside 文件，read 应拒绝
+  // 能力探测（第三方评估 §4.1）：建不成**真**链接就显式 SKIP——否则这里实际测的是
+  // "读工作目录内的一个空文件"，而断言却在宣称"软链围栏通过了"。
   const symlink = path.join(root, 'link.txt');
-  try { fs.symlinkSync(path.join(outside, 'secret.txt'), symlink); } catch {}
-  const rSym = await dispatch('read', { path: 'link.txt' }, ctxIn);
-  assert.equal(rSym.ok, false, '软链接指向工作目录外应拒绝（realpath 校验）');
+  const symlinkOk = makeRealSymlink(path.join(outside, 'secret.txt'), symlink);
+  if (symlinkOk) {
+    const rSym = await dispatch('read', { path: 'link.txt' }, ctxIn);
+    assert.equal(rSym.ok, false, '软链接指向工作目录外应拒绝（realpath 校验）');
+  } else {
+    skipNote('软链接逃逸（指向工作目录外应拒绝）');
+  }
   // 白名单放行：fsAllowDirs 加入 outside 后 read 应成功
   const ctxAllow = { cwd: root, cfg: { fsAllowDirs: [outside] } };
   const rAllow = await dispatch('read', { path: path.join(outside, 'secret.txt') }, ctxAllow);
@@ -221,7 +256,7 @@ const ctx = { cwd: tmp };
   assert.ok(String(rAllow.output).includes('top-secret'), '白名单内应读到内容');
   safeRmSync(root, { recursive: true, force: true });
   safeRmSync(outside, { recursive: true, force: true });
-  ok('tools：路径穿越防护（绝对/相对/软链接越界拒绝，fsAllowDirs 白名单放行）');
+  ok(`tools：路径穿越防护（绝对/相对/软链接越界拒绝${symlinkOk ? '' : '；⚠ 本机建不出真软链，该支已 SKIP（见 §124 桩 fs 单测）'}，fsAllowDirs 白名单放行）`);
 }
 
 // ---------- 5g. git 只读工具 + HTTP 只读抓取（v0.3.1） ----------
@@ -1588,11 +1623,14 @@ const ctx = { cwd: tmp };
   const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-link-'));
   const outsideMd = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-out-'));
   fs.writeFileSync(path.join(outsideMd, 'SKILL.md'), '---\nname: evil-skill\ndescription: x\n---\n\n# 越界');
-  let linkMade = true;
-  try { fs.symlinkSync(path.join(outsideMd, 'SKILL.md'), path.join(linkDir, 'SKILL.md')); } catch { linkMade = false; }
+  // 能力探测（评估 §4.1）：必须确认建出来的是**真**符号链接，否则本机无权限时会静默生成
+  // 一个普通文件，用例就变成"安装一个普通技能"，断言永远不成立（CI 有权限而绿、开发机红）。
+  const linkMade = makeRealSymlink(path.join(outsideMd, 'SKILL.md'), path.join(linkDir, 'SKILL.md'));
   if (linkMade) {
     const linkR = installFromDir(linkDir);
     assert.ok(linkR.error && linkR.error.includes('符号链接'), 'SKILL.md 为符号链接应拒绝');
+  } else {
+    skipNote('技能安装拒绝符号链接 SKILL.md');
   }
   safeRmSync(linkDir, { recursive: true, force: true });
   safeRmSync(outsideMd, { recursive: true, force: true });
@@ -5307,13 +5345,10 @@ console.log(JSON.stringify({ okOn, xml }));`;
     // 「trust 记一个路径、运行时查另一个路径」→ 信任看起来完全没生效。
     {
       const link81 = path.join(os.tmpdir(), `mingdao-p11-link-${process.pid}-${Date.now()}`);
-      let linked = false;
-      try {
-        fs.symlinkSync(root81, link81, 'dir');
-        linked = true;
-      } catch {
-        /* 平台不支持符号链接则跳过（Windows 非开发者模式） */
-      }
+      // 能力探测（评估 §4.1）：`'dir'` 在 Windows 上走的是目录链接（junction）语义，
+      // 但"没抛错"仍不等于建出了链接——必须 lstat 复核，否则下面整段是在测一个普通目录
+      // （信任当然会通过，断言就是假绿）。
+      const linked = makeRealSymlink(root81, link81, 'dir');
       if (linked) {
         try {
           assert.ok(P.trustPack(link81).ok, '通过符号链接 trust 应成功');
@@ -8662,12 +8697,9 @@ process.stdout.write('done');`
       assert.ok(inner.j.entries.some((e) => e.name === 'sub'), '应列出真实子目录');
 
       // 符号链接逃逸：<home>/escape -> /
-      let canSymlink = true;
-      try {
-        fs.symlinkSync(path.sep, path.join(home116, 'escape'), 'dir');
-      } catch {
-        canSymlink = false; // Windows 无权限创建符号链接：跳过这一支，其余断言照跑
-      }
+      // 能力探测（评估 §4.1）：必须复核 lstat().isSymbolicLink()——"没抛错"不等于建出了链接
+      const canSymlink = makeRealSymlink(path.sep, path.join(home116, 'escape'), 'dir');
+      if (!canSymlink) skipNote('Web 围栏的符号链接逃逸支（fs-browse / 工作空间登记）');
       if (canSymlink) {
         const escaped = await jreq116('/api/fs-browse?dir=' + encodeURIComponent(path.join(home116, 'escape')));
         assert.equal(
@@ -8686,9 +8718,8 @@ process.stdout.write('done');`
         //     最近的存在祖先（也就是 normal 自己）→ 围栏判定通过、statSync 才报 ENOENT → 400 而非 403。
         //     CI 上就是这么红的（ubuntu/macOS 绿、windows 红）。
         const outsideTarget = process.platform === 'win32' ? process.env.SystemRoot || 'C:\\Windows' : path.sep + 'usr';
-        try {
-          fs.symlinkSync(outsideTarget, path.join(normal, 'link-out'), 'dir');
-        } catch {}
+        const madeLinkOut = makeRealSymlink(outsideTarget, path.join(normal, 'link-out'), 'dir');
+        assert.ok(madeLinkOut, '（前置）目录内指向围栏外的链接条目必须真的建成，否则下面的 403 断言测的是别的东西');
         const listed = await jreq116('/api/fs-browse?dir=' + encodeURIComponent(normal));
         assert.equal(listed.status, 200, 'normal 目录仍可浏览');
         assert.ok(listed.j.entries.some((e) => e.name === 'real'), '真实目录要列出来');
@@ -8997,7 +9028,10 @@ process.stdout.write('done');`
       const schedSrc = fs.readFileSync(path.join(srcDir, 'schedule.js'), 'utf8');
       // M-13：避峰长等待必须切片并在每片复查租约
       assert.ok(/const waitGuarded = async/.test(schedSrc), 'M-13：避峰等待必须有带租约检查的切片等待器');
-      assert.ok(/Math\.min\(left, 60000\)/.test(schedSrc), 'M-13：单片不得超过 60s');
+      // v0.6.6：切片长度改为参数（`sliceMs = 60000`）——every/once 的等待要更细的 3s 片，
+      // 避峰等待仍用 60s 片。这里钉住"默认值有界且按参数截断"，比原来写死 60000 更强。
+      assert.ok(/const waitGuarded = async \([\s\S]{0,80}sliceMs = 60000\)/.test(schedSrc), 'M-13：切片等待器必须带长度参数，且默认单片不得超过 60s');
+      assert.ok(/Math\.min\(left, sliceMs\)/.test(schedSrc), 'M-13：切片必须按 sliceMs 截断（默认 60s）');
       assert.ok(/if \(shouldStop\(\)\) return 'aborted';/.test(schedSrc), 'M-13：每片醒来都要复查租约');
       assert.ok(
         /if \(\(await waitGuarded\(defer\.getTime\(\) - Date.now\(\) \+ 2000\)\) === 'aborted'\) return 'aborted';/.test(schedSrc),
@@ -10059,16 +10093,16 @@ safeRmSync(tmp, { recursive: true, force: true });
 {
   // ① P0-1：realpathSync 对**悬空**软链抛 ENOENT，旧实现于是回退到"只做字符串前缀比较"，
   //    判定"落在工作目录内"并放行 —— 但真正的写操作会跟随链接，把文件建到围栏之外。
+  //    能力探测（评估 §4.1）：这里必须用 makeRealSymlink —— 旧写法只 catch 异常，
+  //    在"建不出真链却也不抛错"的环境里会退化成"往工作目录内的普通文件写"，断言必然失败
+  //    （这正是第三方在标准 Windows 账户上看到 smoke 崩溃的同一形态）。围栏本身另有
+  //    平台无关的桩 fs 单测（§124），所以这里 SKIP 不会留下覆盖空洞。
   {
     const root123 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p1fs-root-'));
     const out123 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p1fs-out-'));
-    let canLink123 = true;
     const escapedTarget = path.join(out123, 'created-by-escape.txt');
-    try {
-      fs.symlinkSync(escapedTarget, path.join(root123, 'dangling-out.txt'));
-    } catch {
-      canLink123 = false; // Windows 无权限建软链：跳过本支，其余断言照跑
-    }
+    const canLink123 = makeRealSymlink(escapedTarget, path.join(root123, 'dangling-out.txt'));
+    if (!canLink123) skipNote('悬空软链写出围栏（write 应拒绝）—— §124 已用桩 fs 覆盖同一判据');
     if (canLink123) {
       assert.equal(fs.existsSync(escapedTarget), false, '（前置）悬空链接的目标此刻必须不存在，否则测不到回退分支');
       const wOut = await dispatch('write', { path: 'dangling-out.txt', content: 'escaped' }, { cwd: root123, cfg: {} });
@@ -10078,13 +10112,13 @@ safeRmSync(tmp, { recursive: true, force: true });
       // 反例保护：**指向围栏内**的悬空链接必须照常可写 —— 修复不能退化成"凡悬空链接一律拒绝"，
       // 否则本地模型/脚本常用的"先建链接、后建目标"工作流会被误伤。
       const insideTarget = path.join(root123, 'inside-target.txt');
-      fs.symlinkSync(insideTarget, path.join(root123, 'dangling-in.txt'));
+      assert.ok(makeRealSymlink(insideTarget, path.join(root123, 'dangling-in.txt')), '（前置）围栏内的悬空链接应能建成');
       const wIn = await dispatch('write', { path: 'dangling-in.txt', content: 'ok-inside' }, { cwd: root123, cfg: {} });
       assert.equal(wIn.ok, true, `指向围栏内的悬空链接应照常可写，实际 ${JSON.stringify(wIn)}`);
       assert.equal(fs.readFileSync(insideTarget, 'utf8'), 'ok-inside', '内容应真正落到链接目标（围栏内）');
       // 链接成环：必须**有界返回**（旧实现的递归解析若无深度上限会栈溢出/挂死）
-      fs.symlinkSync(path.join(root123, 'loop-b.txt'), path.join(root123, 'loop-a.txt'));
-      fs.symlinkSync(path.join(root123, 'loop-a.txt'), path.join(root123, 'loop-b.txt'));
+      assert.ok(makeRealSymlink(path.join(root123, 'loop-b.txt'), path.join(root123, 'loop-a.txt')), '（前置）环状链接应能建成');
+      assert.ok(makeRealSymlink(path.join(root123, 'loop-a.txt'), path.join(root123, 'loop-b.txt')), '（前置）环状链接应能建成');
       const wLoop = await dispatch('write', { path: 'loop-a.txt', content: 'x' }, { cwd: root123, cfg: {} });
       assert.equal(wLoop.ok, false, '软链成环必须被判为越界/不可解析并返回，而不是无限解析');
     }
@@ -10269,6 +10303,139 @@ safeRmSync(tmp, { recursive: true, force: true });
   }
 
   ok('v0.6.5 补丁版越权链：悬空软链写不出围栏（含环状链接有界返回）+ 未信任 Pack 的 pack info 不执行代码 + 改 API 地址必须重交 Key（凭证级操作）');
+}
+
+// ---------- 124. v0.6.6：围栏判定的**平台无关**单测（桩 fs）+ 软链能力探测自检 ----------
+// 起因（第三方评估 v0.6.5 报告 §4.1）：符号链接围栏此前只能在"能建出真软链"的机器上被验证——
+// Windows 非管理员/未开开发者模式建不出符号链接，某些沙箱文件系统甚至会把建链请求降级成普通文件，
+// 于是这条**安全边界**在开发机上从未被真正验证过（CI runner 有管理员权限，长期是绿的）。
+// `withinRoot` 现已导出并接受 `io` 注入口，下面用桩 fs 覆盖全部判定，任何平台都跑；
+// 真软链环境下的行为级验证仍在 §2b / §116 / §123①（建不出时显式 SKIP）。
+{
+  const { withinRoot } = await import(pathToFileURL(path.join(srcDir, 'tools', 'fs-tools.js')).href);
+  const ROOT124 = process.platform === 'win32' ? 'C:\\work' : '/work';
+  const OUT124 = process.platform === 'win32' ? 'C:\\outside' : '/outside';
+  const j124 = (...p) => [ROOT124, ...p].join(path.sep);
+  /**
+   * 桩 fs：只声明"真实存在的路径"（realPaths）与"符号链接表"（links），其余 realpathSync 一律抛 ENOENT。
+   * @param {Set<string>} realPaths @param {Map<string,string>} links
+   * @returns {any}
+   */
+  const stub124 = (realPaths, links) => {
+    const calls = { lstat: 0, readlink: 0 };
+    return {
+      calls,
+      realpathSync: (/** @type {any} */ p) => {
+        if (realPaths.has(p)) return p;
+        throw new Error('ENOENT');
+      },
+      lstatSync: (/** @type {any} */ p) => {
+        calls.lstat += 1;
+        if (links.has(p)) return { isSymbolicLink: () => true, isFile: () => false, isDirectory: () => false };
+        if (realPaths.has(p)) return { isSymbolicLink: () => false, isFile: () => true, isDirectory: () => true };
+        throw new Error('ENOENT');
+      },
+      readlinkSync: (/** @type {any} */ p) => {
+        calls.readlink += 1;
+        const d = links.get(p);
+        if (d === undefined) throw new Error('EINVAL');
+        return d;
+      },
+    };
+  };
+  // ① 悬空链接 → 围栏**外**：必须拒绝（这正是 v0.6.5 P0-1 的漏洞形态）
+  const s1 = stub124(new Set([ROOT124, OUT124]), new Map([[j124('dang-out.txt'), OUT124 + path.sep + 'created.txt']]));
+  assert.equal(withinRoot(ROOT124, j124('dang-out.txt'), 0, s1), false, '悬空链接指向围栏外必须判越界（桩 fs）');
+  // ② 悬空链接 → 围栏**内**：必须放行（不能退化成"凡悬空一律拒绝"）
+  const s2 = stub124(new Set([ROOT124]), new Map([[j124('dang-in.txt'), j124('inside.txt')]]));
+  assert.equal(withinRoot(ROOT124, j124('dang-in.txt'), 0, s2), true, '悬空链接指向围栏内必须放行（桩 fs）');
+  // ③ 链接成环：必须有界返回 false，且 readlink 调用次数有上限（否则栈溢出/挂死）
+  const s3 = stub124(new Set([ROOT124]), new Map([[j124('a'), j124('b')], [j124('b'), j124('a')]]));
+  assert.equal(withinRoot(ROOT124, j124('a'), 0, s3), false, '链接成环必须 fail-closed（桩 fs）');
+  assert.ok(s3.calls.readlink <= 20, `成环解析必须有界（实际 readlink ${s3.calls.readlink} 次，深度上限 16）`);
+  // ④ 目标不存在且不是链接（＝write 新文件）：走"上跳到已存在祖先"的合法路径，必须放行
+  const s4 = stub124(new Set([ROOT124]), new Map());
+  assert.equal(withinRoot(ROOT124, j124('brand-new.txt'), 0, s4), true, '新建文件（父目录在围栏内）必须放行（桩 fs）');
+  // ⑤ 真实存在但在围栏外：拒绝（常规越界，防回归）
+  const s5 = stub124(new Set([ROOT124, OUT124]), new Map());
+  assert.equal(withinRoot(ROOT124, OUT124 + path.sep + 'secret.txt', 0, s5), false, '围栏外已存在路径必须拒绝（桩 fs）');
+  // ⑥ 根自身与子路径：放行（前缀比较不能把根本身算成越界）
+  const s6 = stub124(new Set([ROOT124]), new Map());
+  assert.equal(withinRoot(ROOT124, ROOT124, 0, s6), true, '根自身必须判在围栏内（桩 fs）');
+  assert.equal(withinRoot(ROOT124, j124('sub', 'f.txt'), 0, stub124(new Set([ROOT124, j124('sub')]), new Map())), true, '围栏内子目录必须放行（桩 fs）');
+
+  // ⑦ 能力探测自检：评估 §4.1 的"降级形态"是**普通文件**顶替符号链接——
+  //    探测判据必须能把普通文件认成"不是链接"（否则用例又会退化成测空文件）。
+  const tmp124 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-symprobe-'));
+  const plain124 = path.join(tmp124, 'plain-link.txt');
+  fs.writeFileSync(plain124, '');
+  assert.equal(fs.lstatSync(plain124).isSymbolicLink(), false, '普通文件必须被探测为"不是符号链接"（评估 §4.1 的降级形态）');
+  // 建链真失败（链接路径的父目录不存在）时必须返回 false，而不是抛错或假通过。
+  // 注意别拿"目标不存在"当失败：**悬空链接是合法且必须支持的**（§123① 的正常用例就是悬空链接）。
+  assert.equal(
+    makeRealSymlink(plain124, path.join(tmp124, 'nonexistent-dir', 'l')),
+    false,
+    '建链失败（链接所在目录不存在）时探测必须返回 false，而不是抛错或假通过'
+  );
+  // ⑧ 在能建真链的机器上（macOS/Linux/管理员 Windows），探测必须返回 true —— 不能因为加了探测就把正常用例也跳过
+  const realLink124 = path.join(tmp124, 'real-link.txt');
+  const canReal124 = makeRealSymlink(path.join(tmp124, 'plain-link.txt'), realLink124, 'file');
+  if (canReal124) {
+    assert.equal(fs.lstatSync(realLink124).isSymbolicLink(), true, '建成的链接必须被 lstat 认作符号链接');
+  } else {
+    skipNote('本机符号链接能力探测（macOS/Linux 上应能建成；Windows 需开发者模式/管理员）');
+  }
+  // ⑨ **探测器自身的判据**（桩注入，任何平台都跑）——评估 §4.1 的场景就是"建链请求没抛错、
+  //    但产物不是符号链接"（沙箱/受限账户静默降级成普通文件）。这里把三种环境都钉住：
+  //    若有人把 `lstat().isSymbolicLink()` 换掉（或图省事 `return true`），本组断言立刻失败。
+  const ioDegraded = {
+    symlinkSync: () => {}, // 不抛错……
+    lstatSync: () => ({ isSymbolicLink: () => false }), // ……但产物是普通文件
+  };
+  assert.equal(makeRealSymlink('/t', '/l', 'file', ioDegraded), false, '降级环境（不抛错却没建出链接）必须被探测为失败——否则用例会退化成"测一个普通文件"');
+  const ioReal = { symlinkSync: () => {}, lstatSync: () => ({ isSymbolicLink: () => true }) };
+  assert.equal(makeRealSymlink('/t', '/l', 'file', ioReal), true, '真建成时必须返回 true（否则所有软链用例会被无条件跳过，覆盖悄悄归零）');
+  const ioEperm = {
+    symlinkSync: () => {
+      throw new Error('EPERM');
+    },
+    lstatSync: () => ({ isSymbolicLink: () => true }),
+  };
+  assert.equal(makeRealSymlink('/t', '/l', 'file', ioEperm), false, 'EPERM（标准 Windows 未开开发者模式的常见形态）必须返回 false');
+  safeRmSync(tmp124, { recursive: true, force: true });
+  ok('v0.6.6 围栏（桩 fs，平台无关）：悬空指向外拒 / 悬空指向内放行 / 成环有界拒 / 新建文件放行 / 根与子路径放行 + 软链能力探测自检');
+}
+
+// ---------- 125. v0.6.6：Windows 测试门禁的守卫（平台相关部分只能做源码级） ----------
+// 第三方评估 v0.6.5 报告 §4.3：run-all（`npm test` / `npm run coverage` 的入口）在 Windows 上
+// spawn('.cmd') 无 shell → **同步**抛 EINVAL → 汇总器崩溃 → bench 的 214 条断言从不执行。
+// 这个失败模式只在 Windows 出现（POSIX 上 spawn 一个不存在的 .cmd 是异步 ENOENT），
+// 本机无法行为级复现，故按本仓既有做法（§122l）做**源码级**守卫，如实标注层级。
+{
+  const runAll125 = fs.readFileSync(path.join(srcDir, '..', 'test', 'run-all.mjs'), 'utf8');
+  assert.ok(
+    /shell:\s*process\.platform === 'win32'/.test(runAll125),
+    'run-all 必须给 Windows 的 spawn 开 shell：Node ≥18.20/20.12 起 spawn .cmd/.bat 无 shell 会**同步**抛 EINVAL'
+  );
+  assert.ok(
+    /try\s*\{\s*child\s*=\s*spawn\(/.test(runAll125) && /catch[\s\S]{0,300}进程启动失败/.test(runAll125),
+    'spawn 必须包在 try/catch 里：同步抛错时 ChildProcess 根本没被创建，on(error) 收不到，汇总器会整体崩溃（bench 门禁静默空转）'
+  );
+  // 反向自检：软链用例必须统一走能力探测（makeRealSymlink），smoke.js 里**不得**再直接调 fs.symlinkSync——
+  // 否则"建不出真链却不抛错"的环境（评估 §4.1）又会把断言测成"读/写一个普通文件"。
+  const rawSymlinks125 = (fs.readFileSync(path.join(srcDir, '..', 'test', 'smoke.js'), 'utf8').match(/fs\.symlinkSync\(/g) || []).length;
+  assert.equal(rawSymlinks125, 0, `smoke.js 里不得直接调用 fs.symlinkSync（实际 ${rawSymlinks125} 次）——新增软链用例请用 makeRealSymlink 做能力探测`);
+  // 调度侧：every/once 的等待必须是"可中断的切片"，行为级断言在 test/e2e-schedule.js（接管延迟 ≤12s）
+  const schedule125 = fs.readFileSync(path.join(srcDir, 'schedule.js'), 'utf8');
+  assert.ok(
+    /waitGuarded\(need,\s*3000\)/.test(schedule125) && /waitGuarded\(Math\.min\(cur\.nextRunAt - now, 60000\),\s*3000\)/.test(schedule125),
+    'every / once 的等待都必须切成 ≤3s 的片逐片查租约（第三方评估 §4.2：整段 60s 等待会把接管延迟拉到 60s）'
+  );
+  assert.ok(
+    !/await wait\(Math\.min\(Math\.max\(\(cur\.nextRunAt \|\| now\) - now, 1000\), 60000\)\)/.test(schedule125),
+    '不得回退成"一整段最长 60s 且期间不查租约"的等待'
+  );
+  ok('v0.6.6 Windows 测试门禁守卫（源码级）：run-all 开 shell + spawn try/catch + 软链用例统一走能力探测 + 调度等待切片化');
 }
 
 delete process.env.MINGDAO_HOME;
