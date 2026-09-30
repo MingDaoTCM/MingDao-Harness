@@ -10744,12 +10744,15 @@ safeRmSync(tmp, { recursive: true, force: true });
       const runProbe = () => spawnSync(process.execPath, ['-e', probe], { encoding: 'utf8', env: { ...process.env, MINGDAO_HOME: home127b } });
       const okRead = runProbe();
       assert.ok(/TODAY=1\.23/.test(okRead.stdout), `可读时应算出今日费用，实际：${okRead.stdout}`);
-      fs.chmodSync(file127b, 0o000); // 存在但读不出来（stat 能过）
+      // 「存在但读不出来」（stat 能过、read 失败）：用**同名目录**顶替文件——readFileSync 抛 EISDIR，
+      // 且 POSIX 与 Windows 表现一致。⚠ 第一版用 chmod 000，Windows 上对文件主无效（CI 当场红：
+      // `实际：TODAY=1.23`）——这是本项目第三次"平台差异被 CI 掩盖"（前两次见 RELEASE-CHECKLIST §1.3）。
+      fs.rmSync(file127b, { force: true });
+      fs.mkdirSync(file127b);
       const badRead = runProbe();
       assert.ok(/TODAY=null/.test(badRead.stdout), `读失败必须返回 null（不能静默当 0），实际：${badRead.stdout}`);
       assert.ok(/费用统计读取失败/.test(badRead.stderr), '读失败必须告警一次（此前无任何信号）');
-      fs.chmodSync(file127b, 0o600);
-      fs.rmSync(file127b, { force: true });
+      fs.rmdirSync(file127b);
       const noFile = runProbe();
       assert.ok(/TODAY=0/.test(noFile.stdout), `文件不存在是"今天还没花钱"（0），实际：${noFile.stdout}`);
       safeRmSync(home127b, { recursive: true, force: true });
