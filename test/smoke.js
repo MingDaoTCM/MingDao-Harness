@@ -10637,7 +10637,9 @@ safeRmSync(tmp, { recursive: true, force: true });
       }
     })(srcDir);
     /** 剥注释后再判（注释里正当地提到这些写法不该算违规） */
-    const strip = (/** @type {string} */ t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    // 先归一化行尾：CI 的 Windows 腿会把 LF 转成 CRLF，任何跨行正则都会因此失配
+    // （本仓已多次吃过这个亏；v0.6.7 的 Windows 腿就是这么红的）
+    const strip = (/** @type {string} */ t) => t.replace(/\r\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
     const dnsUsers = [];
     const privateDefs = [];
     const metaDefs = [];
@@ -11013,7 +11015,9 @@ safeRmSync(tmp, { recursive: true, force: true });
 
     // ⑧ 结构守卫（源码级）：这几条口径不许再回退
     {
-      const strip = (/** @type {string} */ t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      // 先归一化行尾：CI 的 Windows 腿会把 LF 转成 CRLF，任何跨行正则都会因此失配
+    // （本仓已多次吃过这个亏；v0.6.7 的 Windows 腿就是这么红的）
+    const strip = (/** @type {string} */ t) => t.replace(/\r\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
       const agentSrc = strip(fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8'));
       assert.ok(/status: outcome\.status/.test(agentSrc), '账本 runEnd 的 status 必须取自单一来源 outcome');
       assert.ok(!/finish === 'max_steps'/.test(agentSrc), "不得再出现 `finish === 'max_steps'` 死条件");
@@ -11185,16 +11189,20 @@ safeRmSync(tmp, { recursive: true, force: true });
 
     // ⑩ 结构守卫（源码级）：锁内不得有进程调用；share-accept 的文件写必须在锁内且原子
     {
-      const strip = (/** @type {string} */ t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      // 先归一化行尾：CI 的 Windows 腿会把 LF 转成 CRLF，任何跨行正则都会因此失配
+    // （本仓已多次吃过这个亏；v0.6.7 的 Windows 腿就是这么红的）
+    const strip = (/** @type {string} */ t) => t.replace(/\r\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
       const sched = strip(fs.readFileSync(path.join(srcDir, 'schedule.js'), 'utf8'));
       assert.ok(/function stopJobProcesses/.test(sched), 'schedule 的进程操作必须收在锁外调用的小函数里');
       for (const fn of ['removeSchedule', 'pauseSchedule']) {
-        const body = (sched.match(new RegExp(`export function ${fn}[\\s\\S]*?\\n}\\n`)) || [''])[0];
+        // ⚠ Windows 的 actions/checkout 会把 LF 转成 CRLF —— 写死 `\n}\n` 在那边匹配不到
+        // （本仓已多次吃过这个亏；v0.6.7 的 Windows 腿就是这么红的：前置断言先炸）。
+        const body = (sched.match(new RegExp(`export function ${fn}[\\s\\S]*?\\r?\\n}\\r?\\n`)) || [''])[0];
         assert.ok(body.length > 0, `（前置）应能定位 ${fn} 的函数体`);
         assert.ok(!/pidOwnedBy\(|killTask\(/.test(body), `${fn} 的锁内不得再直接做进程调用（M-6）`);
       }
       const syn = strip(fs.readFileSync(path.join(srcDir, 'sync-server.js'), 'utf8'));
-      const acc = (syn.match(/function doShareAccept[\s\S]*?\n}\n/) || [''])[0];
+      const acc = (syn.match(/function doShareAccept[\s\S]*?\r?\n}\r?\n/) || [''])[0];
       assert.ok(/atomicWriteFileSync\(target/.test(acc), 'share-accept 就地刷新必须用原子写');
       assert.ok(/atomicWriteFileSync\(path\.join/.test(acc), 'share-accept 的冲突副本也必须用原子写（此前是裸 writeFileSync）');
       const replSrc = strip(fs.readFileSync(path.join(srcDir, 'commands', 'repl.js'), 'utf8'));
