@@ -1205,3 +1205,48 @@ run-all 的 shell、run-all 的 try/catch、调度切片（源码级）、调度
 **教训**：这一批四个问题（含第三方的三处）全是"**验证逻辑自身的判据太宽**"——只判"抛不抛错"、
 只判"体积一致"、只判"Release 存在"。**判据要对着"我们真正在意的那件事"写**：
 在意的不是"文件在不在"，而是"它是这一个版本的、且能被下载"。
+
+## 3.41 已修复（v0.6.7 批十二~批十五：三份 v0.6.6 审计报告的收口）
+
+**来源**：三份第三方报告（全量代码审计 58 项 / 第六轮复审 / 安全与质量审计），共同把
+「**同一规则多份实现 → 最弱的那份说了算**」指为本项目安全缺陷的唯一共性根因。
+本批按它们的 v0.6.7 建议范围收口，逐条走「先复现 → 定级 → 修复 → 回归断言 → 变异验证」。
+
+| 批 | 条目 | 报告出处 | 落地 |
+| --- | --- | --- | --- |
+| 十二 | **fetch 工具 SSRF 单一口径**：DNS 复检 fail-open、check/connect 两次解析（DNS rebinding）、元数据只按主机名判 | 报告一 C-1/H-1、报告二 P2-2、报告三 P1（三个报告的头号发现） | 新增 `src/ssrf-guard.js`（判定+钉扎单源）；`runFetch` 整条走 `safeFetchText`；`tools/fetch.js` 只留工具契约并再导出同一函数对象。**行为级复现**：桩解析失败 → 旧路径放行、新路径 fail-closed；桩解析→127.0.0.1 + 不可解析主机名仍能连通（证明连接用的是**钉住的 IP**） |
+| 十二 | **出网闸门盲区**：`safe-fetch` 走 `node:http(s)`，完全绕过只钩 `globalThis.fetch` 的闸门 | 报告三 M1/M2 | net-guard 新增 `guardEgress()`（与 fetch 钩子共用同一入口），safe-fetch 每跳显式过闸+记账；**行为级**：block 档下 skill/registry/模型发现路径被拦且入账 |
+| 十二 | **`fetch(Request, init)` 丢失 Request 语义 → 静默降级成空 GET** | 报告二 P2-3 | 逐字段合并（method/headers/body/signal/duplex + 若干 init 字段），**行为级**：服务端收到 POST + body |
+| 十二 | **跨 origine 只剥三个头（黑名单）**：`x-api-key` 等自定义凭据头原样送给重定向目标 | 报告一 M-4 | 改**反向白名单**（`stripHeadersForCrossOrigin`）；**行为级**：第二跳 `x-api-key`/`authorization` 已剥、`accept`/`user-agent` 保留 |
+| 十三 | **账本结局口径分裂**（返回值 capHit 与 runEnd 不一致、`'max_steps'` 死条件、截断方向反向） | 报告二 P2-1 | runTurn 内新增 `outcome` 单一来源，所有出口 `markOutcome()`，runEnd 与返回值同源；**行为级**：跑满步数时 `run.end.status==='capped' && capHit===true` 且与返回值一致 |
+| 十三 | **费用护栏读失败当 0**（statSync 过、readFileSync 失败 → 静默 ¥0） | 报告一 H-3 | 新增 `listCacheStatsStrict()`（区分 ENOENT 与读失败），护栏走严格读；**行为级（子进程）**：文件存在但 chmod 000 → `todayCost()` 返 **null** 而非 0，且告警一次 |
+| 十三 | **usage 缺失记 ¥0 → 三档护栏失明且无信号** | 报告一 H-4、登记 §3.39①(a) | agent 置 `usageUnknown` 并在有响应无 usage 时告警一次；`recordUsage` 记 `cost:null + usageUnknown`；账本 cost 事件带 `usageUnknown`；护栏给出"今日 N 次用量未知"提示 |
+| 十三 | **Batch 失败/取消路径漏账**、**Batch 不查护栏** | 报告一 M-10、登记 §3.39①(c) | 四条失败路径记「用量未知」；提交前 `checkCostGuard`（block 档拒绝提交，**服务端零请求**——行为级断言） |
+| 十三 | **downgrade 不看在途费用**（降级成免检通道） | 登记 §3.39①(b) | 降级换模型后按在途费用复查，仍超限即停（行为级：`providerCalls === 0`） |
+| 十三 | `run.start.packs` 恒为空数组（取不存在的键） | 报告二 P3-1 | 改取 `mounted.map(p => p.name)`；行为级：挂载 Pack 后账本里能看到它 |
+| 十三 | capHit 口径：Web 标 `done`、worker 标 `failed` | 报告二小项 | 统一为「不算完成」：Web 侧 `'capped'`（前端给明确横幅），worker 维持 `'failed'` |
+| 十四 | **脱敏器不认带引号键**（`{"api_key": …}` / `{'api_key': …}` 明文进审计与诊断包） | 报告一 H-2、登记 §3.39② | 正则允许成对引号包裹键名/值；**测试刻意用无前缀密钥值**（`sk-` 被另一条规则掩掉，拿它测会假绿——变异验证当场指出） |
+| 十四 | **凭证写用宽松读**（损坏时一次 init/WebUI 设 Key 清空其余凭据） | 报告一 M-1（H-8 只修了 key 命令层） | `setStoredKey`/`removeStoredKey` 内置严格读、损坏即拒绝写；三个 WebUI 调用点 + init 向导把失败说出来 |
+| 十四 | **deny 拆段漏命令替换/子 shell/`\r`/续行**；`denyStrict` 被 `sh -c` 绕过 | 报告一 M-2、报告二 P3-6 | 分隔面补全（fail-closed 方向）+ denyStrict 下包装执行直接拒绝并给可操作指引 |
+| 十四 | **bash env 词表漏 `key` 段**（`OPENAI_KEY`/`GITHUB_KEY` 原样透传子进程） | 报告一 M-3 | 与脱敏器共用 `ENV_SECRET_SEGMENTS`（唯一例外 `pwd`，避免剥离 `PWD`） |
+| 十四 | **constraints ReDoS 判定弱于 grep**（`(a|aa)+`/`((a|ab)x)+` 装载即通过） | 报告一 M-5 | 新增 `src/regex-safety.js` 作为单一来源（嵌套量词 + 歧义分支，含嵌套组），grep/constraints/packs 三处共用；刻意不拦 `(a+)?`（`?` 只重复 0/1 次，不会爆炸） |
+| 十四 | `workspaces set` 存**未归一化**路径 → 改链指向即围栏塌陷 | 报告一 H-5、登记 P1-21 | 存 `t2`（realpathDeep 结果），与同文件 add 分支对齐 |
+| 十五 | `redactDeep` 对象键数无界、`/memory add` 裸 appendFileSync（0644/无日期戳）、worker 的 ask 漏对象形态、`pack new` 写进非发现路径、自定义 Provider 模块按 `Date.now()` 无限重载、`clampText` 裸 slice 切代理对、schedule 锁内做进程调用、share-accept 文件写在锁外且非原子、会话 id 同秒碰撞 | 报告一 L-1/L-10/M-6/M-7/M-13、报告二 P3-3/P3-4/P3-5/P3-7 | 逐项落地；**测试基建**：新增 `test/mutate/`（变异验证脚本入库，报告一 S-3② 的欠账——此前"7/7"是手工过程、谁也复现不了） |
+
+**变异验证（本批累计 38 条）**：`node test/mutate/run.mjs`
+（批十二 8/8、批十三 10/10、批十四·十五 10/10，另有 v0.6.5/v0.6.6 的 4+7 条历史条目）。
+过程中被抓出 **3 处假绿**（断言第一版抓不到变异）：
+① 用 `sk-…` 测"带引号的键"——它被前缀规则掩掉了，测不到 H-2；
+② M-13 两次调用落在同一毫秒 → 变异体与修复版表现一致；
+③ 变异验证脚本自身的关键词对不上（失败的断言不是要钉的那条）。
+三条都按"收紧后重验才算数"处理。
+
+**未纳入本批（如实登记，按报告 §五/§八 排期）**：
+- 报告一 **M-8**（sync-server 设备级吊销 / push 配额与限流）、**M-9**（memory 子系统 4 处锁外读-改-写）、
+  **M-11**（逐轮回调计价锚点——本批已随 H-4 一并把 `perf.requestStartAt` 透到 recordUsage，逐轮路径同源）、
+  **L-2/L-4/L-5/L-12/L-15/L-16/L-17** 等低危项；
+- 报告一 **P1-1**（agent.js 拆分，runTurn ~1057 行）、**P1-2**（结构化摘要 + 关键事实钉死）、
+  **P1-3**（预算状态注入上下文）、**P1-4**（出网闸门对 bash curl 的补强）、**P1-5**（ARCHITECTURE.md 重建）、
+  报告二 P3-2 的消费方、报告三 §4 阶段二/三（对抗测试集扩面、容器 CI job、关键模块 TS 迁移、发布状态机）；
+- 报告一 **H-6/L-18**（自更新多镜像取最大版本、install.sh 无校验和）——供应链完整性锚需要发布流程配合，
+  与 `ledger --sign-key`、在线缓存基准（P0-2）同列为 v1.0 前项。
