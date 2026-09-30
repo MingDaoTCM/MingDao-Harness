@@ -11,6 +11,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { resolveProviderConfig } from './providers/index.js';
 import { estimateBatchCost, BATCH_DISCOUNT } from './pricing.js';
+import { checkCostGuard } from './cost-guard.js';
 import { recordCacheStats } from './cachestats.js';
 import { approxTokens } from './context.js';
 
@@ -223,6 +224,18 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
     }
   }
 
+  // —— v0.6.7（登记 §3.39①(c)）：Batch 也要过费用护栏 ——
+  // 此前 Batch 通道**完全不查 costGuard**（只认用户显式给的 --max-cost）：一次提交几百条问题，
+  // 恰恰是"烧穿日限"最省事的路径，而护栏在交互通道上却是硬的。这里与交互通道同一口径：
+  // block 档直接拒绝提交，warn/downgrade 档把护栏的话转达给调用方（不静默）。
+  {
+    const guard = checkCostGuard(model);
+    if (guard) {
+      if (guard.blocked) return { error: `费用护栏拦截，未提交批处理：${guard.message}` };
+      onStatus?.(guard.message);
+    }
+  }
+
   // —— 省钱 B2：--max-cost 预算上限（提交前估算拦截）——
   let estimatedCost = /** @type {number|null} */ (0);
   if (maxCost > 0) {
@@ -264,6 +277,34 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
       )
       .join('\n') + '\n';
 
+  /**
+   * 失败/取消路径的**最少诚实记账**（v0.6.7 / 报告一 M-10）。
+   * 批次一旦提交，服务端就可能已经处理并计费，而此前这四条路径（本地取消 / 超 24h / failed /
+   * expired·cancelled）本地**一条记录都不写**——账单在涨、账上却没有这笔。
+   * 拿不到 token 数就如实记「用量未知」（cost:null + usageUnknown + 服务端已处理条数），
+   * 让今日护栏能说出"有 N 次未知消费"，而不是把未知记成 0。
+   * @param {any} j 最近一次批次状态（可能为 null）
+   * @param {string} reason
+   */
+  const recordUnaccountedBatch = (j, reason) => {
+    try {
+      const rc = j?.request_counts || {};
+      const done = rc.completed != null ? `${rc.completed}/${rc.total ?? '?'}` : '未知';
+      recordCacheStats({
+        model,
+        prompt: 0,
+        completion: 0,
+        hit: null,
+        miss: null,
+        cost: null, // 未知：绝不写 0（0 会被读成"没花钱"）
+        saved: null,
+        batch: true,
+        usageUnknown: true,
+        note: `batch ${reason}（服务端已处理 ${done} 条，用量未知）`,
+      });
+    } catch {}
+  };
+
   try {
     onStatus?.('上传输入文件…');
     const fileId = await uploadFile(base, apiKey, jsonl, signal);
@@ -286,6 +327,7 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
       if (signal?.aborted) {
         // 本地取消必须尽力转化为服务端取消，否则用户以为停了、账单照涨
         const cancelled = await cancelServerBatch(base, apiKey, batch.id);
+        recordUnaccountedBatch(null, '本地取消');
         return {
           error: cancelled
             ? '已取消（已请求服务端停止该批次）'
@@ -297,6 +339,7 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
       if (Date.now() - t0 > 24 * 3600 * 1000) {
         // 超窗口同样要尝试停掉，避免留下一个无人接管却在计费的批次
         const cancelled = await cancelServerBatch(base, apiKey, batch.id);
+        recordUnaccountedBatch(null, '超 24h 窗口');
         return {
           error: `批处理超过 24h 窗口${cancelled ? '（已请求服务端停止）' : '（服务端取消失败，批次可能仍在计费）'}`,
           batchId: batch.id,
@@ -309,7 +352,10 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
         failures = 0;
       } catch (err) {
         failures += 1;
-        if (failures >= 10) return { error: `轮询失败：${(/** @type {any} */ (err))?.message || err}（任务仍在服务端，ID ${batch.id}）`, batchId: batch.id };
+        if (failures >= 10) {
+          recordUnaccountedBatch(null, '轮询连续失败');
+          return { error: `轮询失败：${(/** @type {any} */ (err))?.message || err}（任务仍在服务端，ID ${batch.id}）`, batchId: batch.id };
+        }
         await new Promise((r) => setTimeout(r, Math.min(baseInterval * 1.5 ** failures, 30000)));
         continue;
       }
@@ -320,6 +366,7 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
       }
       if (['failed', 'expired', 'cancelled', 'canceled'].includes(st)) {
         const detail = j?.errors?.data?.[0]?.message || j?.errors?.message || '';
+        recordUnaccountedBatch(j, `服务端状态 ${st}`);
         return { error: `批处理失败：${st}${detail ? '（' + detail + '）' : ''}`, batchId: batch.id };
       }
       polls += 1;
@@ -351,12 +398,18 @@ export async function runBatch({ cfg, model, questions, workingDir = process.cwd
       if (!outputs[i]) outputs[i] = { id: String(i), content: '' };
     }
     const usage = { prompt_tokens: prompt, completion_tokens: completion };
-    const cost = estimateBatchCost(model, prompt, completion);
+    // v0.6.7（H-4 的 batch 变体）：结果里没有 usage（网关不回 / 全部条目失败）时，
+    // prompt+completion 恒为 0 —— 那不是"免费"，而是"没有用量数据"，必须区分。
+    const usageUnknown = prompt === 0 && completion === 0;
+    const cost = usageUnknown ? null : estimateBatchCost(model, prompt, completion);
     const outFile = path.join(workingDir, `mingdao-batch-result-${Date.now()}.jsonl`);
     fs.writeFileSync(outFile, outputs.map((o) => JSON.stringify(o)).join('\n') + '\n');
-    recordCacheStats({ model, prompt, completion, hit: null, miss: null, cost, saved: null, batch: true });
+    recordCacheStats({
+      model, prompt, completion, hit: null, miss: null, cost, saved: null, batch: true,
+      ...(usageUnknown ? { usageUnknown: true, note: 'batch 结果未返回 usage（用量未知）' } : {}),
+    });
     onStatus?.(`完成：${outputs.length} 条结果${deduped ? `（去重合并 ${deduped} 条）` : ''}`);
-    return { ok: true, batchId: batch.id, outputFile: outFile, results: outputs, usage, cost, discount: BATCH_DISCOUNT, deduped, estimatedCost };
+    return { ok: true, batchId: batch.id, outputFile: outFile, results: outputs, usage, cost, usageUnknown, discount: BATCH_DISCOUNT, deduped, estimatedCost };
   } catch (err) {
     // 批处理端点不支持（404/405 等）→ 明确告知，不静默
     return { error: `批处理不可用：${(/** @type {any} */ (err))?.message || err}（该服务商可能不支持 Batch API，可用 config.batchBaseUrl 指定支持的网关）` };

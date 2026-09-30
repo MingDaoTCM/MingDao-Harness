@@ -172,7 +172,11 @@ export async function handlePack(cmd, args) {
       process.exitCode = 1;
       return true;
     }
-    const dir = path.resolve(process.cwd(), 'packs', name);
+    // v0.6.7（报告二 P3-5）：此前写进 `cwd/packs/<name>` —— 该目录**不在任何发现路径**里
+    // （发现层级：内置 <repo>/packs → ~/.mingdao/packs → 项目 .mingdao/packs（信任门）→ config.packs），
+    // 于是照做的新用户"Pack 不生效且没有任何报错"。默认写到项目级 `.mingdao/packs/`，
+    // 并在下一步提示里给出 trust 命令（项目级必须显式信任才挂载）。
+    const dir = path.resolve(process.cwd(), '.mingdao', 'packs', name);
     if (fs.existsSync(dir)) {
       console.log(`[错误] 目录已存在：${dir}`);
       process.exitCode = 1;
@@ -228,6 +232,7 @@ export function createPack(ctx) {
     console.log(`✓ 已生成脚手架：${dir}`);
     console.log('下一步：');
     console.log(`  1. 编辑 ${path.join(dir, 'pack.json')}（描述/权限）与 pack.mjs（工具/约束）`);
+    console.log(`  2. mingdao pack trust ${path.dirname(path.dirname(dir))}   # 项目级 Pack 必须显式信任才会挂载`);
     console.log(`  2. mingdao pack verify ${dir}`);
     return true;
   }

@@ -5,7 +5,7 @@
 import { trimMessages, clampText, messageTokens, approxTokens } from './context.js';
 import { compactConversation } from './compact.js';
 import { buildToolSchemas, dispatch } from './tools/index.js';
-import { modelPreset } from './models.js';
+import { DEFAULT_MODEL, modelPreset } from './models.js';
 import { resolveModelCaps, safeBudget, EDGE_RATIO } from './model-caps.js';
 import { makeTokenCounter } from './tokenizer.js';
 import { createHooks } from './hooks.js';
@@ -383,6 +383,22 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     /** v0.6.3（M-16）：本回合是否出现过"上游提前关流"（回答可能不完整）。
      * 刻意不叫 truncated——既有 `truncated` 的含义是"步数兜底总结也失败了"，两者必须分开。 */
     let upstreamTruncated = false;
+    // v0.6.7（报告二 P2-1）：**结局判定的单一来源**。
+    // 此前账本 runEnd 在 finally 里拿不到返回值，只能用局部变量 `finish` 重算结局，于是四处口径分裂：
+    //   ① 跑满步数：返回值 capHit:true，账本却记 status='done'、capHit=false；
+    //   ② `finish === 'max_steps'` 是**死条件**（全文件无人赋该值，析取支永不成立）；
+    //   ③ 步数耗尽的另一条分支（末轮仍有正文+工具调用）返回时**根本没有 capHit 字段**，
+    //      与同一 if 的 `break` 分支（capHit:true）自相矛盾；
+    //   ④ `finish === 'length'` 时账本记 capHit:true，而循环跑满的返回值是 truncated:true —— 同一次运行两个说法。
+    // 现在：所有出口都调用 markOutcome 写进同一个 outcome，返回值与 runEnd 都从它取。
+    /** @type {{status: string, capHit: boolean, truncated: boolean, aborted: boolean, upstreamTruncated: boolean, usageUnknown: boolean}} */
+    const outcome = { status: 'done', capHit: false, truncated: false, aborted: false, upstreamTruncated: false, usageUnknown: false };
+    /** 收敛本回合结局（后写覆盖，便于"先默认、后升级"）。
+     * @param {string} status @param {Partial<{capHit: boolean, truncated: boolean, aborted: boolean}>} [extra] */
+    const markOutcome = (status, extra = {}) => {
+      outcome.status = status;
+      Object.assign(outcome, extra);
+    };
     // v0.3.1 自动续跑（长程执行）：跑满 stepLimit 步后不再直接中断，而是注入进度摘要再续跑，
     // 最多 maxRounds 轮（默认 3，可用 cfg.maxRounds 调）；审计/重构等大任务不再「一步中断」。
     const maxRounds = Math.max(1, Number(cfg.maxRounds) || 3);
@@ -406,7 +422,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       cwd: workingDir,
       permission: cfg.permission ?? permission?.mode ?? null,
       preset: preset?.name ?? cfg.preset ?? null,
-      packs: getActivePackContext()?.packs ?? [],
+      // v0.6.7（报告二 P3-1）：activeCtx 的形状是 { mounted, warnings, promptSections, constraints, toolCount }，
+      // **没有 `.packs` 键** —— 这里此前恒为 []，账本里"本次运行挂了哪些 Pack"永远记空。
+      packs: (getActivePackContext()?.mounted || []).map((/** @type {any} */ p) => p?.name).filter(Boolean),
     });
     // 回合性能指标（状态栏：LLM 时长 / 工具时长 / 首 token 延迟 / 步数）
     let llmMsTotal = 0;
@@ -430,6 +448,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       usedModel: activeModel, // 省钱 B4：本回合实际使用模型（降级后归属它）
       requestStartAt: lastRequestStartAt, // v0.4.6：峰谷计价锚点（请求发起时刻，非落账时刻）
       deliverables: [...deliverables], // v0.3.1：CLI/REPL 续跑检查点复用（此前 artifacts 恒空）
+      // v0.6.7（报告一 H-4）：本回合是否出现过"模型有响应但服务端没回 usage"
+      usageUnknown: outcome.usageUnknown,
     });
     let aborted = false;
     let emptyRounds = 0; // 连续空/截断输出计数（防止无限续写）
@@ -675,7 +695,26 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       // 费用护栏（A2/B4）：每轮开始前按今日实际费用检查；block 暂停本轮；
       // downgrade 自动切换便宜模型继续执行（每回合只切一次，切换即粘滞）
       if (cfg.costGuard) {
-        const guard = checkCostGuard(activeModel);
+        let guard = checkCostGuard(activeModel);
+        // v0.6.7（登记 §3.39①(b)，报告一 §2.5 复核「仍成立」）：**在途费用必须参与降级决策**。
+        // 此前 downgrade 档只看**落账**（checkCostGuard → todayCost），而单看落账要在回合结束后才更新——
+        // 于是长回合里贵模型会一直用到跑完，实测单回合可超日限 9.1×（note=null，用户毫无察觉）。
+        // 现在：若「今日已用 + 本回合在途」已越线，且当前还不在最便宜档，就**当场触发降级**
+        // （不否决降级本身——那等于把这个功能废掉；只是把它触发得更早）。
+        if (!guard && !downgraded) {
+          const g0 = costGuardConfig();
+          if (g0 && String(g0.action) === 'downgrade' && Number(g0.dailyLimitYuan) > 0) {
+            const usedNow = usedTodayWithInflight();
+            if (usedNow != null && usedNow >= Number(g0.dailyLimitYuan)) {
+              guard = {
+                blocked: false,
+                downgrade: true,
+                downgradeModel: String(g0.downgradeModel || DEFAULT_MODEL),
+                message: `⚠ 费用护栏：今日已用（含本回合在途）≈¥${usedNow.toFixed(4)} 已达上限 ¥${Number(g0.dailyLimitYuan).toFixed(2)}——已自动降级到便宜模型继续执行。`,
+              };
+            }
+          }
+        }
         if (guard) {
           if (guard.blocked) {
             stripOrphanCalls();
@@ -765,13 +804,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         io.endTurn();
         if (aborted) {
           stripOrphanCalls();
-          return { text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: true, durationMs: Date.now() - startedAt, perf: perf() };
+          markOutcome('aborted', { aborted: true });
+          return { text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: outcome.aborted, upstreamTruncated, durationMs: Date.now() - startedAt, perf: perf() };
         }
         // MacBook 本地 507 memory_refusal 根因（v0.4.5）：服务端内存拒绝不是「空输出」——
         // 直接终结合合并透出降级提示，不计入空轮、不注入续写重试（内存未释放必再 507，空烧请求）。
         const e = /** @type {any} */ (err);
         if (e?.status === 507 || /memory_refusal|内存不足|内存拒绝/i.test(String(e?.message || ''))) {
           stripOrphanCalls();
+          markOutcome('done');
           return {
             text: null,
             reasoning: '',
@@ -780,6 +821,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             finish,
             truncated: false,
             aborted: false,
+            upstreamTruncated,
             note: '本地模型内存不足（507 memory_refusal）——请压缩上下文（减小 config.contextBudget 或 /compact）、减少并发子任务，或重启模型服务释放内存后再继续。',
             durationMs: Date.now() - startedAt,
             perf: perf(),
@@ -812,6 +854,23 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       });
       // 省钱 B1：只读阶段中模型文字明确表达写意图 → 下一轮注入全量工具（多一轮，几乎无感）
       if (readOnlyPhase && hasWriteIntent(res.text)) readOnlyPhase = false;
+      if (!res.usage && (res.text || res.toolCalls?.length)) {
+        // v0.6.7（报告一 H-4）：网关/自定义端点不返回 usage 时，此前这回合在账上**不存在**——
+        // warn/block/downgrade 三档护栏全部失明且没有任何信号。这里置位 + 明确告知，
+        // 落账时按"用量未知"处理（cost:null / priced:false），绝不冒充"这次花了 ¥0"。
+        if (!outcome.usageUnknown) {
+          outcome.usageUnknown = true;
+          try {
+            io.print(
+              style(
+                '⚠ 服务端未返回本次调用的用量（usage 缺失）：这一回合无法计费，今日费用护栏会少计这部分消费。\n' +
+                  '  常见于自建网关/中转端点；如需精确护栏，请让网关透传 usage 字段。',
+                C.yellow
+              )
+            );
+          } catch {}
+        }
+      }
       if (res.usage) {
         usage.prompt_tokens += res.usage.prompt_tokens || 0;
         usage.completion_tokens += res.usage.completion_tokens || 0;
@@ -842,7 +901,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (res.text) {
             const ap = await applyOutputConstraints(res.text, { messages, provider, activeModel, temperature, maxOutput, usage, signal: currentAc?.signal });
             messages.push({ role: 'assistant', content: ap.text });
-            return { text: ap.text, reasoning: res.reasoning || '', usage, steps, finish, truncated: false, aborted: false, upstreamTruncated, note: ap.note || undefined, durationMs: Date.now() - startedAt, perf: perf() };
+            // 步数已耗尽：这一条与下方 `break`（→ 兜底总结/截断收尾）必须是同一口径
+            markOutcome('capped', { capHit: true });
+            return { text: ap.text, reasoning: res.reasoning || '', usage, steps, finish, truncated: false, aborted: false, capHit: outcome.capHit, upstreamTruncated, note: ap.note || undefined, durationMs: Date.now() - startedAt, perf: perf() };
           }
           break;
         }
@@ -1203,6 +1264,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           // 静默空输出（无工具无正文）：同样回填续写提示，避免界面"没动静"（审计 Q1：与截断续写统一护栏）
           emptyRounds += 1;
           if (emptyRounds >= maxEmptyRounds) {
+            markOutcome('done');
             return {
               text: null,
               reasoning: res.reasoning || '',
@@ -1211,6 +1273,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               finish,
               truncated: false,
               aborted: false,
+              upstreamTruncated,
               note: '模型本轮没有输出正文。',
               durationMs: Date.now() - startedAt,
               perf: perf(),
@@ -1239,14 +1302,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           });
           continue;
         }
+        markOutcome(finish === 'length' ? 'capped' : 'done', { capHit: false, truncated: finish === 'length' });
         return {
           text: finalText,
           reasoning: res.reasoning || '',
           usage,
           steps,
           finish,
-          truncated: false,
+          truncated: outcome.truncated,
           aborted: false,
+          upstreamTruncated,
           note: outputNote || undefined,
           durationMs: Date.now() - startedAt,
           perf: perf(),
@@ -1352,16 +1417,19 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           : { text: null, note: null };
         if (wrapApplied.text) messages.push({ role: 'assistant', content: wrapApplied.text });
         // capHit：本轮因步数上限被迫收尾（任务可能未真正完成）→ 供上层落检查点续跑
-        return { text: wrapApplied.text || null, reasoning: wrapRes.reasoning || '', usage, steps, finish, truncated: false, aborted: false, capHit: true, note: wrapApplied.note || undefined, durationMs: Date.now() - startedAt, perf: perf() };
+        markOutcome('capped', { capHit: true });
+        return { text: wrapApplied.text || null, reasoning: wrapRes.reasoning || '', usage, steps, finish, truncated: false, aborted: false, capHit: outcome.capHit, upstreamTruncated, note: wrapApplied.note || undefined, durationMs: Date.now() - startedAt, perf: perf() };
       } catch (/** @type {any} */ err) {
         // v0.4.1：不再静默吞异常——总结失败原因透出，便于定位（此前用户只见「输出截断/无反馈」）
         try { io.print(style(`⚠ 兜底总结失败：${String(err?.message || err)}`, C.yellow)); } catch {}
       }
     }
-    return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, capHit: true, durationMs: Date.now() - startedAt, perf: perf() };
+    markOutcome('capped', { capHit: true, truncated: true });
+    return { text: null, reasoning: '', usage, steps, finish, truncated: outcome.truncated, aborted: false, capHit: outcome.capHit, upstreamTruncated, durationMs: Date.now() - startedAt, perf: perf() };
     }
     // 理论不可达（for 循环末轮必 return）；给 tsc 一个兜底，保证 runTurn 恒有返回值
-    return { text: null, reasoning: '', usage, steps, finish, truncated: true, aborted: false, capHit: true, durationMs: Date.now() - startedAt, perf: perf() };
+    markOutcome('capped', { capHit: true, truncated: true });
+    return { text: null, reasoning: '', usage, steps, finish, truncated: outcome.truncated, aborted: false, capHit: outcome.capHit, upstreamTruncated, durationMs: Date.now() - startedAt, perf: perf() };
     } catch (/** @type {any} */ err) {
       // 审计 P2-6（v0.4.2）：工具管线异常（hooks.pre / permission.check / prepTool 等）沿大 try 上抛时，
       // assistant tool_calls 已 push 进 messages 却无对应 tool 回填——会话恢复后 API 因孤儿 tool_call_id 400。
@@ -1383,7 +1451,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           // 两者单价不同（flash 便宜数倍），于是账本与日费用护栏系统性偏移，
           // 而"降级省钱"恰恰是靠这里体现的。
           const yuan = estimateCost(activeModel, usage.prompt_tokens, usage.completion_tokens, cacheSplit(usage), costDate);
-          const priced = typeof yuan === 'number' && Number.isFinite(yuan);
+          // v0.6.7（H-4）：用量未知时哪怕 0/0 也算出一个真 0（estimateCost(0,0)===0），
+          // 那会把"没记账"伪装成"没花钱"。未知一律 priced:false + yuan:null。
+          const usageKnown = !outcome.usageUnknown && (usage.prompt_tokens > 0 || usage.completion_tokens > 0 || steps === 0);
+          const priced = usageKnown && typeof yuan === 'number' && Number.isFinite(yuan);
           turnLedger.cost({
             // BUG-024：归属同样要用实际计费的模型（run.start 里已记过"用户请求的模型"，
             // 这里再写 modelName 会让"花了钱的那次调用"归属到一个没被调用的模型）
@@ -1391,6 +1462,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             usage,
             yuan: priced ? yuan : null,
             priced,
+            // v0.6.7（H-4）：把"用量未知"作为显式事实落账，事后可区分「没花钱」与「没记账」
+            ...(usageKnown ? {} : { usageUnknown: true }),
             pricing: { requestStartAt: lastRequestStartAt, peak: isPeakHour(costDate) },
           });
           turnLedger.runEnd({
@@ -1398,15 +1471,17 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             // status 是「这次运行怎么结束的」，与模型层的 finish_reason（stop/tool_calls/length）
             // 不是一回事：前者给人看账本，后者记在 model.round 里。混用会让「status=stop」这种
             // 记录无法回答「这次到底完成了没有」。
-            status: aborted ? 'aborted' : finish === 'length' || finish === 'max_steps' ? 'capped' : 'done',
+            // v0.6.7（P2-1）：一律取自 outcome —— 与返回值**同一个来源**，不可能再分裂
+            status: outcome.status,
             steps,
             rounds: round + 1,
             yuanTotal: priced ? yuan : null,
             priced,
-            // capHit/truncated 的判定与下方返回值保持同一口径：跑到步数上限被迫收尾
-            capHit: Boolean(finish === 'length' || finish === 'max_steps'),
-            truncated: Boolean(finish === 'length'),
-            aborted,
+            capHit: outcome.capHit,
+            truncated: outcome.truncated,
+            aborted: outcome.aborted,
+            // v0.6.7（P3-2）：上游提前关流此前只置位、不落账（"检测到了、传递断了"）
+            upstreamTruncated: Boolean(upstreamTruncated || outcome.upstreamTruncated),
           });
           // v0.6.2（B-WS-1/2）：记账降级必须让用户看见。
           // 此前写账本失败只把 alive 置 false，用户拿到一段「正常」总结却不知道这次运行

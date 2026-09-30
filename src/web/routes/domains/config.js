@@ -261,7 +261,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (!/** @type {Record<string, any>} */ (PROVIDERS)[provider]) return json(res, 400, { error: `未知服务商 ${provider}` });
       const key = String(body.key || '').trim();
       if (!key) return json(res, 400, { error: 'Key 不能为空（删除请用 removeProviderKey）' });
-      setStoredKey(provider, key);
+      const sk = setStoredKey(provider, key);
+      if (sk && sk.ok === false) return json(res, 400, { error: sk.error }); // v0.6.7（M-1）：凭证库损坏时拒绝写并如实报错
       providerCache.clear(); // 质检：Key 立即生效（缓存持有旧无 Key 实例 → 此前需重启）
       // 设置 Key 后立即拉取线上真实模型名单（失败不影响 Key 保存，回退预设）
       const fr = provider === 'custom' ? { error: '自定义服务商无模型列表' } : await fetchProviderModels(cfg, provider, { force: true });
@@ -332,7 +333,10 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         ...(Number(body.contextWindow) > 0 ? { contextWindow: Math.round(Number(body.contextWindow)) } : (prev.contextWindow ? { contextWindow: prev.contextWindow } : {})),
         ...(Number(body.maxOutputTokens) > 0 ? { maxOutputTokens: Math.round(Number(body.maxOutputTokens)) } : (prev.maxOutputTokens ? { maxOutputTokens: prev.maxOutputTokens } : {})),
       };
-      if (String(body.key || '').trim()) setStoredKey(`custom:${name}`, String(body.key).trim());
+      if (String(body.key || '').trim()) {
+        const sk3 = setStoredKey(`custom:${name}`, String(body.key).trim());
+        if (sk3 && sk3.ok === false) return json(res, 400, { error: sk3.error }); // v0.6.7（M-1）
+      }
       saveConfig(cfg);
       // baseUrl 改动影响 isLocal 判定 → 超时档位变化；清缓存让新超时/新端点即时生效
       providerCache.clear();
@@ -372,7 +376,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (!(cfg.customModels || {})[name]) return json(res, 400, { error: `自定义模型 ${name} 不存在` });
       const key = String(body.key || '').trim();
       if (!key) return json(res, 400, { error: 'Key 不能为空' });
-      setStoredKey(`custom:${name}`, key);
+      const sk2 = setStoredKey(`custom:${name}`, key);
+      if (sk2 && sk2.ok === false) return json(res, 400, { error: sk2.error }); // v0.6.7（M-1）
       providerCache.clear(); // 质检：Key 立即生效
       return json(res, 200, { ok: true, name, keyMasked: maskKey(key) });
     }

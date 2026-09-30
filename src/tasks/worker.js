@@ -41,7 +41,11 @@ export async function runWorkerTask(id, question, { permission, model, offpeak }
     // 后台无交互：ask 权限降级为 readonly 并注明（需要写权限请 mingdao run --permission auto）
     let perm = permission || cfg.permission || 'ask';
     let note = '';
-    if (perm === 'ask') {
+    // v0.6.7（报告二 P3-4）：配置允许**对象形态** `{ mode: 'ask' }`，而这里此前只做字符串严格比较
+    // ——对象形态的 ask 漏判 → 后台任务不退化 readonly，随后 quiet IO 的 ask 在非 TTY 下走 EOF
+    // 按拒绝处理，于是后台任务逐写操作被逐个拒绝（嘈杂失败），而不是干净地声明"按只读执行"。
+    const permMode = perm && typeof perm === 'object' ? String(perm.mode || '') : String(perm);
+    if (permMode === 'ask') {
       perm = 'readonly';
       note = 'ask 权限下后台任务按只读执行';
     }
@@ -117,6 +121,9 @@ export async function runWorkerTask(id, question, { permission, model, offpeak }
     }
     // P1-3（v0.4.5）：capHit（跑满步数上限后收尾）语义是「未真正完成、可续跑」——此前 worker 不判
     // capHit 直接判 done，后台任务/链式编排把未完成任务当成功（假完成）。
+    // v0.6.7（报告二 P2-1 小项）：与 WebUI 同一口径——capHit/truncated **不算成功**。
+    // WebUI 的会话任务条目标 'capped'，后台任务状态机（受 schedule 依赖判定约束）沿用 'failed'：
+    // 两处一致的是"不能当完成"，差异只是各自词表里的取值。
     const finalStatus = res.capHit ? 'failed' : res.truncated ? 'failed' : res.aborted ? 'killed' : 'done';
     if (res.capHit && !note) note = '达到步数上限，任务未完成（可续跑）。';
     recordUsage(res.perf?.usedModel || modelName, res.usage, /** @type {any} */ (res.perf));

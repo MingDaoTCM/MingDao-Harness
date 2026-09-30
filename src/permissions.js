@@ -33,7 +33,12 @@ function summarize(name, args) {
  */
 export function splitShellSegments(/** @type {any} */ cmd) {
   return String(cmd ?? '')
-    .split(/\s*(?:;|&&|\|\||\||&|\n)\s*/)
+    // v0.6.7（报告一 M-2 / 报告二 P3-6）：分隔面补全——此前只拆 `; && || | & 换行`，于是
+    //   `echo $(rm -rf /x)`、`` echo `rm -rf /x` ``、`true \r rm -rf /x`、`a \\\n rm -rf /x`
+    // 的**段首**都不是危险命令，deny 规则被直达绕过（deny 是 auto 档唯一防线）。
+    // 现在把命令替换（`$(` / 反引号）、子 shell 括号、`\r`、行尾续行反斜杠一并当分隔符。
+    // 方向是 fail-closed：多拆只会多匹配 deny 规则（最坏是多问一次确认），不会漏掉危险段。
+    .split(/\s*(?:;|&&|\|\||\||&|\r|\n|\$\(|\(|\)|`|\\\r?\n)\s*/)
     .map((/** @type {string} */ seg) => seg.trim())
     .filter(Boolean);
 }
@@ -115,10 +120,31 @@ export function normalizePermission(/** @type {any} */ rawMode) {
  * @param {any} args
  * @returns {{decision: 'allow'|'deny'|'ask', reason: string, rule: string|null, denyStrict?: boolean}}
  */
+// v0.6.7（报告二 P3-6，报告一 M-2 的另一半）：**denyStrict 下包装执行形态 fail-closed**。
+//
+// 拆段（splitShellSegments）已经补上命令替换与子 shell 括号，但 `sh -c '…'`、`eval '…'`、
+// `bash -c "…"` 这类**把真命令藏在参数里**的写法无法靠拆段看穿：段首是 `sh`/`eval`，
+// 不匹配任何以真实命令开头的 deny 规则。普通 deny 档可以接受这一点（它是"防手滑"，
+// 被绕过还有权限模式兜底）；但 `denyStrict: true` 是用户显式要求的**硬拦截**，
+// 语义上不该存在"换个写法就直达"的通道 —— 于是这里对包装形态直接拒绝。
+const SHELL_WRAPPER = /(^|\s|;|&&|\|\||\|)(sh|bash|zsh|dash|ksh|cmd|powershell|pwsh)\s+-c\b|(^|\s|;|&&|\|\||\|)eval\b|(^|\s|;|&&|\|\||\|)command\s+-v\b/i;
+
+/**
+ * @param {any} rawMode @param {any} name @param {any} args
+ */
 export function evaluatePermission(/** @type {any} */ rawMode, /** @type {any} */ name, /** @type {any} */ args = {}) {
   const { mode, allow, deny, denyStrict } = normalizePermission(rawMode);
   const hitDeny = deny.find((/** @type {any} */ r) => ruleMatches(r, name, args, true));
   if (hitDeny) return { decision: 'deny', reason: 'rule-deny', rule: hitDeny, denyStrict };
+  // denyStrict + 包装执行：deny 规则看不穿参数里的命令，只能整体拒绝（给出可操作的指引）
+  if (denyStrict && deny.length > 0 && name === 'bash' && SHELL_WRAPPER.test(String(args?.command ?? ''))) {
+    return {
+      decision: 'deny',
+      reason: 'deny-strict-wrapper',
+      rule: 'denyStrict:shell-wrapper',
+      denyStrict: true,
+    };
+  }
   const hitAllow = allow.find((/** @type {any} */ r) => ruleMatches(r, name, args));
   if (hitAllow) return { decision: 'allow', reason: 'rule-allow', rule: hitAllow };
   if (mode === 'auto') return { decision: 'allow', reason: 'mode-auto', rule: null };
@@ -155,7 +181,8 @@ export function createPermission(rawMode, io) {
             io.print(
               style(
                 `⛔ 已拒绝：${name}${summarize(name, args)} 命中 deny 规则「${v.rule}」` +
-                  `（config.permission.denyStrict=true：deny 为硬拦截，不提供本次放行）。`,
+                  `（config.permission.denyStrict=true：deny 为硬拦截，不提供本次放行）。` +
+                  (v.reason === 'deny-strict-wrapper' ? '\n  原因：命令用 sh -c / eval 等包装执行，deny 规则看不穿参数里的真实命令。请直接写命令本身（不要包一层 shell）。' : ''),
                 C.red
               )
             );

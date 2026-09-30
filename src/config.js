@@ -181,7 +181,15 @@ export async function runWizard(io) {
     const envDetected = hasEnvKey() ? '（检测到环境变量，回车直接使用）' : '';
     const input = await io.ask(`② ${provider} 的 API Key${envDetected}：`, { hidden: true });
     apiKey = String(input || '').trim();
-    if (apiKey) setStoredKey(provider, apiKey);
+    if (apiKey) {
+      // v0.6.7（M-1）：写函数已 fail-closed，这里必须把失败**说出来**（否则向导会继续往下走、
+      // 用户以为 Key 已保存，而实际什么都没写）。
+      const sk = setStoredKey(provider, apiKey);
+      if (sk && sk.ok === false) {
+        io.print(`[错误] ${sk.error}`); // 不用彩色工具：config.js 不依赖 ui.js 的样式模块（避免循环依赖）
+        continue;
+      }
+    }
     if (!apiKey && !hasEnvKey()) {
       const skipped = await io.confirm('  未输入 API Key，跳过密钥设置？');
       if (!skipped) continue;

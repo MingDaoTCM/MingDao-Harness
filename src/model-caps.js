@@ -6,7 +6,7 @@ import { modelPreset } from './models.js';
 // 审计 P3-3（v0.4.2）：本地判定复用 fetch.js 的 isPrivateHost（IPv4 私网/回环/CGNAT/多播 + IPv6
 // fc00::/7、fe80::/10、::、::1、IPv4-mapped）——此前只查 IPv4 与 ::1，IPv6 本地模型被误判远程
 // （超时档位错），且与 fetch 工具/SSRF 判定各维护一份、口径漂移。
-import { isPrivateHost } from './tools/fetch.js';
+import { isPrivateHost } from './ssrf-guard.js';
 import fs from 'node:fs';
 import path from 'node:path';
 

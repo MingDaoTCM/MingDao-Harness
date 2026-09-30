@@ -425,7 +425,10 @@ export async function runRepl(ctx) {
             io.print('用法：/memory add <内容>');
             continue;
           }
-          fs.appendFileSync(memPath, `- ${text}\n`);
+          // v0.6.7（报告二 P3-3）：此前是**裸 appendFileSync** —— ①没有日期戳（与 appendMemory 的
+          // `- [date] …` 格式不一致，后续 dedupe/检索的日期解析会漏掉这类条目）；
+          // ②文件不存在时按默认 0644 新建，绕过记忆文件 0600 的私有权纪律。改走同一条写路径。
+          appendMemory([String(text)]); // 与 memoryFile() 同一路径（<home>/AGENTS.md，即上面的 memPath）
           io.print(style(`✓ 已追加到用户记忆 ${memPath}（后续会话自动生效）`, C.green));
         } else if (arg === 'extract') {
           io.startSpinner('正在从当前对话提炼记忆…');

@@ -175,23 +175,17 @@ export function postRunStatus(/** @type {any} */ cur2, /** @type {any} */ result
 }
 
 export function removeSchedule(/** @type {any} */ home, /** @type {any} */ id) {
-  // 质检 H3：读-改-写序列加锁，与 sleeper 循环的状态写互斥（防丢更新）
+  // v0.6.7（报告一 M-6）：**锁内不得做外部进程调用**。
+  // 此前 `pidOwnedBy`（macOS 回退到同步 `ps`，最长 3s）与 `killTask`（内部还要取 tasks 锁）
+  // 都在 schedule 锁内执行 → 持锁数秒 → 等锁方 5s 锁超时 → sleeper 协程退出、job 卡在 running。
+  // 这正是 v0.6.2 §3.27 在 tasks.js 修掉、却在 schedule 复发的同一反模式。
+  // 现在：先在锁内读快照，出锁再做进程操作，最后进锁改状态。
+  const job0 = readSchedule(home, id);
+  if (!job0) return false;
+  stopJobProcesses(home, job0);
   return withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
     const job = readSchedule(home, id);
-    if (!job) return false;
-    if (job.pid) {
-      const owned = pidOwnedBy(job.pid, id); // 质检 M11：cmdline 含调度 id 才 kill
-      if (owned === true) { // 非 Linux/无法校验（null）不盲杀（CodeBuddy 报告：PID 复用误杀风险）
-        try {
-          process.kill(job.pid, 'SIGTERM');
-        } catch {}
-      }
-    }
-    // 正在跑的 worker 同步停止，避免成孤儿继续执行
-    // P0-2（v0.4.5）：killTask 失败不应阻断「删除」这一更强用户意图——包 try/catch 保证删除照常
-    try {
-      if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
-    } catch {}
+    if (!job) return false; // 期间已被别的线程删掉：幂等返回
     try {
       fs.unlinkSync(path.join(scheduleDir(home), id + '.json'));
     } catch {}
@@ -199,23 +193,32 @@ export function removeSchedule(/** @type {any} */ home, /** @type {any} */ id) {
   });
 }
 
+/** 停止一个调度任务持有的进程（**必须在锁外调用**，见 M-6 注释）。
+ * @param {any} home @param {any} job */
+function stopJobProcesses(/** @type {any} */ home, /** @type {any} */ job) {
+  if (job?.pid) {
+    const owned = pidOwnedBy(job.pid, job.id); // 质检 M11：cmdline 含调度 id 才 kill
+    if (owned === true) { // 非 Linux/无法校验（null）不盲杀（CodeBuddy 报告：PID 复用误杀风险）
+      try {
+        process.kill(job.pid, 'SIGTERM');
+      } catch {}
+    }
+  }
+  // 正在跑的 worker 同步停止，避免成孤儿继续执行
+  // P0-2（v0.4.5）：killTask 失败不应阻断「删除/暂停」这一更强的用户意图——包 try/catch
+  try {
+    if (job?.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
+  } catch {}
+}
+
 export function pauseSchedule(/** @type {any} */ home, /** @type {any} */ id) {
-  // 质检 H3：读-改-写序列加锁（pause 与 sleeper 的 postRunStatus 写互斥，杜绝 pause 被覆盖）
+  // 同 removeSchedule：进程操作在锁外（v0.6.7 / M-6）
+  const job0 = readSchedule(home, id);
+  if (!job0) return false;
+  stopJobProcesses(home, job0);
   return withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
     const job = readSchedule(home, id);
     if (!job) return false;
-    if (job.pid) {
-      const owned = pidOwnedBy(job.pid, id); // 质检 M11：cmdline 含调度 id 才 kill
-      if (owned === true) { // 非 Linux/无法校验（null）不盲杀（CodeBuddy 报告：PID 复用误杀风险）
-        try {
-          process.kill(job.pid, 'SIGTERM');
-        } catch {}
-      }
-    }
-    // P0-2（v0.4.5）：killTask 失败不应阻断「暂停」的状态写
-    try {
-      if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) killTask(home, job.lastTaskId);
-    } catch {}
     writeSchedule(home, { ...job, status: 'paused', pid: null, lastTaskId: null });
     return true;
   });
@@ -514,7 +517,9 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
         if (curN && curN.status !== 'paused') writeSchedule(home, { ...curN, note: `避峰等待至北京时间 ${defer.toISOString().slice(11, 16)}（闲时起执行）` });
       });
       // M-13：切片等待，每片都复查租约（原来是一整段可能长达数小时的 sleep）
-      if ((await waitGuarded(defer.getTime() - Date.now() + 2000)) === 'aborted') return 'aborted';
+      // v0.6.7（报告一 L-14）：这里此前用 waitGuarded 的**默认 60s 片**，与 every/once 的
+      // 3s 片不一致 —— 宣传的"接管延迟 ≈5s"在避峰路径上其实是 ~62s。统一用 3s 片。
+      if ((await waitGuarded(defer.getTime() - Date.now() + 2000, 3000)) === 'aborted') return 'aborted';
       if (shouldStop()) return 'aborted'; // 睡醒后若已失去租约，直接放弃（避免接管方并跑）
     }
     if (job.after?.length) {

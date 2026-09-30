@@ -198,7 +198,15 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
   // 自定义 Provider 模块优先（仅普通自定义端点；custom:<模型名> 走 OpenAI 兼容直连）
   const customFile = customProviderFile(pc.name); // R4：见上方说明（白名单 + 包含性检查）
   if (customFile && pc.isCustom && !pc.name.includes(':') && fs.existsSync(customFile)) {
-    const mod = await import(pathToFileURL(customFile).href + `?v=${Date.now()}`);
+    // v0.6.7（报告一 M-13）：此前是 `?v=${Date.now()}` ——**每次建 provider 都换一个 URL**，
+    // 而 ESM 缓存按 URL 计：长驻 WebUI 里模块实例无限累积、顶层代码反复执行。
+    // 改成按 **mtime** 作版本键（同文件里 visionProbeCache 已是这个方案）：文件没改就复用同一实例，
+    // 改了才重新 import。
+    let ver = '0';
+    try {
+      ver = String(Math.round(fs.statSync(customFile).mtimeMs));
+    } catch {}
+    const mod = await import(pathToFileURL(customFile).href + `?v=${ver}`);
     if (typeof mod.createProvider !== 'function') {
       throw new Error(`自定义 Provider 模块 ${customFile} 未导出 createProvider(cfg)。`);
     }

@@ -6,6 +6,7 @@
 // 非 Linux 或未安装 bwrap 时自动降级为 off，并在结果中注明（不静默假装沙箱）。
 
 import { spawn, spawnSync } from 'node:child_process';
+import { ENV_SECRET_SEGMENTS } from '../redact.js';
 import { spawnOpts } from '../proc.js';
 
 const MAX_OUTPUT = 20000;
@@ -15,7 +16,10 @@ const MAX_TIMEOUT_SECONDS = 600;
 // （一条 env 即可泄露），与沙箱档位解耦；config.bashEnvKeep 按名放行，config.bashEnvFilter=false
 // 整体关闭（回到完全透传）。
 const SENSITIVE_ENV_PAIR = /(api[_-]?key|access[_-]?key|client[_-]?secret|private[_-]?key)/i;
-const SENSITIVE_ENV_SEGMENT = /(^|_)(token|secret|password|passwd|credential|authorization|auth)(_|$)/i;
+// v0.6.7（报告一 M-3）：段词表改为**与脱敏器共用同一来源**（ENV_SECRET_SEGMENTS）——
+// 此前这里手写一份且漏了 `key` 段：`OPENAI_KEY`/`ANTHROPIC_KEY`/`GITHUB_KEY` 原样透传子进程，
+// 一条 `env` 就把密钥送进模型上下文。两份词表各自演化必然漂移（本仓已多次登记同款教训）。
+const SENSITIVE_ENV_SEGMENT = new RegExp(`(^|_)(${[...ENV_SECRET_SEGMENTS].join('|')})(_|$)`, 'i');
 // 审计 P3-6（v0.4.2）：导出供 hooks.js 复用——hook 子进程 env 与 bash 工具同口径过滤敏感变量。
 // P3 修复（v0.4.6）：SSH_AUTH_SOCK 会被 `(^|_)auth(_|$)` 段规则误判为敏感变量而剥离，导致
 // bash 工具里 git-over-SSH / ssh-agent 全部失效（macOS 常态：push/pull 走 SSH 时必用）。

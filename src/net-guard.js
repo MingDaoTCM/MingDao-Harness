@@ -111,6 +111,78 @@ export function decideEgress(/** @type {any} */ url) {
 }
 
 /**
+ * 不经 `globalThis.fetch` 的外联路径统一入口（v0.6.7；报告 3 的 M1）。
+ *
+ * 背景：闸门此前**只**包 `globalThis.fetch`，而 `safe-fetch.js` 走 `node:http(s).request`
+ * （它必须这样——只有 http 模块能把"已校验的 IP"钉给连接层，防 DNS rebinding）。
+ * 于是「skill 下载 / registry 拉取 / 模型发现」三条自动出口既不受 block 拦截、也不进出网账本：
+ * 用户配了 `config.net` 想自证"数据不出门"，实际漏的恰恰是这几条自动路径——
+ * 对一个把"出网自证"当卖点的项目，**失真的安全叙事比明确不拦更危险**。
+ *
+ * 语义与 globalThis.fetch 那条完全一致（同一份 activePolicy、同一个 recordEgress）：
+ *   · 未安装 → 放行、不记账；
+ *   · block 且不在白名单 → `{ blocked: true, message }`，调用方必须拒绝本次连接；
+ *   · warn 且不在白名单 → 放行 + 记账 + **只告警一次**（避免刷屏）。
+ * @param {any} url
+ * @returns {{ blocked: boolean, message: string, decision: any }}
+ */
+export function guardEgress(/** @type {any} */ url) {
+  const d = decideEgress(url);
+  if (d.allowed) return { blocked: false, message: '', decision: d };
+  if (activePolicy?.mode === 'block') {
+    return {
+      blocked: true,
+      message:
+        `出网被拦截：${d.host}${d.port ? ':' + d.port : ''} 不在 config.net.allow 白名单内（mode=block）。` +
+        `若这是必要的外部依赖，请把该主机显式加入白名单；若只是想让数据不出门，请保持拦截并改用内网端点。`,
+      decision: d,
+    };
+  }
+  if (!warnedOnce) {
+    warnedOnce = true;
+    try {
+      process.stderr.write(`[MingDao] ⚠ 出网告警：${d.host} 不在白名单内（mode=warn，已放行并记账）。运行 mingdao net report 查看明细。\n`);
+    } catch {}
+  }
+  return { blocked: false, message: '', decision: d };
+}
+
+/** 跨 origin 跳转时**允许保留**的请求头（反向白名单）。
+ *
+ * v0.6.7（报告 1 M-4）：此前是**黑名单**（只删 authorization / cookie / proxy-authorization），
+ * 于是 `x-api-key` / `api-key` / `x-auth-token` / `x-amz-security-token` 这类自定义凭据头
+ * 会原样带给重定向目标——而"自定义头里放密钥"恰恰是网关类服务的常见做法。
+ * 反向白名单的方向与安全一致：**没被点名的头一律不跨源**（新增自定义头默认安全）。
+ * 白名单只放"不带身份、且对重定向后的请求仍需成立"的头。 */
+const CROSS_ORIGIN_KEEP_HEADERS = new Set([
+  'accept',
+  'accept-encoding',
+  'accept-language',
+  'cache-control',
+  'content-length',
+  'content-type',
+  'if-match',
+  'if-modified-since',
+  'if-none-match',
+  'if-range',
+  'if-unmodified-since',
+  'range',
+  'user-agent',
+]);
+
+/** 按反向白名单裁掉不该跨源的头；返回新的 Headers（输入未被修改）。
+ * @param {any} headers */
+export function stripHeadersForCrossOrigin(headers) {
+  const src = new Headers(headers || {});
+  /** @type {[string,string][]} */
+  const keep = [];
+  src.forEach((v, k) => {
+    if (CROSS_ORIGIN_KEEP_HEADERS.has(String(k).toLowerCase())) keep.push([k, v]);
+  });
+  return new Headers(keep);
+}
+
+/**
  * 安装出网闸门（幂等）。未配置 config.net → 不安装，返回 false。
  * @param {any} rawNet cfg.net
  * @returns {boolean} 是否安装
@@ -129,14 +201,8 @@ export function installEgressGate(/** @type {any} */ rawNet) {
       );
     globalThis.fetch = async (/** @type {any} */ input, /** @type {any} */ init) => {
       const url = typeof input === 'string' ? input : input && typeof input === 'object' && 'url' in input ? input.url : String(input);
-      const d = decideEgress(url);
-      if (!d.allowed && activePolicy?.mode === 'block') throw blockedError(d);
-      if (!d.allowed && activePolicy?.mode === 'warn' && !warnedOnce) {
-        warnedOnce = true;
-        try {
-          process.stderr.write(`[MingDao] ⚠ 出网告警：${d.host} 不在白名单内（mode=warn，已放行并记账）。运行 mingdao net report 查看明细。\n`);
-        } catch {}
-      }
+      const g = guardEgress(url); // 与 safe-fetch 共用同一个入口（block 抛错 / warn 一次性告警 + 记账）
+      if (g.blocked) throw blockedError(g.decision);
       // 重定向必须**逐跳**判定（v0.6.0 自查发现的绕过）：
       // 调用方不指定 redirect 时 undici 默认自己跟随 3xx，闸门只看得到**首个** URL——
       // 于是「允许 api.deepseek.com」会被利用成：该主机返回 302 指向任意地址，内核照样跟过去，
@@ -155,21 +221,38 @@ export function installEgressGate(/** @type {any} */ rawNet) {
       const isRequestInput = Boolean(input) && typeof input === 'object' && typeof input.url === 'string';
       /** @type {any} */
       let current = url; // 字符串 URL：供 new URL(loc, current) 使用（不能是 Request 对象）
+      // v0.6.7（报告 2 的 P2-3）：**Request + init 并存时逐字段合并**。
+      // 此前只在「只传 Request、没有 init」时才继承其语义；而 `fetch(new Request(u,{method:'POST',body}), {signal})`
+      // 这种「加个 AbortSignal」的常见写法会走 `{...init, redirect:'manual'}` 分支，
+      // 于是 method/body/headers 全丢 → **静默降级成空 GET**（行为级实测：服务端收到 `GET body=""`）。
+      // 透明代理改变请求语义属于「安全组件引入数据损坏」，必须逐字段按 fetch 规范合并：
+      // init 优先，未给的字段回落到 Request。
       /** @type {any} */
-      let curInit =
-        isRequestInput && !init
-          ? {
-              // 有 init 时按 fetch 规范由 init 覆盖，这里只在「只传 Request」时继承其语义
-              method: input.method,
-              headers: input.headers,
-              body: input.body,
-              signal: input.signal,
-              ...(input.duplex ? { duplex: input.duplex } : {}),
-              redirect: 'manual',
-            }
-          : init
-            ? { ...init, redirect: 'manual' }
-            : { redirect: 'manual' };
+      let curInit;
+      if (isRequestInput) {
+        /** @type {any} */
+        const merged = {};
+        const method = init?.method ?? input.method;
+        if (method) merged.method = method;
+        if (input.headers || init?.headers) {
+          const h = new Headers(input.headers || {});
+          if (init?.headers) new Headers(init.headers).forEach((v, k) => h.set(k, v));
+          merged.headers = h;
+        }
+        const body = init?.body ?? input.body;
+        if (body !== undefined && body !== null) merged.body = body;
+        const signal = init?.signal ?? input.signal;
+        if (signal) merged.signal = signal;
+        if (input.duplex && !init?.duplex) merged.duplex = input.duplex;
+        for (const k of ['mode', 'credentials', 'cache', 'integrity', 'keepalive', 'referrer', 'referrerPolicy']) {
+          const v = init?.[k] ?? input[k];
+          if (v !== undefined && v !== null) merged[k] = v;
+        }
+        merged.redirect = 'manual'; // 由本闸门逐跳处理
+        curInit = merged;
+      } else {
+        curInit = init ? { ...init, redirect: 'manual' } : { redirect: 'manual' };
+      }
       for (let hop = 0; ; hop++) {
         const res = await base(current, curInit);
         if (![301, 302, 303, 307, 308].includes(res.status)) return res;
@@ -207,12 +290,11 @@ export function installEgressGate(/** @type {any} */ rawNet) {
         // 手动跟随重定向时 `curInit` 原样复用，而 undici 在 `redirect:'manual'` 下不会替你做
         // 同源剥离——实测 warn 模式的第二跳 `https://attacker.example/steal` 仍带着第一跳的
         // `Authorization: Bearer sk-…`。与 mode 无关：warn 放行的是「出网」，不该顺手把凭据送出去。
-        // 与 fetch 规范对齐：只有同源（scheme+host+port 全同）才保留这些头。
+        // v0.6.7（报告 1 M-4）：改**反向白名单**（见 stripHeadersForCrossOrigin）——
+        // 黑名单只删得掉三个头，`x-api-key` 之类的自定义凭据头会原样泄漏给重定向目标。
         try {
           if (new URL(next).origin !== new URL(String(current)).origin && curInit?.headers) {
-            const h = new Headers(curInit.headers);
-            for (const k of ['authorization', 'cookie', 'proxy-authorization']) h.delete(k);
-            curInit = { ...curInit, headers: h };
+            curInit = { ...curInit, headers: stripHeadersForCrossOrigin(curInit.headers) };
           }
         } catch {}
         try {

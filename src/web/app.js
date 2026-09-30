@@ -562,6 +562,7 @@ async function updateTasksPanel(){
     const prev=lastBgStatus.get(t.id);
     if(prev && prev.status==='running' && t.status!=='running'){
       if(t.status==='done') renderBanner({text:'✅ 后台任务「'+esc(String(t.message||'').slice(0,30)||'任务')+'」已完成'+(t.durationMs!=null?'（用时 '+(t.durationMs/1000).toFixed(1)+' 秒）':'')});
+      else if(t.status==='capped') renderBanner({text:'⚠ 已达步数上限，任务未完成（可续跑）——直接发送消息即可从断点继续。', warn:true});
       else if(t.status==='failed') renderBanner({text:'✖ 后台任务「'+esc(String(t.message||'').slice(0,30)||'任务')+'」失败：'+esc(String(t.error||'').slice(0,60))});
     }
     lastBgStatus.set(t.id,{status:t.status});

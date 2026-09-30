@@ -145,5 +145,12 @@ export function trimMessages(/** @type {any} */ messages, /** @type {any} */ bud
 export function clampText(/** @type {any} */ text, maxChars = TOOL_RESULT_LIMIT) {
   const s = String(text);
   if (s.length <= maxChars) return s;
-  return s.slice(0, maxChars) + `\n…[输出过长已截断，原文共 ${s.length} 字符]`;
+  // v0.6.7（报告一 L-1）：此前是裸 slice —— 截断点落在**代理对**中间会切出半个 emoji，
+  // 后续序列化/渲染得到 U+FFFD（BUG-079 只修了 safeHead 那条路径）。这里与它同源：回退一个码元。
+  const safeHead = (/** @type {string} */ t, /** @type {number} */ n) => {
+    if (t.length <= n) return t;
+    const c = t.charCodeAt(n - 1);
+    return c >= 0xd800 && c <= 0xdbff ? t.slice(0, n - 1) : t.slice(0, n);
+  };
+  return safeHead(s, maxChars) + `\n…[输出过长已截断，原文共 ${s.length} 字符]`;
 }

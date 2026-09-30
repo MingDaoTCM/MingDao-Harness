@@ -122,7 +122,12 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
             error: `目录 ${t2} 不在允许范围内（家目录 / 启动目录 / 当前工作目录 / web.browseRoots）。确需切换请配置 web.allowAnyWorkspaceDir: true。`,
           });
         }
-        const r = await setWorkspaceDir(name, body.dir);
+        // v0.6.7（报告一 H-5 / 登记 P1-21 的 set 入口）：**存的必须是归一化后的路径**。
+        // 此前检查用 realpathDeep、落库却传原始 body.dir —— 与同文件 add 分支不对称：
+        // 先建 evil→允许目录、以 evil 通过检查、再把 evil 改指向 `/`，注册表与 state.workingDir
+        // 都是 evil，而 allowedRoots() 每次对 workingDir 做 realpathDeep → 新目标**自己成了允许根**
+        // → fs-browse 围栏整体塌陷。这是"同一判据只加在一条入口上"的第三次重演。
+        const r = await setWorkspaceDir(name, t2);
         if (r.error) return json(res, 400, { error: r.error });
       }
       const dir = workspacePath(name);

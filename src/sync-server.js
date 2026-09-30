@@ -505,47 +505,55 @@ function doShareRevoke(username, shareId) {
  * @param {any} shareId
  */
 function doShareAccept(username, shareId) {
-  const shares = readJson(sharesFile(), {});
-  const s = shares[shareId];
-  if (!s) return { notFound: '分享不存在（可能已撤销）' };
-  if (s.owner === username) return { error: '不能接受自己的分享' };
-  const srcFile = path.join(sessionsDir(s.owner), s.name);
+  // v0.6.7（报告一 M-7）：**文件写必须与记账在同一把锁内**。
+  // 此前只有 accepted/meta/shares 的写在 withWriteLock 里，而**会话文件本身**的写
+  // （就地刷新 / 冲突副本 / 首次落盘）在锁外——两个设备并发接受同一分享时，
+  // 同一 target 会被双写（后写覆盖前者）；跨设备冲突时还会丢掉接受方已有的文件。
+  // 现在：读源文件（锁外，只读）→ 一切"决定 + 写文件 + 记账"都在同一把锁内完成；
+  // 冲突副本同时改为**原子写**（此前是裸 writeFileSync，中断会留半截文件）。
+  const src0 = (() => {
+    const shares = readJson(sharesFile(), {});
+    const s0 = shares[shareId];
+    if (!s0) return { notFound: '分享不存在（可能已撤销）' };
+    if (s0.owner === username) return { error: '不能接受自己的分享' };
+    return { owner: s0.owner, name: s0.name };
+  })();
+  if (src0.notFound) return { notFound: src0.notFound };
+  if (src0.error) return { error: src0.error };
   let content;
   try {
-    content = fs.readFileSync(srcFile, 'utf8');
+    content = fs.readFileSync(path.join(sessionsDir(src0.owner), src0.name), 'utf8');
   } catch {
     return { notFound: '分享的会话已被删除' };
   }
-  const accepted = readJson(acceptedFile(), {});
-  const prev = (accepted[username] || {})[shareId];
-  const prevName = prev?.savedAs || s.name;
-  const target = path.join(sessionsDir(username), prevName);
-  let existing = null;
-  try {
-    existing = fs.readFileSync(target, 'utf8');
-  } catch {}
-  let savedAs = prevName;
-  let conflict = false;
-  if (prev && existing !== null && sha(existing) === prev.copyHash && existing !== content) {
-    // 接受者未修改副本：就地刷新到最新
-    atomicWriteFileSync(target, content, { mode: 0o600 }); // 质检 H4
-  } else if (existing !== null && existing !== content) {
-    // 目标名已有不同内容：另存时间戳副本（绝不覆盖）
-    savedAs = prevName.replace(/\.jsonl$/, `.shared-${Date.now()}.jsonl`);
-    fs.mkdirSync(sessionsDir(username), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(path.join(sessionsDir(username), savedAs), content, { mode: 0o600 });
-    conflict = true;
-  } else {
-    fs.mkdirSync(sessionsDir(username), { recursive: true, mode: 0o700 });
-    atomicWriteFileSync(target, content, { mode: 0o600 }); // 质检 H4
-  }
   return withWriteLock(() => {
-    // v0.6.3（P0-4）：**锁内重读**。此前 shares/accepted 是在锁**外**读的，写回的是陈旧快照——
-    // 于是"revoke 之后的一次并发 accept"会把已删除的 shareId 写回去（分享复活），
-    // 同理也会覆盖并发的 pulls/accepted 更新。这里重新读取并再次校验存在性。
+    // v0.6.3（P0-4）：**锁内重读**——此前 shares/accepted 在锁外读、写回陈旧快照，
+    // 于是"revoke 之后的一次并发 accept"会把已删除的 shareId 写回去（分享复活）。
     const shares2 = readJson(sharesFile(), {});
     if (!shares2[shareId]) return { notFound: '分享不存在（可能已被并发撤销）' };
+    const s = shares2[shareId];
     const accepted2 = readJson(acceptedFile(), {});
+    const prev = (accepted2[username] || {})[shareId];
+    const prevName = prev?.savedAs || s.name;
+    const target = path.join(sessionsDir(username), prevName);
+    let existing = null;
+    try {
+      existing = fs.readFileSync(target, 'utf8');
+    } catch {}
+    let savedAs = prevName;
+    let conflict = false;
+    if (prev && existing !== null && sha(existing) === prev.copyHash && existing !== content) {
+      atomicWriteFileSync(target, content, { mode: 0o600 }); // 接受者未修改副本：就地刷新到最新
+    } else if (existing !== null && existing !== content) {
+      // 目标名已有不同内容：另存时间戳副本（绝不覆盖）
+      savedAs = prevName.replace(/\.jsonl$/, `.shared-${Date.now()}.jsonl`);
+      fs.mkdirSync(sessionsDir(username), { recursive: true, mode: 0o700 });
+      atomicWriteFileSync(path.join(sessionsDir(username), savedAs), content, { mode: 0o600 }); // v0.6.7（M-7）：改原子写
+      conflict = true;
+    } else {
+      fs.mkdirSync(sessionsDir(username), { recursive: true, mode: 0o700 });
+      atomicWriteFileSync(target, content, { mode: 0o600 });
+    }
     const meta = readJson(metaFile(username), {});
     meta[savedAs] = { mtime: Date.now(), size: Buffer.byteLength(content) };
     writeJson(metaFile(username), meta);

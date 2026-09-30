@@ -9034,8 +9034,8 @@ process.stdout.write('done');`
       assert.ok(/Math\.min\(left, sliceMs\)/.test(schedSrc), 'M-13：切片必须按 sliceMs 截断（默认 60s）');
       assert.ok(/if \(shouldStop\(\)\) return 'aborted';/.test(schedSrc), 'M-13：每片醒来都要复查租约');
       assert.ok(
-        /if \(\(await waitGuarded\(defer\.getTime\(\) - Date.now\(\) \+ 2000\)\) === 'aborted'\) return 'aborted';/.test(schedSrc),
-        'M-13：避峰分支必须走切片等待（原实现是一整段可能长达数小时的 sleep）'
+        /if \(\(await waitGuarded\(defer\.getTime\(\) - Date\.now\(\) \+ 2000, 3000\)\) === 'aborted'\) return 'aborted';/.test(schedSrc),
+        'M-13：避峰分支必须走切片等待，且用与其他路径一致的 3s 片（原实现是一整段可能长达数小时的 sleep；v0.6.7 / L-14 统一为 3s）'
       );
 
       const cliSrc = fs.readFileSync(path.join(srcDir, 'cli.js'), 'utf8');
@@ -10436,6 +10436,776 @@ safeRmSync(tmp, { recursive: true, force: true });
     '不得回退成"一整段最长 60s 且期间不查租约"的等待'
   );
   ok('v0.6.6 Windows 测试门禁守卫（源码级）：run-all 开 shell + spawn try/catch + 软链用例统一走能力探测 + 调度等待切片化');
+}
+
+// ---------- 126. v0.6.7 批十二：出网单一口径（SSRF 判定/钉扎 + 闸门覆盖 + Request 语义 + 跨源头白名单） ----------
+// 三份 v0.6.6 审计报告的共同头号发现（报告一 C-1/H-1、报告二 P2-2、报告三 P1）：
+// **fetch 工具自己维护了一份更弱的 SSRF 实现**，与 safe-fetch（BUG-057 已修好的那份）并存——
+//   · DNS 复检的 catch 是「放行」（fail-open，解析失败反而绕过防护）；
+//   · 校验用 lookup()、连接由 undici 再解析一次 → DNS rebinding 窗口（check 公网、connect 内网）；
+//   · 元数据只按主机名判，域名解析到元数据 IP 时不触发。
+// 报告二另有 P2-3（net-guard 对 fetch(Request, init) 丢失 method/body → 静默降级成空 GET），
+// 报告三另有 M1（safe-fetch 走 node:http，**完全绕过**出网闸门 → config.net 的"数据不出门"自证有盲区）。
+// 本节的注入缝（lookup 桩）与 v0.6.6 给 withinRoot 加 `io` 同款理由：只有把解析器换成桩，
+// 才能在离线环境下证明"**判定用的是解析后的地址**、**连接用的是钉住的地址**"。
+{
+  const SG126 = await import(pathToFileURL(path.join(srcDir, 'ssrf-guard.js')).href);
+  const SF126 = await import(pathToFileURL(path.join(srcDir, 'safe-fetch.js')).href);
+  const NG126 = await import(pathToFileURL(path.join(srcDir, 'net-guard.js')).href);
+  const FT126 = await import(pathToFileURL(path.join(srcDir, 'tools', 'fetch.js')).href);
+  const http126 = await import('node:http');
+
+  // ① 对抗性地址表（报告三 §4.4 的建议）：URL 规范化后的各种编码形态必须仍判为私网/元数据
+  {
+    const mustBlock = [
+      '[::ffff:127.0.0.1]', '[::ffff:7f00:1]', '[0:0:0:0:0:ffff:7f00:1]', '[::ffff:a00:1]', '[::ffff:a9fe:a9fe]',
+      '[::1]', '[::]', '[fe80::1]', '[fd00::1]', '[64:ff9b::7f00:1]', '[::ffff:8.8.8.8]'.replace('8.8.8.8', '10.0.0.1'),
+      '0.0.0.0', '127.0.0.1', '10.0.0.1', '172.16.0.1', '192.168.1.1', '169.254.169.254', '100.100.100.200', '224.0.0.1',
+    ];
+    for (const h of mustBlock) assert.equal(SG126.isPrivateHost(h), true, `SSRF：${h} 必须判为内网/保留地址`);
+    const mustAllow = ['8.8.8.8', '93.184.216.34', '[2606:4700::1111]', 'example.com', 'api.deepseek.com'];
+    for (const h of mustAllow) assert.equal(SG126.isPrivateHost(h), false, `SSRF：${h} 必须判为公网`);
+    // v0.6.7（H-1）两处 fail-closed：zone-id 与"含冒号但解析不出 8 组"此前都落到 return false（放行）
+    assert.equal(SG126.isPrivateHost('fe80::1%eth0'), true, 'IPv6 zone-id 必须按私有处理（dns.lookup 接受该形态，解析器却解析不了）');
+    assert.equal(SG126.isPrivateHost('::gggg'), true, '无法解析的 IPv6 必须 fail-closed（此前 return false = 放行）');
+    assert.equal(SG126.isPrivateHost('999.999.999.999'), true, '非法点分四段必须 fail-closed');
+    // URL 规范化后的"怪编码"最终仍指向私网 → 必须拦（WHATWG URL 会先归一化，这里钉住这条保证）
+    for (const raw of ['http://0x7f.0.0.1/', 'http://2130706433/', 'http://0177.0.0.1/', 'http://127.1/']) {
+      assert.equal(SG126.isPrivateHost(new URL(raw).hostname), true, `${raw} 规范化后必须仍判为私网`);
+    }
+    // 元数据端点独立成表（无任何放行开关）
+    assert.equal(SG126.isMetadataHost('fd00:ec2::254'), true, 'IPv6 云元数据地址必须认得');
+    assert.equal(SG126.isMetadataHost('100.100.100.200'), true, '阿里云元数据地址（落在 CGNAT 段内）必须认得');
+  }
+
+  // ② 判定层：fail-closed / 解析后地址 / 钉扎地址（全部用桩解析器，离线可复现）
+  {
+    const dnsFail = () => Promise.reject(Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }));
+    const vFail = await SG126.resolveHostGuarded('rebind.invalid', { lookup: dnsFail });
+    assert.equal(vFail.blocked, true, 'DNS 解析失败必须拒绝（fail-closed）——旧 fetch 工具在这里放行，正是 rebinding 的入口');
+    assert.ok(/fail-closed/.test(vFail.reason), `拒绝理由要点明 fail-closed，实际：${vFail.reason}`);
+    const vPrivate = await SG126.resolveHostGuarded('attacker.example', { lookup: async () => [{ address: '10.0.0.5', family: 4 }] });
+    assert.equal(vPrivate.blocked, true, '域名解析到内网地址必须拒绝（判定要用解析后的地址，不是主机名字面量）');
+    assert.ok(/10\.0\.0\.5/.test(vPrivate.reason), `理由里要写出解析到的地址，实际：${vPrivate.reason}`);
+    const vMeta = await SG126.resolveHostGuarded('attacker.example', { lookup: async () => [{ address: '169.254.169.254', family: 4 }] });
+    assert.equal(vMeta.blocked, true, '域名解析到云元数据地址必须拒绝');
+    const vPublic = await SG126.resolveHostGuarded('attacker.example', { lookup: async () => [{ address: '93.184.216.34', family: 4 }] });
+    assert.equal(vPublic.blocked, false, '解析到公网地址应放行');
+    assert.deepEqual(vPublic.pinned, ['93.184.216.34'], '必须回传**钉扎地址**——连接层只能连它，不能再解析一次');
+    const vEmpty = await SG126.resolveHostGuarded('attacker.example', { lookup: async () => [] });
+    assert.equal(vEmpty.blocked, true, '解析结果为空必须拒绝（fail-closed）');
+  }
+
+  // ③ 端到端钉扎：桩解析把"不可解析的主机名"指向本机服务 → 必须真的连上（证明连接用的是钉住的 IP）
+  {
+    let hit126 = null;
+    const srv126 = http126.createServer((req, res) => {
+      hit126 = { url: req.url, host: req.headers.host };
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.end('PINNED-OK');
+    });
+    await new Promise((r) => srv126.listen(0, '127.0.0.1', r));
+    const p126 = srv126.address().port;
+    try {
+      const r = await SF126.safeFetchText(`http://cannot-resolve.invalid:${p126}/pinned-path`, {
+        allowPrivate: true,
+        lookup: async () => [{ address: '127.0.0.1', family: 4 }],
+      });
+      assert.equal(r.error, undefined, `钉扎后应连到已校验 IP，实际：${r.error}`);
+      assert.equal(r.text, 'PINNED-OK', '响应正文应来自钉扎 IP 上的服务');
+      assert.equal(hit126?.url, '/pinned-path', '请求应真的到达该服务（主机名本身不可解析）');
+      assert.equal(r.status, 200, 'safeFetchText 必须回传状态码（fetch 工具迁入后仍要报给模型）');
+      assert.ok('contentType' in r, 'safeFetchText 必须回传 contentType');
+      // 反例：allowPrivate 关闭时，同样的桩解析结果必须被拒（内网地址不因"主机名看起来是公网"而放行）
+      const rBlocked = await SF126.safeFetchText(`http://cannot-resolve.invalid:${p126}/x`, {
+        lookup: async () => [{ address: '127.0.0.1', family: 4 }],
+      });
+      assert.ok(rBlocked.error && /内网/.test(rBlocked.error), `解析到回环必须拒绝，实际：${JSON.stringify(rBlocked)}`);
+    } finally {
+      srv126.close();
+      srv126.closeAllConnections?.();
+    }
+  }
+
+  // ④ fetch 工具：单一口径（走的正是上面那套判定），三种地址形态都必须拒
+  {
+    const ctx126 = { cwd: os.tmpdir(), cfg: {} };
+    const fLocal = await dispatch('fetch', { url: 'http://127.0.0.1:9/' }, ctx126);
+    assert.equal(fLocal.ok, false, 'fetch 工具：本机地址必须拒绝');
+    assert.ok(/内网/.test(String(fLocal.error)), 'fetch 工具：拒绝理由应说明内网');
+    const fMeta = await dispatch('fetch', { url: 'http://169.254.169.254/latest/meta-data/' }, ctx126);
+    assert.equal(fMeta.ok, false, 'fetch 工具：云元数据必须拒绝');
+    assert.ok(/元数据/.test(String(fMeta.error)), 'fetch 工具：元数据要给专门的理由');
+    const fV6 = await dispatch('fetch', { url: 'http://[::ffff:7f00:1]:9/' }, ctx126);
+    assert.equal(fV6.ok, false, 'fetch 工具：IPv4-mapped 十六进制形态必须拒绝');
+    const fFile = await dispatch('fetch', { url: 'file:///etc/passwd' }, ctx126);
+    assert.equal(fFile.ok, false, 'fetch 工具：非 http(s) 必须拒绝');
+  }
+
+  // ⑤ 出网闸门覆盖（报告三 M1）：safe-fetch 走 node:http，也必须过闸 + 记账
+  {
+    assert.equal(NG126.installEgressGate({ allow: ['allowed.example'], mode: 'block' }), true, '闸门应安装');
+    try {
+      const r = await SF126.safeFetchText('http://blocked.example/x', { allowPrivate: true, lookup: async () => [{ address: '127.0.0.1', family: 4 }] });
+      assert.ok(r.error && /出网被拦截/.test(r.error), `block 模式下 safe-fetch 必须被拦，实际：${JSON.stringify(r)}`);
+      const logged = NG126.readEgressLog({}).filter((e) => e.host === 'blocked.example');
+      assert.ok(logged.length > 0 && logged[0].allowed === false, '被拦的这次出网必须进账本（此前 node:http 路径完全不入账）');
+      const okd = NG126.decideEgress('https://allowed.example/v1');
+      assert.equal(okd.allowed, true, '白名单内主机必须放行（拦截不能把正常路径一起挡掉）');
+    } finally {
+      NG126.uninstallEgressGate();
+    }
+  }
+
+  // ⑥ 报告二 P2-3：`fetch(new Request(POST, body), { signal })` 必须仍是 POST + body
+  //    （原实现只在"没有 init"时才继承 Request 语义；带 init 时 method/body/headers 全丢 → 空 GET）
+  {
+    let seen126 = /** @type {any} */ (null);
+    const srv126b = http126.createServer((req, res) => {
+      let body = '';
+      req.on('data', (c) => (body += c));
+      req.on('end', () => {
+        seen126 = { method: req.method, body, xApiKey: req.headers['x-api-key'] };
+        res.writeHead(200);
+        res.end('ok');
+      });
+    });
+    await new Promise((r) => srv126b.listen(0, '127.0.0.1', r));
+    const p126b = srv126b.address().port;
+    NG126.installEgressGate({ allow: [], mode: 'warn' }); // warn：放行 + 闸门自己逐跳跟随
+    try {
+      const ac126 = new AbortController();
+      const reqObj = new Request(`http://127.0.0.1:${p126b}/post`, {
+        method: 'POST',
+        body: 'hello-body-126',
+        headers: { 'x-api-key': 'sk-secret-126' },
+      });
+      await fetch(reqObj, { signal: ac126.signal }).then((r) => r.text());
+      assert.equal(seen126?.method, 'POST', `Request+init 合并后必须仍是 POST，实际 ${seen126?.method}`);
+      assert.equal(seen126?.body, 'hello-body-126', `Request+init 合并后 body 不能丢，实际 ${JSON.stringify(seen126?.body)}`);
+      assert.equal(seen126?.xApiKey, 'sk-secret-126', 'Request 上的自定义头不能丢');
+    } finally {
+      NG126.uninstallEgressGate();
+      srv126b.close();
+      srv126b.closeAllConnections?.();
+    }
+  }
+
+  // ⑦ 报告一 M-4：跨 origin 跳转按**反向白名单**剥头（黑名单只删得掉 authorization/cookie/proxy-authorization，
+  //    x-api-key 这类自定义凭据头会原样送给攻击者域）
+  {
+    let atAttacker = /** @type {any} */ (null);
+    const srvAttacker = http126.createServer((req, res) => {
+      atAttacker = { headers: { ...req.headers } };
+      res.end('attacker');
+    });
+    await new Promise((r) => srvAttacker.listen(0, '127.0.0.1', r));
+    const pAtt = srvAttacker.address().port;
+    const srvFirst = http126.createServer((req, res) => {
+      res.writeHead(302, { Location: `http://127.0.0.1:${pAtt}/steal` });
+      res.end();
+    });
+    await new Promise((r) => srvFirst.listen(0, '127.0.0.1', r));
+    const pFirst = srvFirst.address().port;
+    NG126.installEgressGate({ allow: [], mode: 'warn' });
+    try {
+      await fetch(`http://127.0.0.1:${pFirst}/redirect`, {
+        headers: { 'x-api-key': 'sk-leak-126', authorization: 'Bearer sk-leak-126', accept: 'text/plain', 'user-agent': 'mdh-test-126' },
+      }).then((r) => r.text());
+      assert.equal(atAttacker?.headers?.['x-api-key'], undefined, 'x-api-key 不得跨 origin 保留（这是黑名单漏掉的那一类）');
+      assert.equal(atAttacker?.headers?.authorization, undefined, 'authorization 不得跨 origin 保留');
+      assert.equal(atAttacker?.headers?.accept, 'text/plain', '安全头（accept）应继续保留——白名单不能把正常请求削光');
+      assert.equal(atAttacker?.headers?.['user-agent'], 'mdh-test-126', 'user-agent 应保留');
+      assert.ok(NG126.stripHeadersForCrossOrigin, '跨源头裁剪必须是可测的单一函数');
+    } finally {
+      NG126.uninstallEgressGate();
+      srvFirst.close();
+      srvAttacker.close();
+      srvFirst.closeAllConnections?.();
+      srvAttacker.closeAllConnections?.();
+    }
+  }
+
+  // ⑧ 结构守卫（报告一 S-1「判定单源制度化」的第一步）：这几类判定只允许一处实现
+  {
+    const jsFiles126 = [];
+    (function walk126(/** @type {string} */ d) {
+      for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+        const fp = path.join(d, e.name);
+        if (e.isDirectory()) walk126(fp);
+        else if (e.name.endsWith('.js')) jsFiles126.push(fp);
+      }
+    })(srcDir);
+    /** 剥注释后再判（注释里正当地提到这些写法不该算违规） */
+    const strip = (/** @type {string} */ t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    const dnsUsers = [];
+    const privateDefs = [];
+    const metaDefs = [];
+    const fetchImpl = [];
+    for (const f of jsFiles126) {
+      const rel = path.relative(srcDir, f);
+      const code = strip(fs.readFileSync(f, 'utf8'));
+      if (/node:dns\/promises/.test(code)) dnsUsers.push(rel);
+      if (/function isPrivateHost\s*\(/.test(code)) privateDefs.push(rel);
+      if (/function isMetadataHost\s*\(/.test(code)) metaDefs.push(rel);
+      // 「自己拿 lookup + 自己 fetch」= 又写了一份 SSRF 判定（正是本批修掉的形态）
+      if (/await fetch\(/.test(code) && /dns\/promises|lookup\(/.test(code)) fetchImpl.push(rel);
+    }
+    assert.deepEqual(dnsUsers, ['ssrf-guard.js'], `DNS 解析只允许在 ssrf-guard.js 里做（实际：${dnsUsers.join(', ')}）`);
+    assert.deepEqual(privateDefs, ['ssrf-guard.js'], `isPrivateHost 只允许一处实现（实际：${privateDefs.join(', ')}）`);
+    assert.deepEqual(metaDefs, ['ssrf-guard.js'], `isMetadataHost 只允许一处实现（实际：${metaDefs.join(', ')}）`);
+    assert.deepEqual(fetchImpl, [], `不得再出现"自校验 DNS + 自 fetch"的第二份 SSRF 实现（实际：${fetchImpl.join(', ')}）`);
+    // fetch 工具必须走 safeFetchText；safe-fetch 必须过闸；再导出必须是同一函数对象（不是副本）
+    const ftCode = strip(fs.readFileSync(path.join(srcDir, 'tools', 'fetch.js'), 'utf8'));
+    assert.ok(/safeFetchText/.test(ftCode), 'fetch 工具必须复用 safeFetchText（单一来源）');
+    assert.ok(!/\blookup\(/.test(ftCode), 'fetch 工具不得自己再解析 DNS');
+    const sfCode = strip(fs.readFileSync(path.join(srcDir, 'safe-fetch.js'), 'utf8'));
+    assert.ok(/guardEgress\(/.test(sfCode), 'safe-fetch 必须过出网闸门（否则 config.net 的"数据不出门"自证有盲区）');
+    assert.equal(FT126.isPrivateHost, SG126.isPrivateHost, 'tools/fetch.js 的再导出必须是 ssrf-guard 的同一个函数对象');
+    assert.equal(FT126.isMetadataHost, SG126.isMetadataHost, 'tools/fetch.js 的再导出必须是 ssrf-guard 的同一个函数对象');
+  }
+  ok('v0.6.7 批十二 出网单一口径：对抗地址表 + 判定层 fail-closed/钉扎 + 端到端 IP 钉扎 + 闸门覆盖 safe-fetch + Request+init 语义 + 跨源反向白名单 + 判定单源结构守卫');
+}
+
+// ---------- 127. v0.6.7 批十三：账本与计费诚实性（结局单源 / 读失败 fail-open / 用量缺失 / Batch 漏账 / 降级在途） ----------
+// 报告二 P2-1（结局判定分裂）、报告一 H-3（读失败当 0）、H-4（usage 缺失记 0）、M-10（Batch 失败路径漏账）、
+// 登记 §3.39①(b)/(c)（downgrade 不看在途、Batch 不查护栏）。
+// 统一不变量：**「未知」绝不等于「0」**（金额未知、用量未知、结局未知都要能被说出来）。
+{
+  const http127 = await import('node:http');
+  const { createLedger, newRunId, readRun } = await import(pathToFileURL(path.join(srcDir, 'ledger.js')).href);
+  const CS127 = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+  const CG127 = await import(pathToFileURL(path.join(srcDir, 'cost-guard.js')).href);
+  const BATCH127 = await import(pathToFileURL(path.join(srcDir, 'batch.js')).href);
+  const home127 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p127-'));
+  const prevHome127 = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = home127;
+
+  /** 读**最近一次**回合的账本（同一 home 下会有多份 run，必须按 mtime 取最新——否则会读到上一段的账） */
+  const lastRunEvents = () => {
+    const dir = path.join(home127, 'ledger');
+    const files = fs
+      .readdirSync(dir)
+      .filter((n) => n.endsWith('.jsonl'))
+      .map((n) => ({ n, t: fs.statSync(path.join(dir, n)).mtimeMs }))
+      .sort((a, b) => b.t - a.t);
+    return readRun(files[0].n.replace(/\.jsonl$/, ''));
+  };
+  try {
+    // ① P2-1：**结局判定的单一来源**——返回值与账本 run.end 必须完全一致
+    //    （报告二的行为级复现是：RETURN capHit=true / LEDGER status=done capHit=false）
+    {
+      let t127 = 0;
+      const fake127 = {
+        async chat(/** @type {any} */ opts) {
+          t127 += 1;
+          if ((opts.tools || []).length) {
+            return {
+              text: '',
+              toolCalls: [{ id: 'c127_' + t127, type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: 'x.txt' }) } }],
+              usage: { prompt_tokens: 5, completion_tokens: 2 },
+              finish: 'tool_calls',
+            };
+          }
+          return { text: '兜底总结。', toolCalls: null, usage: { prompt_tokens: 6, completion_tokens: 8 }, finish: 'stop' };
+        },
+      };
+      const agent127 = createAgent({
+        provider: fake127,
+        permission: { async check() { return true; } },
+        io: createIO({ quiet: true }),
+        modelName: 'deepseek-v4-flash',
+        workingDir: home127,
+        cfg: { permission: 'auto', maxRounds: 1 },
+        maxSteps: 2,
+      });
+      const r127 = await agent127.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: '做任务' }]);
+      const ev = lastRunEvents();
+      const runEnd = ev.find((/** @type {any} */ e) => e.type === 'run.end');
+      const runStart = ev.find((/** @type {any} */ e) => e.type === 'run.start');
+      assert.ok(runEnd, '账本必须有 run.end');
+      assert.equal(r127.capHit, true, '跑满步数应标记 capHit（前置：本场景确实命中上限）');
+      assert.equal(runEnd.status, r127.capHit ? 'capped' : 'done', `账本 status 必须与返回值同源（实际 status=${runEnd.status}，返回值 capHit=${r127.capHit}）`);
+      assert.equal(Boolean(runEnd.capHit), Boolean(r127.capHit), '账本 capHit 必须与返回值一致（此前跑满步数时账本记 false）');
+      assert.equal(Boolean(runEnd.truncated), Boolean(r127.truncated), '账本 truncated 必须与返回值一致');
+      assert.equal(Boolean(runEnd.aborted), Boolean(r127.aborted), '账本 aborted 必须与返回值一致');
+      // P3-1：run.start 的 packs 必须是真名单（此前取了一个不存在的 .packs 键，恒为空数组）
+      assert.ok(Array.isArray(runStart?.packs), 'run.start 必须带 packs 数组');
+      assert.ok(!('max_steps' === String(runEnd.status)), '死条件 max_steps 不得再出现');
+    }
+
+    // ② H-3：cache-stats **文件存在但读不出来** → todayCost 必须返回 null（而非 0）
+    //    用子进程跑：todayCost 有 mtime 缓存，同进程内前一次成功读会掩盖这次失败。
+    {
+      const home127b = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p127b-'));
+      const file127b = path.join(home127b, 'cache-stats.jsonl');
+      fs.writeFileSync(file127b, JSON.stringify({ at: Date.now(), model: 'deepseek-v4-flash', prompt: 100, completion: 10, cost: 1.23 }) + '\n');
+      const probe = `import(${JSON.stringify(pathToFileURL(path.join(srcDir, 'cost-guard.js')).href)}).then((m) => { console.log('TODAY=' + JSON.stringify(m.todayCost())); });`;
+      const runProbe = () => spawnSync(process.execPath, ['-e', probe], { encoding: 'utf8', env: { ...process.env, MINGDAO_HOME: home127b } });
+      const okRead = runProbe();
+      assert.ok(/TODAY=1\.23/.test(okRead.stdout), `可读时应算出今日费用，实际：${okRead.stdout}`);
+      fs.chmodSync(file127b, 0o000); // 存在但读不出来（stat 能过）
+      const badRead = runProbe();
+      assert.ok(/TODAY=null/.test(badRead.stdout), `读失败必须返回 null（不能静默当 0），实际：${badRead.stdout}`);
+      assert.ok(/费用统计读取失败/.test(badRead.stderr), '读失败必须告警一次（此前无任何信号）');
+      fs.chmodSync(file127b, 0o600);
+      fs.rmSync(file127b, { force: true });
+      const noFile = runProbe();
+      assert.ok(/TODAY=0/.test(noFile.stdout), `文件不存在是"今天还没花钱"（0），实际：${noFile.stdout}`);
+      safeRmSync(home127b, { recursive: true, force: true });
+    }
+
+    // ③ H-4：用量缺失 → 记 null/priced:false + **可见信号**（今日未知条数 + 护栏告警）
+    {
+      const r1 = CS127.recordUsage('deepseek-v4-flash', { prompt_tokens: 0, completion_tokens: 0 }, { usageUnknown: true });
+      assert.equal(r1.ok, true, '未知用量也要落账（记的是"未知"这件事）');
+      const line = fs.readFileSync(path.join(home127, 'cache-stats.jsonl'), 'utf8').trim().split('\n').pop();
+      const entry = JSON.parse(String(line));
+      assert.equal(entry.cost, null, '用量未知绝不能记成 ¥0（0 会被读成"没花钱"）');
+      assert.equal(entry.usageUnknown, true, '必须显式标记 usageUnknown');
+      assert.equal(CG127.todayCost(), 0, '金额无法估算：累计金额仍是 0（但下面条数不为 0）');
+      assert.equal(CG127.todayCostUnknownCount(), 1, '今日"用量未知"的次数必须可查（护栏的可见信号）');
+      fs.writeFileSync(path.join(home127, 'config.json'), JSON.stringify({ costGuard: { dailyLimitYuan: 10, action: 'warn' } }));
+      const guardMsg = CG127.checkCostGuard('deepseek-v4-flash');
+      assert.ok(guardMsg && /用量未知/.test(guardMsg.message), `护栏必须说出"有未知消费"，实际：${JSON.stringify(guardMsg)}`);
+      // 反例：正常用量不得被当成未知
+      CS127.recordUsage('deepseek-v4-flash', { prompt_tokens: 1000, completion_tokens: 100 }, {});
+      assert.equal(CG127.todayCostUnknownCount(), 1, '正常记账不得增加未知计数');
+      assert.ok(CG127.todayCost() > 0, '正常记账必须计入今日费用');
+    }
+
+    // ④ H-4 端到端：真实回合里 provider 不回 usage → 返回值与账本都要标"用量未知"
+    {
+      let t127c = 0;
+      const fake127c = {
+        async chat() {
+          t127c += 1;
+          // 有正文、**没有 usage**（自建网关/中转端点常见）
+          return { text: '回答（网关未回 usage）', toolCalls: null, usage: null, finish: 'stop' };
+        },
+      };
+      const agent127c = createAgent({
+        provider: fake127c,
+        permission: { async check() { return true; } },
+        io: createIO({ quiet: true }),
+        modelName: 'deepseek-v4-flash',
+        workingDir: home127,
+        cfg: { permission: 'auto', maxRounds: 1 },
+        maxSteps: 2,
+      });
+      const r = await agent127c.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: '问一句' }]);
+      assert.equal(r.perf?.usageUnknown, true, '返回值必须带 usageUnknown（供 CLI/WebUI 落账时区分"未知"与"0"）');
+      const ev = lastRunEvents();
+      const cost = ev.find((/** @type {any} */ e) => e.type === 'cost');
+      assert.ok(cost, '账本必须有 cost 事件');
+      assert.equal(cost.priced, false, '用量未知时 priced 必须为 false（不得冒充有价）');
+      assert.equal(cost.yuan, null, '用量未知时金额必须为 null');
+      assert.equal(cost.usageUnknown, true, '账本必须显式记下"这次用量未知"');
+      assert.equal(t127c >= 1, true, '（前置）确实调用过模型');
+    }
+
+    // ⑤ M-10 + §3.39①(c)：Batch 失败路径要落账；有护栏时提交前必须过闸
+    {
+      process.env.MINGDAO_BATCH_POLL_MS = '50';
+      const homeB127 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p127batch-'));
+      const prevHomeB = process.env.MINGDAO_HOME;
+      process.env.MINGDAO_HOME = homeB127;
+      // 批处理需要凭据（与既有 batch 测试同款：cfg.provider='custom' 但模型预设走 deepseek 的 Key）
+      fs.writeFileSync(path.join(homeB127, 'credentials.json'), JSON.stringify({ deepseek: 'sk-batch-127-abcdef123456' }), { mode: 0o600 });
+      let serverHits = 0;
+      const mock127 = http127.createServer((req, res) => {
+        serverHits += 1;
+        const u = new URL(req.url, 'http://x');
+        if (u.pathname === '/files') {
+          req.on('data', () => {});
+          req.on('end', () => {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ id: 'file-x' }));
+          });
+          return;
+        }
+        if (u.pathname === '/batches' && req.method === 'POST') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ id: 'batch-x', status: 'validating' }));
+          return;
+        }
+        if (u.pathname === '/batches/batch-x') {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ id: 'batch-x', status: 'failed', request_counts: { completed: 3, total: 3 }, errors: { message: '上游拒绝' } }));
+          return;
+        }
+        res.writeHead(404);
+        res.end('{}');
+      });
+      await new Promise((r) => mock127.listen(0, '127.0.0.1', r));
+      const port127 = mock127.address().port;
+      const cfgB = { provider: 'custom', model: 'deepseek-v4-flash', baseUrl: `http://127.0.0.1:${port127}/v1` };
+      try {
+        const rFail = await BATCH127.runBatch({ cfg: cfgB, model: 'deepseek-v4-flash', questions: ['问题一'], workingDir: homeB127, onStatus: () => {} });
+        assert.ok(rFail.error && /批处理失败/.test(rFail.error), `应如实报失败，实际：${JSON.stringify(rFail)}`);
+        const statsFile = path.join(homeB127, 'cache-stats.jsonl');
+        assert.ok(fs.existsSync(statsFile), 'Batch 失败/取消路径必须留下记录（此前一条都不写：账单在涨、账上没有这笔）');
+        const stats = fs.readFileSync(statsFile, 'utf8');
+        assert.ok(/"usageUnknown":true/.test(stats), '服务端已处理的批次失败，本地必须记一条"用量未知"（此前一条都不写）');
+        assert.ok(/"batch":true/.test(stats), 'Batch 记录要带 batch 标记');
+        assert.ok(!/"cost":0\b/.test(stats), '未知消费绝不能记成 cost:0');
+        // §3.39①(c)：护栏 block 档必须在**提交前**拒绝（服务端不该被碰到）
+        fs.writeFileSync(
+          path.join(homeB127, 'cache-stats.jsonl'),
+          JSON.stringify({ at: Date.now(), model: 'deepseek-v4-flash', prompt: 10, completion: 1, cost: 99, hit: null, miss: null }) + '\n'
+        );
+        fs.writeFileSync(path.join(homeB127, 'config.json'), JSON.stringify({ costGuard: { dailyLimitYuan: 1, action: 'block' }, provider: 'custom', model: 'deepseek-v4-flash' }));
+        const hitsBefore = serverHits;
+        const rBlocked = await BATCH127.runBatch({ cfg: cfgB, model: 'deepseek-v4-flash', questions: ['问题一'], workingDir: homeB127, onStatus: () => {} });
+        assert.ok(rBlocked.error && /费用护栏拦截/.test(rBlocked.error), `护栏 block 档必须拒绝提交，实际：${JSON.stringify(rBlocked)}`);
+        assert.equal(serverHits, hitsBefore, '被护栏拦截时不得向服务端发出任何请求（拦截要在提交前）');
+      } finally {
+        mock127.close();
+        mock127.closeAllConnections?.();
+        delete process.env.MINGDAO_BATCH_POLL_MS;
+        process.env.MINGDAO_HOME = prevHomeB;
+        safeRmSync(homeB127, { recursive: true, force: true });
+      }
+    }
+
+    // ⑥ 登记 §3.39①(b)：action='downgrade' 也必须看在途费用（降级不是免检通道）
+    {
+      const homeD127 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p127dg-'));
+      process.env.MINGDAO_HOME = homeD127;
+      try {
+        // 今日已超限（落账）→ 护栏给出 downgrade；换到便宜模型后按最坏成本复查 → 仍超 → 必须停
+        const today = Date.now();
+        const start = new Date(new Date(today).toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+        start.setHours(0, 0, 0, 0);
+        fs.writeFileSync(
+          path.join(homeD127, 'cache-stats.jsonl'),
+          JSON.stringify({ at: start.getTime() + 60000, model: 'deepseek-v4-pro', prompt: 10, completion: 1, cost: 5, hit: null, miss: null }) + '\n'
+        );
+        fs.writeFileSync(path.join(homeD127, 'config.json'), JSON.stringify({ costGuard: { dailyLimitYuan: 1, action: 'downgrade', downgradeModel: 'deepseek-v4-flash' } }));
+        let providerCalls = 0;
+        const agentD = createAgent({
+          provider: { async chat() { providerCalls += 1; return { text: '不该被调用', toolCalls: null, usage: { prompt_tokens: 1, completion_tokens: 1 }, finish: 'stop' }; } },
+          permission: { async check() { return true; } },
+          io: createIO({ quiet: true }),
+          modelName: 'deepseek-v4-pro',
+          workingDir: homeD127,
+          cfg: { permission: 'auto', maxRounds: 1, costGuard: { dailyLimitYuan: 1, action: 'downgrade', downgradeModel: 'deepseek-v4-flash' } },
+          maxSteps: 2,
+        });
+        const rd = await agentD.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: '做任务' }]);
+        // v0.6.7（登记 §3.39①(b)）：修法是让**在途费用参与降级决策**，而不是否决降级本身
+        // （否决等于把"降级继续干"这个功能废掉——第一版就是这么写的，被既有 41d 降级用例当场抓出）。
+        // 本用例：落账已超线 → 触发降级 → 请求应发给**便宜模型**（而不是一个都不发）。
+        assert.equal(rd.perf?.usedModel, 'deepseek-v4-flash', `超限时应降级到便宜模型继续（实际 ${rd.perf?.usedModel}）`);
+        assert.equal(providerCalls, 1, '降级后应正常发出一次请求');
+        // ⑥-b 在途费用必须**参与决策**（这是登记 §3.39①(b) 的本体）：
+        // 落账未越线、但「今日已用 + 本回合在途」越线时，贵模型不该继续用到回合结束
+        // ——报告实测单回合可超日限 9.1×。这里让第一轮用掉一大笔（在途越线），第二轮必须换便宜模型。
+        {
+          const homeD2 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p127dg2-'));
+          const prevD2 = process.env.MINGDAO_HOME;
+          process.env.MINGDAO_HOME = homeD2;
+          try {
+            const today0 = Date.now();
+            const dayStart = new Date(new Date(today0).toLocaleString('en-US', { timeZone: 'Asia/Shanghai' }));
+            dayStart.setHours(0, 0, 0, 0);
+            fs.writeFileSync(
+              path.join(homeD2, 'cache-stats.jsonl'),
+              JSON.stringify({ at: dayStart.getTime() + 1000, model: 'deepseek-v4-pro', prompt: 10, completion: 1, cost: 0.5, hit: null, miss: null }) + '\n'
+            );
+            fs.writeFileSync(path.join(homeD2, 'config.json'), JSON.stringify({ costGuard: { dailyLimitYuan: 1, action: 'downgrade', downgradeModel: 'deepseek-v4-flash' } }));
+            /** 只记录**主循环**的调用：回合内还可能有 no-tool 的辅助调用（约束改写/压缩摘要等），
+             *  它们不属于"这一步用了哪个模型"，混在一起会让断言看起来失败（第一版就这么错过一次）。 */
+            const used = [];
+            let n = 0;
+            const agentB = createAgent({
+              provider: {
+                async chat(/** @type {any} */ opts) {
+                  const withTools = (opts.tools || []).length > 0;
+                  if (withTools) used.push(opts.model);
+                  n += 1;
+                  if (withTools && n <= 2) {
+                    // 第一轮（主循环）：贵模型 + 巨额用量（在途因此越线）+ 继续调用工具（迫使进入下一轮）
+                    return { text: '', toolCalls: [{ id: 'c' + n, type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: 'x.txt' }) } }], usage: { prompt_tokens: 900000, completion_tokens: 10 }, finish: 'tool_calls' };
+                  }
+                  return { text: '完成', toolCalls: null, usage: { prompt_tokens: 5, completion_tokens: 3 }, finish: 'stop' };
+                },
+              },
+              permission: { async check() { return true; } },
+              io: createIO({ quiet: true }),
+              modelName: 'deepseek-v4-pro',
+              workingDir: homeD2,
+              cfg: { permission: 'auto', maxRounds: 1, costGuard: { dailyLimitYuan: 1, action: 'downgrade', downgradeModel: 'deepseek-v4-flash' } },
+              maxSteps: 3,
+            });
+            await agentB.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: '做任务' }]);
+            assert.ok(used.length >= 2, `（前置）应至少两轮，实际 ${JSON.stringify(used)}`);
+            assert.equal(used[0], 'deepseek-v4-pro', '第一轮仍是原模型（落账此时未越线）');
+            assert.equal(used[1], 'deepseek-v4-flash', `在途越线后必须立刻降级（实际第二轮用了 ${used[1]}）——这正是"在途参与决策"`);
+          } finally {
+            process.env.MINGDAO_HOME = prevD2;
+            safeRmSync(homeD2, { recursive: true, force: true });
+          }
+        }
+
+        // 已在最便宜档 + （含在途）越线 → 必须停：模型已是 downgradeModel 本身，无法再降
+        {
+          let calls2 = 0;
+          const agentD2 = createAgent({
+            provider: { async chat() { calls2 += 1; return { text: 'x', toolCalls: null, usage: { prompt_tokens: 1, completion_tokens: 1 }, finish: 'stop' }; } },
+            permission: { async check() { return true; } },
+            io: createIO({ quiet: true }),
+            modelName: 'deepseek-v4-flash',
+            workingDir: homeD127,
+            cfg: { permission: 'auto', maxRounds: 1, costGuard: { dailyLimitYuan: 1, action: 'downgrade', downgradeModel: 'deepseek-v4-flash' } },
+            maxSteps: 2,
+          });
+          const rd2 = await agentD2.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: '做任务' }]);
+          assert.ok(/已是最便宜|无法再降|已暂停/.test(String(rd2.note || '')), `已最便宜且越线必须停并说明，实际 note=${rd2.note}`);
+          assert.equal(calls2, 0, '已最便宜且越线时不得再发请求');
+        }
+      } finally {
+        process.env.MINGDAO_HOME = home127;
+        safeRmSync(homeD127, { recursive: true, force: true });
+      }
+    }
+
+    // ⑦ P3-1：账本 run.start 的 packs 必须是**真名单**（挂载了 Pack 时不能是空数组）
+    {
+      const P127 = await import(pathToFileURL(path.join(srcDir, 'packs.js')).href);
+      const proj127 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p127pack-'));
+      const pdir127 = path.join(proj127, '.mingdao', 'packs', 'p127');
+      fs.mkdirSync(pdir127, { recursive: true });
+      fs.writeFileSync(
+        path.join(pdir127, 'pack.json'),
+        JSON.stringify({ apiVersion: 1, name: 'p127', version: '1.0.0', engines: { mingdao: `>=${(await import(pathToFileURL(path.join(srcDir, 'packs.js')).href)).coreVersionOf()} <999.0.0` }, description: 'probe', contributes: { tools: true } })
+      );
+      fs.writeFileSync(path.join(pdir127, 'pack.mjs'), 'export const apiVersion = 1;\nexport function createPack() { return {}; }\n');
+      try {
+        assert.ok(P127.trustPack(path.dirname(pdir127)).ok, '（前置）项目级 Pack 信任应成功');
+        P127.resetPacksForTest();
+        const mounted = await P127.mountPacks({}, { cwd: proj127 });
+        assert.ok(mounted.mounted.some((/** @type {any} */ p) => p.name === 'p127'), '（前置）Pack 应已挂载');
+        const agentP = createAgent({
+          provider: { async chat() { return { text: 'ok', toolCalls: null, usage: { prompt_tokens: 1, completion_tokens: 1 }, finish: 'stop' }; } },
+          permission: { async check() { return true; } },
+          io: createIO({ quiet: true }),
+          modelName: 'deepseek-v4-flash',
+          workingDir: proj127,
+          cfg: { permission: 'auto', maxRounds: 1 },
+          maxSteps: 1,
+        });
+        await agentP.runTurn([{ role: 'system', content: '系统' }, { role: 'user', content: '做任务' }]);
+        const ev = lastRunEvents();
+        const runStart = ev.find((/** @type {any} */ e) => e.type === 'run.start');
+        assert.ok(
+          Array.isArray(runStart?.packs) && runStart.packs.includes('p127'),
+          `run.start.packs 必须列出真正挂载的 Pack（此前恒为 []），实际：${JSON.stringify(runStart?.packs)}`
+        );
+      } finally {
+        P127.resetPacksForTest();
+        safeRmSync(proj127, { recursive: true, force: true });
+      }
+    }
+
+    // ⑧ 结构守卫（源码级）：这几条口径不许再回退
+    {
+      const strip = (/** @type {string} */ t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      const agentSrc = strip(fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8'));
+      assert.ok(/status: outcome\.status/.test(agentSrc), '账本 runEnd 的 status 必须取自单一来源 outcome');
+      assert.ok(!/finish === 'max_steps'/.test(agentSrc), "不得再出现 `finish === 'max_steps'` 死条件");
+      assert.ok(/usageUnknown/.test(agentSrc), 'agent 必须识别"用量缺失"');
+      const cgSrc = strip(fs.readFileSync(path.join(srcDir, 'cost-guard.js'), 'utf8'));
+      assert.ok(/listCacheStatsStrict/.test(cgSrc), '护栏必须走严格读取（读失败要能被区分出来）');
+      assert.ok(!/listCacheStats\(/.test(cgSrc), '护栏不得再用"读失败当空列表"的宽松读取');
+      const bSrc = strip(fs.readFileSync(path.join(srcDir, 'batch.js'), 'utf8'));
+      assert.ok(/checkCostGuard/.test(bSrc), 'Batch 通道必须查费用护栏');
+      assert.ok(/recordUnaccountedBatch/.test(bSrc), 'Batch 失败/取消路径必须留下"用量未知"记录');
+      const webSrc = strip(fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8'));
+      assert.ok(/r\.capHit \? 'capped' : 'done'/.test(webSrc), 'Web 侧 capHit 不得再标成 done（与 worker 口径统一为「不算完成」）');
+      const wkSrc = strip(fs.readFileSync(path.join(srcDir, 'tasks', 'worker.js'), 'utf8'));
+      assert.ok(/res\.capHit \? 'failed'/.test(wkSrc), 'worker 侧 capHit 仍按「不算完成」处理');
+    }
+    ok('v0.6.7 批十三 账本与计费诚实性：结局单源（返回值≡账本）+ 读失败返 null + 用量缺失记 null/可见信号 + Batch 失败落账与护栏前置 + 降级看在途 + run.start 真 Pack 名单 + 结构守卫');
+  } finally {
+    process.env.MINGDAO_HOME = prevHome127;
+    safeRmSync(home127, { recursive: true, force: true });
+  }
+}
+
+// ---------- 128. v0.6.7 批十四/十五：安全面中危 + P3 速修 ----------
+// 报告一 H-2（脱敏引号键）/ M-1（凭证写 fail-closed）/ M-2（deny 拆段）/ M-3（bash env 词表）/
+// M-5（ReDoS 单源）/ M-13（Provider 模块无限重载）/ L-1（代理对截断）；
+// 报告二 P3-3/P3-4/P3-5/P3-7；报告一 M-6/M-7 的锁纪律（结构守卫 + e2e-local 行为级）。
+{
+  const prevHome128 = process.env.MINGDAO_HOME;
+  const home128 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p128-'));
+  process.env.MINGDAO_HOME = home128;
+  try {
+    // ① H-2：脱敏器必须认得**带引号的键**（JSON / YAML / 冒号后带引号），而不再只认裸 `KEY=`
+    {
+      const { redactSecrets } = await import(pathToFileURL(path.join(srcDir, 'redact.js')).href);
+      // ⚠ 用**没有已知前缀**的密钥值（AWS 那种）来测：`sk-…` 会被另一条前缀规则掩掉，
+      // 拿它测"带引号的键"会得到假绿（第一版就是这么写的，变异验证当场指出该断言抓不到变异）。
+      const secret = 'wJalrXUtnFEMIsecret1284567890ABCDEF';
+      const mustMask = [`{"api_key": "${secret}"}`, `{'api_key': '${secret}'}`, `api_key: "${secret}"`, `AWS_SECRET_ACCESS_KEY=${secret}`, `x-api-key: ${secret}`];
+      for (const s of mustMask) assert.ok(!redactSecrets(s).includes(secret), `带引号/裸键的密钥都必须被掩码：${s}`);
+      // 负向对照：同为 JSON、但键名不是密钥词 → 不得掩码（证明上面掩的是"键名语义"而不是"JSON 一律掩"）
+      for (const s of ['max_tokens: 4096', 'monkey=banana', `{"note": "${secret}"}`, '{"count": 12345}']) {
+        assert.equal(redactSecrets(s), s, `不得误伤普通内容：${s}`);
+      }
+    }
+
+    // ② P3-7：redactDeep 的对象键数必须有上限（且显式标记截断）
+    {
+      const { redactDeep } = await import(pathToFileURL(path.join(srcDir, 'ledger.js')).href);
+      const big = {};
+      for (let i = 0; i < 500; i += 1) big['k' + i] = 'v';
+      const out = redactDeep(big);
+      const keys = Object.keys(out);
+      assert.ok(keys.length <= 101, `对象键数必须被截断（实际 ${keys.length} 个）`);
+      assert.ok(typeof out['…'] === 'string' && /截断/.test(out['…']), '被截断必须显式标记，不能静默丢键');
+    }
+
+    // ③ M-3：bash 子进程 env 过滤必须覆盖 `*_KEY`（此前 OPENAI_KEY 原样透传）
+    {
+      const BASH128 = await import(pathToFileURL(path.join(srcDir, 'tools', 'bash.js')).href);
+      for (const k of ['OPENAI_KEY', 'ANTHROPIC_KEY', 'GITHUB_KEY', 'MY_TOKEN_V2', 'AWS_SECRET_ACCESS_KEY']) {
+        assert.equal(BASH128.isSensitiveEnv(k), true, `${k} 必须被判为敏感变量（不得透传子进程）`);
+      }
+      assert.equal(BASH128.isSensitiveEnv('SSH_AUTH_SOCK'), false, 'SSH_AUTH_SOCK 是连接句柄（显式放行），不能被误伤');
+      assert.equal(BASH128.isSensitiveEnv('PATH'), false, '普通变量不得被过滤');
+    }
+
+    // ④ M-2 / P3-6：deny 拆段覆盖命令替换，denyStrict 覆盖包装执行
+    {
+      const P128 = await import(pathToFileURL(path.join(srcDir, 'permissions.js')).href);
+      const segs = P128.splitShellSegments('echo $(rm -rf /x)');
+      assert.ok(segs.some((x) => x.trim().startsWith('rm')), `命令替换内部必须被拆成独立段，实际：${JSON.stringify(segs)}`);
+      const strict = { mode: 'auto', deny: ['bash:rm *'], denyStrict: true };
+      for (const cmd of ['rm -rf /x', 'echo $(rm -rf /x)', 'echo `rm -rf /x`', "sh -c 'rm -rf /x'", 'true\rrm -rf /x']) {
+        const v = P128.evaluatePermission(strict, 'bash', { command: cmd });
+        assert.equal(v.decision, 'deny', `denyStrict 下必须拦：${JSON.stringify(cmd)}（实际 ${v.decision}）`);
+      }
+      assert.equal(P128.evaluatePermission(strict, 'bash', { command: 'ls -la' }).decision, 'allow', '正常命令不得被误拦');
+    }
+
+    // ⑤ M-5：ReDoS 判定单一来源，且覆盖两份旧实现都漏掉的形态
+    {
+      const R128 = await import(pathToFileURL(path.join(srcDir, 'regex-safety.js')).href);
+      const C128 = await import(pathToFileURL(path.join(srcDir, 'constraints.js')).href);
+      for (const bad of ['(a+)+', '(a|aa)+', '(a|a?)+', '((a|ab)x)+']) {
+        assert.ok(R128.patternRejectionReason(bad), `${bad} 必须被拒（灾难性回溯）`);
+        assert.equal(C128.isValidPattern(bad), false, `约束引擎也必须拒：${bad}`);
+      }
+      for (const okp of ['(a|b)+', '(ab)+', '(a+)?', '\\d{3}-\\d{4}', '^[a-z]+$']) {
+        assert.equal(R128.patternRejectionReason(okp), null, `安全的 pattern 不得被误拒：${okp}`);
+        assert.equal(C128.isValidPattern(okp), true, `约束引擎不得误拒：${okp}`);
+      }
+      const ftSrc = fs.readFileSync(path.join(srcDir, 'tools', 'fs-tools.js'), 'utf8');
+      assert.ok(/from '\.\.\/regex-safety\.js'/.test(ftSrc), 'grep 必须共用 regex-safety.js');
+      assert.ok(!/function hasAmbiguousAlternation/.test(ftSrc), 'grep 不得再自己维护一份歧义分支判定');
+    }
+
+    // ⑥ M-1：凭证库损坏时 setStoredKey **拒绝写**（不静默清空其余凭据）
+    {
+      const CR128 = await import(pathToFileURL(path.join(srcDir, 'credentials.js')).href);
+      fs.writeFileSync(CR128.credentialsPath(), JSON.stringify({ deepseek: 'sk-keep-me-128' }), { mode: 0o600 });
+      assert.equal(CR128.getStoredKey('deepseek'), 'sk-keep-me-128');
+      fs.writeFileSync(CR128.credentialsPath(), '{ 这不是 JSON');
+      const r = CR128.setStoredKey('openai', 'sk-new-128');
+      assert.equal(r.ok, false, '凭证库损坏时必须拒绝写（此前会静默清空其余凭据）');
+      assert.ok(/拒绝写入/.test(String(r.error)), `拒绝理由要说清原因，实际：${r.error}`);
+      assert.equal(fs.readFileSync(CR128.credentialsPath(), 'utf8'), '{ 这不是 JSON', '被拒时原文件必须保持原样（供人工抢救）');
+      fs.writeFileSync(CR128.credentialsPath(), JSON.stringify({ deepseek: 'sk-keep-me-128' }), { mode: 0o600 });
+      assert.equal(CR128.setStoredKey('openai', 'sk-new-128').ok, true, '正常文件下写应成功');
+      assert.equal(CR128.getStoredKey('deepseek'), 'sk-keep-me-128', '写一个键不得影响其它键');
+    }
+
+    // ⑦ M-13：自定义 Provider 模块按 mtime 重载（不再每次换 URL、无限累积模块实例）
+    {
+      const homeP128 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p128prov-'));
+      const prevH = process.env.MINGDAO_HOME;
+      process.env.MINGDAO_HOME = homeP128;
+      try {
+        const pdir = path.join(homeP128, 'providers');
+        fs.mkdirSync(pdir, { recursive: true });
+        const counter = path.join(homeP128, 'loads.txt');
+        const modFile = path.join(pdir, 'myprov.mjs');
+        fs.writeFileSync(modFile, `import fs from 'node:fs';\nfs.appendFileSync(${JSON.stringify(counter)}, 'x');\nexport async function createProvider() { return { chat: async () => ({ text: 'ok', usage: null, finish: 'stop' }) }; }\n`);
+        const PROV128 = await import(pathToFileURL(path.join(srcDir, 'providers', 'index.js')).href);
+        // 注意：条目必须是**纯能力/路由覆盖**（不含 baseUrl 等传输字段），否则 resolveProviderConfig 会
+        // 早退成 `custom:<模型名>` 的 OpenAI 兼容直连，而不会走自定义 Provider 模块。
+        const cfgP = { provider: 'deepseek', model: 'p128m', customModels: { p128m: { provider: 'myprov' } } };
+        await PROV128.createProvider(cfgP, 'p128m').catch(() => {});
+        // 隔 5ms 再建一次：按 Date.now() 换 URL 的实现会因此重新求值（恢复版本的 mtime 键不会）。
+        // 不隔开的话两次落在同一毫秒，变异体与修复版表现一致 —— 断言就抓不到变异（第一版如此）。
+        await new Promise((r) => setTimeout(r, 5));
+        await PROV128.createProvider(cfgP, 'p128m').catch(() => {});
+        const loads1 = fs.readFileSync(counter, 'utf8').length;
+        assert.equal(loads1, 1, `同一 mtime 下模块只应被求值一次（实际 ${loads1} 次）——按 Date.now() 换 URL 会无限重载`);
+        const future = new Date(Date.now() + 3000);
+        fs.utimesSync(modFile, future, future);
+        await PROV128.createProvider(cfgP, 'p128m').catch(() => {});
+        assert.equal(fs.readFileSync(counter, 'utf8').length, 2, '文件改动（mtime 变化）后应重新加载');
+      } finally {
+        process.env.MINGDAO_HOME = prevH;
+        safeRmSync(homeP128, { recursive: true, force: true });
+      }
+    }
+
+    // ⑧ P3-5：`pack new` 必须写进**发现路径**（项目级 .mingdao/packs），并提示 trust
+    {
+      const cwd128 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p128pack-'));
+      const r = spawnSync(process.execPath, [path.join(srcDir, 'cli.js'), 'pack', 'new', 'probe128'], {
+        cwd: cwd128,
+        encoding: 'utf8',
+        env: { ...process.env, MINGDAO_HOME: home128 },
+      });
+      const out = String(r.stdout || '') + String(r.stderr || '');
+      assert.ok(fs.existsSync(path.join(cwd128, '.mingdao', 'packs', 'probe128', 'pack.json')), `脚手架必须写进 .mingdao/packs（发现路径），实际输出：${out.slice(-200)}`);
+      assert.ok(!fs.existsSync(path.join(cwd128, 'packs')), '不得再写进不在发现路径上的 cwd/packs');
+      assert.ok(/pack trust/.test(out), '下一步提示必须给出 trust 命令（项目级 Pack 要显式信任才挂载）');
+      safeRmSync(cwd128, { recursive: true, force: true });
+    }
+
+    // ⑨ L-1：截断不得切出半个代理对（emoji）
+    {
+      const { clampText } = await import(pathToFileURL(path.join(srcDir, 'context.js')).href);
+      const s = 'a'.repeat(9) + '😀' + 'b'.repeat(10); // 代理对正好跨在第 10 个码元处
+      const out = clampText(s, 10);
+      const head = out.split('\n')[0];
+      const last = head.charCodeAt(head.length - 1);
+      assert.ok(!(last >= 0xd800 && last <= 0xdbff), '截断点不得留下孤立的高位代理（会渲染成 U+FFFD）');
+      assert.ok(!out.includes('\ufffd'), '输出不得含替换字符');
+    }
+
+    // ⑩ 结构守卫（源码级）：锁内不得有进程调用；share-accept 的文件写必须在锁内且原子
+    {
+      const strip = (/** @type {string} */ t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      const sched = strip(fs.readFileSync(path.join(srcDir, 'schedule.js'), 'utf8'));
+      assert.ok(/function stopJobProcesses/.test(sched), 'schedule 的进程操作必须收在锁外调用的小函数里');
+      for (const fn of ['removeSchedule', 'pauseSchedule']) {
+        const body = (sched.match(new RegExp(`export function ${fn}[\\s\\S]*?\\n}\\n`)) || [''])[0];
+        assert.ok(body.length > 0, `（前置）应能定位 ${fn} 的函数体`);
+        assert.ok(!/pidOwnedBy\(|killTask\(/.test(body), `${fn} 的锁内不得再直接做进程调用（M-6）`);
+      }
+      const syn = strip(fs.readFileSync(path.join(srcDir, 'sync-server.js'), 'utf8'));
+      const acc = (syn.match(/function doShareAccept[\s\S]*?\n}\n/) || [''])[0];
+      assert.ok(/atomicWriteFileSync\(target/.test(acc), 'share-accept 就地刷新必须用原子写');
+      assert.ok(/atomicWriteFileSync\(path\.join/.test(acc), 'share-accept 的冲突副本也必须用原子写（此前是裸 writeFileSync）');
+      const replSrc = strip(fs.readFileSync(path.join(srcDir, 'commands', 'repl.js'), 'utf8'));
+      assert.ok(!/appendFileSync\(memPath/.test(replSrc), '/memory add 不得再裸 appendFileSync（要日期戳 + 0600）');
+      const wk = strip(fs.readFileSync(path.join(srcDir, 'tasks', 'worker.js'), 'utf8'));
+      assert.ok(/typeof perm === 'object'/.test(wk), 'worker 的 ask 判定必须支持对象形态配置');
+      const wsRoute = strip(fs.readFileSync(path.join(srcDir, 'web', 'routes', 'domains', 'workspace.js'), 'utf8'));
+      assert.ok(/setWorkspaceDir\(name, t2\)/.test(wsRoute), 'workspaces set 必须存归一化后的路径（H-5）');
+    }
+    ok('v0.6.7 批十四/十五：脱敏引号键 + redactDeep 键上限 + bash env 共享词表 + deny 拆段与 denyStrict 包装拒绝 + ReDoS 单源 + 凭证写 fail-closed + Provider mtime 重载 + pack new 落发现路径 + 代理对安全截断 + 锁纪律结构守卫');
+  } finally {
+    process.env.MINGDAO_HOME = prevHome128;
+    safeRmSync(home128, { recursive: true, force: true });
+  }
 }
 
 delete process.env.MINGDAO_HOME;

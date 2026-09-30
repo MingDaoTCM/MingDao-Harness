@@ -65,7 +65,12 @@ export function redactDeep(value, depth = 0, fn = redactSecrets) {
   if (Array.isArray(value)) return value.slice(0, 100).map((v) => redactDeep(v, depth + 1, fn));
   /** @type {any} */
   const out = {};
-  for (const [k, v] of Object.entries(value)) out[k] = redactDeep(v, depth + 1, fn);
+  // v0.6.7（报告二 P3-7）：对象此前**全量遍历、键数无上限**——工具结果里带一个 10 万键的对象，
+  // 每次写账本都要整份递归（数组早有 slice(0,100)、字符串有 MAX_TEXT、深度有 4 层上限，只有对象漏了）。
+  // 与数组同例：保留前 100 个键，并**显式标记**被截断（静默丢键会让账本看起来"就是这些字段"）。
+  const entries = Object.entries(value);
+  for (const [k, v] of entries.slice(0, 100)) out[k] = redactDeep(v, depth + 1, fn);
+  if (entries.length > 100) out['…'] = `[更多键已截断：共 ${entries.length} 个键]`;
   return out;
 }
 
@@ -254,6 +259,9 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
         pricing: f.pricing ?? null,
         yuan: f.yuan ?? null,
         priced: f.priced === true,
+        // v0.6.7（报告一 H-4）：**用量未知**必须是一个显式事实，而不是"priced:false"里的一条注释——
+        // 后端不回 usage 时 priced 与"无价模型"都是 false，事后稽核却要能区分这两件事。
+        ...(f.usageUnknown === true ? { usageUnknown: true } : {}),
       });
     },
     netEgress(/** @type {any} */ f = {}) {
@@ -275,6 +283,8 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
         capHit: f.capHit === true,
         truncated: f.truncated === true,
         aborted: f.aborted === true,
+        // v0.6.7（报告二 P3-2）：上游提前关流此前只"置位"不落账（检测到了、传递断了）
+        ...(f.upstreamTruncated === true ? { upstreamTruncated: true } : {}),
       });
       // 只有 run.end **真的落盘了**才封条：局部失败时封一条残缺账本会让校验谎报完整
       if (line) seal(line);

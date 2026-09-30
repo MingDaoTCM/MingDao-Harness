@@ -68,6 +68,11 @@ export function recordCacheStats(/** @type {any} */ entry) {
       // 这些调用不在 agent 回合 usage 里，单独入账，不与回合级重复计费。
       aux: entry.aux === true ? true : undefined,
       auxReason: entry.auxReason ? String(entry.auxReason) : undefined,
+      // v0.6.7（报告一 H-4 / M-10）：这笔消费**用量未知**（服务端没回 usage、或批次在拿不到
+      // token 数的情况下失败/被取消）。金额按 null 记，但 todayCost 会把条数汇总成可见信号，
+      // 免得"没记账"被读成"没花钱"。
+      usageUnknown: entry.usageUnknown === true ? true : undefined,
+      note: entry.note ? String(entry.note).slice(0, 200) : undefined,
     });
     // v0.6.3（BUG-009）：**追加与轮转共用同一把锁**。
     // 原实现是「锁外追加 + 锁内轮转」，仍留有丢失窗口：A 追加 → B 追加 → A 进锁读整文件、
@@ -146,6 +151,22 @@ export function recordCacheStats(/** @type {any} */ entry) {
 let /** @type {any} */ _statsCache = null;
 
 export function listCacheStats(limit = 2000) {
+  const r = listCacheStatsStrict(limit);
+  return r.ok ? r.entries : [];
+}
+
+/**
+ * 严格读取（v0.6.7 / 报告一 H-3）：区分「文件不存在」与「真的读不出来」。
+ *
+ * 为什么必须区分：`todayCost()` 护栏此前经过**宽松版**读取——`listCacheStats` 内部 `catch → []`，
+ * 于是"statSync 能过、readFileSync 失败"（Windows 杀软锁文件、权限竞态、盘符瞬断）会被当成
+ * **空列表 = 今日消费 ¥0**，护栏据此判定"没超支"并继续放行，且**没有任何告警**——
+ * 与该文件自己写下的「绝不静默当 0」（cost-guard.js）的纪律直接冲突。
+ * 护栏要的是「能不能读到」，不是「读到几条」。
+ * @param {number} [limit]
+ * @returns {{ok: true, entries: any[]} | {ok: false, error: string, code: string}}
+ */
+export function listCacheStatsStrict(limit = 2000) {
   try {
     const file = cacheStatsFile();
     const st = fs.statSync(file);
@@ -160,9 +181,10 @@ export function listCacheStats(limit = 2000) {
       }
       _statsCache = { mtimeMs: st.mtimeMs, size: st.size, limit, lines: out };
     }
-    return _statsCache.lines.slice(-limit);
-  } catch {
-    return [];
+    return { ok: true, entries: _statsCache.lines.slice(-limit) };
+  } catch (/** @type {any} */ err) {
+    // 读失败时**不能**复用旧缓存：这份数据是护栏的判据，宁可说"读不到"也不能给一份过期账
+    return { ok: false, error: String(err?.message ?? err), code: String(err?.code || '') };
   }
 }
 
@@ -198,9 +220,17 @@ export function recordUsage(/** @type {any} */ modelName, /** @type {any} */ usa
   const priceAt = Number(perf?.requestStartAt) > 0 ? new Date(Number(perf.requestStartAt)) : undefined;
   const prompt = usage?.prompt_tokens || 0;
   const completion = usage?.completion_tokens || 0;
+  // v0.6.7（报告一 H-4 / 报告二 S-2「未知 ≠ 0」）：服务端没回 usage 的调用**绝不能**以 ¥0 入账——
+  // 那会让"少计"看起来像"没花钱"，护栏（warn/block/downgrade）随之失明且无信号。
+  // 这里记 cost:null + usageUnknown:true，todayCost 会把它计成"今日有 N 次用量未知"，
+  // 由护栏给出可见告警（金额无法估算，但事实被记下来了）。
+  const usageUnknown = perf?.usageUnknown === true;
   let cost = null;
   let saved = null;
-  if (split) {
+  if (usageUnknown) {
+    cost = null;
+    saved = null;
+  } else if (split) {
     const base = estimateCost(modelName, prompt, completion, null, priceAt);
     cost = estimateCost(modelName, prompt, completion, split, priceAt);
     if (base != null && cost != null) saved = base - cost;
@@ -217,6 +247,8 @@ export function recordUsage(/** @type {any} */ modelName, /** @type {any} */ usa
     miss: split?.miss ?? null,
     cost,
     saved,
+    // v0.6.7（H-4）：显式标记"这次用量未知"，供 todayCost 汇总出可见信号
+    ...(usageUnknown ? { usageUnknown: true } : {}),
     steps: perf?.steps ?? undefined,
     llmMs: perf?.llmMs ?? undefined,
     toolMs: perf?.toolMs ?? undefined,

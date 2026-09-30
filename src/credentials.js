@@ -73,15 +73,24 @@ export function getStoredKey(providerName) {
 
 /** @param {any} providerName @param {any} key */
 export function setStoredKey(providerName, key) {
-  const creds = loadCredentials();
+  // v0.6.7（报告一 M-1；H-8 只修了 key 命令那一层）：**严格读必须内置在写函数里**。
+  // 写路径是「读 → 改一个键 → 全量重写」，宽松读（读不出来当空对象）会让一次 `init` 向导
+  // 或 WebUI 设 Key 就把其余全部凭据静默清空——修在调用点等于要求每个调用点都自觉。
+  // 现在：读不出来就**拒绝写**，并把原因返回给调用方（谁也不许静默"成功"）。
+  const r = readCredentialsStrict();
+  if (!r.ok) {
+    return { ok: false, error: `凭证库读不出来，已拒绝写入以免清空其余凭据：${r.error}（原文件保持原样，请人工检查 ${credentialsPath()}）` };
+  }
+  const creds = r.data;
   if (key) creds[providerName] = String(key);
   else delete creds[providerName];
   saveCredentials(creds);
+  return { ok: true, error: null };
 }
 
 /** @param {any} providerName */
 export function removeStoredKey(providerName) {
-  setStoredKey(providerName, null);
+  return setStoredKey(providerName, null);
 }
 
 // 脱敏展示：只显示首 6 位与末 4 位，永不输出完整 Key。

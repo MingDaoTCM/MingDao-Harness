@@ -16,10 +16,9 @@ import os from 'node:os';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { lookup } from 'node:dns/promises';
 import { fileURLToPath } from 'node:url';
 import { mingdaoHome, ensureHome } from './config.js';
-import { isPrivateHost } from './tools/fetch.js';
+import { isPrivateHost } from './ssrf-guard.js';
 
 const LIB_DIR = fileURLToPath(new URL('../skills-lib', import.meta.url));
 

@@ -31,7 +31,7 @@ import { buildUserContent } from './attachments.js';
 import { MAX_CONCURRENT, SECURITY_HEADERS } from './constants.js';
 import { createAgent } from '../agent.js';
 import { createPermission } from '../permissions.js';
-import { isPrivateHost as sharedIsPrivateHost, isMetadataHost } from '../tools/fetch.js';
+import { isPrivateHost as sharedIsPrivateHost, isMetadataHost, resolveHostGuarded } from '../ssrf-guard.js';
 import { buildSystemPrompt } from '../prompts.js';
 import { loadProjectMemory, loadProjectMemoryEntries, retrieveRelevant, extractAndAppendProjectMemory } from '../memory.js';
 import { saveTaskStateMergeAsync, clearTaskState, loadTaskState, resumePrompt, checkpointHint } from '../task-state.js';
@@ -302,12 +302,12 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   const srvlog = createLogWriter(path.join(mingdaoHome(), 'logs', 'web-server.log'));
 
   // —— SSRF 防护（质检 S1）：远端地址校验 ——
-  // v0.4.6 P1：本文件的 isPrivateHost 副本已删除，改用 tools/fetch.js 的单一实现。
+  // v0.4.6 P1：本文件的 isPrivateHost 副本已删除，改用单一实现。
   // 副本只识别 `::ffff:` + 点分四段，而 URL 解析器会把该形态规范化成十六进制
   // （[::ffff:127.0.0.1] → [::ffff:7f00:1]），副本判为公网 → 私网目标放行。
-  // 单一来源同时覆盖 skill-lib.installFromUrl 与 fetch 工具，避免复现同款缺口。
+  // v0.6.7（报告 1 M-14①「同一规则多份实现」）：判定本身也搬到了 ssrf-guard.js——
+  // 这里只保留"什么场景该判"（对外监听才判、元数据无条件判），不再自己写一份解析逻辑。
   const isPrivateHost = (/** @type {any} */ h) => sharedIsPrivateHost(h);
-  const isIpLiteral = (/** @type {any} */ h) => /^\d{1,3}(\.\d{1,3}){3}$/.test(String(h)) || String(h).includes(':');
   /** @param {any} raw */
   async function validateRemoteUrl(raw) {
     let u;
@@ -324,22 +324,16 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     }
     // 威胁模型：本机回环绑定时（默认/桌面版），本机模型服务（如 Ollama）属可信场景，放行；
     // 对外监听（0.0.0.0）时拒绝私网目标——除非显式 allowPrivateEndpoints。
-    // 域名目标：DNS 解析后逐条校验（2026-09-02 加固，防 DNS 重绑定把域名指向内网绕过字面量检查）。
+    // 域名目标：解析后逐条校验（防 DNS 重绑定把域名指向内网绕过字面量检查）。
     const serverBoundLocal = isLoopbackHost(host);
     if (!cfg.web?.allowPrivateEndpoints && !serverBoundLocal) {
       const h = String(u.hostname || '').toLowerCase();
-      let blocked = isPrivateHost(h);
-      if (!blocked && h && h !== 'localhost' && !isIpLiteral(h)) {
-        try {
-          const { lookup } = await import('node:dns/promises');
-          const addrs = await lookup(h, { all: true, verbatim: true });
-          blocked = addrs.some((/** @type {any} */ a) => isPrivateHost(a.address));
-        } catch {
-          // DNS 解析失败：保持放行（服务端会在连接时报错）；解析成功且指向内网 → 拦截
-        }
-      }
-      if (blocked) {
-        return { error: `拒绝访问内网/本机地址（${u.hostname}）——服务已对外监听，如确需连接可信内网服务，请在 config.json 设 web.allowPrivateEndpoints: true` };
+      // v0.6.7：判定与 DNS 复检统一走 ssrf-guard.js（单一来源），并且**解析失败即拒绝**——
+      // 此前这里是「DNS 解析失败：保持放行」，与 safe-fetch 的 fail-closed 口径相反。
+      // 注意这里不接受 allowPrivate：本分支的前提就是"服务已对外监听"，私网目标必须拒。
+      const v = await resolveHostGuarded(h, { allowPrivate: false });
+      if (v.blocked) {
+        return { error: `${String(v.reason).replace(/——SSRF 防护。$/, '')}——服务已对外监听，如确需连接可信内网服务，请在 config.json 设 web.allowPrivateEndpoints: true` };
       }
     }
     return { ok: true };
@@ -717,7 +711,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         const hint = checkpointHint(clearTaskState(finalSessionName), 'clear');
         if (hint) send({ type: 'banner', text: hint, warn: true });
       }
-      entry.status = r.aborted ? 'aborted' : 'done';
+      // v0.6.7（报告二 P2-1 小项）：跑满步数(capHit)此前在 Web 侧被标成 'done'，而 worker 同情形标
+      // 'failed' —— 同一件事两个说法。统一口径：**capped 不是成功**（任务未真正完成、可续跑）。
+      // 这里用 'capped'（前端按非 done 渲染成警示色 + 未完成任务横幅），worker 侧维持其既有词表
+      // 里的 'failed'（任务状态机 status 取值受 task-state/schedule 依赖判定约束，不新增取值）。
+      entry.status = r.aborted ? 'aborted' : r.capHit ? 'capped' : 'done';
       notifyBusy();
       entry.durationMs = Date.now() - entry.startedAt;
       srvlog('chat 发送 done ' + taskId + ' status=' + entry.status + ' 总耗时=' + entry.durationMs + 'ms');

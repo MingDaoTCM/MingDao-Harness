@@ -4,6 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { MAX_FILE_READ_BYTES } from '../web/constants.js';
+import { hasAmbiguousAlternation } from '../regex-safety.js'; // v0.6.7（M-5）：与约束引擎共用同一份 ReDoS 判定
 
 const MAX_SCAN_FILES = 20000;
 const MAX_GLOB_RESULTS = 1000;
@@ -507,17 +508,6 @@ export function glob(args, ctx) {
  * 保守起见只看首字符：`(foo|bar)+`、`(get|post)+` 这类无重叠分支不会误伤。
  * @param {string} pattern
  */
-function hasAmbiguousAlternation(pattern) {
-  const re = /\(([^()]*)\)\s*(?:[+*]|\{\d+,?\d*\})/g;
-  let m;
-  while ((m = re.exec(pattern))) {
-    const branches = m[1].split('|').map((b) => b.trim());
-    if (branches.length < 2) continue;
-    const firsts = branches.map((b) => b.replace(/^\^/, '')[0] || '');
-    if (new Set(firsts).size < firsts.length) return true;
-  }
-  return false;
-}
 
 /**
  * @param {any} args

@@ -5,10 +5,16 @@ import os from 'node:os';
 
 // 常见密钥前缀（GitHub/OpenAI/AWS/Slack/Google 等）；sk- 保留前缀、其余整体掩码
 // 密钥词（按 `_`/`-` 分段后**整段相等**才算命中，避免 `monkey` 这类子串误伤）
-const SECRET_NAME_SEGMENTS = new Set([
+export const SECRET_NAME_SEGMENTS = new Set([
   'key', 'keys', 'apikey', 'token', 'secret', 'password', 'passwd', 'pwd', 'pass',
   'credential', 'credentials', 'auth', 'authorization', 'cookie', 'session',
 ]);
+// v0.6.7（报告一 M-3）：子进程 env 过滤（bash/hooks/MCP）与脱敏器必须**同一份词表**——
+// 此前两份各自维护，bash 那份漏了 `key` 段：`OPENAI_KEY` / `ANTHROPIC_KEY` / `GITHUB_KEY`
+// 会原样透传给子进程，一条 `env` 就把密钥打进模型上下文。
+// 唯一例外是 `pwd`：`PWD` 是每个 shell 都有的标准变量（不是凭据），
+// 按它过滤会让子进程少一个常用变量 —— 所以 env 侧用下面这份去掉 pwd 的集合。
+export const ENV_SECRET_SEGMENTS = new Set([...SECRET_NAME_SEGMENTS].filter((x) => x !== 'pwd'));
 const KEY_PREFIX = /(ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{30,})/g;
 
 // v0.6.3（审计 H-1/H-2）：**脱敏器自身的覆盖缺口**。
@@ -37,15 +43,20 @@ export function redactSecrets(/** @type {any} */ text) {
   //   `x-api-key: …`（带 `api` 的复合名）。注释当时写着"覆盖 api_key/token/secret/password"，
   //   读起来像覆盖了，实测一个都没中——**"有规则"不等于"规则认得"**。
   // 现在把名字按 `_`/`-` 分段，任一段是密钥词就掩码值（保留名字，便于排查"配了哪些"）。
+  // v0.6.7（报告一 H-2，**三份报告都点到**）：**键名可能带引号**。
+  // 原正则要求名字后面紧跟 `=`/`:`（只允许空白），于是 JSON/YAML 里最常见的形态全部漏过：
+  //   `{"api_key": "sk-…"}`、`{'api_key': 'sk-…'}`、`api_key: "sk-…"`
+  // ——而诊断包是用户会主动贴到公开渠道的产物、审计日志是本机持久化的明文。
+  // 现在名字两侧允许成对的引号（`\1` 反向引用保证左右引号一致），值一侧的引号也允许。
   s = s.replace(
-    /([A-Za-z0-9][A-Za-z0-9_-]{0,63})(\s*[=:]\s*)(["']?)([^\s"',}]{5,})/g,
-    (/** @type {string} */ m, /** @type {string} */ name, /** @type {string} */ sep, /** @type {string} */ q, /** @type {string} */ val) => {
+    /(["']?)([A-Za-z0-9][A-Za-z0-9_-]{0,63})\1(\s*[=:]\s*)(["']?)([^\s"',}]{5,})/g,
+    (/** @type {string} */ m, /** @type {string} */ qn, /** @type {string} */ name, /** @type {string} */ sep, /** @type {string} */ qv, /** @type {string} */ val) => {
       const segs = String(name).toLowerCase().split(/[_-]+/);
       if (!segs.some((x) => SECRET_NAME_SEGMENTS.has(x))) return m;
       // 认证方案名本身不是凭据：`Authorization: Bearer <token>` 由上面那条 Bearer 规则
       // 负责掩掉 token，这里若连 `Bearer` 一起掩，审计行会退化成 `Authorization: *** ***`（可读性白损）
       if (/^(bearer|basic|token|digest)$/i.test(val)) return m;
-      return `${name}${sep}${q}***`;
+      return `${qn}${name}${qn}${sep}${qv}***`;
     }
   );
   s = s.replace(/([?&](?:key|token|secret|api_key|access_token)=)[^&\s"']+/gi, '$1***');

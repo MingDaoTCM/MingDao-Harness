@@ -19,6 +19,8 @@
 /** @typedef {{ id: string, kind: string, pack?: string, tool?: string, pattern?: string, action?: string, fields?: string[], requireArg?: string, arg?: string, onMissing?: string }} Constraint */
 
 /** 合法的输出处置动作 */
+import { hasNestedQuantifier, hasAmbiguousAlternation } from './regex-safety.js'; // v0.6.7（M-5）：ReDoS 判定的单一来源
+
 export const OUTPUT_ACTIONS = new Set(['block', 'block-and-rewrite', 'warn']);
 
 /** 约束支持的 kind（与 packs.js / PACK-API §4 对齐） */
@@ -97,10 +99,11 @@ export function toolMatches(c, toolName) {
  * 比作者本意严得多，且理由里会印出 `/undefined/`，看起来像引擎坏了。
  * @param {any} pattern
  */
-// 经典灾难性回溯形状：**被量词修饰的组，其内部也以量词结尾**——
-// `(a+)+`、`(a*)*`、`(\d+)*`、`(x+){2,}`。这类模式在最坏输入上指数级回溯。
-// 刻意保守：只拦嵌套量词，不动 `(a|b)+`、`(ab)+`、`(a+)?` 这些常见且安全的写法。
-const REDOS_NESTED_QUANT = /\([^()]*[+*]\)(?:[+*]|\{\d*,?\d*\})/;
+// v0.6.7（报告一 M-5 / M-14②）：ReDoS 判定改为**共用 src/regex-safety.js**。
+// 此前这里只看嵌套量词（`(a+)+`），而 grep 侧另有一份"歧义分支"判定——两份都不完整，
+// 于是 `(a|aa)+`、`(a|a?)+`、`((a|ab)x)+` 在**约束引擎**这条路径上装载即通过
+// （约束匹配的是模型输出，报告实测 28 字符即耗时数十秒 → 同步卡死整个进程）。
+// 单一来源同时覆盖 约束装载 / Pack 校验 / grep 工具三处。
 
 /**
  * 约束 pattern 的拒绝原因（null = 可用）。
@@ -123,8 +126,9 @@ export function patternRejectionReason(/** @type {any} */ pattern) {
   } catch (/** @type {any} */ e) {
     return `正则无法编译：${e?.message || e}`;
   }
-  if (REDOS_NESTED_QUANT.test(pattern)) {
-    return 'pattern 含嵌套量词（如 (a+)+、(\\d+)*），在长文本上会指数级回溯——实测 29 字符即耗时数秒；请改写为不含嵌套量词的形式';
+  // 共用判定：嵌套量词 + 歧义分支（含嵌套组），见 src/regex-safety.js
+  if (hasNestedQuantifier(pattern) || hasAmbiguousAlternation(pattern)) {
+    return 'pattern 会灾难性回溯（嵌套量词或歧义分支，如 (a+)+、(a|aa)+、(a|a?)+、((a|ab)x)+）——实测 28–29 字符即耗时数秒到数十秒，会卡死内核；请改写为无歧义、无嵌套量词的形式';
   }
   return null;
 }

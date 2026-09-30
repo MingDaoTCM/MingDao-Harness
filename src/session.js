@@ -44,8 +44,19 @@ export function createSession(home) {
   const dir = path.join(home, 'sessions');
   fs.mkdirSync(dir, { recursive: true });
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-  const rand = Math.random().toString(36).slice(2, 6);
-  const file = path.join(dir, `${stamp}-${rand}.jsonl`);
+  // v0.6.7（报告一 L-10）：同秒 + 4 位随机仍有碰撞概率，而此前**不检查存在性**——
+  // 撞上就静默覆盖别人的会话。与 schedule 的 id 生成对齐：存在就换（最多 20 次），
+  // 仍撞则退化为递增序号（确定性兜底，不引入新的随机源）。
+  for (let i = 0; i < 20; i += 1) {
+    const rand = Math.random().toString(36).slice(2, 6);
+    const file = path.join(dir, `${stamp}-${rand}.jsonl`);
+    if (!fs.existsSync(file)) return { file, name: path.basename(file) };
+  }
+  for (let i = 1; i < 1000; i += 1) {
+    const file = path.join(dir, `${stamp}-x${i}.jsonl`);
+    if (!fs.existsSync(file)) return { file, name: path.basename(file) };
+  }
+  const file = path.join(dir, `${stamp}-${Date.now()}.jsonl`);
   return { file, name: path.basename(file) };
 }
 
