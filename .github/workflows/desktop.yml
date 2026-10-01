@@ -89,7 +89,7 @@ jobs:
         working-directory: desktop
         run: node gen-update-yml.mjs
       - name: 上传工件
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: mingdao-desktop-${{ matrix.name }}
           path: |
