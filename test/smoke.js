@@ -11248,7 +11248,9 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
       );
       const noReadHook = path.join(hdir, 'noread.mjs');
       fs.writeFileSync(noReadHook, 'process.exit(0);');
-      const mk = (f) => ({ PreToolUse: [{ matcher: 'write', cmd: `${process.execPath} ${f}` }] });
+      // ⚠ 路径必须**加引号**：Windows 上 process.execPath 形如 `C:\\Program Files\\nodejs\\node.exe`，
+      // 不加引号会被 shell 在空格处截断 → hook 根本没跑起来（CI 的 Windows 腿就是这样红的）。
+      const mk = (f) => ({ PreToolUse: [{ matcher: 'write', cmd: `"${process.execPath}" "${f}"` }] });
       const big = 'x'.repeat(300 * 1024); // 300KB > 管道缓冲（64KB）
       const args = { path: '/tmp/x', content: big };
       const sent = Buffer.byteLength(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'write', tool_input: args }));
