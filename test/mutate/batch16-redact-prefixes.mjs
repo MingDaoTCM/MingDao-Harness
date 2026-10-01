@@ -7,7 +7,7 @@ const SEC = () => M.section('130');
 M.mutate({
   name: '① 删掉 Dify app- 那一行（回到"表里没有它"）',
   file: 'src/redact.js',
-  from: "  { vendor: 'Dify 应用 Key', re: /\\bapp-[A-Za-z0-9]{20,}/g, mask: 'app-***', sample: 'app-abcdefghijklmnopqrstuvwx' },\n",
+  from: "  { vendor: 'Dify 应用 Key', re: /\\bapp-[A-Za-z0-9]{20,}/g, mask: 'app-***', sample: sampleOf('app-') },\n",
   to: '',
   expect: ['前缀表必须存在且至少 4 行', '同口径掩码'],
   run: SEC,
@@ -25,8 +25,8 @@ M.mutate({
 M.mutate({
   name: '③ app- 正则放宽到含 `-`（误伤普通标识）',
   file: 'src/redact.js',
-  from: "  { vendor: 'Dify 应用 Key', re: /\\bapp-[A-Za-z0-9]{20,}/g, mask: 'app-***', sample: 'app-abcdefghijklmnopqrstuvwx' },",
-  to: "  { vendor: 'Dify 应用 Key', re: /\\bapp-[A-Za-z0-9-]{20,}/g, mask: 'app-***', sample: 'app-abcdefghijklmnopqrstuvwx' },",
+  from: "  { vendor: 'Dify 应用 Key', re: /\\bapp-[A-Za-z0-9]{20,}/g, mask: 'app-***', sample: sampleOf('app-') },",
+  to: "  { vendor: 'Dify 应用 Key', re: /\\bapp-[A-Za-z0-9-]{20,}/g, mask: 'app-***', sample: sampleOf('app-') },",
   expect: ['不得误掩普通标识'],
   run: SEC,
 });
@@ -34,7 +34,7 @@ M.mutate({
 M.mutate({
   name: '④ 某一行忘了带 sample（表驱动断言失去依据）',
   file: 'src/redact.js',
-  from: "sample: 'dataset-abcdefghijklmnopqrstuvwx' },",
+  from: "sample: sampleOf('dataset-') },",
   to: "sample: undefined },",
   expect: ['每行必须带 vendor/re/mask/sample'],
   run: SEC,
@@ -43,8 +43,8 @@ M.mutate({
 M.mutate({
   name: '⑤ 掩码不保留前缀（改成整体 ***，排查时看不出配了哪类 key）',
   file: 'src/redact.js',
-  from: "  { vendor: 'Dify 应用 Key', re: /\\bapp-[A-Za-z0-9]{20,}/g, mask: 'app-***', sample: 'app-abcdefghijklmnopqrstuvwx' },",
-  to: "  { vendor: 'Dify 应用 Key', re: /\\bapp-[A-Za-z0-9]{20,}/g, mask: '***', sample: 'app-abcdefghijklmnopqrstuvwx' },",
+  from: "  { vendor: 'Dify 应用 Key', re: /\\bapp-[A-Za-z0-9]{20,}/g, mask: 'app-***', sample: sampleOf('app-') },",
+  to: "  { vendor: 'Dify 应用 Key', re: /\\bapp-[A-Za-z0-9]{20,}/g, mask: '***', sample: sampleOf('app-') },",
   expect: ['应保留', '同口径掩码'],
   run: SEC,
 });

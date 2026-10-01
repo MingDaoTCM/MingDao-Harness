@@ -39,17 +39,22 @@ const JWT_TOKEN = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}/
 // 所以每一行都必须带 `sample`（该前缀的一个真实形态样例），由 test/smoke.js 的**表驱动断言**
 // 逐个验证"样例确实被掩掉了"——新增一行而没被掩，测试当场红。
 // @type {{vendor: string, re: RegExp, mask: string, sample: string}[]}
+// 样例**运行时拼装**：源码里不放密钥形态的字面量。
+// 为什么：本仓库是公开的，`app-` + 24 位这种字面量会被密钥扫描命中，也会让人误以为仓库里漏了真钥；
+// 而表驱动断言只需要"每行有一个能被自己规则认出的样例"——拼出来即可，语义完全一样。
+const sampleOf = (/** @type {string} */ prefix) => prefix + 'x'.repeat(24);
+
 export const SECRET_PREFIXES = [
   // DeepSeek / OpenAI 风格：保留前缀便于排查"配了哪一类 key"
-  { vendor: 'sk- 系（DeepSeek/OpenAI 等）', re: /(sk-[A-Za-z0-9_-]{6,})/g, mask: 'sk-***', sample: 'sk-abcdefghijklmnopqrstuvwx' },
+  { vendor: 'sk- 系（DeepSeek/OpenAI 等）', re: /(sk-[A-Za-z0-9_-]{6,})/g, mask: 'sk-***', sample: sampleOf('sk-') },
   // Dify 应用 API Key：`app-` + 一长串 base62（下游每把都是这个形态）。
   // 刻意**不含** `-`/`_`：否则 `app-deployment-config-2024` 这类普通标识会被误掩，
   // 而脱敏器一旦误伤就会被人关掉——保守与可用之间，这条选"只认纯 base62 长串"。
-  { vendor: 'Dify 应用 Key', re: /\bapp-[A-Za-z0-9]{20,}/g, mask: 'app-***', sample: 'app-abcdefghijklmnopqrstuvwx' },
+  { vendor: 'Dify 应用 Key', re: /\bapp-[A-Za-z0-9]{20,}/g, mask: 'app-***', sample: sampleOf('app-') },
   // Dify 知识库（dataset）API Key：同厂商另一类凭据，形态与 app- 同构
-  { vendor: 'Dify 知识库 Key', re: /\bdataset-[A-Za-z0-9]{20,}/g, mask: 'dataset-***', sample: 'dataset-abcdefghijklmnopqrstuvwx' },
+  { vendor: 'Dify 知识库 Key', re: /\bdataset-[A-Za-z0-9]{20,}/g, mask: 'dataset-***', sample: sampleOf('dataset-') },
   // 其余厂商（GitHub / AWS / Slack / Google）：整体掩码
-  { vendor: 'GitHub/AWS/Slack/Google', re: KEY_PREFIX, mask: '***', sample: 'ghp_abcdefghijklmnopqrstuvwx' },
+  { vendor: 'GitHub/AWS/Slack/Google', re: KEY_PREFIX, mask: '***', sample: sampleOf('ghp_') },
 ];
 
 export function redactSecrets(/** @type {any} */ text) {
