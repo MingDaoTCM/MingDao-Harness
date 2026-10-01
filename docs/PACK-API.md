@@ -1,9 +1,9 @@
 # 垂域 Pack API v1（草案）
 
 > 状态：**v1 已冻结（2026-09-11，决策已确认）**，随 v0.5.0 发布生效。本文是上游与下游之间的接口契约。
-> 变更纪律：v1 冻结后，minor 版本只增不改；任何改动必须同步更新本文 + `CHANGELOG-PACK.md` + 兼容性矩阵。
+> 变更纪律：v1 冻结后，minor 版本只增不改；任何改动必须同步更新本文 + `internal/CHANGELOG-PACK.md` + 兼容性矩阵。
 > 定位：让垂域团队（中医、法律、教育、制造、政务…）**不修改内核源码**就能做出可私有化、可审计、受约束的智能体。
-> 关联：`STRATEGY-0.5.md`（战略）、`DEVELOPER.md`（现有扩展点）、`CONFIG.md`（配置）。
+> 关联：`internal/STRATEGY-0.5.md`（战略）、`DEVELOPER.md`（现有扩展点）、`CONFIG.md`（配置）。
 
 ---
 
@@ -221,7 +221,7 @@ export function createPack(ctx) {
 | --- | --- | --- |
 | PreToolUse | `tool-deny`、`tool-arg-require`、`arg-forbid`、`confirm` | 前三个命中即阻止执行，回填工具错误给模型，写审计；`confirm` 见下方说明 |
 | PostToolUse | `completeness`、`result-forbid` | `completeness` 缺项 → 拒绝该工具结果，要求模型补采；`result-forbid` → 屏蔽结果并提示 |
-| 输出前 | `output-forbid`、`require-citation` | 命中 → 按 `action` 处理：`block`（改为固定合规文案）/ `block-and-rewrite`（再请求一次修正）/ `warn`（放行并标注） |
+| 输出前 | `output-forbid`、`require-citation`（❌ **未实现，见 §4.1，请勿依赖**：`KINDS` 里没有它，写进 Pack 会被判 kind 非法、整个 Pack 装载失败） | 命中 → 按 `action` 处理：`block`（改为固定合规文案）/ `block-and-rewrite`（再请求一次修正）/ `warn`（放行并标注） |
 
 **`confirm`（v0.6.4 起真正求值）**：即使在 `auto` 权限档位下，命中的工具调用也**必须**先得到人工确认才执行
 ——它的存在意义正是「权限已经放行，领域还要再问一次」。两种情形一律按 fail-closed 阻止：
@@ -345,7 +345,7 @@ manifest 可声明 `budget.dailyYuan` + `budget.action`。超限时 `ctx.llm()` 
 > `pack verify` 当 CI 门禁，等于**在 CI 上执行被审仓库的任意 Node 代码**（且不经 `pack trust` 信任门）。
 > 现在默认确实是静态的；约束与提示词段的合法性由代码产出，静态阶段无法校验，需要那种覆盖请显式加 `--runtime`。
 
-**上游义务**：任何 Pack API 变更必须同步更新本文 + 兼容性矩阵 + `docs/CHANGELOG-PACK.md`。
+**上游义务**：任何 Pack API 变更必须同步更新本文 + 兼容性矩阵 + `docs/internal/CHANGELOG-PACK.md`。
 
 ---
 

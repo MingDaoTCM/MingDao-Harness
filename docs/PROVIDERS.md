@@ -72,11 +72,22 @@ export async function createProvider(cfg) {
 }
 ```
 
-然后配置：
+然后配置（**key 不要写进 `config.json`** —— 本仓三处文档都承诺"配置文件不含任何密钥、可安全分享/提交"）：
+
+```bash
+# 1) 把 Key 存进本机凭证库（<home>/credentials.json，权限 600）
+mingdao key set anthropic        # 交互式输入，或 echo "<key>" | mingdao key set anthropic
+# 2) 或者用环境变量（CI/容器推荐）
+export ANTHROPIC_API_KEY=<key>
+```
 
 ```json
-{ "provider": "anthropic", "model": "claude-sonnet-4-5", "apiKey": "sk-ant-..." }
+{ "provider": "anthropic", "model": "claude-sonnet-4-5" }
 ```
+
+> 说明（F-H2，v0.6.8 文档审计）：本文件此前给出的示例里带 `"apiKey"`，与
+> `PROVIDERS.md:7` / `CONFIG.md:3` / `README.md` 的承诺直接冲突。`config.json` 里的 `apiKey`
+> 仅作为**旧配置兼容**读取，**不要**再这样写——配置可能被分享、提交或进入团队仓库。
 
 规则：`provider` 名不在内置预设中且存在同名模块文件时，优先加载该模块；否则按 OpenAI 兼容方式使用 `baseUrl`。
 

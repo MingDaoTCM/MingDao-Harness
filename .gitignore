@@ -20,3 +20,6 @@ desktop/package-lock.json
 # 项目级自动记忆（本地私有，不入库）
 .mingdao/
 test/mutate/.generated/
+# 审计/排查用的临时产物（v0.6.8：此前散落在工作树里污染 git status）
+_audit_*
+_AUDIT_*

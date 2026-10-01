@@ -28,12 +28,36 @@ const KEY_PREFIX = /(ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-
 const PEM_BLOCK = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z0-9 ]*PRIVATE KEY-----/g;
 const JWT_TOKEN = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}/g;
 
+// ── 已知密钥前缀表（**单一来源**，v0.6.8）──────────────────────────────────────────
+//
+// 为什么把它做成**表**而不是散在 redactSecrets 里的若干行 replace：
+// 前缀表是"按厂商逐个维护"的，每接入一个新厂商就多一个漏点，**而且漏了不会报错**——
+// v0.6.3 漏了 PEM/JWT/赋值式，v0.6.8 又漏了 Dify 的 `app-`（下游反馈：同一份日志里
+// DeepSeek 的 `sk-` 被掩掉了、Dify 的 key 原样漏出。**半掩比不掩更危险**——贴日志的人
+// 会以为"已经脱敏了"）。两次的教训是同一句话：**"表里有规则"不等于"规则认得你正在用的那种 key"**。
+//
+// 所以每一行都必须带 `sample`（该前缀的一个真实形态样例），由 test/smoke.js 的**表驱动断言**
+// 逐个验证"样例确实被掩掉了"——新增一行而没被掩，测试当场红。
+// @type {{vendor: string, re: RegExp, mask: string, sample: string}[]}
+export const SECRET_PREFIXES = [
+  // DeepSeek / OpenAI 风格：保留前缀便于排查"配了哪一类 key"
+  { vendor: 'sk- 系（DeepSeek/OpenAI 等）', re: /(sk-[A-Za-z0-9_-]{6,})/g, mask: 'sk-***', sample: 'sk-abcdefghijklmnopqrstuvwx' },
+  // Dify 应用 API Key：`app-` + 一长串 base62（下游每把都是这个形态）。
+  // 刻意**不含** `-`/`_`：否则 `app-deployment-config-2024` 这类普通标识会被误掩，
+  // 而脱敏器一旦误伤就会被人关掉——保守与可用之间，这条选"只认纯 base62 长串"。
+  { vendor: 'Dify 应用 Key', re: /\bapp-[A-Za-z0-9]{20,}/g, mask: 'app-***', sample: 'app-abcdefghijklmnopqrstuvwx' },
+  // Dify 知识库（dataset）API Key：同厂商另一类凭据，形态与 app- 同构
+  { vendor: 'Dify 知识库 Key', re: /\bdataset-[A-Za-z0-9]{20,}/g, mask: 'dataset-***', sample: 'dataset-abcdefghijklmnopqrstuvwx' },
+  // 其余厂商（GitHub / AWS / Slack / Google）：整体掩码
+  { vendor: 'GitHub/AWS/Slack/Google', re: KEY_PREFIX, mask: '***', sample: 'ghp_abcdefghijklmnopqrstuvwx' },
+];
+
 export function redactSecrets(/** @type {any} */ text) {
   let s = String(text ?? '');
   // 私钥块必须**先**处理：它内部含大量 base64，交给后面的规则逐段匹配既慢又可能只掩一半
   s = s.replace(PEM_BLOCK, '[已脱敏的私钥块]');
-  s = s.replace(/(sk-[A-Za-z0-9_-]{6,})/g, 'sk-***'); // 保留 sk- 前缀（兼容审计标记）
-  s = s.replace(KEY_PREFIX, '***');
+  // 前缀表逐行替换（顺序即优先级；每行的 re 都带 /g，String.replace 会重置 lastIndex，可安全复用）
+  for (const { re, mask } of SECRET_PREFIXES) s = s.replace(re, mask);
   s = s.replace(JWT_TOKEN, 'eyJ***');
   s = s.replace(/(Authorization\s*:\s*Bearer\s+)[^\s"',}]+/gi, '$1***');
   // 赋值式密钥：**按名字分段判定**，而不是枚举固定字段名。

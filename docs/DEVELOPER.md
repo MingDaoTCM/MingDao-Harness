@@ -1,6 +1,8 @@
-# MingDao Harness 开发者指南（v0.4.0 契约化）
+# MingDao Harness 开发者指南
 
-> 战略依据：[STRATEGY-NEXT.md](STRATEGY-NEXT.md)（垂直产品 × 开放内核）。
+> 契约化起于 v0.4.0；本指南不绑定具体版本，接口稳定性以 `src/index.js` 的 `@stable`/`@experimental` 标注为准。
+
+> 战略依据：[STRATEGY-NEXT.md](internal/STRATEGY-NEXT.md)（垂直产品 × 开放内核）。
 > 本指南面向**用 MingDao 做二次开发 / 定制自己智能体**的开发者。
 > 稳定契约：`@stable` 导出在 minor 版本内保持向后兼容；`@experimental` 可能调整。
 
@@ -127,7 +129,7 @@ export function createPack(ctx) {
 3. **只收紧、不放松**：约束不授予任何权限，也不改变 `permissions.js` 的判定。
 
 完整契约（manifest 字段、约束 kind、`ctx.llm` 语义、版本兼容窗口）见 [PACK-API.md](PACK-API.md)；
-Pack API 变更史见 [CHANGELOG-PACK.md](CHANGELOG-PACK.md)。
+Pack API 变更史见 [CHANGELOG-PACK.md](internal/CHANGELOG-PACK.md)。
 
 ## 三、库嵌入：最小示例
 
@@ -153,17 +155,21 @@ console.log(res.text, res.usage, res.perf);
 
 ## 四、公共 API 速查（@stable 面）
 
-| 分组 | 导出 |
+| 分组 | 导出（共 70 个 `@stable`） |
 | --- | --- |
-| Agent 内核 | `createAgent` · `createPermission` · `createIO` |
-| Provider/模型 | `createProvider` · `resolveProviderConfig` · `modelPreset` · `resolveModelCaps` · `safeBudget` · `isLocalBaseUrl` |
-| 工具 | `registerTool` · `listRegisteredTools` · `mountConfigTools` · `buildToolSchemas` · `dispatch` |
-| Agent Preset | `listPresets` · `loadPreset` · `validatePreset` · `presetConfigOverrides` · `presetSystemBlock` |
-| 上下文 | `trimMessages` · `approxTokens` · `clampText` · `compactConversation` |
-| 配置/凭证 | `loadConfig` · `saveConfig` · `mingdaoHome` · `setStoredKey` · `maskKey` |
-| 计价/计量 | `estimateCost` · `isPeakHour` · `countTokens` · `makeTokenCounter` |
+| Agent 内核 | `createAgent` · `createPermission` · `createIO` · `style` · `C` |
+| Provider 与模型 | `createProvider` · `resolveProviderConfig` · `MODELS` · `PROVIDERS` · `modelPreset` · `providerPreset` · `resolveModelCaps` · `safeBudget` · `isLocalBaseUrl` |
+| 工具（含 v0.4.0 第三方注册） | `toolSchemas` · `dispatch` · `registerTool` · `listRegisteredTools` · `mountConfigTools` · `buildToolSchemas` |
+| Agent Preset（v0.4.0） | `listPresets` · `loadPreset` · `validatePreset` · `presetConfigOverrides` · `presetSystemBlock` · `presetDirs` |
+| 垂域 Pack（v0.5.0 契约，Pack API v1） | `listPacks` · `loadPack` · `validateManifest` · `mountPacks` · `satisfiesRange` · `packDirs` · `coreVersionOf` · `loadedPackNames` · `SUPPORTED_PACK_API` · `CONSTRAINT_KINDS` |
+| 约束引擎（v0.5.0 契约，Pack API v1 的领域红线） | `compileConstraints` · `checkPreTool` · `checkPostTool` · `checkOutput` · `blockedOutputText` · `toolMatches` |
+| 上下文与压缩 | `trimMessages` · `approxTokens` · `clampText` · `TOOL_RESULT_LIMIT` · `compactConversation` · `summarizeConversation` |
+| 配置与凭证 | `mingdaoHome` · `ensureHome` · `loadConfig` · `saveConfig` · `runWizard` · `effectiveApiKey` · `credentialsPath` · `loadCredentials` · `saveCredentials` · `getStoredKey` · `setStoredKey` · `removeStoredKey` · `maskKey` · `resolveApiKey` |
+| 计价与计量 | `estimateCost` · `estimateCostLabel` · `isPeakHour` · `PRICE_DATA_AS_OF` · `countTokens` · `heuristicTokens` · `makeTokenCounter` · `isTokenizable` |
 
-@experimental（接口可能调整）：update/audit/skill-lib/skills/mcp/session 组。
+`@experimental`（接口可能调整，共 19 个）：`updateCheck` · `mingdaoUpdate` · `mingdaoRollback` · `findRepoRoot` · `writeAudit` · `listAudit` · `redactSecrets` · `auditFile` · `trustSkill` · `skillDirHash` · `readSourceMeta` · `tamperedSkillNames` · `McpClient` · `startMcpServers` · `createSession` · `latestSession` · `listSessions` · `appendMessages` · `loadSession`。
+
+> 本表由 `node scripts/gen-api-table.mjs` 从 `src/index.js` 生成；`scripts/doc-lint.mjs` 会校验它与代码一致（漂移即失败）。
 
 ## 五、约定
 

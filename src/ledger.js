@@ -22,7 +22,7 @@ import { atomicWriteFileSync, appendFilePrivateSync } from './atomic-write.js';
 import { mingdaoHome, ensureHome } from './config.js';
 import { redactSecrets, redactSensitive } from './redact.js';
 
-/** v1：字段只增不改（变更需在 docs/CHANGELOG-PACK.md 同款变更日志里记录） */
+/** v1：字段只增不改（变更需在 docs/internal/CHANGELOG-PACK.md 同款变更日志里记录） */
 export const LEDGER_VERSION = 1;
 /** 默认保留最近多少次运行（超出按 mtime 删最旧） */
 const DEFAULT_MAX_RUNS = 200;

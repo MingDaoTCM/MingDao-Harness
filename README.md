@@ -6,9 +6,12 @@
 
 轻量的「模型循环 + 工具 + 权限」内核，能力以 ESM 库导出、接口全部开放。架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
 
+> **语言政策**：本仓的**规范文档是中文**（`README.md` 与 `docs/`）；`README.en.md` 只覆盖"评估与部署所需的最小面"
+> （这是什么、3 步上手、安全模型与边界、命令索引）。两者冲突时，以**中文文档与代码**为准。
+
 ## 为什么选 MingDao
 
-- ⚡ **真正的零依赖**：纯 Node.js ≥ 18，无任何 npm 运行时依赖、无构建步骤——装完即用，不拖 node_modules
+- ⚡ **真正的零依赖**：内核与 CLI 纯 Node.js ≥ 18，**无任何 npm 运行时依赖**、无构建步骤——装完即用，不拖 node_modules（桌面版外壳另需 Electron / electron-updater，见下文"桌面版"）
 - 💰 **DeepSeek-V4 深度省钱**：1M 上下文预设（单次输出上限 384K）、**缓存命中计价**（命中价仅为未命中的 1/30）+ 命中率仪表盘、峰谷计价（高峰＝北京工作日 9:00–12:00、14:00–18:00，闲时半价自动识别）、自动路由（pro 规划 / flash 执行 + 分类缓存 + 会话粘滞）、精确 tokenizer（官方词表 BPE）、滞回自动压缩、**Batch API 半价批处理**（`mingdao batch`）、**避峰调度**（`--offpeak` 高峰顺延到最近闲时 12:00/18:00）、**费用护栏**（每日上限防超支）
 - 🖥 **双界面 + IDE 全家桶**：产品级 TUI（流式 Markdown、代码高亮、编辑 diff、Ctrl+C 中断、Tab 补全）与 `mingdao web` 一键 WebUI（PWA 可装桌面、多任务并行、全项设置面板）；VS Code 侧边栏与 JetBrains 工具窗深度集成
 - 🧠 **36 个技能开箱即用**：14 个内置常驻 + 22 个可安装技能库（线上 registry 逐文件 sha256 校验防供应链篡改，`mingdao skill install sql` 一键装，可自建企业内 registry）
@@ -18,7 +21,7 @@
 - 🖼 **多模态**：DeepSeek-V4-Flash-Vision-Exp 视觉模型内置，WebUI 直接上传图片；模型列表以官方 `/models` 线上名单为准，新模型发布自动出现
 - ♻ **长会话不丢上下文**：超预算自动压缩——早期段落由 executor 模型压成摘要注入（`/compact` 可手动），绝不静默失忆
 - 🔎 **历史会话秒搜**：增量索引全文检索（中文 bigram 分词，`mingdao sessions search` / WebUI 搜索框共用）；WebUI **会话级工作空间**——每个会话记住自己的项目目录，多任务并行互不串目录
-- 🌍 **真·跨平台**：Linux / macOS / Windows 全程实测，三平台 CI 矩阵（Ubuntu 18/20/22 + Windows + macOS）常驻守护，Windows 下 journal/测试全绿
+- 🌍 **真·跨平台**：Linux / macOS / Windows 全程实测，CI 矩阵常驻守护——Linux（Node 18/20/22）+ Windows（Node 20）+ macOS（Node 20）；覆盖率门禁只在 Linux/Node 20 腿执行（`--coverage` 需要 v8 覆盖率数据，其它腿跑普通测试）
 
 ## 快速开始（3 步）
 
@@ -232,7 +235,7 @@ mingdao cost --by pack          # 垂域费用分账
 
 ### 模型与 Key
 
-- 内置：DeepSeek（v4-pro / v4-flash / v4-flash-vision-exp）、OpenAI（GPT-5 系列）、Qwen（qwen3.7-max）、GLM（GLM-5）、Kimi（kimi-latest）
+- 内置：DeepSeek（`deepseek-v4-pro` / `deepseek-flash`〔旧名 `deepseek-v4-flash` 仍兼容，官方已改名〕/ `deepseek-v4-flash-vision-exp`）、OpenAI（GPT-5 系列）、Qwen（qwen3.7-max）、GLM（GLM-5）、Kimi（kimi-latest）
 - **动态模型列表**：下拉框只显示已设置 Key 的服务商，名单以官方 `/models` 接口线上拉取为准（缓存 1 小时，设置面板可手动「刷新模型」），新模型发布自动出现
 - 自定义 OpenAI 兼容端点：WebUI 设置面板直接添加/修改/删除（名称/标签/API 地址/Key，可标 `vision` 支持图片）
 - 其他协议：`~/.mingdao/providers/<name>.mjs` 写 `createProvider(cfg)`，见 [docs/PROVIDERS.md](docs/PROVIDERS.md)
@@ -289,12 +292,21 @@ mingdao cost --by pack          # 垂域费用分账
 ## 目录结构
 
 ```
-src/               CLI / Agent 循环 / 工具 / 权限 / 技能库 / MCP / 云同步 / WebUI（全部零依赖）
+src/               CLI / Agent 循环 / 工具 / 权限 / 技能库 / MCP / 云同步 / WebUI（内核与 CLI 全部零依赖）
+  src/web/         WebUI 服务端与前端（app.js / index.html / routes 各域）
+  src/commands/    CLI 子命令（init/run/web/key/pack/batch/ledger/schedule/sync/update…）
+  src/tools/       工具实现（read/write/edit/ls/glob/grep/bash/git/fetch/skill/task…）
 skills/            14 个内置常驻技能
 skills-lib/        22 个可安装技能库预设
 registry/          线上技能 registry 索引
-test/              smoke（离线）+ e2e（真实进程/HTTP）测试
-docs/              架构与扩展文档
+presets/           内置 Agent 预设（如 local-audit）
+packs/             内置示例 Pack（example-hello）
+assets/            内置分词器数据（tokenizer-data.json.gz，约 762 KB，`src/tokenizer.js` 使用）
+desktop/           Electron 桌面版外壳（含自动更新、原生目录选择器）
+ide/               VS Code / JetBrains 插件
+scripts/           发布与质量脚本（覆盖率、棘轮、发布校验、文档守卫…）
+test/              smoke（离线）/ e2e（真实进程与 HTTP）/ api-contracts / bench / mutate（变异验证）
+docs/              架构与扩展文档（`docs/internal/` 是内部过程文档，不随 npm 包分发）
 install.sh / install.bat / install.ps1   一键安装
 ```
 

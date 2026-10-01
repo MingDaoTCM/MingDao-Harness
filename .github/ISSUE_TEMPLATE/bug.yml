@@ -1,0 +1,43 @@
+name: Bug 报告
+description: 报告可复现的缺陷（不要贴真实密钥或未脱敏日志）
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ⚠ 安全漏洞请走 [SECURITY.md](../SECURITY.md) 的私密渠道，**不要**开公开 issue。
+        贴日志前请先自查：诊断包（`mingdao diagnose`）已脱敏，但仍请确认没有真实 Key/令牌。
+  - type: input
+    id: version
+    attributes:
+      label: 版本与平台
+      description: "`mingdao --version` 的输出 + 操作系统 + Node 版本"
+      placeholder: "0.6.8 / macOS 15.3 / Node 22.11"
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: 发生了什么
+      description: 期望行为 vs 实际行为
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 最小复现
+      description: 命令、配置（**删掉 Key**）、或最小脚本。能一条命令复现最好。
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: permission
+    attributes:
+      label: 权限档位 / 沙箱
+      options: ["ask（默认）", "auto", "readonly", "不确定"]
+  - type: textarea
+    id: logs
+    attributes:
+      label: 相关日志（已脱敏）
+      description: "`mingdao diagnose` 生成的诊断包内容，或 `~/.mingdao/audit.jsonl` 的相关行"
+      render: text

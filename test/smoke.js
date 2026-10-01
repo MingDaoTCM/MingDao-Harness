@@ -4296,7 +4296,7 @@ console.log(JSON.stringify({ okOn, xml }));`;
   assert.deepEqual(onlyCli, [
     '  mingdao --preset <名>      应用智能体预设（工具白名单/权限/参数，v0.4.0 契约化）',
     '  mingdao diagnose           一键生成诊断报告（脱敏打包日志/审计/配置，便于反馈排查）',
-    '  mingdao ledger list/show/export/verify 执行账本（每步可审计、脱敏可导出、哈希链可校验）',
+    '  mingdao ledger list/show/export/verify/replay 执行账本（每步可审计、脱敏可导出、哈希链可校验、可离线回放）',
     '  mingdao net report/policy     出网白名单与出网自证（数据不出门可导出）',
   ], `CLI 独有行应恰好是 --preset / diagnose / ledger / net，实际 ${JSON.stringify(onlyCli)}`);
   assert.deepEqual(onlyRepl, ['  /preset      列出/切换智能体预设（v0.4.0 契约化）'],
@@ -4956,9 +4956,19 @@ console.log(JSON.stringify({ okOn, xml }));`;
     if (hasBash75) {
       const notRepo = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-notrepo-'));
       const instSrc = fs.readFileSync(path.join(srcDir, '..', 'install.sh'), 'utf8');
-      const r75 = spawnSync('bash', ['-s', '--', '--offline'], {
+      // F-M8（v0.6.9）：先验证"被管进 bash"这件事本身会被拒绝（这正是报告点名的问题形态：
+      // install.sh 的头注释曾推荐 `curl … | bash`，而 README 明确说这种调用在 curl 失败时会静默以 0 退出）。
+      const piped = spawnSync('bash', ['-s', '--'], {
         cwd: notRepo, input: instSrc, encoding: 'utf8', timeout: 30000,
         env: { ...process.env, HOME: home75 },
+      });
+      const pipedOut = String(piped.stdout || '') + String(piped.stderr || '');
+      assert.equal(piped.status, 2, `管道调用必须被明确拒绝（退出码 2 与"安装失败"区分），实际 ${piped.status}：${pipedOut.slice(0, 200)}`);
+      assert.ok(pipedOut.includes('请改用') && pipedOut.includes('-o install.sh'), '拒绝时必须给出正确的下载后再运行命令');
+      // 显式放行时才继续走下面的离线分支（本用例要测的是离线拒绝，不是管道拒绝）
+      const r75 = spawnSync('bash', ['-s', '--', '--offline'], {
+        cwd: notRepo, input: instSrc, encoding: 'utf8', timeout: 30000,
+        env: { ...process.env, HOME: home75, MINGDAO_INSTALL_ALLOW_PIPE: '1' },
       });
       const out75 = String(r75.stdout || '') + String(r75.stderr || '');
       assert.ok(out75.includes('离线安装需要在本仓库目录内运行'),
@@ -11386,6 +11396,56 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
     process.env.MINGDAO_HOME = prevHome129;
     safeRmSync(home129, { recursive: true, force: true });
   }
+}
+
+// ---------- 130. v0.6.8：脱敏器前缀表（下游反馈：Dify `app-` 漏出） ----------
+// 来源：下游（MingDao-TCM-Harness）反馈 + PR #1 + 工作区 AUDIT-下游反馈-脱敏器漏Dify密钥.md。
+// 教训与 v0.6.3 那次同一类：**"表里有规则"不等于"规则认得你正在用的那种 key"**，
+// 所以这里不只断言"Dify 被掩了"，而是**表驱动**——遍历 `SECRET_PREFIXES` 每一行，
+// 用该行自带的 `sample` 验证"这一行真的认得它声称认得的形态"。新增厂商忘了配 sample/正则写错 → 当场红。
+{
+  const { redactSecrets, SECRET_PREFIXES } = await import(pathToFileURL(path.join(srcDir, 'redact.js')).href);
+
+  // ① 表驱动：每一行的样例都必须被掩掉，且保留该行声明的掩码前缀
+  assert.ok(
+    Array.isArray(SECRET_PREFIXES) && SECRET_PREFIXES.length >= 4,
+    '前缀表必须存在且至少 4 行（sk- 系 / Dify 应用 app- / Dify 知识库 dataset- / GitHub-AWS-Slack-Google）——少一行就是某个厂商的 key 会原样漏出'
+  );
+  for (const row of SECRET_PREFIXES) {
+    assert.ok(row && typeof row.vendor === 'string' && row.re instanceof RegExp && typeof row.mask === 'string' && typeof row.sample === 'string',
+      `前缀表每行必须带 vendor/re/mask/sample（表驱动断言依赖它），问题行：${JSON.stringify(row)}`);
+    const out = redactSecrets(`K=${row.sample} tail`);
+    assert.ok(!out.includes(row.sample), `[${row.vendor}] 样例必须被掩码（前缀表里有规则 ≠ 规则认得这种 key）`);
+    assert.ok(out.includes(row.mask), `[${row.vendor}] 掩码后应保留 ${row.mask}`);
+  }
+
+  // ② 下游的原场景：同一行里 sk- 与 app- 必须**同口径**掩掉（半掩比不掩更危险）
+  {
+    const line = redactSecrets('dify=app-abcdefghijklmnopqrstuvwx deepseek=sk-abcdefghijklmnopqrstuvwx');
+    assert.ok(line.includes('app-***') && line.includes('sk-***'), `app- 与 sk- 必须同口径掩码，实际：${line}`);
+    assert.ok(!line.includes('abcdefghijklmnopqrstuvwx'), '原始 key 内容不得残留');
+    // 诊断包/审计行里常见的引号形态也要掩到
+    const json = redactSecrets('{"dify_key": "app-abcdefghijklmnopqrstuvwx"}');
+    assert.ok(!json.includes('app-abcdefghijklmnopqrstuvwx'), 'JSON 引号形态下的 app- key 同样必须被掩码');
+  }
+
+  // ③ 反向：不得误伤普通短横线标识（误伤会让人直接关掉脱敏——那是比漏掩更糟的结果）
+  for (const benign of ['app-deployment-config-2024', 'dataset-summary-2024', 'app-1234', 'deployment-app-config', 'dataset-2024-01']) {
+    assert.equal(redactSecrets(benign), benign, `不得误掩普通标识：${benign}`);
+  }
+  // 边界的**如实说明**：`my-app-<20+ 位 base62>` 会被掩掉——`\b` 在 `-` 处成立，且长 base62 串
+  // 与真 key 无法区分，所以这里选 fail-closed（宁可多掩一个标识，不可漏掩一把 key）。
+  // 这是刻意的取舍，不是漏判：把它写进断言，免得后人以为是 bug。
+  assert.equal(redactSecrets('my-app-abcdefghijklmnopqrstuvwx'), 'my-app-***', '前缀后接长 base62 串一律掩（fail-closed，刻意取舍）');
+
+  // ④ 结构：前缀表是**唯一**来源（不得再有散落的 sk-/ghp_ 替换行）
+  {
+    const src = fs.readFileSync(path.join(srcDir, 'redact.js'), 'utf8');
+    assert.ok(/export const SECRET_PREFIXES/.test(src), '前缀表必须导出（供表驱动测试与文档引用）');
+    assert.ok(!src.includes("s = s.replace(/(sk-[A-Za-z0-9_-]{6,})/g"), 'sk- 的替换必须由前缀表承担，不得再散写一行');
+    assert.ok(!/s\.replace\(KEY_PREFIX, /.test(src), 'KEY_PREFIX 的替换同样必须走表');
+  }
+  ok('v0.6.8 脱敏器：前缀表单一来源 + 表驱动样例全掩 + 下游 app-/sk- 同口径 + 不误伤普通短横线标识');
 }
 
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket

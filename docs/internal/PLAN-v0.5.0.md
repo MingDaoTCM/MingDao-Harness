@@ -1,6 +1,6 @@
 # PLAN-v0.5.0「垂域 Pack 契约」— 落地计划
 
-> 依据：`STRATEGY-0.5.md` §七（阶段 A）+ §十（✅ 已确认 2026-09-11）。
+> 依据：`internal/STRATEGY-0.5.md` §七（阶段 A）+ §十（✅ 已确认 2026-09-11）。
 > 决策：v0.5 只做 **确定性① 约束确定性 + ② 成本确定性**；③ 行为确定性（执行账本/可回放/合规导出）**放 v0.6.0**。
 > 契约：接口定义见 `PACK-API.md`（v1 冻结目标）。
 > 纪律：每步可独立验证；全绿门禁（6 套测试 + strict 0/0 + tsc 0）+ 新增回归断言；**v0.5.0 发布即触发 Deyi 回迁**。
@@ -11,13 +11,13 @@
 
 | 阶段 | 状态 | 产出 |
 | --- | --- | --- |
-| A0 契约冻结 | ✅ 完成 | `PACK-API.md` v1 冻结 + 三条决策拍板；`docs/CHANGELOG-PACK.md`（v1 条目） |
+| A0 契约冻结 | ✅ 完成 | `PACK-API.md` v1 冻结 + 三条决策拍板；`docs/internal/CHANGELOG-PACK.md`（v1 条目） |
 | A1 Pack 加载器 | ✅ 完成 | `src/packs.js`：三级遮蔽发现 / manifest 严格校验 / 极简 semver（npm 语义）/ 工具注册 / 坏 Pack 只告警 / 幂等挂载 |
 | A2 CLI | ✅ 完成 | `src/commands/pack.js`：`list / verify / new / info`；`verify` 即下游 CI 门禁 |
 | A3 约束引擎 | ✅ 完成（含接线） | `src/constraints.js` 三时机 + 6 kind + fail-closed；**已接入 agent**：PreToolUse（工具/参数）、PostToolUse（缺项拒绝结果）、输出前（回填历史之前改写/拦截）；约束事件写审计；CLI/WebUI/worker 启动各挂载一次 |
 | A4 成本确定性 | ✅ 完成 | `ctx.llm()` 统一模型出口（usage 并入当前回合 → 今日费用/缓存/峰谷/护栏全部生效）；**Pack 归因记录**（cost=null 标记，不与回合级重复计费）；`mingdao cost --by pack`；`pack verify` 对「自建模型调用」的静态告警（A4.6）；**Pack 级预算**（A4.5：`budget.dailyYuan` + action，调用前拦截） |
 | A5 提示词段 | ✅ 完成 | `buildSystemPrompt` 注入 `<pack_rules>`（按 order + pack/id 确定性排序，字节稳定不破坏前缀缓存） |
-| A6 文档 | ✅ 完成 | `packs/example-hello/` 示例 + `PACK-API.md` + `CHANGELOG-PACK.md`；README「垂域 Pack」小节 + `DEVELOPER.md` Pack 章节（含最小 pack.mjs 与三条要点） |
+| A6 文档 | ✅ 完成 | `packs/example-hello/` 示例 + `PACK-API.md` + `internal/CHANGELOG-PACK.md`；README「垂域 Pack」小节 + `DEVELOPER.md` Pack 章节（含最小 pack.mjs 与三条要点） |
 | A7 发布 | ✅ 完成 | 版本 0.5.0；CHANGELOG + `RELEASE-NOTES-0.5.0.md`；tag `v0.5.0` |
 | A7 下游回迁 | ⏳ 待下游执行 | 上游已交付 `docs/MIGRATION-DEYI-v0.5.md`；回迁在 Linux 原机进行 |
 
@@ -31,7 +31,7 @@
 断言规模：smoke 83 → **86 组**；6/6 套测试全绿；tsc 0 错误；strict 0/0。
 
 **下一步**：
-0. **v0.6.0「合规与确定性」已立项**：落地计划见 `PLAN-v0.6.0.md`（确定性③：执行账本 / 决策回放 /
+0. **v0.6.0「合规与确定性」已立项**：落地计划见 `internal/PLAN-v0.6.0.md`（确定性③：执行账本 / 决策回放 /
    出网白名单自证 / 离线安装）。上游在等待下游回迁反馈的窗口期，先推进这条不依赖下游的线。
 1. **下游执行回迁**（Linux 原机）：按 `MIGRATION-DEYI-v0.5.md` 把 3 个域工具搬进 `pack-tcm`，
    `pack verify` 进下游 CI；回迁中遇到的每个「别扭点」都反馈上游当契约缺陷修（dogfooding）。
@@ -58,7 +58,7 @@
 | 项 | 内容 | 验收 |
 | --- | --- | --- |
 | A0.1 | 定稿 `PACK-API.md` 三个待定问题（§9）：内置 Provider 不可覆盖 / `block-and-rewrite` 计费归 Pack / Pack 内 `fetch` 允许但需白名单+入账 | 文档更新并标注「v1 冻结」 |
-| A0.2 | 新增 `docs/CHANGELOG-PACK.md`（Pack API 变更日志，从 v1 起） | 文件存在且有 v1 条目 |
+| A0.2 | 新增 `docs/internal/CHANGELOG-PACK.md`（Pack API 变更日志，从 v1 起） | 文件存在且有 v1 条目 |
 
 ### A1. Pack 加载器 + manifest（2 天）
 
@@ -123,7 +123,7 @@
 
 | 项 | 内容 | 验收 |
 | --- | --- | --- |
-| A7.1 | 版本 0.4.6 → **0.5.0**（minor：新增 Pack API）；`CHANGELOG-PACK.md` 记录 v1 冻结 | 版本一致 + 全绿 |
+| A7.1 | 版本 0.4.6 → **0.5.0**（minor：新增 Pack API）；`internal/CHANGELOG-PACK.md` 记录 v1 冻结 | 版本一致 + 全绿 |
 | A7.2 | 发布（自检 → commit → tag → 推 origin → 官网/镜像按既有流程） | CI + Desktop 绿 |
 | A7.3 | **Deyi 回迁**：`pack-tcm` 从 `providers/dify.mjs` 拆出 3 工具 + 3 条约束 + 提示词段；`mingdao pack verify` 进下游 CI | 域内费用可见、红线可阻断、工具卡片正常 |
 
@@ -168,4 +168,4 @@ A3 与 A4 可并行（不同模块），A5 依赖 A1。
 2. 一个不含领域逻辑的中立示例 Pack（`example-hello`）端到端跑通（工具可用、约束可阻断、提示词段到达、费用入账）；
 3. **Deyi 的 3 个域工具成功从 Provider 迁出**，域内费用出现在 `cost report` 里，中医红线可被测试阻断；
 4. 全绿门禁 + strict 0/0 + tsc 0 + 运行时 0 依赖；
-5. `PACK-API.md` 标注 v1 冻结，`CHANGELOG-PACK.md` 有 v1 条目，兼容性矩阵写下「0.5.x / 0.6.x 支持 v1」。
+5. `PACK-API.md` 标注 v1 冻结，`internal/CHANGELOG-PACK.md` 有 v1 条目，兼容性矩阵写下「0.5.x / 0.6.x 支持 v1」。

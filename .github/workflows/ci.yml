@@ -1,4 +1,4 @@
-# MingDao-Harness CI：Ubuntu(18/20/22) + Windows + macOS 三平台矩阵跑全部四套测试（全部离线，无需任何密钥）。
+# Linux(Node 18/20/22) + Windows(Node 20) + macOS(Node 20)
 # Windows 平台缺陷（评估 D1–D5）此前因 CI 只有 Linux 而结构性无法发现，现永久守住。
 name: CI
 
@@ -97,6 +97,10 @@ jobs:
           exit $code
       - name: API 域契约测试（7 域路由契约 + body 上限）
         run: node test/api-contracts.js
+      - name: 文档守卫（链接 / 命令表 / kind / 模型 id / 架构覆盖 / API 表 / 变异总数）
+        # v0.6.8（文档审计 §7.7）：把"文档与代码不一致"变成 CI 红——此前全靠人肉复查，
+        # 结果 ARCHITECTURE 停在 v0.1.x、PACK-API 列了未实现的 kind、README 的 CI 矩阵与模型 id 过时。
+        run: node scripts/doc-lint.mjs
       - name: 变异验证（自审闸门是否真的能抓到改坏）
         # v0.6.8（报告一 M-6/K-10）：报告点名的欠账——「发布说明写 28/28，但 CI 从不跑它」。
         # 每一批的 mutate 脚本都必须在这里跑：断言抓不到变异 = 断言没意义。

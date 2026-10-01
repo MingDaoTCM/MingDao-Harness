@@ -106,7 +106,7 @@
 - 验收：CI 输出覆盖率报告；`npm run bench` 全绿；tsc strict 0 错误；CHANGELOG 自动生成首版
 
 ### Phase 4 —「能力演进」v0.3.x（可选，按需启动）
-从《六份评估综合分析》（docs/EVALUATION-SYNTHESIS.md）与审计收敛出的长期项：
+从《六份评估综合分析》（docs/internal/EVALUATION-SYNTHESIS.md）与审计收敛出的长期项：
 - 跨平台沙箱补位（Windows Job Object / macOS seatbelt）
 - 记忆语义检索（node:sqlite + 简单相似度，保持零依赖）
 - WebUI 看板扩展（费用二级分账、按小时/天折线）

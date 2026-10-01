@@ -17,7 +17,7 @@
    配套 `docs/DEVELOPER.md`（预设格式 / 工具注册 / 库嵌入最小示例 / API 速查）。
 4. **战略定调**：垂直产品 × 开放内核——保持 DeepSeek 省钱 Coding Agent 的垂直深度，
    同时把内核开放给开发者做二次开发；「本地/私有化第一公民」与「DeepSeek 省钱」并列主攻
-   （详见 docs/STRATEGY-NEXT.md）。延续零依赖根基：不引入插件内核、不做云平台。
+   （详见 docs/internal/STRATEGY-NEXT.md）。延续零依赖根基：不引入插件内核、不做云平台。
 
 ## 安装
 

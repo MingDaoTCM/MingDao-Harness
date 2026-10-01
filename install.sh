@@ -2,10 +2,22 @@
 # MingDao-Harness 一键安装脚本（三平台通用：Gitee / GitCode / GitHub 内容一致）
 # 用法：
 #   1) 在仓库目录内：bash install.sh                       —— 就地安装
-#   2) 一行安装：curl -fsSL <本平台 raw install.sh> | bash -s -- <gitee|gitcode|github>
-#      —— 脚本自动从指定平台（失败时依次兜底其余平台）获取仓库到 ~/.mingdao/repo 后安装
+#   2) 先下载再运行（**推荐**）：
+#        curl -fsSL <本平台 raw install.sh> -o install.sh && bash install.sh <gitee|gitcode|github>
+#      —— 自动从指定平台（失败时依次兜底其余平台）获取仓库到 ~/.mingdao/repo 后安装
+#      ⚠ 不要把本脚本直接管进 bash（`curl … | bash`）：curl 失败时右侧读到 EOF 会**以 0 退出**，
+#        终端什么都不打印，用户会以为装好了（README「为什么不是 curl | bash」有完整说明）。
+#        若确实这样调用了，脚本会在下面检测并明确拒绝（见 STDIN 检查）。
 # 功能：检查/自动安装 Node.js（官方源 → Gitee 镜像）→ 安装 mingdao 命令（npm link，或用户目录软链）
 set -euo pipefail
+
+# F-M8（v0.6.8）：检测"被管进 bash"的调用方式（stdin 不是终端且不是我们自己的脚本文件）。
+# 这类调用在 curl 失败时会静默以 0 退出——与其让用户以为装好了，不如明确拒绝并给正确命令。
+if [ ! -t 0 ] && [ "${MINGDAO_INSTALL_ALLOW_PIPE:-}" != "1" ]; then
+  echo "[MingDao] 请改用：curl -fsSL <install.sh 地址> -o install.sh && bash install.sh <gitee|gitcode|github>" >&2
+  echo "[MingDao] 原因：管道形式下 curl 失败会静默以 0 退出，你会以为装好了。（确需管道调用请设 MINGDAO_INSTALL_ALLOW_PIPE=1）" >&2
+  exit 2
+fi
 
 GREEN='\033[32m'; YELLOW='\033[33m'; RED='\033[31m'; NC='\033[0m'
 info(){ echo -e "${GREEN}[MingDao]${NC} $*"; }

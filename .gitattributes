@@ -1,0 +1,26 @@
+# 行尾策略（v0.6.8）：**明确钉死 LF**。
+#
+# 为什么需要显式钉住：本仓的测试与文档守卫大量按 `\n` 匹配源码/文档文本
+# （结构守卫里的 `\n}\n`、变异验证的多行锚点、`bash -n` 的脚本检查……），
+# 而 Git for Windows 默认 `core.autocrlf=true` → Windows 上检出的是 CRLF →
+# 这些校验在 Windows 上**假红**（已实际发生四次，最近一次让 CI 的变异验证整批失效）。
+# 钉死 LF 后，检出到任何平台都是 LF，本地与 CI 行为一致。
+* text=auto eol=lf
+
+# 二进制：不做行尾转换（否则 diff 里会出现"整文件改动"的噪声）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.gz binary
+*.zip binary
+*.exe binary
+*.dmg binary
+*.deb binary
+*.AppImage binary
+*.p12 binary
+
+# 锁文件交给 npm 自己维护，Git 不参与行尾处理（避免每次 install 产生噪声 diff）
+package-lock.json -text

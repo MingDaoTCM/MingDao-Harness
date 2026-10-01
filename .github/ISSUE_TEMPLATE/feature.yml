@@ -1,0 +1,20 @@
+name: 功能建议
+description: 提议一个新能力或改进（请先说明它解决什么问题）
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你想解决什么问题
+      description: 描述场景与当前的痛点，而不是直接给方案
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你设想的做法（可选）
+  - type: textarea
+    id: boundary
+    attributes:
+      label: 边界与风险
+      description: 这个能力会让内核多做什么？它**不**应该覆盖什么？（权限、出网、Pack 隔离、跨平台）

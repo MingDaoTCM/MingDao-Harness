@@ -17,7 +17,7 @@ import { pathToFileURL, fileURLToPath } from 'node:url';
 import { mingdaoHome, ensureHome } from './config.js';
 import { atomicWriteJsonSync } from './atomic-write.js';
 // 目录内容指纹复用技能的同一实现（同一套「逐文件 sha256 → 再哈希」口径），
-// 不另写一份——本仓已经有「同一逻辑多份副本」的教训（见 docs/AUDIT-v0.4.6.md）。
+// 不另写一份——本仓已经有「同一逻辑多份副本」的教训（见 docs/internal/AUDIT-v0.4.6.md）。
 import { skillDirHash } from './skill-lib.js';
 import { isValidPattern, patternRejectionReason, PATTERN_KINDS, KINDS } from './constraints.js';
 import { registerTool } from './tools/index.js';

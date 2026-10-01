@@ -106,7 +106,7 @@
 | # | 级别 | 缺陷 | 位置 | 修复 |
 | --- | --- | --- | --- | --- |
 | 33 | **P1** | **启发式计数不是「保守上界」**：纯标点低估 3 倍、单字母词/随机字母数字 2 倍、纯数字 1.3 倍（10 类样本 6 类偏低）→ 非 DeepSeek 模型预算/压缩/批量预检系统性偏小 | `src/tokenizer.js:137` | 改为按字符类别 + 连续串估算（标点 1:1、数字 1/2、字母串 ≥1、空白不重复计）；实测 11 类样本 3 类轻微低估（≤9%）、平均比值 1.14。**并修正文档中「普适上界」的虚假表述** |
-| 34 | **P1** | **省钱基准虚高（口径自纠）**：④⑤ 用启发式计数测「面向 DeepSeek 的省钱主张」（JSON 结构字符多，偏差 1.1–1.8 倍）；⑤ 还维护了一份**过期 6 工具副本**（实现已在 v0.4.4 加入 `task`）→ 报出「综合省 64%」 | `test/bench/bench-cost.mjs`、`bench-savings.mjs`、`test/smoke.js` | 改用随包官方词表精确计数；只读档集合从 `agent.js` 单源导出；新增类别化断言。**真实值：④48.9%、⑤28.9%、综合 51%**，并同步修正 `SAVINGS-BENCHMARK.md` / `STRATEGY-NEXT.md` |
+| 34 | **P1** | **省钱基准虚高（口径自纠）**：④⑤ 用启发式计数测「面向 DeepSeek 的省钱主张」（JSON 结构字符多，偏差 1.1–1.8 倍）；⑤ 还维护了一份**过期 6 工具副本**（实现已在 v0.4.4 加入 `task`）→ 报出「综合省 64%」 | `test/bench/bench-cost.mjs`、`bench-savings.mjs`、`test/smoke.js` | 改用随包官方词表精确计数；只读档集合从 `agent.js` 单源导出；新增类别化断言。**真实值：④48.9%、⑤28.9%、综合 51%**，并同步修正 `SAVINGS-BENCHMARK.md` / `internal/STRATEGY-NEXT.md` |
 | 35 | P3 | `maxOutputCeiling`（官方 384K 单次输出规格）**只定义零引用** → README「单次输出上限 384K」在框架里拿不到 | `src/models.js:57`、`model-caps.js`、`agent.js:47` | 纳入能力面并作为显式 `maxOutputTokens` 的硬上限 |
 | 36 | P2 | **日界/避峰时区错位**：`beijingParts` 用可配置时区，`beijingToDate` 却硬编码 UTC+8 → 覆盖 `pricing.timezone` 后日界与 `--offpeak` 顺延错 12 小时（美东实测） | `src/pricing.js:145` | 按目标时区真实偏移换算（两遍法处理夏令时） |
 | 37 | P2 | **峰谷单价按落账时刻判定**：跨 12:00/18:00 边界的请求错记一档（1M prompt 的 pro 调用 ¥9 vs ¥4.5） | `src/agent.js`、`src/cachestats.js` | 记录请求**发起**时刻并作为计价锚点 |

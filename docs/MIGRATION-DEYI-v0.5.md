@@ -8,7 +8,7 @@
 
 
 > 面向：下游 Line B（中医垂域层，Linux 原机开发）
-> 上游契约：`PACK-API.md`（v1 已冻结）· 变更史 `CHANGELOG-PACK.md`
+> 上游契约：`PACK-API.md`（v1 已冻结）· 变更史 `internal/CHANGELOG-PACK.md`
 > 触发：**v0.5.0 发布即回迁**（决策已确认）。目标：把 3 个域工具从 `providers/dify.mjs` 的 `chat()` 里搬出来。
 > 纪律：下游**只通过扩展点接入，绝不修改上游源码**；内核 bug 在上游修。
 
@@ -251,7 +251,7 @@ mingdao key set deepseek <你的 DeepSeek Key>     # 写入 <MINGDAO_HOME>/crede
 | --- | --- |
 | 声明 | `pack.json` 写 `apiVersion: 1` + `engines.mingdao: ">=0.5 <0.7"` |
 | 支持窗口 | 上游承诺支持最近 2 个 minor（0.5 / 0.6 支持 v1） |
-| 上游变更 | 任何 Pack API 变更同步更新 `PACK-API.md` + `CHANGELOG-PACK.md` + 兼容性矩阵 |
+| 上游变更 | 任何 Pack API 变更同步更新 `PACK-API.md` + `internal/CHANGELOG-PACK.md` + 兼容性矩阵 |
 | 下游义务 | 每个上游 minor 发布后跑一次 `pack verify`，并入 CI |
 | 破坏性变更 | 走 major + 迁移指南（如可行再配 codemod） |
 

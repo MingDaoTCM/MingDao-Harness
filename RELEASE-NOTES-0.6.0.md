@@ -5,9 +5,9 @@
 > 主题：**合规与确定性（确定性③：行为确定性）** —— 把「每步可审计、可回放、可自证」做成内核能力，
 > 让私有化 / 受监管场景能自己回答「这个结论是怎么来的、花了多少钱、数据有没有出门」。
 >
-> 落地计划与逐项进度见 [docs/PLAN-v0.6.0.md](docs/PLAN-v0.6.0.md)；
+> 落地计划与逐项进度见 [docs/internal/PLAN-v0.6.0.md](docs/internal/PLAN-v0.6.0.md)；
 > 本版同时收口了 v0.4.6 审计登记表的**全部仓库内条目**（v0.5.1 已按决策取消，
-> 因此 v0.4.7 修复系列随本版一起发布），完整清单见 [docs/AUDIT-v0.4.6.md](docs/AUDIT-v0.4.6.md)。
+> 因此 v0.4.7 修复系列随本版一起发布），完整清单见 [docs/internal/AUDIT-v0.4.6.md](docs/internal/AUDIT-v0.4.6.md)。
 
 ---
 
@@ -112,7 +112,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1 -Offline   # Win
 ## 修复（含随本版发布的 v0.4.7 修复系列）
 
 v0.5.1 已按决策取消，因此 v0.4.6 审计登记表的**全部仓库内条目**随本版收口
-（逐项 `file:line`、复现证据与变异校验见 [docs/AUDIT-v0.4.6.md](docs/AUDIT-v0.4.6.md)）。
+（逐项 `file:line`、复现证据与变异校验见 [docs/internal/AUDIT-v0.4.6.md](docs/internal/AUDIT-v0.4.6.md)）。
 这里只列影响面最大的几类：
 
 **调度与任务生命周期**（v0.4.7）

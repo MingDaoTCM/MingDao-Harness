@@ -1,6 +1,6 @@
 # 桌面双击启动（过渡方案）
 
-按 [docs/DESKTOP-EVALUATION.md](../../docs/DESKTOP-EVALUATION.md) 的结论：在满足立项条件前，用以下零成本脚本获得「双击即用」体验（独立窗口由 PWA 承担，本方案负责一键启动服务器 + 打开界面）。
+按 [docs/internal/DESKTOP-EVALUATION.md](../../docs/internal/DESKTOP-EVALUATION.md) 的结论：在满足立项条件前，用以下零成本脚本获得「双击即用」体验（独立窗口由 PWA 承担，本方案负责一键启动服务器 + 打开界面）。
 
 | 平台 | 文件 | 用法 |
 | --- | --- | --- |

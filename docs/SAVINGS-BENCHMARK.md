@@ -1,6 +1,6 @@
 # 省钱基准（SAVINGS-BENCHMARK）
 
-> 对应规划：`docs/PLAN-v0.3.0.md` P0-1
+> 对应规划：`docs/internal/PLAN-v0.3.0.md` P0-1
 > 运行：`node test/bench/bench-savings.mjs`（已并入 `npm run bench`）
 > 首期基线：v0.2.8 代码，2026-09-03 记录
 > 一句话承诺：**「同一件事，MingDao 比裸调 DeepSeek API 省 X%，且任务做得到底」——本文件就是把 X 变成可复现、可回归的数字。**

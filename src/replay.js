@@ -94,7 +94,7 @@ export function replayRun(/** @type {any} */ runId, { constraints = [], permissi
     notes.push(`账本记录的是 ${start.permission} 档权限，本次按 ${typeof permission === 'string' ? permission : permission?.mode} 档重判——差异可能来自权限档位变化，而不只是规则变化。`);
   }
   notes.push('回放基于账本中**已脱敏**的参数：若某条规则依赖被掩码的内容，回放可能不命中。');
-  notes.push('回放只重判「决策」，不重跑工具、不重放模型输出（模型非确定性，见 docs/PLAN-v0.6.0.md C0.5）。');
+  notes.push('回放只重判「决策」，不重跑工具、不重放模型输出（模型非确定性，见 docs/internal/PLAN-v0.6.0.md C0.5）。');
 
   return { ok: true, runId, recordedAt: start?.at ?? null, recordedModel: start?.model ?? null, steps, summary, notes };
 }

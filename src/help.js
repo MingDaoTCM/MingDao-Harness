@@ -31,7 +31,7 @@ export function helpLines({ variant = 'cli', home = '' } = {}) {
     : [
         ['  mingdao diagnose           一键生成诊断报告（脱敏打包日志/审计/配置，便于反馈排查）', null],
         // v0.6.0 C1
-        ['  mingdao ledger list/show/export/verify 执行账本（每步可审计、脱敏可导出、哈希链可校验）', null],
+        ['  mingdao ledger list/show/export/verify/replay 执行账本（每步可审计、脱敏可导出、哈希链可校验、可离线回放）', null],
         ['  mingdao net report/policy     出网白名单与出网自证（数据不出门可导出）', null],
       ]);
   // 仅会话内才存在的行
@@ -62,6 +62,10 @@ export function helpLines({ variant = 'cli', home = '' } = {}) {
     ['  mingdao update [--check]   一键自更新（git 安装形态；--check 只对比版本）', null],
     ['  mingdao rollback           回滚到上次 update 之前的提交', null],
     ['  mingdao audit [数量]       查看工具调用审计日志（默认最近 20 条）', null],
+    ['  mingdao cost [天数]        费用与缓存命中统计（¥/天、命中率、按模型/工具分账）', null],
+    ['  mingdao batch run|status|cancel  Batch API 半价批处理（自建任务清单，服务端异步跑）', null],
+    ['  mingdao pack list/info/new/trust/verify  垂域 Pack（脚手架、信任门、静态校验）', null],
+    ['  mingdao mcp list/add/remove/serve/preset  MCP 服务器（接入外部工具）与预设', null],
     ...diagnoseRow,
     ['  mingdao desktop            启动桌面版（Electron，任意目录可用，托盘常驻）', null],
     ['  mingdao --help / --version 帮助 / 版本', null],
@@ -75,6 +79,7 @@ export function helpLines({ variant = 'cli', home = '' } = {}) {
     ['云同步与技能库（跨设备会话同步 / 技能安装）', C.bold + C.yellow],
     ['  mingdao sync login <用户名> [密码] <服务器地址> 登录云同步（自动注册）', null],
     ['  mingdao sync push|pull|status|logout  推送 / 拉取 / 状态 / 退出', null],
+    ['  mingdao sync passwd|share|accept|conflicts  改密码 / 分享会话 / 接受分享 / 冲突列表', null],
     ['  mingdao sync-server [端口] 自建云同步服务器（数据目录 /var/lib/mingdao-sync）', null],
     ['  mingdao skill search|install|uninstall|update <名称> 技能库（内置 + 线上 registry）', null],
     ['', null],

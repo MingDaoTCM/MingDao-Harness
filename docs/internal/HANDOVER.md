@@ -9,8 +9,8 @@
 | --- | --- |
 | ① 恢复并验证本机开发环境 | macOS + Node v24.20.0；零依赖安装；`npm run typecheck` 0 错误；strict 棘轮 0/0 |
 | ② 通读源代码与架构文档 | `docs/ARCHITECTURE.md` 等通读；产出物见 ③④ |
-| ③ 审计 bug 并修复 | `docs/AUDIT-v0.4.6.md`：T1–T34（含 8×P0/P1 级安全与成本缺陷），全部带 `file:line`、复现证据与**变异校验**；关键修复均有回归断言 |
-| ④ 差异化升级方案（含路线图） | `STRATEGY-0.5.md`（定位升级：可私有化的垂域智能体内核）、`PLAN-v0.5.0.md`、`PLAN-v0.6.0.md`、`RELEASE-TRAIN.md`，且**已执行**：v0.5.0 已发布；v0.6.0 C1–C4 代码完成 |
+| ③ 审计 bug 并修复 | `docs/internal/AUDIT-v0.4.6.md`：T1–T34（含 8×P0/P1 级安全与成本缺陷），全部带 `file:line`、复现证据与**变异校验**；关键修复均有回归断言 |
+| ④ 差异化升级方案（含路线图） | `internal/STRATEGY-0.5.md`（定位升级：可私有化的垂域智能体内核）、`internal/PLAN-v0.5.0.md`、`internal/PLAN-v0.6.0.md`、`internal/RELEASE-TRAIN.md`，且**已执行**：v0.5.0 已发布；v0.6.0 C1–C4 代码完成 |
 
 当前门禁：tsc 0 / strict 0-0 / smoke **101** / e2e-local 17 / e2e-web 24 /
 e2e-schedule 10 / api-contracts 8 / bench 214；CI 五腿全绿（Ubuntu 18/20/22 + **Windows** + macOS）。

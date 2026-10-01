@@ -2,7 +2,7 @@
 
 > 主题：**垂域 Pack 契约 v1** —— 定位从「省钱 Coding Agent + 开放内核」升级为
 > **可私有化的垂域智能体内核**。这一版把上游与下游之间的扩展点变成正式契约。
-> 战略见 [docs/STRATEGY-0.5.md](docs/STRATEGY-0.5.md)，落地计划与进度见 [docs/PLAN-v0.5.0.md](docs/PLAN-v0.5.0.md)。
+> 战略见 [docs/internal/STRATEGY-0.5.md](docs/internal/STRATEGY-0.5.md)，落地计划与进度见 [docs/internal/PLAN-v0.5.0.md](docs/internal/PLAN-v0.5.0.md)。
 
 ## 一句话
 
@@ -57,8 +57,8 @@ mingdao pack list / info tcm      # 查看已加载 Pack 与贡献面
 ### 5. 文档
 
 - `docs/PACK-API.md`（v1 冻结，含三条拍板决策）
-- `docs/CHANGELOG-PACK.md`（Pack API 变更史）
-- `docs/PLAN-v0.5.0.md`（落地计划 + 滚动进度）
+- `docs/internal/CHANGELOG-PACK.md`（Pack API 变更史）
+- `docs/internal/PLAN-v0.5.0.md`（落地计划 + 滚动进度）
 - **`docs/MIGRATION-DEYI-v0.5.md`（下游回迁指南，含逐项迁移步骤与 DoD）**
 - README「垂域 Pack」小节 + `docs/DEVELOPER.md` Pack 章节
 
