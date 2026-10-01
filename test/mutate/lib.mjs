@@ -14,6 +14,7 @@
 //
 // 约定：`expect` 是**断言原文里的关键词**——关键词对不上就算"逃逸"（很可能只是失败的断言不是你修的那条）。
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -22,10 +23,27 @@ export const repoRoot = path.join(path.dirname(fileURLToPath(import.meta.url)), 
 const smokePath = path.join(repoRoot, 'test', 'smoke.js');
 const outDir = path.join(repoRoot, 'test', 'mutate', '.generated');
 
+/**
+ * 行尾归一化：CRLF（含游离 CR）→ LF。
+ *
+ * v0.6.8（Windows 腿修复）：Git for Windows 的 `core.autocrlf` 默认是 true，而本仓库没有
+ * `.gitattributes`——windows-latest 上 checkout 出来的工作树里，**每个文本文件都是 CRLF**，
+ * 而本文件的 `from` 锚点一律按 LF 书写（多行锚点用 '\n' 连接）。读文件不归一化，多行锚点就
+ * 永远 `includes()` 不到：批十二~十五会静默退化成"变异点未找到 7 处 / 批次 0/4 全中"，
+ * 看起来像"守卫全挂了"，实际是脚手架自己读错了行尾（假红）。
+ *
+ * 本地复现（macOS 上同样可行）：把 src/ssrf-guard.js、src/agent.js、src/cost-guard.js、
+ * src/batch.js、src/credentials.js、ide/vscode/extension.js 转成 CRLF 后跑
+ * `node test/mutate/run.mjs`，失败项与数量与 CI 的 Windows 日志逐字一致。
+ */
+export function normalizeEol(s) {
+  return String(s).replace(/\r\n?/g, '\n');
+}
+
 /** 抽出 smoke.js 的某一节（含软链探测辅助函数与最小前置），生成可独立运行的脚本。 */
 export function extractSection(num) {
   fs.mkdirSync(outDir, { recursive: true });
-  const smoke = fs.readFileSync(smokePath, 'utf8');
+  const smoke = normalizeEol(fs.readFileSync(smokePath, 'utf8'));
   const start = smoke.indexOf(`// ---------- ${num}.`);
   if (start < 0) throw new Error(`未能定位第 ${num} 节`);
   // v0.6.8（报告一 M-6）：边界取**从本节起的下一个节头**（或文件末的收尾标记），
@@ -82,7 +100,7 @@ export function makeMutator(opts = {}) {
       return spawnSync(process.execPath, [rel], {
         cwd: repoRoot,
         encoding: 'utf8',
-        env: { ...process.env, MINGDAO_HOME: fs.mkdtempSync(path.join('/tmp', 'mdh-mut-')), ...extraEnv },
+        env: { ...process.env, MINGDAO_HOME: fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-mut-')), ...extraEnv },
       });
     },
     /**
@@ -91,9 +109,18 @@ export function makeMutator(opts = {}) {
      */
     mutate(m) {
       const f = path.join(repoRoot, m.file);
-      const orig = fs.readFileSync(f, 'utf8');
+      const raw = fs.readFileSync(f, 'utf8');
+      // v0.6.8（Windows 腿）：匹配前把工作树的行尾归一化成 LF（见 normalizeEol 的注释）。
+      // 归一化只用于**匹配与写入**；还原时写回 raw——跑完工作树的字节必须与跑之前完全一致
+      // （Windows 上就是 CRLF 原样），否则变异验证会污染工作区，比不跑还危险。
+      const orig = normalizeEol(raw);
       if (!orig.includes(m.from)) {
-        results.push({ name: m.name, ok: false, why: `变异点未找到：${JSON.stringify(m.from.slice(0, 60))}` });
+        const crlf = raw.includes('\r\n');
+        results.push({
+          name: m.name,
+          ok: false,
+          why: `变异点未找到：${JSON.stringify(m.from.slice(0, 60))}${crlf ? '（该文件是 CRLF，已按 LF 归一化后仍未匹配）' : ''}`,
+        });
         if (!quiet) console.log(`✗ ${m.name}\n    变异点未找到（${m.file}）`);
         return false;
       }
@@ -102,7 +129,7 @@ export function makeMutator(opts = {}) {
       try {
         out = m.run();
       } finally {
-        fs.writeFileSync(f, orig); // 先还原，再判结果
+        fs.writeFileSync(f, raw); // 先还原原始字节，再判结果
       }
       const text = String(out?.stdout || '') + String(out?.stderr || '');
       const hit = out?.status !== 0 && m.expect.some((k) => text.includes(k));
