@@ -4,10 +4,11 @@
 //  - 系统托盘（关闭最小化到托盘）、应用菜单、窗口大小/位置记忆、单实例锁
 //  - 权限收紧（摄像头/通知/插件等一律拒绝）、外链交系统浏览器
 //  - 打包版自动检查更新（electron-updater，GitHub Releases）
-import { app, BrowserWindow, shell, dialog, Tray, Menu, nativeImage, powerSaveBlocker } from 'electron';
+import { app, BrowserWindow, shell, dialog, ipcMain, Tray, Menu, nativeImage, powerSaveBlocker } from 'electron';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 /**
@@ -224,7 +225,15 @@ async function createWindow() {
     icon: loadIcon('icon.png') || undefined,
     show: false,
     // 权限收紧（审计 MiniMax §2.1）：webview 显式禁用 + 页面 CSP（index.html meta）双重防线
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true, webviewTag: false },
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webviewTag: false,
+      // v0.6.8：向 WebUI 暴露**极小**的桌面能力（目前只有"选目录"）。沙箱下 preload 仍可用
+      // contextBridge/ipcRenderer，渲染进程依旧拿不到 Node —— 与既有安全档位一致。
+      preload: path.join(__dirname, 'preload.cjs'),
+    },
   });
   mainWindow = win;
   if (st.maximized) win.maximize();
@@ -298,15 +307,47 @@ async function createWindow() {
     appLog('render-process-gone ' + JSON.stringify(details || {}));
     if (!quitting && guardCrash()) win.webContents.reload();
   });
-  // 只允许本机地址在窗口内导航；其余链接交给系统浏览器
+  // 只允许**本窗口这一个端口**的本机地址在窗口内导航；其余链接交给系统浏览器。
+  // v0.6.8（报告一 K-8）：此前判据是 `startsWith('http://127.0.0.1:')`——任何本机端口都放行，
+  // 而本机常有别的服务（开发服务器、日志面板、其它应用的回环端口）；`openExternal` 也**不校验协议**
+  // （`file:`/`smb:`/自定义 scheme 会原样交给系统处理）。现在：端口钉死 + 仅 http(s) 出外链。
+  const allowedOrigin = `http://127.0.0.1:${info.port}`;
+  const openExternalSafe = (/** @type {any} */ url) => {
+    try {
+      const u = new URL(String(url));
+      if (u.protocol === 'http:' || u.protocol === 'https:') shell.openExternal(u.href);
+      else appLog('拒绝用系统浏览器打开非 http(s) 链接：' + u.protocol);
+    } catch {
+      appLog('拒绝打开无法解析的链接');
+    }
+  };
   win.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    openExternalSafe(url);
     return { action: 'deny' };
   });
   win.webContents.on('will-navigate', (e, url) => {
-    if (!url.startsWith('http://127.0.0.1:')) {
+    if (!String(url).startsWith(allowedOrigin)) {
       e.preventDefault();
-      shell.openExternal(url);
+      openExternalSafe(url);
+    }
+  });
+  // 原生目录选择器（v0.6.8，负责人要求）：登记/添加工作空间时弹系统对话框，**默认停在当前用户家目录**，
+  // 用户点一下就能选中自己的项目目录；取消返回 null（前端据此什么都不做）。
+  ipcMain.removeHandler('mdh:pick-directory');
+  ipcMain.handle('mdh:pick-directory', async (_evt, startDir) => {
+    try {
+      const start = typeof startDir === 'string' && startDir ? startDir : os.homedir();
+      const r = await dialog.showOpenDialog(win, {
+        title: '选择工作空间目录',
+        defaultPath: start,
+        properties: ['openDirectory', 'createDirectory'],
+        buttonLabel: '使用此目录',
+      });
+      if (r.canceled || !r.filePaths || !r.filePaths.length) return null;
+      return r.filePaths[0];
+    } catch (e) {
+      appLog('目录选择器失败：' + (e && /** @type {any} */ (e).message ? /** @type {any} */ (e).message : String(e)));
+      return null;
     }
   });
 }

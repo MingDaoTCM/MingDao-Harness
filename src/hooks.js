@@ -118,14 +118,21 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
       // stdin 'error' 谁先到取决于调度：macOS 上 error 先到（本地 5/5 通过），
       // ubuntu Node 18/20 上 close 先到 → 空输出被当成「放行」，用例在 CI 上红。
       //
-      // 改成看**可完成的写入**：`end()` 之后 'finish' 表示载荷已全部交给内核（对端读过），
-      // 'error' 表示失败，两者都不发生就说明载荷**从未送达**。这个判据不依赖事件先后：
-      //   · 读了 stdin 的 hook → finish 必然在它退出前触发（数据在它读走时就进了内核）；
-      //   · 没读 stdin 的 hook → finish 永不触发，close 时按「未送达」处理。
-      let stdinFlushed = false;
-      child.stdin.on('finish', () => {
-        stdinFlushed = true;
-      });
+      // v0.6.8（报告一 K-1，**严重**）：判据从 `'finish'` 事件改为**写入回调**。
+      //
+      // 原判据是「`end()` 之后 'finish' 是否触发」，注释里写着"这个判据不依赖事件先后"——
+      // 但实测它在 Windows 命名管道上**不可靠**：Node 24.14.0 下 40 次复现 0 次通过
+      // （24.21.0 才 40/40），于是「载荷已送达」被误判成「未送达」→ 任何读 stdin 的合规 hook
+      // 在大文件写入时都被误拦（生产功能破坏 + 测试/发布链路在 Windows 上断裂）。
+      //
+      // 现在改用**可计量的证据**：`write()` 的回调在**这一块数据交给内核**时触发。
+      //   · hook 读了 stdin → 回调必触发（数据被读走）；
+      //   · hook 不读 → 载荷若 ≤ 管道缓冲（64KB）回调也会触发（内核收下了）→ 尊重它的输出；
+      //     载荷 > 64KB 且无人读 → 回调不触发 → close 时判「未送达」→ fail-closed。
+      // 这条判据与平台无关，也不依赖任何事件先后。
+      const payloadStr = JSON.stringify(payload);
+      const payloadBytes = Buffer.byteLength(payloadStr);
+      let stdinDeliveredBytes = 0;
       child.stdin.on('error', (e) => {
         stdinFailed = String(/** @type {any} */ (e)?.message ?? e);
       });
@@ -138,15 +145,24 @@ export function createHooks(hooksCfg = {}, /** @type {any} */ workingDir, /** @t
         // 载荷没送进去、且 hook 也没给出任何判定 → 这次运行**不可信**，按 hook 失败处理
         // （调用方 !ok → block，fail-closed）。若 hook 仍给出了输出，说明它本就没打算读 stdin
         // （例如 `echo '{"decision":"approve"}'`），那种情况下尊重它的判定，避免误伤既有策略。
-        if (!String(out).trim() && (stdinFailed || !stdinFlushed)) {
-          const why = stdinFailed ?? '载荷未写完（子进程可能未读取 stdin 就退出）';
+        // 只认**写入回调**这一条可计量证据。刻意**不用** `writableFinished` 兜底：
+        // 子进程 EPIPE 提前退出时它也可能是 true，于是「300KB 载荷没送进去」会被判成送达
+        // ——那是 fail-open（实测：不读 stdin 且退出码 0 的 hook 会因此拿到 approve）。
+        const delivered = stdinDeliveredBytes >= payloadBytes;
+        if (!String(out).trim() && (stdinFailed || !delivered)) {
+          const why = stdinFailed ?? `载荷未送达（已交给内核 ${stdinDeliveredBytes}/${payloadBytes} 字节，子进程可能未读取 stdin 就退出）`;
           finish({ ok: false, error: `hook 输入写入失败：${why}` });
           return;
         }
         finish({ ok: true, exitCode: code, output: out, stderr: err, truncated: outTruncated });
       });
       try {
-        child.stdin.write(JSON.stringify(payload));
+        // ⚠ 回调在**出错时也会被调用**（Node 的 Writable 语义：`cb(err)`）。
+        // 必须判 err —— 否则 EPIPE 会被当成"送达成功"，判据整体 fail-open
+        // （实测：300KB 载荷 + 不读 stdin 的 hook 会因此拿到 approve）。
+        child.stdin.write(payloadStr, (/** @type {any} */ err) => {
+          if (!err) stdinDeliveredBytes = payloadBytes;
+        });
         child.stdin.end();
       } catch (e) {
         // 同步抛出与异步 error 同源，统一交给 close 收口（不在这里 finish，避免重复结算）

@@ -6,6 +6,7 @@
 const vscode = require('vscode');
 const http = require('http');
 const { spawn } = require('child_process');
+const path = require('node:path');
 
 let serverProc = null;
 
@@ -13,7 +14,24 @@ function port() {
   return vscode.workspace.getConfiguration('mingdao').get('port', 3820);
 }
 function bin() {
-  return vscode.workspace.getConfiguration('mingdao').get('binary', 'mingdao');
+  // v0.6.8（报告一 K-2，**高**）：**只读用户级（全局）设置**。
+  //
+  // 此前是 `get('binary', 'mingdao')` —— 它会返回**工作区级**的值，而工作区级设置来自
+  // 被打开仓库里的 `.vscode/settings.json`：恶意仓库只要写上
+  //   { "mingdao.binary": "./payload.sh" }
+  // 用户在仓库里点一次「启动 MingDao 服务」就执行了仓库自带的任意程序（RCE）。
+  // 这里 `inspect()` 只取 `globalValue`（用户自己设置的值），工作区/远程值一律忽略。
+  const cfg = vscode.workspace.getConfiguration('mingdao');
+  const g = cfg.inspect ? cfg.inspect('binary') : null;
+  const v = (g && g.globalValue) || 'mingdao';
+  const s = String(v).trim();
+  if (!s) return 'mingdao';
+  // 明确拒绝在工作区目录内执行相对路径程序（正常用户只会写 'mingdao' 或绝对路径）
+  if (!path.isAbsolute(s) && s !== 'mingdao' && /[\\/]/.test(s)) {
+    vscode.window.showWarningMessage('MingDao: 已忽略工作区内的相对 binary 设置（安全策略），改用 mingdao。');
+    return 'mingdao';
+  }
+  return s;
 }
 function base() {
   return `http://127.0.0.1:${port()}`;
@@ -36,7 +54,8 @@ function ensureServer() {
     health((ok) => {
       if (ok) return resolve(true);
       if (serverProc) return resolve(false);
-      const child = spawn(bin(), ['web', String(port())], { stdio: 'ignore' });
+      // shell: false（显式）：参数以数组传递，永不经过 shell 解析
+      const child = spawn(bin(), ['web', String(port())], { stdio: 'ignore', shell: false });
       serverProc = child;
       child.on('error', () => {
         serverProc = null;

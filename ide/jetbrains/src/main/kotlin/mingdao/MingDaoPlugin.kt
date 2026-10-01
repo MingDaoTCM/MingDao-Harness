@@ -50,12 +50,19 @@ fun healthy(project: Project): Boolean {
 fun startServer(project: Project) {
     val s = project.service<MingDaoSettings>()
     val os = System.getProperty("os.name").lowercase()
-    val cmd = if (os.contains("win")) {
-        listOf("cmd", "/c", "start", "", s.binary, "web", s.port.toString())
-    } else {
-        listOf("sh", "-c", "nohup ${s.binary} web ${s.port} >/dev/null 2>&1 &")
-    }
-    ProcessBuilder(cmd).start()
+    // v0.6.8（报告一 K-2，**高**）：**绝不把 binary 拼进 shell 字符串**。
+    //
+    // 此前 POSIX 分支是 `sh -c "nohup ${s.binary} web ${s.port} >/dev/null 2>&1 &"` ——
+    // settings（可由项目级配置写入）里给 binary 填 `x; rm -rf ~ #` 就是一次真实命令注入；
+    // Windows 分支经 `cmd /c` 同样会被再次解析。现在一律用 argv 数组直接 exec：
+    // 参数不再经过任何 shell，注入面归零；输出丢弃、进程独立于 IDE 存活（无需 nohup）。
+    val binary = s.binary.trim()
+    require(binary.isNotEmpty()) { "MingDao: binary 未配置" }
+    val cmd = listOf(binary, "web", s.port.toString())
+    ProcessBuilder(cmd)
+        .redirectOutput(ProcessBuilder.Redirect.DISCARD)
+        .redirectError(ProcessBuilder.Redirect.DISCARD)
+        .start()
     repeat(15) {
         if (healthy(project)) return
         Thread.sleep(400)

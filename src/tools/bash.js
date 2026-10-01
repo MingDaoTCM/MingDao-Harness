@@ -102,15 +102,55 @@ function foldRepeats(/** @type {any} */ s) {
  */
 export function decodeProcessOutput(buf) {
   if (!buf || !buf.length) return '';
+  // v0.6.8（报告一 K-3/K-4，**高**）：**局部解码失败不得升级为全局结论**。
+  //
+  // 原实现：严格 UTF-8 一旦抛错，就把**整个缓冲区**按 GBK 解一遍。于是一个坏字节
+  // （网络/日志里极常见的 0xFF、被截断的多字节序列）会把 360KB 合法 UTF-8 中文全部变成乱码
+  // ——报告实测 `输出.includes('测') === false`。这正是项目自己在报告里点名的反模式：
+  // 「检测到局部事实 → 升级成全局结论」。
+  //
+  // 现在的判据分层：
+  //   ① 严格 UTF-8 成功 → 直接用（绝大多数情况）；
+  //   ② 失败时看**首个非法字节之前**的合法多字节序列个数：≥2 个说明这段数据本来就是 UTF-8
+  //      （只是混了个坏字节）→ 用**非致命 UTF-8** 解，坏字节只影响它自己（输出里 1 个 U+FFFD）；
+  //   ③ 否则（前缀全是 ASCII/单字节，典型是 Windows cmd 的 GBK/CP936 中文）→ 按 GBK 解。
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(buf);
   } catch {
+    if (validMultibytePrefix(buf) >= 2) return new TextDecoder('utf-8', { fatal: false }).decode(buf);
     try {
       return new TextDecoder('gbk').decode(buf);
     } catch {
-      return buf.toString('utf8');
+      return new TextDecoder('utf-8', { fatal: false }).decode(buf);
     }
   }
+}
+
+/**
+ * 统计「首个非法字节之前」出现的**合法多字节 UTF-8 序列**个数（导出以便确定性测试）。
+ * 只做判定、不产生输出；遇到非法序列立刻停下（我们只关心"这段数据像不像 UTF-8"）。
+ * @param {Buffer} buf
+ */
+export function validMultibytePrefix(buf) {
+  let i = 0;
+  let count = 0;
+  while (i < buf.length) {
+    const b = buf[i];
+    if (b < 0x80) { i += 1; continue; }
+    let len = 0;
+    if (b >= 0xc2 && b <= 0xdf) len = 2;
+    else if (b >= 0xe0 && b <= 0xef) len = 3;
+    else if (b >= 0xf0 && b <= 0xf4) len = 4;
+    else return count; // 非法起始字节（0x80-0xC1、0xF5-0xFF）
+    if (i + len > buf.length) return count; // 尾部被截断的多字节序列
+    for (let k = 1; k < len; k += 1) {
+      const c = buf[i + k];
+      if (c < 0x80 || c > 0xbf) return count; // 续字节非法
+    }
+    count += 1;
+    i += len;
+  }
+  return count;
 }
 
 /**

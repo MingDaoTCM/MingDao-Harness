@@ -75,7 +75,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
   const allowAnyDir = cfg?.web?.allowAnyWorkspaceDir === true;
 
   if (method === 'GET' && p === '/api/workspaces') {
-    json(res, 200, { ok: true, workspaces: listWorkspaces(), current: currentWorkspace(state.workingDir)?.name || null, cwd: state.workingDir });
+    json(res, 200, { ok: true, workspaces: listWorkspaces(), current: currentWorkspace(state.workingDir)?.name || null, cwd: state.workingDir, home: os.homedir() });
     return true;
   }
 
@@ -155,7 +155,10 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
   // 目录浏览器（「新建工作空间」选择电脑磁盘目录用）：本机运行时即用户电脑的目录树；
   // 只列子目录（不含隐藏目录），供前端逐级导航选择
   if (method === 'GET' && p === '/api/fs-browse') {
+    // v0.6.8（负责人要求）：不带 dir 时落到**当前系统用户的家目录** —— 登记/改目录的默认起点
+    // 就应该是"我自己的目录"，而不是服务器进程的 cwd（用户往往不知道那是什么，还得自己找路径）。
     let dir = String(url.searchParams.get('dir') || '').trim();
+    if (!dir) dir = os.homedir();
     if (!path.isAbsolute(dir)) return json(res, 400, { error: '需要绝对路径' });
     // 评估 6.1（v0.4.3）：先 path.resolve 消解 .. 段，再做前缀比较与 stat/readdir——此前字符串
     // 前缀比较用未规范化的 dir，`/home/u/../../etc` 能通过 startsWith('/home/u/') 但 stat 解析到 /etc。
@@ -186,7 +189,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       let parent = path.dirname(dir);
       // 父目录同样不得越出基目录（与上面的判定共用同一个 realpath 版 withinAllowed，避免两处漂移）
       if (!withinAllowed(parent)) parent = /** @type {any} */ (null);
-      json(res, 200, { ok: true, path: dir, parent: parent === dir ? null : parent, entries });
+      json(res, 200, { ok: true, path: dir, parent: parent === dir ? null : parent, entries, home: os.homedir() });
     } catch (/** @type {any} */ err) {
       json(res, 400, { error: String(err?.message || err) });
     }

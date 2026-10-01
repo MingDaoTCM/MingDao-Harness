@@ -27,8 +27,16 @@ export function extractSection(num) {
   fs.mkdirSync(outDir, { recursive: true });
   const smoke = fs.readFileSync(smokePath, 'utf8');
   const start = smoke.indexOf(`// ---------- ${num}.`);
-  const end = smoke.indexOf('\ndelete process.env.MINGDAO_HOME;');
-  if (start < 0 || end < 0) throw new Error(`未能定位第 ${num} 节`);
+  if (start < 0) throw new Error(`未能定位第 ${num} 节`);
+  // v0.6.8（报告一 M-6）：边界取**从本节起的下一个节头**（或文件末的收尾标记），
+  // 而不是"文件里第一处 `delete process.env.MINGDAO_HOME;`"——后者若出现在本节之前，
+  // slice(start, end) 会得到空串：生成脚本里一条断言都没有，节"通过"得毫无意义
+  // （变异验证会因此变成假绿，正是它本该防的事）。
+  const nextHeader = smoke.indexOf('\n// ---------- ', start + 1);
+  const tailMark = smoke.indexOf('\ndelete process.env.MINGDAO_HOME;', start + 1);
+  const candidates = [nextHeader, tailMark].filter((i) => i > start);
+  const end = candidates.length ? Math.min(...candidates) : smoke.length;
+  if (end <= start) throw new Error(`第 ${num} 节的边界计算异常`);
   const hStart = smoke.indexOf('// 建一个**真正的**符号链接');
   const hEnd = smoke.indexOf('// ---------- 1. token 估算');
   const helpers = hStart >= 0 && hEnd > hStart ? smoke.slice(hStart, hEnd) : '';
@@ -40,6 +48,8 @@ import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path'
 import { spawnSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 const srcDir = ${JSON.stringify(path.join(repoRoot, 'src'))};
+const repoRoot = path.dirname(srcDir); // v0.6.8：节里可能引用仓库根（脚本/desktop/ide 守卫）
+const require = (await import('node:module')).createRequire(import.meta.url); // 生成的脚本是 ESM，CJS 加载 preload 时需要它
 const { dispatch } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
 const { saveConfig, loadConfig } = await import(pathToFileURL(path.join(srcDir, 'config.js')).href);
 const { createAgent } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);

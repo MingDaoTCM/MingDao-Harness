@@ -11223,6 +11223,169 @@ delete process.env.MINGDAO_HOME;
 safeRmSync(smokeHome, { recursive: true, force: true });
 console.log(`\n全部通过：${passed} 组断言 ✓`);
 // 显式收尾退出（v0.6.5）：本套件里有若干**故意造成半开连接**的桩服务端（例如批处理超时用例里
+// ---------- 129. v0.6.8：外圈质量洼地（hooks 判据 / 解码 / 门禁假绿 / 变异切片 / IDE 注入 / 桌面目录选择器） ----------
+// 来源：第三方 v0.6.7 审计报告（K-1 严重、K-3/K-4/K-5/K-6/K-7 高、K-2 高、M-6 中）+ 负责人实测要求
+// （桌面版登记/添加工作空间应弹系统目录选择器并默认停在用户家目录）。
+{
+  const prevHome129 = process.env.MINGDAO_HOME;
+  const home129 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p129-'));
+  // 本节要用仓库根（scripts/desktop/ide 守卫）。**局部定义**：完整 smoke 里没有全局 repoRoot，
+  // 而抽取出来的脚本里外层已有同名 const —— 在块作用域里遮蔽是合法的（两处都能跑）。
+  const repoRoot = path.join(srcDir, '..');
+  process.env.MINGDAO_HOME = home129;
+  try {
+    // ① K-1（严重）：hook 的"载荷是否送达"必须用**可计量的证据**判定，而不是 'finish' 事件。
+    //    行为级：>64KB 载荷 + 读 stdin 的 hook → 放行且子进程收到**全部字节**；
+    //            同载荷 + 不读 stdin 的 hook → 明确 block（fail-closed），不再是"看起来读过了"。
+    {
+      const { createHooks } = await import(pathToFileURL(path.join(srcDir, 'hooks.js')).href);
+      const hdir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p129hook-'));
+      const counter = path.join(hdir, 'n.txt');
+      const readHook = path.join(hdir, 'read.mjs');
+      fs.writeFileSync(
+        readHook,
+        `import fs from 'node:fs'; let n=0; process.stdin.on('data',(c)=>{n+=c.length}); process.stdin.on('end',()=>{fs.writeFileSync(${JSON.stringify(counter)},String(n)); console.log(JSON.stringify({decision:'approve'}))});`
+      );
+      const noReadHook = path.join(hdir, 'noread.mjs');
+      fs.writeFileSync(noReadHook, 'process.exit(0);');
+      const mk = (f) => ({ PreToolUse: [{ matcher: 'write', cmd: `${process.execPath} ${f}` }] });
+      const big = 'x'.repeat(300 * 1024); // 300KB > 管道缓冲（64KB）
+      const args = { path: '/tmp/x', content: big };
+      const sent = Buffer.byteLength(JSON.stringify({ hook_event_name: 'PreToolUse', tool_name: 'write', tool_input: args }));
+      const r1 = await createHooks(mk(readHook), hdir, {}).pre('write', args);
+      assert.equal(r1.decision, 'approve', `读 stdin 的 hook 不得被误拦（K-1；实际 ${r1.decision} ${r1.reason || ''}）`);
+      assert.equal(fs.readFileSync(counter, 'utf8'), String(sent), 'hook 必须收到**完整的**载荷（K-1 的实质：数据真的送到了）');
+      const r2 = await createHooks(mk(noReadHook), hdir, {}).pre('write', args);
+      assert.equal(r2.decision, 'block', `不读 stdin 且无输出的 hook 必须 fail-closed（实际 ${r2.decision}）`);
+      assert.ok(/写入失败|未送达/.test(String(r2.reason || '')), `拒绝理由要说清是"载荷没送进去"，实际：${r2.reason}`);
+      // 判据不得再依赖 'finish' 事件
+      const hooksSrc = fs.readFileSync(path.join(srcDir, 'hooks.js'), 'utf8');
+      assert.ok(!/stdin\.on\('finish'/.test(hooksSrc), "K-1：判据不得再建立在 'finish' 事件上（Windows 命名管道不可靠）");
+      assert.ok(/stdinDeliveredBytes/.test(hooksSrc), 'K-1：必须按已交付字节数判定');
+      assert.ok(/if \(!err\) stdinDeliveredBytes = payloadBytes;/.test(hooksSrc), 'K-1：写入回调必须判 err（否则 EPIPE 会被当成送达成功，判据 fail-open）');
+      // 判据必须是**严格的字节比较**：加 `|| writableFinished` 之类兜底会在"子进程 EPIPE 提前退出"时
+      // 把没送进去的载荷判成送达（fail-open）。该差异在本机不可稳定复现（取决于平台对 end() 的收尾时序），
+      // 所以这里用一条**精确**的源码守卫钉住表达式本身。
+      assert.ok(
+        /const delivered = stdinDeliveredBytes >= payloadBytes;/.test(hooksSrc),
+        'K-1：送达判据必须严格等于"已交付字节数 ≥ 载荷字节数"（不得加 writableFinished 之类兜底）'
+      );
+      safeRmSync(hdir, { recursive: true, force: true });
+    }
+
+    // ② K-3/K-4（高）：**一个坏字节不得把整段输出变成乱码**（局部失败 → 局部影响）
+    {
+      const BASH129 = await import(pathToFileURL(path.join(srcDir, 'tools', 'bash.js')).href);
+      const zh = '中文测试内容'.repeat(30);
+      const utf8 = Buffer.from(zh, 'utf8');
+      const withBad = Buffer.concat([utf8, Buffer.from([0xff]), utf8]);
+      const out1 = BASH129.decodeProcessOutput(withBad);
+      assert.ok(out1.includes('测'), 'K-3：混了一个坏字节的 UTF-8 输出必须**保住其余内容**（此前整段变乱码）');
+      assert.equal((out1.match(/\uFFFD/g) || []).length, 1, 'K-3：坏字节只应影响它自己（1 个 U+FFFD）');
+      // 逐字保真（比"含某个字"强得多：整段按 GBK 解时，长文本里可能碰巧出现"测"）
+      assert.equal(out1.replace(/\uFFFD/g, ''), zh + zh, 'K-3：坏字节之外的内容必须逐字保真（不得整段降级成 GBK）');
+      const truncated = Buffer.concat([utf8, Buffer.from([0xe4, 0xb8]), utf8]);
+      const out2 = BASH129.decodeProcessOutput(truncated);
+      assert.ok(out2.includes('测') && (out2.match(/\uFFFD/g) || []).length === 1, 'K-4：被截断的多字节序列同样只影响局部');
+      // 真 GBK（Windows cmd 输出）仍必须按 GBK 解对
+      const gbk = Buffer.from([0xd6, 0xd0, 0xce, 0xc4]);
+      assert.equal(BASH129.decodeProcessOutput(gbk), '中文', 'Windows 的 GBK 输出必须仍被正确解码（不能因为修 K-3 而回归）');
+      assert.equal(BASH129.decodeProcessOutput(Buffer.from('plain ascii')), 'plain ascii', '纯 ASCII 不受影响');
+    }
+
+    // ③ K-5/K-6：覆盖率门禁**不得假绿**（路径映射 + 分母 = 全部 src 文件 + 分母为 0 即失败）
+    {
+      const cov = fs.readFileSync(path.join(repoRoot, 'scripts', 'coverage-report.mjs'), 'utf8');
+      assert.ok(/fileURLToPath\(url\)/.test(cov), 'K-5：V8 数据的 file:// URL 必须用 fileURLToPath 映射（replace 在 Windows 上必然失败）');
+      assert.ok(!/url\.replace\('file:\/\/', ''\)/.test(cov), 'K-5：不得再用 replace 解 URL');
+      assert.ok(/allSrc/.test(cov) && /readdirSync/.test(cov), 'K-6：分母必须遍历全部 src 文件，而不是只统计"加载过的"');
+      assert.ok(/\}\)\(path\.join\(root, 'src'\)\);/.test(cov), 'K-6：分母必须真的从 src/ 根开始遍历');
+      assert.ok(/totalLines === 0[\s\S]{0,200}process\.exit\(1\)/.test(cov), 'K-6：分母为 0 必须失败（不能打印 0% 假装是质量结论）');
+      // K-7：棘轮不得走 npx（会把"工具缺失"算成 0 错误）
+      const ratchet = fs.readFileSync(path.join(repoRoot, 'scripts', 'strict-ratchet.mjs'), 'utf8');
+      assert.ok(!/execSync\('npx tsc/.test(ratchet), 'K-7：棘轮不得再调用 npx tsc');
+      assert.ok(/typescript', 'bin', 'tsc'|typescript\/bin\/tsc/.test(ratchet), 'K-7：棘轮必须用仓库内的 typescript 编译器入口');
+      assert.ok(/找不到[\s\S]{0,120}process\.exit\(1\)|process\.exit\(1\)[\s\S]{0,120}找不到/.test(ratchet), 'K-7：编译器缺失必须显式失败');
+    }
+
+    // ④ M-6：变异脚本的切片必须**停在本节末尾**（否则生成的脚本可能一条断言都没有 → 变异验证变假绿）
+    {
+      const { extractSection } = await import(pathToFileURL(path.join(repoRoot, 'test', 'mutate', 'lib.mjs')).href);
+      const sec128 = fs.readFileSync(extractSection('128'), 'utf8');
+      assert.ok(sec128.includes('v0.6.7 批十四/十五'), 'M-6：切片必须包含本节内容');
+      assert.ok(!sec128.includes('v0.6.8：外圈质量洼地'), 'M-6：切片必须**停在本节末尾**（不得把下一节吞进来）');
+      assert.ok(!sec128.includes('账本与计费诚实性'), 'M-6：切片不得吞掉更早/更后的节');
+      assert.ok(sec128.split('assert.').length > 20, 'M-6：切片里必须有实质断言（空切片会让变异验证永远"通过"）');
+    }
+
+    // ⑤ K-2（高）：IDE 插件不得把设置拼进 shell；VS Code 不得信任工作区级可执行路径
+    {
+      const vsc = fs.readFileSync(path.join(repoRoot, 'ide', 'vscode', 'extension.js'), 'utf8');
+      assert.ok(/inspect\('binary'\)/.test(vsc) && /globalValue/.test(vsc), 'K-2：VS Code 插件必须只读**用户级** binary 设置（工作区级可被仓库注入）');
+      assert.ok(!/getConfiguration\('mingdao'\)\.get\('binary'/.test(vsc), 'K-2：不得再用会返回工作区值 的 get(binary)');
+      assert.ok(/shell: false/.test(vsc), 'K-2：spawn 必须显式 shell:false');
+      const jb = fs.readFileSync(path.join(repoRoot, 'ide', 'jetbrains', 'src', 'main', 'kotlin', 'mingdao', 'MingDaoPlugin.kt'), 'utf8');
+      assert.ok(!/sh", "-c", "nohup \$\{s\.binary\}/.test(jb), 'K-2：JetBrains 插件不得把 binary 拼进 sh -c 字符串（命令注入）');
+      assert.ok(/listOf\(binary, "web", s\.port\.toString\(\)\)/.test(jb), 'K-2：必须用 argv 数组直接 exec');
+    }
+
+    // ⑥ 桌面版目录选择器（负责人要求）：原生对话框 + 默认停在**当前用户家目录**
+    {
+      // 6a preload 的暴露面（用 electron 桩加载，行为级）
+      const Module = (await import('node:module')).default;
+      const exposed = [];
+      const invokes = [];
+      const orig = Module.prototype.require;
+      Module.prototype.require = function (/** @type {any} */ id) {
+        if (id === 'electron') {
+          return {
+            contextBridge: { exposeInMainWorld: (/** @type {any} */ k, /** @type {any} */ v) => exposed.push([k, Object.keys(v)]) },
+            ipcRenderer: { invoke: (/** @type {any} */ ch, /** @type {any} */ arg) => invokes.push([ch, arg]) },
+          };
+        }
+        return orig.apply(this, arguments);
+      };
+      try {
+        // preload 是 CJS：用 createRequire 加载（smoke 本体与抽取脚本都是 ESM，故内联导入）
+        (await import('node:module')).createRequire(import.meta.url)(path.join(repoRoot, 'desktop', 'preload.cjs'));
+      } finally {
+        Module.prototype.require = orig;
+      }
+      assert.equal(exposed.length, 1, 'preload 只应暴露一个全局对象');
+      assert.equal(exposed[0][0], '__MDH_DESKTOP__');
+      assert.ok(exposed[0][1].includes('pickDirectory') && exposed[0][1].includes('isDesktop'), `preload 暴露面应最小化，实际 ${exposed[0][1]}`);
+      // 6b 主进程侧：IPC 处理器 + 原生对话框 + 默认家目录
+      const mainSrc = fs.readFileSync(path.join(repoRoot, 'desktop', 'main.js'), 'utf8');
+      assert.ok(/ipcMain\.handle\('mdh:pick-directory'/.test(mainSrc), '主进程必须注册目录选择 IPC');
+      assert.ok(/dialog\.showOpenDialog\(/.test(mainSrc) && /openDirectory/.test(mainSrc), '必须弹**系统原生**目录选择器');
+      assert.ok(/startDir\s*\?\s*startDir\s*:\s*os\.homedir\(\)/.test(mainSrc), '选择器必须默认停在当前系统用户的家目录');
+      assert.ok(/preload: path\.join\(__dirname, 'preload\.cjs'\)/.test(mainSrc), '沙箱下 preload 必须是 .cjs（ESM preload 在 sandbox:true 下不可用）');
+      // 6c 前端：桌面壳里优先原生选择器，否则回退内置弹窗，且起点是家目录
+      const appSrc = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+      assert.ok(/window\.__MDH_DESKTOP__/.test(appSrc), '前端必须检测桌面壳能力');
+      assert.ok(/j\.home \|\| j\.cwd/.test(appSrc), '内置弹窗的起点必须是**用户家目录**（cwd 只作兜底）');
+      const html = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+      assert.ok(/id="dirPickHome"/.test(html), '弹窗里要有「🏠 用户目录」按钮');
+      // 6d 服务端：不带 dir 的 fs-browse 落到家目录，并在响应里带上 home
+      const wsSrc = fs.readFileSync(path.join(srcDir, 'web', 'routes', 'domains', 'workspace.js'), 'utf8');
+      assert.ok(/if \(!dir\) dir = os\.homedir\(\)/.test(wsSrc), 'fs-browse 不带 dir 时必须默认到家目录');
+      assert.ok(/home: os\.homedir\(\)/.test(wsSrc), '响应里必须带上 home（前端据此显示「用户目录」）');
+    }
+
+    // ⑦ 桌面外壳的导航/外链收紧（K-8 的廉价部分）
+    {
+      const mainSrc = fs.readFileSync(path.join(repoRoot, 'desktop', 'main.js'), 'utf8');
+      assert.ok(/const allowedOrigin = `http:\/\/127\.0\.0\.1:\$\{info\.port\}`/.test(mainSrc), 'K-8：窗口内导航必须钉死到**本窗口的端口**');
+      assert.ok(!/if \(!url\.startsWith\('http:\/\/127\.0\.0\.1:'\)\)/.test(mainSrc), 'K-8：不得再放行任意本机端口');
+      assert.ok(/protocol === 'http:' \|\| u\.protocol === 'https:'/.test(mainSrc), 'K-8：外链必须限 http(s)（否则 file:/smb: 会被交给系统）');
+    }
+    ok('v0.6.8：hooks 送达判据（可计量，非 finish 事件）+ 坏字节局部化解码（GBK 不回归）+ 覆盖率分母/URL 与棘轮工具校验 + 变异切片边界 + IDE 命令注入修复 + 桌面原生目录选择器（默认家目录）');
+  } finally {
+    process.env.MINGDAO_HOME = prevHome129;
+    safeRmSync(home129, { recursive: true, force: true });
+  }
+}
+
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket
 // —— 实测 ubuntu/macOS + Node 20 上"断言全过、进程却不退出"，CI 里表现为冒烟步骤永远 in_progress
 // （Node 18/22/Windows 因为拆连接更快而侥幸通过）。这里显式退出，断言本身不受影响；

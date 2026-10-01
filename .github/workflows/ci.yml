@@ -97,5 +97,9 @@ jobs:
           exit $code
       - name: API 域契约测试（7 域路由契约 + body 上限）
         run: node test/api-contracts.js
+      - name: 变异验证（自审闸门是否真的能抓到改坏）
+        # v0.6.8（报告一 M-6/K-10）：报告点名的欠账——「发布说明写 28/28，但 CI 从不跑它」。
+        # 每一批的 mutate 脚本都必须在这里跑：断言抓不到变异 = 断言没意义。
+        run: node test/mutate/run.mjs
       - name: 类型门禁（tsc --checkJs 全量严格，与 strict 棘轮同一 tsconfig.full.json）
         run: npx tsc -p tsconfig.full.json

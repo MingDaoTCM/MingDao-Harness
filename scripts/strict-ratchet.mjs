@@ -12,7 +12,14 @@ const baseline = JSON.parse(fs.readFileSync(baselineFile, 'utf8')).count;
 let out = '';
 let raw = '';
 try {
-  execSync('npx tsc -p tsconfig.full.json', { cwd: root, stdio: 'pipe' });
+    // v0.6.8（报告一 K-7，**高**）：不再走 `npx`（它会去网上找 `tsc` 存根 → "工具缺失"被算成 0 错误）。
+  // 直接用仓库内安装的 typescript 编译器入口；找不到就**显式失败**（工具缺失 ≠ 零错误）。
+  const tscJs = path.join(root, 'node_modules', 'typescript', 'bin', 'tsc');
+  if (!fs.existsSync(tscJs)) {
+    console.error('strict 棘轮：找不到 node_modules/typescript/bin/tsc（先 npm ci）。工具缺失不等于 0 错误，按失败处理。');
+    process.exit(1);
+  }
+  execSync(`"${process.execPath}" "${tscJs}" -p tsconfig.full.json`, { cwd: root, stdio: 'pipe' });
   out = '';
 } catch (e) {
   out = String(e.stdout || '');

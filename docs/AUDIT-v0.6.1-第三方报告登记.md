@@ -1250,3 +1250,33 @@ run-all 的 shell、run-all 的 try/catch、调度切片（源码级）、调度
   报告二 P3-2 的消费方、报告三 §4 阶段二/三（对抗测试集扩面、容器 CI job、关键模块 TS 迁移、发布状态机）；
 - 报告一 **H-6/L-18**（自更新多镜像取最大版本、install.sh 无校验和）——供应链完整性锚需要发布流程配合，
   与 `ledger --sign-key`、在线缓存基准（P0-2）同列为 v1.0 前项。
+
+## 3.42 已修复（v0.6.8：v0.6.7 审计报告的"外圈质量洼地" + 桌面版目录选择器）
+
+**来源**：`MingDaoHarness-v0.6.7-审计报告.md`（50 项：1 严重 / 9 高 / 22 中 / 18 低）、
+`MingDaoHarness-v0.6.7-docs-audit-report.md`（文档专项），以及负责人在桌面版实测后提出的
+"登记/添加工作空间应弹系统用户目录"要求。报告的核心判断值得原样引用：
+**「检测能力很强，收口环节偏弱」**——检测到局部事实后升级成全局结论。
+
+| 报告项 | 级别 | 复现 | 落地 |
+| --- | --- | --- | --- |
+| **K-1** hook 的 stdin 完成判据用 `'finish'` 事件 | **严重** | 是（本机 300KB 载荷探针；报告在 Node 24.14/Windows 上 0/40） | 判据改为**可计量证据**：写入回调（且必须判 `err`）交付的字节数 ≥ 载荷字节数。探针：读 stdin 的 hook 收到 307,296 字节 = 我们发出的字节数并放行；不读 stdin 的 hook 明确 `block`（理由 `write EPIPE`）。**顺带修掉一处 fail-open**：回调在出错时也会被调用，不判 err 会把 EPIPE 当送达成功 |
+| **K-3/K-4** 一个坏字节 → 整段按 GBK 解（360KB 中文全乱码） | 高 | 是 | 分层判据：严格 UTF-8 成功即用；失败时看**首个非法字节之前**的合法多字节序列数（≥2 → 非致命 UTF-8，坏字节只影响自己）；否则才 GBK。逐字保真断言 + GBK 回归断言 |
+| **K-5** coverage 的 URL→路径用 `replace('file://','')` | 高 | 是（Windows 恒 `0%（0/0）`） | 改 `fileURLToPath`；分母为 0 即**失败**（数据采不到 ≠ 覆盖率低） |
+| **K-6** 未加载文件被从分母剔除 | 高 | 是 | 分母 = `src/**/*.js` 全部文件，未加载的按 0 计入并列出；打印口径改为"分母 = 全部 N 个文件" |
+| **K-7** 棘轮走 `npx tsc`（工具缺失 → 0 错误） | 高 | 是 | 直接用 `node_modules/typescript/bin/tsc`；缺失即 exit 1 |
+| **K-2** IDE 插件命令注入 | 高 | 是（阅读即确认） | JetBrains：`sh -c "nohup ${binary} …"` → argv 数组 `ProcessBuilder(binary, "web", port)`；VS Code：`get('binary')`（含工作区值）→ `inspect().globalValue` + 显式 `shell:false` |
+| **K-8** 桌面外壳导航/外链过宽 | 高 | 是 | 导航钉死到**本窗口端口**（`http://127.0.0.1:${info.port}`）；`openExternal` 限 http(s) |
+| **M-6** 变异脚本切片边界取"文件里第一处收尾标记" | 中 | 是 | 改为**本节之后的第一个节头**（或收尾标记），并断言切片里必须有实质断言；**变异套件接入 CI**（报告点名的"发布说明写 28/28、CI 从不跑"欠账） |
+| **负责人要求**：桌面版登记/添加工作空间弹系统用户目录 | — | — | 新增 `desktop/preload.cjs`（contextBridge 只暴露 `pickDirectory`/`isDesktop`）+ `ipcMain.handle('mdh:pick-directory')`（`dialog.showOpenDialog`，`defaultPath = os.homedir()`）；前端优先原生选择器、浏览器回退内置弹窗且起点也是家目录；`/api/fs-browse` 不带 `dir` 时默认家目录并在响应里带 `home`；弹窗加「🏠 用户目录」按钮。**踩到并修掉一个真坑**：`desktop` 是 `"type":"module"`，`sandbox:true` 下 ESM preload 不可用 → 必须 `preload.cjs` |
+
+**变异验证**：`batch15-shell.mjs` **13/13**（本批累计 41 条）。
+过程中又抓出 **2 处自身缺陷**：
+① 断言消息里的 markdown `**` 让"期望关键词"匹配不上 → 变异虽然真的让断言红了，却被判成"逃逸"（关键词必须与失败信息逐字对齐）；
+② `test/mutate/lib.mjs` **无法在变异进程内自我变异**（模块已被缓存，改文件不改变已加载行为）——该条改为新进程手工复现并如实标注，不再假装"全自动覆盖"。
+
+**未纳入本批（如实登记）**：报告一 K-8 的**完整版**（Electron 代码签名 + 更新包签名校验）、K-9（IDE 令牌安全存储 / 401 与不可达区分）、
+M-1（Pack 能力代理或子进程隔离，需架构改动）、M-2/M-3/M-4/M-15/M-13/M-14/M-8（断言文本化改造、固定端口、CSP 移入响应头、IME 回车等）、
+M-18（**ARCHITECTURE.md 重建**，仍停在 v0.1.x 口径，报告两轮点名）、M-19（`PROVIDERS.md:77` 教用户把 Key 写进 `config.json`）、
+M-21（`SECURITY.md`/`CONTRIBUTING.md` 缺失）、M-22（`tsconfig.json` 死配置）、L-1（仓库里 `1200` 垃圾文件）、
+文档报告 F-H1~F-L9 的其余条目、v0.7.0 的测试框架迁移（`node:test` + TAP/JUnit）与 `agent.js` 拆分。

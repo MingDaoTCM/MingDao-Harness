@@ -135,16 +135,37 @@ function loadDirList(){
 }
 function openDirPicker(startDir, cb){
   pickerCb = cb;
+  // v0.6.8（负责人要求）：登记/添加/改目录时**优先弹系统原生目录选择器**，且默认停在
+  // **当前用户的家目录**——用户点一下就能选中自己的项目目录，不必先知道绝对路径。
+  const native = window.__MDH_DESKTOP__ && window.__MDH_DESKTOP__.pickDirectory;
+  if (native) {
+    // 桌面版：原生对话框（返回 null = 用户取消 → 什么都不做）
+    Promise.resolve(window.__MDH_DESKTOP__.pickDirectory(startDir || null))
+      .then((picked) => { pickerCb = null; if (picked && cb) cb(String(picked)); })
+      .catch(() => openDirPickerWeb(startDir, cb));
+    return;
+  }
+  openDirPickerWeb(startDir, cb);
+}
+
+/** 浏览器 / 原生选择器不可用时的回退：内置目录浏览弹窗（同样默认落在用户家目录） */
+function openDirPickerWeb(startDir, cb){
+  pickerCb = cb;
   if (startDir) { pickerDir = startDir; loadDirList(); }
   else {
-    // 无指定起点：从服务器当前工作目录开始浏览
+    // 无指定起点：**用户家目录**（服务端 /api/workspaces 会带上 home；旧的 cwd 只作兜底）
     fetch('/api/workspaces', { cache: 'no-store' }).then((r) => r.json()).then((j) => {
-      pickerDir = (j && j.cwd) || '/';
+      pickerDir = (j && (j.home || j.cwd)) || '/';
       loadDirList();
     }).catch(() => { pickerDir = '/'; loadDirList(); });
   }
   $('#dirModal').style.display = 'flex';
 }
+$('#dirPickHome').onclick = () => {
+  fetch('/api/workspaces', { cache: 'no-store' }).then((r) => r.json()).then((j) => {
+    if (j && j.home) { pickerDir = j.home; loadDirList(); }
+  }).catch(() => {});
+};
 $('#dirPickOk').onclick = () => { const cb = pickerCb; pickerCb = null; $('#dirModal').style.display = 'none'; if (cb) cb(pickerDir); };
 $('#dirPickNone').onclick = () => { const cb = pickerCb; pickerCb = null; $('#dirModal').style.display = 'none'; if (cb) cb(null); };
 $('#dirPickCancel').onclick = () => { pickerCb = null; $('#dirModal').style.display = 'none'; };
