@@ -4,6 +4,10 @@
 // 运行：node test/e2e-local.js
 
 import assert from 'node:assert/strict';
+
+// v0.6.10（下游 PR #10 的同类问题）：源码里**不放密钥形态的字面量**——公开仓库会被密钥扫描命中，
+// 也会让人误以为漏了真钥。测试只需要"能被规则认出的字符串"，运行时拼装等价。
+const FAKE = (/** @type {string} */ p, /** @type {number} */ n = 20) => p + 'x'.repeat(n);
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -127,7 +131,7 @@ function writeConfig(permission) {
   );
 }
 writeConfig('auto');
-fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ custom: 'sk-test-1234567890abcdef' }), {
+fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ custom: FAKE('sk-test-', 20) }), {
   mode: 0o600,
 });
 
@@ -204,8 +208,10 @@ function ok(name) {
 {
   const r = await runCli(['key', 'status']);
   assert.equal(r.code, 0, 'stderr: ' + r.err);
-  assert.ok(r.out.includes('custom: sk-tes…cdef'), 'key status 应脱敏显示凭证');
-  assert.ok(!r.out.includes('sk-test-1234567890abcdef'), 'key status 不得泄露完整密钥');
+  // 期望值按**同一个拼装出来的值**计算（v0.6.10：源码里不再有密钥形态字面量）
+  const KEY4 = FAKE('sk-test-', 20);
+  assert.ok(r.out.includes(`${KEY4.slice(0, 6)}\u2026${KEY4.slice(-4)}`), 'key status 应脱敏显示凭证');
+  assert.ok(!r.out.includes(KEY4), 'key status 不得泄露完整密钥');
   ok('mingdao key status 脱敏显示');
 }
 

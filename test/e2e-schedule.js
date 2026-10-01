@@ -3,6 +3,10 @@
 // 运行：node test/e2e-schedule.js
 
 import assert from 'node:assert/strict';
+
+// v0.6.10（下游 PR #10 的同类问题）：源码里**不放密钥形态的字面量**——公开仓库会被密钥扫描命中，
+// 也会让人误以为漏了真钥。测试只需要"能被规则认出的字符串"，运行时拼装等价。
+const FAKE = (/** @type {string} */ p, /** @type {number} */ n = 20) => p + 'x'.repeat(n);
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -102,7 +106,7 @@ fs.writeFileSync(
     contextBudget: 32000,
   })
 );
-fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ custom: 'sk-test-1234567890abcdef' }), { mode: 0o600 });
+fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ custom: FAKE('sk-test-', 20) }), { mode: 0o600 });
 
 function runCli(args, opts = {}) {
   return new Promise((resolve) => {

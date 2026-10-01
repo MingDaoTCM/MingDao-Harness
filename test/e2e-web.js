@@ -3,6 +3,10 @@
 // 运行：node test/e2e-web.js
 
 import assert from 'node:assert/strict';
+
+// v0.6.10（下游 PR #10 的同类问题）：源码里**不放密钥形态的字面量**——公开仓库会被密钥扫描命中，
+// 也会让人误以为漏了真钥。测试只需要"能被规则认出的字符串"，运行时拼装等价。
+const FAKE = (/** @type {string} */ p, /** @type {number} */ n = 20) => p + 'x'.repeat(n);
 import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -98,7 +102,7 @@ function writeConfig(permission) {
   );
 }
 writeConfig('auto');
-fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ custom: 'sk-test-1234567890abcdef' }), { mode: 0o600 });
+fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ custom: FAKE('sk-test-', 20) }), { mode: 0o600 });
 
 // 启动 web 服务器（可反复调用；返回 {child, base}）。
 // Windows 随机端口可能命中 Hyper-V 保留段（如 50770–50869）抛 EACCES/EADDRINUSE——捕获后换端口重试（评估 P2-2）
@@ -489,9 +493,9 @@ let base = await startWeb(work1);
   assert.equal(sw.ok, true, sw.error);
   const up = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'updateCustom', name: 'web-custom', label: '改标签', baseUrl: `http://127.0.0.1:${mockPort}/v1` }) })).json();
   assert.equal(up.ok, true, up.error);
-  const sk = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setCustomKey', name: 'web-custom', key: 'sk-new-key-1234567890' }) })).json();
+  const sk = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setCustomKey', name: 'web-custom', key: FAKE('sk-new-key-', 20) }) })).json();
   assert.ok(sk.ok && sk.keyMasked.includes('…'), '应支持自定义模型设 Key');
-  const pk = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setProviderKey', provider: 'deepseek', key: 'sk-ds-test-1234567890' }) })).json();
+  const pk = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'setProviderKey', provider: 'deepseek', key: FAKE('sk-ds-test-', 20) }) })).json();
   assert.ok(pk.ok && pk.keyMasked.includes('…'), '应支持服务商设 Key');
   const rk = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'removeProviderKey', provider: 'deepseek' }) })).json();
   assert.equal(rk.ok, true);
@@ -602,7 +606,7 @@ let base = await startWeb(work1);
   const ev2 = await chatOnce(base, { message: '看图', attachments: [{ type: 'image', name: 'a.png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' }] });
   assert.ok(ev2.some((e) => e.type === 'error' && String(e.message).includes('不支持图片')), '非视觉模型应拒绝图片');
   // 视觉自定义模型（vision:true）→ 图文数组透传
-  const addV = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'addCustom', name: 'web-vision', label: '视觉', baseUrl: `http://127.0.0.1:${mockPort}/v1`, key: 'sk-web-vision-1234567890', vision: true }) })).json();
+  const addV = await (await fetch(base + '/api/models-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'addCustom', name: 'web-vision', label: '视觉', baseUrl: `http://127.0.0.1:${mockPort}/v1`, key: FAKE('sk-web-vision-', 20), vision: true }) })).json();
   assert.equal(addV.ok, true, addV.error);
   const swV = await (await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'web-vision' }) })).json();
   assert.equal(swV.ok, true, swV.error);

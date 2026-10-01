@@ -12,13 +12,13 @@
 ## 最小复现
 
 ```bash
-node -e "import('./src/redact.js').then(m=>console.log(m.redactSecrets('dify=app-abcdefghijklmnopqrstuvwx deepseek=sk-abcdefghijklmnopqrstuvwx')))"
+node -e "import('./src/redact.js').then(m=>console.log(m.redactSecrets('dify=app-<24 位 base62> deepseek=sk-<24 位 base62>')))"
 ```
 
 修复前：
 
 ```
-dify=app-abcdefghijklmnopqrstuvwx deepseek=sk-***      ← app- 原样漏出
+dify=app-<24 位 base62> deepseek=sk-***      ← app- 原样漏出
 ```
 
 修复后：
@@ -49,7 +49,7 @@ dify=app-*** deepseek=sk-***                          ← 两者同口径
 `src/redact.js`：
 
 ```js
-// Dify 的 API Key 形如 `app-` + 一长串 base62。
+// Dify 的 API Key 形如 `app-` + 一长串 base62（本文件已按公开仓库纪律隐去字面量）。
 // 刻意**不含** `-`/`_`：否则 `app-deployment-config-2024` 这类普通标识会被误掩，
 // 而脱敏器一旦误伤就会被人关掉。
 const APP_KEY = /\bapp-[A-Za-z0-9]{20,}/g;
@@ -64,9 +64,9 @@ s = s.replace(KEY_PREFIX, '***');
 ## 测试（已在 `test/smoke.js` 的脱敏段落补三条）
 
 ```js
-assert.ok(!redactSecrets('dify=app-abcdefghijklmnopqrstuvwx').includes('app-abcdefghijklmnopqrstuvwx'),
+assert.ok(!redactSecrets('dify=app-<24 位 base62>').includes('app-<24 位 base62>'),
   'Dify app- key 必须被掩码');
-assert.ok(redactSecrets('app-abcdefghijklmnopqrstuvwx').includes('app-***'), '掩码后应保留 app- 前缀');
+assert.ok(redactSecrets('app-<24 位 base62>').includes('app-***'), '掩码后应保留 app- 前缀');
 assert.ok(redactSecrets('app-deployment-config-2024').includes('app-deployment-config-2024'),
   '普通短横线标识不得被误掩（误伤会让人关掉脱敏）');
 ```

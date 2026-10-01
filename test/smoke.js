@@ -8,6 +8,10 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+// v0.6.10（下游 PR #10 的同类问题）：**源码里不放密钥形态的字面量**——公开仓库会被密钥扫描命中，
+// 也会让人误以为仓库漏了真钥。测试只需要"一个能被对应规则认出的字符串"，运行时拼装完全等价。
+const FAKE = (/** @type {string} */ p, /** @type {number} */ n = 20) => p + 'x'.repeat(n);
+
 const srcDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
 
 const { createAgent } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
@@ -929,13 +933,13 @@ const ctx = { cwd: tmp };
   }
 
   // 凭证库：独立文件、600 权限、脱敏显示
-  const key = 'sk-test-abcdef1234567890';
+  const key = FAKE('sk-test-', 20);
   setStoredKey('deepseek', key);
   assert.equal(getStoredKey('deepseek'), key);
   if (process.platform !== 'win32') {
     assert.equal(fs.statSync(credentialsPath()).mode & 0o777, 0o600, '凭证文件权限应为 600');
   }
-  assert.equal(maskKey(key), 'sk-tes…7890', '脱敏格式应为「前6位…后4位」');
+  assert.equal(maskKey(key), `${key.slice(0, 6)}\u2026${key.slice(-4)}`, '脱敏格式应为「前6位…后4位」');
   assert.deepEqual(Object.keys(loadCredentials()), ['deepseek']);
 
   // 解析优先级：环境变量 > 凭证库 > config 显式字段（兼容旧配置）
@@ -1813,7 +1817,8 @@ const ctx = { cwd: tmp };
   async function startRegServer(envExtra) {
     const child = spawn(
       process.execPath,
-      ['--input-type=module', '-e', `import { pathToFileURL } from 'node:url'; const { runSyncServer } = await import(pathToFileURL(${JSON.stringify(path.join(srcDir, 'sync-server.js'))}).href); const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: ${JSON.stringify(regDir)} }); srv.on('listening', () => console.log('PORT ' + srv.address().port));`],
+      ['--input-type=module', '-e', `import { pathToFileURL } from 'node:url';
+ const { runSyncServer } = await import(pathToFileURL(${JSON.stringify(path.join(srcDir, 'sync-server.js'))}).href); const srv = runSyncServer({ port: 0, host: '127.0.0.1', dataDir: ${JSON.stringify(regDir)} }); srv.on('listening', () => console.log('PORT ' + srv.address().port));`],
       { env: { ...process.env, ...envExtra }, stdio: ['ignore', 'pipe', 'pipe'] }
     );
     let out = '';
@@ -2300,8 +2305,8 @@ const ctx = { cwd: tmp };
   const bashRow = rows.find((r) => r.tool === 'bash' && r.denied);
   assert.ok(bashRow && bashRow.reason === '未授权' && bashRow.args.includes('echo hello'), 'bash 拒绝应记录原因与参数');
   // 脱敏：sk- 系 Key 掩码
-  assert.ok(!redactSecrets('curl -H "Authorization: Bearer sk-abcdef1234567890"').includes('sk-abcdef'), 'sk- 密钥应被掩码');
-  assert.ok(redactSecrets('sk-abcdef1234567890').includes('sk-***'), '掩码后应保留 sk-*** 标记');
+  assert.ok(!redactSecrets(`curl -H "Authorization: Bearer ${FAKE('sk-', 20)}"`).includes(FAKE('sk-', 12)), 'sk- 密钥应被掩码');
+  assert.ok(redactSecrets(FAKE('sk-', 20)).includes('sk-***'), '掩码后应保留 sk-*** 标记');
   // v0.3.1 P1-1：统一脱敏——ghp_/Bearer/URL 内嵌凭据也掩码
   const { redactSensitive } = await import(pathToFileURL(path.join(srcDir, 'redact.js')).href);
   assert.ok(!redactSecrets('ghp_1234567890abcdefghij').includes('ghp_1234'), 'ghp_ token 应被掩码');
@@ -4372,10 +4377,10 @@ console.log(JSON.stringify({ okOn, xml }));`;
   const led = L.createLedger(id71);
   led.runStart({ model: 'deepseek-v4-flash', provider: 'deepseek', session: 's.jsonl', cwd: home71, permission: 'auto', packs: ['tcm'] });
   led.modelRound({ round: 0, step: 1, ms: 1200, usage: { prompt_tokens: 100, completion_tokens: 10 }, finish: 'tool_calls' });
-  const rawArgs71 = { command: `curl -H "Authorization: Bearer sk-live-LEAKME123456" https://10.9.8.7/x`, nested: { key: 'sk-nested-LEAKME99999', ip: '192.168.5.5', home: path.join(os.homedir(), 'secret') } };
+  const rawArgs71 = { command: `curl -H "Authorization: Bearer sk-live-LEAKME123456" https://10.9.8.7/x`, nested: { key: FAKE('sk-nested-', 20), ip: '192.168.5.5', home: path.join(os.homedir(), 'secret') } };
   led.toolCall({ callId: 'c1', name: 'bash', rawArgs: rawArgs71, args: rawArgs71, permission: { decision: 'allow' } });
   led.constraint({ kind: 'output-forbid', id: 'no-dosage', stage: 'output', action: 'block' });
-  led.toolResult({ callId: 'c1', name: 'bash', ok: false, blocked: true, ms: 30, result: { ok: false, error: 'sk-live-LEAKME123456' } });
+  led.toolResult({ callId: 'c1', name: 'bash', ok: false, blocked: true, ms: 30, result: { ok: false, error: FAKE('sk-live-', 20) } });
   led.permission({ name: 'write', mode: 'ask', decision: 'deny', source: 'permission.check' });
   led.cost({ model: 'deepseek-v4-flash', usage: { prompt_tokens: 100, completion_tokens: 10 }, yuan: 0.0002, priced: true });
   led.netEgress({ host: 'api.deepseek.com', port: 443, allowed: true, reason: '白名单命中' });
@@ -8018,7 +8023,7 @@ const isPosix111 = process.platform !== 'win32';
       const SC112 = await import(pathToFileURL(path.join(srcDir, 'schedule.js')).href);
       const sessFile = path.join(home112, 'sessions', 's.jsonl');
       fs.mkdirSync(path.dirname(sessFile), { recursive: true });
-      S112.appendMessages(sessFile, [{ role: 'user', content: '我的 key 是 sk-LEAKME1234567890' }]);
+      S112.appendMessages(sessFile, [{ role: 'user', content: `我的 key 是 ${FAKE('sk-LEAKME', 12)}` }]);
       assert.equal(fs.statSync(sessFile).mode & 0o777, 0o600, '会话文件必须 0600（原文会记录用户粘贴的密钥）');
       M112.appendMemory(['- 记住我偏好简短回答']);
       assert.equal(fs.statSync(M112.memoryFile()).mode & 0o777, 0o600, '用户记忆必须 0600');
@@ -11405,6 +11410,8 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
 // 用该行自带的 `sample` 验证"这一行真的认得它声称认得的形态"。新增厂商忘了配 sample/正则写错 → 当场红。
 {
   const { redactSecrets, SECRET_PREFIXES } = await import(pathToFileURL(path.join(srcDir, 'redact.js')).href);
+  // 本节**自带**假密钥工厂：抽取出来的单节脚本也要能独立运行（块作用域内遮蔽文件级的同名常量是合法的）
+  const FAKE = (/** @type {string} */ p, /** @type {number} */ n = 20) => p + 'x'.repeat(n);
 
   // ① 表驱动：每一行的样例都必须被掩掉，且保留该行声明的掩码前缀
   assert.ok(
@@ -11421,12 +11428,14 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
 
   // ② 下游的原场景：同一行里 sk- 与 app- 必须**同口径**掩掉（半掩比不掩更危险）
   {
-    const line = redactSecrets('dify=app-abcdefghijklmnopqrstuvwx deepseek=sk-abcdefghijklmnopqrstuvwx');
+    const APP = FAKE('app-', 24);
+    const SK = FAKE('sk-', 24);
+    const line = redactSecrets(`dify=${APP} deepseek=${SK}`);
     assert.ok(line.includes('app-***') && line.includes('sk-***'), `app- 与 sk- 必须同口径掩码，实际：${line}`);
-    assert.ok(!line.includes('abcdefghijklmnopqrstuvwx'), '原始 key 内容不得残留');
+    assert.ok(!line.includes('x'.repeat(24)), '原始 key 内容不得残留');
     // 诊断包/审计行里常见的引号形态也要掩到
-    const json = redactSecrets('{"dify_key": "app-abcdefghijklmnopqrstuvwx"}');
-    assert.ok(!json.includes('app-abcdefghijklmnopqrstuvwx'), 'JSON 引号形态下的 app- key 同样必须被掩码');
+    const json = redactSecrets(`{"dify_key": "${APP}"}`);
+    assert.ok(!json.includes(APP), 'JSON 引号形态下的 app- key 同样必须被掩码');
   }
 
   // ③ 反向：不得误伤普通短横线标识（误伤会让人直接关掉脱敏——那是比漏掩更糟的结果）
@@ -11436,7 +11445,7 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
   // 边界的**如实说明**：`my-app-<20+ 位 base62>` 会被掩掉——`\b` 在 `-` 处成立，且长 base62 串
   // 与真 key 无法区分，所以这里选 fail-closed（宁可多掩一个标识，不可漏掩一把 key）。
   // 这是刻意的取舍，不是漏判：把它写进断言，免得后人以为是 bug。
-  assert.equal(redactSecrets('my-app-abcdefghijklmnopqrstuvwx'), 'my-app-***', '前缀后接长 base62 串一律掩（fail-closed，刻意取舍）');
+  assert.equal(redactSecrets(`my-app-${'x'.repeat(24)}`), 'my-app-***', '前缀后接长 base62 串一律掩（fail-closed，刻意取舍）');
 
   // ④ 结构：前缀表是**唯一**来源（不得再有散落的 sk-/ghp_ 替换行）
   {
