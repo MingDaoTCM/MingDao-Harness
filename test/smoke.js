@@ -2305,6 +2305,16 @@ const ctx = { cwd: tmp };
   // v0.3.1 P1-1：统一脱敏——ghp_/Bearer/URL 内嵌凭据也掩码
   const { redactSensitive } = await import(pathToFileURL(path.join(srcDir, 'redact.js')).href);
   assert.ok(!redactSecrets('ghp_1234567890abcdefghij').includes('ghp_1234'), 'ghp_ token 应被掩码');
+  // 54c（下游缺口报告）：**Dify 的 app- key**。此前前缀表只有 GitHub/AWS/Slack/Google ——
+  // 于是 sk- 被掩了、app- 原样漏出，同一份日志一半掩一半没掩，最容易被当成"已经脱敏了"。
+  // 下游是"每人一把密钥私下分发"的模式，漏这一条等于把分发方式废掉。
+  // 夹具**运行时拼装**：源码里不放密钥形态的字面量（否则会触发密钥扫描、也让人误以为漏了真钥）
+  const fakeDify = 'app-' + 'x'.repeat(24);
+  assert.ok(!redactSecrets('dify=' + fakeDify).includes(fakeDify), 'Dify app- key 必须被掩码');
+  assert.ok(redactSecrets(fakeDify).includes('app-***'), '掩码后应保留 app- 前缀');
+  // 反例（不是密钥，是普通标识）：不得被误掩 —— 脱敏器一旦误伤就会被人关掉
+  const slug = ['app', 'deployment', 'config', '2024'].join('-');
+  assert.ok(redactSecrets(slug).includes(slug), '普通短横线标识不得被误掩');
   assert.ok(!redactSecrets('curl -H "Authorization: Bearer abc"').includes('abc'), 'Bearer token 应被掩码');
   assert.ok(!redactSecrets('curl "https://x.com?token=secret123"').includes('secret123'), 'URL query token 应被掩码');
   assert.ok(!redactSensitive('http://192.168.1.1').includes('192.168.1.1'), '私网 IP 应被掩码');

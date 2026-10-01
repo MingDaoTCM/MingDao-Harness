@@ -15,6 +15,13 @@ export const SECRET_NAME_SEGMENTS = new Set([
 // 唯一例外是 `pwd`：`PWD` 是每个 shell 都有的标准变量（不是凭据），
 // 按它过滤会让子进程少一个常用变量 —— 所以 env 侧用下面这份去掉 pwd 的集合。
 export const ENV_SECRET_SEGMENTS = new Set([...SECRET_NAME_SEGMENTS].filter((x) => x !== 'pwd'));
+// Dify 的 API Key 形如 `app-` + 一长串 base62（下游 Dify 工作流每把都是这个形态）。
+// 此前这张表只有 GitHub/AWS/Slack/Google 的前缀 —— 于是 **Dify 的 key 在日志/审计/诊断包里原样漏出**，
+// 而 DeepSeek 的 `sk-` 会被掩掉：同一份日志里一半掩了一半没掩，最容易被当成"已经脱敏了"。
+// 少写这一条，等于把下游"每人一把、私发密钥"的分发方式直接废掉。
+// 刻意**不含** `-`/`_`（Dify key 是纯 base62）：否则 `app-deployment-config-2024` 这类
+// 普通短横线标识会被误掩，脱敏器一旦误伤就会被人关掉。
+const APP_KEY = /\bapp-[A-Za-z0-9]{20,}/g;
 const KEY_PREFIX = /(ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{30,})/g;
 
 // v0.6.3（审计 H-1/H-2）：**脱敏器自身的覆盖缺口**。
@@ -33,6 +40,7 @@ export function redactSecrets(/** @type {any} */ text) {
   // 私钥块必须**先**处理：它内部含大量 base64，交给后面的规则逐段匹配既慢又可能只掩一半
   s = s.replace(PEM_BLOCK, '[已脱敏的私钥块]');
   s = s.replace(/(sk-[A-Za-z0-9_-]{6,})/g, 'sk-***'); // 保留 sk- 前缀（兼容审计标记）
+  s = s.replace(APP_KEY, 'app-***'); // 保留 app- 前缀（与 sk-*** 同口径，便于排查"配了哪把"）
   s = s.replace(KEY_PREFIX, '***');
   s = s.replace(JWT_TOKEN, 'eyJ***');
   s = s.replace(/(Authorization\s*:\s*Bearer\s+)[^\s"',}]+/gi, '$1***');
