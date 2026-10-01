@@ -114,7 +114,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: 下载全部工件
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
       # 同版本重建（0.1.65 等）需要在同一 Release 上覆盖资产。softprops 的 update-a-release-asset
