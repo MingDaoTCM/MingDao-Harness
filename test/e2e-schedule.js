@@ -142,14 +142,65 @@ function jobFile(id) {
   return path.join(home, 'schedule', id + '.json');
 }
 
-async function waitFor(fn, timeoutMs, intervalMs = 400) {
+/**
+ * 轮询等待（带上限）。超时**必须**留下诊断：本套件此前用写死的 25s，
+ * 在慢 runner（Windows CI）上偶发假红，而失败信息只有一句"应在 25s 内完成"——
+ * 看不出是"任务没跑"还是"机器太慢"。现在超时会把调度状态、守护进程 pid、任务文件一起打出来。
+ * @param {() => any} fn @param {number} timeoutMs @param {number} [intervalMs] @param {string} [label]
+ */
+async function waitFor(fn, timeoutMs, intervalMs = 400, label = '条件') {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
     const v = fn();
     if (v) return v;
-    if (Date.now() > deadline) return null;
+    if (Date.now() > deadline) {
+      console.error(`  ⏱ ${label} 等待超时（${timeoutMs}ms，本机基线 ${baseMs}ms）——现场：`);
+      try {
+        const dir = path.join(home, 'schedule');
+        for (const f of fs.existsSync(dir) ? fs.readdirSync(dir) : []) {
+          if (f.endsWith('.json')) console.error(`     ${f}: ${fs.readFileSync(path.join(dir, f), 'utf8').slice(0, 300)}`);
+        }
+        const pidf = path.join(home, 'schedule', '.daemon.pid');
+        console.error(`     daemon pid 文件：${fs.existsSync(pidf) ? fs.readFileSync(pidf, 'utf8').trim() : '(不存在)'}`);
+      } catch {}
+      return null;
+    }
     await sleep(intervalMs);
   }
+}
+
+// 等待预算**按本机实测**：先量一次 CLI 冷启动，再给 10 倍 + 10s 的余量（下限 20s、上限 150s）。
+// 为什么不是写死：慢 runner 上真实需要的时间可以是快机器的 10 倍以上（v0.6.10 的 Windows 腿
+// 就是被写死的 25s 打成假红的）。这样"慢"不再等于"坏"，而真正的回归仍然会超时。
+let baseMs = 200;
+{
+  const t = Date.now();
+  await runCli(['--version']);
+  baseMs = Math.max(50, Date.now() - t);
+}
+// 下限取 30s：本套件里最重的一处（连续失败熔断）原本就需要约 30s，预算只能放大、不能缩小。
+const budget = (/** @type {number} */ factor = 10) => Math.min(Math.max(baseMs * factor + 15000, 30000), 180000);
+
+// ---------- 0. 一次性任务：**进程内确定性**驱动（不赌守护进程启动） ----------
+// 为什么加这一条：原来唯一的断言依赖"守护进程被 spawn → 3s 片轮询 → 跑任务"整条链路，
+// 在慢 runner 上最坏要几十秒（v0.6.10 的 Windows 腿就是被写死的 25s 打成假红的）。
+// 这里直接调用守护进程用的**同一个协程**（runSleeper）跑一次到期任务，把"状态机是否正确"
+// 与"这台机器有多快"彻底解耦；守护进程那条链路仍在下面测（那才是端到端），只是不再用死时钟卡它。
+{
+  const { addSchedule, runSleeper, readSchedule } = await import(pathToFileURL(path.join(root, 'src', 'schedule.js')).href);
+  const past = fmt(new Date(Date.now() - 60000)); // 已到期的分钟 → nextRunAt 在过去 → 立即执行
+  const a0 = addSchedule(home, '确定性一次性任务', { at: past, permission: 'auto' });
+  assert.ok(a0 && a0.id, '应能用 addSchedule 直接建任务（不经过 CLI）');
+  await runSleeper(home, a0.id, {}); // shouldStop 默认 false → 跑完一次即返回
+  const j0 = readSchedule(home, a0.id);
+  assert.equal(j0.runs, 1, '进程内驱动一次后 runs 必须为 1');
+  assert.equal(j0.status, 'done', '进程内驱动后状态必须是 done');
+  assert.equal(j0.history.length, 1, '应记录 1 条执行历史');
+  assert.equal(j0.history[0].status, 'done', '历史条目状态必须为 done');
+  assert.ok(j0.lastTaskId, '应关联后台任务');
+  const t0 = readJson(path.join(home, 'tasks', j0.lastTaskId + '.json'));
+  assert.equal(t0.status, 'done', '关联任务的状态必须为 done');
+  ok('一次性任务：进程内确定性驱动（状态机正确，与机器快慢解耦）');
 }
 
 // ---------- 1. 一次性定时（--at 5 秒后） ----------
@@ -163,8 +214,8 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   const job = await waitFor(() => {
     const j = readJson(jobFile(id));
     return j && j.status === 'done' ? j : null;
-  }, 25000);
-  assert.ok(job, '一次性任务应在 25s 内完成');
+  }, budget(), '一次性任务（守护进程路径）');
+  assert.ok(job, `一次性任务应在 ${budget()}ms 内完成（本机基线 ${baseMs}ms）`);
   assert.equal(job.runs, 1);
   assert.ok(job.lastTaskId, '应关联任务');
   assert.ok(Array.isArray(job.history) && job.history.length === 1, '应记录执行历史');
@@ -185,7 +236,7 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   const j1 = await waitFor(() => {
     const j = readJson(jobFile(id));
     return j && j.runs >= 2 ? j : null;
-  }, 20000);
+  }, budget(), '周期任务状态');
   assert.ok(j1, '周期任务应至少运行 2 次');
   const runsBefore = j1.runs;
   const p = await runCli(['schedule', 'pause', id]);
@@ -199,7 +250,7 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   const j2 = await waitFor(() => {
     const j = readJson(jobFile(id));
     return j && j.runs > runsBefore ? j : null;
-  }, 20000);
+  }, budget(), '周期任务状态');
   assert.ok(j2, '恢复后应继续运行');
   const rm = await runCli(['schedule', 'remove', id]);
   assert.equal(rm.code, 0);
@@ -216,7 +267,7 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   const jobB = await waitFor(() => {
     const j = readJson(jobFile(ids[1]));
     return j && j.status === 'done' ? j : null;
-  }, 30000);
+  }, budget(), '周期任务状态');
   assert.ok(jobB, '链尾任务应完成');
   const tA = readJson(path.join(home, 'tasks', readJson(jobFile(ids[0])).lastTaskId + '.json'));
   const tB = readJson(path.join(home, 'tasks', jobB.lastTaskId + '.json'));
@@ -277,7 +328,7 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   const j = await waitFor(() => {
     const jj = readJson(jobFile(id));
     return jj && jj.status === 'failed' ? jj : null;
-  }, 30000);
+  }, budget(), '周期任务状态');
   assert.ok(j, '连续失败后应熔断停止（status=failed）');
   assert.equal(j.runs, 3, '熔断前应恰好运行 3 次（第 3 次失败即停止）');
   assert.ok((j.consecutiveFailures || 0) >= 3, '应记录连续失败次数');
@@ -309,7 +360,7 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
     if (!j || !j.lastTaskId) return null;
     const t = readJson(path.join(home, 'tasks', j.lastTaskId + '.json'));
     return t && t.status === 'running' && t.pid ? { job: j, task: t } : null;
-  }, 30000);
+  }, budget(), '周期任务状态');
   assert.ok(running, '应观察到 worker 在途运行（含 pid）');
 
   // 强杀：worker 没有任何机会写终态
@@ -321,7 +372,7 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   const settled = await waitFor(() => {
     const j = readJson(jobFile(id));
     return j && j.history && j.history.length >= 1 ? j : null;
-  }, 60000);
+  }, budget(15), '慢任务在途窗口');
   assert.ok(settled, '被强杀的 worker 应在 60s 内被回收并记账（修复前会空转到 2h 上限）');
   const elapsed = Date.now() - t0;
   assert.ok(elapsed < 55000, `回收应远快于 2h 上限，实际 ${elapsed}ms`);
@@ -351,7 +402,7 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
       const l = fs.readFileSync(daemonPidFile(home), 'utf8').trim().split(/\s+/);
       return aliveCheck(Number(l[0])) && l[1] ? { pid: Number(l[0]) } : null;
     } catch { return null; }
-  }, 15000);
+  }, budget(), '进程状态');
   assert.ok(pidLine, 'daemon 应存活且 pidfile 格式正确');
   // 1b) **等 sleeper 真的进入等待片**再篡改租约。
   //     这一步是确定性关键（v0.6.6 补）：监督循环 2s 一轮，若在它把协程拉起来之前就篡改，
@@ -478,14 +529,14 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   const daemonPid = await waitFor(() => {
     const p = readPid();
     return p && aliveCheck(p) ? p : null;
-  }, 15000);
+  }, budget(), '进程状态');
   assert.ok(daemonPid, 'daemon 应启动');
 
   // 等在途运行：job 必须出现 lastTaskId + runnerPid（修复前这两项要等跑完才写）
   const inFlight = await waitFor(() => {
     const j = readJob(sid2);
     return j && j.status === 'running' && j.lastTaskId && j.runnerPid ? j : null;
-  }, 25000);
+  }, budget(), '慢任务在途窗口');
   assert.ok(inFlight, '任务开始运行后 job 文件应立即带 lastTaskId + runnerPid（否则接管方会误判崩溃）');
   assert.equal(Number(inFlight.runnerPid), daemonPid, 'runnerPid 应指向正在监督的 daemon');
 
@@ -501,7 +552,7 @@ async function waitFor(fn, timeoutMs, intervalMs = 400) {
   const done = await waitFor(() => {
     const j = readJob(sid2);
     return j && Array.isArray(j.history) && j.history.length >= 1 ? j : null;
-  }, 40000);
+  }, budget(15), '接管后任务状态');
   assert.ok(done, '任务应完成一轮');
   assert.equal(done.runs, 1, `同一任务不得被并发执行两次（实际 runs=${done.runs}）`);
   assert.equal((done.history || []).length, 1, '历史应只有一条记录');
