@@ -160,3 +160,28 @@ export function checkCostGuard(modelName) {
   }
   return null;
 }
+
+/**
+ * **发送前**的前置拦截判据（v0.6.11，审计 P1-1 拆分第一刀：从 `agent.js` 的 runTurn 循环里抽出）。
+ *
+ * 为什么值得单独抽出来：这段判断决定「这一发贵请求到底发不发得出去」，此前埋在 1000 行的
+ * `runTurn` 里、依赖 6 个局部变量，只能靠端到端（造真实回合）间接验证。抽成纯函数后
+ * 边界条件（统计不可读 / 无价格数据 / 恰好等于上限 / 上限未配置）可以逐条钉死。
+ *
+ * 语义（与抽取前**逐字一致**）：
+ *   · 上限未配置或 ≤0 → 不拦（调用方通常已按此短路，这里再判一次是为了让函数自身可信）；
+ *   · `used` 或 `worst` 为 null（统计不可读 / 无价格数据）→ **不拦也不算过**：
+ *     返回 null，由主检查 `checkCostGuard` 去告警「无价格数据」，避免此处重复误拦或静默放行；
+ *   · 「今日已用（含在途）+ 本轮最坏成本」达到或超过上限 → 返回可读的拦截文案。
+ * @param {number} limitYuan 日上限（元）
+ * @param {number|null} used 今日已用（含本回合在途）；null = 统计不可读
+ * @param {number|null} worst 本轮最坏成本；null = 无价格数据
+ * @returns {string|null} 拦截文案（应拦截），或 null（放行/无法判断）
+ */
+export function preflightBlockMessage(limitYuan, used, worst) {
+  const limit = Number(limitYuan);
+  if (!Number.isFinite(limit) || limit <= 0) return null;
+  if (used == null || worst == null) return null; // 无法判断：不误拦，也不静默放行（主检查会告警）
+  if (used + worst < limit) return null;
+  return `⛔ 护栏前置拦截：本轮最坏成本 ≈¥${worst.toFixed(4)}，今日已用 ≈¥${used.toFixed(4)}，合计将超过上限 ¥${limit.toFixed(2)}——请求未发出。可调高 config.costGuard.dailyLimitYuan 或改用更小模型。`;
+}

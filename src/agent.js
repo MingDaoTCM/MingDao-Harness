@@ -13,7 +13,7 @@ import { createIO, style, C } from './ui.js';
 import { subagentModel } from './routing.js';
 import { writeAudit } from './audit.js';
 import { redactSecrets } from './redact.js';
-import { checkCostGuard, costGuardConfig, todayCost } from './cost-guard.js';
+import { checkCostGuard, costGuardConfig, todayCost, preflightBlockMessage } from './cost-guard.js';
 import { recordCacheStats, packDailyCost } from './cachestats.js';
 import { estimateCost, cacheSplit, isPeakHour } from './pricing.js';
 import { resolveProviderConfig, createProvider } from './providers/index.js';
@@ -677,15 +677,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           let promptTokens = 0;
           for (const m of sanitized) promptTokens += messageTokens(m, count);
           const worst = estimateCost(activeModel, promptTokens, maxOutput, null, new Date());
-          const used = usedTodayWithInflight(); // 含本回合在途费用（防长回合烧穿）
-          if (used == null || worst == null) {
-            // P0-4（v0.4.5）：统计不可读 或 无价格数据（最坏成本未知）→ 无法判断，跳过前置拦截
-            // （护栏主检查 checkCostGuard 会显式告警「无价格数据」，此处不重复误拦也不静默放行）
-          } else if (used + worst >= Number(g.dailyLimitYuan)) {
+          // 判据本身抽到 cost-guard.js 的 preflightBlockMessage（v0.6.11 / P1-1 第一刀）：
+          // 它能被单测逐条钉边界，而 runTurn 只负责"拿到数字 → 问判据 → 该拦就拦"。
+          // 统计不可读 / 无价格数据时判据返回 null（不误拦、也不静默放行——主检查会告警）。
+          const msg = preflightBlockMessage(g.dailyLimitYuan, usedTodayWithInflight(), worst);
+          if (msg) {
             stripOrphanCalls();
             return {
               text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
-              note: `⛔ 护栏前置拦截：本轮最坏成本 ≈¥${worst.toFixed(4)}，今日已用 ≈¥${used.toFixed(4)}，合计将超过上限 ¥${Number(g.dailyLimitYuan).toFixed(2)}——请求未发出。可调高 config.costGuard.dailyLimitYuan 或改用更小模型。`,
+              note: msg,
               durationMs: Date.now() - startedAt, perf: perf(),
             };
           }

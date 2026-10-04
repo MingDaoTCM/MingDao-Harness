@@ -11457,6 +11457,45 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
   ok('v0.6.8 脱敏器：前缀表单一来源 + 表驱动样例全掩 + 下游 app-/sk- 同口径 + 不误伤普通短横线标识');
 }
 
+// ---------- 131. v0.6.11：护栏前置判据抽成纯函数（审计 P1-1 拆分第一刀） ----------
+// 这段判断决定"贵请求发不发得出去"，此前埋在 runTurn 的循环里、依赖 6 个局部变量，
+// 只能靠端到端（造真实回合）间接验证。抽出来之后，边界条件逐条钉死。
+{
+  const { preflightBlockMessage } = await import(pathToFileURL(path.join(srcDir, 'cost-guard.js')).href);
+
+  // ① 超限即拦，且文案里必须带上三个数字（排查时不需要再去翻配置）
+  const hit = preflightBlockMessage(1, 0.9, 0.2);
+  assert.ok(typeof hit === 'string' && hit.includes('前置拦截'), `超限必须给出拦截文案，实际：${hit}`);
+  assert.ok(hit.includes('0.2000') && hit.includes('0.9000') && hit.includes('1.00'), `文案必须含最坏/已用/上限三个数字，实际：${hit}`);
+
+  // ② 恰好等于上限 → 拦（`>=` 而不是 `>`；差一点点不拦）
+  assert.ok(preflightBlockMessage(1, 0.8, 0.2), '恰好等于上限必须拦（口径是 >=）');
+  assert.equal(preflightBlockMessage(1, 0.8, 0.1999), null, '略低于上限不得拦（否则会误伤正常请求）');
+
+  // ③ 无法判断时**既不误拦也不静默放行**：返回 null，交给主检查告警"无价格数据"
+  assert.equal(preflightBlockMessage(1, null, 0.2), null, '统计不可读（used=null）不得据此拦截');
+  assert.equal(preflightBlockMessage(1, 0.9, null), null, '无价格数据（worst=null）不得据此拦截');
+
+  // ④ 上限未配置/非法 → 不拦（护栏整体关闭时不该有任何前置行为）
+  for (const bad of [0, -1, NaN, undefined, null, 'abc']) {
+    assert.equal(preflightBlockMessage(bad, 99, 99), null, `上限为 ${String(bad)} 时不得拦截`);
+  }
+
+  // ⑤ 结构：runTurn 里不得再内联那段判据（防"抽出去了又抄一份回来"）
+  {
+    const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+    assert.ok(/preflightBlockMessage\(/.test(agentSrc), 'runTurn 必须调用抽出来的判据');
+    assert.ok(!/used \+ worst >= Number\(g\.dailyLimitYuan\)/.test(agentSrc), 'runTurn 里不得再内联最坏成本比较（那正是抽出去的东西）');
+    // 判据只有一处实现：全仓不得再出现第二份同名比较
+    const dup = fs.readdirSync(srcDir).filter((f) => f.endsWith('.js')).filter((f) => {
+      const t = fs.readFileSync(path.join(srcDir, f), 'utf8');
+      return f !== 'cost-guard.js' && /used \+ worst >=/.test(t);
+    });
+    assert.deepEqual(dup, [], `最坏成本比较只允许出现在 cost-guard.js，实际还有：${dup.join('、')}`);
+  }
+  ok('v0.6.11 护栏前置判据：抽成纯函数 + 边界逐条钉死（超限/恰好等于/无法判断/未配置）+ 单源结构守卫');
+}
+
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket
 // —— 实测 ubuntu/macOS + Node 20 上"断言全过、进程却不退出"，CI 里表现为冒烟步骤永远 in_progress
 // （Node 18/22/Windows 因为拆连接更快而侥幸通过）。这里显式退出，断言本身不受影响；
