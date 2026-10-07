@@ -371,6 +371,14 @@ async function send(){
   // v0.4.0 Agent Preset：选择器选中的预设随本轮发送（服务端按会话应用一次）
   const presetVal=$('#presetSel')?.value;
   if(presetVal) payload.preset=presetVal;
+  // v0.6.12（用户实测：选了「自动」仍被按只读跑）：**权限模式必须随本轮请求显式带上**。
+  // 此前 permSel 只走 applyConfig→POST /api/config 把 permission 写进 config.json，chat 请求体里
+  // 从不带 permission —— 服务端因此分不清"用户此刻选了 auto"与"config.json 里躺着 auto"，
+  // 预设（如 local-audit 声明 permission=readonly）便会静默压过用户的选择：每调用一次非只读工具
+  // 都弹「只读模式将拦截 …」。服务端优先级：显式选择 > 预设 > config.json（server.js 的
+  // resolveTurnPermission）。config.json 的对象形态（allow/deny）由服务端保留，这里只发 mode。
+  const permVal=$('#permSel')?.value;
+  if(permVal) payload.permission=permVal;
   // 带上文开关：勾选后系统提示注入最近会话日志（默认不注入——新会话全新开始，避免串到历史会话上下文）
   if($('#journalChk')?.checked) payload.withJournal=true;
   if(attachments.length) payload.attachments=attachments;
@@ -676,7 +684,14 @@ function presetPicked(){
   if(p.temperature!==undefined) over.push('温度 '+p.temperature);
   if(p.contextBudget) over.push('预算 '+p.contextBudget);
   const summary=over.length?'（覆盖：'+over.join(' · ')+'）':'';
-  renderBanner({ text: '🧩 已选预设「'+(p.label||p.name)+'」：'+(p.description||'（无描述）')+summary+'。随本次发送生效，其余设置保持不变。' });
+  // v0.6.12：预设声明的权限与你此刻选的权限档不一致时**当场说清楚谁说了算**。
+  // 用户实测的困惑正是这里：预设 local-audit 声明 readonly，而他在「权限模式」里选的是自动——
+  // 界面上两处各说各话，谁也不提示冲突，于是他看到的是"我选了自动却按只读跑"。
+  const permNow=$('#permSel')?.value||'';
+  const conflict=(p.permission&&permNow&&p.permission!==permNow)
+    ? ' ⚠ 该预设声明权限 '+p.permission+'，与你当前选择的「'+permNow+'」不同——本轮按你的显式选择 '+permNow+' 执行（要按预设跑，请把权限模式切到 '+p.permission+'）。'
+    : '';
+  renderBanner({ text: '🧩 已选预设「'+(p.label||p.name)+'」：'+(p.description||'（无描述）')+summary+'。随本次发送生效，其余设置保持不变。'+conflict, warn: Boolean(conflict) });
 }
 async function init(){
   try{

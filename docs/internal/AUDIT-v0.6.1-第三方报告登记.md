@@ -1932,3 +1932,107 @@ M-8 更大范围（**单行**源码文本守卫、结构扫描白名单等）**�
   读缓存：这是**可用性/完整性**问题，不是提权，P1 随子进程隔离一起解决。
 - **跨平台差异照旧**：macOS/Windows 无廉价 syscall 沙箱，与设计文档 §7 同一结论；本轮的冻结与裁剪
   是纯 JS 语义，三平台一致。
+
+## 3.51 已修复（v0.6.12 开发线：WebUI「权限模式」选择被预设静默压过——用户选了自动却按只读跑）
+
+来源：**负责人真机实测**（桌面版 Electron 薄壳 + 本地部署模型），不是第三方报告条目。
+现象：权限模式选「自动」、沙箱选「off-一直执行」，再选「本地模型审计（内置）」预设后，
+**每调用一次工具**都弹 `权限确认 只读模式将拦截 task，是否本次放行？[y/N]`。
+
+### 一、先复现（探针入库与否：`/tmp/probe-perm-mode.mjs`，修前 / 修后各跑一遍）
+
+探针驱动**真实 WebUI**（`node src/cli.js web <port>` + 临时 `MINGDAO_HOME` + 本机桩 provider 提供
+OpenAI 兼容 SSE），桩模型每回合调用 `todo`——它在 `presets/local-audit.json` 的白名单内，
+**不在** `READONLY_TOOLS`（`read/glob/grep/ls/skill/git/fetch`）里，因此"是否发 ask 事件"就是
+"有效模式是不是 readonly"的判据。三份互相独立的观测量：SSE `ask` 事件、账本 `run.start.permission`
+（`src/agent.js:416` 写入）、桩 provider 收到的工具表（据此区分"预设没加载"与"预设加载了但权限被覆盖"）。
+
+| # | 请求体 | 修前有效模式 | 修后有效模式 |
+| --- | --- | --- | --- |
+| ① | `{preset:'local-audit'}`（不发 permission） | `readonly`（预设生效，**设计如此**） | `readonly`（同左，且新增可见说明） |
+| ② | `{permission:'auto', preset:'local-audit'}` | **`readonly`（bug 现场）** | **`auto`** |
+| ③ | `{permission:'auto'}`（不发预设） | `auto` | `auto` |
+| ④（追加） | `{permission:'readonly', preset:'evil-auto'}` | — | `readonly` + 「属提权…已忽略」banner（反提权不放松） |
+
+②的修前逐字证据：`ask 事件 = ["只读模式将拦截 todo，是否本次放行？[y/N] "]`、
+`账本 run.start.permission = "readonly"`、桩收到 9 个工具且 `<preset_rules>` 存在（即**预设确实加载了**，
+不是"预设没生效"）。修后②：`ask 事件 = []`、账本 `"auto"`，并新增一行可见说明
+`🔐 本会话权限：auto（来源：WebUI 显式选择）——不再逐次确认，工具直接执行；预设 local-audit 声明
+permission=readonly，已按你的显式选择 auto 执行`。
+
+> 复现过程中的一次**探针自身错误**也记录在案：第一版探针在①里漏发了 `preset` 字段，导致①显示 `auto`，
+> 看起来"预设根本没生效"。补上字段并加"桩看到的工具表"这一观测量后才定住真实现场——
+> 这正是本次要求"别只信报告、先复现"的价值。
+
+### 二、根因链（前端哪一行 + 服务端哪一行）
+
+1. **前端**：`src/web/app.js` 的 `#permSel`（`src/web/index.html` 的权限下拉）变更时只走
+   `applyConfig({permission})` → `POST /api/config`（`applyConfig` 定义在 app.js 末尾），
+   把权限**落盘进 config.json**；而 chat 请求体（app.js 的
+   `const payload={message:text,file:currentSession}` 一段）**只带 `preset`/`withJournal`/`attachments`，
+   从不带 `permission`**。
+2. **服务端**：`src/web/server.js` 的 `handleChat` 只读 `body.preset`；`body.permission` **全文件无人读取**
+   （注释里承诺的「CLI/WebUI 显式 > 预设 > config.json」只落实了后两级）。
+   于是 `presetPermissionOverride(preset, cfg.permission ?? 'ask')` 拿到的"当前权限"，正是用户刚刚
+   经 `/api/config` 写进 `cfg`/config.json 的**显式选择**——两者在服务端已无法区分。
+3. **反提权分支为何不拦**：`src/presets.js` 的 `presetPermissionOverride` 只拦"预设让权限**变宽松**"
+   （`readonly < ask < auto`）。`local-audit` 声明的 `readonly` 比 `auto` **更保守**，不属提权 →
+   返回 `readonly` → `chatCfg.permission` 被覆盖 → `createPermission('readonly', io)`。
+4. **弹窗**：`src/permissions.js` 的 `evaluatePermission` 对"readonly 档 + 非只读工具"返回
+   `ask / readonly-write`，`createPermission` 里对应文案即
+   `只读模式将拦截 <工具名>，是否本次放行？[y/N]`。`task`/`todo` 都不在 `READONLY_TOOLS` 里，
+   所以"每调用一次工具都弹一次"。
+5. **用户"无论是否选本地模型审计都会弹"的观感**：预设下拉是**会话级粘滞**的（`#presetSel` 一直选着，
+   切换权限档不会清掉它，`presetPicked()` 也只发一条介绍 banner），因此之后每条消息仍然带着
+   `preset:'local-audit'`；用户以为"换个权限档就覆盖了预设"，实际两处各说各话、且**没有任何一处**告诉他
+   本轮真正生效的是哪一档。
+
+### 三、修法（前端发字段 + 服务端单源判定 + 把有效档位说出来）
+
+1. **前端真的把权限发出去**（`src/web/app.js`）：chat 请求体新增 `payload.permission = $('#permSel').value`；
+   `presetPicked()` 在"预设声明的权限 ≠ 当前选择的权限"时当场给一条 warn banner，写明谁说了算；
+   `src/web/index.html` 的 `#permSel` title 补上"随每条消息发送、优先于预设"的说明。
+2. **服务端单源判定**（`src/web/server.js` 新增导出纯函数 `resolveTurnPermission({preset, explicit, configPermission})`）：
+   - 显式选择（`body.permission`，白名单 `ask/auto/readonly`，非法值一律忽略、绝不 fail-open）为**终值**：
+     预设既不能提权、也不能借"更保守"静默压低；同时**保留**"预设想提权"这一安全信号（`escalated`）；
+   - 无显式选择时沿用既有 `presetPermissionOverride` 反提权规则，再回落 config.json；
+   - config.json 的**对象形态**（`{mode, allow, deny}`）在切档时只换 `mode`，`allow`/`deny` 原样保留
+     （与 v0.6.3 P1-3 在 `presets.js` 的同款纪律）；
+   - `handleChat` 用它的结果统一改写 `chatCfg.permission`（没勾预设时显式选择同样生效），
+     `createPermission` 仍吃 `chatCfg.permission`——判定结果与权限引擎之间只有这一条路。
+3. **把"本会话的有效权限"说出来**：会话开始（或该会话的 `mode|source` 变化）随 SSE 发一条 banner：
+   `🔐 本会话权限：readonly（来源：预设 local-audit）——仅只读工具直接放行，其余逐次询问是否本次放行`；
+   显式选择与预设声明冲突时追加一句"已按你的显式选择 auto 执行"。**用户困惑的根源不是权限算错了，
+   而是算了没人说**——这条 banner 直接对着根因。
+4. **`src/permissions.js` 的判定语义一行未动**（本轮唯一的权限判定改动全在 web 入口的"谁说了算"上）。
+
+### 四、断言与变异
+
+- `test/smoke.js` **只追加**第 137 节（接 §136）：① 显式 `auto` + 只读预设 → `auto`（回归）；
+  ①b 对象形态切档保留 `deny`；② 反提权不放松（有显式 / 无显式两条路都钉）；
+  ③ 预设 `readonly` + 无显式选择 → `readonly` **且有可见说明**（写清档位与来源）；非法显式值被忽略；
+  ④ 结构守卫：**前端 `payload.permission` 取自 `#permSel`**、**服务端读 `body.permission`**、
+  预设分支走 `resolveTurnPermission`、`chatCfg.permission` 来自判定结果、`turnPerm.banner` 真的随流下发。
+- `test/mutate/batch25-perm-mode.mjs`：**9/9 全中**——① 服务端不再读 `body.permission`；② 预设声明重新压过
+  显式选择；③ 抹掉反提权标记；④ 无显式选择时反提权整体放松；⑤ 可见说明丢来源；⑥ 可见说明不再下发；
+  ⑦ 对象形态切档丢 `deny`；⑧ 接线不再用判定结果；⑨ 前端不再发权限字段。
+- `test/mutate/README.md` 的「变异总数」由 131 → **140**（与 `node scripts/doc-lint.mjs` 打印的"实际 140 条"同一提交落库）。
+- 变异套件在**独立 worktree**（`git worktree add --detach /tmp/mut-perm HEAD`，拷入本轮改动后运行，
+  跑完 `git worktree remove --force`）里执行，避免与其它并发变异线互相覆盖工作区。
+
+### 五、未做边界（如实登记）
+
+- **接受 `body.permission` 不扩大攻击面，但也没有额外加固**：能发 `/api/chat` 的一方本就能
+  `POST /api/config` 改全局权限（同一套 token/Host/Origin/`Sec-Fetch-Site` 校验），显式档位只在**本次请求内**
+  生效、不落盘。未给"每次请求的权限选择"单独设审计/账本字段（账本 `run.start.permission` 记的仍是
+  生效值，未记"来源"）。
+- **只改了 WebUI 入口**：CLI（`src/cli.js`）、REPL（`src/commands/repl.js`）、调度（`src/schedule.js`）
+  的预设权限优先级本轮一字未动——它们没有"界面显式选择"与"config.json"分离的问题（CLI 的 `--permission`
+  是进程级参数，语义本就清楚）。桌面版是 Electron 薄壳，**未改 `desktop/**`**，它加载的就是本文件修好的 WebUI。
+- **`presetPicked()` 的冲突提示只在"切换预设下拉的那一刻"出现**：用户若先选预设、后改权限档，
+  那一刻的提示在 chat 流里由服务端 banner 补（本会话 `mode|source` 变化时说一次），但前端不会为此弹第二次 toast。
+- **可见说明是会话级去重（`Map<sessionName, mode|source>`）**：同一会话内档位不变就不再重复播报；
+  自动标题改名会让 `sessionName` 变化、可能多播一次（可接受，未做按会话 id 的稳定键）。
+- **未做的事**：没有改 `docs/CONFIG.md` / `README.md` 去写明"显式选择 > 预设 > config.json"
+  （不在本轮允许改动清单内）；预设与权限的**语义冲突**（如"只读审计预设 + 用户选 auto"）
+  仍按"用户说了算"处理，未提供"预设强制锁定档位"的机制。

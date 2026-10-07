@@ -68,9 +68,84 @@ import { recordUsage, listCacheStats, summarizeCacheStats, costBreakdown } from 
 import { PRICE_DATA_AS_OF } from '../pricing.js';
 import { costGuardStatus } from '../cost-guard.js';
 import { presetList, buildPreset } from '../mcp-presets.js';
+// v0.6.12：resolveTurnPermission() 需要预设反提权判定——改为静态导入（该模块本就无副作用，
+// 域路由 /api/presets 也在用它；动态导入留在别处只是为了少加载，这里必须能同步取到）。
+import { presetPermissionOverride } from '../presets.js';
 import { syncStatus, syncLogin, syncLogout, syncPush, syncPull, syncRemoteList, maybeAutoSync, syncChangePassword, syncShareCreate, syncShareList, syncShareAccept, syncShareRevoke, listSyncConflicts, resolveSyncConflict } from '../sync.js';
 
 const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html');
+
+/** 合法权限模式（与 /api/config 的校验同一口径：非法值一律忽略，绝不 fail-open）。 */
+const PERMISSION_MODES = new Set(['ask', 'auto', 'readonly']);
+/** 各档位的"会发生什么"人话说明（可见说明与前端提示共用同一份文案）。 */
+const PERM_HINT = /** @type {Record<string, string>} */ ({
+  ask: '写文件 / 执行命令前逐次确认',
+  auto: '不再逐次确认，工具直接执行',
+  readonly: '仅只读工具直接放行，其余逐次询问是否本次放行',
+});
+
+/**
+ * 解析「本回合的有效权限」——把"谁说了算"收成**单源纯函数**（v0.6.12，用户实测 bug）。
+ *
+ * 优先级：**WebUI/CLI 显式选择 > 预设 > config.json**（这段注释在 v0.6.12 之前只是注释，
+ * `body.permission` 全文件无人读取：前端把权限只写进 config.json，服务端便分不清
+ * "用户此刻选了 auto"与"config.json 里躺着 auto"，预设的 readonly 因此静默压过用户的选择）。
+ *
+ * 边界（与 v0.4.1 的反提权语义共存，不是替换）：
+ *   · **预设不得提权**：预设声明的 permission 比基准更宽松（readonly→ask/auto、ask→auto）时
+ *     一律忽略并置 `escalated=true`（调用方据此照旧发那条 ⚠ banner）——有显式选择时基准就是显式选择；
+ *   · **用户自己选 auto 是正当的**：显式选择是终值，预设既不能借"更保守"静默压低它，也不能提权；
+ *   · 非法/缺失的显式值一律忽略（回落预设/配置），绝不 fail-open。
+ *
+ * @param {{ preset?: any, explicit?: any, configPermission?: any }} [input]
+ * @returns {{ permission: any, mode: string, source: 'webui'|'preset'|'config', sourceLabel: string,
+ *            presetNote: string|null, escalated: boolean, usePresetPermission: boolean, baseMode: string, banner: string }}
+ */
+export function resolveTurnPermission({ preset = null, explicit = null, configPermission = 'ask' } = {}) {
+  const norm = (/** @type {any} */ v) => {
+    const m = v && typeof v === 'object' ? String(v.mode ?? '') : String(v ?? '');
+    return PERMISSION_MODES.has(m) ? m : null;
+  };
+  const explicitMode = PERMISSION_MODES.has(String(explicit)) ? String(explicit) : null;
+  const configMode = norm(configPermission) ?? 'ask';
+  const declared = preset && preset.permission !== undefined && PERMISSION_MODES.has(String(preset.permission)) ? String(preset.permission) : null;
+  const presetName = String(preset?.name ?? '');
+  const RANK = /** @type {Record<string, number>} */ ({ readonly: 0, ask: 1, auto: 2 });
+  const baseMode = explicitMode ?? configMode;
+  /** 单位置结果装配：一切分支都从这里出去，避免"某个分支忘了带 banner/来源" */
+  const build = (/** @type {any} */ permission, /** @type {'webui'|'preset'|'config'} */ source, /** @type {string|null} */ presetNote, /** @type {boolean} */ escalated) => {
+    const mode = norm(permission) ?? 'ask';
+    const sourceLabel =
+      source === 'webui' ? 'WebUI 显式选择' : source === 'preset' ? `预设 ${presetName}` : 'config.json';
+    return {
+      permission,
+      mode,
+      source,
+      sourceLabel,
+      presetNote,
+      escalated,
+      usePresetPermission: source === 'preset',
+      baseMode,
+      banner: `🔐 本会话权限：${mode}（来源：${sourceLabel}）——${PERM_HINT[mode]}${presetNote ? `；${presetNote}` : ''}`,
+    };
+  };
+  // ① 显式选择：终值。预设只保留"它想提权"这个信号（安全告警不能因为用户恰好选了更宽的档就消失）
+  if (explicitMode) {
+    const escalated = Boolean(declared && RANK[declared] > RANK[explicitMode]);
+    const presetNote =
+      declared && declared !== explicitMode ? `预设 ${presetName} 声明 permission=${declared}，已按你的显式选择 ${explicitMode} 执行` : null;
+    // config.json 的**对象形态**（{mode, allow, deny}，docs/CONFIG.md 推荐写法）里的 allow/deny 是
+    // 用户自己写的规则，切换档位不能把它们丢掉——只换 mode、其余原样保留（与 presets.js 的
+    // presetPermissionOverride "对象进→对象出" 同一纪律；前端 permSel 只发得出 mode 字符串）。
+    const permission = configPermission && typeof configPermission === 'object' ? { ...configPermission, mode: explicitMode } : explicitMode;
+    return build(permission, 'webui', presetNote, escalated);
+  }
+  // ② 无显式选择：预设按既有反提权规则生效（或回落 config.json）
+  if (!preset || declared === null) return build(configPermission, 'config', null, false);
+  const ov = presetPermissionOverride(preset, configPermission);
+  if (ov.escalated) return build(ov.permission, 'config', null, true);
+  return build(ov.permission, 'preset', null, false);
+}
 
 /** @param {any} res @param {any} code @param {any} obj */
 function json(res, code, obj) {
@@ -295,6 +370,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   }
   const draftTexts = new Map(); // 质检 A5：草稿按会话维度存储（此前单槽多客户端互相覆盖）
   const sessionMemoryCache = new Map(); // v0.3.0 P0-3：项目记忆「会话内快照」——同一会话系统提示恒定（保前缀缓存）
+  // v0.6.12：本会话**已播报过的**有效权限（`mode|source`），用于"会话开始说一次、档位变了再说一次"。
+  // 放在这里而不是模块级：同一进程多次 runWebServer（测试/嵌入）不互相串味。
+  const permissionNotices = new Map();
 
   // —— 服务端诊断日志（第二问无反应排查 + 长期运维）：<mingdao-home>/logs/web-server.log ——
   // 记录每次对话的关键阶段与耗时；2MB 滚动。桌面版与 WebUI 共用同一日志。
@@ -501,29 +579,59 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         sessionMemoryCache.delete(oldest);
       }
     }
+    // v0.6.12（用户实测 bug：选了「自动」仍被按只读跑）：**WebUI 的权限选择必须随请求显式传入**。
+    // 此前 `#permSel` 只走 POST /api/config（把 permission 写进 config.json），chat 请求体里从不带
+    // permission，服务端便无从区分「用户此刻显式择了 auto」与「config.json 里躺着 auto」——
+    // 于是一旦勾了 local-audit 预设（声明 permission=readonly），预设就静默压过用户的选择：
+    // 每调用一次非只读工具（如 task/todo）都弹「只读模式将拦截 …」。注释里承诺的
+    // 「CLI/WebUI 显式 > 预设 > config.json」在这一格是空的（body.permission 全文件无人读取）。
+    const explicitPermission = PERMISSION_MODES.has(String(body.permission)) ? String(body.permission) : null;
     // v0.4.0 Agent Preset：body.preset 按会话一次选定（新会话或显式传值）；应用工具白名单/参数覆盖，
-    // 系统提示注入预设定制段。预设覆盖优先级：CLI/WebUI 显式 > 预设 > config.json。
+    // 系统提示注入预设定制段。预设覆盖优先级：CLI/WebUI 显式 > 预设 > config.json（v0.6.12 起真的成立）。
     let chatPreset = /** @type {any} */ (null);
     let presetBlock = '';
     let chatCfg = cfg;
+    let turnPerm = resolveTurnPermission({ explicit: explicitPermission, configPermission: cfg.permission ?? 'ask' });
     if (typeof body.preset === 'string' && body.preset) {
-      const { loadPreset, presetConfigOverrides, presetSystemBlock, presetPermissionOverride } = await import('../presets.js');
+      const { loadPreset, presetConfigOverrides, presetSystemBlock } = await import('../presets.js');
       chatPreset = loadPreset(taskDir, body.preset);
       if (chatPreset) {
         const over = presetConfigOverrides(chatPreset);
         // P0（v0.4.1）：预设 permission 提权防护——不得把 ask/readonly 静默改成 auto
-        const permOv = presetPermissionOverride(chatPreset, cfg.permission ?? 'ask');
-        if (permOv.escalated) {
-          delete over.permission;
-          send({ type: 'banner', text: `⚠ 预设 "${chatPreset.name}" 声明 permission=${chatPreset.permission} 属提权（当前 ${cfg.permission ?? 'ask'}），已忽略并保持 ${permOv.permission}。` });
-        } else if (chatPreset.permission !== undefined) {
-          over.permission = permOv.permission;
+        turnPerm = resolveTurnPermission({ preset: chatPreset, explicit: explicitPermission, configPermission: cfg.permission ?? 'ask' });
+        if (turnPerm.escalated) {
+          send({
+            type: 'banner',
+            text: `⚠ 预设 "${chatPreset.name}" 声明 permission=${chatPreset.permission} 属提权（当前 ${turnPerm.baseMode}），已忽略并保持 ${turnPerm.mode}。`,
+          });
         }
+        if (turnPerm.usePresetPermission) over.permission = turnPerm.permission;
+        else delete over.permission; // 显式选择最高优先级：预设不得借"更保守"静默压低
         chatCfg = { ...cfg, ...over, presetName: chatPreset.name };
         presetBlock = presetSystemBlock(chatPreset);
       } else {
         // 预设不存在：不静默——banner 告知（前端下拉与磁盘不同步/项目级预设未带入时可见）
         send({ type: 'banner', text: `⚠ 预设 "${String(body.preset)}" 不存在，已按当前配置继续。` });
+      }
+    }
+    // v0.6.12：**无论有没有预设，本回合生效的权限都以 turnPerm 为准**——显式选择在"没勾预设"这一格
+    // 同样必须生效（此前 createPermission 读的是 chatCfg.permission，即 config.json 的值）。
+    chatCfg = { ...chatCfg, permission: turnPerm.permission };
+    // v0.6.12：**把"本会话的有效权限"说出来**。这次用户困惑的根源不是权限算错了，而是
+    // 「我选了自动、它按只读跑、而且没有任何一处告诉我」——预设是会话级粘滞的（下拉一直选着），
+    // 用户以为换个权限档就覆盖了它。新会话开始与档位变更各说一次，不刷屏。
+    {
+      const noticeKey = `${turnPerm.mode}|${turnPerm.source}`;
+      const prevNotice = permissionNotices.get(sessionName);
+      if (prevNotice !== noticeKey) {
+        permissionNotices.set(sessionName, noticeKey);
+        if (permissionNotices.size > 200) permissionNotices.delete(permissionNotices.keys().next().value);
+        send({
+          type: 'banner',
+          text: prevNotice
+            ? `🔐 本会话权限已变更：${prevNotice.split('|')[0]} → ${turnPerm.mode}（来源：${turnPerm.sourceLabel}）——${PERM_HINT[turnPerm.mode]}`
+            : turnPerm.banner,
+        });
       }
     }
     const systemPrompt = buildSystemPrompt({ workingDir: taskDir, withJournal: body.withJournal === true, projectMemory: projectMemorySnapshot, presetBlock });

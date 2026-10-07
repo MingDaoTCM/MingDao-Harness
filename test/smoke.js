@@ -12905,6 +12905,89 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
   ok('v0.6.11 工具编排两端：可见性判据（只读档/白名单/已用工具/MCP 三态/顺序）+ 回填正文（原样/紧凑 JSON/复用前缀/约束拒绝/截断且前缀不计入）+ 单源结构守卫');
 }
 
+// ---------- 137. v0.6.12：WebUI 权限选择显式生效（显式 > 预设 > config.json）+ 生效档位可见（用户实测 bug） ----------
+// 用户实测（桌面版 + 本地部署模型）：权限模式选「自动」、沙箱 off，之后**每调用一次工具**都弹
+//   「只读模式将拦截 task，是否本次放行？[y/N]」。
+// 确定性复现（/tmp/probe-perm-mode.mjs：真实 `node src/cli.js web <port>` + 临时 MINGDAO_HOME + 本机桩 provider；
+// 三份互相独立的观测量 = SSE ask 事件（桩模型调 todo：在 local-audit 白名单内、但不在 READONLY_TOOLS 里）/
+// 账本 run.start.permission / 桩收到的工具表）：
+//   ① preset=local-audit（不发 permission）        → readonly（预设生效，设计如此）
+//   ② permission=auto + preset=local-audit（修前） → **readonly**（bug 现场：显式选择被静默压过）
+//   ③ permission=auto（不发预设）                   → auto
+//   修后 ② → auto，且 banner 写明「本会话权限：auto（来源：WebUI 显式选择）……预设 local-audit 声明
+//   permission=readonly，已按你的显式选择 auto 执行」；反提权方向不变（显式 readonly + 预设 auto → readonly）。
+// 根因链：src/web/app.js 的 #permSel 只走 applyConfig → POST /api/config（把 permission 写进 config.json），
+//   chat 请求体**从不带** permission；src/web/server.js 只读 body.preset，随后用
+//   presetPermissionOverride(preset, cfg.permission) 判定"当前权限"——而这个值正是用户刚写进 config.json 的
+//   显式选择；local-audit 的 readonly 比 auto **更保守**，反提权分支（只拦"变宽松"）根本不触发，
+//   于是 chatCfg.permission 被静默覆盖成 readonly，用户选了自动却按只读跑、且没有任何一处告诉他。
+// 本节钉四件事：① 显式 auto 压过只读预设（回归）；② 反提权不放松（有/无显式选择两条路都钉）；
+//   ③ 无显式选择时预设照旧生效**且有可见说明**；④ 前端确实发了权限字段、服务端确实用它（结构守卫）。
+{
+  const { resolveTurnPermission } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
+  const presetRO = { name: 'local-audit', permission: 'readonly' };
+  const presetAuto = { name: 'evil-auto', permission: 'auto' };
+
+  // ① 显式 auto + 只读预设 → auto（回归：修前这里是 readonly）
+  {
+    const r = resolveTurnPermission({ preset: presetRO, explicit: 'auto', configPermission: 'auto' });
+    assert.equal(r.mode, 'auto', '显式选择必须压过预设声明的权限：显式 auto + 只读预设的有效模式必须是 auto');
+    assert.equal(r.source, 'webui', '有效权限的来源必须是 WebUI 显式选择（可见说明要照此写）');
+    assert.equal(r.usePresetPermission, false, '有显式选择时，预设声明的 permission 不得写进本回合配置');
+    assert.equal(r.presetNote !== null, true, '显式选择与预设声明不一致时必须给出一句说明（而不是静默二选一）');
+    assert.ok(String(r.presetNote).includes('readonly'), '说明里必须点出预设声明的那个值（readonly）');
+  }
+  // ①b 对象形态：换档不得丢掉用户自己写的 allow/deny（docs/CONFIG.md 推荐写法，前端只发得出 mode）
+  {
+    const r = resolveTurnPermission({ explicit: 'auto', configPermission: { mode: 'ask', deny: ['bash:rm'] } });
+    assert.deepEqual(r.permission, { mode: 'auto', deny: ['bash:rm'] }, '显式切档只改 mode，config.json 的对象形态里 deny 规则必须原样保留');
+    assert.equal(r.mode, 'auto', '对象形态下的有效模式同样必须是显式选择');
+  }
+  // ② 反提权不放松：有显式选择（基准=显式）与无显式选择（基准=config）两条路都不许放宽
+  {
+    const r = resolveTurnPermission({ preset: presetAuto, explicit: 'readonly', configPermission: 'auto' });
+    assert.equal(r.mode, 'readonly', '反提权不放松：显式 readonly + 声明 auto 的预设，有效模式仍是 readonly');
+    assert.equal(r.escalated, true, '预设试图提权必须被标记出来（escalated），哪怕用户的选择恰好更宽');
+    const r2 = resolveTurnPermission({ preset: presetAuto, configPermission: 'ask' });
+    assert.equal(r2.mode, 'ask', '无显式选择时，预设 auto 也不得把 ask 放宽成 auto');
+    assert.equal(r2.escalated, true, '无显式选择时的提权同样必须被标记（escalated）');
+    const r3 = resolveTurnPermission({ preset: presetAuto, configPermission: 'readonly' });
+    assert.equal(r3.mode, 'readonly', '无显式选择时，预设 auto 不得把 readonly 放宽');
+  }
+  // ③ 预设 readonly + 无显式选择 → readonly，**且有可见说明**（用户困惑的根源是"没人告诉我"）
+  {
+    const r = resolveTurnPermission({ preset: presetRO, explicit: null, configPermission: 'auto' });
+    assert.equal(r.mode, 'readonly', '无显式选择时，预设声明的 readonly 照旧生效');
+    assert.equal(r.source, 'preset', '来源必须标成预设（可见说明要写清是谁定的档）');
+    const b = String(r.banner || '');
+    assert.ok(b.includes('本会话权限：readonly'), '可见说明必须写明本会话生效的档位（本会话权限：readonly）');
+    assert.ok(b.includes('来源：预设 local-audit'), '可见说明必须写明档位来源（来源：预设 local-audit）');
+    assert.ok(b.includes('只读工具直接放行'), '可见说明还要说清该档位会发生什么（否则用户仍不知道后果）');
+    // 非法/缺失的显式值一律忽略（绝不 fail-open）
+    const bad = resolveTurnPermission({ explicit: 'root', configPermission: 'ask' });
+    assert.equal(bad.mode, 'ask', '非法权限值必须被忽略并回落 config.json，绝不 fail-open');
+    assert.equal(bad.source, 'config', '非法显式值不得被当作有效来源');
+  }
+  // ④ 结构守卫：说明它守的是什么——「前端真的发了」与「服务端真的用了」
+  {
+    const appSrc = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+    const from = appSrc.indexOf('const payload={message:text,file:currentSession}');
+    const to = appSrc.indexOf('const sentAttachments=attachments;');
+    assert.ok(from >= 0 && to > from, '（前置）应能定位 app.js 里 chat 请求体的构造段');
+    const sendSrc = appSrc.slice(from, to);
+    assert.ok(/payload\.permission\s*=/.test(sendSrc), '前端必须把权限模式随 chat 请求发出（payload.permission）——只写进 /api/config 时，服务端分不清"用户显式选择"与"配置文件默认值"');
+    assert.ok(/#permSel/.test(sendSrc), 'payload.permission 必须取自 #permSel（权限模式选择器），不得是别的猜法');
+    const srvSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+    assert.ok(/PERMISSION_MODES\.has\(String\(body\.permission\)\)/.test(srvSrc), '服务端必须读取请求体的 permission（修前 body.permission 全文件无人读取）');
+    assert.ok(/resolveTurnPermission\(\{\s*preset:\s*chatPreset/.test(srvSrc), '预设分支必须走 resolveTurnPermission（优先级单源，不许就地另写一套）');
+    assert.ok(/chatCfg\s*=\s*\{\s*\.\.\.chatCfg,\s*permission:\s*turnPerm\.permission\s*\}/.test(srvSrc), '权限引擎吃到的 chatCfg.permission 必须来自 resolveTurnPermission 的结果（没勾预设时显式选择也要生效）');
+    assert.ok(/createPermission\(\s*chatCfg\.permission/.test(srvSrc), '权限引擎必须用 chatCfg.permission 构造——判定结果要真的接上，不能算了不用');
+    assert.ok(/turnPerm\.banner/.test(srvSrc), '可见说明（turnPerm.banner）必须真的随 SSE 流下发，而不是只算出来没人用');
+  }
+
+  ok('v0.6.12 WebUI 权限：显式选择 > 预设 > config.json（反提权不放宽 + 对象形态 deny 不丢）+ 生效档位与来源有可见说明 + 单源与接线结构守卫');
+}
+
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket
 // —— 实测 ubuntu/macOS + Node 20 上"断言全过、进程却不退出"，CI 里表现为冒烟步骤永远 in_progress
 // （Node 18/22/Windows 因为拆连接更快而侥幸通过）。这里显式退出，断言本身不受影响；

@@ -326,7 +326,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
   <div id="composer">
     <button id="attachBtn" title="上传图片或文本文件（图片需视觉模型，如 deepseek-v4-flash-vision-exp）">📎</button>
     <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送，Shift+Enter 换行）"></textarea>
-    <select id="permSel" title="权限模式：询问＝写文件/执行命令前先确认（推荐） · 自动＝全部直接放行 · 只读＝禁止修改与执行">
+    <select id="permSel" title="权限模式：询问＝写文件/执行命令前先确认（推荐） · 自动＝全部直接放行 · 只读＝禁止修改与执行。此处选择随每条消息一起发送，优先于预设声明的权限（预设只能收紧、不能提权）；会话开始时会在对话里标明本轮生效的档位与来源">
       <option value="ask">询问</option>
       <option value="auto">自动</option>
       <option value="readonly">只读</option>
