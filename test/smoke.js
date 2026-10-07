@@ -12165,6 +12165,223 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
   }
 }
 
+// ---------- 135. v0.6.11：Electron 更新包**来源签名**（审计 K-8 完整版 / 报告 §5.2 主线 B / 登记 §3.47） ----------
+// 先复现（探针 /tmp/probe-update-feed.mjs，未入库：本机 HTTP 投毒 feed + 桩 electron-updater，
+// 被测对象是**真实的 desktop/main.js**；feed 地址取自 electron-builder.yml 的真实 publish.url，
+// 只把 origin 换成本机返回者 = DNS/主机劫持的最小模拟）：
+//   ① 投毒 feed + 攻击者**自己算的** sha512 → 下载 → 校验 MATCH → `quitAndInstall()` 被调用
+//      ⇒ electron-updater 的 sha512 只证明"字节与同一份 yml 一致"，不证明"yml 来自官网"；
+//   ② 只改字节不改清单（传输损坏）→ sha512 mismatch → 不安装 ⇒ 那一层只防传输损坏，符合预期；
+//   修后同一条探针：③ 无签名（默认档）→ warn-and-install，UI/日志都写"未验证来源签名"；
+//   ④ 无签名 + MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 → reject 且关掉 autoInstallOnAppQuit；
+//   ⑤ 攻击者密钥签的包 → reject（"来源"二字的全部价值）；
+//   ⑥ 信任公钥签的包 → 验签通过 → install；⑦ 清单声明了签名但内容为空 → reject（第四态）。
+// 本节把判据抽出来逐条钉死：① 有效签名 → install；② 篡改一个字节 → reject；③ 换一把密钥 → reject；
+// ④ 无签名 + 默认 → warn-and-install；⑤ 无签名 + 环境变量要求 → reject；⑥ main.js 的源码级守卫
+// （安装前必须过门禁、公钥必须是内置常量、拒绝必须关掉"退出时安装"）。
+// **诚实边界**：默认档仍是 warn-and-install（发布链路还没接入签名，见 docs/CODE-SIGNING.md §五）；
+// macOS/Windows 的**代码签名**（Gatekeeper/SmartScreen）是另一件事，不在本节范围。
+{
+  const prevHome135 = process.env.MINGDAO_HOME;
+  const home135 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p135-'));
+  process.env.MINGDAO_HOME = home135;
+  const prevRequire135 = process.env.MINGDAO_REQUIRE_UPDATE_SIGNATURE;
+  const repoRoot135 = path.join(srcDir, '..');
+  const crypto135 = await import('node:crypto');
+  const uv135 = await import(pathToFileURL(path.join(repoRoot135, 'desktop', 'update-verify.js')).href);
+  // ⑦ 有一条**故意失败**的用例（--keygen 拒绝写进仓库）。变异验证会把那条拒绝改坏，那时脚本
+  // 会真的在仓库里建出密钥文件——所以进 try 前先清残留，finally 里再清一次：变异跑不得污染
+  // 工作树（与脚手架"跑完字节与跑前一致"同一条纪律）。声明放在 try 之外，finally 才看得见。
+  const inRepoDir135 = path.join(repoRoot135, 'desktop', '.tmp-key-135');
+  safeRmSync(inRepoDir135, { recursive: true, force: true });
+  try {
+    // 两把密钥：official = 模拟"内置公钥"那一把；attacker = 攻击者的另一把（同等强度、不同来源）
+    const official135 = crypto135.generateKeyPairSync('ed25519');
+    const attacker135 = crypto135.generateKeyPairSync('ed25519');
+    const pemOf135 = (k) => k.export({ type: 'spki', format: 'pem' }).toString();
+    const officialPem135 = pemOf135(official135.publicKey);
+    const attackerPem135 = pemOf135(attacker135.publicKey);
+    const artifact135 = Buffer.concat([Buffer.from('MINGDAO-INSTALLER-BYTES-v0.6.11\n'), Buffer.alloc(4096, 0x41)]);
+    const pkg135 = path.join(home135, 'mingdao-setup-0.6.11-x64.exe');
+    fs.writeFileSync(pkg135, artifact135);
+    const sign135 = (key, bytes) => crypto135.sign(null, bytes, key).toString('base64');
+    const goodSig135 = sign135(official135.privateKey, artifact135);
+    const badSig135 = sign135(attacker135.privateKey, artifact135);
+
+    // ① 有效签名 → install（bytes 形态与 filePath 形态都能验；keyId 沿用 ledger 的 SPKI-DER-sha256 约定）
+    {
+      const r1 = uv135.verifyArtifactSignature({ filePath: pkg135, signatureB64: goodSig135, publicKeyPem: officialPem135 });
+      assert.equal(r1.ok, true, '有效签名必须验过：' + JSON.stringify(r1));
+      assert.equal(r1.keyId, uv135.keyIdOf(officialPem135), 'keyId 必须是验签公钥的指纹（与 src/ledger.js 同约定）');
+      const r1b = uv135.verifyArtifactSignature({ bytes: artifact135, signatureB64: goodSig135, publicKeyPem: official135.publicKey });
+      assert.equal(r1b.ok, true, 'bytes 形态同样可验（不强迫调用方先落盘）');
+      const g1 = uv135.evaluateUpdate({ filePath: pkg135, signatureB64: goodSig135, publicKeyPem: officialPem135, requireSignature: true, version: '0.6.11' });
+      assert.equal(g1.decision, 'install', '有效签名 + 要求验签 → install（实际 ' + g1.decision + '）');
+      assert.equal(g1.allowInstall, true, '验签通过才允许安装');
+      assert.ok(g1.notice.detail.includes('来源签名校验通过') && g1.notice.detail.includes(String(g1.keyId)), 'install 文案必须点明"校验通过"并给出 keyId，实际：' + g1.notice.detail);
+      const short = uv135.verifyArtifactSignature({ filePath: pkg135, signatureB64: Buffer.alloc(63).toString('base64'), publicKeyPem: officialPem135 });
+      assert.equal(short.ok, false, '长度不对的"签名"必须判失败');
+      assert.ok(short.reason.includes('64 字节'), '失败原因必须点明 ed25519 签名长度，实际：' + short.reason);
+      // 非 ed25519 公钥：拒绝而不是崩
+      const rsa135 = crypto135.generateKeyPairSync('rsa', { modulusLength: 2048 });
+      const rsaRes = uv135.verifyArtifactSignature({ filePath: pkg135, signatureB64: goodSig135, publicKeyPem: pemOf135(rsa135.publicKey) });
+      assert.equal(rsaRes.ok, false, '非 ed25519 公钥必须判失败');
+      assert.ok(rsaRes.reason.includes('ed25519'), '原因要点明只认 ed25519，实际：' + rsaRes.reason);
+    }
+
+    // ② 篡改一个字节 → reject（不是"警告后照装"；UI 必须说"来源不可信，已拒绝"+ 给出官网手动下载）
+    {
+      const tampered135 = Buffer.from(artifact135);
+      tampered135[0] = tampered135[0] ^ 0x01;
+      fs.writeFileSync(pkg135, tampered135);
+      const r2 = uv135.verifyArtifactSignature({ filePath: pkg135, signatureB64: goodSig135, publicKeyPem: officialPem135 });
+      assert.equal(r2.ok, false, '改一个字节必须验不过');
+      assert.ok(r2.reason.includes('不匹配'), '失败原因必须说"不匹配"，实际：' + r2.reason);
+      const g2 = uv135.evaluateUpdate({ filePath: pkg135, signatureB64: goodSig135, publicKeyPem: officialPem135 });
+      assert.equal(g2.decision, 'reject', '篡改一个字节 → reject（签名无效必须拒绝）');
+      assert.equal(g2.allowInstall, false, '签名无效一律不放行');
+      assert.ok(g2.notice.message.includes('更新包来源不可信，已拒绝'), 'UI 必须写明"更新包来源不可信，已拒绝"，实际：' + g2.notice.message);
+      assert.ok(g2.notice.detail.includes('请从官网手动下载'), 'UI 必须给出下一步（从官网手动下载）');
+      assert.ok(g2.logLine.includes('拒绝安装') && g2.logLine.includes('不匹配'), '日志必须留下拒绝结论与原因');
+      fs.writeFileSync(pkg135, artifact135); // 还原，供后续用例使用
+    }
+
+    // ③ 换一把密钥签的包 → reject（并反验：用攻击者自己的公钥必须验过，证明失败原因真是"密钥不匹配"）
+    {
+      const r3 = uv135.verifyArtifactSignature({ filePath: pkg135, signatureB64: badSig135, publicKeyPem: officialPem135 });
+      assert.equal(r3.ok, false, '换一把密钥签的包必须验不过（这就是"来源"二字的全部价值）');
+      const g3 = uv135.evaluateUpdate({ filePath: pkg135, signatureB64: badSig135, publicKeyPem: officialPem135 });
+      assert.equal(g3.decision, 'reject', '换密钥 → reject');
+      const r3b = uv135.verifyArtifactSignature({ filePath: pkg135, signatureB64: badSig135, publicKeyPem: attackerPem135 });
+      assert.equal(r3b.ok, true, '用攻击者自己的公钥验同一份签名必须通过（证明上面判失败不是"看到签名就无脑失败"）');
+      assert.notEqual(r3b.keyId, uv135.keyIdOf(officialPem135), '两把密钥的 keyId 必须不同（否则是同一把）');
+    }
+
+    // ④ 无签名 + 默认 → warn-and-install（不能把存量用户的自动更新直接掐死，但必须**明示**未验证）
+    {
+      const g4 = uv135.evaluateUpdate({ filePath: pkg135, signatureB64: '', publicKeyPem: officialPem135, requireSignature: false, version: '0.6.11' });
+      assert.equal(g4.decision, 'warn-and-install', '无签名 + 默认档 → warn-and-install（实际 ' + g4.decision + '）');
+      assert.equal(g4.allowInstall, true, 'warn-and-install 仍允许安装——但必须明示');
+      assert.ok(g4.notice.detail.includes('本次更新未验证来源签名'), 'UI 必须明确写出"本次更新未验证来源签名"，实际：' + g4.notice.detail);
+      assert.ok(g4.notice.title.includes('未验证来源签名'), '标题也要让用户看见（不能只藏在详情里）');
+      assert.ok(g4.logLine.includes('未验证来源签名'), '日志必须同样如实记录');
+      // 三种签名载体：清单内嵌优先、本机旁车次之、都没有就如实报"无签名"（不伪造）
+      const c4 = await uv135.collectUpdateSignature({ filePath: pkg135, fetchImpl: null });
+      assert.equal(c4.hasSignature, false, '没有签名载体时必须如实报"无签名"');
+      const c4b = await uv135.collectUpdateSignature({ filePath: pkg135, inlineSignature: goodSig135, fetchImpl: null });
+      assert.equal(c4b.hasSignature, true, '清单内嵌 signature 必须被采纳');
+      assert.equal(c4b.signatureB64, goodSig135, '内嵌签名必须原样进入校验');
+      fs.writeFileSync(pkg135 + '.sig', goodSig135 + '\n');
+      const c4c = await uv135.collectUpdateSignature({ filePath: pkg135, fetchImpl: null });
+      assert.equal(c4c.hasSignature, true, '本机 <包>.sig 旁车必须被采纳（发布侧 --sign 的产物）');
+      assert.ok(c4c.source.includes('.sig'), '日志要能说出签名来自哪个载体，实际：' + c4c.source);
+      fs.rmSync(pkg135 + '.sig', { force: true });
+      // 第四态：清单**声明**了签名字段但内容为空 → 拒绝（"拿不到证据"不等于"没问题"，与 ledger §133 同一口径）
+      const g4b = uv135.evaluateUpdate({ signatureB64: '', declaredSignature: true, publicKeyPem: officialPem135 });
+      assert.equal(g4b.decision, 'reject', '声明了签名却拿不到内容 → reject（第四态）');
+      assert.ok(String(g4b.verifyResult.reason).includes('声明了签名'), '第四态原因必须说清"声明了签名但为空"，实际：' + g4b.verifyResult.reason);
+    }
+
+    // ⑤ 无签名 + MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 → reject（fail-closed 开关；并逐条钉死纯决策边界）
+    {
+      process.env.MINGDAO_REQUIRE_UPDATE_SIGNATURE = '1';
+      assert.equal(uv135.requireSignatureFromEnv(), true, 'MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 必须被读到');
+      const g5 = uv135.evaluateUpdate({ filePath: pkg135, signatureB64: '', publicKeyPem: officialPem135, requireSignature: uv135.requireSignatureFromEnv() });
+      assert.equal(g5.decision, 'reject', '无签名 + 要求验签 → reject（无签名必须拒绝）');
+      assert.equal(g5.allowInstall, false, 'reject 必须不放行');
+      assert.ok(g5.notice.detail.includes('请从官网手动下载'), '拒绝文案必须给出官网手动下载');
+      delete process.env.MINGDAO_REQUIRE_UPDATE_SIGNATURE;
+      assert.equal(uv135.requireSignatureFromEnv(), false, '不设开关时默认不要求验签（本轮默认档 = warn-and-install）');
+      assert.equal(uv135.decideUpdatePolicy({ hasSignature: true, verifyResult: { ok: true }, requireSignature: false }), 'install', '有签名 + 验过 → install');
+      assert.equal(uv135.decideUpdatePolicy({ hasSignature: true, verifyResult: null, requireSignature: false }), 'reject', '有签名但拿不到校验结果 → reject（"无法确认"不等于通过）');
+      assert.equal(uv135.decideUpdatePolicy({ hasSignature: true, verifyResult: { ok: false, reason: 'x' }, requireSignature: false }), 'reject', '有签名 + 验不过 → reject');
+      assert.equal(uv135.decideUpdatePolicy({ hasSignature: false, verifyResult: null, requireSignature: true }), 'reject', '无签名 + 要求 → reject');
+      assert.equal(uv135.decideUpdatePolicy({}), 'warn-and-install', '两个入参都缺省 → 默认档（放行但明示）');
+    }
+
+    // ⑥ 源码守卫：main.js 在**安装之前**过门禁；公钥是内置常量（不从网络取）；拒绝要覆盖"退出时安装"
+    {
+      const uvSrc135 = fs.readFileSync(path.join(repoRoot135, 'desktop', 'update-verify.js'), 'utf8');
+      const mainSrc135 = fs.readFileSync(path.join(repoRoot135, 'desktop', 'main.js'), 'utf8');
+      // 负面守卫只看**代码行**：注释里正大光明写着旧写法/复现证据，不能让"把证据写进注释"把守卫弄红
+      const mainCode135 = mainSrc135.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+      assert.ok(/export const UPDATE_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----/.test(uvSrc135), '公钥必须是源码里的**内置常量**（pin 在 update-verify.js）');
+      const resolveBlock135 = uvSrc135.slice(uvSrc135.indexOf('export function resolveUpdatePublicKeyPem'), uvSrc135.indexOf('export function requireSignatureFromEnv'));
+      assert.ok(resolveBlock135.length > 0 && !/https?:/.test(resolveBlock135), '取公钥的那段代码里不得出现任何 URL（公钥不从网络取）');
+      assert.ok(!/\bfetch\s*\(/.test(uvSrc135.split('export async function collectUpdateSignature')[0]), '验签/取公钥路径不得依赖 fetch（fetch 只允许出现在取**签名**的 collectUpdateSignature 里）');
+      const pinned135 = uv135.resolveUpdatePublicKeyPem({});
+      assert.equal(pinned135.pem, uv135.UPDATE_PUBLIC_KEY_PEM, '默认必须用内置常量');
+      assert.equal(pinned135.source, 'pinned', '默认来源必须是 pinned');
+      const envOnly135 = uv135.resolveUpdatePublicKeyPem({ MINGDAO_UPDATE_PUBKEY_PEM: officialPem135 });
+      assert.equal(envOnly135.pem, uv135.UPDATE_PUBLIC_KEY_PEM, '只设环境变量**不得**替换内置公钥（需要显式双开关）');
+      const both135 = uv135.resolveUpdatePublicKeyPem({ MINGDAO_UPDATE_PUBKEY_PEM: officialPem135, MINGDAO_UPDATE_ALLOW_PUBKEY_OVERRIDE: '1' });
+      assert.equal(both135.pem, officialPem135.trim(), '显式双开关时才允许覆盖（开发/测试用）');
+      assert.equal(both135.source, 'env-override', '覆盖必须留下来源标记');
+      const gateFn135 = mainCode135.indexOf('async function verifyDownloadedUpdate');
+      const gateCall135 = mainCode135.indexOf('await verifyDownloadedUpdate(info)');
+      const rejectGuard135 = mainCode135.indexOf('if (gate.allowInstall === false)');
+      const quitIdx135 = mainCode135.indexOf('autoUpdater.quitAndInstall()');
+      assert.ok(gateFn135 > 0 && gateCall135 > 0, '下载完成后必须调用来源校验（verifyDownloadedUpdate）');
+      assert.ok(rejectGuard135 > gateFn135, '必须有"拒绝 → 不安装"的显式分支');
+      assert.ok(quitIdx135 > rejectGuard135, 'quitAndInstall 必须排在拒绝分支**之后**（安装前已过门禁）');
+      assert.ok(/autoUpdater\.autoInstallOnAppQuit = false/.test(mainCode135.slice(rejectGuard135, quitIdx135)), '拒绝分支必须关掉 autoInstallOnAppQuit（否则退出应用时照样装）');
+      assert.ok(/collectUpdateSignature\(/.test(mainCode135) && /resolveUpdatePublicKeyPem\(\)/.test(mainCode135), '签名取材与公钥都必须走 update-verify.js（单源）');
+      // 门禁**体内**必须现取内置公钥并把它交给校验：否则"公钥常量"就只是启动日志里的摆设
+      const gateBody135 = mainCode135.slice(gateFn135, mainCode135.indexOf('function setupAutoUpdate()'));
+      assert.ok(gateBody135.length > 0 && /resolveUpdatePublicKeyPem\(\)/.test(gateBody135), '门禁里必须用内置公钥常量取公钥（不从网络取，resolveUpdatePublicKeyPem）');
+      assert.ok(/publicKeyPem:\s*key\.pem/.test(gateBody135), '取到的内置公钥必须真的交给 evaluateUpdate（不能取了不用）');
+      assert.ok(/from '\.\/update-verify\.js'/.test(mainCode135), 'main.js 必须静态导入 update-verify.js');
+      assert.ok(/autoUpdater\.on\('update-downloaded', async/.test(mainCode135), 'update-downloaded 处理器必须是 async（要 await 校验）');
+    }
+
+    // ⑦ 发布侧工具行为：--keygen（私钥 600、绝不打印、拒绝写进仓库）+ --sign/--verify 与客户端同一实现
+    {
+      const tool135 = path.join(repoRoot135, 'scripts', 'update-sign.mjs');
+      const keyDir135 = path.join(home135, 'update-keys');
+      const kg = spawnSync(process.execPath, [tool135, '--keygen', '--out', keyDir135], { cwd: repoRoot135, encoding: 'utf8' });
+      assert.equal(kg.status, 0, '--keygen 必须成功：' + String(kg.stderr || ''));
+      const keyFile135 = path.join(keyDir135, 'update-signing-key.json');
+      const keyJson135 = JSON.parse(fs.readFileSync(keyFile135, 'utf8'));
+      if (process.platform !== 'win32') assert.equal(fs.statSync(keyFile135).mode & 0o777, 0o600, '私钥文件必须 600');
+      assert.ok(!String(kg.stdout).includes(keyJson135.privateKey), '**私钥绝不能出现在 stdout**（CI 日志/工单会泄露）');
+      assert.ok(!String(kg.stdout).includes(keyJson135.privateKey.slice(0, 24)), '私钥片段也不得出现在 stdout');
+      assert.ok(String(kg.stdout).includes('BEGIN PUBLIC KEY'), '必须打印公钥（发行方要把它 pin 进 update-verify.js）');
+      assert.ok(String(kg.stdout).includes('绝不'), '输出必须写明私钥纪律（不打印/不入库）');
+      const pkgSign135 = path.join(home135, 'sign-me.exe');
+      fs.writeFileSync(pkgSign135, artifact135);
+      const sg = spawnSync(process.execPath, [tool135, '--sign', pkgSign135, '--key', keyFile135], { cwd: repoRoot135, encoding: 'utf8' });
+      assert.equal(sg.status, 0, '--sign 必须成功：' + String(sg.stderr || ''));
+      assert.ok(fs.existsSync(pkgSign135 + '.sig'), '--sign 必须产出 <包>.sig（客户端按这个约定取签名）');
+      const pubPem135 = crypto135.createPublicKey({ key: Buffer.from(keyJson135.publicKey, 'base64'), format: 'der', type: 'spki' }).export({ type: 'spki', format: 'pem' }).toString();
+      const pubFile135 = path.join(home135, 'update-signing-pub.pem');
+      fs.writeFileSync(pubFile135, pubPem135);
+      const clientSide135 = uv135.verifyArtifactSignature({ filePath: pkgSign135, signatureB64: fs.readFileSync(pkgSign135 + '.sig', 'utf8'), publicKeyPem: pubPem135 });
+      assert.equal(clientSide135.ok, true, '发布侧签出来的包，客户端实现必须能验过（同一套约定）：' + JSON.stringify(clientSide135));
+      assert.equal(clientSide135.keyId, keyJson135.keyId, '发布侧与客户端的 keyId 必须一致（两处同一算法）');
+      const vg = spawnSync(process.execPath, [tool135, '--verify', pkgSign135, '--pub', pubFile135], { cwd: repoRoot135, encoding: 'utf8' });
+      assert.equal(vg.status, 0, '--verify 自检必须通过：' + String(vg.stderr || ''));
+      const badPkg135 = path.join(home135, 'sign-me-tampered.exe');
+      fs.writeFileSync(badPkg135, Buffer.concat([artifact135, Buffer.from('X')]));
+      fs.copyFileSync(pkgSign135 + '.sig', badPkg135 + '.sig');
+      const vgBad = spawnSync(process.execPath, [tool135, '--verify', badPkg135, '--pub', pubFile135], { cwd: repoRoot135, encoding: 'utf8' });
+      assert.notEqual(vgBad.status, 0, '改过字节的包，--verify 必须非 0 退出（发布侧自检不能永远绿）');
+      const kgRepo = spawnSync(process.execPath, [tool135, '--keygen', '--out', inRepoDir135], { cwd: repoRoot135, encoding: 'utf8' });
+      assert.notEqual(kgRepo.status, 0, '--keygen 必须拒绝把私钥写进仓库（除非显式 --allow-repo）');
+      assert.ok(!fs.existsSync(inRepoDir135), '被拒绝后不得留下任何密钥文件');
+      assert.ok(String(kgRepo.stderr).includes('拒绝把私钥写进仓库'), '拒绝理由必须说清"私钥入库 = 谁能伪造官方更新包"');
+    }
+
+    ok('v0.6.11 更新来源签名：有效签名→install / 篡改一个字节→reject / 换密钥→reject（且反验通过）/ 无签名默认→warn-and-install（UI+日志写明"未验证来源签名"）/ 无签名+REQUIRE=1→reject / 声明签名却为空→reject / 公钥内置常量且只设环境变量不得替换 / main.js 安装前过门禁且拒绝时关掉 autoInstallOnAppQuit / --keygen 私钥 600 且绝不打印、拒绝入库 / --sign 与客户端同一实现');
+  } finally {
+    if (prevRequire135 === undefined) delete process.env.MINGDAO_REQUIRE_UPDATE_SIGNATURE;
+    else process.env.MINGDAO_REQUIRE_UPDATE_SIGNATURE = prevRequire135;
+    if (prevHome135 === undefined) delete process.env.MINGDAO_HOME;
+    else process.env.MINGDAO_HOME = prevHome135;
+    safeRmSync(inRepoDir135, { recursive: true, force: true });
+    safeRmSync(home135, { recursive: true, force: true });
+  }
+}
+
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket
 // —— 实测 ubuntu/macOS + Node 20 上"断言全过、进程却不退出"，CI 里表现为冒烟步骤永远 in_progress
 // （Node 18/22/Windows 因为拆连接更快而侥幸通过）。这里显式退出，断言本身不受影响；

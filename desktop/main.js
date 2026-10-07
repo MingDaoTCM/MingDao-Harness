@@ -10,6 +10,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+// 更新包**来源签名**校验（审计 K-8）：纯函数 + 内置公钥常量，判据/文案/取舍见该模块文件头。
+// electron-updater 自带的 sha512 只防传输损坏，不防"换了发布源 / 被投毒的 feed"——这一步补的是来源。
+import { collectUpdateSignature, evaluateUpdate, keyIdOf, requireSignatureFromEnv, resolveUpdatePublicKeyPem } from './update-verify.js';
 
 /**
  * 更新遥测是否被显式关闭（审计 BUG-083）。
@@ -437,6 +440,46 @@ async function checkUpdatesFromMenu() {
   }
 }
 
+/**
+ * 「下载完成 → 安装」之间的**来源校验**（审计 K-8 的收口点）。
+ *
+ * 为什么不能让 electron-updater 的 sha512 顶这一关：sha512 来自**同一份 feed**的 latest*.yml，
+ * 控制 feed 的一方可以同时换掉包与清单里的 sha512，校验照样通过（探针 /tmp/probe-update-feed.mjs
+ * 用本文件的真实代码复现过：投毒 feed → 下载 → sha512 MATCH → quitAndInstall）。
+ *
+ * 判据与文案都在 desktop/update-verify.js（纯函数，test/smoke.js §135 逐条钉边界）：
+ *   有签名 + 验签通过 → install；有签名 + 验不过 → **一律 reject**；
+ *   无签名 → 默认 warn-and-install（如实提示"未验证来源签名"），
+ *   设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 时改为 reject。
+ *
+ * 诚实边界：feed 被控制时攻击者可以**删掉签名**，把这次更新降级成"无签名"——本函数无法区分
+ * "发布链路本来没签"与"签名被剥离"（当前发布链路确实还没有签名步骤）。所以默认档是放行+明示，
+ * fail-closed 开关交给发行方/高安全用户。详见 docs/CODE-SIGNING.md §五。
+ */
+async function verifyDownloadedUpdate(info) {
+  const filePath = String(info?.downloadedFile ?? '');
+  const files = Array.isArray(info?.files) ? info.files : [];
+  const hasKey = (o) => !!o && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, 'signature');
+  const declaredSignature = hasKey(info) || files.some(hasKey);
+  const inlineSignature = typeof info?.signature === 'string' ? info.signature : typeof files[0]?.signature === 'string' ? files[0].signature : '';
+  let sig = { signatureB64: '', source: '无', reason: '没有可用的签名载体' };
+  try {
+    sig = await collectUpdateSignature({ filePath, inlineSignature, declaredSignature });
+  } catch (err) {
+    sig = { signatureB64: '', source: '无', reason: '取签名失败：' + String(err?.message || err) };
+  }
+  const key = resolveUpdatePublicKeyPem(); // 内置常量（可用 --keygen 生成的公钥替换；不从网络取）
+  return evaluateUpdate({
+    filePath,
+    signatureB64: sig.signatureB64,
+    declaredSignature,
+    publicKeyPem: key.pem,
+    requireSignature: requireSignatureFromEnv(),
+    source: sig.source,
+    version: String(info?.version ?? app.getVersion()),
+  });
+}
+
 // 自动更新（仅打包版；官网 generic feed 发布产物时生效）
 function setupAutoUpdate() {
   if (!app.isPackaged || process.env.MINGDAO_NO_AUTOUPDATE === '1') return;
@@ -449,7 +492,15 @@ function setupAutoUpdate() {
       }
       const LINUX_NO_APPIMAGE = process.platform === 'linux' && !process.env.APPIMAGE; // deb 安装形态
       autoUpdater.autoDownload = !LINUX_NO_APPIMAGE;
-      appLog('自动更新检查启动（feed: 官网 /updates' + (LINUX_NO_APPIMAGE ? '，deb 形态：仅检测不下载' : '') + '）');
+      const key0 = resolveUpdatePublicKeyPem();
+      appLog(
+        '自动更新检查启动（feed: 官网 /updates' +
+          (LINUX_NO_APPIMAGE ? '，deb 形态：仅检测不下载' : '') +
+          '；来源签名：' +
+          (requireSignatureFromEnv() ? '必须验签（MINGDAO_REQUIRE_UPDATE_SIGNATURE=1）' : '默认档（无签名时警告后安装）') +
+          '，内置公钥 keyId=' + (keyIdOf(key0.pem) ?? '不可用') + '，公钥来源=' + key0.source +
+          '）'
+      );
       let updateSeen = false;
       let downloaded = false;
       let downloadRetries = 0;
@@ -511,10 +562,22 @@ function setupAutoUpdate() {
         appLog('开始自动下载（autoDownload=true）');
       });
       autoUpdater.on('download-progress', (p) => appLog('updater 下载进度 ' + Math.round(Number(p?.percent) || 0) + '%'));
-      autoUpdater.on('update-downloaded', (info) => {
+      autoUpdater.on('update-downloaded', async (info) => {
         downloaded = true;
         const v = String(info?.version ?? app.getVersion());
         appLog('updater 下载完成 ' + v);
+        // —— 来源签名门禁（审计 K-8）：下载完成 → 安装之间必须过这一关 ——
+        const gate = await verifyDownloadedUpdate(info);
+        appLog(gate.logLine);
+        if (gate.allowInstall === false) {
+          // 拒绝就要**彻底**拒绝：autoInstallOnAppQuit 默认为 true，不关掉的话退出应用时
+          // electron-updater 照样会把这个已被拒的包装上——"拒绝"必须覆盖"退出时安装"这条路径。
+          autoUpdater.autoInstallOnAppQuit = false;
+          appLog('已关闭 autoInstallOnAppQuit：被拒绝的更新不得在退出时安装');
+          appLog('更新包来源不可信，已拒绝；请从官网手动下载：https://harness.mingdao.ai/#downloads');
+          dialog.showMessageBox(gate.notice).catch(() => {});
+          return;
+        }
         // 官网下载统计信标：下载完成上报一次（按次精确计数，不受 Range 分片影响）。
         // 仅打包版上报；fire-and-forget，失败不影响更新流程。
         //
@@ -529,18 +592,10 @@ function setupAutoUpdate() {
             body: JSON.stringify({ kind: 'update', os: process.platform, ver: v }),
           }).catch(() => {});
         }
-        // 友好的更新就绪提示（用户反馈：此前界面像报错——改为明确的正向语气）
+        // 更新就绪提示：文案由 desktop/update-verify.js 的 buildUpdateNotice 单源产出
+        // （三态 = 验签通过 / 未验证来源签名 / 拒绝安装，避免"同一结论两处措辞"）
         dialog
-          .showMessageBox({
-            type: 'info',
-            title: '更新已就绪',
-            message: `MingDao Harness v${v} 下载完成，重启应用即可完成更新`,
-            detail: '更新不会改动你的配置与会话。更新内容见官网：https://harness.mingdao.ai',
-            buttons: ['立即重启安装', '稍后'],
-            defaultId: 0,
-            cancelId: 1,
-            noLink: true,
-          })
+          .showMessageBox(gate.notice)
           .then((r) => {
             if (r.response !== 0) return;
             // Linux AppImage：安装前确认当前文件仍在（用户可能已手动移动/删除 → 历史 ENOENT 事故）

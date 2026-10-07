@@ -1545,3 +1545,104 @@ K-2（把设置拼进 shell）在 v0.6.8 已修，本节收口 K-9 本身。
   M-13（前端 fetch 对所有目标附加令牌头）同样不在本次范围。
 - 未做 VS Code 侧的"令牌失效自动刷新"（令牌是静态 bearer，没有刷新机制）；未做 JetBrains 侧令牌的图形化
   设置页（需要在本批未开放的 `plugin.xml` 里注册新 Action）。
+
+## 3.47 已修复（v0.6.11 开发线：Electron 自动更新包的**来源签名**校验）
+
+**来源**：报告一 **K-8**「Electron 自动更新无签名验证」的**完整版**（问题 1）与 §5.2 主线 B 第 2 条
+（"Electron（K-8）：签名 + **更新签名校验** + `openExternal` 协议白名单 + navigate 白名单钉端口"）。
+K-8 的问题 2/3（`openExternal` 协议白名单、`will-navigate` 钉端口）在 v0.6.8 已修；本节收口"更新签名校验"。
+
+**本任务要分清的两件事**（也是 K-8 原文的要点）：
+
+| 机制 | 回答的问题 | 能否防"换了发布源" |
+| --- | --- | --- |
+| electron-updater 自带 sha512 | 下载到的字节与**同一份 feed 提供的** `latest*.yml` 是否一致 | **不能**：清单与包同源，控制 feed 的一方两边一起换 |
+| 本节新增的来源签名（ed25519 + 内置公钥） | 这个包是不是**持有官方私钥的一方**签的 | 能（攻击者造不出签名） |
+| macOS/Windows **代码签名**（Gatekeeper/SmartScreen） | 系统要不要信这个 App 的制作者 | 不是一回事，**不在本节范围**（见 `docs/CODE-SIGNING.md` 一~四节） |
+
+### 一、先复现（探针未入库：`/tmp/probe-update-feed.mjs`，修前/修后各跑）
+
+探针方式：起一个**本机 HTTP 服务**扮演"被投毒的官网 `/updates`"；用 `module.registerHooks` 把
+`electron` 与 `electron-updater` 换成桩（后者的校验语义与真实实现同款：**只**拿同一份 feed 的 yml 比
+sha512），被测对象是**真实的 `desktop/main.js`**；feed 地址取自 `desktop/electron-builder.yml` 的
+真实 `publish.url`（`https://harness.mingdao.ai/updates/`），只把 origin 换成本机返回者
+——即 DNS/主机/CDN 劫持的最小模拟（URL 一个字符没变，返回内容换了主人）。
+
+| # | 场景 | 实测（修前） | 判定 |
+| --- | --- | --- | --- |
+| ① | 投毒 feed + 攻击者**自己算的** sha512（恶意包 229,381 字节） | 下载 → sha512 **MATCH** → `quitAndInstall()` 被调用，对话框"更新已就绪" | **成立**：sha512 不构成来源信任 |
+| ② | 同一份投毒清单，只把包字节改掉（传输损坏） | sha512 mismatch → 弹"更新下载失败" → **不安装** | 成立：那一层只防传输损坏，符合预期 |
+
+**修后同一探针**（判据与文案全部走 `desktop/update-verify.js`）：
+
+| # | 场景 | 实测（修后） |
+| --- | --- | --- |
+| ③ | 无签名 + 默认档 | `warn-and-install`：仍安装，但日志与 UI 都写"**本次更新未验证来源签名**"（标题也是"更新已就绪（未验证来源签名）"） |
+| ④ | 无签名 + `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1` | `reject`：不安装，且**关闭 `autoInstallOnAppQuit`**（否则退出应用时照样装），提示官网手动下载 |
+| ⑤ | 攻击者用**自己的密钥**签的包（feed 提供 `<包>.sig`） | `reject`：`签名与更新包字节不匹配（包被改过，或由另一把密钥签发）` |
+| ⑥ | 用**客户端信任的公钥**签的包 | `install`：`签名有效（ed25519，keyId=c5d6051ae34bd721，签名来源=feed 目录 …sig）` |
+| ⑦ | 清单**声明**了 `signature` 字段但内容为空 | `reject`：第四态——"拿不到证据"不等于"没问题"（与账本来源签名 §3.45 同一口径） |
+
+### 二、修法（取舍都写在这里）
+
+| 决定 | 为什么 |
+| --- | --- |
+| **ed25519**（不用同样零依赖的 HMAC-SHA256） | 与 `src/ledger.js` 的账本来源签名**同一取舍**：HMAC 的验证密钥就是签名密钥，把验证权交出去等于把伪造能力交出去。ed25519 非对称：私钥只在离线机/CI secret，公钥内置进客户端、也可交给第三方复核。签名对象是**安装包的原始字节**（`crypto.sign(null, bytes, key)`），keyId 沿用同一算法（SPKI DER 的 sha256 前 16 位） |
+| 公钥**内置成常量**（`desktop/update-verify.js` 的 `UPDATE_PUBLIC_KEY_PEM`），**不从网络取** | 从网络取公钥等于没 pin（同一份被投毒的 feed 可以连公钥一起换）。允许构建时替换：`--keygen` 打印 PEM → 贴进常量。`MINGDAO_UPDATE_PUBKEY_PEM` + `MINGDAO_UPDATE_ALLOW_PUBKEY_OVERRIDE=1` 是**显式双开关**的开发/测试覆盖（只设前者不生效），发布构建不得设置 |
+| 判据抽成**纯函数** `decideUpdatePolicy({hasSignature, verifyResult, requireSignature})` → `install / warn-and-install / reject` | 三态决策要能被**行为测试**逐条钉边界（§135 直接调函数），而不是靠"源码里有这句话"。`evaluateUpdate` 是"校验 + 决策 + 文案"的组合入口，`main.js` 只负责把结果交给 dialog 与日志 |
+| 文案与判据**同源**（`buildUpdateNotice`） | 本仓吃过"同一结论两处措辞"的亏（§3.45 记过：`ledger verify` 说 ✅ 而导出物说别的）。UI 文案也是契约（"未验证来源签名"必须出现），放在纯函数里才能断言 |
+| **有签名 + 验签失败/拿不到证据 → 一律 reject** | 签名在而验不过，只有三种可能：包被改、密钥不对、证据不全——没有一种可以"忽略后继续装" |
+| **无签名 → 默认 `warn-and-install`** | 当前发布链路**还没有签名步骤**（`gen-update-yml.mjs` 与服务器脚本都不产出 `.sig`）。默认 reject 等于一夜之间掐死所有存量用户的自动更新：威胁模型里"feed 被投毒"是低概率高影响，"更新永远装不上"是必然发生。所以默认放行但**如实告知**（UI + 日志都写"未验证来源签名"），fail-closed 开关交给发行方（`MINGDAO_REQUIRE_UPDATE_SIGNATURE=1`）；发布链路接入签名后把默认档改成 `reject` 只需改一行 |
+| 拒绝时**同时关闭 `autoInstallOnAppQuit`** | electron-updater 默认 `autoInstallOnAppQuit = true`：只拦"立即重启安装"的话，用户点"稍后"再退出应用，被拒绝的包**照样会装上**——"拒绝"必须覆盖"退出时安装"这条路径 |
+| 签名载体：① yml 内嵌 `signature:` ② 本机旁车 `<包>.sig` ③ feed 目录 `<包名>.sig` | ③ 是发布侧正式载体（`scripts/update-sign.mjs --sign` 产物，与包同目录同名上传，HTTPS 取的是公开数据）；② 供离线/自签包；① 面向未来。`gen-update-yml.mjs` 每次打包会把 `latest*.yml` **整份重写**，所以发布流程以**旁车**为准 |
+| `--keygen` **拒绝把私钥写进仓库**（除非显式 `--allow-repo`）、拒绝覆盖已有密钥、私钥 600、**只打印公钥** | 私钥入库 = 把"伪造官方更新包"的能力交给所有人；静默覆盖 = 悄悄换信任根（所有旧签名失效）。三条纪律写进脚本、`docs/CODE-SIGNING.md` §五 与 §135 的行为断言 |
+| 发布侧自检 `--verify` 复用**客户端的同一个实现** | 避免"发布侧说通过、客户端说无效"的两套实现漂移 |
+
+### 三、断言与变异
+
+- `test/smoke.js` **§135**（新节，接在 §134 之后，只追加）：① 有效签名 → `install`（`filePath`/`bytes`
+  两种形态、keyId 与 ledger 同约定、非 ed25519 公钥拒绝、63 字节"签名"拒绝）；② 篡改一个字节 →
+  `reject`（UI"更新包来源不可信，已拒绝" + "请从官网手动下载"，日志留结论）；③ 换一把密钥 → `reject`，
+  并**反验**（用攻击者自己的公钥验同一份签名必须通过，证明失败原因真是密钥不匹配而不是"无脑失败"——
+  与 §133 账本签名同一手法）；④ 无签名 + 默认 → `warn-and-install`（UI 标题与详情、日志都必须出现
+  "未验证来源签名"；三种签名载体各自被采纳；清单声明签名却为空 → reject 第四态）；⑤ 无签名 +
+  `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1` → `reject`，并把 `decideUpdatePolicy` 的边界逐条钉死
+  （有签名无结果 → reject、缺省入参 → 默认档）；⑥ **源码守卫**：main.js 在安装前 `await`
+  门禁、`quitAndInstall()` 排在拒绝分支之后、拒绝分支关掉 `autoInstallOnAppQuit`、公钥是内置常量
+  且门禁体内真的用了它（只设环境变量不得替换内置公钥、产生签名的路径不得出现 URL/fetch）；
+  ⑦ **发布侧工具行为**：`--keygen` 私钥 600 且 stdout 无任何私钥material、拒绝写进仓库、
+  `--sign` 产出的包客户端实现能验过（keyId 两边一致）、改过字节的包 `--verify` 必须非 0。
+- `test/mutate/batch21-update-sign.mjs`：**15/15 全中**（验签失败也放过 / REQUIRE=1 时无签名仍放行 /
+  默认档退回 install / `crypto.verify` 结果不看 / 签名不覆盖文件字节 / 丢掉 64 字节长度检查 /
+  丢掉"声明了签名但为空"第四态 / 忽略清单内嵌签名 / UI 标题去掉"未验证来源签名" / main.js 拒绝分支
+  改成 `if (false)` / 公钥不再走内置常量 / 拒绝时不关 `autoInstallOnAppQuit` / `--keygen` 打印私钥 /
+  `--keygen` 不拒绝入库 / `--sign` 签的不是文件字节）。变异总数 79 → **94**。
+- 文档面：`docs/CODE-SIGNING.md` 新增 **§五「更新包的来源签名」**（与代码签名的区别、密钥托管、
+  发布步骤、四种情形的决策表、失败处置、边界）；`desktop/README.md` 补"更新包来源签名"一节。
+- 探针（未入库，放在 `/tmp/probe-update-feed.mjs`）：本机 HTTP 投毒 feed + 桩 `electron-updater`，
+  跑真实 `desktop/main.js`，七个场景（见 §一）；修前复现"投毒 feed + 正确 sha512 → 装上了"，
+  修后复现三态决策与"换密钥 → 拒绝"。
+
+### 四、未做边界（如实登记）
+
+- **发布链路本轮未改**：`desktop/gen-update-yml.mjs`、服务器发布脚本、`.github/workflows/desktop.yml`
+  都没有签名步骤，feed 里**没有** `.sig`。所以线上实际走的是**默认档 `warn-and-install`**：
+  照旧安装 + UI/日志明示"未验证来源签名"。代码与判据已就位且 fail-closed，**但"必须验签"要发行方
+  开启**（接签名 + 设 `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1` 或改默认档）。
+- **降级无法区分**：控制 feed 的攻击者可以**删掉** `.sig`，把这次更新降级成"无签名"——默认档下这仍然
+  会走到 `warn-and-install`。要真正关闭它，必须"发布链路每次都签"+"客户端 REQUIRE=1"，二者缺一不可。
+  这是"不掐死存量自动更新"这一取舍的必然后果。
+- **内置公钥对应的私钥本轮未保留**（生成后即弃，从未写盘/打印，`keyId=d1e7bef80ca5d508`）：
+  也就是说"验签通过"这条路径**在当前发布链路下不会被走到**——本轮先到位的是机制与 fail-closed 判据。
+  它同时保证：任何**别人**签的包（含攻击者）一律验不过。
+- **内嵌 `signature:` 载体未经真实库验证**：客户端会优先读 `latest*.yml` 里内嵌的 `signature` 字段，
+  但这依赖 `electron-updater` 把未知 yml 字段透传到 `update-downloaded` 的 `info`——本仓没有装
+  `electron-updater`（桌面端 `node_modules` 在 CI 才装），**只有桩验证过**。因此发布流程以**旁车
+  `<包>.sig`** 为准（探针里实测走通的是这一条）。
+- **`UPDATE_FEED_BASE` 与 `electron-builder.yml` 的 `publish.url` 是两处常量**：改了 feed 地址要一起改，
+  否则取 `.sig` 会 404 → 降级成"无签名"（默认档仍是 warn-and-install）。这是已知的配置耦合。
+- **不含代码签名**：macOS Gatekeeper / Windows SmartScreen（`desktop/electron-builder.yml` 的签名配置
+  仍注释着、构建产物仍未签名）不在本任务范围；用户**手动**从官网下载走的仍是浏览器 TLS + 系统提示，
+  本机制只覆盖 `electron-updater` 的自动更新路径。
+- 未做密钥吊销 / 多密钥并存验签（换密钥即所有旧客户端拒绝，属非对称 pin 的固有代价，已在文档"失败处置"
+  里写明步骤）；未做签名的时间戳/透明度日志（与账本签名同一既有边界）。
