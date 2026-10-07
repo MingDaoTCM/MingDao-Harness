@@ -3,6 +3,77 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.11（2026-10-07）— Pack 反向提权 + 两项「来源信任」+ 三个用户实测缺陷
+
+> 补丁版。这一版**不是**清理版：每个条目都对应一个可复现的缺陷或一个明确的合规缺口。
+> 最重的是审计 M-1 的 **P0**——第三方 Pack 的工具拿到内核 `ctx` 本身，一行改写就能让权限引擎失效。
+> 另有三个**用户实测**的 WebUI 缺陷（权限模式被预设静默压过 / 停止键在等权限确认时形同虚设 /
+> 内置预设写死 `permission`），以及桌面版**打包漏 `preload.cjs`**。
+> 变异验证 **16 批 157 条全中**（数字由 `scripts/doc-lint.mjs` ⑥ 守卫）。
+> 逐条复现与取舍见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` §3.44~§3.53。
+
+### 一、安全：Pack 反向提权（审计 M-1，P0）+ 两处来源信任
+
+- **Pack 反向提权收口**：此前第三方 Pack 的工具拿到的就是内核 `ctx`——不是"能不能读文件"的问题，
+  而是**能不能关掉管它的那道门**（`ctx.permission.check = () => ({allow:true})` 一行即可）。
+  现在给第三方 Pack 的 ctx 做**白名单裁剪 + 冻结**（`cfg` 去掉 `providers`/`io`/`permission`/`spawnTask`/`provider`），
+  分档**只能收紧**（内置 → 第三方会重建），内核 ctx 不裁剪不冻结（否则误伤内置工具）。
+  回归套件 `test/pack-ctx-privesc.js`（4 组）**已接入 CI**：改写 `permission`/替换 `provider` 全部无效。
+- **账本来源签名 `ledger --sign-key`（ed25519）**：哈希链 + 封条的**全部输入都来自账本自身**、算法公开——
+  改 `ok:false`→`ok:true`、逐行重算 `prev`、按新末行改写封条，**不需要任何密钥**，旧 `verify` 三项逐项通过。
+  即旧 verify 只回答"自写入后没被随手改过"，回答不了**"是谁写的"**。签名落在**封条**上
+  （规范载荷 runId/v/total/head/at），公钥指纹 `sigKey` 写进**链内**（否则只删封条就能伪装成"历史无签名账本"）。
+  默认开启、密钥 `<home>/ledger-key.json`（600、原子写、**不并进 `credentials.json`**——凭证库的
+  读-改-全量重写会顺手清掉它）；`LEDGER_VERSION` **保持 1**。`verify` 四态：
+  有效 → 0；**无签名（历史账本）→ 0**（升级不得把历史账本判成坏账本）；**签名无效 → 非 0**；
+  **无法验签 → 非 0**（"无法确认来源"不等于通过）。`verifyRun` 的 `ok` 含义不变，来源结论另放
+  `provenance`/`trusted`——塞进 `ok` 会让所有旧调用点在没读新字段的情况下改变行为。
+- **桌面版更新包来源签名校验（K-8 完整版）**：electron-updater 的 sha512 只说"字节与**同一份 feed**
+  的清单一致"，控制 feed 的一方两边一起换——**不构成来源信任**。客户端内置公钥（**不从网络取**，
+  从网络取等于没 pin），判据是纯函数 `decideUpdatePolicy()` → `install / warn-and-install / reject`：
+  **有签名但验不过一律 reject**；**无签名默认 `warn-and-install`**（发布链路还没有签名步骤，
+  默认 reject 等于一夜之间掐死所有存量用户的自动更新），UI + 日志都如实写"本次更新未验证来源签名"；
+  `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1` 转 reject 并**同时关掉 `autoInstallOnAppQuit`**
+  （否则用户点"稍后"、退出时被拒的包照样会装上）。发布侧 `scripts/update-sign.mjs` 与客户端**同一实现**。
+- **IDE 插件令牌（K-9）**：改存 VS Code `SecretStorage` / JetBrains `PasswordSafe`，
+  **工作区级旧令牌一律忽略**（顺带堵掉"克隆一个仓库即注入 `mingdao.port`/`mingdao.token`"），
+  结果分 `ok / unauthorized / unreachable` 三态——此前"只认 200"，401 被当成"连不上"，
+  用户看不到真正的原因。
+
+### 二、用户实测缺陷：权限模式 / 停止键 / 预设覆盖
+
+- **WebUI「权限模式」显式选择被预设静默压过**（选了「自动」仍按只读跑，不报错、无提示）：
+  优先级固化为**显式选择 > 预设建议 > `config.json`**，界面显示生效档位与来源（banner）。
+- **停止键在等待权限确认时形同虚设**：服务端挂在一个 120 秒等待上，停止要等它自然到点。
+  现在**解除挂起确认优先于超时**；前端所有停止路径收敛到唯一出口 `stopTurn()`（失败重试 3 次 + 可见提示）；
+  权限确认遮罩不再盖住停止按钮，作废弹窗不再留在界面上。
+- **内置预设「本地模型审计」写死 `permission: "readonly"`**：`permission` 是**覆盖**语义，
+  等于把"建议"写成了"覆盖"。改为 `recommendedPermission: "readonly"`（**建议**语义），
+  `label` 改「只读代码审计（本地模型）」——只读效果本来就由 `tools` 白名单保证（里面没有 `write`/`edit`）。
+  `src/presets.js` 的字段白名单收下 `recommendedPermission` 并校验取值域；
+  **`presetPermissionOverride()` 的反提权语义一字未改**（老/第三方预设仍可声明 `permission`，仍只拦"变宽松"），
+  但在注释里写死纪律：**内置预设不得声明 `permission`**。
+  `test/api-contracts.js` 新增三条契约断言（在列表里 / 透出 `recommendedPermission` / **不带 `permission`**）。
+- **桌面版打包漏 `preload.cjs` + `update-verify.js`**：两个文件进 asar 的配置补齐
+  （漏 `preload.cjs` = 桌面版前端桥整个失效）；设置面板「＋ 登记工作空间」接上目录选择器
+  （v0.6.8 只接了主界面那条路，设置面板此前只能手打绝对路径）。
+
+### 三、重构与守卫（审计 P1-1 第三刀 / M-8 第一批）
+
+- `src/tools-flow.js`（新增）：工具编排两端——**可见性判据**（只读档 / 白名单 / 已用工具 / MCP 三态 / 顺序）
+  与**回填正文**（原样 / 紧凑 JSON / 复用前缀 / 约束拒绝 / 截断且前缀不计入）抽成纯函数（P1-1 第三刀；
+  前两刀为 `src/cost-guard.js` 的护栏前置判据与每轮决策）。
+- **M-8 结构守卫收口第一批（15 处）**：7 处"跨行源码文本匹配"改**行为化**断言、8 处加固为**单源**守卫——
+  守卫自己也会腐化，"文档里写了"≠"代码里做了"。
+- 新增变异批次 `batch17`~`batch27`（含 `privesc`/`perm-mode`/`stop`/`preset` 四条针对性批次），
+  总数 **157**；`test/e2e-schedule.js` 墙钟断言改为**按本机实测的自适应预算** +
+  **进程内确定性**断言（写死 25s 曾在 Windows 腿假红）。
+- 新增英文配置文档 `docs/CONFIG.en.md`；修两处已核实的中文文档勘误。
+
+> 升级须知与已知边界（`recommendedPermission` 未接界面、老预设仍可 `permission`、
+> 更新包签名默认仍 warn-and-install、Electron 真机点击未验证、账本签名不防同权限本机对手等）
+> 见 `RELEASE-NOTES-0.6.11.md`。
+
 ## v0.6.10（2026-10-01）— 公开仓库不再出现"形似密钥"的字面量
 
 > 补丁版，**零行为变化**：只改样例的写法与测试夹具。
