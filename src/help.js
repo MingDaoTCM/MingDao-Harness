@@ -75,6 +75,13 @@ export function helpLines({ variant = 'cli', home = '' } = {}) {
     ['  mingdao key set <服务商>   交互式保存 API Key（隐藏输入）', null],
     ['  mingdao key remove <服务商> 删除凭证', null],
     ['  mingdao key import         从环境变量导入所有可用 Key', null],
+    // v0.6.11（登记 §3.45）：账本**来源签名**的两行说明。
+    // 为什么放在「凭证管理」这个共享块而不是 CLI 独有块：签名密钥是同一类东西
+    //（600、独立文件、绝不进 config.json / 仓库），且这里本来就同时展示 `mingdao key …`。
+    // 更硬的理由是 §69 把「CLI 独有行」用 deepEqual 钉成**恰好 4 行**——往那边加一行就得改那条守卫，
+    // 而守卫钉住的正是"两个入口的帮助不得各自漂移"，不该为了多两行说明去松它。
+    ['  mingdao ledger --sign-key [--generate|--force] 查看/生成本机账本签名密钥（ed25519 · 600 · 绝不进 config.json）', null],
+    ['  mingdao ledger verify <id> [--key <文件>] 校验哈希链 + 封条 + 来源签名（有效 / 无签名 / 无效 三态）', null],
     ['', null],
     ['云同步与技能库（跨设备会话同步 / 技能安装）', C.bold + C.yellow],
     ['  mingdao sync login <用户名> [密码] <服务器地址> 登录云同步（自动注册）', null],

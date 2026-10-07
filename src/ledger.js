@@ -14,15 +14,27 @@
 //   ④ **降级必须可见**（v0.6.2，第三方报告 B-WS-1/2 + A-LG-1）：账本写失败不再静默 no-op，
 //      而是记下原因并由调用方提示用户；run.end 额外写一份**封条**侧车文件，
 //      使「删掉尾部若干行（含 run.end）」这种**链内自洽的截断**第一次变得可检出。
+//   ⑤ **来源必须可证**（v0.6.11，登记 §3.45）：哈希链 + 封条只能证明「文件内部自洽」，
+//      它们的全部输入都来自账本自身、算法是公开的——所以只能回答「自写入后有没有被随手改过」，
+//      回答不了「**是谁写的**」。新增 ed25519 来源签名后，verify 才能回答后者（详见下方签名区）。
 
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { atomicWriteFileSync, appendFilePrivateSync } from './atomic-write.js';
+import { atomicWriteFileSync, atomicWritePrivateSync, appendFilePrivateSync } from './atomic-write.js';
 import { mingdaoHome, ensureHome } from './config.js';
 import { redactSecrets, redactSensitive } from './redact.js';
 
-/** v1：字段只增不改（变更需在 docs/internal/CHANGELOG-PACK.md 同款变更日志里记录） */
+/**
+ * v1：字段只增不改（变更需在 docs/internal/CHANGELOG-PACK.md 同款变更日志里记录）。
+ *
+ * v0.6.11 的来源签名**刻意不动这个版本号**：`v` 描述的是「事件信封」的语义
+ *（`{v, runId, seq, at, type, prev, …}`），而本项只往封条与 run.end 里**加了可选字段**
+ *（`sig` / `sigKey`），旧读者按原样忽略它们、新读者遇到缺失就退化成「无签名」——两侧都不需要分支。
+ * 反过来，一旦把 v 改成 2，所有按 `v === 1` 过滤历史账本的第三方脚本（导出物里就带着这个字段）
+ * 会**集体漏掉新账本**，而它们本来完全读得懂。真要改版本号的标准是「旧读者会读错」，
+ * 不是「新读者多了字段」。
+ */
 export const LEDGER_VERSION = 1;
 /** 默认保留最近多少次运行（超出按 mtime 删最旧） */
 const DEFAULT_MAX_RUNS = 200;
@@ -103,6 +115,319 @@ export function isValidRunId(/** @type {any} */ id) {
   return typeof id === 'string' && /^[a-z0-9]+-[a-f0-9]{6}$/.test(id);
 }
 
+// ---------------------------------------------------------------------------
+// 来源签名（v0.6.11，登记 §3.45）：把「账本没被改过」升级为「账本是不是持有本机那把密钥的一方写的」
+//
+// 为什么必须做（探针实测，/tmp/probe-ledger-sign.mjs，未入库）：
+//   把一条 `tool.result` 的 ok:false 改成 ok:true、逐行重算 prev、再按新末行改写封条的
+//   total/head —— **全程不用任何密钥**（sha256 是公开算法），旧 verifyRun 三项
+//   （链内一致 / 条数 / 链头）逐项吻合，照样报「✅ 校验通过」。也就是：旧 verify 只能回答
+//   「这份账本自写入后没被随手改过」，回答不了「是谁写的」——而合规场景要的恰恰是后者。
+//
+// 为什么选 ed25519 而不是同样零依赖的 HMAC-SHA256：
+//   HMAC 的验证密钥**就是**签名密钥：任何能验的人都能伪造，第三方审计必须拿到「能写账本的那把
+//   秘密」才能复核，等于把伪造能力交出去——与「来源可信」的目的正好相反。ed25519 是非对称的：
+//   本机只留私钥，公钥（keyId + SPKI）可以交给审计方，对方能验证「这条链由那把密钥签发且未被改动」，
+//   但**不能**凭空补签一份新账本。Node ≥18.17 原生支持、零新增依赖，所以没有理由退而求其次。
+//
+// 诚实边界（不写清楚就等于暗示）：
+//   · 私钥与账本同机同权限，能改账本的对手通常也能读私钥——本层对**同权限的本机对手**不设防，
+//     它防的是「换一台机器/换一把密钥伪造一份来源」以及「事后整体重写并声称是原机写的」；
+//   · 把整条链连同封条一起重写、**并删掉所有签名痕迹**之后，只能退化成「无签名」这一态
+//     （与历史账本无法区分）——所以 verify 对「账本自述被签过、而签名不在」这一形状单独判失败；
+//   · 私钥一旦丢失，历史账本只能报「由另一把密钥签发」——这不是篡改，但也**不能**算通过。
+// ---------------------------------------------------------------------------
+
+/** 签名算法：ed25519（理由见上）。写进封条，给未来的算法轮换留出判据 */
+export const LEDGER_SIG_ALG = 'ed25519';
+/** 规范载荷的域分隔前缀：把「账本封条签名」与任何别的签名场景隔开（防跨协议重放） */
+const SIG_DOMAIN = 'mingdao-ledger-seal-v1';
+
+/**
+ * 签名密钥文件：<home>/ledger-key.json（600、原子写）。
+ * 为什么不并进 credentials.json：那是**模型 API Key** 的库，删除/导入/云同步的口子都在那边
+ * （`key remove`/`key import` 会全量重写它）。签名密钥一旦被顺手清掉，历史账本会集体变成
+ * 「另一把密钥签发」——把两种生命周期完全不同的秘密放同一个文件，迟早被一次 `key remove` 连坐。
+ */
+export function ledgerKeyPath() {
+  return path.join(mingdaoHome(), 'ledger-key.json');
+}
+
+/**
+ * 公钥指纹：SPKI DER 的 sha256 前 16 位。
+ * 它是**公开**信息（可以进 verify 输出、进封条、进工单），用来回答「这条账本是不是这把密钥签的」，
+ * 而不必交出私钥——这正是选非对称算法的收益。
+ * @param {import('node:crypto').KeyObject} publicKey
+ */
+export function keyIdOf(publicKey) {
+  return crypto.createHash('sha256').update(publicKey.export({ type: 'spki', format: 'der' })).digest('hex').slice(0, 16);
+}
+
+/**
+ * 待签名/待验证的**规范载荷**。
+ *
+ * 为什么签「字段拼出来的规范串」而不是封条文件的字节：封条是 JSON，缩进、键序、末尾换行
+ * 任何一处变化都会让「字节签名」失效，可那是**格式化**不是篡改——把格式化误判成篡改，
+ * 用户下次只能学会忽略这个告警。签名必须钉在语义字段上，而 runId/版本/条数/链头/时刻
+ * 恰好完整描述「这是哪一次运行、有多少条事件、最后一条是什么」。
+ *
+ * 导出给第三方验签者：没有它，ed25519 的非对称价值（别人只拿公钥也能复核）就落不了地。
+ * @param {any} rec 封条记录（sig 字段本身不参与签名）
+ */
+export function sealSignaturePayload(rec) {
+  return [SIG_DOMAIN, String(rec?.runId ?? ''), String(rec?.v ?? ''), String(rec?.total ?? ''), String(rec?.head ?? ''), String(rec?.at ?? '')].join('\n');
+}
+
+/** @param {any} rec @param {import('node:crypto').KeyObject} privateKey */
+export function signSealRecord(rec, privateKey) {
+  return crypto.sign(null, Buffer.from(sealSignaturePayload(rec), 'utf8'), privateKey).toString('base64');
+}
+
+/**
+ * 验签。返回 false 覆盖两种情形：签名解不出（base64/长度不合法）与验签不通过——
+ * 调用方只会把它们归到同一结论（「这份账本不是持有该密钥的一方写的」），
+ * 分开报只会给用户多一个无从处置的细节。
+ * @param {any} rec @param {import('node:crypto').KeyObject} publicKey
+ */
+export function verifySealRecord(rec, publicKey) {
+  const sig = rec?.sig;
+  if (!sig || typeof sig.value !== 'string') return false;
+  try {
+    return crypto.verify(null, Buffer.from(sealSignaturePayload(rec), 'utf8'), publicKey, Buffer.from(sig.value, 'base64'));
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 签名密钥（私钥 + 由它导出的公钥）。`privateKey` 为 null = 只有公钥的**验证用**文件。
+ * @typedef {{keyId: string, publicKey: import('node:crypto').KeyObject, privateKey: import('node:crypto').KeyObject|null, createdAt: number|null}} LedgerSigningKey
+ */
+
+/**
+ * 严格读签名密钥：**必须区分「文件不存在」与「内容损坏」**（credentials.js 的 H-8 是同一个教训）。
+ * 损坏时绝不自动重建：重建会让全部已签账本从「本机密钥签发」一夜之间变成「另一把密钥签发」，
+ * 而那正是 verify 要报「签名无效」的形状——一次自作聪明的自愈，把历史账本全判成坏账。
+ * @returns {{ok: boolean, missing: boolean, key: LedgerSigningKey|null, error: string|null}}
+ */
+export function readLedgerKeyStrict() {
+  const p = ledgerKeyPath();
+  let raw;
+  try {
+    raw = fs.readFileSync(p, 'utf8');
+  } catch (err) {
+    if (/** @type {any} */ (err)?.code === 'ENOENT') return { ok: true, missing: true, key: null, error: null };
+    return { ok: false, missing: false, key: null, error: `无法读取 ${p}：${String(/** @type {any} */ (err)?.message ?? err)}` };
+  }
+  /** @type {any} */
+  let data;
+  try {
+    // 容错 BOM：Windows 上 PowerShell 另存为会写出 BOM，那是**可解析**的内容（同 credentials.js）
+    const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+    data = JSON.parse(text);
+    if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('顶层不是 JSON 对象');
+  } catch (err) {
+    return { ok: false, missing: false, key: null, error: `${p} 解析失败：${String(/** @type {any} */ (err)?.message ?? err)}（已拒绝使用；修好之前不要把签名密钥当不存在——重建会让历史账本全部变成「另一把密钥签发」）` };
+  }
+  if (String(data.alg ?? '') !== LEDGER_SIG_ALG) {
+    return { ok: false, missing: false, key: null, error: `${p} 的 alg 是 ${String(data.alg ?? '(缺失)')}，本版只认 ${LEDGER_SIG_ALG}` };
+  }
+  try {
+    const pub = typeof data.publicKey === 'string' && data.publicKey ? crypto.createPublicKey({ key: Buffer.from(data.publicKey, 'base64'), format: 'der', type: 'spki' }) : null;
+    const priv = typeof data.privateKey === 'string' && data.privateKey ? crypto.createPrivateKey({ key: Buffer.from(data.privateKey, 'base64'), format: 'der', type: 'pkcs8' }) : null;
+    const publicKey = pub ?? (priv ? crypto.createPublicKey(priv) : null);
+    if (!publicKey) throw new Error('既没有 publicKey 也没有 privateKey');
+    const keyId = keyIdOf(publicKey);
+    // 文件里记的 keyId 与公钥对不上 = 手改过、或两个文件的字段被混在一起。
+    // 此时**不能**以文件里的 keyId 为准：那等于让 A 密钥冒充 B 的身份（verify 会认这个身份）。
+    if (data.keyId && String(data.keyId) !== keyId) {
+      throw new Error(`记录的公钥指纹 ${data.keyId} 与实际公钥 ${keyId} 不一致（文件被改过，或两个文件的字段被混在一起）`);
+    }
+    return { ok: true, missing: false, key: { keyId, publicKey, privateKey: priv, createdAt: Number(data.createdAt) || null }, error: null };
+  } catch (err) {
+    return { ok: false, missing: false, key: null, error: `${p} 里的密钥不可用：${String(/** @type {any} */ (err)?.message ?? err)}` };
+  }
+}
+
+/**
+ * 生成并落盘一把本机签名密钥（600、原子写、绝不打印私钥）。
+ * `force=false` 时**拒绝覆盖已存在的密钥**：换密钥会让此前所有已签账本被判「另一把密钥签发」，
+ * 这必须是一次显式决定，而不是顺手加个 --generate 的副作用。
+ * @param {{force?: boolean}} [opts]
+ * @returns {{ok: boolean, keyId: string|null, path: string, error: string|null}}
+ */
+export function generateLedgerKey({ force = false } = {}) {
+  const p = ledgerKeyPath();
+  const cur = readLedgerKeyStrict();
+  if (!force) {
+    if (cur.ok && cur.key) {
+      return { ok: false, keyId: cur.key.keyId, path: p, error: `已存在签名密钥（keyId=${cur.key.keyId}）：覆盖它会让此前所有已签账本变成「另一把密钥签发」。确认要换请加 --force，并先备份旧文件（否则旧账本再也无法验签通过）。` };
+    }
+    if (!cur.ok) return { ok: false, keyId: null, path: p, error: `现有密钥文件读不出来，已拒绝覆盖：${cur.error}` };
+  }
+  try {
+    const { publicKey, privateKey } = crypto.generateKeyPairSync('ed25519');
+    const rec = {
+      v: 1,
+      alg: LEDGER_SIG_ALG,
+      // keyId 一并落盘只为「一眼看出这是哪把密钥」；读的时候**以实际公钥重算为准**（见 readLedgerKeyStrict）
+      keyId: keyIdOf(publicKey),
+      publicKey: publicKey.export({ type: 'spki', format: 'der' }).toString('base64'),
+      privateKey: privateKey.export({ type: 'pkcs8', format: 'der' }).toString('base64'),
+      createdAt: Date.now(),
+    };
+    ensureHome();
+    atomicWritePrivateSync(p, JSON.stringify(rec, null, 2) + '\n');
+    return { ok: true, keyId: rec.keyId, path: p, error: null };
+  } catch (err) {
+    return { ok: false, keyId: null, path: p, error: `写入 ${p} 失败：${String(/** @type {any} */ (err)?.message ?? err)}` };
+  }
+}
+
+/**
+ * 取本机签名密钥，**不存在则自动生成**。
+ *
+ * 为什么默认生成，而不是「没密钥就不签」：可选签名在合规上等于没有签名——没人会先跑一条
+ * 生成命令再开始干活，于是「来源可信」永远停在计划里（本项在发布说明里挂了三轮就是这个下场）。
+ * 代价是第一次记账会多出一个 <home>/ledger-key.json（600），可随时用 `mingdao ledger --sign-key` 查到。
+ * @returns {{ok: boolean, key: LedgerSigningKey|null, created: boolean, error: string|null}}
+ */
+export function ensureLedgerKey() {
+  const r = readLedgerKeyStrict();
+  if (r.ok && r.key) return { ok: true, key: r.key, created: false, error: null };
+  if (r.ok && r.missing) {
+    const g = generateLedgerKey();
+    if (!g.ok) return { ok: false, key: null, created: false, error: g.error };
+    const again = readLedgerKeyStrict();
+    return { ok: Boolean(again.ok && again.key), key: again.key, created: true, error: again.error };
+  }
+  return { ok: false, key: null, created: false, error: r.error };
+}
+
+/**
+ * 取用于**校验**的公钥：`--key <文件>` 指定的文件，否则本机 <home>/ledger-key.json。
+ * 接受两种形态：① 本模块的密钥文件（只要有 publicKey 字段即可，私钥可缺）；
+ * ② PEM/SPKI 公钥文件——第三方审计手上只有公钥是常态，不该逼对方伪造一份带私钥的文件。
+ * @param {string|null} [keyPath]
+ * @returns {{ok: boolean, keyId: string|null, publicKey: import('node:crypto').KeyObject|null, source: string, error: string|null}}
+ */
+export function loadVerifyKey(keyPath = null) {
+  const src = keyPath || ledgerKeyPath();
+  if (!keyPath) {
+    const r = readLedgerKeyStrict();
+    if (r.ok && r.key) return { ok: true, keyId: r.key.keyId, publicKey: r.key.publicKey, source: src, error: null };
+    if (r.ok && r.missing) {
+      return { ok: false, keyId: null, publicKey: null, source: src, error: `本机没有签名密钥（${src}）——无法判断这条账本的来源；要用别的公钥校验请加 --key <文件>` };
+    }
+    return { ok: false, keyId: null, publicKey: null, source: src, error: r.error };
+  }
+  let raw;
+  try {
+    raw = fs.readFileSync(keyPath, 'utf8');
+  } catch (err) {
+    return { ok: false, keyId: null, publicKey: null, source: src, error: `无法读取校验密钥 ${keyPath}：${String(/** @type {any} */ (err)?.message ?? err)}` };
+  }
+  try {
+    const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+    /** @type {import('node:crypto').KeyObject} */
+    let pub;
+    if (/-----BEGIN/.test(text)) {
+      pub = crypto.createPublicKey(text); // PEM：第三方交出的公钥（私钥 PEM 也能导出对应公钥）
+    } else {
+      const data = JSON.parse(text);
+      if (typeof data?.publicKey === 'string' && data.publicKey) pub = crypto.createPublicKey({ key: Buffer.from(data.publicKey, 'base64'), format: 'der', type: 'spki' });
+      else if (typeof data?.privateKey === 'string' && data.privateKey) pub = crypto.createPublicKey(crypto.createPrivateKey({ key: Buffer.from(data.privateKey, 'base64'), format: 'der', type: 'pkcs8' }));
+      else throw new Error('既没有 publicKey 也没有 privateKey');
+    }
+    return { ok: true, keyId: keyIdOf(pub), publicKey: pub, source: src, error: null };
+  } catch (err) {
+    return { ok: false, keyId: null, publicKey: null, source: src, error: `${keyPath} 不是可用的校验密钥：${String(/** @type {any} */ (err)?.message ?? err)}` };
+  }
+}
+
+/**
+ * @typedef {{signed: boolean, provenance: 'valid'|'none'|'invalid'|'unverifiable', signerKeyId: string|null, verifyKeyId: string|null, provenanceError: string|null}} Provenance
+ */
+
+/**
+ * 来源签名判定：三态 + 「无法校验」这一态（本机没有对应公钥时）。
+ *
+ * 判据顺序不可换：**先看有没有签名，再看签名对不对**。反过来会把「本来就没签名」的历史账本
+ * 一律报成「签名无效」——升级当天全部历史账本变成坏账本，正是向后兼容要求的红线。
+ * @param {any} seal @param {Set<string>} declaredKeyIds @param {string|null} keyPath
+ * @returns {Provenance}
+ */
+function provenanceOf(seal, declaredKeyIds, keyPath) {
+  const declared = declaredKeyIds.size ? [...declaredKeyIds][0] : null;
+  const sig = seal && typeof seal === 'object' ? seal.sig : null;
+  if (!sig || typeof sig.value !== 'string') {
+    // 账本自己声明「我被 X 签过」，而封条里没有签名 → 这不是"老账本"，是签名证据被剥离
+    if (declared) {
+      return {
+        signed: false,
+        provenance: 'invalid',
+        signerKeyId: declared,
+        verifyKeyId: null,
+        provenanceError: `账本自身声明由密钥 ${declared} 签发，但封条里没有签名记录——签名证据被剥离或封条被替换（这与「历史账本本来就没有签名」不是一回事）`,
+      };
+    }
+    return { signed: false, provenance: 'none', signerKeyId: null, verifyKeyId: null, provenanceError: null };
+  }
+  const signerKeyId = typeof sig.keyId === 'string' && sig.keyId ? sig.keyId : null;
+  if (String(sig.alg ?? '') !== LEDGER_SIG_ALG) {
+    return { signed: true, provenance: 'unverifiable', signerKeyId, verifyKeyId: null, provenanceError: `签名算法 ${String(sig.alg ?? '(缺失)')} 本版不支持（只认 ${LEDGER_SIG_ALG}）` };
+  }
+  const k = loadVerifyKey(keyPath);
+  if (!k.ok || !k.publicKey) {
+    return { signed: true, provenance: 'unverifiable', signerKeyId, verifyKeyId: null, provenanceError: k.error };
+  }
+  if (signerKeyId && k.keyId !== signerKeyId) {
+    return {
+      signed: true,
+      provenance: 'invalid',
+      signerKeyId,
+      verifyKeyId: k.keyId,
+      provenanceError: `该账本由 keyId=${signerKeyId} 签发，而用于校验的密钥是 keyId=${k.keyId}——换了一把密钥（或这份账本来自另一台机器）；要用原密钥校验请加 --key <文件>`,
+    };
+  }
+  if (!verifySealRecord(seal, k.publicKey)) {
+    return {
+      signed: true,
+      provenance: 'invalid',
+      signerKeyId,
+      verifyKeyId: k.keyId,
+      provenanceError: '签名与内容不匹配：内容（或封条的条数/链头/时刻）被改写后重算过哈希链——链是自洽的，但**不是**持有该密钥的那一方写的',
+    };
+  }
+  return { signed: true, provenance: 'valid', signerKeyId, verifyKeyId: k.keyId, provenanceError: null };
+}
+
+/** 无签名结论的默认字段（错误路径上复用，保证返回形状恒定：原有字段一个不改，新字段永远在） */
+const NO_PROVENANCE = { signed: false, provenance: 'none', signerKeyId: null, verifyKeyId: null, provenanceError: null, trusted: false };
+
+/**
+ * 来源结论的**单源文案**：CLI 与导出物共用一份。
+ * 为什么不让两边各写一句：本仓已经吃过"同一结论两处措辞"的亏（`ledger verify` 说 ✅ 而导出物说
+ * 「无法确认」），用户看到哪一份取决于他用了哪条路径——合规物上这是致命的。
+ * @param {{provenance?: string, signerKeyId?: string|null, verifyKeyId?: string|null, provenanceError?: string|null}} v
+ */
+export function provenanceText(v) {
+  // 三态用**需求原话**写死（「链完整 + 签名有效 / 链完整但无签名 / 链完整但签名无效」）：
+  // 合规复核是拿人眼与脚本一起 grep 这几句话的，措辞漂移一次就得重新对账。
+  switch (v?.provenance) {
+    case 'valid':
+      return `✅ 有效——链完整 + 签名有效（ed25519 · keyId=${v.signerKeyId ?? '?'}）：由持有该密钥的一方写入，内容与封条自签名后未被改动`;
+    case 'none':
+      return '⚠️ 无签名——链完整但无签名（仅哈希链完整）：该账本写于启用来源签名之前，或签名证据已被整体抹除（本项无法区分两者），不能据此认定来源';
+    case 'invalid':
+      return `❌ 无效——链完整但签名无效：${v.provenanceError ?? '签名与内容不符'}`;
+    case 'unverifiable':
+      return `⚠️ 无法校验——链完整但无法验签：${v.provenanceError ?? '没有可用的公钥'}`;
+    default:
+      return '⚠️ 未知（校验结果里没有来源结论）';
+  }
+}
+
 /**
  * 创建一次运行的账本写入器。所有方法在账本不可用时**静默降级**（no-op），
  * 绝不让「记账失败」影响正常执行——与 writeAudit 同款容错。
@@ -118,6 +443,34 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
   // 而本文件开头就写着「被静默截断的合规账本比不记账更糟」。失败要留痕、要能说出口。
   let failure = /** @type {string|null} */ (null);
   let failures = 0;
+  // 签名密钥按**写入器实例**缓存（不是模块级）：模块级缓存会在测试/多 home 场景下串味——
+  // 换了 MINGDAO_HOME 却仍复用上一个 home 的密钥，签出来的账本"来源"是错的。
+  /** @type {LedgerSigningKey|null|undefined} */
+  let keyCache;
+  /** 取/建签名密钥失败的原因（**与 failure 分开**：账本本身写得好好的，只是这一份没有来源签名） */
+  let signError = /** @type {string|null} */ (null);
+
+  /**
+   * 本回合的签名密钥（惰性 + 记忆化）。
+   * 为什么要惰性：一次回合要写几十条事件，取密钥只需一次；而**签名失败绝不能中断记账**
+   *（「记账失败不影响执行」是本文件的既有纪律）——取不到就写无签名账本，并在 run.end 里
+   * 如实**不声明** sigKey，让 verify 得到诚实的「无签名」而不是一个假的「已签」。
+   */
+  function signingKey() {
+    if (keyCache !== undefined) return keyCache;
+    // 账本整体停用（`cfg.ledger:false` / runId 非法 / 之前写失败）时**不生成密钥**：
+    // 否则"关掉账本"的用户也会被凭空写一个密钥文件——一个纯粹为记账服务的副作用。
+    if (!alive) return null;
+    try {
+      const r = ensureLedgerKey();
+      keyCache = r.ok ? r.key : null;
+      if (!r.ok) signError = r.error;
+    } catch (err) {
+      keyCache = null; // 只可能来自 ensureHome/写盘等意外抛出：降级为无签名，不影响记账
+      signError = String(/** @type {any} */ (err)?.message ?? err);
+    }
+    return keyCache;
+  }
 
   /** 事件落盘：一行一个 JSON，返回该行内容（供测试/调试） */
   function write(/** @type {string} */ type, /** @type {any} */ payload) {
@@ -148,10 +501,18 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
    * 为什么必须另存：删掉尾部若干行（含 run.end）后，链内每一行的 prev 依然自洽，
    * 单看文件查不出被截断——实测「只留前 3 行」原实现照样报 ok:true（A-LG-1 的真实盲区）。
    * 诚实边界：封条与账本同目录、同权限，能防**误删/漏写/随手改**，防不住同时改写两者的对手。
+   *
+   * v0.6.11：封条同时承担**来源签名**（签名覆盖 runId/版本/条数/链头/时刻，即整条链的承诺）。
+   * 为什么签在封条上而不是每一行上：① 封条本来就是「这份账本的全部内容是什么」的承诺，
+   * 签它等价于签整条链；② 逐行签名会让每条事件多 88 字节 base64 与一次 sign()，
+   * 而收益只是「能定位到被改的那一行」——链内一致性检查已经能定位到行。
    */
   function seal(/** @type {string} */ lastLine) {
     try {
+      /** @type {any} */
       const rec = { v: LEDGER_VERSION, runId, total: seq, head: digestOf(lastLine), at: now() };
+      const key = signingKey();
+      if (key?.privateKey) rec.sig = { alg: LEDGER_SIG_ALG, keyId: key.keyId, value: signSealRecord(rec, key.privateKey) };
       atomicWriteFileSync(sealFile(runId), JSON.stringify(rec, null, 2) + '\n', { mode: 0o600 });
       return rec;
     } catch (err) {
@@ -180,6 +541,15 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
     /** 最近一次失败原因（无则 null）——给用户看到具体是什么坏了，而不是「记账失败」四个字 */
     get lastError() {
       return failure;
+    },
+    /** 这一份账本用于签名的密钥指纹（无签名则 null）——给命令面/测试看「是谁写的」 */
+    get signingKeyId() {
+      return signingKey()?.keyId ?? null;
+    },
+    /** 取/建签名密钥失败的原因（无则 null）。与 degraded 分开：账本写得好好的，只是没有来源签名 */
+    get signingError() {
+      signingKey();
+      return signError;
     },
     /** 回合开始：模型/权限/预设/Pack 等「当时的规则环境」——复检时要靠它对齐上下文 */
     runStart(/** @type {any} */ f = {}) {
@@ -273,6 +643,12 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
       });
     },
     runEnd(/** @type {any} */ f = {}) {
+      // v0.6.11（§3.45）：把「本回合由哪把密钥签发」写进**链内**（run.end 也是链的一部分）。
+      // 为什么非写不可：签名本身在封条里，而封条是个可以被单独删掉的侧车文件——只删封条
+      // 就能把一份已签账本伪装成「历史无签名账本」，从而骗过「无签名也退 0」的兼容路径。
+      // 有了链内的这条声明，verify 才能区分「本来就是无签名老账本」与「签名证据被剥离」。
+      // 必须在 write 之前取密钥：写完之后再取，run.end 的内容就与签名无关了。
+      const signer = signingKey();
       const line = write('run.end', {
         ms: f.ms ?? null,
         status: f.status ?? null,
@@ -285,6 +661,8 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
         aborted: f.aborted === true,
         // v0.6.7（报告二 P3-2）：上游提前关流此前只"置位"不落账（检测到了、传递断了）
         ...(f.upstreamTruncated === true ? { upstreamTruncated: true } : {}),
+        // 只写 keyId（公钥指纹，公开信息），不写签名本身：签名在封条里，覆盖整条链
+        ...(signer ? { sigKey: signer.keyId } : {}),
       });
       // 只有 run.end **真的落盘了**才封条：局部失败时封一条残缺账本会让校验谎报完整
       if (line) seal(line);
@@ -324,9 +702,16 @@ export function readRun(/** @type {any} */ runId) {
  *      只靠 ① 永远查不出（A-LG-1）。没有封条时不得谎报「完整」，只能报 `sealed:false` + warning。
  * 诚实边界：**不含可信时间戳**，只能证明「自写入后未被改动」，不能证明生成时刻；
  * 封条与账本同权限同目录，防误删/漏写，不防同时改写两者的对手。
+ *
+ * v0.6.11（§3.45）新增第 ③ 层——**来源签名**：①② 的全部输入都来自账本自身、算法公开，
+ * 对手改完内容重算一遍就能逐项吻合（探针实测）。③ 用 ed25519 回答「是不是持有某把密钥的一方
+ * 写的」，并且**只增字段不改既有字段**：`ok` 的含义仍然是「链 + 封条自洽」，
+ * 来源结论另放在 `provenance` / `trusted` 上——把新结论塞进 ok，会让所有旧调用点
+ * （导出、Web、CI 门禁）在没读新字段的情况下改变行为。
  * @param {any} runId
+ * @param {{keyPath?: string|null}} [opts] `keyPath` = 用哪份公钥验签（默认本机 <home>/ledger-key.json）
  */
-export function verifyRun(/** @type {any} */ runId) {
+export function verifyRun(/** @type {any} */ runId, { keyPath = null } = {}) {
   const raw = (() => {
     try {
       return fs.readFileSync(runFile(runId), 'utf8');
@@ -334,21 +719,24 @@ export function verifyRun(/** @type {any} */ runId) {
       return null;
     }
   })();
-  if (raw === null) return { ok: false, error: '账本不存在', badSeq: null, total: 0, sealed: false, warning: null };
+  if (raw === null) return { ok: false, error: '账本不存在', badSeq: null, total: 0, sealed: false, warning: null, ...NO_PROVENANCE };
   const lines = raw.split('\n').filter(Boolean);
   let prev = GENESIS;
   let sawEnd = false;
+  /** 链内自述的签发密钥（run.end 的 sigKey）——用于识破「只删封条冒充老账本」 */
+  const declaredKeyIds = new Set();
   for (let i = 0; i < lines.length; i++) {
     let ev;
     try {
       ev = JSON.parse(lines[i]);
     } catch {
-      return { ok: false, error: `第 ${i + 1} 行不是合法 JSON`, badSeq: i + 1, total: lines.length, sealed: false, warning: null };
+      return { ok: false, error: `第 ${i + 1} 行不是合法 JSON`, badSeq: i + 1, total: lines.length, sealed: false, warning: null, ...NO_PROVENANCE };
     }
     if (ev.prev !== prev) {
-      return { ok: false, error: `第 ${i + 1} 行的前序哈希不匹配（该行或其上一行被改动/删除）`, badSeq: ev.seq ?? i + 1, total: lines.length, sealed: false, warning: null };
+      return { ok: false, error: `第 ${i + 1} 行的前序哈希不匹配（该行或其上一行被改动/删除）`, badSeq: ev.seq ?? i + 1, total: lines.length, sealed: false, warning: null, ...NO_PROVENANCE };
     }
     if (ev.type === 'run.end') sawEnd = true;
+    if (typeof ev.sigKey === 'string' && ev.sigKey) declaredKeyIds.add(ev.sigKey);
     prev = digestOf(lines[i]);
   }
   // ② 封条比对：链内自洽之后，回答「尾部有没有被切掉」
@@ -356,22 +744,26 @@ export function verifyRun(/** @type {any} */ runId) {
   if (seal) {
     const total = Number(seal.total) || 0;
     if (lines.length < total) {
-      return { ok: false, error: `账本被截断：封条记录应有 ${total} 条事件，实际只有 ${lines.length} 条（尾部 ${total - lines.length} 条被删除）`, badSeq: lines.length + 1, total: lines.length, sealed: true, warning: null };
+      return { ok: false, error: `账本被截断：封条记录应有 ${total} 条事件，实际只有 ${lines.length} 条（尾部 ${total - lines.length} 条被删除）`, badSeq: lines.length + 1, total: lines.length, sealed: true, warning: null, ...NO_PROVENANCE };
     }
     if (lines.length > total) {
-      return { ok: false, error: `封条之后被追加了 ${lines.length - total} 条事件（封条 total=${total}，实际 ${lines.length}）`, badSeq: total + 1, total: lines.length, sealed: true, warning: null };
+      return { ok: false, error: `封条之后被追加了 ${lines.length - total} 条事件（封条 total=${total}，实际 ${lines.length}）`, badSeq: total + 1, total: lines.length, sealed: true, warning: null, ...NO_PROVENANCE };
     }
     const head = lines.length ? digestOf(lines[lines.length - 1]) : GENESIS;
     if (head !== seal.head) {
-      return { ok: false, error: '末条事件与封条记录的链头不一致（尾部被改写）', badSeq: lines.length, total: lines.length, sealed: true, warning: null };
+      return { ok: false, error: '末条事件与封条记录的链头不一致（尾部被改写）', badSeq: lines.length, total: lines.length, sealed: true, warning: null, ...NO_PROVENANCE };
     }
-    return { ok: true, error: null, badSeq: null, total: lines.length, sealed: true, warning: null };
+    const prov = provenanceOf(seal, declaredKeyIds, keyPath);
+    return { ok: true, error: null, badSeq: null, total: lines.length, sealed: true, warning: null, ...prov, trusted: prov.provenance === 'valid' || prov.provenance === 'none' };
   }
   // 无封条：链内是自洽的，但**尾部是否完整无从判断**——必须说出来，不能报「完整」
   const warning = sawEnd
     ? '该账本含 run.end 事件却没有封条文件——封条可能被删除，无法判断尾部是否被截断'
     : '该账本尚未封条（回合未正常收尾），无法判断尾部是否被截断';
-  return { ok: true, error: null, badSeq: null, total: lines.length, sealed: false, warning };
+  // 封条没了 → 签名也没了（签名就写在封条里）。此时**不许**因为"没有签名"就报平安：
+  // 若链内自述被某把密钥签过（run.end 的 sigKey），那是签名证据被剥离，必须报出来。
+  const prov = provenanceOf(null, declaredKeyIds, keyPath);
+  return { ok: true, error: null, badSeq: null, total: lines.length, sealed: false, warning, ...prov, trusted: false };
 }
 
 /**
@@ -496,6 +888,9 @@ export function exportRun(/** @type {any} */ runId, { format = 'json' } = {}) {
         : `❌ ${v.error}`
     }`
   );
+  // v0.6.11（§3.45）：导出物是对外交付的**合规物**，只写「链完整」会让收件人以为来源也可信。
+  // 来源必须与完整性并列写出来——这正是本项存在的理由（旧导出物缺的从来不是链，而是这一行）。
+  lines.push(`- 来源签名：${provenanceText(v)}`);
   lines.push('');
   lines.push('| # | 时刻 | 事件 | 摘要 |');
   lines.push('| --- | --- | --- | --- |');

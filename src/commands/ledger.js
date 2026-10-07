@@ -2,29 +2,87 @@
 //   list                     最近若干次运行（时间/模型/事件数/状态/费用）
 //   show <runId>             人读明细（默认最近一次）
 //   export <runId> [--format json|md] [--out <文件>]   脱敏导出（对外的最小可用产物）
-//   verify <runId>           校验哈希链（能发现改行/删行）
+//   verify <runId> [--key <文件>]   校验哈希链 + 封条 + **来源签名**（v0.6.11）
+//   replay <runId> [--json]  离线回放
+//   --sign-key [--generate|--force] 查看/生成本机账本签名密钥（v0.6.11）
 //
 // 诚实边界（不写清楚就等于暗示）：
 //   · 哈希链只能证明「自写入后未被改动」，**不含可信时间戳**，不等同于审计级不可否认；
+//   · 来源签名（ed25519）能回答「是不是持有那把密钥的一方写的」，但私钥与账本同机同权限：
+//     能改账本的对手通常也能读私钥，故本层主要防「换一台机器/换一把密钥伪造来源」，
+//     不防同权限的本机对手——这条边界必须跟着结论一起说出口；
 //   · 导出物已按「密钥 + 私网 IP + 家目录」两级规则脱敏，但**明细字段本身经过截断**，
 //     它不是原始数据的完整副本，不能当作证据原件保存。
 
 import fs from 'node:fs';
 import { createIO, style, C } from '../ui.js';
-import { listRuns, readRun, verifyRun, exportRun, isValidRunId, ledgerDir } from '../ledger.js';
+import { listRuns, readRun, verifyRun, exportRun, isValidRunId, ledgerDir, ledgerKeyPath, readLedgerKeyStrict, generateLedgerKey, provenanceText } from '../ledger.js';
 import { replayRun, renderReplay, KIND } from '../replay.js';
 import { loadConfig } from '../config.js';
 import { getActivePackContext, mountPacks } from '../packs.js';
 
 /** 用法串：未知子命令与用法提示共用一份，避免两处漂移 */
-const USAGE = '用法：mingdao ledger list [数量] | show <runId> | export <runId> [--format json|md] [--out 文件] | verify <runId> | replay <runId> [--json]';
+const USAGE = '用法：mingdao ledger list [数量] | show <runId> | export <runId> [--format json|md] [--out 文件] | verify <runId> [--key 文件] | replay <runId> [--json] | --sign-key [--generate|--force]';
 const KNOWN_SUBS = new Set(['list', 'show', 'verify', 'replay', 'export']);
+
+/** 打印签名密钥状态：**只说指纹与路径，绝不回显私钥**（同 credentials 的 maskKey 口径） */
+function printKeyStatus(/** @type {any} */ io) {
+  const p = ledgerKeyPath();
+  const r = readLedgerKeyStrict();
+  if (r.ok && r.key) {
+    io.print(style('账本来源签名密钥', C.bold));
+    io.print(`  文件：${p}（权限 600，绝不进 config.json / 凭证库 / 仓库）`);
+    io.print(`  算法：ed25519 · 公钥指纹 keyId=${r.key.keyId}${r.key.createdAt ? ` · 创建于 ${new Date(r.key.createdAt).toLocaleString('zh-CN', { hour12: false })}` : ''}`);
+    // 公钥是**公开**信息，正好用来交给第三方复核（私钥永不打印、永不导出）
+    io.print(style(`  公钥（可交给第三方验签，不含私钥）：${r.key.publicKey.export({ type: 'spki', format: 'der' }).toString('base64')}`, C.dim));
+    io.print(style('  换密钥会让此前所有已签账本变成「另一把密钥签发」；要用旧密钥验签请：mingdao ledger verify <runId> --key <旧密钥文件>', C.dim));
+    return true;
+  }
+  if (r.ok && r.missing) {
+    io.print('本机还没有账本来源签名密钥。');
+    io.print(style(`生成：mingdao ledger --sign-key --generate（写入 ${p}，权限 600）`, C.dim));
+    io.print(style('说明：新账本在首次收尾时会自动生成密钥并签名，无需手动初始化——这条命令是给「要确认/要换/要指定」的场景用的。', C.dim));
+    return true;
+  }
+  io.print(style(`❌ 签名密钥不可用：${r.error}`, C.red));
+  process.exitCode = 1;
+  return true;
+}
 
 /** @param {any} cmd @param {any} args */
 export async function handleLedger(cmd, args) {
   const io = createIO();
   const sub = args[0] || 'list';
   const rest = args.slice(1);
+  // v0.6.11（§3.45）：`--sign-key` 是**选项形态**而不是子命令（请求形态就是 `ledger --sign-key`），
+  // 所以必须在 KNOWN_SUBS 判定**之前**拦下——否则它会被当成"未知子命令"退 1，
+  // 而用户敲的正是文档里写的那一行。
+  const signKeyFlag = args.includes('--sign-key');
+  if (signKeyFlag) {
+    const generate = args.includes('--generate');
+    const force = args.includes('--force');
+    if (force && !generate) {
+      io.print('--force 只与 --generate 连用（覆盖已有密钥必须是一次显式决定）');
+      process.exitCode = 1;
+      return true;
+    }
+    if (!generate) return printKeyStatus(io);
+    const cur = readLedgerKeyStrict();
+    const g = generateLedgerKey({ force });
+    if (!g.ok) {
+      io.print(style(`❌ ${g.error}`, C.red));
+      process.exitCode = 1;
+      return true;
+    }
+    io.print(`✅ 已生成账本签名密钥：${g.path}（权限 600）`);
+    io.print(`   公钥指纹 keyId=${g.keyId} · 算法 ed25519`);
+    io.print(style('   私钥只写在该文件里，本命令不打印完整密钥（文件内容即密钥，请按密钥对待）。', C.dim));
+    if (cur.ok && cur.key && cur.key.keyId !== g.keyId) {
+      io.print(style(`   ⚠ 已覆盖旧密钥（旧 keyId=${cur.key.keyId}）：此前用它签过的账本现在会报「由另一把密钥签发」。`, C.yellow));
+    }
+    io.print(style('   新写入的账本会自动带上来源签名；老账本（无签名）仍然校验通过并如实报告「无签名」。', C.dim));
+    return true;
+  }
   // v0.6.3（M-21）：未知子命令此前会一路走到函数末尾「打印用法并退 0」，脚本/CI 无法与
   // 「命令成功」区分。这里**先**判子命令——顺序很重要：放在 runId 解析之后会被
   // 「runId 格式不合法」分支抢先命中，于是同样的输入有时退 1、有时退 0。
@@ -93,17 +151,36 @@ export async function handleLedger(cmd, args) {
   }
 
   if (sub === 'verify') {
-    const v = verifyRun(runId);
-    if (v.ok && v.sealed) {
-      io.print(`✅ ${runId} 校验通过：${v.total} 条事件链内一致，且与封条吻合（未被改动、尾部未被截断）。`);
-    } else if (v.ok) {
-      // 链内一致 ≠ 完整。原实现只报「哈希链完整」，把「尾部被删掉一截」说成了完整。
-      io.print(style(`⚠ ${runId} 链内一致（${v.total} 条事件），但完整性无法确认：${v.warning}。`, C.yellow));
-      process.exitCode = 1;
-    } else {
+    // v0.6.11（§3.45）：`--key <文件>` 用指定的公钥验签（默认本机 <home>/ledger-key.json）。
+    // 为什么必须能指定：① 账本换过机器/换过密钥时要用**原密钥**复核；
+    // ② 第三方审计手上只有公钥，逼他先在本机生成一把密钥就等于把伪造能力交出去。
+    const v = verifyRun(runId, { keyPath: flag('--key') });
+    const prov = provenanceText(v);
+    if (!v.ok) {
       io.print(style(`❌ ${runId} 校验失败：${v.error}`, C.red));
       process.exitCode = 1;
+    } else if (!v.sealed) {
+      // 链内一致 ≠ 完整。原实现只报「哈希链完整」，把「尾部被删掉一截」说成了完整。
+      io.print(style(`⚠ ${runId} 链内一致（${v.total} 条事件），但完整性无法确认：${v.warning}。`, C.yellow));
+      io.print(`   来源签名：${prov}`);
+      process.exitCode = 1;
+    } else if (v.provenance === 'valid' || v.provenance === 'none') {
+      // 三态里的**前两态**：链完整 + 签名有效 / 链完整但无签名。都退 0——
+      // 老账本（写于启用签名之前）不能被升级判成坏账本，这是向后兼容的红线。
+      io.print(`✅ ${runId} 校验通过：${v.total} 条事件链内一致，且与封条吻合（未被改动、尾部未被截断）。`);
+      io.print(`   来源签名：${prov}`);
+      if (v.provenance === 'none') {
+        io.print(style('   （无签名只说明"这份账本没被签过"，不等于被篡改；要覆盖新账本请让签名密钥存在：mingdao ledger --sign-key --generate）', C.dim));
+      }
+      io.print(style('   说明：签名证明「写入方持有该密钥」，但私钥与账本同机同权限——不防能同时读写两者的本机对手。', C.dim));
+    } else {
+      // 第三态：**链完整但签名无效**（被篡改后重算过链，或换了一把密钥）。链是自洽的，
+      // 但来源不可信——按合规口径这必须是失败（非 0），否则 CI/审计拿它当门禁就是假通过。
+      io.print(style(`❌ ${runId} 链完整但来源签名无效：${v.provenanceError ?? prov}`, C.red));
+      io.print(style(`   （哈希链与封条本身吻合：${v.total} 条事件未被改动、尾部未被截断——问题出在「是谁写的」。）`, C.dim));
+      process.exitCode = 1;
     }
+    // 旧文案原样保留（既有输出字段只增不改）：用户与脚本此前依赖的这句仍然在。
     io.print(style('说明：哈希链 + 封条只能证明「自写入后未被改动、尾部未被截断」，不含可信时间戳，不等同于审计级不可否认。', C.dim));
     return true;
   }
@@ -177,7 +254,7 @@ export async function handleLedger(cmd, args) {
 
   // v0.6.3（M-21）：未知子命令此前静默落到「打印用法并退 0」——CI/脚本无法区分
   // 「用法提示」与「命令成功」。这是退出码语义的静默失效，明确退 1。
-  io.print('用法：mingdao ledger list [数量] | show <runId> | export <runId> [--format json|md] [--out 文件] | verify <runId> | replay <runId> [--json]');
+  io.print(USAGE);
   process.exitCode = 1;
   return true;
 }

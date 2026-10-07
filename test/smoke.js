@@ -11560,6 +11560,213 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
   ok('v0.6.11 每轮护栏决策：proceed/warn/block/try-downgrade/already-cheapest 五动作 + 在途触发 + BUG-023/035 回归 + 单源守卫');
 }
 
+// ---------- 133. v0.6.11：账本来源签名（`ledger --sign-key`，登记 §3.45） ----------
+// 缺口（探针实测，/tmp/probe-ledger-sign.mjs）：哈希链 + 封条的全部输入都来自**账本自身**，
+// 算法（sha256）又是公开的——把 tool.call 的 name 改掉、逐行重算 prev、再按新末行改写封条的
+// total/head，**全程不需要任何密钥**，旧 verifyRun 三项（链内一致/条数/链头）逐项吻合，照样
+// 报 ok:true。即：旧 verify 只能回答「没被随手改过」，回答不了「是谁写的」。
+// 本节把三态钉死：① 新账本签名有效；② 老账本（无签名）不得因升级变成坏账本；
+// ③ 改内容重算链 / 换一把密钥写，都必须判「签名无效」且**退出码非 0**（否则 CI 拿它当门禁即假通过）。
+{
+  const L133 = await import(pathToFileURL(path.join(srcDir, 'ledger.js')).href);
+  const C133 = await import('node:crypto');
+  const cli133 = path.join(srcDir, 'cli.js');
+  const home133 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ledger133-'));
+  const home133b = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ledger133b-'));
+  const home133c = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ledger133c-'));
+  const prevHome133 = process.env.MINGDAO_HOME;
+  const runCli133 = (/** @type {string[]} */ a, /** @type {string} */ home = home133) =>
+    spawnSync(process.execPath, [cli133, ...a], { encoding: 'utf8', env: { ...process.env, MINGDAO_HOME: home } });
+  const keyFile133 = path.join(home133, 'ledger-key.json');
+
+  /** 读密钥文件里的私钥材料（**只在本节内部**用于"扮演对手/第三方"；实现本身从不导出私钥） */
+  const privOf = (/** @type {string} */ p) => {
+    const rec = JSON.parse(fs.readFileSync(p, 'utf8'));
+    return { rec, priv: C133.createPrivateKey({ key: Buffer.from(rec.privateKey, 'base64'), format: 'der', type: 'pkcs8' }) };
+  };
+  /** 手工造一份**历史格式**账本（run.end 无 sigKey、封条无 sig）：模拟升级前写下的账本 */
+  const writeLegacy = (/** @type {string} */ home, /** @type {string} */ runId) => {
+    const dir = path.join(home, 'ledger');
+    fs.mkdirSync(dir, { recursive: true });
+    let prev = '0'.repeat(16);
+    /** @type {string[]} */
+    const lines = [];
+    const mk = (/** @type {string} */ type, /** @type {any} */ payload) => {
+      const line = JSON.stringify({ v: 1, runId, seq: lines.length + 1, at: 1700000000000 + lines.length, type, prev, ...payload });
+      prev = L133.digestOf(line);
+      lines.push(line);
+      return line;
+    };
+    mk('run.start', { model: 'legacy-model' });
+    mk('tool.call', { name: 'read' });
+    const last = mk('run.end', { status: 'done' });
+    fs.writeFileSync(path.join(dir, runId + '.jsonl'), lines.join('\n') + '\n');
+    fs.writeFileSync(path.join(dir, runId + '.seal.json'), JSON.stringify({ v: 1, runId, total: lines.length, head: L133.digestOf(last), at: 1700000000100 }, null, 2) + '\n');
+  };
+  /**
+   * 对手动作：改内容 → 逐行重算 prev → 同步封条的 total/head。
+   * `resign` 传 {keyId, priv} 时用**对手自己的密钥**重签封条——这是本项要防的最强形态：
+   * 攻击者不是删掉签名，而是拿一把合法密钥伪造出一份「看起来完整可信」的账本。
+   */
+  const rewriteAll = (/** @type {string} */ home, /** @type {string} */ runId, /** @type {(ev: any) => void} */ mutate, /** @type {any} */ resign = null) => {
+    const f = path.join(home, 'ledger', runId + '.jsonl');
+    const sp = path.join(home, 'ledger', runId + '.seal.json');
+    let prev = '0'.repeat(16);
+    const out = fs
+      .readFileSync(f, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((l) => {
+        const ev = JSON.parse(l);
+        mutate(ev);
+        ev.prev = prev; // 逐行重算：链内依旧完全自洽
+        const line = JSON.stringify(ev);
+        prev = L133.digestOf(line);
+        return line;
+      });
+    fs.writeFileSync(f, out.join('\n') + '\n');
+    const seal = JSON.parse(fs.readFileSync(sp, 'utf8'));
+    seal.total = out.length;
+    seal.head = L133.digestOf(out[out.length - 1]);
+    if (resign) seal.sig = { alg: 'ed25519', keyId: resign.keyId, value: L133.signSealRecord(seal, resign.priv) };
+    fs.writeFileSync(sp, JSON.stringify(seal, null, 2) + '\n');
+  };
+
+  try {
+    process.env.MINGDAO_HOME = home133;
+
+    // ① 生成密钥 → 新账本签名有效（CLI 面 + 库面 + 导出物三处同口径）
+    // 先摆一份 config.json：密钥**绝不能**落到这里（结构与内容双重确认，见 ⑤）
+    fs.writeFileSync(path.join(home133, 'config.json'), JSON.stringify({ model: 'deepseek-v4-flash' }, null, 2) + '\n');
+    const gen = runCli133(['ledger', '--sign-key', '--generate']);
+    assert.equal(gen.status, 0, `--sign-key --generate 应成功，实际 ${gen.status}：${gen.stdout}${gen.stderr}`);
+    assert.ok(fs.existsSync(keyFile133), '密钥必须落到 <home>/ledger-key.json');
+    const keyRec = JSON.parse(fs.readFileSync(keyFile133, 'utf8'));
+    const derivedKeyId = L133.keyIdOf(C133.createPublicKey({ key: Buffer.from(keyRec.publicKey, 'base64'), format: 'der', type: 'spki' }));
+    assert.equal(keyRec.alg, 'ed25519', '算法必须是 ed25519（非对称：公钥可交第三方复核）');
+    assert.ok(gen.stdout.includes(derivedKeyId), `输出必须给出公钥指纹（供人工核对），实际：${gen.stdout}`);
+    // 「不打印完整密钥」是可断言的事实，不是承诺：私钥材料一个字符都不得出现在输出里
+    assert.ok(!gen.stdout.includes(keyRec.privateKey.slice(0, 32)), '`--sign-key --generate` 绝不打印私钥');
+    const status133 = runCli133(['ledger', '--sign-key']);
+    assert.equal(status133.status, 0, '--sign-key 状态查询应成功');
+    assert.ok(status133.stdout.includes(derivedKeyId), '状态查询应显示公钥指纹');
+    assert.ok(!status133.stdout.includes(keyRec.privateKey.slice(0, 32)), '状态查询绝不打印私钥');
+    // 覆盖已有密钥必须被拒绝：换了密钥，此前所有已签账本都会变成「另一把密钥签发」
+    const genAgain = runCli133(['ledger', '--sign-key', '--generate']);
+    assert.equal(genAgain.status, 1, '已有密钥时 --generate 必须拒绝覆盖（否则历史账本一夜之间全变坏账）');
+    assert.ok(genAgain.stdout.includes('已存在'), `拒绝理由必须说清，实际：${genAgain.stdout}`);
+    assert.equal(JSON.parse(fs.readFileSync(keyFile133, 'utf8')).privateKey, keyRec.privateKey, '被拒绝时密钥文件必须原样不动');
+
+    const id133 = L133.newRunId();
+    const led133 = L133.createLedger(id133);
+    led133.runStart({ model: 'deepseek-v4-flash' });
+    led133.toolCall({ name: 'read' });
+    led133.runEnd({ status: 'done' });
+    assert.equal(led133.signingKeyId, derivedKeyId, '写入器必须用本机密钥签名');
+    const seal133 = JSON.parse(fs.readFileSync(path.join(home133, 'ledger', id133 + '.seal.json'), 'utf8'));
+    assert.equal(seal133.sig?.alg, 'ed25519', '新账本的封条必须带 ed25519 签名');
+    assert.equal(seal133.sig?.keyId, derivedKeyId, '封条里的 keyId 必须等于本机密钥指纹');
+    const ev133 = L133.readRun(id133);
+    assert.equal(ev133.find((/** @type {any} */ e) => e.type === 'run.end')?.sigKey, derivedKeyId, 'run.end 必须在**链内**声明签发密钥（否则"只删封条"无法与老账本区分）');
+
+    const v1 = L133.verifyRun(id133);
+    assert.equal(v1.ok, true, '① 链应完整');
+    assert.equal(v1.sealed, true, '① 应有封条');
+    assert.equal(v1.provenance, 'valid', `① 新账本来源签名必须有效，实际 ${v1.provenance}：${v1.provenanceError}`);
+    assert.equal(v1.trusted, true, '① 链完整 + 签名有效 → trusted');
+    assert.equal(v1.signerKeyId, derivedKeyId, '① 结论里必须带上签发密钥指纹');
+    const cli1 = runCli133(['ledger', 'verify', id133]);
+    assert.equal(cli1.status, 0, `① CLI 校验应退 0，实际 ${cli1.status}：${cli1.stdout}`);
+    assert.ok(cli1.stdout.includes('校验通过') && cli1.stdout.includes('签名有效'), `① 必须明确写出「链完整 + 签名有效」，实际：${cli1.stdout}`);
+    assert.ok(L133.exportRun(id133, { format: 'md' }).text.includes('来源签名：✅ 有效'), '① 导出物必须与 CLI 同口径地写出「签名有效」');
+
+    // ② **向后兼容**：老账本（无签名）仍必须校验通过，且如实报告「无签名」
+    //    —— 一次升级把历史账本判成坏账本，是本项最不能犯的错。
+    const legacyId = L133.newRunId();
+    writeLegacy(home133, legacyId);
+    const v2 = L133.verifyRun(legacyId);
+    assert.equal(v2.ok, true, '② 老账本链完整必须仍然为 true');
+    assert.equal(v2.provenance, 'none', '② 老账本必须报「无签名」，而不是「签名无效」');
+    assert.equal(v2.trusted, true, '② 无签名不等于坏账本（链完整即可信度不变）');
+    const cli2 = runCli133(['ledger', 'verify', legacyId]);
+    assert.equal(cli2.status, 0, `② 老账本 CLI 必须退 0（升级不得让历史账本变坏账），实际 ${cli2.status}`);
+    assert.ok(cli2.stdout.includes('无签名'), `② 必须如实写出「无签名」，实际：${cli2.stdout}`);
+    assert.ok(!cli2.stdout.includes('签名无效'), '② 不得把「无签名」说成「签名无效」');
+    assert.ok(L133.exportRun(legacyId, { format: 'md' }).text.includes('来源签名：⚠️ 无签名'), '② 导出物也必须如实报告无签名');
+    // ②b 本机完全没有密钥时，老账本同样不得被判失败（否则换台机器复核历史账本就全红）：
+    //     把同一份老账本放到一个**没有密钥**的 home 里（不能只换 home 而不放账本——那测的是"账本不存在"）
+    writeLegacy(home133c, legacyId);
+    const cli2b = runCli133(['ledger', 'verify', legacyId], home133c);
+    assert.equal(cli2b.status, 0, `② 本机无密钥时老账本仍应退 0，实际 ${cli2b.status}：${cli2b.stdout}`);
+    assert.ok(cli2b.stdout.includes('无签名'), '② 本机无密钥时同样如实报「无签名」');
+
+    // ③ 篡改内容 + 重算整条链 + 改写封条（保留原签名）→ 链是自洽的，但签名必须当场失效
+    rewriteAll(home133, id133, (ev) => {
+      if (ev.type === 'tool.call') ev.name = 'rm-rf'; // 把"读了什么"改成"删了什么"
+    });
+    const tampered = L133.readRun(id133).find((/** @type {any} */ e) => e.type === 'tool.call');
+    assert.equal(tampered?.name, 'rm-rf', '③ 前置：篡改必须真的落到文件上（否则断言是假绿）');
+    const v3 = L133.verifyRun(id133);
+    assert.equal(v3.ok, true, '③ **链层看不见这次篡改**（这正是本项存在的理由：链完整 ≠ 来源可信）');
+    assert.equal(v3.provenance, 'invalid', `③ 签名必须失效，实际 ${v3.provenance}`);
+    assert.equal(v3.trusted, false, '③ 签名无效 → trusted 必须为 false');
+    const cli3 = runCli133(['ledger', 'verify', id133]);
+    assert.notEqual(cli3.status, 0, '③ 签名无效必须退非 0（CI 拿它当门禁才有意义）');
+    assert.ok(cli3.stdout.includes('签名无效'), `③ 必须点明「签名无效」，实际：${cli3.stdout}`);
+    assert.ok(!/✅ .*校验通过/.test(cli3.stdout), '③ 签名无效时不得再打「✅ 校验通过」');
+
+    // ④ **本项的核心价值**：换成另一把密钥写的账本必须被判「签名无效」
+    //    对手不是删签名，而是拿一把**合法**密钥重签一份改过的账本——旧 verify 对它毫无办法。
+    const genB = runCli133(['ledger', '--sign-key', '--generate'], home133b);
+    assert.equal(genB.status, 0, '④ 前置：第二把密钥应能生成');
+    const keyB = privOf(path.join(home133b, 'ledger-key.json'));
+    const keyIdB = L133.keyIdOf(C133.createPublicKey(keyB.priv));
+    assert.notEqual(keyIdB, derivedKeyId, '④ 前置：两把密钥必须不同');
+    rewriteAll(home133, id133, (ev) => {
+      if (ev.type === 'tool.call') ev.name = 'write';
+    }, { keyId: keyIdB, priv: keyB.priv });
+    const v4 = L133.verifyRun(id133);
+    assert.equal(v4.ok, true, '④ 换密钥重写后链仍然自洽（链层依旧无感）');
+    assert.equal(v4.provenance, 'invalid', '④ 另一把密钥签发的账本必须判「签名无效」');
+    assert.equal(v4.signerKeyId, keyIdB, '④ 结论里要写明实际签发方，便于排查「是不是换过密钥」');
+    const cli4 = runCli133(['ledger', 'verify', id133]);
+    assert.notEqual(cli4.status, 0, '④ 换密钥写的账本 CLI 必须退非 0');
+    assert.ok(cli4.stdout.includes(keyIdB), `④ 应指出实际签发密钥指纹，实际：${cli4.stdout}`);
+    // ④b 但用**对手那把公钥**去验，同一份账本必须报「有效」——证明 ④ 不是"看到 keyId 不同就无脑失败"，
+    //     而是真的做了 ed25519 验签（第三方只拿公钥复核的路径也因此成立）。
+    const cli4b = runCli133(['ledger', 'verify', id133, '--key', path.join(home133b, 'ledger-key.json')]);
+    assert.equal(cli4b.status, 0, `④ 用签发方公钥验签应通过，实际 ${cli4b.status}：${cli4b.stdout}`);
+    assert.ok(cli4b.stdout.includes('签名有效'), '④ 用签发方公钥验签必须报「签名有效」');
+    // ④c 只删封条（签名证据被剥离）不得退化成"无签名老账本"而放行
+    rewriteAll(home133, id133, () => {}, { keyId: derivedKeyId, priv: privOf(keyFile133).priv });
+    assert.equal(L133.verifyRun(id133).provenance, 'valid', '④ 前置：用本机密钥重签后应重新有效');
+    fs.rmSync(path.join(home133, 'ledger', id133 + '.seal.json'));
+    assert.equal(L133.verifyRun(id133).provenance, 'invalid', '④ 链内声明过签发密钥时，封条消失＝签名证据被剥离（不得当成"无签名"放行）');
+    assert.notEqual(runCli133(['ledger', 'verify', id133]).status, 0, '④ 签名证据被剥离必须退非 0');
+
+    // ⑤ 结构守卫：密钥文件 600、绝不进 config.json / 凭证库、私钥不落任何别的文件
+    if (process.platform !== 'win32') {
+      assert.equal((fs.statSync(keyFile133).mode & 0o777).toString(8), '600', '签名密钥文件必须是 600');
+    }
+    assert.equal(fs.readFileSync(path.join(home133, 'config.json'), 'utf8'), JSON.stringify({ model: 'deepseek-v4-flash' }, null, 2) + '\n', 'config.json 不得被签名密钥写入任何东西');
+    assert.ok(!fs.readFileSync(path.join(home133, 'config.json'), 'utf8').includes('privateKey'), 'config.json 里不得出现 privateKey');
+    assert.ok(!fs.existsSync(path.join(home133, 'credentials.json')), '签名密钥不得并进凭证库（key remove/import 会全量重写它）');
+    {
+      // 源码级：ledger.js 只认 ledger-key.json，且不得调用 config / credentials 的写入口
+      const ledSrc = fs.readFileSync(path.join(srcDir, 'ledger.js'), 'utf8');
+      assert.ok(ledSrc.includes("'ledger-key.json'"), '密钥路径必须是 <home>/ledger-key.json');
+      assert.ok(!/saveConfig|setStoredKey|credentialsPath/.test(ledSrc), 'ledger.js 不得把密钥写进 config.json / credentials.json');
+      // 私钥只在签名时被读出来用，绝不进账本事件与封条（写进账本等于把伪造能力随账本一起发出去）
+      assert.ok(!JSON.stringify(seal133).includes(keyRec.privateKey.slice(0, 32)), '封条里不得出现私钥材料');
+      assert.ok(!fs.readFileSync(path.join(home133, 'ledger', legacyId + '.jsonl'), 'utf8').includes(keyRec.privateKey.slice(0, 32)), '账本事件里不得出现私钥材料');
+    }
+  } finally {
+    process.env.MINGDAO_HOME = prevHome133;
+    for (const h of [home133, home133b, home133c]) safeRmSync(h, { recursive: true, force: true });
+  }
+  ok('v0.6.11 账本来源签名：新账本签名有效 + 老账本如实报无签名仍退 0 + 改内容重算链/换密钥重签判无效退非 0 + 密钥 600 且不进 config.json');
+}
+
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket
 // —— 实测 ubuntu/macOS + Node 20 上"断言全过、进程却不退出"，CI 里表现为冒烟步骤永远 in_progress
 // （Node 18/22/Windows 因为拆连接更快而侥幸通过）。这里显式退出，断言本身不受影响；
