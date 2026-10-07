@@ -9588,6 +9588,36 @@ process.stdout.write('done');`
       //   证明不了它在所有调用点都被用上。行尾先归一化（CRLF 工作树上跨行匹配会失配 → 假红）。
       const libSrc120 = fs.readFileSync(path.join(srcDir, 'skill-lib.js'), 'utf8').replace(/\r\n?/g, '\n');
       assert.ok(/if \(!meta \|\| !meta\.name\) return \{ error: '技能缺少可解析的 frontmatter\.name/.test(libSrc120), 'readSkillMeta 返回 null 时不得再去读 meta.name（那会抛 TypeError 并留下临时目录）');
+
+      // 【v0.6.11 Windows 腿修复】installFromGit 的临时目录清理必须在 finally 里 —— **源码不变量**。
+      // 为什么需要它（Windows CI 实测，2026-10-07）：上面那条行为化探针在 Windows 上**证明不了任何事**——
+      //   `installFromGit` 用 spawn('git', …, {shell:false})（src/proc.js#spawnOpts 不带 shell），
+      //   而 Windows 上 spawn 一个 .cmd/.bat 桩必须开 shell（否则同步抛 EINVAL），裸 `git` 桩根本进不了 PATH 解析。
+      //   于是探针 `skipNote` 跳过，变异验证里 batch23 的 ⑩（把清理挪出 finally）**逃逸**成 15/16（macOS 16/16）。
+      //   M-8 收口时把这一条从"数 finally 块出现次数"改成行为化，Windows 上就**一道守卫都不剩**了——
+      //   `skipNote` 是"本机测不了"的诚实表达，但它不能同时充当"这条不变量没人管"的借口。
+      // 所以这里保留一条**平台无关**的来源级不变量：要求 installFromGit 的**最后一处**递归清理
+      // 落在 finally 块内。为什么是"最后一处"而不是"只有一处"：函数体里**允许**早退路径自带清理
+      // （`git clone` 失败那条 return 之前就有一处，是正当的），但"任何抛出路径都不能漏"靠的必须是 finally——
+      // 所以早退清理可以有，**最后一道**必须在 finally 里。这样能抓到"清理挪出 finally / 清理被删掉 /
+      // 只剩错误分支里那句早退清理"三类回归，且不假装是行为证明（真正的行为证明是上面那条探针，POSIX 上照跑）。
+      {
+        const giStart = libSrc120.indexOf('export async function installFromGit');
+        assert.ok(giStart >= 0, '应能在 skill-lib.js 里定位 installFromGit（源码不变量定位失败说明结构被改动）');
+        const rest = libSrc120.slice(giStart + 1);
+        const nextExport = rest.indexOf('\nexport ');
+        const body = nextExport >= 0 ? rest.slice(0, nextExport) : rest;
+        const CLEAN = 'fs.rmSync(tmp, { recursive: true, force: true })';
+        const splitAt = body.indexOf('} finally {');
+        assert.ok(splitAt >= 0, 'installFromGit 必须保留 finally 块（tempDir 清理的落点）');
+        const lastClean = body.lastIndexOf(CLEAN);
+        assert.ok(lastClean >= 0, 'installFromGit 必须清理临时目录（一处都不剩）');
+        assert.ok(
+          lastClean > splitAt,
+          'installFromGit 中途失败后**不得留下临时目录**（BUG-010：清理必须在 finally 里，任何一条抛出路径都不能漏；'
+            + '早退路径自带清理是允许的，但**最后一道**必须在 finally 内）'
+        );
+      }
     }
 
     // ② BUG-067：检查点文件名不得穿越目录
