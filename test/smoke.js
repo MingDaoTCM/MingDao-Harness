@@ -11737,6 +11737,18 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
     const cli4b = runCli133(['ledger', 'verify', id133, '--key', path.join(home133b, 'ledger-key.json')]);
     assert.equal(cli4b.status, 0, `④ 用签发方公钥验签应通过，实际 ${cli4b.status}：${cli4b.stdout}`);
     assert.ok(cli4b.stdout.includes('签名有效'), '④ 用签发方公钥验签必须报「签名有效」');
+    // ④d 第四态「无法验签」：把已签账本拿到**没有对应公钥**的环境里校验，必须报「无法校验」且非 0
+    //     ——"无法确认来源"不等于通过（否则把账本拷到别的机器上就绕过了来源检查）；
+    //     而它与"签名无效"必须分开说，否则用户会拿着"无效"去追一个并不存在的篡改。
+    for (const f of fs.readdirSync(path.join(home133, 'ledger'))) {
+      if (f.startsWith(id133)) fs.copyFileSync(path.join(home133, 'ledger', f), path.join(home133c, 'ledger', f));
+    }
+    const cli4d = runCli133(['ledger', 'verify', id133], home133c);
+    assert.notEqual(cli4d.status, 0, '④ 没有对应公钥时不得判通过（"无法确认来源"≠通过）');
+    assert.ok(cli4d.stdout.includes('无法校验'), `④ 必须报「无法校验」而不是含混的「签名无效」，实际：${cli4d.stdout}`);
+    // 用 --key 把签发方公钥交进来，同一份账本必须恢复为「签名有效」——这正是第三方复核的路径
+    const cli4e = runCli133(['ledger', 'verify', id133, '--key', path.join(home133b, 'ledger-key.json')], home133c);
+    assert.equal(cli4e.status, 0, `④ 用 --key 提供签发方公钥后应通过，实际 ${cli4e.status}：${cli4e.stdout}`);
     // ④c 只删封条（签名证据被剥离）不得退化成"无签名老账本"而放行
     rewriteAll(home133, id133, () => {}, { keyId: derivedKeyId, priv: privOf(keyFile133).priv });
     assert.equal(L133.verifyRun(id133).provenance, 'valid', '④ 前置：用本机密钥重签后应重新有效');
@@ -11764,7 +11776,7 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
     process.env.MINGDAO_HOME = prevHome133;
     for (const h of [home133, home133b, home133c]) safeRmSync(h, { recursive: true, force: true });
   }
-  ok('v0.6.11 账本来源签名：新账本签名有效 + 老账本如实报无签名仍退 0 + 改内容重算链/换密钥重签判无效退非 0 + 密钥 600 且不进 config.json');
+  ok('v0.6.11 账本来源签名：新账本签名有效 + 老账本如实报无签名仍退 0 + 改内容重算链/换密钥重签判无效退非 0 + 无公钥判「无法校验」+ 密钥 600 且不进 config.json');
 }
 
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket

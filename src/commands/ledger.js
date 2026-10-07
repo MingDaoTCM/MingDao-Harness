@@ -173,6 +173,13 @@ export async function handleLedger(cmd, args) {
         io.print(style('   （无签名只说明"这份账本没被签过"，不等于被篡改；要覆盖新账本请让签名密钥存在：mingdao ledger --sign-key --generate）', C.dim));
       }
       io.print(style('   说明：签名证明「写入方持有该密钥」，但私钥与账本同机同权限——不防能同时读写两者的本机对手。', C.dim));
+    } else if (v.provenance === 'unverifiable') {
+      // 第四态：**有签名但没公钥可验**（换机器复核、密钥被删/被换走）。它与"签名无效"是两件事——
+      // 混成一句会让用户拿着"无效"去追一个并不存在的篡改；但同样**不能退 0**：
+      // "无法确认来源"不等于通过，否则把账本拷到别的机器上就绕过了整条来源检查。
+      io.print(style(`⚠ ${runId} 链完整，但来源签名无法校验：${v.provenanceError ?? prov}`, C.yellow));
+      io.print(style(`   （哈希链与封条本身吻合：${v.total} 条事件未被改动、尾部未被截断；确认来源之前不得当作通过。）`, C.dim));
+      process.exitCode = 1;
     } else {
       // 第三态：**链完整但签名无效**（被篡改后重算过链，或换了一把密钥）。链是自洽的，
       // 但来源不可信——按合规口径这必须是失败（非 0），否则 CI/审计拿它当门禁就是假通过。
