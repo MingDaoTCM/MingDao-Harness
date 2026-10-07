@@ -6128,7 +6128,16 @@ if (process.platform !== 'win32') {
       '声明了对应能力就不该再报"未声明"：' + JSON.stringify(r2.warnings)
     );
     // 93d. P2-4 结构守卫：忙锁键必须在改名后迁移（端到端竞态窗口很短，难以稳定复现）
-    const srvSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+    //
+    // ⚠ M-8 §3.49（**加固后的文本绊线，不是行为证明**）：下面三条只看归一化后的源码文本。
+    //   · 它抓得到的回归：删掉迁移调用、把键换成别的（本轮实测 oldName → 红）、
+    //     把调用挪出 if (renamed) 块 / 挪到 240 字之外。
+    //   · 它**证明不了**的：这段代码是否真的会被执行（本轮实测：`if (false) claimSessionKey(...)`
+    //     照样绿）、迁移后新文件名是否真的被判「忙」（那要两个并发回合，窗口只有几十毫秒，
+    //     端到端不可稳定复现——这正是当初写成源码守卫的原因，如实登记）。
+    //   · 本轮只做**加固**：内容先做行尾归一化（CRLF 工作树上 `\n` 跨行匹配会整体失配 → 假红；
+    //     本仓已被 CRLF 打过两次，且同一块里插 300 字注释也会假红，本轮实测）。
+    const srvSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8').replace(/\r\n?/g, '\n');
     assert.ok(/const claimSessionKey\b/.test(srvSrc), '应有 claimSessionKey（占位迁移）');
     assert.ok(
       /if \(renamed\) \{[\s\S]{0,240}claimSessionKey\(session\.file\)/.test(srvSrc),
@@ -6930,7 +6939,13 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
       //（本用例又必须设 MINGDAO_NO_DAEMON=1 以免留下野守护进程，那会让"它自己退出了"与
       //  "被我们杀了"无法区分 → 行为断言必然假绿）。因此改为钉住该分支同时做了两件事：
       // 记录原因 + 杀掉子进程 + 返回 false。少任何一件，这个 P0 就可能被重新引进来。
-      const scSrc = fs.readFileSync(path.join(srcDir, 'schedule.js'), 'utf8');
+      //
+      // ⚠ M-8 §3.49（**加固后的文本绊线，不是行为证明**）：内容先做行尾归一化。
+      //   · 抓得到的：删掉 kill（本轮实测 → 红）、把 kill 换成别的写法（正则要求它就是 catch 里的下一条语句）。
+      //   · 抓不到的：kill 被包进永不执行的分支（本轮实测把 kill 包成 `if (false) { try {…} }` 时，
+      //     正则因相邻性被破坏而红，但 `spawned = false` 那条放进 `if (false)` 依然绿——
+      //     真正的"返回 false"由上面的行为断言接住，杀子进程这一半没有可观测出口，如实登记）。
+      const scSrc = fs.readFileSync(path.join(srcDir, 'schedule.js'), 'utf8').replace(/\r\n?/g, '\n');
       const iCatch = scSrc.indexOf('pidfileError = String(');
       assert.ok(iCatch > -1, 'spawnDaemon 必须有 pidfile 写失败分支');
       const branch = scSrc.slice(iCatch, iCatch + 500);
@@ -8569,15 +8584,98 @@ withFileLockSync(${JSON.stringify(lockPath)}, () => {
         cache.clear();
         const third = read({ path: 'a.txt' }, ctx);
         assert.ok(String(third.output).includes(marker), '清缓存后必须重新给出正文——否则模型在"正文已被压缩掉"的情况下只会拿到一句占位串');
-        // agent 必须暴露同一个开关，且自动压缩路径要调用它
-        const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
-        const compactIdx = agentSrc.indexOf('onCompact?.(messages)');
-        assert.ok(compactIdx > 0, 'agent.js 应有 onCompact 调用点');
-        assert.ok(
-          /agentReadCache\.clear\(\);[\s\S]{0,400}onCompact\?\.\(messages\)/.test(agentSrc),
-          '自动压缩成功路径必须先清读取缓存再回调 onCompact'
-        );
-        assert.ok(/clearReadCache:\s*\(\)\s*=>\s*agentReadCache\.clear\(\)/.test(agentSrc), 'agent 必须对外暴露 clearReadCache');
+        // agent 必须暴露同一个开关，且自动压缩路径要调用它。
+        // M-8 §3.49 **行为化**（原为 agent.js 上的跨行文本匹配
+        // /agentReadCache\.clear\(\);[\s\S]{0,400}onCompact\?\.\(messages\)/）：
+        // 现在跑一次**真的自动压缩**——先在 agent 自己的读取去重缓存里放好 a.txt，
+        // 让压缩在同一个 agent 里发生，再看"压缩之后同回合再读同一文件"拿到的是正文还是占位串。
+        // 顺序（先清缓存、再回调 onCompact）也改成可观测：回调发生时按那张表里还有没有这条记录判定。
+        {
+          let capturedCache = /** @type {Map<any, any> | null} */ (null);
+          let cacheSizeAtCallback = -1;
+          let callbackFired = false;
+          const origClear115 = Map.prototype.clear;
+          // 认出 agent 的读取去重缓存：**不靠变量名/排版**，只看"被清掉的那张表里存着含 a.txt 的键"
+          Map.prototype.clear = function (/** @type {any} */ ...a) {
+            if (!capturedCache && this instanceof Map && this.size > 0) {
+              for (const k of this.keys()) {
+                if (String(k).includes('a.txt')) {
+                  capturedCache = this;
+                  break;
+                }
+              }
+            }
+            return origClear115.apply(this, a);
+          };
+          try {
+            const dirM1b = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-m1b-'));
+            const seenReads = [];
+            let n115 = 0;
+            const provider115 = {
+              async chat(/** @type {any} */ opts) {
+                // 摘要请求（compact.js 的 summarizeConversation）不带 tools；主回合一定带
+                if (Array.isArray(opts.tools) && opts.tools.length === 0) {
+                  return { text: '{"summary":"早期上下文已压缩"}', usage: { prompt_tokens: 5, completion_tokens: 2 }, finish: 'stop' };
+                }
+                const toolMsgs = (opts.messages || []).filter((/** @type {any} */ m) => m.role === 'tool');
+                if (!toolMsgs.length) {
+                  n115 += 1;
+                  return {
+                    text: '',
+                    toolCalls: [{ id: 'r115_' + n115, type: 'function', function: { name: 'read', arguments: JSON.stringify({ path: 'a.txt' }) } }],
+                    usage: { prompt_tokens: 5, completion_tokens: 2 },
+                    finish: 'tool_calls',
+                  };
+                }
+                seenReads.push(String(toolMsgs[toolMsgs.length - 1].content || ''));
+                return { text: '看过了', toolCalls: null, usage: { prompt_tokens: 5, completion_tokens: 2 }, finish: 'stop' };
+              },
+            };
+            fs.writeFileSync(path.join(dirM1b, 'a.txt'), marker + '\n' + 'x'.repeat(50));
+            const agentM1 = createAgent({
+              provider: provider115,
+              permission: { async check() { return true; } },
+              io: createIO({ quiet: true }),
+              modelName: 'deepseek-v4-flash',
+              workingDir: dirM1b,
+              cfg: { permission: 'auto', autoCompact: true, contextBudget: 2000, maxRounds: 1, compactTrigger: 0.8 },
+              maxSteps: 3,
+              onCompact: () => {
+                callbackFired = true;
+                cacheSizeAtCallback = capturedCache ? capturedCache.size : -2;
+              },
+            });
+            await agentM1.runTurn([{ role: 'user', content: '读一下 a.txt' }]);
+            assert.ok(seenReads[0] && seenReads[0].includes(marker), '（前置）第一轮的 read 必须真的把正文读进来了');
+            // 第二轮：塞进远超预算的历史 → 触发自动压缩 → 压缩后**同回合**再读同一文件
+            const long115 = Array.from({ length: 10 }, (_, i) => [
+              { role: 'user', content: `历史${i}：` + '长'.repeat(600) },
+              { role: 'assistant', content: `好的${i}` },
+            ]).flat();
+            await agentM1.runTurn([{ role: 'user', content: '再读一下 a.txt' }, ...long115]);
+            assert.ok(callbackFired, '（前置）第二轮确实触发了自动压缩（否则下面的断言证明不了任何事）');
+            const lastRead = String(seenReads[seenReads.length - 1] || '');
+            assert.ok(
+              lastRead.includes(marker),
+              `自动压缩之后，同一个 agent 再读同一文件必须重新给出**正文**（压缩已把正文换成摘要，"看过"的记忆必须跟着失效）；实际拿到：${lastRead.slice(0, 120)}`
+            );
+            assert.ok(!/内容与上次读取一致/.test(lastRead), '压缩后不得再命中读取去重缓存（占位串等于告诉模型"内容还在上下文里"）');
+            assert.equal(
+              cacheSizeAtCallback,
+              0,
+              `onCompact 被调用时读取去重缓存必须**已经清空**（先清缓存、再回调；回调里若有读文件动作，拿到占位串就等于把"看过"当成了"还在上下文里"），实际：${
+                cacheSizeAtCallback === -2 ? '回调发生时那张缓存还没被清过（顺序反了或根本没清）' : `${cacheSizeAtCallback} 条`
+              }`
+            );
+            safeRmSync(dirM1b, { recursive: true, force: true });
+          } finally {
+            Map.prototype.clear = origClear115;
+          }
+        }
+        {
+          const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8').replace(/\r\n?/g, '\n');
+          assert.ok(/clearReadCache:\s*\(\)\s*=>\s*agentReadCache\.clear\(\)/.test(agentSrc), 'agent 必须对外暴露 clearReadCache');
+        }
       } finally {
         safeRmSync(dirM1, { recursive: true, force: true });
       }
@@ -9012,8 +9110,15 @@ process.stdout.write('done');`
     // ② P0-4 / M-13 / P1-5：这三处是长驻进程里的时序缺陷，全部落在**命令层/守护层**，
     //    单进程单测无法端到端触发（要真的杀掉 daemon、真的让写盘失败）。
     //    因此这里用**源码级守卫**钉住修复点，并在登记里如实说明它们的验证层级。
+    //
+    // ⚠ M-8 §3.49（**加固后的文本绊线，不是行为证明**）：本块所有源码断言先做**行尾归一化**
+    //   （CRLF 工作树上跨行 `\n` 匹配会整体失配 → 假红；本仓已被 CRLF 打过两次）。
+    //   它们抓得到：删掉 await/删掉 try-catch/把 sliceMs 默认值放大（本轮实测 → 红）。
+    //   它们**证明不了**：这段代码是否真的会被执行、这些分支在真实并发下是否真的成立
+    //   （本轮实测：把 lastSeen 的失败留痕删掉、把改密的 `delete devices[username]` 删掉，
+    //    本块**全绿**——前者要真让写盘失败、后者要有并发 pair 才能端到端观测，做不到就如实说）。
     {
-      const syncSrc = fs.readFileSync(path.join(srcDir, 'sync-server.js'), 'utf8');
+      const syncSrc = fs.readFileSync(path.join(srcDir, 'sync-server.js'), 'utf8').replace(/\r\n?/g, '\n');
       // P0-4：withWriteLock 是 async，任何一处"调用但不 await/return"都会让 rejected promise
       // 变成 unhandledRejection → 同步服务进程直接退出（所有在线设备一起掉线）
       const bare = [];
@@ -9025,14 +9130,16 @@ process.stdout.write('done');`
         bare.push(t.slice(0, 90));
       }
       assert.deepEqual(bare, [], `sync-server.js 里存在未 await 的 withWriteLock（P0-4 会让整个同步服务退出）：\n${bare.join('\n')}`);
-      assert.ok(/await withWriteLock\(\(\) => \{[\s\S]{0,200}lastSeen|try \{\r?\n\s+await withWriteLock/.test(syncSrc), 'lastSeen 的写锁必须被 await（并包 try/catch 留痕）');
+      assert.ok(
+        /await withWriteLock\(\(\) => \{[\s\S]{0,200}lastSeen|try \{\n\s+await withWriteLock/.test(syncSrc),
+        'lastSeen 的写锁必须被 await（并包 try/catch 留痕）'
+      );
       assert.ok(/await doChangePassword\(/.test(syncSrc), 'doChangePassword 改为持锁执行后，调用点必须 await');
       // 改密函数体里必须仍有 `return withWriteLock(`（互斥本身没变）；**不再限制距离**——
       // v0.6.5（BUG-064）把 ~18ms 的 scrypt 挪到了拿锁之前，函数体自然变长，按"前 400 字"匹配
       // 是在测"代码排版"而不是"是否互斥"。
-      // 注意用 \\r?\\n：Windows 的 actions/checkout 会把 LF 转成 CRLF，写死 \\n 会让这段匹配不到
-      // （本仓 §3.32 记过同款教训：在「文本」上断言，就要按各平台的文本形态写）
-      const dcpBody = (syncSrc.match(/async function doChangePassword[\s\S]*?\r?\n}\r?\n/) || [''])[0];
+      // 行尾已归一化（原先写 `\r?\n` 只是为了容忍 CRLF；归一化之后就不需要那种双形态写法了）。
+      const dcpBody = (syncSrc.match(/async function doChangePassword[\s\S]*?\n}\n/) || [''])[0];
       assert.ok(dcpBody.includes('return withWriteLock('), '改密（吊销全部设备）必须与设备表写互斥');
       assert.ok(/await verifyPassword\(/.test(dcpBody), '改密必须在锁外 await 校验旧密码（BUG-064：同步 scrypt 会阻塞事件循环）');
       assert.ok(!/scryptSync\(/.test(syncSrc), 'BUG-064：sync-server.js 不得再出现同步 scrypt');
@@ -9040,11 +9147,14 @@ process.stdout.write('done');`
       assert.ok(/const shares2 = readJson\(sharesFile\(\), \{\}\);/.test(syncSrc), 'doShareAccept 必须在锁内重读 shares');
       assert.ok(/if \(!shares2\[shareId\]\) return \{ notFound/.test(syncSrc), '锁内重读后发现分享已被并发撤销 → 必须拒绝，而不是把已删除的 shareId 写回');
 
-      const schedSrc = fs.readFileSync(path.join(srcDir, 'schedule.js'), 'utf8');
+      const schedSrc = fs.readFileSync(path.join(srcDir, 'schedule.js'), 'utf8').replace(/\r\n?/g, '\n');
       // M-13：避峰长等待必须切片并在每片复查租约
       assert.ok(/const waitGuarded = async/.test(schedSrc), 'M-13：避峰等待必须有带租约检查的切片等待器');
       // v0.6.6：切片长度改为参数（`sliceMs = 60000`）——every/once 的等待要更细的 3s 片，
       // 避峰等待仍用 60s 片。这里钉住"默认值有界且按参数截断"，比原来写死 60000 更强。
+      // ⚠ M-8 §3.49 文本绊线（不是行为证明）：抓得到"默认值被放大到 600s"（本轮实测 → 红）；
+      //   证明不了这些切片在真实接管场景下够细——那一半由 test/e2e-schedule.js 的
+      //   「接管延迟 ≤12s」行为断言接住（本节的 ok() 文案里已如实标注）。
       assert.ok(/const waitGuarded = async \([\s\S]{0,80}sliceMs = 60000\)/.test(schedSrc), 'M-13：切片等待器必须带长度参数，且默认单片不得超过 60s');
       assert.ok(/Math\.min\(left, sliceMs\)/.test(schedSrc), 'M-13：切片必须按 sliceMs 截断（默认 60s）');
       assert.ok(/if \(shouldStop\(\)\) return 'aborted';/.test(schedSrc), 'M-13：每片醒来都要复查租约');
@@ -9235,28 +9345,135 @@ process.stdout.write('done');`
       assert.ok(warns119.some((w) => w.includes('compactTrigger')), `越界值必须告警（静默失效正是本条缺陷的要害），实际：${JSON.stringify(warns119)}`);
     }
 
-    // ⑥ BUG-029 / BUG-030：这两条是重试循环里的时序细节，端到端要凑出"总量计时器恰好在退避期间触发"
-    //    才能复现，成本不划算；用源码级守卫钉住（并如实登记它们的验证层级）。
+    // ⑥ BUG-029（M-8 §3.49 **行为化**）：原写法在 providers/index.js 上跨行匹配
+    //    /for \(;;\) \{\r?\n\s+\/\/[^\n]*BUG-029[\s\S]{0,400}?if \(totalExpired\) \{/ ——
+    //    既依赖那句注释、又依赖 400 字距离：注释一改/排版一动就假红（本轮实测：复查之前插 420 字注释
+    //    → 红），而把复查改成"只告警不中断"（BUG-029 原样复发）它照样绿（本轮实测）。
+    //    现在改为**注入桩上游、数请求**：总量计时器在退避 sleep 期间到点后，循环头若不复查，
+    //    就会在"总时长已超"之后再发一次 attempt（多一次计费、且用户按了中断也可能再发）。
+    {
+      const stub029 = makeStub119();
+      stub029.queued.push('500', '500', 'ok', 'ok'); // 若真的多发一次，就会命中后面的 ok
+      const port029 = await listen119(stub029);
+      try {
+        const provider029 = await PROV119.createProvider(
+          {
+            provider: 'deepseek',
+            model: 'deepseek-v4-flash',
+            baseUrl: `http://127.0.0.1:${port029}/v1`,
+            apiKey: 'k',
+            timeout: { totalMs: 900, firstTokenMs: 5000, streamIdleMs: 5000 },
+          },
+          'deepseek-v4-flash'
+        );
+        let threw029 = null;
+        const t029 = Date.now();
+        try {
+          await provider029.chat({ model: 'deepseek-v4-flash', messages: [{ role: 'user', content: 'hi' }] });
+        } catch (/** @type {any} */ e) {
+          threw029 = String(e?.message || e);
+        }
+        const spent029 = Date.now() - t029;
+        assert.ok(threw029, '总量护栏到点必须抛错，而不是靠重试继续等');
+        assert.ok(
+          /总时长超限/.test(threw029),
+          `退避 sleep 期间总量到点时，错误必须是「总时长超限」而不是上游那条 500——后者说明循环头没复查、又发了一次请求。实际：${threw029}`
+        );
+        assert.equal(
+          stub029.hits.length,
+          1,
+          `退避期间总量到点后**不得**再发下一次 attempt（否则重试序列比声明的总时长久），实际请求 ${stub029.hits.length} 次`
+        );
+        assert.ok(spent029 >= 800, `前置：本场景确实等到了总量计时器触发（实际 ${spent029}ms）`);
+      } finally {
+        await close119(stub029);
+      }
+    }
+    // BUG-030 仍是"退避必须可被 Ctrl+C 打断"的时序细节，端到端要真按中断键才凑得出，
+    // 保留源码级守卫并**如实标注层级**（见登记 §3.49：这一条未行为化）。
     {
       const provSrc119 = fs.readFileSync(path.join(srcDir, 'providers', 'index.js'), 'utf8');
-      assert.ok(
-        /for \(;;\) \{\r?\n\s+\/\/[^\n]*BUG-029[\s\S]{0,400}?if \(totalExpired\) \{/.test(provSrc119),
-        'BUG-029：重试循环**头部**必须复查总量护栏（原实现只在 catch 里看，退避期间超时仍会再发一次）'
-      );
-      assert.ok(/await sleep\(backoff, opts\.signal\)/.test(provSrc119), 'BUG-030：退避等待必须接信号（否则 Ctrl+C 后最长干等 30s）');
+      // ⚠ 文本绊线（不是行为证明）：只证明"退避等待把 signal 递进去了"这句文本在，
+      //   证明不了 Ctrl+C 时真的会在 30s 内返回（那需要一次真按键的端到端）。
+      //   行尾先归一化：CRLF 工作树上写死 \n 的跨行匹配会整体失配 → 假红。
+      const provSrc119n = provSrc119.replace(/\r\n?/g, '\n');
+      assert.ok(/await sleep\(backoff, opts\.signal\)/.test(provSrc119n), 'BUG-030：退避等待必须接信号（否则 Ctrl+C 后最长干等 30s）');
     }
 
     // ⑦ BUG-024：账本计价与归属都必须用"本回合实际使用的模型"
     {
-      const agentSrc119 = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+      // M-8 §3.49 **行为化**（原为 agent.js 上的跨行文本匹配
+      // /turnLedger\.cost\(\{[\s\S]{0,200}?model: activeModel,/）：造一次**真实降级**
+      // （费用护栏 over-limit + action=downgrade），然后读账本 cost 事件里的 model。
+      // 原写法既抓不到"降级逻辑没了"（默认路径照样写 activeModel），也会被一个注释判成假红
+      // （本轮实测：`activeModel /* … */,` → 红；`model: activeModel` 放进死分支 → 绿）。
+      {
+        const home024 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-bug024-'));
+        const prevHome024 = process.env.MINGDAO_HOME;
+        process.env.MINGDAO_HOME = home024;
+        try {
+          saveConfig({
+            provider: 'deepseek',
+            model: 'deepseek-v4-pro',
+            permission: 'auto',
+            costGuard: { dailyLimitYuan: 0.001, action: 'downgrade', downgradeModel: 'deepseek-v4-flash' },
+          });
+          const { recordUsage: rec024 } = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
+          rec024('deepseek-v4-pro', { prompt_tokens: 1000000, completion_tokens: 100 }); // 今日费用远超上限 → 必降级
+          const calledModels024 = [];
+          const stub024 = {
+            async chat(/** @type {any} */ opts) {
+              calledModels024.push(opts.model);
+              return { text: '降级后继续完成', toolCalls: null, usage: { prompt_tokens: 5, completion_tokens: 3 }, finish: 'stop' };
+            },
+          };
+          const agent024 = createAgent({
+            provider: stub024,
+            permission: { async check() { return true; } },
+            io: createIO({ quiet: true }),
+            modelName: 'deepseek-v4-pro',
+            workingDir: home024,
+            cfg: { permission: 'auto', costGuard: { dailyLimitYuan: 0.001, action: 'downgrade' } },
+          });
+          const r024 = await agent024.runTurn([{ role: 'user', content: '你好' }]);
+          assert.deepEqual(calledModels024, ['deepseek-v4-flash'], `（前置）确实发生了降级：请求发给的是 flash，实际 ${JSON.stringify(calledModels024)}`);
+          assert.equal(r024.perf?.usedModel, 'deepseek-v4-flash', '（前置）返回值归属降级后的模型');
+          const { readRun: readRun024 } = await import(pathToFileURL(path.join(srcDir, 'ledger.js')).href);
+          const dir024 = path.join(home024, 'ledger');
+          const newest024 = fs
+            .readdirSync(dir024)
+            .filter((n) => n.endsWith('.jsonl'))
+            .map((n) => ({ n, t: fs.statSync(path.join(dir024, n)).mtimeMs }))
+            .sort((a, b) => b.t - a.t)[0];
+          assert.ok(newest024, '（前置）本回合应写下一份账本');
+          const ev024 = readRun024(newest024.n.replace(/\.jsonl$/, ''));
+          const cost024 = ev024.find((/** @type {any} */ e) => e.type === 'cost');
+          const start024 = ev024.find((/** @type {any} */ e) => e.type === 'run.start');
+          assert.ok(cost024, '账本必须有 cost 事件');
+          assert.equal(start024?.model, 'deepseek-v4-pro', '（前置）run.start 记的是"用户请求的模型"（两者必须分得开，否则这条断言证明不了归属）');
+          assert.equal(
+            cost024.model,
+            'deepseek-v4-flash',
+            `账本 cost 事件的 model 必须是**本回合实际使用**的模型（降级后是 flash）；写成用户配置的 pro 会让"花了钱的那次调用"归属到一个没被调用的模型，实际 ${cost024.model}`
+          );
+        } finally {
+          if (prevHome024 === undefined) delete process.env.MINGDAO_HOME;
+          else process.env.MINGDAO_HOME = prevHome024;
+          safeRmSync(home024, { recursive: true, force: true });
+        }
+      }
+      // 计价那一行仍是源码级守卫（**如实标注**：这是文本绊线，不是行为证明）。
       // 必须连同**账本那一行特有**的参数一起匹配：只匹配 `estimateCost(activeModel, usage.prompt_tokens`
       // 会被同文件里 `inFlightCost()` 的同形调用命中，于是变异（把这行改回 modelName）照样"通过"
       // ——变异验证当场指出这条断言是假绿。
-      assert.ok(
-        /estimateCost\(activeModel, usage\.prompt_tokens, usage\.completion_tokens, cacheSplit\(usage\), costDate\)/.test(agentSrc119),
-        '账本计价必须用 activeModel（降级后 modelName 与实际调用不是同一个模型）'
-      );
-      assert.ok(/turnLedger\.cost\(\{[\s\S]{0,200}?model: activeModel,/.test(agentSrc119), '账本 cost 事件的 model 也必须是 activeModel');
+      // 它证明不了：这行是否真的会被执行（例如被挪进死分支）。归属那一半已由上面的账本行为断言接住。
+      {
+        const agentSrc119 = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8').replace(/\r\n?/g, '\n');
+        assert.ok(
+          /estimateCost\(activeModel, usage\.prompt_tokens, usage\.completion_tokens, cacheSplit\(usage\), costDate\)/.test(agentSrc119),
+          '账本计价必须用 activeModel（降级后 modelName 与实际调用不是同一个模型）'
+        );
+      }
     }
   } finally {
     /* 所有 stub 已在各自 finally 关闭 */
@@ -9308,10 +9525,68 @@ process.stdout.write('done');`
       assert.ok(rBad && (rBad.error || rBad.name), '前置：这次调用应失败或成功（仅用于清理验证）');
       const after2 = leftovers120().filter((f) => !before2.includes(f));
       assert.deepEqual(after2, [], `任何失败路径都不得留下临时目录，实际：${after2.join(', ')}`);
-      // 源码级：两个安装器的清理都必须在 finally 里
-      const libSrc120 = fs.readFileSync(path.join(srcDir, 'skill-lib.js'), 'utf8');
-      const finallyCleanups = (libSrc120.match(/finally \{\r?\n\s+try \{\r?\n\s+fs\.rmSync\(tmp/g) || []).length;
-      assert.equal(finallyCleanups, 2, `installFromUrl 与 installFromGit 都必须用 finally 清理临时目录，实际 ${finallyCleanups} 处`);
+      // BUG-010 的第二半（M-8 §3.49 **行为化**）：原为 skill-lib.js 上的跨行文本匹配
+      // （数 `/finally \{\r?\n\s+try \{\r?\n\s+fs\.rmSync\(tmp/g` 出现 2 次）。
+      // 那条既会被"finally 里加一行注释"判成假红（本轮实测），也抓不到"tmp 换成别的路径"这类
+      // 真实回归。现在改成给 **installFromGit** 也造一条"中途必抛"的路径，端到端看临时目录有没有残留。
+      // 桩 git 只能替换 PATH（POSIX），Windows 腿跳过并如实登记（能力探测，与 §116 的软链同款）。
+      {
+        const gitStubDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-gitstub-'));
+        const gitRepoDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-gitrepo-'));
+        fs.mkdirSync(path.join(gitRepoDir, 'skillA'), { recursive: true });
+        fs.writeFileSync(path.join(gitRepoDir, 'skillA', 'SKILL.md'), '---\nname: probe120git\ndescription: 批九探针\n---\n\n# 探针\n内容');
+        const stubGit = path.join(gitStubDir, 'git');
+        fs.writeFileSync(
+          stubGit,
+          [
+            '#!/bin/sh',
+            'if [ "$1" = "--version" ]; then echo "git version 2.43.0"; exit 0; fi',
+            'if [ "$1" = "clone" ]; then',
+            '  last=""',
+            '  for a in "$@"; do last="$a"; done',
+            `  cp -R ${JSON.stringify(gitRepoDir)}/. "$last" 2>/dev/null`,
+            '  exit $?',
+            'fi',
+            'exit 0',
+            '',
+          ].join('\n'),
+          { mode: 0o755 }
+        );
+        const prevPath120 = process.env.PATH;
+        try {
+          process.env.PATH = gitStubDir + path.delimiter + prevPath120;
+          const probeGit = spawnSync('git', ['--version'], { encoding: 'utf8' });
+          const stubWorks = String(probeGit.stdout || '').includes('2.43.0');
+          if (!stubWorks) {
+            // Windows（桩 .sh 不会被 CreateProcess 选中）与没有 sh 的环境：如实跳过，不假装测过
+            skipNote('installFromGit 的 finally 临时目录清理（桩 git 需要 POSIX 的 PATH 替换）');
+          } else {
+            const blkGit = path.join(home120, 'not-a-dir-git');
+            fs.writeFileSync(blkGit, 'x');
+            const beforeGit = leftovers120();
+            process.env.MINGDAO_HOME = path.join(blkGit, 'sub'); // ensureHome() 必失败 → 落在 finally 那一段
+            const rGit = await LIB120.installFromGit('https://example.invalid/probe120.git').catch((/** @type {any} */ e) => ({
+              error: String(e?.message || e),
+            }));
+            process.env.MINGDAO_HOME = home120;
+            assert.ok(rGit && (rGit.error || rGit.names), `（前置）这次 git 安装应当失败或成功而非挂死，实际 ${JSON.stringify(rGit).slice(0, 160)}`);
+            const afterGit = leftovers120().filter((f) => !beforeGit.includes(f));
+            assert.deepEqual(
+              afterGit,
+              [],
+              `installFromGit 中途失败后**不得留下临时目录**（BUG-010：清理必须在 finally 里，任何一条抛出路径都不能漏）实际：${afterGit.join(', ')}`
+            );
+          }
+        } finally {
+          if (prevPath120 === undefined) delete process.env.PATH;
+          else process.env.PATH = prevPath120;
+          safeRmSync(gitStubDir, { recursive: true, force: true });
+          safeRmSync(gitRepoDir, { recursive: true, force: true });
+        }
+      }
+      // ⚠ 文本绊线（不是行为证明）：这一条只证明 readSkillMeta 的返回值判空那句文本还在，
+      //   证明不了它在所有调用点都被用上。行尾先归一化（CRLF 工作树上跨行匹配会失配 → 假红）。
+      const libSrc120 = fs.readFileSync(path.join(srcDir, 'skill-lib.js'), 'utf8').replace(/\r\n?/g, '\n');
       assert.ok(/if \(!meta \|\| !meta\.name\) return \{ error: '技能缺少可解析的 frontmatter\.name/.test(libSrc120), 'readSkillMeta 返回 null 时不得再去读 meta.name（那会抛 TypeError 并留下临时目录）');
     }
 
@@ -9367,7 +9642,10 @@ process.stdout.write('done');`
   ok('v0.6.3 批九 上游能力与文档：安装器临时目录 finally 清理 + 检查点路径穿越设防 + 令牌不进 argv + 文档跟上实现');
 }
 
-safeRmSync(tmp, { recursive: true, force: true });
+// v0.6.11（M-8 §3.49，附带修复）：这一行在**整份 smoke** 里位于所有节之外，靠模块级的 `tmp` 取目录；
+// 而 `extractSection()` 只抽单节 → 抽取出来的脚本里 `tmp` 未声明 → ReferenceError 让 §120 根本跑不完
+// （变异验证无法单独跑这一节）。加一层存在性判断：整份运行的行为不变，抽取运行时跳过。
+if (typeof tmp !== 'undefined') safeRmSync(tmp, { recursive: true, force: true });
 // ---------- 121. v0.6.5 批十：中级缺陷收口（审计 BUG-023/025/026/027/037/038/041/043/044/046/047/048） ----------
 {
   // 121a. BUG-026：动态模型名单必须按**服务商**校验（此前遍历所有服务商缓存 → 校验面跨家泄漏）
@@ -10424,18 +10702,50 @@ safeRmSync(tmp, { recursive: true, force: true });
 // ---------- 125. v0.6.6：Windows 测试门禁的守卫（平台相关部分只能做源码级） ----------
 // 第三方评估 v0.6.5 报告 §4.3：run-all（`npm test` / `npm run coverage` 的入口）在 Windows 上
 // spawn('.cmd') 无 shell → **同步**抛 EINVAL → 汇总器崩溃 → bench 的 214 条断言从不执行。
-// 这个失败模式只在 Windows 出现（POSIX 上 spawn 一个不存在的 .cmd 是异步 ENOENT），
-// 本机无法行为级复现，故按本仓既有做法（§122l）做**源码级**守卫，如实标注层级。
+// v0.6.11（M-8 §3.49）："同步抛错"这一半**已行为化**——平台行为造不出来，但"spawn 同步抛错"
+// 本身可以用 `--import` 预载脚本注入（把 child_process.spawn 换成必抛的实现），
+// 于是判据从"源码里有 try/catch"升级成"同步抛错时汇总器不崩、照样出汇总表、退出码非 0"
+// （原跨行文本匹配 /catch[\s\S]{0,300}进程启动失败/ 实测抓不到"catch 里重新抛出"这个真实回归）。
 {
   const runAll125 = fs.readFileSync(path.join(srcDir, '..', 'test', 'run-all.mjs'), 'utf8');
   assert.ok(
     /shell:\s*process\.platform === 'win32'/.test(runAll125),
     'run-all 必须给 Windows 的 spawn 开 shell：Node ≥18.20/20.12 起 spawn .cmd/.bat 无 shell 会**同步**抛 EINVAL'
   );
-  assert.ok(
-    /try\s*\{\s*child\s*=\s*spawn\(/.test(runAll125) && /catch[\s\S]{0,300}进程启动失败/.test(runAll125),
-    'spawn 必须包在 try/catch 里：同步抛错时 ChildProcess 根本没被创建，on(error) 收不到，汇总器会整体崩溃（bench 门禁静默空转）'
-  );
+  {
+    const tmp125 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p125-'));
+    try {
+      const preload125 = path.join(tmp125, 'spawn-throw125.mjs');
+      fs.writeFileSync(
+        preload125,
+        [
+          "import { createRequire } from 'node:module';",
+          "const cp = createRequire(import.meta.url)('node:child_process');",
+          'const orig = cp.spawn;',
+          'cp.spawn = function (...a) {',
+          "  if (String(a[0]).includes('npm')) { const e = new Error('注入：spawn 同步抛错（等价 Windows 上 .cmd 无 shell 的 EINVAL）'); e.code = 'EINVAL'; throw e; }",
+          '  return orig.apply(this, a);',
+          '};',
+        ].join('\n')
+      );
+      const r125 = spawnSync(process.execPath, ['--import', pathToFileURL(preload125).href, path.join('test', 'run-all.mjs'), '--suite=bench'], {
+        cwd: path.join(srcDir, '..'),
+        encoding: 'utf8',
+      });
+      const out125 = String(r125.stdout || '') + String(r125.stderr || '');
+      assert.ok(
+        /进程启动失败/.test(out125),
+        `spawn 同步抛错必须被如实报告成"该套件失败"，而不是整个汇总器炸掉。实际输出尾部：${out125.slice(-300)}`
+      );
+      assert.ok(
+        /测试汇总/.test(out125),
+        `同步抛错**不得**让汇总器崩溃（否则前面套件的失败详情与最终汇总表一起丢失、bench 静默空转）。实际输出尾部：${out125.slice(-300)}`
+      );
+      assert.equal(r125.status, 1, `同步抛错应记为 1 套失败并以非零码退出，实际 status=${r125.status}`);
+    } finally {
+      safeRmSync(tmp125, { recursive: true, force: true });
+    }
+  }
   // 反向自检：软链用例必须统一走能力探测（makeRealSymlink），smoke.js 里**不得**再直接调 fs.symlinkSync——
   // 否则"建不出真链却不抛错"的环境（评估 §4.1）又会把断言测成"读/写一个普通文件"。
   const rawSymlinks125 = (fs.readFileSync(path.join(srcDir, '..', 'test', 'smoke.js'), 'utf8').match(/fs\.symlinkSync\(/g) || []).length;
@@ -10450,7 +10760,7 @@ safeRmSync(tmp, { recursive: true, force: true });
     !/await wait\(Math\.min\(Math\.max\(\(cur\.nextRunAt \|\| now\) - now, 1000\), 60000\)\)/.test(schedule125),
     '不得回退成"一整段最长 60s 且期间不查租约"的等待'
   );
-  ok('v0.6.6 Windows 测试门禁守卫（源码级）：run-all 开 shell + spawn try/catch + 软链用例统一走能力探测 + 调度等待切片化');
+  ok('v0.6.6 Windows 测试门禁守卫：run-all 开 shell（源码级）+ spawn 同步抛错不崩汇总器且退非 0（行为级）+ 软链用例统一走能力探测 + 调度等待切片化');
 }
 
 // ---------- 126. v0.6.7 批十二：出网单一口径（SSRF 判定/钉扎 + 闸门覆盖 + Request 语义 + 跨源头白名单） ----------
@@ -11203,21 +11513,46 @@ safeRmSync(tmp, { recursive: true, force: true });
     }
 
     // ⑩ 结构守卫（源码级）：锁内不得有进程调用；share-accept 的文件写必须在锁内且原子
+    //
+    // ⚠ M-8 §3.49（**加固后的文本绊线，不是行为证明**）：函数体改用**花括号配平的结构化提取**
+    //   （`bodyOf`），不再用 `export function X[\s\S]*?\r?\n}\r?\n` 这种"排版式"正则：
+    //   · 假红：把 `export function removeSchedule` 改成 `export async function removeSchedule`
+    //     （行为完全不变）原来会让前置断言当场炸（本轮实测 → 红）；结构化提取不受影响。
+    //   · 盲区（原来更严重）：非贪婪正则在函数体内**任何**列 0 的 `}` 处截断 → 后半段永久不被检查；
+    //     现在是整段花括号配平区间，检查面只增不减。
+    //   · 它证明不了的：这些函数在真实并发下是否真的不持锁做进程调用（那要复现 5s 锁超时）；
+    //     本轮实测 `stopJobProcesses` 改名成别的函数（原函数名消失）时本块仍绿——
+    //     这里只钉"名字在、调用点不在锁内"，不钉"它真的会杀进程"。
     {
       // 先归一化行尾：CI 的 Windows 腿会把 LF 转成 CRLF，任何跨行正则都会因此失配
     // （本仓已多次吃过这个亏；v0.6.7 的 Windows 腿就是这么红的）
     const strip = (/** @type {string} */ t) => t.replace(/\r\n/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+      // 按花括号配平取函数体（内容已 strip 掉注释；字符串里出现花括号的几率在本仓这些函数里为 0）
+      const bodyOf = (/** @type {string} */ text, /** @type {string} */ name) => {
+        const at = text.search(new RegExp(`(^|\\n)[^\\n]*\\bfunction\\s+${name}\\s*\\(`));
+        if (at < 0) return '';
+        const open = text.indexOf('{', at);
+        if (open < 0) return '';
+        let depth = 0;
+        for (let i = open; i < text.length; i++) {
+          if (text[i] === '{') depth += 1;
+          else if (text[i] === '}') {
+            depth -= 1;
+            if (depth === 0) return text.slice(open, i + 1);
+          }
+        }
+        return '';
+      };
       const sched = strip(fs.readFileSync(path.join(srcDir, 'schedule.js'), 'utf8'));
       assert.ok(/function stopJobProcesses/.test(sched), 'schedule 的进程操作必须收在锁外调用的小函数里');
       for (const fn of ['removeSchedule', 'pauseSchedule']) {
-        // ⚠ Windows 的 actions/checkout 会把 LF 转成 CRLF —— 写死 `\n}\n` 在那边匹配不到
-        // （本仓已多次吃过这个亏；v0.6.7 的 Windows 腿就是这么红的：前置断言先炸）。
-        const body = (sched.match(new RegExp(`export function ${fn}[\\s\\S]*?\\r?\\n}\\r?\\n`)) || [''])[0];
+        const body = bodyOf(sched, fn);
         assert.ok(body.length > 0, `（前置）应能定位 ${fn} 的函数体`);
         assert.ok(!/pidOwnedBy\(|killTask\(/.test(body), `${fn} 的锁内不得再直接做进程调用（M-6）`);
       }
       const syn = strip(fs.readFileSync(path.join(srcDir, 'sync-server.js'), 'utf8'));
-      const acc = (syn.match(/function doShareAccept[\s\S]*?\r?\n}\r?\n/) || [''])[0];
+      const acc = bodyOf(syn, 'doShareAccept');
+      assert.ok(acc.length > 0, '（前置）应能定位 doShareAccept 的函数体');
       assert.ok(/atomicWriteFileSync\(target/.test(acc), 'share-accept 就地刷新必须用原子写');
       assert.ok(/atomicWriteFileSync\(path\.join/.test(acc), 'share-accept 的冲突副本也必须用原子写（此前是裸 writeFileSync）');
       const replSrc = strip(fs.readFileSync(path.join(srcDir, 'commands', 'repl.js'), 'utf8'));
@@ -11312,17 +11647,68 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
 
     // ③ K-5/K-6：覆盖率门禁**不得假绿**（路径映射 + 分母 = 全部 src 文件 + 分母为 0 即失败）
     {
-      const cov = fs.readFileSync(path.join(repoRoot, 'scripts', 'coverage-report.mjs'), 'utf8');
+      // ⚠ 顺序要紧（M-8 §3.49）：**先跑原有的文本断言，再跑新的行为断言**。
+      //   理由：行为断言会真的去执行脚本（更靠后、更贵），而既有变异批（batch15 ⑤⑦）的
+      //   `expect` 关键词就挂在文本断言上——先跑文本，坏法才会由"它原本对应的那条"报出来。
+      const cov = fs.readFileSync(path.join(repoRoot, 'scripts', 'coverage-report.mjs'), 'utf8').replace(/\r\n?/g, '\n');
       assert.ok(/fileURLToPath\(url\)/.test(cov), 'K-5：V8 数据的 file:// URL 必须用 fileURLToPath 映射（replace 在 Windows 上必然失败）');
       assert.ok(!/url\.replace\('file:\/\/', ''\)/.test(cov), 'K-5：不得再用 replace 解 URL');
       assert.ok(/allSrc/.test(cov) && /readdirSync/.test(cov), 'K-6：分母必须遍历全部 src 文件，而不是只统计"加载过的"');
       assert.ok(/\}\)\(path\.join\(root, 'src'\)\);/.test(cov), 'K-6：分母必须真的从 src/ 根开始遍历');
-      assert.ok(/totalLines === 0[\s\S]{0,200}process\.exit\(1\)/.test(cov), 'K-6：分母为 0 必须失败（不能打印 0% 假装是质量结论）');
       // K-7：棘轮不得走 npx（会把"工具缺失"算成 0 错误）
-      const ratchet = fs.readFileSync(path.join(repoRoot, 'scripts', 'strict-ratchet.mjs'), 'utf8');
+      const ratchet = fs.readFileSync(path.join(repoRoot, 'scripts', 'strict-ratchet.mjs'), 'utf8').replace(/\r\n?/g, '\n');
       assert.ok(!/execSync\('npx tsc/.test(ratchet), 'K-7：棘轮不得再调用 npx tsc');
       assert.ok(/typescript', 'bin', 'tsc'|typescript\/bin\/tsc/.test(ratchet), 'K-7：棘轮必须用仓库内的 typescript 编译器入口');
-      assert.ok(/找不到[\s\S]{0,120}process\.exit\(1\)|process\.exit\(1\)[\s\S]{0,120}找不到/.test(ratchet), 'K-7：编译器缺失必须显式失败');
+      // M-8 §3.49 **行为化**（原为跨行匹配「totalLines === 0 … process.exit(1)」）：
+      // 那条连"在 process.exit(1) 前插 12 个字符"都会假红（距离被撑过 200，本轮实测），
+      // 而把 exit 换成 `if (false) process.exit(1)` 又照样绿。现在把脚本原样复制到一个
+      // **分母为 0 的临时仓库根**下真跑一次：数据/工具不可用时必须失败，而不是打印 0% 当质量结论。
+      {
+        const covRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-covroot-'));
+        try {
+          fs.mkdirSync(path.join(covRoot, 'scripts'), { recursive: true });
+          fs.mkdirSync(path.join(covRoot, 'src'), { recursive: true }); // 一个 src 文件都没有 → 分母 0
+          fs.mkdirSync(path.join(covRoot, '.coverage'), { recursive: true });
+          fs.writeFileSync(path.join(covRoot, '.coverage', 'empty.json'), JSON.stringify({ result: [] }));
+          fs.copyFileSync(path.join(repoRoot, 'scripts', 'coverage-report.mjs'), path.join(covRoot, 'scripts', 'coverage-report.mjs'));
+          const rc = spawnSync(process.execPath, [path.join(covRoot, 'scripts', 'coverage-report.mjs')], { encoding: 'utf8' });
+          const outCov = String(rc.stdout || '') + String(rc.stderr || '');
+          assert.equal(rc.status, 1, `分母为 0（src 下一个文件都没有）必须退 1，实际 status=${rc.status}；输出：${outCov.slice(0, 200)}`);
+          assert.ok(
+            /未采集到任何可统计的 src 文件/.test(outCov),
+            `K-6：分母为 0 必须失败（不能打印 0% 假装是质量结论）——必须明确说"没采到可统计的数据"，实际：${outCov.slice(0, 200)}`
+          );
+          // 只判退出码是不够的：分母为 0 时后面那条「覆盖率低于阈值」也会退 1，
+          // 于是"跳过这条分支"照样能过（**变异第一版就是这么逃逸的**）。必须同时要求
+          // **没有**打印出那份 0% 覆盖率报告。
+          assert.ok(
+            !/行覆盖率（分母/.test(outCov),
+            `分母为 0 时不得打印"0%（0/0 行）"这种质量结论（那正是 K-6 要防的假绿），实际：${outCov.slice(0, 200)}`
+          );
+        } finally {
+          safeRmSync(covRoot, { recursive: true, force: true });
+        }
+      }
+      // M-8 §3.49 **行为化**（原为跨行匹配「找不到 … process.exit(1)」）：把判据短接成
+      // `if (!existsSync(tscJs) && false)`（工具缺失时照样报"未恶化"退出 0）旧写法照样绿（本轮实测）。
+      // 现在把脚本+基线复制到**没有 node_modules** 的临时仓库根下真跑一次：必须显式失败。
+      {
+        const ratRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ratroot-'));
+        try {
+          fs.mkdirSync(path.join(ratRoot, 'scripts'), { recursive: true });
+          fs.copyFileSync(path.join(repoRoot, 'scripts', 'strict-ratchet.mjs'), path.join(ratRoot, 'scripts', 'strict-ratchet.mjs'));
+          fs.copyFileSync(path.join(repoRoot, 'scripts', 'strict-baseline.json'), path.join(ratRoot, 'scripts', 'strict-baseline.json'));
+          const rr = spawnSync(process.execPath, [path.join(ratRoot, 'scripts', 'strict-ratchet.mjs')], { encoding: 'utf8' });
+          const outRat = String(rr.stdout || '') + String(rr.stderr || '');
+          assert.equal(rr.status, 1, `typescript 缺失必须显式失败（绝不能算出 0 条错误并报"未恶化"），实际 status=${rr.status}；输出：${outRat.slice(0, 200)}`);
+          assert.ok(
+            /找不到 node_modules\/typescript\/bin\/tsc/.test(outRat),
+            `失败原因必须点明是"工具缺失"，而不是让人以为真的 0 错误，实际：${outRat.slice(0, 200)}`
+          );
+        } finally {
+          safeRmSync(ratRoot, { recursive: true, force: true });
+        }
+      }
     }
 
     // ④ M-6：变异脚本的切片必须**停在本节末尾**（否则生成的脚本可能一条断言都没有 → 变异验证变假绿）

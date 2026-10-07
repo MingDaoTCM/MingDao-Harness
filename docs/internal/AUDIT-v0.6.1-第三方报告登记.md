@@ -1746,6 +1746,87 @@ sha512），被测对象是**真实的 `desktop/main.js`**；feed 地址取自 `
 - **结构守卫是"绊线"不是"证明"**：它按特征表达式逐族拦截已知的抄回写法，理论上仍有绕过空间
   （例如换变量名 + 用 `Array.prototype.includes` 代替 `Set.has` 再改名）；本节的把握来自
   **14 条变异全部命中**，而不是"守卫穷尽了所有写法"。更大的拆分（`runTurn` 主循环本身）仍在排期。
+
+## 3.49 已修复（v0.6.11 开发线：M-8 收口第一批——**多行源码文本匹配**）
+
+**来源**：M-8「约 189 个断言检查源码文本而非行为；无害重排即红，真实回归若落在匹配文本内则绿」。
+本批**只啃最脆的一类**：读 `src/**` 源码字符串 + **跨行**正则（`\n` / `\r?\n` / `[\s\S]{0,n}` 桥接）。
+M-8 更大范围（**单行**源码文本守卫、结构扫描白名单等）**不在本批**，未收口也不在本批计数内。
+
+### 一、目标集合（自己核实）
+
+- `grep -c readFileSync test/smoke.js` = **187**（与 M-8 的"约 189"同量级）。
+- 逐个扫描后（含**动态** `new RegExp(...)` 与 `.match()` 提取函数体的写法），**跨行**匹配共 **16 处**；
+  另有 1 处行级守卫（`/spawned = false/`）作用在同一个失败分支的多行切片上，一并处理。
+- 本批收口 **15 处**（14 处跨行匹配 + 上述 1 处行级守卫）；**剩余 2 处**未收口（见 §五）。
+
+### 二、先复现（"改坏源码 → 看守卫红不红"，27 条探针，全部还原）
+
+| 探针类型 | 实例（§节 / 改法） | 旧守卫 |
+| --- | --- | --- |
+| 真实回归 → 红（守卫有效） | §93 `claimSessionKey(session.file)`→`(oldName)`；§103 删 `child.kill('SIGKILL')`；§118 去掉改密 `withWriteLock`；§118 `sliceMs=60000`→`600000`；§119 删循环头部总量复查；§119 `model: activeModel`→`modelName`；§128 两处原子写→裸写 | red ×7 |
+| **无害重排 → 红（假红，M-8 实证）** | §93 `if (renamed) {` 内插 300 字注释；§103 `pidfileError=…` 与 `try {` 之间插一行注释；§115 clear 与 `onCompact` 之间插 500 字注释；§118 `try {` 与 `await withWriteLock` 之间插注释；§119 复查之前插 420 字注释；§119 `activeModel` 后加注释；§120 `finally {` 内插一行注释；§128 `export function removeSchedule`→`export async function`（行为不变）；§129 coverage 的 `process.exit(1)` 前多 12 个字符 | **红 ×9** |
+| **真实回归却绿（M-8 实证）** | §93 调用挪进 `if (false)`；§115 `clear` 挪进 `if (false)`；§118 删 lastSeen 写失败留痕；§118 删改密的 `delete devices[username]`（**改密不再吊销任何设备**）；§119 头部复查改成"只告警不中断"（BUG-029 原样复发）；§125 `catch` 保留日志但 `throw err`（汇总器照样崩）；§128 `stopJobProcesses` 改名（进程操作小函数成死代码）；§129 棘轮 `existsSync(tscJs) && false`（工具缺失照样"未恶化"） | **绿 ×8** |
+
+### 三、逐处：原守卫 → 它防什么 → 新做法 → 变异条号
+
+| # | 位置（改前） | 原守卫防什么回归 | 新做法 | 变异 |
+| --- | --- | --- | --- | --- |
+| 1 | §93 `test/smoke.js`（读 `src/web/server.js`）`/if \(renamed\) \{[\s\S]{0,240}claimSessionKey\(session\.file\)/` | 会话自动标题改名后**忙锁键不迁移** → 用新文件名发起的回合不被判「忙」，同一会话文件被两个回合并发追加（交错/丢一轮） | **加固**：内容先做行尾归一化；显式标注"文本绊线，不是行为证明"（写清它抓得到什么、证明不了什么）。端到端竞态窗口只有几十毫秒，无法稳定行为化 | ① |
+| 2 | §103（读 `src/schedule.js`）`/pidfileError = String\([\s\S]{0,80}?\);\s*try \{\s*child\.kill\('SIGKILL'\);\s*\} catch \{\}/` | pidfile 写失败后**不撤回**刚拉起的 daemon → 留下无人跟踪的第二个守护进程，同一批定时任务并发执行两次 | **加固**：行尾归一化 + 绊线标注。detached 子进程拿不到 pid、也不能让它长期存活，没有可观测出口 | ② |
+| 3 | §103 同一分支的 `/spawned = false/` | pidfile 写失败却**仍报成功**（调用方以为 daemon 起来了） | **加固**：行尾归一化 + 绊线标注；并写明同一处的**行为断言**（`spawnDaemon(...) === false`）才是主判据，文本只是第二道 | ③ |
+| 4 | §115（读 `src/agent.js`）`/agentReadCache\.clear\(\);[\s\S]{0,400}onCompact\?\.\(messages\)/` | 压缩把文件正文换成摘要后**读取去重缓存不失效** → 模型再读同一文件只拿到「内容与上次读取一致」占位串，凭残缺信息继续改文件 | **行为化**：真跑一次自动压缩——先让 agent 读过 `a.txt`，再塞远超预算的历史触发压缩，压缩后**同回合**再读必须拿到正文（且不得命中占位串）；顺序另判：`onCompact` 被调用时那张缓存必须已清空（回调里读文件不能拿到占位串）。缓存靠"表里存着含 `a.txt` 的键"识别，不靠变量名/排版 | ④、④b |
+| 5 | §118（读 `src/sync-server.js`）`/await withWriteLock\(\(\) => \{[\s\S]{0,200}lastSeen\|try \{\r?\n\s+await withWriteLock/` | `withWriteLock` 是 async，**未 await** → unhandledRejection → 整个同步服务进程退出（所有在线设备一起掉线）；且写失败必须留痕而不是崩 | **加固**：行尾归一化（归一化后 `\r?\n` 双形态写法收敛为 `\n`）+ 同块统一的绊线说明。真让 lastSeen 写盘失败要 root/只读盘，端到端不可控 | ⑤ |
+| 6 | §118 提取 `/async function doChangePassword[\s\S]*?\r?\n}\r?\n/` 后断言互斥/锁外校验 | 改密（吊销全部设备 token）与设备表写**不互斥** → 并发的 pair 能把已吊销的旧 token 写回；scrypt 挪进锁内 → 阻塞事件循环 | **加固**：行尾归一化 + 绊线标注（如实写明"证明不了这段代码会被执行"）。互斥本身的端到端复现要精确制造并发 pair 竞态 | ⑥ |
+| 7 | §118（读 `src/schedule.js`）`/const waitGuarded = async \([\s\S]{0,80}sliceMs = 60000\)/` | 切片等待器默认片长被放大 → 避峰等待退回"一整段 sleep"，接管延迟被拉长到小时级 | **加固**：行尾归一化 + 绊线标注，并指明行为面由 `test/e2e-schedule.js` 的「接管延迟 ≤12s」接住 | ⑦ |
+| 8 | §119（读 `src/providers/index.js`）`/for \(;;\) \{\r?\n\s+\/\/[^\n]*BUG-029[\s\S]{0,400}?if \(totalExpired\) \{/` | 重试循环**头部**不复查总量护栏 → 退避 sleep 期间总时长到点后仍会再发一次 attempt（多一次计费；用户按了中断也可能再发） | **行为化**：桩上游 + `timeout.totalMs=900` + 首次即 500（可重试的瞬态）→ 断言错误必须是「总时长超限」而**不是**上游那条 500，且**请求数恰为 1** | ⑧ |
+| 9 | §119（读 `src/agent.js`）`/turnLedger\.cost\(\{[\s\S]{0,200}?model: activeModel,/` | 账本 `cost` 事件把**降级后实际调用的模型**写成了用户配置的模型 → 账本与日费用护栏系统性偏移，"降级省钱"看不出来 | **行为化**：造一次**真实降级**（护栏 over-limit + `action=downgrade`），读账本 `cost` 事件的 `model` 必须是 flash；同时断言 `run.start` 记的仍是 pro（两者必须分得开，否则这条断言证明不了归属） | ⑨ |
+| 10 | §120（读 `src/skill-lib.js`）`/finally \{\r?\n\s+try \{\r?\n\s+fs\.rmSync\(tmp/g` 计数 == 2 | 两个安装器的临时目录清理**必须走 finally** → 任何一条抛出路径（如坏 `MINGDAO_HOME`）都会在 `/tmp` 里留下整份克隆 | **行为化**：`installFromUrl` 那一半本来就有行为断言；本批补上 `installFromGit` 那一半——POSIX 桩 `git`（`--version`/`clone` 两条分支）+ 坏 `MINGDAO_HOME` 注入 → 断言 `/tmp` 无新增 `mingdao-skill-*` 残留。Windows 上桩脚本无法替换 PATH → `skipNote` 如实跳过（不假装测过） | ⑩ |
+| 11 | §125（读 `test/run-all.mjs`）`/try\s*\{\s*child\s*=\s*spawn\(/` 且 `/catch[\s\S]{0,300}进程启动失败/` | Windows 上 `spawn('.cmd')` 无 shell **同步**抛 EINVAL → 汇总器崩溃 → 最终汇总表与必跑套件（bench）静默空转 | **行为化**：平台行为造不出来，但"同步抛错"可以注入——`--import` 预载脚本把 `child_process.spawn` 换成必抛实现，真跑一次 `test/run-all.mjs --suite=bench`，断言：输出有「进程启动失败」、**仍然打印汇总表**、退出码 1 | ⑪ |
+| 12 | §128（读 `src/schedule.js`）`new RegExp(\`export function ${fn}[\\s\\S]*?\\r?\\n}\\r?\\n\`)` | `removeSchedule`/`pauseSchedule` 的锁内又出现 `pidOwnedBy`/`killTask`（M-6 复发：持锁数秒 → 等锁方 5s 超时 → job 卡 running） | **加固（结构化提取）**：改用花括号配平取函数体（替代"排版式"非贪婪正则）。副作用是**检查面只增不减**：函数体不再在第一个列 0 的 `}` 处被截断；`export async function` 这类无害重排不再假红 | ⑬ |
+| 13 | §128（读 `src/sync-server.js`）`/function doShareAccept[\s\S]*?\r?\n}\r?\n/` | share-accept 的就地刷新/冲突副本退回**裸 `writeFileSync`** → 半截文件（会话内容丢失） | **加固（结构化提取）**：同上，并补一条"（前置）应能定位函数体"的断言，避免提取失败静默变成"空体恒绿" | ⑫ |
+| 14 | §129（读 `scripts/coverage-report.mjs`）`/totalLines === 0[\s\S]{0,200}process\.exit\(1\)/` | 覆盖率**分母为 0** 时打印「0%（0/0 行）」并当质量结论（工具/数据不可用 ≠ 0 错误） | **行为化**：把脚本原样复制到**没有 src 文件**的临时仓库根下真跑一次：必须说"没采到可统计的 src 文件"、**不得打印 0% 覆盖率报告**、退 1 | ⑭ |
+| 15 | §129（读 `scripts/strict-ratchet.mjs`）`/找不到[\s\S]{0,120}process\.exit\(1\)\|process\.exit\(1\)[\s\S]{0,120}找不到/` | typescript 缺失时棘轮算出 0 条错误并报「未恶化」（严格门禁空转，且"工具缺失"被当成"零错误"） | **行为化**：把脚本+基线复制到**没有 `node_modules`** 的临时仓库根下真跑一次：必须点明"找不到 `node_modules/typescript/bin/tsc`"且退 1 | ⑮ |
+
+> 第 14 处特意加了第二条断言（"不得打印 0% 报告"）：只判退出码是不够的——分母为 0 时后面那条
+> 「覆盖率低于阈值」也会退 1，于是"跳过这条分支"照样能过（**变异⑭第一版就是这么逃逸的**，已收紧）。
+
+### 四、净保护核对（"原来它抓得到的，现在由谁抓"）
+
+- **行为化的 7 处**：判据从"文本在不在"换成"端到端可观察结果"（HTTP 请求数 / 账本事件 / 工具回填正文 / 进程输出与退出码 / `/tmp` 残留），
+  逐条由 §三的变异证明**新断言确实会红**（16 条变异全部命中）。
+- **加固的 8 处**：正则与匹配窗口**未放宽**（第 12/13 处反而从"截断的前缀"升级为"整段函数体"），
+  只做了行尾归一化 + 显式绊线标注；它们原有抓取能力由变异 ①②③⑤⑥⑦⑫⑬ 逐条钉住。
+- **如实登记的保护面变化（没有下降，但要写清）**：
+  - 第 5 处（lastSeen 写失败留痕）与第 6 处（改密吊销设备）**本来就在文本守卫的盲区里**（探针实测全绿），
+    本批没有把它们行为化（要 root/只读盘、要精确制造并发 pair 竞态），只做了加固——**保护面与改前持平，未新增**。
+  - 第 4 处的"顺序"（先清缓存、再回调）已从文本顺序变成**可观测事实**（回调发生时缓存已空），
+    并额外暴露了一个盲区：`agentReadCache.clear()` 挪进死分支时旧文本守卫**全绿**（变异④）。
+- **附带修复（一处，非本批 15 处之内）**：`test/smoke.js` 里一行位于**所有节之外**的
+  `safeRmSync(tmp, …)` 会让 `extractSection('120')` 生成的脚本抛 `ReferenceError: tmp is not defined`，
+  §120 因此**根本无法被变异脚本单独运行**（"变异验证变假绿"的同款风险）。已加 `typeof tmp !== 'undefined'` 守卫：
+  整份运行的清理行为不变，抽取运行时跳过。
+
+### 五、未做边界（如实报数）
+
+- **本类剩余未收口：2 处**，都在 §134（读 `ide/jetbrains/**/*.kt`）：
+  1. `/class MingDaoSettings[\s\S]*?\n\}/` —— 防"持久化在项目配置里的类又长出 token 字段"；
+  2. `/catch \(_: Exception\) \{\s*\n\s*Probe\.UNREACHABLE/` —— 防"401/403 也被归成 UNREACHABLE"（三态退化回布尔）。
+  未收口原因：本批明确"不要动 `ide/**`"，而**变异验证必须先能改坏被测源码**才能证明新断言有效；
+  且本仓 CI 没有 IntelliJ SDK、无法编译 Kotlin 做行为验证。留待下一批（或 IDE 侧执行者）收口。
+- **M-8 更大范围未动**：约 170 余处**单行**源码文本守卫（`assert.ok(/…/.test(src))`、结构扫描白名单、
+  "全仓不得再出现 X"的负向扫描）不在本批目标内——本批只处理"跨行匹配"这一最脆的子类。
+  它们的目标集合与数量需要单独一轮清点，本批**不声称**M-8 已收口。
+- **变异能力边界**：`test/mutate/*` 只能改**可写文件**；第 10 处的桩 `git` 只在 POSIX 生效（Windows 如实 `skipNote`），
+  §125 的"同步抛错"是**注入**的（真实 EINVAL 只在 Windows 出现），两者都在测试注释里写明了。
+
+### 六、门禁与变异
+
+- `test/mutate/batch23-guards.mjs`：**16/16 全中**（`node test/mutate/batch23-guards.mjs`）。
+  变异总数 108 → **131**（本批 +16；同工作区另一位执行者的 batch24 +7 也在其中，最终数字以
+  `scripts/doc-lint.mjs` 打印的"实际 N 条"为准——本批提交前实测：实际 131 / README 写 131）。
+- 门禁：`npm run typecheck` / `node test/smoke.js` / `node test/e2e-local.js` / `node test/mutate/run.mjs`（全批次）/ `node scripts/doc-lint.mjs`。
+
 ## 3.50 已修复（v0.6.11 开发线：Pack **反向提权**——工具拿到内核 ctx，一行改写即可让权限引擎失效）
 
 来源：**M-1 设计评审时新发现**的缺陷（`docs/internal/DESIGN-pack-isolation.md` §2.1 第 4 条、§9.3、
