@@ -111,6 +111,7 @@ Commands are grouped here for evaluation; `mingdao --help` and `src/help.js` are
 The full reference is **Chinese**; these are the entry points worth knowing:
 
 - [`docs/CONFIG.md`](docs/CONFIG.md) — every `config.json` field: permission rules, sandbox, `config.net`, hooks, MCP, sync, cost guard.
+- [`docs/CONFIG.en.md`](docs/CONFIG.en.md) — English configuration reference (verified against the code): permissions, sandbox & env filtering, egress gate and its limits, cost guard, WebUI exposure, audit/ledger, full field table.
 - [`docs/PACK-API.md`](docs/PACK-API.md) — the Pack contract (manifest, contributions, constraint kinds, and which of them are **not** implemented).
 - [`docs/PROVIDERS.md`](docs/PROVIDERS.md) — built-in providers and writing a custom OpenAI-compatible provider.
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — module map and data flow.

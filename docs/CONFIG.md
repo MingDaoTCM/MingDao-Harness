@@ -189,7 +189,10 @@ mingdao net report --since 7d --json    # 支持 7d / 24h / 90m
 }
 ```
 
-- `PreToolUse`：工具执行前调用，命令输出非空即阻止执行（返回的文本交给模型）；
+- `PreToolUse`：工具执行前调用；**只有** stdout 回 `{"decision":"block","reason":"…"}` 才阻止执行
+  （非 JSON 的非空输出按 fail-closed 也阻止；输出为空、或 JSON 里 `decision` 不是 `block`（如 `approve`）则放行）。
+  > 勘误（v0.6.11）：此处此前写作"命令输出非空即阻止执行"，与实现不符——照它写合规钩子会以为
+  > "随便打印点什么就能拦住"，实际必须回那个 JSON 结构。
 - `PostToolUse`：执行后调用（审计/日志）；
 - 协议：stdin 收 JSON（工具名/参数），stdout 回 JSON；`matcher` 支持 `|` 分隔与 `*` 通配；
 - ⚠ **hooks 命令以 `shell: true` 执行——配置即代码执行**：命令会在每次工具调用时运行，请只填自己完全信任的命令（例如不直接填 `curl <不可信地址>`）。
@@ -233,7 +236,10 @@ mingdao net report --since 7d --json    # 支持 7d / 24h / 90m
   同机的其它进程/其它用户可以直接访问 `/api/*`，多用户机器与共享 CI 上请启用令牌；
 - 绑定 `0.0.0.0`/局域网地址时**强制令牌认证**：未配置则每次启动随机生成并打印
   `http://<地址>:<端口>/?token=…` 访问链接；固定令牌（优先级从高到低）：
-  环境变量 `MINGDAO_WEB_TOKEN`、`web.token`、`mingdao web --auth-token <令牌>`（或 `--auth-token=-` 从 stdin 读）；
+  `mingdao web --auth-token <令牌>`（或 `--auth-token=-` 从 stdin 读）、环境变量 `MINGDAO_WEB_TOKEN`、`web.token`
+  ——即**命令行 > 环境变量 > 配置**（`src/commands/skill.js` 的 `--auth-token` 分支 > `MINGDAO_WEB_TOKEN` > `config.web.token`）。
+  > 勘误（v0.6.11）：此处此前把顺序写反成"环境变量、配置、命令行"。文档审计（F-M2 同批）核对了代码，
+  > 实际是"命令行优先"——照旧文档配置的人会以为环境变量最高，从而留下一个自己没意识到的固定令牌。
   **命令行字面量会进入 argv 与 shell 历史（`ps` 可见）**，故用它时会给出告警；
 - 令牌同时接受 URL `?token=`、请求头 `X-MingDao-Token` 或 `Authorization: Bearer`；
 - 服务端校验 `Host` 头必须等于回环名或绑定地址（防 DNS rebinding），代理场景会 403 属预期。
