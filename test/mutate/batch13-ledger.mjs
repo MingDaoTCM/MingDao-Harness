@@ -81,9 +81,11 @@ M.mutate({
 // ⑧ §3.39①(b)：在途费用不再参与降级**决策**（贵模型会一直用到回合结束）
 M.mutate({
   name: '⑧ 在途费用不再参与降级决策（单回合可烧穿日限）',
-  file: 'src/agent.js',
-  from: '        if (!guard && !downgraded) {\n          const g0 = costGuardConfig();',
-  to: '        if (false && !guard && !downgraded) {\n          const g0 = costGuardConfig();',
+  // v0.6.11：这段判据已从 agent.js 抽到 cost-guard.js 的 roundGuardAction()（P1-1 第二刀），
+  // 锚点随之迁移——锚点不跟着走就会变成"变异点未找到"（假绿），正是本批要防的那类退化。
+  file: 'src/cost-guard.js',
+  from: '  if (!guard && !downgraded) {',
+  to: '  if (false && !guard && !downgraded) {',
   expect: ['在途越线后必须立刻降级'],
   run: SEC,
 });

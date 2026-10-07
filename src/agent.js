@@ -13,7 +13,7 @@ import { createIO, style, C } from './ui.js';
 import { subagentModel } from './routing.js';
 import { writeAudit } from './audit.js';
 import { redactSecrets } from './redact.js';
-import { checkCostGuard, costGuardConfig, todayCost, preflightBlockMessage } from './cost-guard.js';
+import { checkCostGuard, costGuardConfig, todayCost, preflightBlockMessage, roundGuardAction } from './cost-guard.js';
 import { recordCacheStats, packDailyCost } from './cachestats.js';
 import { estimateCost, cacheSplit, isPeakHour } from './pricing.js';
 import { resolveProviderConfig, createProvider } from './providers/index.js';
@@ -695,77 +695,54 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       // 费用护栏（A2/B4）：每轮开始前按今日实际费用检查；block 暂停本轮；
       // downgrade 自动切换便宜模型继续执行（每回合只切一次，切换即粘滞）
       if (cfg.costGuard) {
-        let guard = checkCostGuard(activeModel);
-        // v0.6.7（登记 §3.39①(b)，报告一 §2.5 复核「仍成立」）：**在途费用必须参与降级决策**。
-        // 此前 downgrade 档只看**落账**（checkCostGuard → todayCost），而单看落账要在回合结束后才更新——
-        // 于是长回合里贵模型会一直用到跑完，实测单回合可超日限 9.1×（note=null，用户毫无察觉）。
-        // 现在：若「今日已用 + 本回合在途」已越线，且当前还不在最便宜档，就**当场触发降级**
-        // （不否决降级本身——那等于把这个功能废掉；只是把它触发得更早）。
-        if (!guard && !downgraded) {
-          const g0 = costGuardConfig();
-          if (g0 && String(g0.action) === 'downgrade' && Number(g0.dailyLimitYuan) > 0) {
-            const usedNow = usedTodayWithInflight();
-            if (usedNow != null && usedNow >= Number(g0.dailyLimitYuan)) {
-              guard = {
-                blocked: false,
-                downgrade: true,
-                downgradeModel: String(g0.downgradeModel || DEFAULT_MODEL),
-                message: `⚠ 费用护栏：今日已用（含本回合在途）≈¥${usedNow.toFixed(4)} 已达上限 ¥${Number(g0.dailyLimitYuan).toFixed(2)}——已自动降级到便宜模型继续执行。`,
-              };
-            }
-          }
+        // 判据全部抽到 cost-guard.js 的 roundGuardAction()（v0.6.11 / P1-1 第二刀）：
+        // 这里只负责"问决策 → 按决策执行副作用"（打印、切换模型、提前返回）。
+        // 之所以值得抽：这段里有两处**实测复现过的计费缺陷**（降级后又静默继续、
+        // 在途费用不参与决策），埋在循环里时只能靠端到端验证，现在四个动作可以被逐条钉死。
+        const d = roundGuardAction(
+          checkCostGuard(activeModel),
+          costGuardConfig(),
+          usedTodayWithInflight(),
+          downgraded,
+          activeModel,
+          DEFAULT_MODEL
+        );
+        if (d.action === 'block') {
+          stripOrphanCalls();
+          return {
+            text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
+            note: d.message, durationMs: Date.now() - startedAt, perf: perf(),
+          };
         }
-        if (guard) {
-          if (guard.blocked) {
+        if (d.action === 'already-cheapest') {
+          stripOrphanCalls();
+          return {
+            text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
+            note: `今日费用已达上限（实际 ¥${String((todayCost() ?? 0).toFixed(4))}），且已在最便宜模型上执行，已暂停——调整 config.costGuard 或明天自动恢复。`,
+            durationMs: Date.now() - startedAt, perf: perf(),
+          };
+        }
+        if (d.action === 'try-downgrade') {
+          const target = String(d.model);
+          // MiniMax P0：降级目标零校验会崩溃——必须与当前模型同服务商且已有 Key，
+          // 否则 provider.chat 必然 400；校验失败按 block 处理并给修复指引。
+          const curPc = resolveProviderConfig(cfg, activeModel);
+          const dgPc = resolveProviderConfig(cfg, target);
+          // Key 归属服务商（provider 级），同服务商即天然共享同一 Key，无需再查 apiKey
+          if (dgPc && dgPc.name === curPc.name) {
+            activeModel = target;
+            downgraded = true;
+            io.print(style(d.message, C.yellow));
+          } else {
             stripOrphanCalls();
             return {
-              text: null,
-              reasoning: '',
-              usage,
-              steps,
-              finish,
-              truncated: false,
-              aborted: false,
-              note: guard.message,
-              durationMs: Date.now() - startedAt,
-              perf: perf(),
+              text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
+              note: `费用护栏想降级到 ${target}，但它与当前服务商不一致或缺少 API Key——已暂停执行。请把 config.costGuard.downgradeModel 改为与当前模型同服务商（当前：${curPc.name}）的模型名，或调高 dailyLimitYuan。`,
+              durationMs: Date.now() - startedAt, perf: perf(),
             };
           }
-          if (guard.downgrade) {
-            if (!downgraded && guard.downgradeModel !== activeModel) {
-              // MiniMax P0：降级目标零校验会崩溃——必须与当前模型同服务商且已有 Key，
-              // 否则 provider.chat 必然 400；校验失败按 block 处理并给修复指引。
-              const curPc = resolveProviderConfig(cfg, activeModel);
-              const dgPc = resolveProviderConfig(cfg, guard.downgradeModel);
-              // Key 归属服务商（provider 级），同服务商即天然共享同一 Key，无需再查 apiKey
-              if (dgPc && dgPc.name === curPc.name) {
-                activeModel = guard.downgradeModel;
-                downgraded = true;
-                io.print(style(guard.message, C.yellow));
-              } else {
-                stripOrphanCalls();
-                return {
-                  text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
-                  note: `费用护栏想降级到 ${guard.downgradeModel}，但它与当前服务商不一致或缺少 API Key——已暂停执行。请把 config.costGuard.downgradeModel 改为与当前模型同服务商（当前：${curPc.name}）的模型名，或调高 dailyLimitYuan。`,
-                  durationMs: Date.now() - startedAt, perf: perf(),
-                };
-              }
-            } else {
-              // 已经在降级目标模型上：无法再降，按 block 处理。
-              // v0.6.5（审计 BUG-023/035，实测复现）：此前的外层条件是 `guard.downgrade && !downgraded`，
-              // 于是**本回合刚降过一次**之后（downgraded=true），下一步会落到「两个分支都不进」——
-              // 既不切换也不再拦，静默继续用 flash 发请求继续计费。判据必须是「超限 + 已在最便宜模型」，
-              // 与「一开局就是 flash」那条路径完全同源（那条本来就会拦，两条路径此前结论相反）。
-              stripOrphanCalls();
-              return {
-                text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
-                note: `今日费用已达上限（实际 ¥${String((todayCost() ?? 0).toFixed(4))}），且已在最便宜模型上执行，已暂停——调整 config.costGuard 或明天自动恢复。`,
-                durationMs: Date.now() - startedAt, perf: perf(),
-              };
-            }
-          } else {
-            io.print(style(guard.message, C.yellow));
-          }
+        } else if (d.action === 'warn') {
+          io.print(style(d.message, C.yellow));
         }
       }
 

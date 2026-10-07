@@ -11496,6 +11496,70 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
   ok('v0.6.11 护栏前置判据：抽成纯函数 + 边界逐条钉死（超限/恰好等于/无法判断/未配置）+ 单源结构守卫');
 }
 
+// ---------- 132. v0.6.11：每轮护栏动作决策抽成纯函数（P1-1 第二刀） ----------
+// 这段里有两处**实测复现过的计费缺陷**（降级后又静默继续计费 / 在途费用不参与决策），
+// 此前埋在 runTurn 循环里只能端到端验证。现在四个动作（proceed/warn/block/try-downgrade/
+// already-cheapest）逐条钉死。
+{
+  const { roundGuardAction } = await import(pathToFileURL(path.join(srcDir, 'cost-guard.js')).href);
+  const DG = { action: 'downgrade', dailyLimitYuan: 1, downgradeModel: 'flash-x' };
+  const call = (guard, cfg2, used, downgraded, active = 'pro-x') => roundGuardAction(guard, cfg2, used, downgraded, active, 'flash-default');
+
+  // ① 没有护栏信号也没有在途越线 → 照常执行
+  assert.equal(call(null, DG, 0.1, false).action, 'proceed', '未越线应照常执行');
+  assert.equal(call(null, null, 99, false).action, 'proceed', '未配置护栏时不得有任何动作');
+
+  // ② 在途触发（v0.6.7 / §3.39①(b)）：落账没超、但在途越线且**还没降过** → 当场降级
+  const inflight = call(null, DG, 1.5, false);
+  assert.equal(inflight.action, 'try-downgrade', '在途越线必须触发降级（此前贵模型会一直用到回合结束）');
+  assert.equal(inflight.model, 'flash-x', '降级目标应取配置里的 downgradeModel');
+  assert.ok(inflight.message.includes('在途'), `文案要说明是"含在途"触发的，实际：${inflight.message}`);
+
+  // ③ 已经降过 → 不再重复触在途降级（否则会每轮反复"降级"）
+  assert.equal(call(null, DG, 1.5, true).action, 'proceed', '已降过级时不得反复触发在途降级');
+  // ④ 只有 downgrade 档才在途触发：block 档交给 checkCostGuard 自己的判据
+  assert.equal(call(null, { ...DG, action: 'block' }, 1.5, false).action, 'proceed', '在途触发只属于降级档');
+  // ⑤ 统计不可读（used=null）→ 不得据此触发
+  assert.equal(call(null, DG, null, false).action, 'proceed', '统计不可读时不得据在途数触发降级');
+
+  // ⑥ blocked → 拦，并把 message 原样带出（调用方负责展示）
+  const blocked = call({ blocked: true, message: '⛔ 超限' }, DG, 0, false);
+  assert.equal(blocked.action, 'block');
+  assert.equal(blocked.message, '⛔ 超限');
+
+  // ⑦ 该降级：未降过 + 目标与当前不同 → try-downgrade
+  const dg = call({ blocked: false, downgrade: true, downgradeModel: 'flash-x', message: '要降级' }, DG, 0, false);
+  assert.equal(dg.action, 'try-downgrade');
+  assert.equal(dg.model, 'flash-x');
+
+  // ⑧ **BUG-023/035 回归**：本回合已降过一次 → 必须 already-cheapest（此前两个分支都不进 → 静默继续计费）
+  assert.equal(call({ blocked: false, downgrade: true, downgradeModel: 'flash-x', message: '' }, DG, 0, true).action,
+    'already-cheapest', '本回合降过一次后必须拦，不得静默继续（BUG-023/035）');
+  // ⑨ 降级目标 == 当前模型（一开局就是最便宜档）→ 同一结论
+  assert.equal(call({ blocked: false, downgrade: true, downgradeModel: 'pro-x', message: '' }, DG, 0, false, 'pro-x').action,
+    'already-cheapest', '已在最便宜档必须拦（与"刚降过"同源同结论）');
+
+  // ⑩ warn：既没 blocked 也没 downgrade → 只提示
+  assert.equal(call({ blocked: false, message: '⚠ 提醒' }, { action: 'warn', dailyLimitYuan: 1 }, 0, false).action, 'warn');
+
+  // ⑪ 单源结构守卫：runTurn 里不得再内联这两处分支判断（抄回去就等于抽了个寂寞）
+  {
+    const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+    assert.ok(/roundGuardAction\(/.test(agentSrc), 'runTurn 必须调用抽出来的决策函数');
+    // 更严的口径：护栏对象的**内部字段**根本不该出现在 agent.js —— 决策只经由 roundGuardAction 的结果。
+    // （只查 `if (guard.blocked)` 这种写法太窄：写成 `if (guard && guard.blocked)` 就绕过去了，
+    //   而绕过之后正是 BUG-023/035 那类"两个分支都不进"的温床。）
+    assert.ok(!/guard\.blocked|guard\.downgrade/.test(agentSrc), '护栏对象的内部字段不得出现在 agent.js（应只经过 roundGuardAction 的决策结果）');
+    const dup = fs.readdirSync(srcDir).filter((f) => f.endsWith('.js')).filter((f) => {
+      if (f === 'cost-guard.js') return false;
+      const t = fs.readFileSync(path.join(srcDir, f), 'utf8');
+      return /guard\.downgradeModel === activeModel|downgraded \|\| guard\.downgradeModel/.test(t);
+    });
+    assert.deepEqual(dup, [], `"已在最便宜档"的判据只允许出现在 cost-guard.js，实际还有：${dup.join('、')}`);
+  }
+  ok('v0.6.11 每轮护栏决策：proceed/warn/block/try-downgrade/already-cheapest 五动作 + 在途触发 + BUG-023/035 回归 + 单源守卫');
+}
+
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket
 // —— 实测 ubuntu/macOS + Node 20 上"断言全过、进程却不退出"，CI 里表现为冒烟步骤永远 in_progress
 // （Node 18/22/Windows 因为拆连接更快而侥幸通过）。这里显式退出，断言本身不受影响；

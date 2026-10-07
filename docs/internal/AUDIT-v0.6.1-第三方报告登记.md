@@ -1401,6 +1401,14 @@ PACK-API kind / 模型 id / **ARCHITECTURE 覆盖全部 src 模块** / 变异总
 `test/mutate/batch17-extract.mjs` **5/5**（边界退回 `>`、无法判断改拦截、未配置也拦、
 文案丢数字、runTurn 又抄回内联比较）。变异总数 52。
 
+**第二刀（同日）**：把**每轮护栏动作决策**也抽成纯函数 `roundGuardAction(guard, guardCfg, usedWithInflight, downgraded, activeModel, defaultModel)`
+→ 五个动作 `proceed / warn / block / try-downgrade / already-cheapest`。这段里有两处**实测复现过的计费缺陷**
+（BUG-023/035：降级后两个分支都不进 → 静默继续计费；§3.39①(b)：在途费用不参与决策 → 单回合可超日限 9.1×），
+此前埋在循环里只能端到端验证，现在连同"在途触发只在未降过级时生效""非降级档不得在途触发"一起被逐条钉死。
+§132 十一组断言 + `batch18-roundguard` **6/6**；`agent.js` 的护栏块从 ~85 行降到 ~45 行（剩下的全是副作用：打印、切模型、提前返回）。
+结构守卫同时收紧为「护栏对象的内部字段（`guard.blocked`/`guard.downgrade`）不得出现在 `agent.js`」——
+只查 `if (guard.blocked)` 太窄，写成 `if (guard && guard.blocked)` 就能绕过去（变异验证当场指出）。
+
 **未做（仍在排期）**：`runTurn` 主循环与工具编排的进一步拆分、约 189 个结构守卫的行为化改造、
 Pack 子进程隔离（M-1）、`ledger --sign-key`、Electron 更新包签名校验、IDE 令牌安全存储、
 `docs/CONFIG.en.md` 全文英文。

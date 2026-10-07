@@ -185,3 +185,56 @@ export function preflightBlockMessage(limitYuan, used, worst) {
   if (used + worst < limit) return null;
   return `⛔ 护栏前置拦截：本轮最坏成本 ≈¥${worst.toFixed(4)}，今日已用 ≈¥${used.toFixed(4)}，合计将超过上限 ¥${limit.toFixed(2)}——请求未发出。可调高 config.costGuard.dailyLimitYuan 或改用更小模型。`;
 }
+
+/**
+ * **每轮开始前**的护栏动作决策（v0.6.11，审计 P1-1 拆分第二刀：从 `agent.js` 的 runTurn 循环里抽出）。
+ *
+ * 抽取前的形态是一串嵌套 `if`，其中两处分支曾经出过**实测复现的计费缺陷**（见下），
+ * 却因为埋在循环里而只能靠端到端验证。现在它是一个纯函数：输入全是普通值，输出只有四种动作。
+ *
+ * 四个动作与判据（与抽取前**逐字同源**）：
+ *   · `block`      —— 已超限且不可降级（含"已在最便宜档"）：整轮暂停；
+ *   · `try-downgrade` —— 该降级（含**在途触发**）：调用方负责校验目标模型是否同服务商；
+ *   · `already-cheapest` —— 降级档但已经在该模型上：**必须拦**。
+ *     v0.6.5（BUG-023/035，实测复现）：此前判据是 `downgrade && !downgraded`，于是"本回合刚降过一次"
+ *     之后两个分支都不进 → 既不切换也不再拦，静默继续用便宜模型计费。这里的 `already` 判据
+ *     把"一开局就是最便宜模型"与"本次刚降过去"两条路径**统一到同一结论**（此前两者结论相反）。
+ *   · `warn`       —— 只提示（warn 档或降级不可用时的提示），继续执行。
+ *
+ * 在途触发（v0.6.7 / 登记 §3.39①(b)，报告一 §2.5）：downgrade 档若只看落账，贵模型会一直用到
+ * 回合结束（实测单回合可超日限 9.1×）。所以「今日已用（含在途）已达上限」也要触发降级——
+ * 但**只在还没降过的时候**（已经降过就不该反复触发）。
+ *
+ * @param {any} guard checkCostGuard() 的返回值（null 表示落账未超限）
+ * @param {any} guardCfg costGuardConfig() 的结果
+ * @param {number|null} usedWithInflight 今日已用（含本回合在途）；null = 统计不可读
+ * @param {boolean} downgraded 本回合是否已经降过级
+ * @param {string} activeModel 当前模型名
+ * @param {string} defaultModel 兜底降级目标（DEFAULT_MODEL）
+ * @returns {{action: 'proceed'|'warn'|'block'|'try-downgrade'|'already-cheapest', message: string, model?: string}}
+ */
+export function roundGuardAction(guard, guardCfg, usedWithInflight, downgraded, activeModel, defaultModel) {
+  // ① 在途触发：落账未超限，但"今日已用 + 本回合在途"已越线，且还没降过 → 当场降级
+  if (!guard && !downgraded) {
+    const g0 = guardCfg;
+    if (g0 && String(g0.action) === 'downgrade' && Number(g0.dailyLimitYuan) > 0) {
+      if (usedWithInflight != null && usedWithInflight >= Number(g0.dailyLimitYuan)) {
+        return {
+          action: 'try-downgrade',
+          model: String(g0.downgradeModel || defaultModel),
+          message: `⚠ 费用护栏：今日已用（含本回合在途）≈¥${usedWithInflight.toFixed(4)} 已达上限 ¥${Number(g0.dailyLimitYuan).toFixed(2)}——已自动降级到便宜模型继续执行。`,
+        };
+      }
+    }
+    return { action: 'proceed', message: '' };
+  }
+  if (!guard) return { action: 'proceed', message: '' };
+  // ② 明确要求暂停
+  if (guard.blocked) return { action: 'block', message: String(guard.message ?? '') };
+  if (!guard.downgrade) return { action: 'warn', message: String(guard.message ?? '') };
+  // ③ 降级：已经在目标模型上（或本回合已降过）→ 无法再降，必须拦
+  if (downgraded || guard.downgradeModel === activeModel) {
+    return { action: 'already-cheapest', message: String(guard.message ?? '') };
+  }
+  return { action: 'try-downgrade', model: String(guard.downgradeModel), message: String(guard.message ?? '') };
+}
