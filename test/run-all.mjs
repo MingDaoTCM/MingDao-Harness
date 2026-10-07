@@ -13,6 +13,8 @@ const SUITES = [
   ['e2e-web', 'node', ['test/e2e-web.js']],
   ['e2e-schedule', 'node', ['test/e2e-schedule.js']],
   ['api-contracts', 'node', ['test/api-contracts.js']],
+  // 审计 M-1 §2.1 第 4 条（Pack 反向提权）：工具拿到的 ctx 必须被裁剪 + 冻结
+  ['pack-ctx-privesc', 'node', ['test/pack-ctx-privesc.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];

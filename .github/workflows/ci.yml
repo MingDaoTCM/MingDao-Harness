@@ -97,6 +97,21 @@ jobs:
           exit $code
       - name: API 域契约测试（7 域路由契约 + body 上限）
         run: node test/api-contracts.js
+      - name: Pack ctx 提权回归（工具 ctx 的裁剪 + 冻结，审计 M-1 §2.1 第 4 条）
+        # 只加在 Linux 腿：本套件与平台无关（不 spawn shell、不依赖 /bin/bash——被拒的
+        # bash 调用根本不会执行），但按任务书要求只挂 Linux，Windows/macOS 腿不增抖动。
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          node test/pack-ctx-privesc.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=pack-ctx-privesc 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
       - name: 文档守卫（链接 / 命令表 / kind / 模型 id / 架构覆盖 / API 表 / 变异总数）
         # v0.6.8（文档审计 §7.7）：把"文档与代码不一致"变成 CI 红——此前全靠人肉复查，
         # 结果 ARCHITECTURE 停在 v0.1.x、PACK-API 列了未实现的 kind、README 的 CI 矩阵与模型 id 过时。

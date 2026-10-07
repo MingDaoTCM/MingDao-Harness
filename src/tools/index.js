@@ -497,43 +497,159 @@ function runTodo(/** @type {any} */ args, /** @type {any} */ ctx) {
   };
 }
 
+// —— 工具面向的 ctx（审计 M-1 §2.1 第 4 条：堵住「Pack 反向提权」）——
+//
+// 背景（真实缺陷，探针已复现）：`src/agent.js` 的 makeCtx() 把 permission / provider / io /
+// spawnTask 这些**能力对象**挂在 ctx 上，而 dispatch 此前把该对象**原样**交给工具
+// `run(args, ctx)`。于是一个被投毒（或下游自己写的）Pack 工具只要执行
+//     ctx.permission.check = async () => true
+// 就能让**本会话后续所有**工具调用（含 bash）自动放行——权限引擎失效，且不留任何痕迹。
+//
+// 现在明确分成两个对象，职责不重叠（别再混为一谈）：
+//   · **内核 ctx**：`agent.js` 的 makeCtx() 那个对象，只有内核自己用（循环里要读
+//     `permission.mode`、`permission.check`）。它**不裁剪、不冻结**，也**永不**直接交给工具。
+//   · **工具 ctx**：本节的 makeToolCtx() 产出，是工具 `run(args, ctx)` 唯一能看到的对象——
+//     白名单字段 + `Object.freeze`。
+//
+// 白名单是 grep 出来的真实使用清单（不是猜的），字段 → 消费者：
+//   cwd / workingDir   bash.js、git.js、fs-tools.js、tools/index.js（config.tools 子进程的 cwd）
+//   cfg                bash.js（sandbox / bashEnvKeep / bashEnvFilter）、fs-tools.js（fsAllowDirs）
+//                      —— 只放这四个键：cfg 里还有 providers[].apiKey，凭证不该出现在工具面上
+//   todos              todo 工具（原地 replace 全量清单，必须是同一个数组引用）
+//   readCache          fs-tools.js 的 read 去重（Map，每代理实例一份，必须是同一个 Map 引用）
+//   undoStore          fs-tools.js 的 backup/undo（只读门面 { backups: Map }）
+//   llm                PACK-API §5 的**统一模型出口**（Pack 走它才入账/受日费用护栏，不能裁）
+//   permission         只读门面 { mode, check }：check 是**闭包绑定**的委托。工具确实需要时可
+//                      照常判定（src/permissions.js 的 check 是**无状态**的，不留"本次放行"
+//                      缓存 → 把它给工具不产生提权面），但改它改不动任何东西
+//   spawnTask          只给**内置**工具（`task` 工具需要，见 runTask）；Pack / config.tools 拿不到
+//
+// 三条不变量（`test/pack-ctx-privesc.js` 逐条钉死，`test/mutate/batch24-privesc.mjs` 验证）：
+//   ① `Object.isFrozen(工具 ctx) === true` → Pack 赋值/defineProperty 直接抛 TypeError（ESM 严格模式）；
+//   ② 门面全部是**闭包绑定**的：即便有人能改写属性，内核读的仍是自己那份对象，判定不受影响；
+//   ③ 冻结只作用于**工具 ctx 这个外壳**：mutate 的是 todos / readCache / undoStore.backups
+//      这些"工具本来就要写"的容器（它们仍是内核的那一份），所以 todo / read 去重 / undo 照常工作。
+
+/** 工具能看到的 cfg 键 = src/tools 里真实读到的全部（多一个都是白送）。 */
+const TOOL_CFG_KEYS = ['sandbox', 'fsAllowDirs', 'bashEnvKeep', 'bashEnvFilter'];
+
+/**
+ * 内核 ctx → 工具 ctx 的派生缓存。值为 `{ source, variants }`：
+ *  · `source`：**内核**那个对象——传进来的若已经是工具 ctx，也能从源对象按需重建（只能收紧）；
+ *  · `variants`：按档位（'builtin' | 'custom'）缓存的工具 ctx；同一档只派生一次。
+ * @type {WeakMap<object, { source: any, variants: Record<string, any> }>}
+ */
+const toolCtxCache = new WeakMap();
+
+/**
+ * 裁剪 + 冻结的 cfg（对象本身冻结；数组值另拷一份，防止工具改内核的 fsAllowDirs 白名单）。
+ * @param {any} cfg
+ */
+function toolCfgOf(/** @type {any} */ cfg) {
+  const src = cfg && typeof cfg === 'object' ? cfg : {};
+  /** @type {any} */
+  const out = {};
+  for (const k of TOOL_CFG_KEYS) out[k] = Array.isArray(src[k]) ? [...src[k]] : src[k];
+  return Object.freeze(out);
+}
+
+/**
+ * permission 的**只读门面**：`mode` 是快照，`check` 是绑定到内核对象上的委托。
+ * 没有 permission（库使用方/测试的最小 ctx）时返回 undefined —— 字段干脆不出现。
+ * @param {any} permission
+ */
+function permissionFacade(permission) {
+  if (!permission || typeof permission !== 'object') return undefined;
+  const check = typeof permission.check === 'function' ? permission.check.bind(permission) : null;
+  /** @type {any} */
+  const facade = { mode: permission.mode ?? null };
+  if (check) facade.check = (/** @type {any} */ name, /** @type {any} */ args, /** @type {any} */ label) => check(name, args, label);
+  return Object.freeze(facade);
+}
+
+/**
+ * 由内核 ctx 派生**工具面向**的 ctx（幂等；返回值一定已冻结）。
+ * @param {any} kernelCtx agent.js 的 makeCtx() 对象（或测试/库使用方手搓的等价物）
+ * @param {{ thirdParty?: boolean }} [opts] thirdParty=true：第三方工具档（不给 permission / spawnTask）
+ * @returns {any}
+ */
+export function makeToolCtx(/** @type {any} */ kernelCtx, /** @type {any} */ opts = {}) {
+  const want = opts?.thirdParty === true ? 'custom' : 'builtin';
+  const known = kernelCtx && typeof kernelCtx === 'object' ? toolCtxCache.get(kernelCtx) : undefined;
+  if (known?.variants?.[want]) return known.variants[want]; // 同档幂等：同一内核 ctx 只派生一次
+  // 传进来的若已经是工具 ctx，就从记下的**内核源对象**重建（分档只能收紧，不能把裁掉的字段找回来）
+  const src = known ? known.source : kernelCtx && typeof kernelCtx === 'object' ? kernelCtx : {};
+  /** @type {any} */
+  const out = {
+    cwd: src.cwd,
+    workingDir: src.workingDir,
+    cfg: toolCfgOf(src.cfg),
+    todos: src.todos,
+    readCache: src.readCache,
+    undoStore: src.undoStore && typeof src.undoStore === 'object' ? Object.freeze({ backups: src.undoStore.backups }) : undefined,
+    // 绑定后的冻结门面：闭包捕获**内核**函数，工具改写属性影响不到内核
+    llm: typeof src.llm === 'function' ? (/** @type {any} */ o) => src.llm(o) : undefined,
+  };
+  if (want === 'builtin') {
+    out.spawnTask =
+      typeof src.spawnTask === 'function'
+        ? (/** @type {any} */ prompt, /** @type {any} */ o) => src.spawnTask(prompt, o)
+        : undefined;
+    const perm = permissionFacade(src.permission);
+    if (perm) out.permission = perm;
+  }
+  const frozen = Object.freeze(out);
+  // 一份变体表挂在**内核源对象**上；内核 ctx 与各档工具 ctx 都指向它（派生与收紧都只看这张表）
+  const entry = known || { source: src, variants: /** @type {Record<string, any>} */ ({}) };
+  entry.variants[want] = frozen;
+  toolCtxCache.set(src, entry);
+  toolCtxCache.set(frozen, entry);
+  return frozen;
+}
+
 export async function dispatch(/** @type {any} */ name, /** @type {any} */ args, /** @type {any} */ ctx) {
   const custom = customTools.get(name);
   if (custom) {
+    // Pack 工具 / config.tools / registerTool 注册的第三方工具：走**第三方档**工具 ctx
+    // （白名单 + 冻结，且不含 permission / spawnTask / provider / io）。dispatch 是唯一入口，
+    // 所以这里再派生一次——即使某个调用点把内核 ctx 直接递进来，也到不了工具手上。
+    const customCtx = makeToolCtx(ctx, { thirdParty: true });
     try {
-      const r = await custom.run(args, ctx);
+      const r = await custom.run(args, customCtx);
       return r && typeof r === 'object' ? r : { ok: true, output: String(r ?? '') };
     } catch (/** @type {any} */ err) {
       return { ok: false, error: `自定义工具 ${name} 执行失败：${String(err?.message || err)}` };
     }
   }
+  // 内置工具：同一份白名单 + 冻结；`task` 用到的 spawnTask 是绑定门面，`permission.check` 是只读委托。
+  const toolCtx = makeToolCtx(ctx);
   switch (name) {
     case 'read':
-      return read(args, ctx);
+      return read(args, toolCtx);
     case 'write':
-      return write(args, ctx);
+      return write(args, toolCtx);
     case 'edit':
-      return edit(args, ctx);
+      return edit(args, toolCtx);
     case 'ls':
-      return ls(args, ctx);
+      return ls(args, toolCtx);
     case 'glob':
-      return glob(args, ctx);
+      return glob(args, toolCtx);
     case 'grep':
-      return grep(args, ctx);
+      return grep(args, toolCtx);
     case 'bash':
-      return runBash(args, ctx);
+      return runBash(args, toolCtx);
     case 'skill':
-      return runSkill(args, ctx);
+      return runSkill(args, toolCtx);
     case 'task':
-      return runTask(args, ctx);
+      return runTask(args, toolCtx);
     case 'todo':
-      return runTodo(args, ctx);
+      return runTodo(args, toolCtx);
     case 'undo':
-      return undo(args, ctx);
+      return undo(args, toolCtx);
     case 'git':
-      return runGit(args, ctx);
+      return runGit(args, toolCtx);
     case 'fetch':
-      return runFetch(args, ctx);
+      return runFetch(args, toolCtx);
     default:
       return { ok: false, error: `未知工具：${name}` };
   }

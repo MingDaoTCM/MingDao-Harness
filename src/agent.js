@@ -4,7 +4,9 @@
 
 import { trimMessages, messageTokens, approxTokens } from './context.js';
 import { compactConversation } from './compact.js';
-import { buildToolSchemas, dispatch } from './tools/index.js';
+// 审计 M-1 §2.1 第 4 条（Pack 反向提权）：`makeToolCtx` 把内核 ctx 剪成"工具面向的 ctx"并冻结。
+// 两个对象从此分开：内核 ctx（makeCtx() 的产物）只在循环内用；工具只拿到 makeToolCtx() 的白名单对象。
+import { buildToolSchemas, dispatch, makeToolCtx } from './tools/index.js';
 import { DEFAULT_MODEL, modelPreset } from './models.js';
 import { resolveModelCaps, safeBudget, EDGE_RATIO } from './model-caps.js';
 import { makeTokenCounter } from './tokenizer.js';
@@ -483,7 +485,14 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const turnStrippedSet = new Set(usedToolNames);
     // 整个回合注册一次 SIGINT：思考、工具执行、权限询问期间都能中断
     const offSigint = io.onSigint ? io.onSigint(() => { aborted = true; currentAc?.abort(); }) : () => {};
+    // ⚠ 两个 ctx，别混：
+    //   · `ctx`（内核 ctx）——本轮内核自己用（循环里的权限判定走闭包里的 permission 本体）；
+    //     它**不裁剪、不冻结**，且**不交给任何工具**。
+    //   · `toolCtx`（工具 ctx）——由 makeToolCtx(ctx) 派生：白名单字段 + Object.freeze，
+    //     没有 provider / io / 原始 permission 对象；只有这一份会经 dispatch 交到工具手上
+    //     （dispatch 内还会按"内置 / 第三方"分档再收紧一次，见 src/tools/index.js 的注释）。
     const ctx = makeCtx();
+    const toolCtx = makeToolCtx(ctx);
     /**
    * v0.5.0 A3 ③：输出前领域约束（正文禁用措辞）。
    * 无约束时零开销（constraints.active=false 直接返回原文）；有约束时按 action 处理：
@@ -1041,7 +1050,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               if (!mcp) throw new Error('MCP 工具未启用');
               result = await mcp.call(prep.name, prep.args);
             } else {
-              result = await dispatch(prep.name, prep.args, ctx);
+              // 交出去的是 `toolCtx`（工具面向：白名单 + 冻结），**不是** `ctx`（内核那个）。
+              // 内置工具与 Pack / config.tools 工具走同一入口，因此在这一行之后没有任何工具
+              // 能碰到内核的 permission / provider / io（审计 M-1 §2.1 第 4 条）。
+              result = await dispatch(prep.name, prep.args, toolCtx);
             }
             invalidateReadCache(prep); // 有副作用 → 作废本回合只读缓存（写后再读必须看到新内容）
             if (dedupKey) turnToolCache.set(dedupKey, result);

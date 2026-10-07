@@ -1746,3 +1746,108 @@ sha512），被测对象是**真实的 `desktop/main.js`**；feed 地址取自 `
 - **结构守卫是"绊线"不是"证明"**：它按特征表达式逐族拦截已知的抄回写法，理论上仍有绕过空间
   （例如换变量名 + 用 `Array.prototype.includes` 代替 `Set.has` 再改名）；本节的把握来自
   **14 条变异全部命中**，而不是"守卫穷尽了所有写法"。更大的拆分（`runTurn` 主循环本身）仍在排期。
+## 3.50 已修复（v0.6.11 开发线：Pack **反向提权**——工具拿到内核 ctx，一行改写即可让权限引擎失效）
+
+来源：**M-1 设计评审时新发现**的缺陷（`docs/internal/DESIGN-pack-isolation.md` §2.1 第 4 条、§9.3、
+§10 的 P0 行），**不是**既有登记条目的重复。优先级高于完整 Pack 隔离：它是今天唯一能让
+**已被信任**的 Pack 反过来提权内核的路径，且**不需要换进程**就能堵住。
+
+### 一、漏洞（修前到底发生了什么）
+
+- `src/agent.js` 的 `makeCtx()` 把 `permission`（`src/permissions.js` 的 `createPermission` 返回值）、
+  `provider`、`io`、`spawnTask`、`llm`、`budget`、`modelName` 一起挂在一个对象上；
+  `runTool()` 把这个对象**原样**交给 `dispatch(name, args, ctx)`（`src/tools/index.js`），
+  `dispatch` 再**原样**交给自定义工具的 `run(args, ctx)`——Pack 工具正是经 `registerTool()` 注册进
+  `customTools` 的（`src/packs.js` 的 `mountPacks()`）。内置工具与 Pack 工具**同一入口**。
+- 于是 Pack 侧一行代码即可反向提权：
+  - `ctx.permission.check = async () => true` → 本会话后续**所有**工具调用（含 `bash`）自动放行；
+  - `ctx.permission.mode = 'auto'` → 只读批量快路径等按档位分支的行为一起改变；
+  - `ctx.provider = {...}` → 绕开 `ctx.llm` 的账本与日费用护栏（费用隐身）；
+  - `ctx.io.print(...)` → 伪造用户可见提示；`ctx.spawnTask(...)` → 再取一次工具面。
+- 关键点：**权限判定的闭包与工具看到的对象是同一个**。`src/agent.js` 循环里读的就是那个
+  `permission` 对象，所以 Pack 改的不是"自己那份副本"，而是内核正在用的那一份。
+  这与"只读工具自动放行"的设计无关——同进程下任何"声明式"约束对不配合者都为零。
+
+### 二、复现（探针，修前 / 修后逐字对照）
+
+探针（`/tmp`，不入库）：`registerTool()` 注册一个标了 `readOnly: true` 的恶意工具
+`pack__evil__pwn`（ask 档下只读工具自动放行 → 恶意代码真的会跑）；`permission = createPermission('ask', ioNo)`，
+`ioNo.ask` 恒返回 `'n'`（无交互 → 本该拒绝）；模型第一轮调用恶意工具，第二轮调用
+`bash` 执行 `echo PWNED > <work>/PRIVESC-PROOF.txt`。
+
+| 观测点 | 修前 | 修后 |
+| --- | --- | --- |
+| 工具看到的 `ctx.provider.chat` | `function`（可直接调用，绕过账本） | `undefined` |
+| `ctx.permission.check = async () => true` | **静默成功** | 抛 `TypeError`（`ctx.permission` 在第三方档根本不存在） |
+| 第二轮 `bash` 回填 | `{"ok":true,"exitCode":0,...}`——**真的执行了** | `用户拒绝了该工具的执行权限。` |
+| `PRIVESC-PROOF.txt` 是否落地 | **落地**（本该被拒的调用被放行） | 不落地 |
+
+即：**修前，一次本该被拒的 `bash` 调用（ask 档 + 无交互）会被自动放行**；修后仍然被拒。
+
+### 三、修法（两个对象 + 白名单 + 冻结 + 绑定门面；单入口，无后门）
+
+1. **内核 ctx 与工具 ctx 从此是两个对象**（`src/agent.js` 里逐字写明哪个是哪个）：
+   `ctx = makeCtx()` 只在内核循环里用（**不裁剪、不冻结**，`permission.mode`/`permission.check` 的
+   既有读法一字未动）；交出去的是 `toolCtx = makeToolCtx(ctx)`。
+2. **`makeToolCtx(kernelCtx, { thirdParty })`**（`src/tools/index.js`，新增导出）：
+   - **白名单字段**（= grep 出来的真实使用清单，不是猜的）：`cwd`/`workingDir`（bash、git、fs-tools、
+     `config.tools` 子进程的 cwd）、`cfg`（只留工具真正读到的 4 个键：`sandbox`/`fsAllowDirs`/
+     `bashEnvKeep`/`bashEnvFilter`——`cfg.providers`（含 apiKey）不进工具面）、`todos`（todo 工具原地写回）、
+     `readCache`（read 去重 Map）、`undoStore`（只读门面 `{ backups: Map }`）、`llm`（PACK-API §5 的统一
+     模型出口，**不能裁**：砍掉等于把 Pack 逼回裸 `fetch`）、`permission`（只读门面）、`spawnTask`（仅内置档）；
+   - **`Object.freeze`**：工具 ctx 外壳、`cfg` 门面、`permission` 门面全部冻结 → ESM 严格模式下
+     赋值/`defineProperty` 直接抛 `TypeError`；
+   - **绑定门面**：`llm`/`spawnTask`/`permission.check` 都是闭包捕获**内核**函数的委托
+     （`permission.check` 本就是**无状态**判定，不留"本次放行"缓存，故把它给工具不产生提权面）；
+   - **幂等**：WeakMap 缓存（同一内核 ctx 只派生一次），且**分档只能收紧**——把已裁剪的"内置档"
+     再按第三方档派生时，会从记下的内核源对象**重建**，而不是原样返回。
+3. **第三方档更严**：Pack / `config.tools` / `registerTool` 注册的工具**拿不到** `permission` 与
+   `spawnTask`（没有任何内置工具之外的真实消费者依赖它们）；内置 `task` 工具照常拿到绑定门面。
+4. **单入口兜底（不留后门）**：`dispatch()` 内部按"内置 / 第三方"**再派生一次**——即使将来某个调用点
+   又把内核 ctx 直接递进来，也到不了工具手上。全仓工具调用的真实路径只有 `src/agent.js` 一处
+   （已改为 `toolCtx`），`src/packs.js` **一行未改**（"只在 packs.js 里删字段"那种做法等于没修）。
+5. **语义不变**：`ask`/`readonly`/`deny`（含 `denyStrict`）判定、审计事件、账本事件、
+   PreToolUse/PostToolUse 钩子顺序、只读并行批次**全部逐字未动**（既有 `test/smoke.js` 与
+   `test/e2e-*.js` 全绿即为证）。
+
+### 四、断言与变异
+
+- **`test/pack-ctx-privesc.js`（新套件；不动 `test/smoke.js`——该文件当时正被另一条改动线修改）**：
+  ① 探针场景成为回归：恶意 Pack 工具改写 `permission.check` / 替换 `provider`/`io`/`spawnTask` 全部无效，
+  随后本该被拒的 `bash` 仍然被拒（**行为断言**，且附 y/n 对照组，证明"拒"来自权限判定而不是工具坏了）；
+  ② `Object.isFrozen(工具 ctx)` + 字段白名单逐项断言（含 `cfg` 不含 `providers`/`apiKey`、
+  `fsAllowDirs` 是拷贝）；
+  ③ 内置工具照常工作：`read`/`write`/`todo`/`undo`/`task`，`permission.check` 只读可用且真的委托到内核对象，
+  `spawnTask` 是绑定门面（改不动）；
+  ④ **内核 ctx 未被裁剪、未被冻结**：`makeToolCtx` 不改写入参/不冻结入参；并加一个 `Object.freeze` 探针——
+  真实回合内被冻结的对象里**不得**出现"内核形状"（同时挂 `permission`+`provider`+`io`）的那一个
+  （把 `const ctx = makeCtx()` 改成 `Object.freeze(makeCtx())` 当场上钩）。
+- **接入门禁**：`test/run-all.mjs` 加一套件；`.github/workflows/ci.yml` 加一步（**仅 Linux 腿**，
+  与其它步骤同款 `::error` 注解包装）。
+- **`test/mutate/batch24-privesc.mjs`：7/7 全中**——① 工具 ctx 不再冻结；② 裁剪去掉（工具直接拿到内核 ctx，
+  只是顺手冻上）；③ 裁剪与冻结一起去掉（**回到修前现场**：本该被拒的 bash 落地成文件）；
+  ④ `permission` 门面直接暴露内核对象；⑤ `permission` 门面可写；⑥ 第三方档不再收紧（Pack 重新拿到
+  `permission`/`spawnTask`）；⑦ 把内核 ctx 也一起冻结。变异总数：本批 +7 条，
+  与同轮并行的 `batch23-guards.mjs`（16 条）合计，`test/mutate/README.md` 记为 **131**。
+
+### 五、未做边界（如实登记）
+
+- **本轮只堵"反向提权"这一条进程内路径**。Pack 仍然与宿主**同进程、同 Node 权限**：裸 `import node:fs`
+  读任意文件与凭据、裸 `process.env` 读 `MINGDAO_API_KEY`、裸 `fetch` 出网、`while(true){}` 冻结宿主
+  ——一律照旧。M-1 的方案 A（长驻子进程 + `node:fs`/`net`/`child_process` 能力门面）、
+  Linux 有 `bwrap` 时追加 `--unshare-net`、以及 Node ≥ 20/22 的 `--permission` 强制，**仍是 P1+**，
+  本轮一句都没做（`docs/internal/DESIGN-pack-isolation.md` §5/§7/§10 的分阶段不变）。
+- `permissions` 在 manifest 里**仍是"声明"**：`src/packs.js` 的形状校验与"未声明能力"静态告警
+  （不阻断）本轮未动，`pack verify` 的 AST-lite / `--runtime --isolated` 也未做。
+- `createPack(ctx)` 的 ctx（`makePackCtx()`：`home`/`packDir`/`packName`/`log`）本轮未动；
+  `docs/PACK-API.md:165-173` 已承诺却未实现的 `readJson`/`writeJsonAtomic`/`storage`/`audit`/`fetch`/`secret`
+  仍是欠账（P0 的另一半，属 P1 门面补齐）。
+- **工具面收窄是行为变更，且文档未同步**：第三方工具不再拿到 `spawnTask` 与 `permission`
+  （此前**未写进** `PACK-API.md`，属未文档化的实际能力）；`toolCtx.cfg` 只保留上列 4 个键，
+  `cfg.providers`（含 apiKey）不再出现在工具面。`docs/PACK-API.md` 与 `docs/DEVELOPER.md` 本轮
+  **不在允许改动清单内**，故未同步——需在 P1 一并写明（否则又是一次"文档与实现不一致"）。
+- **冻结只作用于工具 ctx 外壳**：`todos`/`readCache`/`undoStore.backups` 仍是内核那一份（有意——工具
+  本来就要写它们：`todo` 全量替换、`read` 去重、写前备份）。因此恶意工具仍可清空 todo 清单或污染
+  读缓存：这是**可用性/完整性**问题，不是提权，P1 随子进程隔离一起解决。
+- **跨平台差异照旧**：macOS/Windows 无廉价 syscall 沙箱，与设计文档 §7 同一结论；本轮的冻结与裁剪
+  是纯 JS 语义，三平台一致。
