@@ -2,7 +2,7 @@
 // → PostToolUse 钩子 → 结果回填 → 循环，直到模型给出纯文本回复。
 // 附带：子代理（task 工具）、todo 清单状态、undo 备份仓、Ctrl+C 中断。
 
-import { trimMessages, clampText, messageTokens, approxTokens } from './context.js';
+import { trimMessages, messageTokens, approxTokens } from './context.js';
 import { compactConversation } from './compact.js';
 import { buildToolSchemas, dispatch } from './tools/index.js';
 import { DEFAULT_MODEL, modelPreset } from './models.js';
@@ -21,6 +21,10 @@ import { compileConstraints, checkPreTool, checkPostTool, checkOutput, blockedOu
 import { createLedger, newRunId } from './ledger.js';
 import { registerEgressSink } from './net-guard.js';
 import { getActivePackContext } from './packs.js';
+// v0.6.11（审计 P1-1 拆分第三刀）：工具编排两端的判据单源在 tools-flow.js——
+// ① 本轮可见哪些工具（只读档 × 预设白名单 × 已用工具快照 × MCP 只读标注）；
+// ② 工具结果怎么回填（序列化 / 复用前缀 / 约束拒绝文案 / 按窗口截断）。
+import { READONLY_TIER_SET, visibleToolsFor, serializeToolResult, toolResultMessage } from './tools-flow.js';
 
 const MAX_STEPS = 24;
 // 子代理步数上限：审计/精读类只读子任务需要读多个文件 + 交叉引用，12 步易在「读不全」时被截断
@@ -28,10 +32,10 @@ const MAX_STEPS = 24;
 // 提到与主循环一致（24），只读子任务每步是 read/grep（输入便宜、无输出 token），成本增量可忽略。
 const SUBAGENT_MAX_STEPS = 24;
 
-// 只读档工具集（省钱 B1 的「只读阶段」）——模块级单一来源。
-// v0.4.6：此前 test/bench 各自维护一份副本，已经漂移（漏了 v0.4.4 加入的 task），
-// 导致基准测的不是真实只读档。导出后基准与实现共用同一集合。
-export const READONLY_TIER_SET = new Set(['read', 'ls', 'glob', 'grep', 'skill', 'todo', 'git', 'fetch', 'task']);
+// 只读档工具集（省钱 B1 的「只读阶段」）——**单一来源已移到 `tools-flow.js`**（v0.6.11 / P1-1 第三刀）：
+// 它与「本轮可见哪些工具」的判据是同一条规则，放在一起才能保证"改一处就够"。
+// 这里只做**再导出**：bench/smoke 既有的 `from './agent.js'` 导入面与集合内容都不变（行为零变化）。
+export { READONLY_TIER_SET };
 
 // ---------------------------------------------------------------------------
 // 写意图 / 疑问句 / 未达成意图的判定（v0.6.3）
@@ -178,24 +182,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // v0.4.0 Agent Preset：cfg.presetTools 白名单恒生效（在只读档过滤之后收紧——预设只减不增）。
   const presetToolSet = Array.isArray(cfg.presetTools) ? new Set(cfg.presetTools.map(String)) : null;
   const activePresetName = String(cfg.presetName || ''); // 白名单拦截提示用
-  const toolsFor = (/** @type {boolean} */ readOnlyPhase, /** @type {Set<string>} */ strippedSet) => {
-    let schemas = buildToolSchemas(strippedSet, mcpSchemas());
-    if (presetToolSet) {
-      schemas = schemas.filter((/** @type {any} */ t) => {
-        const n = t?.function?.name;
-        if (!n) return true;
-        return presetToolSet.has(n) || (n.startsWith('mcp__') && presetToolSet.has(n.slice(5)));
-      });
-    }
-    if (!readOnlyPhase) return schemas;
-    return schemas.filter((/** @type {any} */ t) => {
-      const n = t?.function?.name;
-      if (!n) return true;
-      if (READONLY_TIER_SET.has(n) || strippedSet.has(n)) return true;
-      if (n.startsWith('mcp__')) return mcp ? mcp.isReadonly(n) : false;
-      return false;
+  // 工具可见性判据（v0.6.11 / P1-1 第三刀）：白名单过滤 + 只读档过滤的实现已单源到 `tools-flow.js`。
+  // 这里只负责把"当前拿得到的东西"递进去（判据本身不在本文件里；结构守卫见 smoke §136）。
+  const toolsFor = (/** @type {boolean} */ readOnlyPhase, /** @type {Set<string>} */ usedNames) =>
+    visibleToolsFor(buildToolSchemas(usedNames, mcpSchemas()), {
+      readOnlyPhase,
+      usedNames,
+      presetToolSet,
+      // MCP 的只读标注按名查询；`isReadonly` 是 mcp 对象上的方法（内部用 this），必须包一层
+      isMcpReadonly: mcp ? (/** @type {string} */ n) => mcp.isReadonly(n) : null,
     });
-  };
 
   // 子代理：全新上下文 + 同一 Provider/权限（提示带「子任务」标记），独立完成子任务后汇报
   async function spawnTask(/** @type {any} */ prompt, { description = '', readOnly = false } = {}) {
@@ -1116,16 +1112,19 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               error: rObj2?.error ?? null,
             });
           }
-          let text = typeof result === 'string' ? result : JSON.stringify(result); // 紧凑 JSON（评估 B3）：嵌套结果省 10-20% 回填 token，且下轮按 prompt 重复计费
-          const prefix = prep.cached ? '（与同回合相同调用结果一致，已复用）\n' : '';
+          // 序列化（字符串原样 / 对象紧凑 JSON）单源在 tools-flow.js：**先序列化、再问约束**，
+          // 与抽取前的求值顺序一字不差（原来这两步就是这个先后）。
+          const text = serializeToolResult(result); // 紧凑 JSON（评估 B3）：嵌套结果省 10-20% 回填 token，且下轮按 prompt 重复计费
           // v0.5.0 A3 ②：领域约束（PostToolUse）——completeness 缺项时**拒绝该工具结果**，
           // 让模型必须继续采集而不是把「未提及」当作已完成（「缺项绝不编造」从提示词升级为内核强制）。
           const pv = checkPostTool(constraints, prep.name, typeof result === 'string' ? safeParse(result) : result);
-          if (pv?.rejected) {
-            auditConstraint(pv.event);
-            text = `【领域约束】${pv.reason}`;
-          }
-          messages.push({ role: 'tool', tool_call_id: prep.tc.id, content: prefix + clampText(text, toolResultCap) });
+          if (pv?.rejected) auditConstraint(pv.event);
+          // 回填正文（复用前缀 / 约束拒绝文案 / 按窗口截断）单源在 tools-flow.js 的 toolResultMessage()
+          messages.push({
+            role: 'tool',
+            tool_call_id: prep.tc.id,
+            content: toolResultMessage(text, { cached: prep.cached, cap: toolResultCap, post: pv }),
+          });
         }
 
         let i = 0;

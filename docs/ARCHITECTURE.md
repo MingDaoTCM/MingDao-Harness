@@ -1,6 +1,6 @@
 # MingDao-Harness 架构设计
 
-> 版本口径：v0.6.8。本文档覆盖 `src/` 全部 **88** 个模块（`find src -name '*.js' | wc -l` = 88），
+> 版本口径：v0.6.8。本文档覆盖 `src/` 全部 **89** 个模块（`find src -name '*.js' | wc -l` = 89），
 > 按层给出每个模块的职责与它守住的那条不变量；判定以文件头注释与实际实现为准，不做推断性描述。
 >
 > 阅读顺序建议：§2 模块索引（查「某件事归谁管」）→ §3 数据流（看一次回合怎么走）→ §4 已知边界（看它**保证不了**什么）。
@@ -76,9 +76,10 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `cost-guard.js` —— 费用护栏：按北京时间自然日累计真实费用，`warn` 线提醒、`limit` 线按 `action` 处理（`warn` / `block` / `downgrade` 到便宜模型）—— 长回合把在途费用并入今日已用，否则统计文件不变会烧穿日限。
 - `batch.js` —— Batch API 半价通道：单轮批量任务（无工具、无流式）走 OpenAI 兼容批处理协议（`/files` → `/batches` → 轮询 → 下载结果，DeepSeek 风格结果端点回退 OpenAI）—— 端点不可用（404/405）必须明确报错告知网关不支持，**绝不静默假装成功**；计费按闲时全未命中 × 0.5，结果记入 `cachestats.js`（`batch: true`）。
 
-### 2.3 工具与围栏（12）
+### 2.3 工具与围栏（13）
 
 - `tools/index.js` —— 工具注册表：模型可见的工具 Schema（OpenAI function-calling 格式）与执行分发器，含第三方 `registerTool` 与 `config.tools` 挂载 —— Schema 与 dispatch 分支必须成对增加。
+- `tools-flow.js` —— 工具编排两端的判据（v0.6.11，审计 P1-1 拆分第三刀，纯函数）：`visibleToolsFor()`（只读档 × 预设白名单 × 本会话已用工具快照 × MCP 只读标注 → 本轮**发给模型哪些工具**）、`serializeToolResult()` / `toolResultMessage()`（字符串原样 / 对象紧凑 JSON × 复用前缀 × 领域约束拒绝 × 按窗口截断 → 工具结果**怎么回填**）以及 `READONLY_TIER_SET`（`agent.js` 原样再导出，导入面不变）—— 打印/审计/账本/`messages.push` 等副作用仍留在 `agent.js`，判据只此一份，结构守卫见 `test/smoke.js` §136。
 - `tools/fs-tools.js` —— 文件系统工具 read / write / edit / ls / glob / grep：统一返回 `{ok, output?|error?}` —— 工作空间围栏 `withinRoot()` 对悬空软链递归复检、深度超 16 层 fail-closed；写/编辑自动备份供 undo。
 - `tools/bash.js` —— bash 工具：子进程执行、超时强杀、输出截断；沙箱三档 `off` / `readonly`（全盘只读 + /tmp tmpfs）/ `safe`（只读文件系统 + `--unshare-net` 断网 + 工作目录可写）—— 仅 Linux + bubblewrap 可用，缺失时降级为 `off` 并在结果中注明，不静默假装沙箱。
 - `tools/fetch.js` —— HTTP 只读抓取工具：GET 任意 http(s) URL，返回文本（512KB 上限，正文截 20K）—— 只保留工具契约（参数校验、呈现口径、错误措辞），实际抓取整条走 `safeFetchText`。

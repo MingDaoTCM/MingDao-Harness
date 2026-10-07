@@ -12382,6 +12382,143 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
   }
 }
 
+// ---------- 136. v0.6.11：工具编排两端的判据抽成纯函数（审计 P1-1 拆分第三刀） ----------
+// 这一刀切的是「工具编排」的头尾两段**纯判据**，此前埋在约 1500 行的 runTurn 里、依赖闭包外的
+// 若干变量，只能靠端到端（造真实回合）间接验证：
+//   ① 本轮**发给模型哪些工具**——只读档 × 预设白名单 × 本会话已用工具快照 × MCP 只读标注；
+//   ② 工具结果**怎么回填**——字符串原样 / 对象紧凑 JSON × 复用前缀 × 领域约束拒绝 × 按窗口截断。
+// 行为清单（抽取前逐条抄下来的）写在 `src/tools-flow.js` 的模块注释里；本节把每一条钉死，
+// 并加一道单源结构守卫（判据只允许有一处实现，且 agent.js 必须真的调用它）。
+{
+  const { READONLY_TIER_SET, visibleToolsFor, serializeToolResult, toolResultMessage } =
+    await import(pathToFileURL(path.join(srcDir, 'tools-flow.js')).href);
+  const S = (/** @type {string} */ name) => ({ type: 'function', function: { name, description: name, parameters: {} } });
+  const NONAME = { type: 'function', function: {} }; // 取不到工具名的条目（自定义/Pack 条目可能如此）
+  const ALL = [S('read'), S('grep'), S('write'), S('bash'), S('mcp__srv__read'), S('mcp__srv__write'), NONAME];
+  const names = (/** @type {any[]} */ list) => list.map((t) => t?.function?.name ?? '(无名)');
+
+  // ① 只读档：只发只读档工具（read/grep）+ 无名条目；写类与 MCP 工具一律不可见
+  //    （没给 isMcpReadonly = 没有 MCP 客户端 → 丢掉，不是"默认放行"）
+  assert.deepEqual(names(visibleToolsFor(ALL, { readOnlyPhase: true })), ['read', 'grep', '(无名)'],
+    '只读档只发只读档工具（read/grep）+ 无名条目，写类与未授信的 MCP 工具一律不可见');
+  // ② 全量档：原样放出全部工具（含写类）；也证明此时不受只读档集合影响
+  assert.deepEqual(names(visibleToolsFor(ALL, { readOnlyPhase: false })), names(ALL),
+    '全量档（readOnlyPhase=false）必须原样放出全部工具——写类工具在任务回合必须可见');
+  // ③ 本会话已调用过的工具：即使不在只读档也保持可见（描述已被剥掉、模型在历史里见过用途）
+  assert.deepEqual(names(visibleToolsFor(ALL, { readOnlyPhase: true, usedNames: new Set(['write']) })),
+    ['read', 'grep', 'write', '(无名)'],
+    '本会话已用过的工具在只读档必须保持可见（否则"上一轮用过 write、这一轮只读提问"会突然不可见）');
+  // ④ MCP 的三态：判定为只读才可见；判定为非只读、或根本没有 MCP 客户端（见 ①）都不给
+  assert.deepEqual(names(visibleToolsFor(ALL, { readOnlyPhase: true, isMcpReadonly: (/** @type {string} */ n) => n === 'mcp__srv__read' })),
+    ['read', 'grep', 'mcp__srv__read', '(无名)'],
+    '只读档 MCP 工具只认 isMcpReadonly 的判定：判定为只读才可见、判定为非只读必须丢掉');
+  assert.deepEqual(names(visibleToolsFor(ALL, { readOnlyPhase: true, isMcpReadonly: () => true })),
+    ['read', 'grep', 'mcp__srv__read', 'mcp__srv__write', '(无名)'], '判定为只读的 MCP 工具都可见');
+  // ⑤ 预设白名单：先于只读过滤、两个阶段都生效（预设只减不增）；短名写法要能匹配 mcp__ 前缀名
+  assert.deepEqual(names(visibleToolsFor(ALL, { readOnlyPhase: false, presetToolSet: new Set(['read', 'bash']) })),
+    ['read', 'bash', '(无名)'],
+    '预设白名单必须先于只读过滤，且在全量档同样生效（预设只减不增）——白名单外的工具任何阶段都不可见');
+  assert.deepEqual(names(visibleToolsFor(ALL, { readOnlyPhase: true, presetToolSet: new Set(['srv__read']), isMcpReadonly: () => true })),
+    ['mcp__srv__read', '(无名)'],
+    '预设里写短名 srv__read 也要能匹配 mcp__srv__read（n.slice(5) 换算），否则 MCP 工具会被白名单误杀');
+  assert.deepEqual(names(visibleToolsFor(ALL, { readOnlyPhase: true, presetToolSet: new Set(['write']) })),
+    ['(无名)'], '预设只减不增：即使白名单点名 write，只读档下它依然不可见');
+  // ⑥ 顺序：filter 语义，输出保持输入相对顺序；纯函数不改入参
+  assert.deepEqual(names(visibleToolsFor([S('grep'), S('read')], { readOnlyPhase: true })), ['grep', 'read'],
+    '输出顺序必须与输入一致（filter 语义），不得重排——schema 顺序变化会白扔前缀缓存');
+  assert.equal(ALL.length, 7, 'visibleToolsFor 不得改动入参数组');
+  // ⑦ 只读档集合本体：单一来源仍是那九个（task 在内——只读子代理在只读档必须看得见）
+  assert.deepEqual([...READONLY_TIER_SET].sort(),
+    ['fetch', 'git', 'glob', 'grep', 'ls', 'read', 'skill', 'task', 'todo'],
+    '只读档集合内容不得变化（read/ls/glob/grep/skill/todo/git/fetch/task）');
+
+  // ⑧ 序列化：字符串原样（不再包一层 JSON 引号）；对象紧凑 JSON；错误结果原样回填
+  assert.equal(serializeToolResult('原始文本'), '原始文本', '字符串结果必须原样回填（不能再 JSON 包一层引号/转义）');
+  assert.equal(serializeToolResult('{"ok":true}'), '{"ok":true}', '看着像 JSON 的字符串也照样原样回填');
+  assert.equal(serializeToolResult(''), '', '空字符串必须原样回填（不得变成 "null"/"undefined"）');
+  assert.equal(serializeToolResult({ ok: true, output: 'hi' }), '{"ok":true,"output":"hi"}',
+    '对象结果必须紧凑 JSON（评估 B3：省回填 token，且下轮按 prompt 重复计费）');
+  assert.equal(serializeToolResult({ ok: false, error: 'boom' }), '{"ok":false,"error":"boom"}',
+    '错误结果（ok:false）必须原样回填给模型——回填路径不做任何"美化"或兜底改写');
+  assert.equal(serializeToolResult(0), '0', '数字结果走 JSON 序列化');
+  assert.equal(serializeToolResult(null), 'null', 'null 结果走 JSON 序列化');
+  assert.equal(serializeToolResult([1, 2]), '[1,2]', '数组结果走紧凑 JSON');
+  // 边界（抽取前就是这口径，本节只负责钉住）：JSON.stringify(undefined) 返回 undefined，
+  // clampText 内部 String() 之后回填正文是字符串 'undefined'
+  assert.equal(serializeToolResult(undefined), undefined, '`undefined` 结果仍返回 `undefined`（JSON.stringify 的固有行为）');
+  assert.equal(toolResultMessage(serializeToolResult(undefined), {}), 'undefined',
+    '`undefined` 结果最终回填成字符串 undefined（与抽取前一致，本次不改）');
+
+  // ⑨ 回填正文：复用前缀逐字一致；领域约束拒绝整段替换；超长截断且**前缀不计入上限**
+  const PREFIX136 = '（与同回合相同调用结果一致，已复用）\n';
+  assert.equal(toolResultMessage('输出', {}), '输出', '无缓存无约束时正文原样');
+  assert.equal(toolResultMessage('输出', { cached: true }), PREFIX136 + '输出',
+    '复用前缀必须逐字出现（含结尾换行）——它提示模型"这是同回合相同调用的结果"');
+  assert.equal(toolResultMessage('输出', { post: { rejected: true, reason: '缺少随访日期' } }), '【领域约束】缺少随访日期',
+    '回填正文：领域约束拒绝必须整段替换原文（模型必须继续采集，不能把"未提及"当已完成）');
+  assert.ok(!toolResultMessage('输出', { post: { rejected: true, reason: 'R' } }).includes('输出'),
+    '领域约束拒绝时，原始结果不得再出现在回填正文里');
+  assert.equal(toolResultMessage('输出', { post: { rejected: false, reason: 'R' } }), '输出', '未拒绝的约束判定不得改写正文');
+  assert.equal(toolResultMessage('输出', { post: null }), '输出', '无约束时正文原样');
+  assert.equal(toolResultMessage('输出', { cached: true, post: { rejected: true, reason: 'R' } }), PREFIX136 + '【领域约束】R',
+    '复用前缀与约束拒绝文案必须同时生效（顺序：前缀在前）');
+  const long136 = 'a'.repeat(30);
+  const cut136 = toolResultMessage(long136, { cap: 10 });
+  assert.ok(cut136.startsWith('a'.repeat(10)) && !cut136.includes('a'.repeat(11)), `截断必须按 cap 切：${cut136}`);
+  assert.ok(cut136.includes('…[输出过长已截断，原文共 30 字符]'), `回填正文：超长必须截断并标出原文字数，实际：${cut136}`);
+  const exact136 = 'b'.repeat(10);
+  assert.equal(toolResultMessage(exact136, { cached: true, cap: 10 }), PREFIX136 + exact136,
+    '复用前缀不计入截断上限（先截断、后加前缀）——恰好等于上限时不得被截断');
+
+  // ⑩ 单源结构守卫：agent.js 必须调用新模块，且不得再内联那段判据
+  {
+    const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+    // 先查"有没有抄回去"（它才是单源被破坏的现场）；再查"有没有真的调用新模块"。
+    // 只查一种写法会被绕过（本仓已经吃过一次：`if (guard.blocked)` → `if (guard && guard.blocked)`）。
+    // 所以按**特征表达式逐族**检查：集合判据 / 字面量副本 / 已用工具判据 / 白名单换算 / MCP 三元式。
+    const VIS_FORBIDDEN = [
+      ['只读档集合判据（READONLY_TIER_SET.has）', /READONLY_TIER_SET\s*\.\s*has\s*\(/],
+      ['只读档集合的字面量副本', /['"]skill['"]\s*,\s*['"]todo['"]\s*,\s*['"]git['"]|['"]git['"]\s*,\s*['"]fetch['"]\s*,\s*['"]task['"]/],
+      ['"本会话已用过的工具"判据（含改名写法）', /\b(usedNames|strippedSet|usedToolNames|turnStrippedSet)\s*\.\s*has\s*\(/],
+      ['预设白名单按名过滤（含 slice(5) 短名换算）', /presetToolSet\s*\.\s*has\s*\(\s*\w+\s*\.\s*slice\s*\(\s*5\s*\)\s*\)/],
+      ['预设白名单按名过滤（filter 里的 has(n)）', /presetToolSet\s*\.\s*has\s*\(\s*n\s*\)/],
+      ['只读档 MCP 放行三元式', /\?\s*mcp\s*\.\s*isReadonly/],
+    ];
+    for (const [what, re] of VIS_FORBIDDEN) {
+      assert.ok(!re.test(agentSrc), `agent.js 里不得再内联只读档可见性判据（${what}）——那正是抽到 tools-flow.js 的东西：${re}`);
+    }
+    const BF_FORBIDDEN = [
+      ['截断（clampText）', /clampText/],
+      ['复用前缀文案', /（与同回合相同调用结果一致，已复用）/],
+      ['序列化（字符串原样 / 紧凑 JSON）', /typeof\s+result\s*===\s*'string'\s*\?\s*result\s*:\s*JSON\.stringify\s*\(\s*result\s*\)/],
+      ['序列化（另一种写法）', /JSON\.stringify\s*\(\s*result\s*\)/],
+      ['约束拒绝改写正文（赋值式）', /text\s*=\s*`【领域约束】/],
+      ['约束拒绝改写正文（pv.reason）', /【领域约束】\$\{\s*pv\s*\.\s*reason\s*\}/],
+    ];
+    for (const [what, re] of BF_FORBIDDEN) {
+      assert.ok(!re.test(agentSrc), `agent.js 里不得再内联工具结果回填的判据（${what}）——那正是抽到 tools-flow.js 的东西：${re}`);
+    }
+    // 反过来也要成立：判据必须真的被**调用**（否则"抽出去"只是多了个没人用的文件）
+    assert.ok(/visibleToolsFor\s*\(/.test(agentSrc), 'agent.js 必须调用 tools-flow.js 的 visibleToolsFor()（工具可见性判据）');
+    assert.ok(/serializeToolResult\s*\(/.test(agentSrc), 'agent.js 必须调用 tools-flow.js 的 serializeToolResult()（结果序列化）');
+    assert.ok(/toolResultMessage\s*\(/.test(agentSrc), 'agent.js 必须调用 tools-flow.js 的 toolResultMessage()（回填正文）');
+    assert.ok(/from\s+'\.\/tools-flow\.js'/.test(agentSrc), '工具编排两端的判据必须从 tools-flow.js 导入（单源）');
+    // mcp__ 前缀判断：可见性判据里原有两处，抽取后 agent.js 只允许剩权限门那一处（isMcp）
+    const mcpPrefix = (agentSrc.match(/startsWith\s*\(\s*'mcp__'\s*\)/g) || []).length;
+    assert.equal(mcpPrefix, 1,
+      'mcp__ 前缀判断只允许权限门那一处（isMcp）；可见性判据里的两处必须留在 tools-flow.js');
+    // 判据只有一处实现：全仓（含 agent.js）不得再出现第二份
+    const dup136 = fs.readdirSync(srcDir).filter((f) => f.endsWith('.js')).filter((f) => {
+      if (f === 'tools-flow.js') return false;
+      const t = fs.readFileSync(path.join(srcDir, f), 'utf8');
+      return /（与同回合相同调用结果一致，已复用）|READONLY_TIER_SET\s*\.\s*has\s*\(/.test(t);
+    });
+    assert.deepEqual(dup136, [], `工具编排两端的判据只允许出现在 tools-flow.js，实际还有：${dup136.join('、')}`);
+  }
+
+  ok('v0.6.11 工具编排两端：可见性判据（只读档/白名单/已用工具/MCP 三态/顺序）+ 回填正文（原样/紧凑 JSON/复用前缀/约束拒绝/截断且前缀不计入）+ 单源结构守卫');
+}
+
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket
 // —— 实测 ubuntu/macOS + Node 20 上"断言全过、进程却不退出"，CI 里表现为冒烟步骤永远 in_progress
 // （Node 18/22/Windows 因为拆连接更快而侥幸通过）。这里显式退出，断言本身不受影响；
