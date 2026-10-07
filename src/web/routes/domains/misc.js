@@ -81,24 +81,76 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
 
   if (method === 'POST' && p === '/api/abort') {
     const body = await readBody(req, MAX_API_BODY);
-    if (body.taskId) {
-      const entry = tasks.get(body.taskId);
-      if (entry?.abortHandler) {
+    /**
+     * 停止一个任务：**必须同时做两件事**——
+     *   ① 置中断标志：`abortHandler()`（agent.js 注册的回调：`aborted = true; currentAc?.abort()`）；
+     *   ② 解除挂起的权限确认（`pendingAsk`）。
+     * 只做 ① 是本次用户实测 bug 的根因：回合正卡在 `await io.ask()` 上时，`aborted` 置真不会让
+     * 那个 await 醒来，工具循环要一直等到 ASK_TIMEOUT_MS（120 秒）超时才继续——用户看到的就是
+     * 「按停止没反应」，日志里则是连着一串「权限确认超时（120 秒未收到应答）」（见 §138）。
+     * 顺序：**先置中断标志、再解除 ask**——`aborted=true` 必须在 ask 的 await 续体被调度前生效，
+     * 否则工具按「拒绝」返回后循环会照常发起下一次模型请求（停止＝没停）。
+     * 与超时的交互：`pendingAsk.resolve()` 内部会 `clearTimeout(askTimer)`，所以停止**优先于**
+     * 120 秒 ask 超时，停止之后不会再冒一条"权限确认超时"的 error。
+     * @param {any} entry
+     * @returns {{ abortedTurn: boolean, releasedAsk: boolean }}
+     */
+    const stopTask = (entry) => {
+      let abortedTurn = false;
+      if (typeof entry?.abortHandler === 'function') {
         try {
           entry.abortHandler();
+          abortedTurn = true;
         } catch {}
       }
+      let releasedAsk = false;
+      if (entry?.pendingAsk) {
+        const pa = entry.pendingAsk;
+        entry.pendingAsk = null; // 先摘掉引用：await 续体唤醒后不得再看到这个挂起项
+        try {
+          pa.resolve(''); // 空串 = 拒绝（与超时同一口径：绝不因停止而放行）
+          releasedAsk = true;
+        } catch {}
+      }
+      return { abortedTurn, releasedAsk };
+    };
+    /** @type {any[]} */
+    const hits = [];
+    let found = true;
+    if (body.taskId) {
+      const entry = tasks.get(body.taskId);
+      if (!entry) found = false;
+      else hits.push({ entry, ...stopTask(entry) });
     } else {
       // 未指定任务：中断全部运行中任务
       for (const t of tasks.values()) {
-        if (t.status === 'running' && t.abortHandler) {
-          try {
-            t.abortHandler();
-          } catch {}
-        }
+        if (t.status === 'running') hits.push({ entry: t, ...stopTask(t) });
       }
+      if (!hits.length) found = false; // 没有运行中的任务可停——别回一个"成功"让前端以为停了
     }
-    json(res, 200, { ok: true });
+    const stopped = hits.filter((h) => h.abortedTurn).length;
+    const releasedAsk = hits.filter((h) => h.releasedAsk).length;
+    // 可见反馈（前端点击后必须有东西发生）：停止是用户主动动作，SSE 流里留一句。
+    // 特别是「等权限确认时被停止」这条路径——此前的表现是界面完全静默 120 秒。
+    for (const h of hits) {
+      if (!h.abortedTurn && !h.releasedAsk) continue; // 什么都没有停下就不吹哨（如实）
+      try {
+        h.entry.send?.({
+          type: 'banner',
+          text: h.releasedAsk
+            ? '■ 已停止本轮：同时解除了挂起的权限确认（按「拒绝」处理，不会放行本次操作）。'
+            : '■ 已停止本轮生成。',
+        });
+      } catch {}
+    }
+    // 如实回报，便于前端区分「停了」「任务已结束」「没有可停的东西」——不再一律 200 静默。
+    json(res, 200, {
+      ok: true,
+      found,
+      stopped,
+      releasedAsk,
+      status: hits.length === 1 ? hits[0].entry.status : null,
+    });
     return true;
   }
 

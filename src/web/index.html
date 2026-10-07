@@ -341,7 +341,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     </select>
     <button id="sendBtn" class="primary">发送</button>
   </div>
-  <div id="hint"><span id="hintText">工具执行与权限确认会实时展示；生成中可点「中断」停止。</span><label style="margin-left:12px;cursor:pointer;user-select:none"><input type="checkbox" id="journalChk" style="vertical-align:-2px;margin:0 4px 0 0">📌 带上文（最近会话日志，默认关＝新会话全新开始）</label></div>
+  <div id="hint"><span id="hintText">工具执行与权限确认会实时展示；生成中（含等待权限确认时）可点「■ 停止」立即中断。</span><label style="margin-left:12px;cursor:pointer;user-select:none"><input type="checkbox" id="journalChk" style="vertical-align:-2px;margin:0 4px 0 0">📌 带上文（最近会话日志，默认关＝新会话全新开始）</label></div>
   <div id="statusBar" title="累计使用统计（轮次/步数/LLM 与工具时长/首 token/吞吐/缓存命中/输入输出 tokens）"></div>
 </footer>
 <div id="modalRoot"></div>
@@ -462,7 +462,8 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <div id="wsList" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
     <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap">
       <input id="wsName" placeholder="空间名称…" style="flex:1;min-width:90px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
-      <input id="wsDir" placeholder="目录（留空 = 服务器工作目录）" style="flex:1.4;min-width:140px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+      <input id="wsDir" placeholder="目录（可点右侧选择；留空登记时也会弹选择器，选「不指定」= 服务器工作目录）" title="可点右侧「选择目录…」用系统对话框选，或直接手输绝对路径" style="flex:1.4;min-width:140px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
+      <button id="wsDirPick" title="用系统/内置目录选择器选目录">选择目录…</button>
     </div>
     <div class="row" style="justify-content:flex-start"><button id="wsAdd">＋ 登记工作空间</button></div>
       </section>

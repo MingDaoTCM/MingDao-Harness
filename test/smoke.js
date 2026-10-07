@@ -12988,6 +12988,483 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
   ok('v0.6.12 WebUI 权限：显式选择 > 预设 > config.json（反提权不放宽 + 对象形态 deny 不丢）+ 生效档位与来源有可见说明 + 单源与接线结构守卫');
 }
 
+// ---------- 138. v0.6.13：WebUI「停止」在两种卡住形态下必须真的停下（用户实测 bug）+ 打包漏 preload.cjs 守卫 ----------
+// 用户实测（桌面版 v0.6.10 + 本地部署模型，日志 ~/Library/Application Support/mingdao-desktop/logs/mingdao.log）：
+//   11:50:27 [renderer] send 点击 generating=false text=376 → 生成中：防睡眠已开启；
+//   此后该回合**再无任何日志**（没有 done、没有 error、没有「回合收尾」）；用户按「停止」界面毫无反应；
+//   12:07:23 起又连出 8 次「权限确认超时（120 秒未收到应答）」。
+//   ~/.mingdao/logs/web-server.log 同刻只有一行 `chat 开始 t7bf… session=新会话 消息长度=376`，该 task 没有任何收尾记录。
+// 复现（探针 /tmp/probe-stop.mjs，未入库：真实 `node src/cli.js web <port>` + 临时 MINGDAO_HOME + 本机桩 provider，
+// 桩在收到请求后只发两帧就不再发也不结束，或回一个 write 工具调用后静默；停止走前端同一条路 POST /api/abort）：
+//   ① 流式中（有帧到达）      修前：**能停**（SSE 385ms 内关闭、done aborted=true、任务落 aborted）
+//   ② 等待权限确认（ask 已下发、POST /api/permission 无人应答）
+//                             修前：**停不住**——abort 返回 200 后 SSE 一直挂着，直到 ASK_TIMEOUT_MS 到点，
+//                             才先冒一条「权限确认超时」error、再 toolDenied、再 done(aborted) 收尾；
+//                             把超时调到 6s 复跑，观测量与生产 120s 形态逐字同形。
+//   ③ 无首帧（等首 token）    修前：能停（0.5s）。
+// 真实断点（两处，缺一即"点了没反应"）：
+//   前端 src/web/app.js：停止按钮 → abort() → 一行 `fetch('/api/abort',…)…catch(()=>{})`（无任何即时反馈，
+//     失败也静默）；权限确认弹窗的遮罩 z-index:50 盖住整个输入区，等待确认时**够不到**停止按钮。
+//   服务端 src/web/routes/domains/misc.js 的 /api/abort：只调 entry.abortHandler()，**从不碰 entry.pendingAsk**。
+//     而此刻回合正 await 在 io.ask() 上，abortHandler 只做 `aborted = true; currentAc?.abort()`
+//     （此时没有在途 LLM 请求可 abort），那个 await 无人唤醒 → 停止要等到 120 秒 ask 超时才生效。
+//     §137 之前修好的"超时按拒绝处理"因此变成了唯一的出口：用户看到的 9 次超时正是它一次次数出来的
+//     （Bug C 与 Bug A 同源，见提交信息）。
+// 修法：① 服务端停止**同时**做两件事：置中断标志 + 解除挂起确认（按「拒绝」落定，绝不放行；
+//   pendingAsk.resolve 内部 clearTimeout → 停止优先于 120 秒超时，且不再冒超时错误），并如实回报
+//   {found, stopped, releasedAsk, status}；② 前端停止收敛成**唯一出口** stopTurn()（主按钮/看门狗/任务面板
+//   三处共用），点击立刻进「停止中…」，失败有可见提示；③ 停止时收掉挂起的确认弹窗（弹窗内也加了
+//   「■ 停止本轮」——遮罩盖住输入区时唯一够得着的停止入口）；④ 8 秒兜底：服务端确认了中断但流仍未收尾，
+//   就断开本轮 SSE（服务端 res.on('close') 走同一套收尾，是第二条真实路径）。
+// Bug B（同节守卫）：desktop/electron-builder.yml 的 files 白名单是**穷举**的，漏了 preload.cjs →
+//   打包版启动即报 `Unable to load preload script: …/app.asar/preload.cjs` + ENOENT，原生目录选择器静默降级。
+//   本轮用 `npx electron-builder --dir` + `npx @electron/asar list` 做了**产物级**验证（见提交信息），
+//   这里留一条**结构级**守卫：**这条守卫防的是打包漏文件，不是运行时行为**（打包产物级验证需要 ~1GB
+//   下载与签名环境，不适合放进冒烟套件）。
+// 同节第五组（同一轮负责人实测）：设置面板 → 工作空间 →「＋ 登记工作空间」**不弹目录选择器**
+//   （`#wsAdd` 只读 `#wsDir` 手输框，从不调 openDirPicker；主界面「＋ 新建工作空间…」那条路是好的）
+//   —— v0.6.8 接原生选择器时只接了主界面，本组守卫防的就是这类**漏接**：结构上查处理函数里有
+//   `openDirPicker(`，行为上把真实源码切片塞进桩 DOM 里点一遍（桌面桥 / 浏览器回退 / 「不指定（当前目录）」/
+//   名称为空 / 「选择目录…」）。
+{
+  // —— 内嵌探针源码（只观测不判定；String.raw 保证 \n 等转义字面不变） ——
+  const STOP138_PROBE_SRC = String.raw`// §138 端到端探针（由 test/smoke.js 第 138 节在运行时写入临时目录并 spawnSync 执行）。
+// 只**观测**、不判定：把两种卡住形态下「点停止」的可观察结果打成一行 JSON，交给 §138 断言。
+// 被测对象是真实 WebUI：「node src/cli.js web <port>」 + 临时 MINGDAO_HOME + 本机桩 provider。
+// 桩 provider 用 HTTP SSE 假装模型：收到请求后要么发几帧就不发也不结束，要么回一个 write 工具调用。
+import http from 'node:http';
+import fs from 'node:fs';
+import os from 'node:os';
+import net from 'node:net';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+
+const ROOT = process.env.STOP138_ROOT;
+const ASK_TIMEOUT_MS = 8000; // 比生产（120000）短，让"没解除挂起确认"的失败形态能快速收敛
+
+function say(o) {
+  process.stdout.write('__STOP138__' + JSON.stringify(o) + '\n');
+}
+
+const reqLog = [];
+let reqCount = 0;
+let stubErr = null;
+const mock = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', (d) => (body += d));
+  req.on('end', () => {
+    let parsed = {};
+    try { parsed = JSON.parse(body); } catch {}
+    reqCount += 1;
+    const n = reqCount;
+    const rec = { n, at: Date.now(), sawSocketClose: false, mode: '' };
+    reqLog.push(rec);
+    res.on('close', () => {
+      if (!rec.endedByUs) rec.sawSocketClose = true; // 对端关掉 = 服务端把 fetch abort 了
+    });
+    const last = [...(parsed.messages || [])].reverse().find((m) => m.role === 'user');
+    const text = typeof last?.content === 'string' ? last.content : JSON.stringify(last?.content ?? '');
+    const sse = (p) => { res.write('data: ' + JSON.stringify(p) + '\n\n'); };
+    if (text.includes('STOP138-HANG')) {
+      rec.mode = 'hang';
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      return; // 一帧不发、也不结束（等首 token）
+    }
+    if (text.includes('STOP138-STREAM')) {
+      rec.mode = 'stream';
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      sse({ choices: [{ delta: { content: '第一段' } }] });
+      sse({ choices: [{ delta: { content: '第二段' } }] });
+      return; // 有帧到达后停住不再发（流式中卡住）
+    }
+    rec.mode = 'ask';
+    res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+    sse({
+      choices: [{
+        delta: {
+          tool_calls: [{ index: 0, id: 'call_138', type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: 'stop138.txt', content: 'x\n' }) } }],
+        },
+        finish_reason: 'tool_calls',
+      }],
+      usage: { prompt_tokens: 10, completion_tokens: 5 },
+    });
+    rec.endedByUs = true;
+    res.end('data: [DONE]\n\n');
+  });
+});
+mock.on('error', (e) => { stubErr = String(e && e.message); });
+try {
+  await new Promise((r) => mock.listen(0, '127.0.0.1', r));
+} catch (e) {
+  say({ fatal: '桩 provider 无法监听：' + String(e && e.message) });
+  process.exit(0);
+}
+const mockPort = mock.address().port;
+
+const home = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-stop138-home-'));
+const work = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-stop138-work-'));
+fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({
+  provider: 'custom', model: 'test-model', baseUrl: 'http://127.0.0.1:' + mockPort + '/v1',
+  permission: 'ask', contextBudget: 32000, autoTitle: false,
+}));
+fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ custom: 'sk-test-' + 'x'.repeat(20) }), { mode: 0o600 });
+
+async function freePort() {
+  return await new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.on('error', reject);
+    s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => resolve(p)); });
+  });
+}
+
+const port = await freePort();
+const child = spawn(process.execPath, [path.join(ROOT, 'src', 'cli.js'), 'web', String(port)], {
+  cwd: work,
+  env: { ...process.env, MINGDAO_HOME: home, MINGDAO_ASK_TIMEOUT_MS: String(ASK_TIMEOUT_MS), MINGDAO_NO_TELEMETRY: '1' },
+  stdio: ['ignore', 'pipe', 'pipe'],
+});
+let srvOut = '';
+child.stdout.on('data', (d) => (srvOut += d));
+child.stderr.on('data', (d) => (srvOut += d));
+const base = 'http://127.0.0.1:' + port;
+
+let ready = false;
+{
+  const deadline = Date.now() + 30000;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) break;
+    try { const r = await fetch(base + '/api/state'); if (r.ok) { ready = true; break; } } catch {}
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+if (!ready) {
+  try { child.kill('SIGKILL'); } catch {}
+  try { mock.close(); } catch {}
+  say({ fatal: 'WebUI 未在 30s 内就绪；服务端输出尾部=' + srvOut.slice(-400) });
+  process.exit(0);
+}
+
+/** 跑一个回合：等 signal 到达 → 点停止（前端同一条路：POST /api/abort {taskId}）→ 观察收尾 */
+async function turn(kind, message, signalType, waitAfterAbortMs) {
+  const out = {
+    kind,
+    aborted: false,
+    abortResp: null,
+    closed: false,
+    closedAfterAbortMs: null,
+    eventTypes: [],
+    doneSeen: false,
+    doneAborted: null,
+    timeoutErrorSeen: false,
+    errorMessages: [],
+    requestsWhenAborted: reqCount,
+    requestsAfterAbort: 0,
+    providerSawSocketClose: false,
+    taskStatus: null,
+    sessionDoneMs: null,
+  };
+  const t0 = Date.now();
+  const resp = await fetch(base + '/api/chat', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ message }),
+  });
+  if (!resp.ok) { out.errorMessages.push('chat HTTP ' + resp.status); return out; }
+  const reader = resp.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  let taskId = null;
+  let abortAt = null;
+  let closed = false;
+  const pump = (async () => {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) { closed = true; break; }
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl).trim();
+        buf = buf.slice(nl + 1);
+        if (!line.startsWith('data:')) continue;
+        let ev; try { ev = JSON.parse(line.slice(5)); } catch { continue; }
+        if (ev.taskId) taskId = ev.taskId;
+        out.eventTypes.push(ev.type);
+        if (ev.type === 'done') { out.doneSeen = true; out.doneAborted = ev.aborted === true; out.sessionDoneMs = Date.now() - t0; }
+        if (ev.type === 'error') {
+          out.errorMessages.push(String(ev.message || ''));
+          if (/权限确认超时/.test(String(ev.message || ''))) out.timeoutErrorSeen = true;
+        }
+        if (ev.type === signalType && !out.aborted) {
+          out.aborted = true;
+          await new Promise((r) => setTimeout(r, 250)); // 让 UI/服务端进入稳定态再点停止
+          abortAt = Date.now();
+          const r = await fetch(base + '/api/abort', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(taskId ? { taskId } : {}),
+          });
+          out.abortResp = { status: r.status, body: await r.json().catch(() => ({})) };
+          out.requestsWhenAborted = reqCount;
+        }
+      }
+    }
+  })();
+  const waitUntil = Date.now() + (out.aborted ? waitAfterAbortMs : 20000);
+  while (!closed && Date.now() < waitUntil) await new Promise((r) => setTimeout(r, 100));
+  out.closed = closed;
+  if (closed && abortAt) out.closedAfterAbortMs = Date.now() - abortAt;
+  if (!closed) { try { await reader.cancel(); } catch {} }
+  await pump.catch(() => {});
+  out.requestsAfterAbort = reqCount - (out.requestsWhenAborted || 0);
+  const mine = reqLog.filter((r) => r.mode === kind);
+  out.providerSawSocketClose = mine.some((r) => r.sawSocketClose);
+  try {
+    const t = await (await fetch(base + '/api/tasks')).json();
+    const me = (t.tasks || []).find((x) => x.id === taskId);
+    out.taskStatus = me ? me.status : null;
+  } catch {}
+  return out;
+}
+
+const result = { askTimeoutMs: ASK_TIMEOUT_MS, fatal: null };
+try {
+  result.stream = await turn('stream', 'STOP138-STREAM 请创建文件 stop138.txt 并写入内容', 'text', 6000);
+  result.hang = await turn('hang', 'STOP138-HANG 请创建文件 stop138.txt 并写入内容', 'turnStart', 6000);
+  result.ask = await turn('ask', 'STOP138-ASK 请创建文件 stop138.txt 并写入内容', 'ask', ASK_TIMEOUT_MS + 6000);
+} catch (e) {
+  result.fatal = String((e && e.message) || e);
+}
+// 「停止 3 秒后不再有新请求」：上一条流关闭后再静置观察
+await new Promise((r) => setTimeout(r, 1500));
+result.requestsTotalAtEnd = reqCount;
+result.stubErr = stubErr;
+say(result);
+try { child.kill('SIGKILL'); } catch {}
+try { mock.close(); } catch {}
+process.exit(0);
+`;
+  const repo = path.join(srcDir, '..'); // 仓库根（真实 smoke 与变异脚手架生成的脚本都用得上）
+
+  // —— ① 行为级：两种卡住形态下点停止（真实 WebUI：cli web + 临时 MINGDAO_HOME + 本机桩 provider） ——
+  // 只**观测**不判定：探针把可观察结果打成一行 JSON，判定全部留在本节（变异必须让这里的断言变红）。
+  const helperDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-stop138-'));
+  const helperPath = path.join(helperDir, 'probe.mjs');
+  fs.writeFileSync(helperPath, STOP138_PROBE_SRC, 'utf8');
+  const run = spawnSync(process.execPath, [helperPath], {
+    cwd: repo,
+    encoding: 'utf8',
+    timeout: 180000,
+    env: { ...process.env, STOP138_ROOT: repo, MINGDAO_HOME: helperDir },
+  });
+  const rawOut = String(run.stdout || '') + String(run.stderr || '');
+  const line = rawOut.split('\n').find((l) => l.startsWith('__STOP138__'));
+  assert.ok(line, '前置：端到端探针必须产出观测结果（否则本节无法判定）——实际输出尾部：' + rawOut.slice(-400));
+  const P = JSON.parse(line.slice('__STOP138__'.length));
+  assert.ok(!P.fatal, '前置：探针必须跑完（真实 WebUI 起得来、桩 provider 连得上），实际：' + P.fatal);
+
+  // ①-1 流式中止：SSE 必须关闭、状态必须复位、内核 AbortController 必须真的 abort
+  {
+    const s = P.stream;
+    assert.equal(s.aborted, true, '前置：流式形态必须真的收到过帧（否则这条测的不是"流式中止"）');
+    assert.equal(s.abortResp && s.abortResp.status, 200, '停止接口必须 200（前端只走 POST /api/abort 这一条路）');
+    assert.ok(s.abortResp.body && Number(s.abortResp.body.stopped) >= 1, '流式中点停止：服务端必须确认中断（stopped≥1），实际 ' + JSON.stringify(s.abortResp && s.abortResp.body));
+    assert.equal(s.closed, true, '流式中止后 SSE 必须关闭（客户端不再挂着）');
+    assert.ok(s.closedAfterAbortMs != null && s.closedAfterAbortMs < 5000, '流式中止必须在数秒内生效（实际 ' + s.closedAfterAbortMs + 'ms）');
+    assert.equal(s.doneSeen, true, '中止后仍必须下发 done（前端据此复位 generating）');
+    assert.equal(s.doneAborted, true, '中止的回合必须如实标 aborted=true');
+    assert.equal(s.taskStatus, 'aborted', '任务状态必须落定成 aborted（不能永远停在 running）');
+    assert.equal(s.providerSawSocketClose, true, '中止必须真的 abort 内核 AbortController——可观察证据：桩 provider 的在途连接被对端关闭');
+    assert.equal(s.requestsAfterAbort, 0, '中止后不得再向模型发起新请求（实际 ' + s.requestsAfterAbort + ' 次）');
+  }
+
+  // ①-2 无首帧中止（等首 token 时点停止）：同一条路径，同样必须停
+  {
+    const s = P.hang;
+    assert.equal(s.aborted, true, '前置：无首帧形态必须真的进过回合');
+    assert.ok(Number(s.abortResp && s.abortResp.body && s.abortResp.body.stopped) >= 1, '无首帧点停止：服务端必须确认中断（stopped≥1）');
+    assert.equal(s.closed, true, '无首帧中止后 SSE 必须关闭');
+    assert.ok(s.closedAfterAbortMs != null && s.closedAfterAbortMs < 5000, '无首帧中止必须在数秒内生效（实际 ' + s.closedAfterAbortMs + 'ms）');
+    assert.equal(s.doneAborted, true, '无首帧被中止的回合必须如实标 aborted=true');
+    assert.equal(s.providerSawSocketClose, true, '无首帧中止同样必须 abort 内核 AbortController（桩 provider 连接被关闭）');
+    assert.equal(s.requestsAfterAbort, 0, '无首帧中止后不得再向模型发起新请求');
+  }
+
+  // ② 等待权限确认时中止：pendingAsk 必须被解除、**不能**等到 120 秒超时、按「拒绝/已中止」落定
+  {
+    const s = P.ask;
+    assert.equal(s.aborted, true, '前置：ask 形态必须真的收到过 ask 事件');
+    const body = (s.abortResp && s.abortResp.body) || {};
+    assert.equal(s.abortResp && s.abortResp.status, 200, '等待权限确认时停止接口必须 200');
+    assert.ok(Number(body.releasedAsk) >= 1, '等待权限确认时点停止：服务端必须**同时**解除挂起的权限确认（releasedAsk≥1）——这正是修前缺失的那一半，实际 ' + JSON.stringify(body));
+    assert.equal(s.timeoutErrorSeen, false, '停止优先于超时：解除挂起确认后**不得**再冒「权限确认超时」（修前的形态就是等满 120 秒再冒它）');
+    assert.equal(s.closed, true, '等待权限确认时点停止：SSE 必须关闭，不能一直挂着');
+    assert.ok(s.closedAfterAbortMs != null && s.closedAfterAbortMs < 5000, '等待权限确认时的停止必须在数秒内生效（探针的 ask 超时是 ' + P.askTimeoutMs + 'ms，实际关闭用了 ' + s.closedAfterAbortMs + 'ms）');
+    assert.ok(s.eventTypes.includes('toolDenied'), '被解除的权限确认必须按「拒绝」落定（toolDenied），绝不因停止而放行');
+    assert.equal(s.doneSeen, true, '按拒绝落定后回合必须收尾（done）——不能挂在 await 上');
+    assert.equal(s.doneAborted, true, '被停止的回合必须如实标 aborted=true');
+    assert.equal(s.taskStatus, 'aborted', '任务状态必须落定成 aborted');
+    assert.equal(s.requestsAfterAbort, 0, '解除挂起确认后不得借"拒绝"再发起下一次模型请求（实际 ' + s.requestsAfterAbort + ' 次）');
+  }
+
+  // —— ③ 结构守卫：前端点击 → 端点 → abort 的**单源**链路（行为级在上面的端到端里） ——
+  {
+    const appSrc = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+    assert.ok(/sendBtn\.onclick=\(\)=>\{ if\(generating\)\{ stopTurnFromButton\(\); \} else \{ send\(\); \} \};/.test(appSrc),
+      '生成态下主按钮必须走停止出口 stopTurnFromButton()（而不是别的地方另起一套）');
+    const abortFetches = appSrc.match(/fetch\('\/api\/abort'/g) || [];
+    assert.equal(abortFetches.length, 1, '停止请求必须**单源**：全前端只允许一处 POST /api/abort（主按钮/看门狗/任务面板共用 stopTurn()），实际 ' + abortFetches.length + ' 处');
+    assert.ok(/async function stopTurn\(taskId\)\{/.test(appSrc), '停止出口 stopTurn(taskId) 必须存在（三处入口共用它）');
+    assert.ok(/if\(stopping\)\{ sendBtn\.textContent='⏹ 停止中…'/.test(appSrc), '点停止必须立刻有可见反馈（按钮进「停止中…」），不能点了什么都不发生');
+    assert.ok(/⚠ 停止失败：/.test(appSrc), '停止失败必须有可见提示（修前 \.catch\(\(\)=>\{\}\) 静默无响应）');
+    assert.ok(/function dismissAskModals\(\)\{/.test(appSrc), '必须存在 dismissAskModals()——停止要能收掉挂起的权限确认弹窗');
+    // 单源守卫要点名**停止这条路上**确实调了它：全文匹配会被别处的调用（如 ask 超时后收弹窗）蒙混过关
+    const stopFnAt = appSrc.indexOf('async function stopTurnFromButton()');
+    const stopFnEnd = appSrc.indexOf('// —— 输入框上方工作状态条', stopFnAt);
+    assert.ok(stopFnAt >= 0 && stopFnEnd > stopFnAt, '（前置）应能定位停止出口 stopTurnFromButton 的函数体');
+    assert.ok(/dismissAskModals\(\);/.test(appSrc.slice(stopFnAt, stopFnEnd)),
+      '停止必须能收掉挂起的权限确认弹窗（遮罩盖住输入区时用户够不到停止按钮）');
+    assert.ok(/data-stop="1"/.test(appSrc), '权限确认弹窗里必须给出「■ 停止本轮」入口（等待确认期间唯一够得着的停止入口）');
+    assert.ok(/sendBtn\.disabled=true/.test(appSrc), '「停止中…」期间必须禁用按钮防连点');
+
+    const miscSrc = fs.readFileSync(path.join(srcDir, 'web', 'routes', 'domains', 'misc.js'), 'utf8');
+    const from = miscSrc.indexOf("p === '/api/abort'");
+    const to = miscSrc.indexOf("if (method === 'GET' && p === '/api/memory')", from);
+    assert.ok(from >= 0 && to > from, '（前置）应能定位 /api/abort 路由块');
+    const abortSrc = miscSrc.slice(from, to);
+    assert.ok(/entry\?\.pendingAsk/.test(abortSrc) && /pa\.resolve\(''\)/.test(abortSrc),
+      '服务端 /api/abort 必须解除挂起的权限确认（只调 abortHandler 时，等 ask 的回合要等到 120 秒超时才停）');
+    assert.ok(/entry\.abortHandler\(\)/.test(abortSrc), '/api/abort 必须保留中断标志（abortHandler → aborted + currentAc.abort()）');
+    assert.ok(/releasedAsk/.test(abortSrc) && /stopped/.test(abortSrc), '/api/abort 必须如实回报 stopped/releasedAsk（前端据此区分"停了"与"没停"）');
+    assert.ok(/found/.test(abortSrc), '/api/abort 必须回报 found（陈旧 taskId 时前端要能说出"该任务已结束"，而不是静默 200）');
+  }
+
+  // —— ④ 结构守卫（Bug B）：打包配置必须包含 preload.cjs ——
+  // ⚠ **这条守卫防的是打包漏文件，不是运行时行为**：它只能证明配置里列了这个文件，
+  // 证明不了产物里有它（产物级验证见本轮用 npx electron-builder --dir + npx @electron/asar list 的实测记录）。
+  {
+    const yml = fs.readFileSync(path.join(repo, 'desktop', 'electron-builder.yml'), 'utf8');
+    const filesIdx = yml.indexOf('\nfiles:');
+    assert.ok(filesIdx >= 0, '（前置）应能定位 electron-builder.yml 的 files 段');
+    const filesBlock = yml.slice(filesIdx, yml.indexOf('extraResources:', filesIdx));
+    assert.ok(/^\s*-\s+preload\.cjs\s*$/m.test(filesBlock),
+      '打包配置 files 必须包含 preload.cjs——packaged 版按 app.asar/preload.cjs 加载（v0.6.10 实测：漏了它 → Unable to load preload script + ENOENT，桌面目录选择器静默降级）');
+    const pkg = JSON.parse(fs.readFileSync(path.join(repo, 'desktop', 'package.json'), 'utf8'));
+    assert.equal(pkg.type, 'module', '（前置）desktop/package.json 是 ESM（"type":"module"）——所以 preload 必须是 .cjs，不能改扩展名');
+    assert.ok(fs.existsSync(path.join(repo, 'desktop', 'preload.cjs')), '（前置）desktop/preload.cjs 必须真的存在（配置列了不存在的文件等于没修）');
+    assert.ok(/^\s*-\s+update-verify\.js\s*$/m.test(filesBlock),
+      '打包配置 files 必须包含 update-verify.js——main.js 顶部**静态** import 它（更新包来源签名），漏打包不是降级而是主进程 ERR_MODULE_NOT_FOUND（同一个齿根）');
+    const mainSrc = fs.readFileSync(path.join(repo, 'desktop', 'main.js'), 'utf8');
+    assert.ok(/preload:\s*path\.join\(__dirname, 'preload\.cjs'\)/.test(mainSrc), '（前置）main.js 仍按 __dirname/preload.cjs 加载——配置项名必须与它一致');
+  }
+
+  // —— ⑤ 设置面板「登记工作空间」必须走**同一个**目录选择器（用户实测：这里不弹系统对话框） ——
+  // 本条防的是**漏接**：v0.6.8 接原生目录选择器时只接了主界面「＋ 新建工作空间…」（#wsSel 的
+  // __add__ 分支），设置面板这条路径仍只读 #wsDir 手输框 → 用户点「登记」什么都不弹，只能手打绝对路径。
+  // 结构守卫只查"处理函数里有没有调 openDirPicker"；行为守卫把**真实源码切片**放进桩 DOM/window/fetch
+  // 里点一遍（桌面桥 / 浏览器回退 / 「不指定（当前目录）」 / 名称为空 / 「选择目录…」五条）。
+  {
+    const appSrc = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+    const hAt = appSrc.indexOf("$('#wsAdd').onclick=");
+    const hEnd = appSrc.indexOf('// 目录框旁的「选择目录…」', hAt);
+    assert.ok(hAt >= 0 && hEnd > hAt, '（前置）应能定位 #wsAdd 的处理函数');
+    const wsAddSrc = appSrc.slice(hAt, hEnd);
+    assert.ok(/openDirPicker\(/.test(wsAddSrc),
+      '设置面板的「登记工作空间」必须调用 openDirPicker——否则不弹系统/内置目录选择器，只能手输绝对路径（这条守卫防的是"只接了主界面、漏接设置面板"这类漏接）');
+    const pickAt = appSrc.indexOf("$('#wsDirPick').onclick=");
+    assert.ok(pickAt >= 0 && /openDirPicker\(/.test(appSrc.slice(pickAt, pickAt + 400)), '「选择目录…」按钮也必须调 openDirPicker（与登记同一条路径）');
+    assert.ok(/id="wsDirPick"/.test(fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8')), '设置面板必须真的有一个「选择目录…」按钮（#wsDirPick）');
+    assert.ok(!/if\(!name\)\s*return;/.test(wsAddSrc), '名称为空时不得静默 return（必须给出可见提示）');
+
+    // 行为级：取真实源码切片（选择器 + 设置面板登记路径）在桩 DOM 里执行，然后模拟点击
+    const aStart = appSrc.indexOf('let pickerCb = null, pickerDir');
+    const aEnd = appSrc.indexOf("const chatEl = $('#chat')");
+    const bStart = appSrc.indexOf('// 登记工作空间（设置面板 → 工作空间）');
+    const bEnd = appSrc.indexOf('// —— 长期记忆 ——', bStart);
+    assert.ok(aStart >= 0 && aEnd > aStart, '（前置）应能定位目录选择器源码切片');
+    assert.ok(bStart >= 0 && bEnd > bStart, '（前置）应能定位设置面板登记路径源码切片');
+    const slice = appSrc.slice(aStart, aEnd) + '\n' + appSrc.slice(bStart, bEnd);
+    const makeWsEnv = (withDesktop) => {
+      const els = new Map();
+      const mkEl = () => /** @type {any} */ ({ value: '', textContent: '', innerHTML: '', title: '', style: {}, onclick: null, addEventListener() {}, appendChild() {}, focus() {}, classList: { add() {}, remove() {} } });
+      const $ = (/** @type {any} */ sel) => { if (!els.has(sel)) els.set(sel, mkEl()); return els.get(sel); };
+      const calls = { posts: [], native: 0, alerts: [] };
+      const win = /** @type {any} */ ({});
+      if (withDesktop) win.__MDH_DESKTOP__ = { pickDirectory: async () => { calls.native += 1; return '/Users/rockie/proj'; } };
+      const fetchStub = async (/** @type {any} */ url, /** @type {any} */ opts) => {
+        if ((opts && opts.method) === 'POST') calls.posts.push({ url, body: JSON.parse(opts.body) });
+        return { json: async () => ({ ok: true, name: 'ws', dir: '/tmp/ws', entries: [], parent: null, home: '/home/u', cwd: '/cwd' }) };
+      };
+      new Function('window', 'document', '$', 'fetch', 'uiAlert', 'renderBanner', 'refreshWorkspaces', 'refreshWsSel', 'reloadModels', slice)(
+        win,
+        { createElement: () => mkEl(), querySelector: () => null },
+        $,
+        fetchStub,
+        (/** @type {any} */ t) => calls.alerts.push(String(t)),
+        () => {},
+        () => {}, () => {}, () => {}
+      );
+      return { $, calls, win };
+    };
+    const tick = () => new Promise((r) => setTimeout(r, 10));
+
+    // ⑤-1 桌面桥：点「登记」（目录框为空）→ 原生选择器被调用，选中路径进请求体
+    {
+      const { $, calls } = makeWsEnv(true);
+      $('#wsName').value = 'proj';
+      $('#wsDir').value = '';
+      $('#wsAdd').onclick();
+      await tick();
+      assert.equal(calls.native, 1, '桌面版点「登记」必须调用 window.__MDH_DESKTOP__.pickDirectory（修前：什么都不弹）');
+      assert.equal(calls.posts.length, 1, '选中目录后必须发出登记请求');
+      assert.equal(calls.posts[0].body.dir, '/Users/rockie/proj', '选中的目录必须进请求体，而不是要求用户手输绝对路径');
+    }
+    // ⑤-2 手输目录仍可直接登记（不强制走选择器）
+    {
+      const { $, calls } = makeWsEnv(true);
+      $('#wsName').value = 'typed';
+      $('#wsDir').value = '/manual/dir';
+      $('#wsAdd').onclick();
+      await tick();
+      assert.equal(calls.native, 0, '已手输目录时不该再多弹一次选择器');
+      assert.equal(calls.posts[0].body.dir, '/manual/dir', '手输的目录仍要生效');
+    }
+    // ⑤-3 无桌面桥（浏览器）→ 回退内置目录弹窗；⑤-4 点「不指定（当前目录）」仍按当前目录登记
+    {
+      const { $, calls } = makeWsEnv(false);
+      $('#wsName').value = 'web';
+      $('#wsDir').value = '';
+      $('#wsAdd').onclick();
+      await tick();
+      assert.equal(calls.native, 0, '没有桌面桥时不得调用原生选择器');
+      assert.equal($('#dirModal').style.display, 'flex', '无桌面桥必须回退到内置目录弹窗（#dirModal 可见）');
+      $('#dirPickNone').onclick(); // 「不指定（当前目录）」
+      await tick();
+      assert.equal(calls.posts.length, 1, '「不指定（当前目录）」仍必须完成登记（语义不能丢）');
+      assert.equal('dir' in calls.posts[0].body, false, '「不指定」时不带 dir 字段，服务端按当前工作目录登记');
+    }
+    // ⑤-5 名称为空 → 有可见提示、不弹选择器、不发请求（不静默无反应）
+    {
+      const { $, calls } = makeWsEnv(true);
+      $('#wsName').value = '';
+      $('#wsDir').value = '';
+      $('#wsAdd').onclick();
+      await tick();
+      assert.equal(calls.posts.length, 0, '名称为空不得发登记请求');
+      assert.equal(calls.native, 0, '名称为空不得弹选择器');
+      assert.ok(calls.alerts.some((t) => t.includes('名称')), '名称为空必须有可见提示（不是静默 return）');
+    }
+    // ⑤-6 「选择目录…」按钮：选中即回填 #wsDir
+    {
+      const { $, calls } = makeWsEnv(true);
+      $('#wsDir').value = '';
+      $('#wsDirPick').onclick();
+      await tick();
+      assert.equal(calls.native, 1, '「选择目录…」必须调 openDirPicker（桌面版即原生对话框）');
+      assert.equal($('#wsDir').value, '/Users/rockie/proj', '选中路径必须回填到 #wsDir');
+    }
+  }
+
+  safeRmSync(helperDir, { recursive: true, force: true });
+  ok('v0.6.13 WebUI 停止：流式中/无首帧/等权限确认三种形态均数秒内真停（SSE 关闭 + aborted 落定 + abortHandler 真的 abort + 解除挂起确认优先于 120s 超时）+ 停止单源与反馈结构守卫 + 设置面板「登记」目录选择器接线守卫（结构 + 行为）+ 打包 preload.cjs/update-verify.js 配置守卫');
+}
+
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket
 // —— 实测 ubuntu/macOS + Node 20 上"断言全过、进程却不退出"，CI 里表现为冒烟步骤永远 in_progress
 // （Node 18/22/Windows 因为拆连接更快而侥幸通过）。这里显式退出，断言本身不受影响；

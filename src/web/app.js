@@ -285,17 +285,35 @@ function renderBanner(ev){ const d=document.createElement('div'); d.className='b
 // 工具卡/横幅/代码块统一插到「本轮 AI 消息」之前：结论与交付物永远位于消息最底部
 function insertBeforeActiveMsg(el){ if(activeAiMsg && activeAiMsg.parentNode){ chatEl.insertBefore(el, activeAiMsg); } else { chatEl.appendChild(el); } }
 
+// 挂起的权限确认弹窗（停止时必须一并收掉——遮罩会盖住输入区的「■ 停止」，
+// 用户点什么都"没反应"；服务端那边也会一直等到 120 秒 ask 超时。审计 §138 Bug A）
+const pendingAskModals=[];
 function askModal(ev){
   return new Promise(resolve=>{
     const root=$('#modalRoot');
     const mask=document.createElement('div'); mask.className='modal-mask';
     const m=document.createElement('div'); m.className='modal';
-    m.innerHTML='<h3>权限确认</h3><div class="q">'+esc(ev.question)+'</div><div class="opts"></div><div class="row"><button class="danger" data-a="n">拒绝</button><button class="primary" data-a="y">允许</button></div>';
-    if(ev.options&&ev.options.length){ m.querySelector('.opts').style.display='flex'; ev.options.forEach(o=>{ const b=document.createElement('button'); b.dataset.a=o.value; b.textContent=o.label||o.value; b.onclick=()=>finish(o.value); m.querySelector('.opts').appendChild(b); }); m.querySelector('.row').style.display='none'; }
+    m.innerHTML='<h3>权限确认</h3><div class="q">'+esc(ev.question)+'</div><div class="opts"></div><div class="row" data-row="yn"><button class="danger" data-a="n">拒绝</button><button class="primary" data-a="y">允许</button></div><div class="row"><button data-stop="1">■ 停止本轮（不再执行）</button></div>';
+    if(ev.options&&ev.options.length){ m.querySelector('.opts').style.display='flex'; ev.options.forEach(o=>{ const b=document.createElement('button'); b.dataset.a=o.value; b.textContent=o.label||o.value; b.onclick=()=>finish(o.value); m.querySelector('.opts').appendChild(b); }); m.querySelector('[data-row="yn"]').style.display='none'; }
+    let settled=false;
+    const entry={ dismiss:()=>finish('',true) }; // 停止路径：不问自答，按「拒绝」落定
+    function finish(a,aborted){
+      if(settled) return; settled=true;
+      const i=pendingAskModals.indexOf(entry); if(i>=0) pendingAskModals.splice(i,1);
+      mask.remove(); resolve({answer:a, aborted:Boolean(aborted)});
+    }
     m.querySelectorAll('[data-a]').forEach(b=>{ if(!b.onclick) b.onclick=()=>finish(b.dataset.a); });
-    function finish(a){ mask.remove(); resolve(a); }
+    // 等待确认期间唯一够得着的停止入口（遮罩挡住了输入区的停止按钮）。
+    // 直接调 stopTurnFromButton()：它会同时收掉本弹窗并把停止发给服务端。
+    const sb=m.querySelector('[data-stop]'); if(sb) sb.onclick=()=>stopTurnFromButton();
     mask.appendChild(m); root.appendChild(mask);
+    pendingAskModals.push(entry);
   });
+}
+function dismissAskModals(){
+  // 停止优先于权限确认：把挂起的确认弹窗全部收掉（服务端已按「拒绝」落定），
+  // 否则遮罩继续盖住界面，用户看到的就是"界面像卡住、点停止没有任何反应"。
+  while(pendingAskModals.length){ const m=pendingAskModals.pop(); try{ m.dismiss(); }catch{} }
 }
 
 async function handleEvents(stream, onEvent){
@@ -354,16 +372,19 @@ async function send(){
   }
   if(!text && !attachments.length) return;
   const turnCtrl=new AbortController();
+  turnAbortCtrl=turnCtrl; // 模块级引用：停止的兜底路径要能断开本轮 SSE（服务端 res.on('close') 同样会收尾）
   // 回合看门狗（无活动超时，非总时长——审计：此前 120s 定时炸弹误杀长时间健康生成，
   // 如模型持续输出大文件代码时到点被掐断：write 参数截断 + 「响应超时已中断」）：
   // 每收到一个 SSE 事件即重置；ask 权限等待期间暂停计时（用户思考不设限），
   // 回复后的下一个事件自动重新武装。仅当 120 秒内真正没有任何事件（挂死）才强制中断。
+  // §138：看门狗与主按钮走**同一个**停止出口 stopTurn()（单源）——此前两处各写一份 fetch，
+  // 改一处漏一处（例如"解除挂起的权限确认"只补在按钮上）。
   let watchdog=null; let killedByWatchdog=false;
   const disarm=()=>{ if(watchdog){ clearTimeout(watchdog); watchdog=null; } };
   const arm=()=>{ disarm(); watchdog=setTimeout(()=>{
     killedByWatchdog=true;
     try{ turnCtrl.abort(); }catch{}
-    fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}).catch(()=>{});
+    stopTurn(curTaskId).catch(()=>{});
   },120000); };
   arm();
   input.value=''; input.style.height='44px';
@@ -406,6 +427,17 @@ async function send(){
   const update=()=>{ if(pending) return; pending=true; requestAnimationFrame(()=>{ pending=false; content.innerHTML=renderMarkdown(raw); scroll(); }); };
   const onActivity=()=>{ if(think.parentNode) think.remove(); if(reason&&reason.parentElement){ reason.parentElement.open=false; reason.parentElement.querySelector('summary').classList.remove('live'); } };
   updateTasksPanel();
+  // 权限确认应答（§138）：弹窗返回 {answer, aborted}——`aborted=true` 表示这条确认是被「停止」
+  // 解除的（服务端已按「拒绝」落定），此时**不再**回 POST /api/permission：回了只会拿到 409，
+  // 而那正是此前"点了允许却什么都没发生"的静默失败形态。
+  const handleAskEvent=(ev)=>{ askModal(ev).then(res=>{
+    if(res.aborted) return;
+    return fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:ev.id,answer:res.answer,taskId:ev.taskId||taskId})})
+      // 「无活动看门狗」在 ask 等待期间是停掉的：无论应答成功与否都要重新武装（与修前一致），
+      // 否则一次应答失败就会让本轮的挂死失去最后一道超时保护
+      .then(r=>{ arm(); if(!r.ok) throw new Error('HTTP '+r.status); })
+      .catch(err=>{ const d=document.createElement('div'); d.className='errline'; d.textContent='✖ 权限应答没能送达服务端（'+((err&&err.message)||'网络错误')+'）——请重新发送上一条消息；服务端在 120 秒无应答后会按「拒绝」处理。'; msg.appendChild(d); scroll(); });
+  }); };
   try{
     const resp=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:turnCtrl.signal});
     if(!resp.ok){ const j=await resp.json().catch(()=>({})); onActivity(); msg.innerHTML='<div class="errline">'+esc(j.error||('HTTP '+resp.status))+'</div>'; updateTasksPanel(); return; }
@@ -422,9 +454,14 @@ async function send(){
       else if(ev.type==='tool'){ onActivity(); update(); const pending=runningTools.get(ev.seq); if(pending){ pending.remove(); runningTools.delete(ev.seq); } const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.result=ev.result; tj.durationMs=ev.durationMs; tj.card=pending||null; } if(ev.name==='task'){ sessionSubs.push({seq:ev.seq, question:String(ev.args?.question||ev.args?.prompt||''), result:ev.result, durationMs:ev.durationMs, msg}); renderSubPanel(); } renderToolEvent(ev); }
       else if(ev.type==='toolDenied'){ onActivity(); const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.denied=ev.reason||'未授权'; } const d=document.createElement('div'); d.className='errline'; d.textContent='✖ '+(ev.reason==='未授权'||!ev.reason?'未授权':ev.reason)+'：'+ev.name; msg.appendChild(d); scroll(); }
       else if(ev.type==='banner'){ renderBanner(ev); }
-      else if(ev.type==='ask'){ update(); askModal(ev).then(a=>fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:ev.id,answer:a,taskId})}).then(()=>arm()).catch(err=>{ const d=document.createElement('div'); d.className='errline'; d.textContent='✖ 权限应答没能送达服务端（'+((err&&err.message)||'网络错误')+'）——请重新发送上一条消息；服务端在 120 秒无应答后会按「拒绝」处理。'; msg.appendChild(d); scroll(); })); }
+      else if(ev.type==='ask'){ update(); handleAskEvent(ev); }
       else if(ev.type==='usage'){ onActivity(); const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; msg.insertBefore(u, content); scroll(); }
-      else if(ev.type==='error'){ console.log('[MingDao] error 事件：' + ev.message); onActivity(); const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); scroll(); }
+      else if(ev.type==='error'){ console.log('[MingDao] error 事件：' + ev.message); onActivity();
+        // §138 Bug C：服务端已按超时把这条确认作废（pendingAsk 清空），前端若继续挂着那个弹窗，
+        // 用户再点「允许」只会拿到 409 且毫无提示，弹窗还会一个个叠起来（界面"像卡住"）。
+        // 这里把作废的确认收掉：该确认已经死了，界面上不该再留一个能点的假弹窗。
+        if(/权限确认超时/.test(String(ev.message||''))) dismissAskModals();
+        const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); scroll(); }
       else if(ev.type==='done'){ console.log('[MingDao] done 事件：session=' + ev.session); onActivity(); if(ev.budget){ const b=ev.budget; if(hintTextEl) hintTextEl.textContent='预算 '+Math.round(b.used/1000)+'K/'+Math.round(b.total/1000)+'K（'+Math.round(b.used/b.total*100)+'%）· 本轮完成 · 提示栏右侧为今日费用与命中率'; } refreshStatusBar(); if(ev.stats&&ev.stats.deliverables&&ev.stats.deliverables.length){ const card=document.createElement('div'); card.className='deliver'; card.innerHTML='<div class="t">📦 交付物（'+ev.stats.deliverables.length+' 个文件）</div>'+ev.stats.deliverables.map(f=>'<div class="i">'+esc(f)+(f.toLowerCase().endsWith('.html')?' <span style="color:var(--accent2)">— 浏览器打开即可运行</span>':'')+'</div>').join(''); msg.appendChild(card); } if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); } currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
     });
   }catch(e){ onActivity(); // 诊断（v0.4.2 network error 排查）：静默中断此前无任何日志，无法区分
@@ -437,11 +474,63 @@ async function send(){
     // 具体错误形态已进日志（fetch failed 等不再绕开续跑提示）。
     d.textContent=(e&&e.name==='AbortError')?(killedByWatchdog?'响应超时已中断（120 秒无任何响应），请重试':'已中断'):('连接中断，本轮未完成。已执行的工作已保存检查点——直接发送「继续」即可从断点续跑（' + Math.round((Date.now() - workT0) / 1000) + 's · ' + stepsCount + ' 步）。');
     msg.appendChild(d); scroll(); }
-  finally{ clearInterval(hintTimer); disarm(); generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); activeAiMsg=null; curWorkT0=0; renderWorkStatus(); scroll(); updateTasksPanel(); }
+  finally{ clearInterval(hintTimer); disarm(); clearTimeout(stopFallbackTimer); stopFallbackTimer=null; stopping=false; turnAbortCtrl=null; generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); activeAiMsg=null; curWorkT0=0; renderWorkStatus(); scroll(); updateTasksPanel(); }
 }
 
 let curTaskId=null; // 本轮 SSE 任务 id（质检 L1：主停止按钮只断本任务，不再误伤其他 tab）
-function abort(){ fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(curTaskId?{taskId:curTaskId}:{})}).then(()=>updateTasksPanel()).catch(()=>{}); }
+let turnAbortCtrl=null; // 本轮 /api/chat 的 AbortController（停止的兜底路径：断开 SSE → 服务端 res.on('close') 收尾）
+let stopping=false; // 「停止中…」在途（按钮即时反馈 + 防连点）
+let stopFallbackTimer=null; // 停止已发出但流迟迟不收尾时的兜底计时器
+
+/**
+ * 停止的**唯一出口**（§138 单源）：主停止按钮 / 回合看门狗 / 任务面板「中断」三处都走这里，
+ * 服务端只有 `POST /api/abort` 一条路。
+ * 返回 {ok, why}：ok=true 表示服务端**确认**了中断（stopped 或 releasedAsk > 0），
+ * 而不是"请求发出去了"——修前这里一律 `.catch(()=>{})`，失败与成功在界面上完全同形（静默无响应）。
+ * @param {string|null} taskId
+ */
+async function stopTurn(taskId){
+  try{
+    const r=await fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(taskId?{taskId}:{})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok) return {ok:false, why:'HTTP '+r.status+(j&&j.error?('：'+j.error):'')};
+    const n=Number(j.stopped||0)+Number(j.releasedAsk||0);
+    if(n>0) return {ok:true, stopped:Number(j.stopped||0), releasedAsk:Number(j.releasedAsk||0)};
+    if(j.found===false) return {ok:false, why:'该任务已结束（服务端没有这个任务）', gone:true};
+    if(j.status&&j.status!=='running') return {ok:false, why:'该任务已结束（'+j.status+'）', gone:true};
+    return {ok:false, why:'服务端未确认中断（可能中断路径没生效）'};
+  }catch(e){ return {ok:false, why:'停止请求没能送达服务端（'+((e&&e.message)||'网络错误')+'）'}; }
+}
+
+/**
+ * 主按钮的停止：**立刻**进入「停止中…」→ 真正调用停止 → 失败必须说出来。
+ * 等待权限确认期间同样可用：先把挂起的确认弹窗收掉（服务端会同步按「拒绝」落定），
+ * 否则遮罩继续盖住界面，用户点什么都"没反应"。
+ */
+async function stopTurnFromButton(){
+  if(stopping) return;
+  stopping=true; setBtn(); renderWorkStatus();
+  dismissAskModals();
+  let res=null;
+  for(let i=0;i<3 && !(res&&(res.ok||res.gone));i++){
+    res=await stopTurn(curTaskId);
+    if(!(res&&res.ok)) await new Promise(r=>setTimeout(r,400));
+  }
+  if(res&&res.ok){
+    renderBanner({text:'■ 已停止本轮'+(res.releasedAsk?'（含挂起的权限确认，按「拒绝」处理）':'')+'…'});
+    // 兜底：服务端确认了中断，但若 8 秒内流仍未收尾，直接断开本轮 SSE。
+    // 服务端 res.on('close') 走的是同一套收尾（置 aborted + 解除挂起确认），这是第二条真实路径。
+    clearTimeout(stopFallbackTimer);
+    stopFallbackTimer=setTimeout(()=>{
+      if(!generating) return;
+      try{ turnAbortCtrl?.abort(); }catch{}
+      renderBanner({text:'⚠ 停止请求已被服务端确认，但本轮连接仍未收尾——已强制断开连接。', warn:true});
+    },8000);
+    return;
+  }
+  stopping=false; setBtn(); renderWorkStatus();
+  renderBanner({text:'⚠ 停止失败：'+((res&&res.why)||'未知原因')+'。可再点一次「■ 停止」。', warn:true});
+}
 
 // —— 输入框上方工作状态条（审计：长任务静默硬伤 → 实时进度可见） ——
 function renderWorkStatus(){
@@ -577,6 +666,9 @@ $('#subRailBtn').onclick=toggleSubPanel;
 $('#sbClose').onclick=()=>{ $('#subPanel').style.display='none'; $('#subRailBtn').classList.remove('on'); syncPanelLayout(); };
 // —— 任务面板（多会话并行） ——
 function setBtn(){
+  // §138：停止点击后立刻有可见反馈（「停止中…」+ 禁用防连点），回合真正收尾后由 finally 复位。
+  if(stopping){ sendBtn.textContent='⏹ 停止中…'; sendBtn.className='danger'; sendBtn.disabled=true; return; }
+  sendBtn.disabled=false;
   sendBtn.textContent = generating ? '■ 停止' : '发送';
   sendBtn.className = generating ? 'danger' : 'primary';
 }
@@ -606,7 +698,7 @@ async function updateTasksPanel(){
     const dot = t.status==='running'?'tp-run':(t.status==='done'?'tp-done':'tp-bad');
     const secs = t.status==='running'?'…':' '+(t.durationMs/1000).toFixed(1)+'s';
     div.innerHTML='<div class="tp-title">'+esc(t.message||'任务')+'</div><div class="tp-meta"><span class="tp-dot '+dot+'"></span>'+t.status+secs+'</div>';
-    if(t.status==='running'){ const b=document.createElement('button'); b.textContent='中断'; b.className='danger'; b.style.cssText='margin-left:auto;padding:2px 8px;font-size:11px'; b.onclick=()=>fetch('/api/abort',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({taskId:t.id})}).catch(()=>{}); div.querySelector('.tp-meta').appendChild(b); }
+    if(t.status==='running'){ const b=document.createElement('button'); b.textContent='中断'; b.className='danger'; b.style.cssText='margin-left:auto;padding:2px 8px;font-size:11px'; b.onclick=async()=>{ const r=await stopTurn(t.id); if(!r.ok) renderBanner({text:'⚠ 中断「'+String(t.message||t.id).slice(0,30)+'」失败：'+r.why, warn:true}); updateTasksPanel(); }; div.querySelector('.tp-meta').appendChild(b); }
     list.appendChild(div);
   }
   for(const t of (j.background||[])){
@@ -838,8 +930,7 @@ $('#schAdd').onclick=async ()=>{
   if(j.ok){ $('#schQuestion').value=''; refreshSchList(); } else { uiAlert(j.error||'添加失败'); }
 };
 // —— 工作空间 ——
-async function refreshWorkspaces(){
-  const r=await fetch('/api/workspaces',{cache:'no-store'}).catch(()=>null); if(!r) return;
+async function refreshWorkspaces(){  const r=await fetch('/api/workspaces',{cache:'no-store'}).catch(()=>null); if(!r) return;
   const j=await r.json(); const list=$('#wsList'); list.innerHTML='';
   if(!j.workspaces||!j.workspaces.length){ list.innerHTML='<div style="color:var(--faint);font-size:12px;padding:6px 2px">暂无登记的工作空间</div>'; return; }
   for(const w of j.workspaces){
@@ -851,13 +942,29 @@ async function refreshWorkspaces(){
     div.appendChild(ed); div.appendChild(rn); div.appendChild(rm); list.appendChild(div);
   }
 }
-$('#wsAdd').onclick=async ()=>{
-  const name=$('#wsName').value.trim(); if(!name) return;
-  const dir=$('#wsDir').value.trim();
-  const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'add',name,dir})});
+// 登记工作空间（设置面板 → 工作空间）：**目录一律走 openDirPicker**（桌面版原生对话框 →
+// 浏览器内置目录弹窗回退），与主界面「＋ 新建工作空间…」（#wsSel 的 __add__ 分支）同一条路径。
+// v0.6.8 接原生选择器时**只接了主界面**：这条路径直接读 #wsDir 手输框，用户点「登记」什么都不弹
+// （负责人实测）。守卫见 test/smoke.js §138（防的就是"只接了一处、漏了另一处"这类漏接）。
+async function addWorkspaceFromSettings(dir){
+  const name=$('#wsName').value.trim();
+  if(!name){ uiAlert('请先填写工作空间名称'); return; } // 不静默无反应
+  // dir 为空（手输框留空 / 选择器里点「不指定（当前目录）」）→ 不带该字段，服务端按当前工作目录登记
+  const payload={action:'add',name}; if(dir) payload.dir=dir;
+  const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const j=await r.json().catch(()=>({error:'请求失败'}));
   if(j.ok){ $('#wsName').value=''; $('#wsDir').value=''; refreshWorkspaces(); refreshWsSel(); reloadModels(); } else uiAlert(j.error||'添加失败');
+}
+$('#wsAdd').onclick=()=>{
+  if(!$('#wsName').value.trim()){ uiAlert('请先填写工作空间名称，再选择目录'); $('#wsName').focus(); return; }
+  const typed=$('#wsDir').value.trim();
+  // 手输了目录 → 直接登记；没输 → **直接弹选择器**（不再要求用户先知道绝对路径）
+  if(typed){ addWorkspaceFromSettings(typed); return; }
+  openDirPicker(null, (dir)=>{ addWorkspaceFromSettings(dir); }); // dir=null（「不指定（当前目录）」/取消）→ 仍按当前目录登记
 };
+// 目录框旁的「选择目录…」：选中即回填文本框（点「不指定」/取消则保持原样）
+$('#wsDirPick').onclick=()=>{ openDirPicker($('#wsDir').value.trim()||null, (dir)=>{ if(dir==null) return; $('#wsDir').value=dir; renderBanner({text:'✓ 已选择目录：'+dir}); }); };
+$('#wsDir').addEventListener('focus', ()=>{ $('#wsDir').title='可点右侧「选择目录…」用系统对话框选，或直接手输绝对路径'; });
 // —— 长期记忆 ——
 function memFlash(msg, good){ const m=$('#memMsg'); m.textContent=msg; m.style.color=good?'var(--accent)':'var(--err)'; setTimeout(()=>{m.textContent='';},4000); }
 async function loadMemoryUI(){
@@ -1168,7 +1275,8 @@ function finalizeCurrentSession(){
 }
 async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); }
 
-sendBtn.onclick=()=>{ if(generating){ abort(); } else { send(); } };
+// §138：主按钮在生成态=停止，必须走**同一个**停止出口（stopTurnFromButton → stopTurn → POST /api/abort）
+sendBtn.onclick=()=>{ if(generating){ stopTurnFromButton(); } else { send(); } };
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
 input.addEventListener('input',()=>{ input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; });
 $('#newChat').onclick=()=>{ finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; refreshSessions(); };

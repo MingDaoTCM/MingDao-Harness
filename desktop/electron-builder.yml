@@ -12,8 +12,19 @@ directories:
 # 应用内只带主进程壳；src/assets/skills 经 extraResources 随包分发（零 npm 运行时依赖不变）
 # build/icon.png + tray.png 必须打包进 asar：窗口/托盘图标运行时按路径读取，
 # 此前 files 白名单漏掉 build/ → 打包版窗口图标与托盘图标缺失（审计：图标统一修复）
+#
+# ⚠ 这份白名单是**穷举**的（`files` 一旦显式给出，electron-builder 不再套默认的 `**/*`）——
+# 主进程运行时按相对路径加载的每个文件都必须列出来，否则打包版一加载就 ENOENT。
+# v0.6.10 用户实测（Bug B）：`preload.cjs` 不在此列 → 打包版启动即报
+#   `Unable to load preload script: …/app.asar/preload.cjs` + `ENOENT … not found in …/app.asar`，
+# 后果是桌面版原生「选择目录」静默降级成手输路径（且启动就报错）。
+# `update-verify.js` 同理：main.js 顶部**静态** import 它（更新包来源签名校验，§135），
+# 漏打包不是降级而是主进程直接 ERR_MODULE_NOT_FOUND（应用起不来）——同一个齿根，一起补上。
+# 回归：test/smoke.js §138 的打包配置守卫（结构级；产物级验证见该节注释）。
 files:
   - main.js
+  - preload.cjs
+  - update-verify.js
   - package.json
   - build/icon.png
   - build/tray.png

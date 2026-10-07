@@ -2036,3 +2036,141 @@ permission=readonly，已按你的显式选择 auto 执行`。
 - **未做的事**：没有改 `docs/CONFIG.md` / `README.md` 去写明"显式选择 > 预设 > config.json"
   （不在本轮允许改动清单内）；预设与权限的**语义冲突**（如"只读审计预设 + 用户选 auto"）
   仍按"用户说了算"处理，未提供"预设强制锁定档位"的机制。
+
+## 3.52 已修复（v0.6.13 开发线：WebUI「停止」键在**等待权限确认**时形同虚设 + 桌面打包漏 `preload.cjs` + 设置面板「登记工作空间」漏接目录选择器）
+
+来源：**负责人真机实测**（桌面版 v0.6.10 + 本地部署模型），不是第三方报告条目。
+日志证据（`~/Library/Application Support/mingdao-desktop/logs/mingdao.log`）：
+
+```
+11:50:27.150Z [renderer] [MingDao] send 点击：generating=false text=376 attachments=0
+11:50:27.153Z 生成中：防睡眠已开启（prevent-display-sleep）
+（此后该回合再无任何日志：没有 done、没有 error、没有「回合收尾」）
+12:07:23.569Z [renderer] [MingDao] error 事件：权限确认超时（120 秒未收到应答），本次操作按「拒绝」处理。
+（同样的超时错误在 12:10/12:13/12:16/12:19/12:22/12:28/12:30/12:33 又出现 8 次）
+```
+
+`~/.mingdao/logs/web-server.log` 对应行只有 `chat 开始 t7bf… session=新会话 消息长度=376`，
+之后该 task **没有任何收尾记录**。用户描述：按「停止」键无响应，界面像卡住。
+
+### 一、先复现（探针 `/tmp/probe-stop.mjs`，未入库；修前 / 修后各跑一遍）
+
+探针驱动**真实 WebUI**（`node src/cli.js web <port>` + 临时 `MINGDAO_HOME` + 本机桩 OpenAI 兼容 SSE provider），
+桩覆盖两种卡住形态，停止走**前端同一条路**（`POST /api/abort {taskId}`）。
+`MINGDAO_ASK_TIMEOUT_MS` 调到 6000 复跑第②形态，观测量与生产 120 秒形态逐字同形。
+
+| # | 卡住形态 | 修前 | 修后 |
+| --- | --- | --- | --- |
+| ① | 流式中（已有帧到达，此后不再发帧也不结束） | **能停**：abort 后 385ms SSE 关闭、`done aborted=true`、任务落 `aborted`、桩连接被关闭 | 同左（388ms；新增一条 `■ 已停止本轮生成。` banner） |
+| ② | 等待权限确认（`ask` 已下发、`POST /api/permission` 无人应答） | **停不住**：abort 返回 `200 {ok:true}` 后 SSE **一直挂着**，直到 `ASK_TIMEOUT_MS` 到点才先冒 `error 权限确认超时…`、再 `toolDenied`、再 `done(aborted)`（6s 探针实测 6042ms 才收尾；生产即 120 秒） | abort 后 **270ms** 收尾：`200 {found:true,stopped:1,releasedAsk:1}` → banner「已停止本轮：同时解除了挂起的权限确认（按「拒绝」处理）」→ `toolDenied` → `done aborted=true`；**不再出现「权限确认超时」** |
+| ③ | 无首帧（等首 token，桩不发任何帧） | 能停（0.5s） | 同左（0.53s） |
+| ④ | 任务已结束再用陈旧 `taskId` 点停止 | 静默 `200 {ok:true}`（前端无法区分"停了"与"没停"） | `200 {ok:true,found:false,stopped:0,releasedAsk:0}` → 前端提示「该任务已结束」 |
+
+修前②的桩 provider 视角：abort 之后**没有**新请求（`requestsAfterAbort=0`），但 SSE 就是不关——
+说明"停止"确实到了服务端，只是卡在了唤醒路径上。
+
+### 二、真实断点（前端哪一行 + 服务端哪一行）
+
+1. **服务端（根因）**：`src/web/routes/domains/misc.js` 的 `/api/abort`（修前 82–103 行）
+   只调 `entry.abortHandler()`，**从不碰 `entry.pendingAsk`**。而此刻回合正 `await` 在
+   `src/permissions.js:201` 的 `io.ask()` 上 → `src/web/server.js:656` 的 `askHandler` Promise 上；
+   `abortHandler` 是 `src/agent.js:487` 注册的 `() => { aborted = true; currentAc?.abort(); }`——
+   它只置标志位并 abort **当前轮次的 LLM 请求**（此刻没有在途 LLM 请求可 abort），
+   那个 `await` 无人唤醒 ⇒ 停止要等到 `ASK_TIMEOUT_MS`（`src/web/server.js:21/667`，120 秒）超时才生效。
+2. **前端**：`src/web/app.js`（修前 444 行）的 `function abort(){ fetch('/api/abort',…)…catch(()=>{}); }`——
+   一行 fetch、无任何即时反馈、失败静默；`sendBtn.onclick`（修前 1171 行）在 `generating` 时调它。
+3. **前端第二处齿根**：权限确认弹窗 `askModal`（app.js）的遮罩是 `position:fixed; inset:0; z-index:50`
+   （`src/web/index.html:207`），等待确认期间**盖住整个输入区**——用户连"停止"按钮都点不到，
+   点击落在遮罩上，视觉上就是"点了没有任何反应"。
+4. **Bug C 与 Bug A 同源**：`ask` 超时（BUG-075 修的"超时按拒绝处理"，`src/web/server.js:667`）
+   本来是防"前端应答丢失导致回合永久挂起"的兜底，但在本轮实测里它是**唯一的出口**——
+   每次超时按拒绝 → 模型再试同一个工具 → 再 ask → 再等 120 秒，于是日志里出现 9 次超时
+   （12:07→12:33，间隔 ≈120 秒 + 一轮模型耗时），这正是用户"停止没反应"的量化形态。
+   **另有次要因素**：前端 `askModal` 从不处理"服务端已超时作废"这件事，作废的弹窗留在 DOM 里、
+   再点「允许」会拿到 409 且前端 `.catch` 不触发（`fetch` 对 4xx 不 reject）——静默失败 + 弹窗叠加。
+
+### 三、修法
+
+1. **服务端 `/api/abort`：停止同时做两件事**（`src/web/routes/domains/misc.js`）：
+   ① `entry.abortHandler()`（置中断标志）；② **解除挂起的权限确认**——`entry.pendingAsk = null` 后
+   `pa.resolve('')`（空串=拒绝，与超时同一口径，**绝不因停止而放行**）。顺序上先①后②，
+   保证 `aborted=true` 在 ask 的 await 续体被调度前生效（否则工具按拒绝返回后循环会照常发下一次模型请求）。
+   `pendingAsk.resolve` 内部 `clearTimeout(askTimer)` ⇒ **停止优先于 120 秒超时**，之后不再冒超时错误。
+   响应改为如实回报 `{ok, found, stopped, releasedAsk, status}`，并向该任务的 SSE 流补一条可见 banner。
+2. **前端停止收敛成唯一出口**（`src/web/app.js`）：`stopTurn(taskId)` 是全前端唯一一处
+   `POST /api/abort`（主按钮 `stopTurnFromButton()` / 回合看门狗 / 任务面板「中断」三处共用）；
+   点击立刻进「停止中…」（`setBtn()` + `sendBtn.disabled`），失败给可见 warn banner（含 HTTP 状态与原因），
+   `found:false`/已结束也给明确文案。
+3. **停止解除挂起的权限确认弹窗**：`dismissAskModals()` 在停止时收掉全部挂起弹窗（服务端已按拒绝落定，
+   弹窗再答只会 409）；弹窗内新增「■ 停止本轮（不再执行）」——遮罩盖住输入区时唯一够得着的停止入口。
+4. **兜底第二条收尾路径**：停止已被服务端确认但 8 秒内流仍未收尾 → 客户端断开本轮 SSE
+   （服务端 `res.on('close')` 走同一套收尾：置 abort + 解除挂起确认）。
+5. **Bug C 的次要因素**：收到 `权限确认超时` 的 error 事件时收掉对应弹窗（作废的确认不再留在界面上）。
+6. **Bug B（打包）**：`desktop/electron-builder.yml` 的 `files` 白名单是**穷举**的
+   （显式给出 `files` 后 electron-builder 不再套默认 `**/*`），漏了 `preload.cjs` →
+   打包版启动即 `Unable to load preload script: …/app.asar/preload.cjs` + ENOENT，原生目录选择器静默降级。
+   **同类齿根一并补上 `update-verify.js`**：`desktop/main.js:15` **静态** import 它
+   （更新包来源签名校验），漏打包不是降级而是主进程 `ERR_MODULE_NOT_FOUND`（应用起不来）。
+   产物级验证见下节。
+
+### 四、断言与变异
+
+- `test/smoke.js` **只追加**第 138 节（接 §137）：① 流式中止（SSE 关闭 <5s、`done aborted=true`、
+  任务落 `aborted`、桩 provider 在途连接被对端关闭=内核 `AbortController` 真的 abort、停止后 0 次新请求）；
+  ①b 无首帧中止同款；② **等待权限确认时中止**（`releasedAsk≥1`、**不再出现「权限确认超时」**、
+  数秒内关闭、按「拒绝」落定 `toolDenied`、`done aborted`）；③ 结构守卫：主按钮走停止出口、
+  **全前端只有一处 `POST /api/abort`**、`stopTurn()` 存在、「停止中…」即时反馈、失败有提示、
+  停止路上确实调了 `dismissAskModals()`、弹窗内有停止入口、服务端 `/api/abort` 同时解除 `pendingAsk` 并如实回报；
+  ④ 打包配置守卫（**明写"这条守卫防的是打包漏文件，不是运行时行为"**）：`files` 必须含 `preload.cjs`
+  与 `update-verify.js`、`desktop/package.json` 仍是 `"type":"module"`（所以 preload 必须 `.cjs`）、
+  `main.js` 仍按 `__dirname/preload.cjs` 加载。
+- `test/mutate/batch26-stop.mjs`：**11/11 全中**——① 停止不再解除挂起确认；② 停止对真实任务变空操作；
+  ③ `abortHandler` 不再真的被调用；④ 前端点击没有即时反馈；⑤ 停止失败重新静默；⑥ 停止不再收弹窗；
+  ⑦ 停止请求不再单源；⑧ 打包漏 `preload.cjs`；⑨ 打包漏 `update-verify.js`；
+  ⑩ 设置面板「登记」改回只读手输框（见第七节）；⑪ 「选择目录…」绕开统一入口。
+- `test/mutate/README.md` 的「变异总数」由 140 → **151**（与 `node scripts/doc-lint.mjs` 打印的"实际 151 条"同一提交落库）。
+- 变异套件在**独立 worktree**（`git worktree add --detach /tmp/mut-stop HEAD`，拷入本轮改动后运行）里执行。
+
+### 五、Bug B 的产物级验证（不是"配置里写了"就算）
+
+- **修前反证**：`cd desktop && npx electron-builder --dir` 从当前工作树产出的
+  `dist/mac-arm64/MingDao Harness.app/Contents/Resources/app.asar`，`npx @electron/asar list` 只列出
+  `/main.js`、`/package.json`、`/build/icon.png`、`/build/tray.png`（+ node_modules）——
+  **`/preload.cjs` 与 `/update-verify.js` 都不在里面**；用户机上安装的 v0.6.10 产物 `asar list` 同样是这四行。
+- **修后**：同样 `--dir` 重建 + `asar list` → `/preload.cjs`、`/update-verify.js` 均在产物内；
+  并用 `@electron/asar extract-file` 把 `preload.cjs` 取出来核对（1154 字节，与 `desktop/preload.cjs` 一致）。
+- 本机 `npx electron-builder --dir` 的**签名**步骤在本地钥匙串上失败（`errSecInternalComponent`），
+  asar 已在此之前生成、不影响上述结论；本轮**未**产出可分发安装包，也未做"打包版真机启动"验证。
+
+### 六、未做边界（如实登记）
+
+- **`src/agent.js` 一行未动**（回合主流程在允许清单外）：因此中止后 `done` 事件的 `note` 仍是
+  `已按 Ctrl+C 中断（工具执行期间收到中断信号）…`——WebUI 用户点的是「■ 停止」而非 Ctrl+C，措辞偏 CLI。
+  本轮用流内 banner「■ 已停止本轮…」补偿，未改内核文案。
+- **停止的"数秒内生效"依赖客户端的停止请求真的发出去**：`stopTurn()` 失败会重试 3 次（间隔 400ms）后
+  给出可见失败提示，但不改服务端"必须收到请求"这个前提（无心跳级强制中断机制）。
+- **未实测桌面版打包产物里的停止键**：本轮端到端验证用的是 `node src/cli.js web`（桌面版加载的同一个
+  服务端），未在 Electron 窗口里做真机点击验证（需要签名版安装包）。
+- **Bug C 的另一半只做了次要修补**：`ask` 仍可能有别的"无人应答"来源（如用户把窗口切走、模态被系统阻塞），
+  本轮只保证"点停止能立刻解除它"与"作废弹窗不再留在界面上"，未改 120 秒这个默认值。
+- **看门狗的 120 秒无活动超时、`ASK_TIMEOUT_MS` 默认值、模型首帧/空闲超时均未改**（只保证停止优先于它们）。
+
+### 七、同一轮追加：设置面板「登记工作空间」漏接目录选择器（负责人实测）
+
+现象：**设置 → 工作空间 →「＋ 登记工作空间」不弹系统目录选择器**（主界面「＋ 新建工作空间…」是好的）。
+根因（`src/web/app.js` 修前 946 行）：`$('#wsAdd').onclick` 只读 `#wsDir` 手输框
+（`const dir=$('#wsDir').value.trim()`），**从不调 `openDirPicker`**；而主界面那条路（`#wsSel` 的 `__add__` 分支）
+走的是 `openDirPicker(null, …)`（v0.6.8 做的：桌面版原生对话框 → 浏览器内置弹窗回退）。
+即 v0.6.8 接原生选择器时**只接了主界面**，设置面板这条路径既没有原生对话框也没有内置弹窗——只能手打绝对路径。
+
+修法：`#wsAdd` 的目录一律走 `openDirPicker`（`#wsDir` 为空时**直接弹**，不再要求用户先手输）；
+手输框旁的「选择目录…」（新增 `#wsDirPick`）选中即回填；`#wsDir` 留空且点「不指定（当前目录）」时
+**不带 `dir` 字段**（服务端按当前工作目录登记，语义不变）；名称为空由静默 `return` 改成 `uiAlert` 可见提示。
+边界：桌面版原生对话框的「取消」不回调（沿用 `openDirPicker` 既有语义：取消 = 什么都不做，不登记）——
+所以桌面版没有"一键按当前目录登记"的入口，需要该语义时用浏览器版（内置弹窗有「不指定（当前目录）」）。
+
+断言：§138 第五组——结构守卫查 **`#wsAdd` 的处理函数里出现了 `openDirPicker(`**（防的正是"只接了主界面、
+漏接设置面板"这类漏接）、`#wsDirPick` 也走同一入口、`index.html` 真有该按钮、名称为空不再静默 return；
+行为守卫把 `app.js` 的**真实源码切片**（选择器 + 登记路径）放进桩 DOM/window/fetch 里点一遍：
+① 有桌面桥 → `pickDirectory` 被调用且选中路径进请求体；② 手输目录直接用；③ 无桌面桥 → `#dirModal` 可见；
+④ 点「不指定（当前目录）」仍登记且不带 `dir`；⑤ 名称为空有提示、不发请求；⑥「选择目录…」回填 `#wsDir`。
