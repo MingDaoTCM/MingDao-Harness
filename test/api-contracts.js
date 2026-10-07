@@ -98,10 +98,21 @@ const post = async (p, body, opts) => {
   // v0.4.0：Agent Preset 列表契约（内置 local-audit 应恒在）
   const presets = await get('/api/presets');
   assert.equal(presets.status, 200, '/api/presets 应 200');
-  assert.ok(presets.j.ok && Array.isArray(presets.j.presets) && presets.j.presets.length >= 1, '/api/presets 结构');
+  assert.ok(presets.j.ok && Array.isArray(presets.j.presets), '/api/presets 结构');
+  // v0.6.14 契约：**内置预设不得覆盖用户的权限选择**。
+  // 内置 local-audit 曾声明 `permission: "readonly"`（覆盖语义）——用户实测：界面「权限模式」选「自动」，
+  // 预设仍把会话按 readonly 跑，每调用一次非只读工具都弹「只读模式将拦截 …，是否本次放行？」。
+  // 现在：只读的硬约束交给 tools 白名单（没有 write/edit），要表达"建议只读"只能用 recommendedPermission
+  // （建议，不参与权限判定、不覆盖档位）。以下三条就是这条契约的机械判据——注意顺序：
+  // 「在列表里」→「不带 permission」→「透出 recommendedPermission」，先钉最硬的那条。
+  const la = presets.j.presets.find((/** @type {any} */ p) => p.name === 'local-audit');
+  assert.ok(la, '内置 local-audit 应列出');
+  assert.ok(!('permission' in la), '内置预设不得带 permission 字段（permission 是覆盖语义，只会造成"沉默覆盖用户权限选择"；内置预设要表达建议就用 recommendedPermission）');
+  assert.equal(la.recommendedPermission, 'readonly', '内置 local-audit 必须透出 recommendedPermission=readonly（"建议"是建议，不是覆盖）');
+  // 列表本身的结构契约（放在上面三条之后：内置预设缺失时先报"应列出"，而不是"列表为空"）
+  assert.ok(presets.j.presets.length >= 1, '/api/presets 至少列出一个预设');
   assert.ok(presets.j.presets.every((/** @type {any} */ p) => p.name && p.label && p.source), '预设条目字段完整');
-  assert.ok(presets.j.presets.some((/** @type {any} */ p) => p.name === 'local-audit'), '内置 local-audit 应列出');
-  ok('config：state/config/models-config/presets 契约（含 v0.3.2 分层超时 + v0.4.0 预设）');
+  ok('config：state/config/models-config/presets 契约（含 v0.3.2 分层超时 + v0.4.0 预设 + v0.6.14 内置预设不覆盖权限选择）');
 }
 
 // —— sessions 域 ——

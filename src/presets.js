@@ -11,8 +11,12 @@
 //   label         展示名（可选，默认 name）
 //   description   一句话用途
 //   systemPrompt  追加到系统提示的定制段（角色/规则/上下文约定）
-//   tools         工具白名单（数组，省略=不限制）
-//   permission    权限模式 ask/auto/readonly（省略=当前配置）
+//   tools         工具白名单（数组，省略=不限制）——**只读的硬约束在这里**：白名单里没有 write/edit，
+//                 模型连写工具都看不到，比任何权限档都硬
+//   permission    权限模式 ask/auto/readonly（省略=当前配置）——**覆盖**语义：会改本回合的档位，
+//                 因此**内置预设不得声明它**（v0.6.14：它只会造成"沉默覆盖用户选择"，见 presetPermissionOverride）
+//   recommendedPermission  建议权限模式（**只是建议**：只做展示/透出，绝不参与判定、绝不改档；
+//                 内置预设要表达"建议只读"就用它，第三方/老预设的 permission 仍按反提权规则生效）
 //   model         建议模型（省略=当前模型）
 //   temperature / maxOutputTokens / maxRounds / contextBudget  参数覆盖
 import fs from 'node:fs';
@@ -24,7 +28,7 @@ const PRESET_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 // 合法字段白名单：未知字段报错（防拼写错误静默失效——契约化核心）
 const KNOWN_FIELDS = new Set([
   'name', 'label', 'description', 'systemPrompt', 'tools',
-  'permission', 'model', 'temperature', 'maxOutputTokens', 'maxRounds', 'contextBudget',
+  'permission', 'recommendedPermission', 'model', 'temperature', 'maxOutputTokens', 'maxRounds', 'contextBudget',
 ]);
 const PERMISSION_MODES = ['ask', 'auto', 'readonly'];
 
@@ -64,6 +68,11 @@ export function validatePreset(/** @type {any} */ obj) {
   if (obj.permission !== undefined && !PERMISSION_MODES.includes(String(obj.permission))) {
     errors.push(`permission 必须是 ${PERMISSION_MODES.join('/')}`);
   }
+  // recommendedPermission 与 permission 同一取值域，但**语义完全不同**：前者是建议（不参与判定），
+  // 后者是覆盖。校验一并做，避免拼错的值（如 'read-only'）静默躺在预设里当装饰。
+  if (obj.recommendedPermission !== undefined && !PERMISSION_MODES.includes(String(obj.recommendedPermission))) {
+    errors.push(`recommendedPermission 必须是 ${PERMISSION_MODES.join('/')}`);
+  }
   for (const k of ['temperature', 'maxOutputTokens', 'maxRounds', 'contextBudget']) {
     if (obj[k] !== undefined && !(Number.isFinite(Number(obj[k])) && Number(obj[k]) > 0)) {
       errors.push(`${k} 必须是正数`);
@@ -74,7 +83,8 @@ export function validatePreset(/** @type {any} */ obj) {
 
 /**
  * 列出全部可用预设（发现顺序：项目遮蔽用户遮蔽内置，同名只留前者）。
- * 返回 [{ name, label, description, source: 'project'|'user'|'builtin', file }]
+ * 返回 [{ name, label, description, source: 'project'|'user'|'builtin', file,
+ *         optional: systemPrompt/tools/permission/recommendedPermission/model, shadowed }]
  */
 export function listPresets(/** @type {any} */ workingDir) {
   ensureHome();
@@ -131,6 +141,9 @@ export function listPresets(/** @type {any} */ workingDir) {
     ...(obj.systemPrompt ? { systemPrompt: obj.systemPrompt } : {}),
     ...(Array.isArray(obj.tools) ? { tools: obj.tools } : {}),
     ...(obj.permission ? { permission: String(obj.permission) } : {}),
+    // v0.6.14：**建议**权限档也透出（WebUI 列表/诊断可读），但它与 permission 不是一回事——
+    // 透出字段名分开，谁都不会把它当覆盖用（覆盖只认 permission，且内置预设不得声明 permission）。
+    ...(obj.recommendedPermission ? { recommendedPermission: String(obj.recommendedPermission) } : {}),
     ...(obj.model ? { model: String(obj.model) } : {}),
   }));
 }
@@ -170,6 +183,8 @@ export function loadPreset(/** @type {any} */ workingDir, /** @type {any} */ nam
  * 预设 → cfg 覆盖：只返回预设声明的参数键（其余键保持调用方当前配置）。
  * tools 单独走 cfg.presetTools（白名单在 agent 的 toolsFor 处生效）。
  * 注意：permission 提权由调用方用 presetPermissionOverride 过滤（防项目级预设提权，见下）。
+ * recommendedPermission **不进覆盖**（v0.6.14）：它是建议，不是覆盖——本函数只搬 permission，
+ * 谁把 recommendedPermission 加进这里的键表，谁就把"建议"偷偷变成"覆盖"。
  */
 export function presetConfigOverrides(/** @type {any} */ preset) {
   const out = /** @type {Record<string, any>} */ ({});
@@ -187,6 +202,12 @@ const PERM_RANK = /** @type {Record<string, number>} */ ({ readonly: 0, ask: 1, 
  * 预设 permission 提权防护（P0 安全，v0.4.1）：预设声明的 permission 不得比当前配置更宽松
  * （如当前 ask → 预设 auto 属提权，忽略并返回当前值）。clone 恶意仓库含 .mingdao/presets/*.json
  * 声明 auto 时，不能静默跳过用户全部确认。返回 { permission, escalated }：escalated=true 表示已拦截提权。
+ *
+ * 纪律（v0.6.14）：**内置预设不得声明 `permission`**——它是"覆盖"语义，只会造成"沉默覆盖用户选择"
+ * （负责人实测：界面上选了「自动」，内置 local-audit 仍把会话按 readonly 跑，每调用一次非只读工具
+ * 都弹「只读模式将拦截 …」）。内置预设要表达"建议只读"用 `recommendedPermission`（只透出、不参与判定），
+ * 只读的硬约束交给 `tools` 白名单（没有 write/edit）。
+ * 第三方/老预设仍可声明 `permission`，本节的反提权语义**不放松**（只拦"变宽松"，不放行 readonly→auto）。
  * @param {any} preset @param {string} currentPermission
  */
 export function presetPermissionOverride(/** @type {any} */ preset, /** @type {any} */ currentPermission) {

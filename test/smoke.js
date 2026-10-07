@@ -12914,6 +12914,8 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
 //   ① preset=local-audit（不发 permission）        → readonly（预设生效，设计如此）
 //   ② permission=auto + preset=local-audit（修前） → **readonly**（bug 现场：显式选择被静默压过）
 //   ③ permission=auto（不发预设）                   → auto
+//   （以上是 v0.6.12 的现场记录，当时内置 local-audit 自己声明 permission=readonly；v0.6.14 起内置
+//   预设不再声明 permission——本节的夹具改成临时预设 ro-fixture/evil-auto，见下方"夹具"说明。）
 //   修后 ② → auto，且 banner 写明「本会话权限：auto（来源：WebUI 显式选择）……预设 local-audit 声明
 //   permission=readonly，已按你的显式选择 auto 执行」；反提权方向不变（显式 readonly + 预设 auto → readonly）。
 // 根因链：src/web/app.js 的 #permSel 只走 applyConfig → POST /api/config（把 permission 写进 config.json），
@@ -12923,10 +12925,25 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
 //   于是 chatCfg.permission 被静默覆盖成 readonly，用户选了自动却按只读跑、且没有任何一处告诉他。
 // 本节钉四件事：① 显式 auto 压过只读预设（回归）；② 反提权不放松（有/无显式选择两条路都钉）；
 //   ③ 无显式选择时预设照旧生效**且有可见说明**；④ 前端确实发了权限字段、服务端确实用它（结构守卫）。
+// 夹具（v0.6.14）：**本节不再依赖内置 local-audit 的内容**。原因：内置预设已删掉 `permission`
+//   字段（它只造成"沉默覆盖用户选择"，见 docs/CONFIG.md「权限优先级与预设」），改成
+//   `recommendedPermission: "readonly"`（建议，不参与判定）——继续拿它当"声明 readonly 的预设"夹具
+//   会变成一条与磁盘内容不符的假夹具。现在在临时工作目录的项目级预设目录（<tmp>/.mingdao/presets/）
+//   里现写两份临时预设、并用 loadPreset() 真的从磁盘读回来：`ro-fixture`（permission=readonly）与
+//   `evil-auto`（permission=auto，专供反提权两条路）。这样本节的语义不变（老/第三方预设仍可声明
+//   permission 并按反提权规则生效），且内置预设的字段纪律另由 test/api-contracts.js 的契约钉住。
 {
   const { resolveTurnPermission } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
-  const presetRO = { name: 'local-audit', permission: 'readonly' };
-  const presetAuto = { name: 'evil-auto', permission: 'auto' };
+  const { loadPreset } = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
+  const fxDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sec137-preset-'));
+  const fxPresetDir = path.join(fxDir, '.mingdao', 'presets');
+  fs.mkdirSync(fxPresetDir, { recursive: true });
+  fs.writeFileSync(path.join(fxPresetDir, 'ro-fixture.json'), JSON.stringify({ name: 'ro-fixture', label: '只读夹具预设', permission: 'readonly', tools: ['read', 'grep'] }));
+  fs.writeFileSync(path.join(fxPresetDir, 'evil-auto.json'), JSON.stringify({ name: 'evil-auto', label: '提权夹具预设', permission: 'auto' }));
+  const presetRO = loadPreset(fxDir, 'ro-fixture');
+  const presetAuto = loadPreset(fxDir, 'evil-auto');
+  assert.ok(presetRO && presetRO.permission === 'readonly', '（前置）临时夹具预设 ro-fixture 必须真的从磁盘加载出 permission=readonly');
+  assert.ok(presetAuto && presetAuto.permission === 'auto', '（前置）临时夹具预设 evil-auto 必须真的从磁盘加载出 permission=auto');
 
   // ① 显式 auto + 只读预设 → auto（回归：修前这里是 readonly）
   {
@@ -12961,7 +12978,7 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
     assert.equal(r.source, 'preset', '来源必须标成预设（可见说明要写清是谁定的档）');
     const b = String(r.banner || '');
     assert.ok(b.includes('本会话权限：readonly'), '可见说明必须写明本会话生效的档位（本会话权限：readonly）');
-    assert.ok(b.includes('来源：预设 local-audit'), '可见说明必须写明档位来源（来源：预设 local-audit）');
+    assert.ok(b.includes('来源：预设 ro-fixture'), '可见说明必须写明档位来源（来源：预设 ro-fixture）');
     assert.ok(b.includes('只读工具直接放行'), '可见说明还要说清该档位会发生什么（否则用户仍不知道后果）');
     // 非法/缺失的显式值一律忽略（绝不 fail-open）
     const bad = resolveTurnPermission({ explicit: 'root', configPermission: 'ask' });
@@ -12985,6 +13002,7 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
     assert.ok(/turnPerm\.banner/.test(srvSrc), '可见说明（turnPerm.banner）必须真的随 SSE 流下发，而不是只算出来没人用');
   }
 
+  safeRmSync(fxDir, { recursive: true, force: true });
   ok('v0.6.12 WebUI 权限：显式选择 > 预设 > config.json（反提权不放宽 + 对象形态 deny 不丢）+ 生效档位与来源有可见说明 + 单源与接线结构守卫');
 }
 

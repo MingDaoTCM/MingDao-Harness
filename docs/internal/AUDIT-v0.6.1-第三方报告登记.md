@@ -2174,3 +2174,97 @@ permission=readonly，已按你的显式选择 auto 执行`。
 行为守卫把 `app.js` 的**真实源码切片**（选择器 + 登记路径）放进桩 DOM/window/fetch 里点一遍：
 ① 有桌面桥 → `pickDirectory` 被调用且选中路径进请求体；② 手输目录直接用；③ 无桌面桥 → `#dirModal` 可见；
 ④ 点「不指定（当前目录）」仍登记且不带 `dir`；⑤ 名称为空有提示、不发请求；⑥「选择目录…」回填 `#wsDir`。
+
+## 3.53 已修复（v0.6.14 开发线：内置预设「本地模型审计」写死 `permission=readonly`——界面选了「自动」仍被静默压回只读）
+
+来源：**负责人真机实测**（与 §3.51 同一条用户线）。§3.51 修的是"预设压过显式选择"这条优先级链的**接线**；
+本轮修的是**源头**：内置预设根本不该声明 `permission`（覆盖语义）。
+现象：WebUI「权限模式」选「自动」（沙箱 off），勾上内置预设后**每调用一次工具**都弹
+`权限确认：只读模式将拦截 task，是否本次放行？[y/N]`——本地部署的小模型因此基本不可用
+（每步都要人点一次，且模型看不到写工具）。
+
+### 一、先复现（真实磁盘上的内置预设 + 单源判定，修前 / 修后对照）
+
+`presets/local-audit.json` 修前逐字带着 `"permission": "readonly"`（v0.4.2 起 auto→readonly）。
+用 `loadPreset(<cwd>, 'local-audit')` 从**磁盘真实加载**该预设，再喂给 §3.51 修好的**单源判定**
+`resolveTurnPermission()`（`src/web/server.js`，正是 `handleChat` 预设分支调用的那个函数）：
+
+| # | 请求体 | 修前有效模式 | 修后有效模式 |
+| --- | --- | --- | --- |
+| ① | `{preset:'local-audit'}`（不发 permission，config=auto） | `readonly`（预设覆盖） | **`auto`**（预设不再改档，回落 config.json） |
+| ② | `{permission:'auto', preset:'local-audit'}` | `auto`（§3.51 已修） | `auto` |
+| ③ | `{permission:'ask', preset:'local-audit'}` | `ask` | `ask` |
+
+修后实测（`node --input-type=module -e …`，临时 `MINGDAO_HOME`，cwd=仓库根）：
+`loadPreset` 结果 `hasPermField=false`、`recommendedPermission="readonly"`、
+`tools=[read,ls,glob,grep,skill,git,fetch,todo,task]`（**无 `write`/`edit`**）；
+`listPresets()`（即 `GET /api/presets`）条目透出 `recommendedPermission:"readonly"`、**无 `permission` 字段**；
+`resolveTurnPermission({preset, explicit:'auto', configPermission:'ask'}).mode === 'auto'`、
+`{preset, explicit:null, configPermission:'auto'}.mode === 'auto'`（不再被预设钉成 readonly）。
+
+> ⚠ 边界：本轮**没有**再跑一遍真实 WebUI 端到端探针。§3.51 的 `/tmp/probe-perm-mode.mjs` 打的是
+> "显式选择 vs 预设"那条路（与本节同一个 `resolveTurnPermission`），本节的观测量是"磁盘预设 + 单源判定"，
+> 不是浏览器点击；`label` 改名后的界面呈现未做截图级验证。
+
+### 二、根因
+
+1. **字段语义错位**：预设的 `permission` 是**覆盖**——`presetConfigOverrides()` 把它搬进 `chatCfg`，
+   `handleChat` 再据此改写 `chatCfg.permission`。内置预设用它表达"建议只读"，等于把"建议"写成了"覆盖"。
+2. **反提权只拦"变宽松"**：`presetPermissionOverride()` 只拦 `readonly < ask < auto` 里"往宽走"的方向，
+   所以 `readonly` 静默压过用户的 `auto` 时既不报错也没有提示（§3.51 补了 banner，但档位仍是被压的：
+   用户选了自动，还是按只读跑）。
+3. **只读其实不需要权限档**：`local-audit` 的 `tools` 白名单里没有 `write`/`edit`，写工具根本不在模型
+   可见的工具表里——"只读"的硬约束已经在白名单里。`permission: readonly` 只额外带来
+   "非只读工具逐次弹窗"（`todo`/`task` 不在 `READONLY_TOOLS` 里），对本地小模型是致命的交互负担。
+
+### 三、修法
+
+1. `presets/local-audit.json`：**删掉 `permission`**，改为 `recommendedPermission: "readonly"`；
+   `label` 改「只读代码审计（本地模型）」；`description` 写明两件事：① 本预设**不启用审计日志/账本**
+   （那是 `config.audit` 与 `mingdao ledger`，与本预设无关）；② 它**不覆盖你的权限档**——只读效果由
+   `tools` 白名单保证（没有 write/edit），权限档以你的显式选择为准。
+2. `src/presets.js`：`KNOWN_FIELDS` 收 `recommendedPermission` 并按 `ask/auto/readonly` 校验取值域
+   （拼错的值不再静默躺在预设里当装饰）；`listPresets()` 透出该字段（`permission` 的透出保持在原位，
+   两者**字段名分开**，谁都不会把建议当覆盖用）；`presetPermissionOverride()` 的**反提权语义一字未改**
+   （第三方/老预设仍可声明 `permission`，仍只拦"变宽松"），但在其注释里写死纪律：
+   **内置预设不得声明 `permission`**（它只会造成"沉默覆盖用户选择"），要表达"建议"就用 `recommendedPermission`。
+3. 内置预设的字段纪律由 `test/api-contracts.js` 机械钉住（见下），不靠"下次记得别写"。
+
+### 四、断言与变异
+
+- `test/smoke.js` 第 137 节：**只改夹具与断言**——不再拿内置 `local-audit` 当"声明 readonly 的预设"夹具
+  （否则它变成一条与磁盘内容不符的假夹具）。现在在临时工作目录的项目级预设目录
+  （`<tmp>/.mingdao/presets/`）里现写 `ro-fixture`（`permission:"readonly"`）与 `evil-auto`
+  （`permission:"auto"`），并 `loadPreset()` **从磁盘真读回来**（前置断言：两份夹具确实加载成功、
+  字段值正确）。①/②/③ 的语义一条不减：显式 `auto` 压过只读预设；反提权有/无显式选择两条路都不许放宽；
+  无显式选择时预设 `readonly` 照旧生效**且有可见说明**（`来源：预设 ro-fixture`）。未改其它节、未新增节号。
+- `test/api-contracts.js`：新增三条契约——内置 `local-audit` 必须 (a) 仍在列表里、(b) 透出
+  `recommendedPermission === 'readonly'`、(c) **不带 `permission` 字段**（断言文案写明
+  "permission 是覆盖语义，只会造成沉默覆盖用户权限选择；内置预设要表达建议就用 recommendedPermission"）。
+- `test/mutate/batch27-preset.mjs`：**6/6 全中**——① 内置预设把 `permission:"readonly"` 写回来；
+  ② 删掉 `recommendedPermission`；③ `listPresets()` 不再透出 `recommendedPermission`；
+  ④ 把"建议"冒充成 `permission` 透出；⑤ 字段白名单不再认 `recommendedPermission`（内置预设被
+  `validatePreset` 拒掉、列表里直接消失）；⑥ `presetPermissionOverride` 放松反提权（允许把 readonly/ask
+  提成 auto）。①②③④⑤ 打 `test/api-contracts.js`，⑥ 打 `test/smoke.js` 第 137 节。
+- `docs/CONFIG.md` 新增「权限优先级与预设（v0.6.14）」：**显式选择 > 预设建议（`recommendedPermission`）
+  > config.json**；写明"预设的 `tools` 白名单才是只读的硬约束；`permission` 字段是覆盖、
+  `recommendedPermission` 只是建议"——§3.51 登记的"未改 CONFIG.md"这一条本轮补上。
+- `test/mutate/README.md` 的「变异总数」由 151 → **157**（与 `node scripts/doc-lint.mjs` 打印的
+  "实际 157 条"同一提交落库）。
+- 变异套件在**独立 worktree**（`git worktree add --detach /tmp/mut-preset HEAD` → 跑 →
+  `git worktree remove --force`）里执行，避免与其它并发变异线互相覆盖工作区。
+
+### 五、未做边界（如实登记）
+
+- **`src/web/**`、`src/agent.js`、`src/cli.js`、`src/commands/repl.js` 一行未动**：本轮只改内置预设与
+  `src/presets.js` 的字段纪律。**`recommendedPermission` 没有接进任何界面**——它只随 `/api/presets`
+  透出，WebUI 预设下拉暂时不会显示这条建议（要在界面上用起来，得改 `src/web/app.js`，不在允许清单内）。
+- **没有"预设强制锁定档位"的机制**：显式选择仍是终值。想要"谁都不能改"的硬只读，用 `denyStrict`
+  或收 `tools` 白名单；本轮不新增锁定机制。
+- **老/第三方预设的 `permission` 覆盖仍在**（有意保留兼容）：本轮只禁内置预设；它们的"沉默覆盖"
+  问题要靠作者迁移到 `recommendedPermission`，**未做自动迁移、也未在加载时告警**。
+- **`docs/DEVELOPER.md` 1.2 的预设格式示例仍把 `permission` 列为字段、未提 `recommendedPermission`**
+  （不在本轮允许改动清单内）；`README.md` 只写了 `presets/` 目录说明，未点预设名，无需跟着改。
+- **未重跑真实 WebUI 端到端探针**（见"复现"里的 ⚠）；`label` 从「本地模型审计」改成
+  「只读代码审计（本地模型）」后，旧截图/旧文档里的字样会与界面不一致。
+
