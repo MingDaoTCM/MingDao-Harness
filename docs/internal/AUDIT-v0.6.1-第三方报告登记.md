@@ -1464,3 +1464,84 @@ Pack 子进程隔离（M-1）、`ledger --sign-key`、Electron 更新包签名�
 - **未做**：密钥吊销/轮换链（多密钥并存验签）、公钥导出子命令（当前可直接取
   `ledger-key.json` 的 `publicKey` 字段或 PEM）、WebUI 侧的来源签名展示、
   Electron 更新包签名校验与 IDE 令牌安全存储（仍按 v0.7.0/v0.8.0 排期）。
+
+## 3.46 已修复（v0.6.11 开发线：IDE 插件的令牌安全存储 + 「401」与「连不上」三态分离）
+
+**来源**：报告一 **K-9**（"两个 IDE 插件对令牌**失明**，嵌入的 WebUI 全接口 401"）与 §5.2 主线 B
+第 1 条（"IDE 插件（K-2、K-9）：参数数组代替 shell；**区分 401 与不可达**；令牌存 IDE 的 SecretStorage"）。
+K-2（把设置拼进 shell）在 v0.6.8 已修，本节收口 K-9 本身。
+
+### 一、先复现（探针未入库：`/tmp/probe-ide-token.mjs`，修前/修后各跑一次）
+
+探针方式：用**桩 vscode 模块**按 VS Code 的配置语义解析（package.json 默认值 < 用户级 settings.json <
+工作区 `.vscode/settings.json`），加载**真实的** `ide/vscode/extension.js`，并把它指向本机起的
+**真实 HTTP** 假 WebUI（强制令牌：无令牌 → 401）。
+
+| # | 待复现的结论 | 实测 | 判定 |
+| --- | --- | --- | --- |
+| ① | 工作区级设置可被被打开的仓库写入 | `ide/vscode/package.json` 的 configuration 里 `mingdao.port` / `autoStopServer` **一个 `scope` 都没声明** → VS Code 默认 `window`（工作区可覆盖），而工作区级设置来自被打开仓库的 `.vscode/settings.json`；仓库写入后 `getConfiguration('mingdao').get('port')` 返回仓库给的字符串 | **成立** |
+| ② | `get()` 会返回工作区级的值（含**未声明**的键） | 对 package.json 里**根本没声明**的 `mingdao.token`，`get('token')` 照样返回 `"repo-supplied-token"`；`inspect('token')` 同时给出 `workspaceValue` 与用户级 `globalValue` | **成立** |
+| ③ | 「插件此前从 settings 读令牌并当凭据用」 | 修前 `extension.js` 里 `token` 字样出现 **0 次**；全历史 `git log --all -S token -- ide/` **为空** | **复现不了** |
+| ④ | 401 与"连不上"是同一句话，且 401 会去启动第二个服务（K-9 根因） | 假 WebUI 回 401 时 `openWebUI()` **spawn 次数 = 1**（真去启动第二个注定失败的服务），提示"服务器启动失败，请运行…查看日志"；换成人人没听的端口（ECONNREFUSED），提示与 401 **逐字相同** | **成立** |
+| ⑤ | 同一机制下**活的**注入面（K-2 同类，顺带发现） | `mingdao.port` 的工作区值修前直达集成终端命令行：实测 `terminal.sendText("mingdao web 1; touch /tmp/pwned-by-repo #")`——用户点一次「MingDao: 启动服务器（终端）」即执行仓库给的命令 | **成立** |
+
+**诚实结论（不把话说大）**：K-9 的原文是"对令牌**失明**"——修前两端**根本没有**令牌支持
+（没有字段、没有读取、没有发送）。所以本次的令牌存储是**新增面**，不是"把令牌换个地方存"；
+"从工作区 settings 读令牌当凭据"这条**在 v0.6.10 的代码里不存在**（③）。②的机制风险真实存在，
+⑤ 就是它在同一文件里的活证据 —— 这也是"访问本机 WebUI 的凭据绝不能放 settings"的论据。
+两端的"旧键迁移"因此是对**用户手写过 `mingdao.token`** 的**防御性覆盖**：没有真实用户数据被迁移过，
+也没有任何旧功能被替换（该键在两端历史代码里从未存在）。
+
+### 二、修法（取舍都写在这里）
+
+| 决定 | 为什么 |
+| --- | --- |
+| VS Code：令牌存 `context.secrets`（SecretStorage），**只从它读** | IDE 自己的加密存储：不落 settings 文件、不随工作区走、不进同步。修前 `get()` 会返回工作区值（①），把凭据留在那里等于交给被打开的仓库 |
+| `mingdao.token` **显式弃用**（`deprecationMessage`）而不是直接删掉，并加 `scope: "application"` | 直接删：用户只看到"未知设置"，不知道令牌该放哪。显式弃用：设置界面直接写明替代命令；`scope=application` 让**工作区连设都不能设**（工作区/远程值一律不生效）。`mingdao.binary` 同样补 `scope: "machine"`（把 v0.6.8 的"只读 globalValue"从代码约定升级成宿主强制的 schema 约定） |
+| 旧值迁移**只认用户级**（`inspect().globalValue`）；工作区级**不迁移、不清空**，只提示"已忽略" | 迁移工作区级值＝把仓库给的字符串**持久化进用户的加密存储**并长期使用（凭据注入）。工作区级设置文件是仓库自己的，插件不去改它。没有 `inspect()`（分不清作用域）时**什么都不做**：宁可让用户手动设一次 |
+| 探测分**三态** `ok / unauthorized / unreachable`，判定抽成纯函数 `ide/vscode/probe.js`（`classifyProbe`） | 判定要能被**行为测试**钉住（§134 直接调函数），而不是靠"源码里有这句话"。修前 `health()` 只有 `statusCode === 200`，401 与 ECONNREFUSED 落在同一个 `false` 上，插件的下一步动作也相同 → 启动第二个注定失败的服务 → 加载公开壳页面 → 每个 `/api` 都 401（④） |
+| `unauthorized` 时**绝不启动服务**，只把用户引向「MingDao: 设置访问令牌」；`unreachable` 才启动并引向 `mingdao web` | 状态不同 ⇒ 用户该做的事不同。401 说明服务在跑、只是凭据不对；再起一个只会得到"端口被占用"或另一个同样 401 的实例，并把用户引向错误方向 |
+| 三态文案也放在 `probe.js`（`probeAdvice`，额外导出） | 文案同样有行为契约（"三种状态三句不同的话"），放在纯函数模块里就能被断言，不必退化成"检查源码文本里有这句话"。报告的建议只写了 `classifyProbe`，这里多导出一个纯函数，未改变 `classifyProbe` 的契约 |
+| 令牌随请求以 `X-MingDao-Token` 发送；内嵌 WebUI 用 `?token=`（SPA 读进 sessionStorage 后从地址栏移除） | 服务端本来就有这两种入口（`src/web/server.js` 的 `requestToken`）。不带令牌时壳页面能加载、每个 `/api` 都 401 —— 正是 K-9 的现场 |
+| 顺带把 `port()` **数值化**（1–65535 整数，否则回退 3820 并提示） | ⑤ 的活注入面：`package.json` 的 `"type": "number"` 只是设置界面上的校验，**不是边界**；值最终拼进 `terminal.sendText` 的命令行字符串，必须在插件侧收口（与 K-2 的"声明≠强制"同一条推理） |
+| JetBrains：`PasswordSafe.instance` + `CredentialAttributes(generateServiceName(...))`，令牌**不留在** `MingDaoSettings` | `MingDaoSettings` 持久化在 `PropertiesComponent`（项目配置，随仓库/工作区走）；凭据库是 macOS Keychain / Windows KeePass / Linux libsecret。`CredentialAttributes(serviceName, userName, requestor)` 三参构造在平台源码里已标 `DeprecationLevel.ERROR`，故只用单参构造（避免"照抄老教程"式编译错误） |
+| JetBrains 探测改用 `conn.responseCode`，不再用 `getInputStream()` | 401 时 `getInputStream()` 抛 `IOException`，被 `catch (_: Exception) { false }` 吞掉 → 与"连不上"混成同一个 `false`（K-9 在 Kotlin 侧的同一根因）。删除布尔化的 `healthy()`，统一 `probeState()` 三态 |
+| 两端都保留"旧键一次性迁移"并清空旧键 | 满足"用户手写过就帮他搬走"的诉求。如 §一 所述，这是防御性覆盖，不是迁移真实旧功能 |
+| 负面源码守卫**只看代码行**（注释里正大光明写着旧写法当复现证据） | 否则"把复现证据写进注释"反而把守卫弄红——守卫要盯的是**行为**，不是文档 |
+
+### 三、断言与变异
+
+- `test/smoke.js` **§134**（新节，接在 §133 之后）：行为断言跑在**桩 vscode 模块 + 真实本地 HTTP** 上
+  （真实 `extension.js`/`probe.js`）——三态（200/204→ok、401/403→unauthorized、ECONNREFUSED/超时/5xx→unreachable、
+  无证据≠通、状态码优先于 error）；三句**互不相同**且各自点明下一步的文案；迁移（用户级搬进 SecretStorage 并清空、
+  工作区级**不迁移不清空**只提示）；令牌只来自 SecretStorage（settings 里放错令牌时，请求头必须仍是 secrets 里的那个）；
+  401 时 `ensureServer`/命令路径 **spawn 次数 = 0**；连不上时 spawn 一次且 `argv` 无 shell；内嵌地址带 `?token=`；
+  端口注入收口（`sendText === "mingdao web 3820"`）且合法的每工作区端口仍生效；package.json 的弃用声明。
+  JetBrains 侧是**源码级守卫**（本仓无 IntelliJ SDK，CI 里无法编译）：`PasswordSafe.instance.get/set`、
+  `CredentialAttributes(generateServiceName(...))`、`MingDaoSettings` 类体内无 token、
+  旧键 `getValue`+`unsetValue`、`401||403 → Probe.UNAUTHORIZED`、`catch → Probe.UNREACHABLE`、
+  不再有 `healthy(`、请求带 `X-MingDao-Token`、地址带 `?token=`、三句文案互不相同。
+- `test/mutate/batch20-ide-token.mjs`：**14/14 全中**（403 掉出令牌集合 / 2xx 收窄成恰好 200 / 5xx 判 ok /
+  无响应码也判 ok / 有响应码却说"服务未启动" / `token()` 改回 settings / 迁移采纳工作区级值 / 401 照样启动服务 /
+  端口不数值化 / 删掉弃用声明 / Kotlin 401 映射成 UNREACHABLE / token 字段回到 `MingDaoSettings` /
+  写令牌改回 `PropertiesComponent` / 401 文案塌回"连不上"）。变异总数 65 → **79**。
+- 文档面：`ide/vscode/README.md`、`ide/jetbrains/README.md` 写清令牌存哪、命令、三态文案与
+  "JetBrains 只有源码守卫、不是行为测试"的边界。
+
+### 四、未做边界（如实登记）
+
+- **没有在真实 VS Code / 真实 IDE 里跑过端到端**：本仓 CI 无 VS Code 宿主、无 IntelliJ SDK。VS Code 侧靠
+  桩 vscode + 真实 HTTP 的行为断言，JetBrains 侧只有源码守卫（要 `gradle runIde` 才能验证行为）；
+  `PasswordSafe` / SecretStorage 的真机行为（钥匙串授权弹窗、远程开发下的凭据重定向）均**未验证**。
+- JetBrains 令牌**输入框不做掩码**（用的是长期稳定的 `Messages.showInputDialog`；掩码输入需要本仓无法编译
+  验证的 API）；`PasswordSafe` 调用按文档要求放到后台线程，但**调用方仍在 EDT 上等待**（彻底非阻塞需把动作
+  改造成 suspend/BGT）。
+- 令牌仍无效时，JetBrains 工具窗**仍会加载无令牌的壳页面**（对话框已提示；理想做法是显示一张本地说明页，
+  需要本仓无法编译验证的 `loadHTML` 等 API）。
+- `mingdao.port` 仍允许工作区级覆盖（合法的每仓库端口是真实需求，已数值化收口）；`mingdao.autoStopServer`
+  仍可被工作区设为 `false`（只影响"关 VS Code 时是否停服务器"，非安全边界；非布尔值一律按"停"处理）。
+- **令牌照旧进日志/进程参数**：`mingdao web --auth-token <令牌>` 的 argv 暴露（BUG-015 已提供
+  `--auth-token=-` 从 stdin 读）属 CLI 面，本节未改；报告 M-12（令牌非一次性、可进 URL 历史）与
+  M-13（前端 fetch 对所有目标附加令牌头）同样不在本次范围。
+- 未做 VS Code 侧的"令牌失效自动刷新"（令牌是静态 bearer，没有刷新机制）；未做 JetBrains 侧令牌的图形化
+  设置页（需要在本批未开放的 `plugin.xml` 里注册新 Action）。

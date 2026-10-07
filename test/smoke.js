@@ -11779,6 +11779,392 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
   ok('v0.6.11 账本来源签名：新账本签名有效 + 老账本如实报无签名仍退 0 + 改内容重算链/换密钥重签判无效退非 0 + 无公钥判「无法校验」+ 密钥 600 且不进 config.json');
 }
 
+// ---------- 134. v0.6.11：IDE 插件的令牌安全存储 + 三态探测（登记 §3.46） ----------
+// 先复现（探针 /tmp/probe-ide-token.mjs，未入库：桩 vscode 模块 + 本机真实 HTTP 假 WebUI，同一份探针
+// 修前修后各跑一次）：
+//   ① 「工作区级设置可被被打开的仓库写入」**成立**：`ide/vscode/package.json` 里 mingdao.port /
+//      autoStopServer 都没声明 scope（VS Code 默认 window → 工作区可覆盖），而
+//      `getConfiguration('mingdao').get('token')` 对 package.json 里**根本没声明**的键也照样返回工作区值
+//      （实测 "repo-supplied-token"；`inspect()` 同时给出 workspaceValue 与用户级 globalValue）。
+//   ② 但「插件此前把工作区里的令牌当凭据用」**复现不了**：修前 extension.js 里 token 字样出现 0 次，
+//      `git log --all -S token -- ide/` 为空 —— 修前的问题是**根本没有令牌支持**（K-9 原话："对令牌失明"）。
+//      所以下面的令牌存储是**新增面**；旧设置迁移是对"用户手写过 mingdao.token"的**防御性覆盖**，
+//      **没有真实用户数据被迁移过**（诚实标注，不把话说大）。
+//   ③ 同一机制下有一条**活的**注入面：mingdao.port 的工作区值修前直达 terminal.sendText
+//      （实测 `sendText = "mingdao web 1; touch /tmp/pwned-by-repo #"`）——本批一并数值化收口。
+//   ④ K-9 根因复现：假 WebUI 强制令牌（无令牌 → 401）时，修前 openWebUI() **spawn 次数 = 1**
+//      （真去启动了第二个注定失败的服务），且 401 与 ECONNREFUSED 的用户提示**逐字相同**
+//      （"服务器启动失败，请运行「MingDao: 启动服务器（终端）」查看日志"）。
+// 修后应满足：401 → 三态 unauthorized、**不 spawn**、提示"令牌无效或已过期…重新输入"；
+//             连不上 → unreachable、spawn 一次、提示"服务未启动？运行 mingdao web"。
+// **诚实边界**：CI 里没有 VS Code 宿主，下面的行为断言全部跑在**桩 vscode 模块**上（真实 HTTP、
+// 真实 extension.js/probe.js）；JetBrains 侧无法编译，只有源码级守卫。
+{
+  const http134 = await import('node:http');
+  const { EventEmitter: EventEmitter134 } = await import('node:events');
+  const require134 = (await import('node:module')).createRequire(import.meta.url);
+  const Module134 = require134('node:module');
+  const cp134 = require134('node:child_process');
+  const repoRoot134 = path.join(srcDir, '..');
+  const extPath134 = path.join(repoRoot134, 'ide', 'vscode', 'extension.js');
+  const vscodePkg134 = JSON.parse(fs.readFileSync(path.join(repoRoot134, 'ide', 'vscode', 'package.json'), 'utf8'));
+  const ktPath134 = path.join(repoRoot134, 'ide', 'jetbrains', 'src', 'main', 'kotlin', 'mingdao', 'MingDaoPlugin.kt');
+  const probeMod134 = require134(path.join(repoRoot134, 'ide', 'vscode', 'probe.js'));
+  // Windows 工作树是 CRLF（Git for Windows 默认）：源码守卫按 LF 归一化后再匹配（与变异脚手架同款）
+  const eol134 = (/** @type {any} */ s) => String(s).replace(/\r\n?/g, '\n');
+  // 负面守卫只看**代码行**：文件头/注释里正大光明地写着旧写法（`get('token')`、`healthy()`、
+  // `statusCode === 200`）作为复现证据，不能让"把证据写进注释"反而把守卫弄红。
+  const code134 = (/** @type {string} */ s) => s.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+
+  // ① 三态判定（纯函数）：五个规定用例 + 边界（2xx 不等于"恰好 200"、500 不是 ok、状态码优先于 error）
+  {
+    const C = probeMod134.classifyProbe;
+    assert.equal(C({ statusCode: 200, error: null }), 'ok', '200 → ok');
+    assert.equal(C({ statusCode: 204 }), 'ok', '2xx 都是"可用"信号（不是恰好 200）');
+    assert.equal(C({ statusCode: 401, error: null }), 'unauthorized', '401 → unauthorized（令牌错，不是"没启动"）');
+    assert.equal(C({ statusCode: 403, error: null }), 'unauthorized', '403 → unauthorized（Host/来源校验失败也走这条）');
+    const refused134 = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:3820'), { code: 'ECONNREFUSED' });
+    assert.equal(C({ statusCode: null, error: refused134 }), 'unreachable', 'ECONNREFUSED → unreachable');
+    const timeout134 = Object.assign(new Error('探测超时（1200ms）'), { code: 'ETIMEDOUT' });
+    assert.equal(C({ statusCode: null, error: timeout134 }), 'unreachable', '超时 → unreachable');
+    assert.equal(C({ statusCode: 500, error: null }), 'unreachable', '5xx 不是 ok（服务在但不可用）');
+    assert.equal(C({}), 'unreachable', '既没响应码也没错误：**没有证据 ≠ 通**');
+    assert.equal(C({ statusCode: 401, error: refused134 }), 'unauthorized', '拿到了响应码就以响应码为准');
+    // 三态各有一句**不同**的话，且每句都点明下一步（行为断言：不查源码文本，直接调函数）
+    const mOk134 = probeMod134.probeAdvice('ok', {});
+    const mAuth134 = probeMod134.probeAdvice('unauthorized', { statusCode: 401 });
+    const mDown134 = probeMod134.probeAdvice('unreachable', { statusCode: null, error: refused134 });
+    assert.equal(new Set([mOk134, mAuth134, mDown134]).size, 3, '三种状态必须是三句不同的提示（不是笼统一句"连接失败"）');
+    assert.ok(mAuth134.includes('令牌无效或已过期') && mAuth134.includes('重新输入'), `401 文案必须说清是令牌并让用户重新输入，实际：${mAuth134}`);
+    assert.ok(mDown134.includes('服务未启动') && mDown134.includes('mingdao web'), `连不上文案必须给出下一步命令，实际：${mDown134}`);
+    assert.ok(probeMod134.probeAdvice('unreachable', { statusCode: 500 }).includes('500'), '服务有响应时不得再说"服务未启动"（把 K-9 的误导反过来）');
+    assert.ok(probeMod134.probeAdvice('unreachable', { statusCode: null, error: timeout134 }).includes('超时'), '超时要与"没启动"区分开（error 只影响文案，不影响三态）');
+  }
+
+  // 桩 vscode：按 VS Code 配置语义解析（默认值 < 用户级 < 工作区级），并记录所有用户可见的提示与命令
+  const spawnCalls134 = [];
+  let startOnSpawn134 = null;
+  const origLoad134 = Module134._load;
+  const realSpawn134 = cp134.spawn;
+  let currentStub134 = null;
+  const makeHost134 = (/** @type {{user?: any, workspace?: any}} */ opts) => {
+    const calls = { sendText: [], messages: [], commands: /** @type {any} */ ({}), openExternal: [], updated: [] };
+    /** 两种写法都接受：`port` 与 `mingdao.port`（VS Code 的 settings.json 里是全名） */
+    const norm134 = (/** @type {any} */ o) =>
+      Object.fromEntries(Object.entries(o || {}).map(([k, v]) => [k.startsWith('mingdao.') ? k : `mingdao.${k}`, v]));
+    const state = { user: norm134(opts.user), workspace: norm134(opts.workspace) };
+    const defaults = {};
+    for (const [k, v] of Object.entries(vscodePkg134.contributes.configuration.properties)) defaults[k] = v.default;
+    const cfg = () => ({
+      get: (/** @type {string} */ key, /** @type {any} */ def) => {
+        const full = `mingdao.${key}`;
+        if (full in state.workspace) return state.workspace[full];
+        if (full in state.user) return state.user[full];
+        if (full in defaults) return defaults[full];
+        return def;
+      },
+      inspect: (/** @type {string} */ key) => {
+        const full = `mingdao.${key}`;
+        return {
+          key: full,
+          defaultValue: defaults[full],
+          globalValue: full in state.user ? state.user[full] : undefined,
+          workspaceValue: full in state.workspace ? state.workspace[full] : undefined,
+          workspaceFolderValue: undefined,
+        };
+      },
+      update: async (/** @type {string} */ key, /** @type {any} */ value, /** @type {number} */ target) => {
+        calls.updated.push({ key, value, target });
+        if (target === 1) {
+          if (value === undefined) delete state.user[`mingdao.${key}`];
+          else state.user[`mingdao.${key}`] = value;
+        }
+      },
+    });
+    const note = (/** @type {string} */ type) => async (/** @type {string} */ m) => void calls.messages.push({ type, text: String(m) });
+    const stub = {
+      workspace: { getConfiguration: () => cfg() },
+      window: {
+        showWarningMessage: note('warn'),
+        showInformationMessage: note('info'),
+        showErrorMessage: note('error'),
+        showInputBox: async () => 'typed-by-user',
+        createTerminal: () => ({ show() {}, sendText: (/** @type {string} */ t) => calls.sendText.push(String(t)) }),
+        registerWebviewViewProvider: () => ({ dispose() {} }),
+        activeTextEditor: undefined,
+      },
+      commands: {
+        registerCommand: (/** @type {string} */ id, /** @type {any} */ fn) => {
+          calls.commands[id] = fn;
+          return { dispose() {} };
+        },
+        executeCommand: async () => {},
+      },
+      env: { openExternal: async (/** @type {any} */ u) => void calls.openExternal.push(String(u)) },
+      Uri: { parse: (/** @type {string} */ s) => ({ toString: () => s }) },
+      ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
+    };
+    return { stub, calls, state };
+  };
+  const makeCtx134 = (/** @type {string} */ secret) => {
+    const m = new Map();
+    if (secret) m.set('mingdao.webToken', secret);
+    return {
+      subscriptions: { push() {} },
+      secrets: {
+        get: async (/** @type {string} */ k) => m.get(k),
+        store: async (/** @type {string} */ k, /** @type {string} */ v) => void m.set(k, v),
+        delete: async (/** @type {string} */ k) => void m.delete(k),
+      },
+      __map: m,
+    };
+  };
+  /** 用桩 vscode 加载**真实的** extension.js（CJS：createRequire 会走 Module._load 钩子） */
+  const loadExt134 = (/** @type {any} */ stub) => {
+    currentStub134 = stub;
+    if (require134.cache) delete require134.cache[extPath134];
+    Module134._load = function (/** @type {any} */ request) {
+      if (request === 'vscode') return currentStub134;
+      return origLoad134.apply(this, arguments);
+    };
+    try {
+      return require134(extPath134);
+    } finally {
+      Module134._load = origLoad134;
+    }
+  };
+  const waitFor134 = async (/** @type {() => boolean} */ cond, /** @type {number} */ ms = 2000) => {
+    const t0 = Date.now();
+    while (Date.now() - t0 < ms) {
+      if (cond()) return true;
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    return cond();
+  };
+
+  cp134.spawn = (/** @type {string} */ bin, /** @type {string[]} */ args, /** @type {any} */ opts) => {
+    spawnCalls134.push({ bin, args, opts });
+    const child = new EventEmitter134();
+    // @ts-ignore 只实现扩展用到的那几个成员
+    child.kill = () => {};
+    if (startOnSpawn134) startOnSpawn134();
+    return child;
+  };
+  const servers134 = [];
+  try {
+    // ② 迁移：用户级旧令牌 → SecretStorage 并清空设置；**工作区级旧令牌绝不迁移**（那是仓库写的）
+    {
+      const host = makeHost134({ user: { 'mingdao.token': 'user-legacy-token' }, workspace: { 'mingdao.token': 'repo-supplied-token' } });
+      const ctx = makeCtx134('');
+      const ext = loadExt134(host.stub);
+      await ext.__test.migrateLegacyToken(ctx);
+      assert.equal(ctx.__map.get('mingdao.webToken'), 'user-legacy-token', '用户级旧令牌必须被迁移进 SecretStorage');
+      assert.notEqual(ctx.__map.get('mingdao.webToken'), 'repo-supplied-token', '工作区级旧令牌**绝不**能成为凭据（工作区设置来自被打开的仓库）');
+      const cleared = host.calls.updated.filter((u) => u.key === 'token');
+      assert.equal(cleared.length, 1, '迁移后必须清空旧设置（恰好一次）');
+      assert.equal(cleared[0].value, undefined, '清空旧设置 = 写入 undefined');
+      assert.equal(cleared[0].target, 1, '只清用户级（Global）：工作区级是仓库自己的文件，不动它');
+      assert.ok(
+        host.calls.messages.some((m) => m.type === 'warn' && m.text.includes('mingdao.token') && m.text.includes('忽略')),
+        '工作区级旧令牌必须被明确忽略并告知用户（不能悄悄当成凭据）'
+      );
+      assert.ok(host.calls.messages.some((m) => m.type === 'info' && m.text.includes('迁移')), '迁移完成必须提示用户');
+      // **只有**工作区级旧令牌时：什么都不迁移（那是被打开的仓库写的），但必须明确告知
+      {
+        const hostWs = makeHost134({ workspace: { 'mingdao.token': 'repo-only-token' } });
+        const ctxWs = makeCtx134('');
+        await loadExt134(hostWs.stub).__test.migrateLegacyToken(ctxWs);
+        assert.equal(ctxWs.__map.get('mingdao.webToken'), undefined, '工作区级旧令牌**绝不**能成为凭据（只有它时也不得迁移进加密存储）');
+        assert.equal(hostWs.calls.updated.length, 0, '不得去改工作区的设置文件（那是仓库自己的文件）');
+        assert.ok(hostWs.calls.messages.some((m) => m.type === 'warn' && m.text.includes('忽略')), '只有工作区级令牌时必须明确告诉用户"已忽略"');
+      }
+      // activate() 也必须真的触发迁移（不是只存在于 __test 里）
+      const host2 = makeHost134({ user: { 'mingdao.token': 'legacy-2' } });
+      const ctx2 = makeCtx134('');
+      loadExt134(host2.stub).activate(ctx2);
+      assert.ok(await waitFor134(() => ctx2.__map.get('mingdao.webToken') === 'legacy-2'), 'activate() 必须触发一次性迁移');
+    }
+
+    // ③ 三态与令牌传递（真实 HTTP）：假 WebUI 只在 X-MingDao-Token = good-token 时回 200，否则 401
+    const seenTokens134 = [];
+    const authSrv134 = http134.createServer((/** @type {any} */ req, /** @type {any} */ res) => {
+      seenTokens134.push(String(req.headers['x-mingdao-token'] || ''));
+      if (seenTokens134.at(-1) !== 'good-token') {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        return res.end('{"error":"未授权：缺少或无效的访问令牌"}');
+      }
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end('{"ok":true}');
+    });
+    await new Promise((r) => authSrv134.listen(0, '127.0.0.1', r));
+    servers134.push(authSrv134);
+    const authPort134 = authSrv134.address().port;
+    {
+      // 3a 令牌只来自 SecretStorage：settings 里放一个**错的**令牌，请求头必须是 secrets 里的那个
+      const host = makeHost134({ user: { 'mingdao.token': 'wrong-from-settings' }, workspace: { port: authPort134 } });
+      const ctx = makeCtx134('good-token');
+      const ext = loadExt134(host.stub);
+      const p = await ext.__test.probeState(ctx);
+      assert.equal(p.state, 'ok', `带正确令牌必须判 ok，实际 ${p.state}`);
+      assert.equal(seenTokens134.at(-1), 'good-token', '请求必须带 SecretStorage 里的令牌（**不是** settings 里的）');
+      assert.ok(p.advice.includes('就绪'), 'ok 有自己的一句提示');
+      assert.equal(await ext.__test.webuiUrl(ctx), `http://127.0.0.1:${authPort134}/?token=good-token`, '内嵌 WebUI 地址必须带令牌（否则嵌进去的壳每个 /api 都 401）');
+    }
+    {
+      // 3b 401：unauthorized + **不启动第二个服务** + 令牌文案（K-9 的核心行为差异）
+      const host = makeHost134({ workspace: { port: authPort134 } });
+      const ctx = makeCtx134('wrong-token');
+      const ext = loadExt134(host.stub);
+      ext.activate(ctx);
+      const p = await ext.__test.probeState(ctx);
+      assert.equal(p.state, 'unauthorized', `错令牌必须判 unauthorized，实际 ${p.state}`);
+      const before = spawnCalls134.length;
+      const ready = await ext.__test.ensureServer(ctx);
+      assert.equal(ready.ok, false, '401 时服务不可用');
+      assert.equal(ready.probe.state, 'unauthorized', '401 时探测结论必须保持 unauthorized');
+      assert.equal(spawnCalls134.length - before, 0, 'K-9：401 时**不得**启动第二个服务（服务在跑，只是令牌不对）');
+      await host.calls.commands['mingdao.openWebUI']();
+      assert.equal(spawnCalls134.length - before, 0, 'K-9：走用户路径（打开 WebUI）同样不得启动第二个服务');
+      assert.ok(
+        host.calls.messages.some((m) => m.type === 'warn' && m.text.includes('令牌无效或已过期') && m.text.includes('重新输入')),
+        `401 的用户提示必须指向令牌与下一步，实际：${JSON.stringify(host.calls.messages)}`
+      );
+    }
+    {
+      // 3c 连不上（ECONNREFUSED）：unreachable + 启动一次 + "服务未启动？运行 mingdao web"
+      const deadSrv = http134.createServer();
+      await new Promise((r) => deadSrv.listen(0, '127.0.0.1', r));
+      const deadPort = deadSrv.address().port;
+      await new Promise((r) => deadSrv.close(r));
+      const host = makeHost134({ workspace: { port: deadPort } });
+      const ctx = makeCtx134('good-token');
+      const ext = loadExt134(host.stub);
+      ext.activate(ctx);
+      const p = await ext.__test.probeState(ctx);
+      assert.equal(p.state, 'unreachable', `没人监听的端口必须判 unreachable，实际 ${p.state}`);
+      assert.ok(p.advice.includes('服务未启动') && p.advice.includes('mingdao web'), `连不上必须给出下一步命令，实际：${p.advice}`);
+      // 假 spawn：服务在第一次轮询前起来（模拟真实启动），验证 ensureServer 的启动路径
+      /** @type {any} */
+      let started = null;
+      startOnSpawn134 = () => {
+        started = http134.createServer((/** @type {any} */ _req, /** @type {any} */ res) => {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end('{"ok":true}');
+        });
+        started.listen(deadPort, '127.0.0.1');
+      };
+      const before = spawnCalls134.length;
+      const ready = await ext.__test.ensureServer(ctx);
+      startOnSpawn134 = null;
+      if (started) servers134.push(started);
+      assert.equal(spawnCalls134.length - before, 1, '连不上时必须启动服务，且只启动一次');
+      assert.deepEqual(spawnCalls134.at(-1).args, ['web', String(deadPort)], 'spawn 必须是 argv 数组（无 shell），端口数值化');
+      assert.equal(ready.ok, true, '服务起来之后 ensureServer 必须报 ok');
+      assert.equal(ready.probe.state, 'ok', '服务起来之后探测结论必须是 ok');
+      await host.calls.commands['mingdao.openWebUI']();
+      assert.ok(host.calls.openExternal.some((u) => u.includes(`:${deadPort}/?token=good-token`)), '打开 WebUI 必须带令牌');
+    }
+    {
+      // 3d 服务在但状态异常（500）：不得说"服务未启动"（把 K-9 的误导反过来）
+      const badSrv = http134.createServer((/** @type {any} */ _req, /** @type {any} */ res) => {
+        res.writeHead(500, { 'content-type': 'application/json' });
+        res.end('{"error":"boom"}');
+      });
+      await new Promise((r) => badSrv.listen(0, '127.0.0.1', r));
+      servers134.push(badSrv);
+      const host = makeHost134({ workspace: { port: badSrv.address().port } });
+      const ext = loadExt134(host.stub);
+      const p = await ext.__test.probeState(makeCtx134('good-token'));
+      assert.equal(p.state, 'unreachable', '500 归入不可用（三态契约里没有第四态）');
+      assert.ok(p.advice.includes('500'), '必须点明是服务端状态码异常');
+      assert.ok(!p.advice.includes('服务未启动'), '服务明明响应了，不得再说"服务未启动"');
+    }
+    {
+      // 3e 超时（永不回包）：unreachable 且文案与"没启动"区分开
+      const hangSrv = http134.createServer(() => {});
+      await new Promise((r) => hangSrv.listen(0, '127.0.0.1', r));
+      servers134.push(hangSrv);
+      const host = makeHost134({ workspace: { port: hangSrv.address().port } });
+      const ext = loadExt134(host.stub);
+      const p = await ext.__test.probeState(makeCtx134('good-token'));
+      assert.equal(p.state, 'unreachable', '永不回包 → unreachable');
+      assert.ok(p.advice.includes('超时'), `超时文案必须体现"服务可能卡住"，实际：${p.advice}`);
+    }
+
+    // ④ 工作区级 port 直达 terminal.sendText（修前实测 `mingdao web 1; touch /tmp/pwned-by-repo #`）
+    {
+      const host = makeHost134({ workspace: { port: '1; touch /tmp/pwned-by-repo #', binary: './payload.sh' } });
+      const ext = loadExt134(host.stub);
+      ext.activate(makeCtx134(''));
+      await host.calls.commands['mingdao.startServer']();
+      assert.equal(host.calls.sendText.at(-1), 'mingdao web 3820', '工作区给的 port 不得进入命令行（数值化收口）');
+      assert.ok(host.calls.messages.some((m) => m.type === 'warn' && m.text.includes('mingdao.port')), '非法端口必须明确告知用户');
+      // 合法的每工作区端口仍然生效（不能把功能一起收掉）
+      const hostOk = makeHost134({ workspace: { port: 3999 } });
+      const extOk = loadExt134(hostOk.stub);
+      extOk.activate(makeCtx134(''));
+      await hostOk.calls.commands['mingdao.startServer']();
+      assert.equal(hostOk.calls.sendText.at(-1), 'mingdao web 3999', '合法的每工作区端口应仍然生效');
+    }
+
+    // ⑤ VS Code 面：package.json 的弃用声明 + 源码守卫（不得再出现 settings 读令牌 / 旧的 200 判据）
+    {
+      const props = vscodePkg134.contributes.configuration.properties;
+      assert.ok(props['mingdao.token'], 'mingdao.token 必须在 configuration 里**显式弃用**：直接删掉的话，用户只看到"未知设置"，不知道令牌该放哪');
+      assert.ok(String(props['mingdao.token'].deprecationMessage || '').includes('设置访问令牌'), 'deprecationMessage 必须写明替代路径（命令）');
+      assert.equal(props['mingdao.token'].scope, 'application', 'scope=application：令牌设置不能被工作区覆盖');
+      assert.equal(props['mingdao.binary'].scope, 'machine', 'K-2：binary 也不接受工作区覆盖');
+      const cmds = vscodePkg134.contributes.commands.map((c) => c.command);
+      assert.ok(cmds.includes('mingdao.setToken') && cmds.includes('mingdao.clearToken'), '必须提供设置/清除令牌的命令');
+      const extSrc = eol134(fs.readFileSync(extPath134, 'utf8'));
+      const extCode = code134(extSrc);
+      assert.ok(!/\.get\(\s*['"]token['"]\s*[,)]/.test(extCode), '令牌**不得**从 settings 读（get(\'token\')）');
+      assert.ok(/secrets\.get\(SECRET_KEY\)/.test(extCode) && /secrets\.store\(SECRET_KEY/.test(extCode), '令牌必须走 SecretStorage（context.secrets）');
+      assert.ok(/require\('\.\/probe\.js'\)/.test(extCode) && /classifyProbe\(/.test(extCode), '三态判定必须用 probe.js 的纯函数');
+      assert.ok(!/statusCode === 200/.test(extCode) && !/cb\(false\)/.test(extCode), 'K-9：不得再留"只有 200 才算活"的旧判据');
+      const vscReadme = fs.readFileSync(path.join(repoRoot134, 'ide', 'vscode', 'README.md'), 'utf8');
+      assert.ok(vscReadme.includes('SecretStorage') && vscReadme.includes('已弃用'), '插件 README 必须写清令牌存哪、旧设置已弃用');
+    }
+
+    // ⑥ JetBrains 面：**源码级守卫**（本仓没有 IntelliJ SDK，CI 里无法编译，故不是行为测试）
+    {
+      const kt = eol134(fs.readFileSync(ktPath134, 'utf8'));
+      const ktCode = code134(kt);
+      assert.ok(/PasswordSafe\.instance\.get\(/.test(ktCode) && /PasswordSafe\.instance\.set\(/.test(ktCode), 'K-9：令牌必须存 IDE 凭据库 PasswordSafe（set/get）');
+      assert.ok(/CredentialAttributes\(generateServiceName\(/.test(ktCode), '凭据属性必须用 generateServiceName 命名（用户能在钥匙串/密码管理器里认出）');
+      const cls = /class MingDaoSettings[\s\S]*?\n\}/.exec(kt);
+      assert.ok(cls, '必须能定位 MingDaoSettings 类');
+      assert.ok(!/token/i.test(cls[0]), 'MingDaoSettings（持久化在项目配置里）不得再有任何 token 字段');
+      assert.ok(/getValue\(LEGACY_TOKEN_KEY\)/.test(ktCode) && /unsetValue\(LEGACY_TOKEN_KEY\)/.test(ktCode), '旧键必须被读出来做一次性迁移并清除');
+      assert.ok(/code == 401 \|\| code == 403 -> Probe\.UNAUTHORIZED/.test(ktCode), '401/403 必须映射成 UNAUTHORIZED（三态，而不是布尔 false）');
+      assert.ok(/catch \(_: Exception\) \{\s*\n\s*Probe\.UNREACHABLE/.test(ktCode), '只有连接层失败才能归为 UNREACHABLE');
+      assert.ok(!/\bhealthy\(/.test(ktCode), 'K-9：不得再留布尔化的 healthy()（把 401 与连不上混成同一个 false 的根源）');
+      assert.ok(/X-MingDao-Token/.test(ktCode), '请求必须带令牌头');
+      assert.ok(/\/\?token=" \+ URLEncoder\.encode\(/.test(ktCode), 'JCEF 地址必须带 ?token=（否则嵌进去的 WebUI 每个 /api 都 401）');
+      const msgs = [...ktCode.matchAll(/Probe\.(OK|UNAUTHORIZED|UNREACHABLE) -> "([^"]*)"/g)].map((m) => [m[1], m[2]]);
+      assert.equal(msgs.length, 3, `三种状态必须各有文案，实际 ${msgs.length} 条`);
+      assert.equal(new Set(msgs.map((x) => x[1])).size, 3, '三种状态的用户提示不得是同一句');
+      /** @type {any} */
+      const by = Object.fromEntries(msgs);
+      assert.ok(by.UNAUTHORIZED.includes('令牌无效或已过期') && by.UNAUTHORIZED.includes('重新输入'), 'JetBrains 的 401 文案必须说清是令牌并让用户重新输入');
+      assert.ok(by.UNREACHABLE.includes('服务未启动') && by.UNREACHABLE.includes('mingdao web'), 'JetBrains 的连不上文案必须给出下一步命令');
+      assert.ok(by.OK.includes('就绪'), 'JetBrains 的 ok 文案自成一句');
+      const jbReadme = fs.readFileSync(path.join(repoRoot134, 'ide', 'jetbrains', 'README.md'), 'utf8');
+      assert.ok(jbReadme.includes('PasswordSafe'), 'JetBrains README 必须写清令牌存哪');
+      assert.ok(jbReadme.includes('源码级守卫') && jbReadme.includes('无法编译'), 'JetBrains README 必须**如实**说明这一段靠源码守卫、不是行为测试');
+    }
+    ok('v0.6.11 IDE 令牌：SecretStorage/PasswordSafe + 工作区级旧令牌一律忽略 + 三态（200/401/403/拒连/超时/5xx）+ 401 不启动第二个服务 + 端口注入收口 + 旧「只认 200」判据清零');
+  } finally {
+    cp134.spawn = realSpawn134;
+    Module134._load = origLoad134;
+    for (const s of servers134) {
+      try {
+        s.close();
+      } catch {}
+    }
+  }
+}
+
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket
 // —— 实测 ubuntu/macOS + Node 20 上"断言全过、进程却不退出"，CI 里表现为冒烟步骤永远 in_progress
 // （Node 18/22/Windows 因为拆连接更快而侥幸通过）。这里显式退出，断言本身不受影响；

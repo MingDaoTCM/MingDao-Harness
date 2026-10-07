@@ -16,6 +16,8 @@
     "onCommand:mingdao.openWebUI",
     "onCommand:mingdao.startServer",
     "onCommand:mingdao.sendSelection",
+    "onCommand:mingdao.setToken",
+    "onCommand:mingdao.clearToken",
     "onView:mingdao.chatView"
   ],
   "main": "./extension.js",
@@ -50,6 +52,14 @@
       {
         "command": "mingdao.sendSelection",
         "title": "MingDao: 发送选中代码"
+      },
+      {
+        "command": "mingdao.setToken",
+        "title": "MingDao: 设置访问令牌"
+      },
+      {
+        "command": "mingdao.clearToken",
+        "title": "MingDao: 清除访问令牌"
       }
     ],
     "menus": {
@@ -67,17 +77,25 @@
         "mingdao.port": {
           "type": "number",
           "default": 3820,
-          "description": "MingDao WebUI 端口"
+          "description": "MingDao WebUI 端口（工作区级可覆盖；非 1-65535 的整数会被忽略并回退 3820）"
         },
         "mingdao.binary": {
           "type": "string",
           "default": "mingdao",
-          "description": "mingdao/mdh 命令路径（安装 npm 包后默认可直接使用，也可写绝对路径）"
+          "scope": "machine",
+          "description": "mingdao/mdh 命令路径（安装 npm 包后默认可直接使用，也可写绝对路径）。scope=machine：不接受工作区级覆盖（工作区设置来自被打开的仓库）"
         },
         "mingdao.autoStopServer": {
           "type": "boolean",
           "default": true,
           "description": "关闭 VS Code 时自动停止由本插件启动的服务器"
+        },
+        "mingdao.token": {
+          "type": "string",
+          "default": "",
+          "scope": "application",
+          "markdownDescription": "**已弃用**：访问令牌不再存放在设置里，而是存在 VS Code 的加密存储（SecretStorage）中，用命令「MingDao: 设置访问令牌」写入。原因见 [README](./README.md)：工作区级设置来自被打开的仓库（`.vscode/settings.json`），把访问本机 WebUI 的凭据放在那里等于把凭据交给仓库。此设置现在只用于**一次性迁移**：仅当旧值在**用户级** settings.json 里时，插件启动时会把它移入加密存储并清空该设置；工作区级的值一律忽略。`scope=application` 保证它不能被工作区覆盖。",
+          "deprecationMessage": "已弃用：请改用命令「MingDao: 设置访问令牌」（存入 VS Code 加密存储 SecretStorage）。用户级的旧值会在插件启动时被自动迁移并清空；工作区级的值一律忽略。"
         }
       }
     }
