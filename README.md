@@ -275,7 +275,7 @@ mingdao cost --by pack          # 垂域费用分账
 
 ## 配置与扩展
 
-配置字段、权限规则、Hooks、MCP、云同步、自定义 Provider 的完整说明见 [docs/CONFIG.md](docs/CONFIG.md)；架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；Provider 扩展见 [docs/PROVIDERS.md](docs/PROVIDERS.md)。
+配置字段、权限规则、Hooks、MCP、云同步、自定义 Provider 的完整说明见 [docs/CONFIG.md](docs/CONFIG.md)；架构见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)；Provider 扩展见 [docs/PROVIDERS.md](docs/PROVIDERS.md)；桌面版自动更新（检查 / 下载 / 来源签名 / feed 与发版链路）见 [docs/DESKTOP-AUTO-UPDATE.md](docs/DESKTOP-AUTO-UPDATE.md)。
 
 ## 常见问题
 
