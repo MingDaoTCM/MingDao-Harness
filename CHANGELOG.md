@@ -3,6 +3,95 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.12（2026-10-08）— 本地模型可观测性与无进展看门狗 + 模型来源标注 + 预设按语义拆分
+
+> 补丁版，起因是**一次真机实测**而不是代码审查的推演：负责人用本地 `MLocalModel3.6.2`
+> （llama.cpp，`llama-server` 常驻 32.6GB / CPU 11%）跑全量仓库审计，引擎跑了 **4 小时 30 分**，
+> 而 `web-server.log` **8 小时零行**、界面只有一个「生成中」、`audit.jsonl` 里 610 次工具调用
+> 绝大多数是**逐字重复**的失败调用。复核结论：**没有一次"挂住的 await"**，
+> 缺的是**回合级判据**与**可观测性**——既有三个超时全是"单请求级"，
+> 而一个回合最坏是 `maxRounds × stepLimit = 72` 次请求（子代理还可递归派生），
+> "每十几分钟返回一次、什么都没做成"的回合可以**合法地**跑掉几小时。
+> 这一版把"看起来在工作"变成"看得见、说得清、停得下来"。
+> 变异验证 **17 批 183 条全中**（数字由 `scripts/doc-lint.mjs` ⑥ 守卫）。
+> 逐条复现与取舍见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` §3.54。
+
+### 一、本地模型可观测性与无进展看门狗（A）
+
+- **回合级无进展看门狗**（`src/agent.js`，新增 `config.noProgressTimeoutMs`，默认 **60 分钟**）：
+  判据 = 连续 N 分钟**既无"成功且不重复的工具结果"、也无新的正文/推理增量**；
+  **重复调用与失败调用不算进展**（真机现场正是它们）。命中即以 `stalled` 结局收尾并如实报告
+  （模型轮次 / 工具调用数 / 其中多少次重复或失败），不再冒充 `done`/`capped`。
+  默认取 60 分钟 = 现有本地单请求总量上限（1800s）的 **2 倍**，保证"一次慢 prefill"永远由更具体的
+  请求级超时先说话；该值**关不掉**（`0`/负数/`NaN`/`Infinity` 一律回落默认）；
+  子代理**继承父回合的截止时刻**（`cfg.turnProgressDeadlineAt`），一整棵树一起收口。
+- **上游/引擎错误透出原文 + 可操作解读**（`describeUpstreamError`）：模板/Jinja、内存拒绝、
+  三类超时、401/403/404/429/5xx 各给一条"这是什么 + 该怎么办"；识别不出时**一字不改**保留原文。
+- **"0 次工具调用"必须说出来**：`perf.zeroToolCalls` 单一来源，WebUI `done.note` 直接取它——
+  不会再出现"看起来在工作、其实一次工具都没调用"。
+- **可观测性三件套**：发送前**规模预告**（估算本轮 prompt tokens + 窗口占比 + 生效首帧上限 +
+  预检结论，≥80% 或"本地端点 + ≥60k tokens"时告警）；**TTFT 首帧时延**（界面 + `chat 首帧` 日志行）；
+  运行中**进度**（阶段/模型轮次/工具调用数/已收字符/≈tok/s/正在等待哪个工具），
+  `web-server.log` **每 30 秒定期落一行** `chat 进度 …`（此前只在回合首尾各一行）。
+- **端点预检**（`probeEndpoint`，仅本地端点，缓存 10 分钟）：`/v1/models` 对照引擎实际加载的模型名
+  （`modelNameMismatch`）；**3 次**极小请求（带工具声明、`max_tokens: 256`）判
+  **稳定支持 / 不稳定（N/3）/ 不支持**，被 `max_tokens` 截断的样本判为**不可判定**（思考型模型常见）；
+  另测一次**参考 prefill**（约 2000 tokens），与本机历史值比对，**≥3 倍变慢**提示"可能仍有旧请求占着"。
+- **按实测自适应超时**（`adaptiveTimeouts`）：首帧上限 = `clamp(max(实测首帧×20, 参考prefill×5),
+  既有默认, 1800s)`；看门狗 = `clamp(max(实测首帧×100, 参考prefill×20), 10min, 60min)`。
+  **用户显式配置永远优先**（显式 > 自适应）。
+
+### 二、模型下拉的**来源标注**（B）
+
+- 下游环境里 Dify chatflow 的应用名混进"模型"列表、看不出是不是官方模型。核实结论（写进
+  `src/model-discovery.js` 注释作为单源说明）：下拉是**配置驱动**的——自定义条目**只来自
+  `config.customModels`**，`fetchProviderModels` 显式跳过 `custom`，自定义端点的 `/models`
+  **从不写进 `model-cache.json`**，**不存在跨环境运行时串数据**；但此前只标 `providerLabel='自定义'`，
+  看不出**来自哪个端点**。
+- 现在每条自定义条目带 `source`（`custom-endpoint`/`custom-capability`）/`sourceLabel`/`endpoint`/
+  `isLocalEndpoint`/`note`（`customSourceOf`），下拉**分组名本身就是来源**，例如
+  「自定义端点 · dify.example.com/v1」，不再与官方模型混在一起。判据走 `resolveProviderConfig`，
+  不另抄一份"哪些字段算端点声明"的键表。
+
+### 三、内置预设按语义**拆分**（C）
+
+- 负责人定位："本地模型只是用来代替云模型 API 而已，功能是一样的；预设的目的是预设上下文窗口/
+  最大输出 tokens 等，让本地模型正常工作——它并不是专为代码审计而设。" 原内置 `local-audit`
+  **一个名字扛了三件事**（本地参数 + 审计人格 + 只读白名单），名实不符。现拆为：
+  - `local-model` —— 只放保守参数（`contextBudget: 65536`/`maxOutputTokens: 4096`/`maxRounds: 4`），
+    **不加人格、不限制工具、不建议权限档**；
+  - `readonly-audit` —— 审计人格 + 只读工具白名单 + `recommendedPermission: "readonly"` + 保守参数。
+- **老名字 `local-audit` 保留为别名**（`PRESET_ALIASES` → `local-model`）：仍可用，但**会说出来**
+  （CLI `console.warn` 一次 + WebUI banner，经 `aliasedFrom` 透出）；**兼容但不静默**。
+  若项目级/用户级自己写了 `local-audit.json`，**以磁盘为准**（别名只在没找到同名预设时兜底）。
+- ⚠ **升级须知（行为变更）**：`--preset local-audit` 现在解析到 `local-model`，
+  **不再有审计人格与只读工具白名单**——此前用它做只读审计的调用点会**失去只读约束**。
+  请改用 `readonly-audit`；两个预设**不能叠加**。
+
+### 断言与变异
+
+- `test/smoke.js` 新增 **§139**（8 组行为 + 结构断言；桩 provider **全部尊重 `signal`**，
+  与真实 provider 同形，否则测的是"不会挂的假桩"）。
+- `test/mutate/batch28-stall.mjs`：**26 条**，**26/26 全中**；
+  `test/mutate/README.md` 变异总数 **157 → 183**。
+- `test/api-contracts.js`：契约改为钉 `local-model`（**不得**带 `systemPrompt`/`tools`/`permission`/
+  `recommendedPermission`，必须带保守参数与 `aliases: ["local-audit"]`）与 `readonly-audit`
+  （必须带人格 + 只读白名单 + `recommendedPermission`，**不得**带 `permission`）。
+
+### 已知边界
+
+- **不做自动重启引擎**：预检只能提示"建议重启"，内核不会替用户杀进程；
+- **预检只覆盖本地端点**（远程不预检，避免每次开聊多打请求）；
+- **工具调用预检是启发式**（同一端点实测两次结论相反 2.7s / 23.9s），四态并提示后果，**不保证**一致；
+- **`contextBudget` 不感知引擎内存**（65536 是本机经验值，按量化/显存自调）；
+- **进度日志 30s 一行是折中**（未做自适应频率）；
+- **看门狗判据依赖"成功且不重复"**：本身就要反复调用同一工具且次次成功的轮询型任务会被判"无进展"，
+  这类任务请调大 `config.noProgressTimeoutMs`；
+- **`recommendedPermission` 本版只透出、未接界面**（只出现在 `GET /api/presets` 的 JSON 里，
+  前端无任何消费点），且**不参与判定**；只读硬约束始终是 `tools` 白名单；
+- **更新包签名校验默认档未变**：无签名 → `warn-and-install`（发布链路仍未接签名步骤），
+  有签名但验不过 → 一律 `reject`；严格模式需 `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1`。
+
 ## v0.6.11（2026-10-07）— Pack 反向提权 + 两项「来源信任」+ 三个用户实测缺陷
 
 > 补丁版。这一版**不是**清理版：每个条目都对应一个可复现的缺陷或一个明确的合规缺口。
