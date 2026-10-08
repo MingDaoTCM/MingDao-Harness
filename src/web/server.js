@@ -23,13 +23,15 @@ import { createLogWriter } from '../log-writer.js';
 import { createApiDispatch } from './routes/api.js';
 import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
 import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credentials.js';
-import { availableModels, fetchProviderModels, providerHasKey } from '../model-discovery.js';
+import { availableModels, fetchProviderModels, providerHasKey, probeEndpoint, adaptiveTimeouts } from '../model-discovery.js';
+import { isLocalBaseUrl } from '../model-caps.js';
 import { createProvider, resolveProviderConfig, helperProvider, resolveVisionSupport } from '../providers/index.js';
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { routeTask, routingConfig } from '../routing.js';
 import { buildUserContent } from './attachments.js';
 import { MAX_CONCURRENT, SECURITY_HEADERS } from './constants.js';
-import { createAgent } from '../agent.js';
+// v0.6.13（A）：进度行文案与 Agent 共用同一份纯函数（口径不漂移）
+import { createAgent, formatTurnProgress } from '../agent.js';
 import { createPermission } from '../permissions.js';
 import { isPrivateHost as sharedIsPrivateHost, isMetadataHost, resolveHostGuarded } from '../ssrf-guard.js';
 import { buildSystemPrompt } from '../prompts.js';
@@ -285,11 +287,67 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   let workingDir = process.cwd(); // 工作空间切换时随之更新（后续会话/工具都跟随新目录）
   const startupCwd = workingDir; // 质检 A3：启动工作目录恒为合法浏览根（工作空间切换后仍可浏览原位）
   // Provider 按模型懒加载缓存：界面切换模型后即时生效
+  // —— 服务端诊断日志（第二问无反应排查 + 长期运维）：<mingdao-home>/logs/web-server.log ——
+  // 记录每次对话的关键阶段与耗时；2MB 滚动。桌面版与 WebUI 共用同一日志。
+  // 质检 A6：统一日志写入器（append + 按行截断 + 原子替换），与桌面 appLog 同款实现。
+  // v0.6.13（A）：定义提前到 provider 创建之前——本地端点的**预检**在 getProviderFor 里就要落日志，
+  // 而启动期 `await getProviderFor(cfg.model)` 早于原先的定义位置（TDZ：会直接 ReferenceError）。
+  const srvlog = createLogWriter(path.join(mingdaoHome(), 'logs', 'web-server.log'));
+
   const providerCache = new Map();
+  // v0.6.13（A 追加）：本地端点的**能力/延迟预检**结果（每次建 provider / 每轮对话开头的提示都读它）。
+  // 只对"本地端点"做：远程服务商不需要（也不该）每次开聊都多打一次请求。
+  const probeByModel = new Map();
+  /** 该模型是否属于"本地端点"（baseUrl 是回环/内网，或 customModels 显式声明 local:true）。 */
+  const isLocalModel = (/** @type {any} */ m) => {
+    try {
+      const pc = resolveProviderConfig(cfg, m) || {};
+      return isLocalBaseUrl(pc.baseUrl) || cfg?.customModels?.[m]?.local === true || cfg?.customModels?.[m]?.isLocal === true;
+    } catch {
+      return false;
+    }
+  };
+  /** 取（或首次执行）预检；失败绝不影响主流程。 */
+  async function ensureProbe(/** @type {any} */ m) {
+    if (probeByModel.has(m)) return probeByModel.get(m);
+    if (!isLocalModel(m)) return null;
+    let probe = null;
+    try {
+      probe = await probeEndpoint(cfg, m, { timeoutMs: 15000 });
+      srvlog(
+        `预检 ${m} ${probe.state} ttft=${probe.ttftMs == null ? 'n/a' : Math.round(probe.ttftMs) + 'ms'} ` +
+          `tools=${probe.toolCalls === true ? '支持' : probe.toolCalls === false ? '未返回' : '未知'} endpoint=${probe.endpoint || '（无）'}`
+      );
+    } catch (/** @type {any} */ e) {
+      srvlog(`预检 ${m} 失败（忽略，按默认超时继续）：${String(e?.message || e)}`);
+    }
+    probeByModel.set(m, probe);
+    if (probeByModel.size > 50) probeByModel.delete(probeByModel.keys().next().value);
+    return probe;
+  }
   /** @param {any} m */
   async function getProviderFor(m) {
     if (!providerCache.has(m)) {
-      providerCache.set(m, await createProvider(cfg, m));
+      // 建 provider 之前先预检：本地端点按实测 TTFT 自适应 config.timeout.firstTokenMs
+      // （providers/index.js 只认 cfg.timeout，因此这里把自适应值**合进 cfg**再建实例）。
+      // 取舍：用户显式配的 firstTokenMs 优先；没配时"地板"仍是既有默认（本地 600s），
+      // 只有实测很慢才会放宽（×20，封顶 1800s）——绝不比现状更激进。
+      let cfgForProvider = cfg;
+      try {
+        const probe = await ensureProbe(m);
+        if (probe) {
+          const adapt = adaptiveTimeouts({
+            probeTtftMs: probe.ttftMs,
+            probePrefillMs: probe.prefillMs,
+            isLocal: true,
+            timeoutCfg: cfg.timeout,
+            noProgressCfg: cfg.noProgressTimeoutMs,
+          });
+          cfgForProvider = { ...cfg, timeout: { ...(cfg.timeout || {}), firstTokenMs: adapt.firstTokenMs } };
+          srvlog(`预检自适应 ${m} firstTokenMs=${adapt.firstTokenMs}（${adapt.basis}）`);
+        }
+      } catch {}
+      providerCache.set(m, await createProvider(cfgForProvider, m));
     }
     return providerCache.get(m);
   }
@@ -374,11 +432,6 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   // 放在这里而不是模块级：同一进程多次 runWebServer（测试/嵌入）不互相串味。
   const permissionNotices = new Map();
 
-  // —— 服务端诊断日志（第二问无反应排查 + 长期运维）：<mingdao-home>/logs/web-server.log ——
-  // 记录每次对话的关键阶段与耗时；2MB 滚动。桌面版与 WebUI 共用同一日志。
-  // 质检 A6：统一日志写入器（append + 按行截断 + 原子替换），与桌面 appLog 同款实现
-  const srvlog = createLogWriter(path.join(mingdaoHome(), 'logs', 'web-server.log'));
-
   // —— SSRF 防护（质检 S1）：远端地址校验 ——
   // v0.4.6 P1：本文件的 isPrivateHost 副本已删除，改用单一实现。
   // 副本只识别 `::ffff:` + 点分四段，而 URL 解析器会把该形态规范化成十六进制
@@ -457,17 +510,73 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     // 进度心跳（审计：长时间健康生成的可感知性——模型持续输出工具参数期间可能长时间
     // 无任何 SSE 事件，界面看似卡死；每 8 秒发一次 progress，前端实时显示已工作时长/步数，
     // 同时充当客户端无活动看门狗的活动源）
+    //
+    // v0.6.13（A / 真机实测：本地 35B 审计回合跑了 4+ 小时、web-server.log 零行）：
+    //   · SSE 心跳照旧 5s 一次，但**日志必须定期留痕**（30s 一行）——否则"在跑"与"卡死"
+    //     在事后取证时完全无法区分（本次现场就是如此：日志只有"chat 开始"一行）。
+    //   · 首帧时延（TTFT）与发送前规模预告各留一行：本地模型 prefill 是几十分钟级的事件，
+    //     它必须自己说话，而不是等用户来问"是不是死了"。
+    let lastProgressLogAt = 0;
+    let forecastLogged = false;
+    let ttftLogged = false;
+    const logTurnProgress = () => {
+      const tp = /** @type {any} */ (io?.turnProgress);
+      if (!tp) return;
+      if (!forecastLogged && tp.forecast) {
+        forecastLogged = true;
+        srvlog(`chat 预告 ${taskId} ${String(tp.forecast.text).replace(/\s*\n\s*/g, ' ｜ ')}`);
+      }
+      if (!ttftLogged && tp.ttftMs != null) {
+        ttftLogged = true;
+        srvlog(`chat 首帧 ${taskId} ${(tp.ttftMs / 1000).toFixed(1)}s（请求发出→第一帧；本地模型此项直接反映 prefill 快慢）`);
+      }
+      if (Date.now() - lastProgressLogAt < 30000) return;
+      lastProgressLogAt = Date.now();
+      const seconds = Math.max(1, (Date.now() - entry.startedAt) / 1000);
+      const ttftS = tp.ttftMs != null ? tp.ttftMs / 1000 : null;
+      const decodeS = ttftS != null ? Math.max(1, seconds - ttftS) : null;
+      srvlog(
+        `chat 进度 ${taskId} ` +
+          formatTurnProgress({
+            phase: entry.pendingAsk ? '等待权限确认' : tp.phase,
+            elapsedMs: Date.now() - entry.startedAt,
+            modelRounds: tp.modelRounds || 0,
+            toolCalls: tp.toolCalls || 0,
+            toolExecuted: tp.toolExecuted || 0,
+            contentChars: tp.contentChars || 0,
+            ttftMs: tp.ttftMs ?? null,
+            tokensPerSec: decodeS && tp.contentTokens ? tp.contentTokens / decodeS : null,
+            pendingTool: tp.pendingTool ? { name: tp.pendingTool.name, ms: Date.now() - tp.pendingTool.startedAt } : null,
+          })
+      );
+    };
     const progressTimer = setInterval(() => {
       try {
+        const tp = /** @type {any} */ (io?.turnProgress);
         // 质检（静默深度优化）：progress 附带阶段语义与子代理数，客户端顶部常驻活动条据此实时播报
-        const phase = entry.pendingAsk ? '等待权限确认' : io?._turnActive ? '模型推理中' : '执行工具中';
+        const phase = entry.pendingAsk ? '等待权限确认' : tp?.phase || (io?._turnActive ? '模型推理中' : '执行工具中');
+        const seconds = Math.max(1, (Date.now() - entry.startedAt) / 1000);
+        const ttftS = tp?.ttftMs != null ? tp.ttftMs / 1000 : null;
+        const decodeS = ttftS != null ? Math.max(1, seconds - ttftS) : null;
         send({
           type: 'progress',
-          seconds: Math.round((Date.now() - entry.startedAt) / 1000),
+          seconds: Math.round(seconds),
           steps: io?.stats?.().toolCount || 0,
           tasks: io?.stats?.().taskCount || 0,
           phase,
+          // v0.6.13（A）：本地模型场景最要紧的几个数（0 次工具调用必须显示为 0，不能省）
+          toolCalls: tp?.toolCalls ?? 0,
+          modelRounds: tp?.modelRounds ?? 0,
+          ttftMs: tp?.ttftMs ?? null,
+          lastTtftMs: tp?.lastTtftMs ?? null,
+          contentChars: tp?.contentChars ?? 0,
+          tokensPerSec: decodeS && tp?.contentTokens ? Number((tp.contentTokens / decodeS).toFixed(1)) : null,
+          pendingTool: tp?.pendingTool ? { name: tp.pendingTool.name, ms: Date.now() - tp.pendingTool.startedAt } : null,
+          stalled: Boolean(tp?.stalled),
         });
+      } catch {}
+      try {
+        logTurnProgress();
       } catch {}
     }, 5000);
     const userMessage = String(body.message ?? '').trim();
@@ -596,6 +705,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       const { loadPreset, presetConfigOverrides, presetSystemBlock } = await import('../presets.js');
       chatPreset = loadPreset(taskDir, body.preset);
       if (chatPreset) {
+        // v0.6.15（C）：老名字（local-audit）走到别名时**必须说出来**——改名可以兼容，但不能静默。
+        if (chatPreset.aliasedFrom) {
+          send({ type: 'banner', text: `ℹ 预设「${chatPreset.aliasedFrom}」已更名为「${chatPreset.name}」（本次已按 ${chatPreset.name} 执行；老名字保留为别名）。` });
+          srvlog(`预设别名 ${taskId} ${chatPreset.aliasedFrom} → ${chatPreset.name}`);
+        }
         const over = presetConfigOverrides(chatPreset);
         // P0（v0.4.1）：预设 permission 提权防护——不得把 ask/readonly 静默改成 auto
         turnPerm = resolveTurnPermission({ preset: chatPreset, explicit: explicitPermission, configPermission: cfg.permission ?? 'ask' });
@@ -699,8 +813,34 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         throw new Error(`模型 ${runModel} 尚未配置 API Key：请点击右上角 ⚙ 设置 →「模型与 API Key」填入密钥。`);
       }
       providerNow = await getProviderFor(runModel); // 审计 P1-1：失败时清理任务占位，避免僵尸 running 耗尽并发
-    } catch (/** @type {any} */ err) {
-      entry.status = 'failed';
+      // v0.6.13（A 追加）：**本地端点先预检、再开工**——"这个端点能不能跑这种任务"必须几秒内有答案。
+      // 预检结果：① 打到界面上（banner，发送前可见）；② 落 web-server.log；③ 随 chatCfg 传给 agent，
+      // 让"发送前规模预告"把实测 TTFT 与本任务上下文一起说出来；④ 没配超时时按它自适应看门狗阈值。
+      try {
+        const probe = await ensureProbe(runModel);
+        if (probe) {
+          const adapt = adaptiveTimeouts({
+            probeTtftMs: probe.ttftMs,
+            probePrefillMs: probe.prefillMs,
+            isLocal: true,
+            timeoutCfg: cfg.timeout,
+            noProgressCfg: cfg.noProgressTimeoutMs,
+          });
+          send({ type: 'banner', text: `🔎 本地端点预检：${probe.note}` });
+          send({
+            type: 'banner',
+            text:
+              `   自适应：首帧上限 ${Math.round(adapt.firstTokenMs / 1000)}s、无进展看门狗 ${Math.round(adapt.noProgressTimeoutMs / 60000)} 分钟` +
+              `（依据：${adapt.basis}${adapt.adapted ? '，未显式配置 config.timeout' : '；你已显式配置，按你的值'}）`,
+          });
+          chatCfg = { ...chatCfg, endpointProbe: probe };
+          if (!(Number(cfg.noProgressTimeoutMs) > 0)) chatCfg.noProgressTimeoutMs = adapt.noProgressTimeoutMs;
+          srvlog(`chat 预检 ${taskId} ${probe.state} ${probe.note}`);
+        }
+      } catch (/** @type {any} */ e) {
+        srvlog(`chat 预检失败（忽略） ${taskId} ${String(e?.message || e)}`);
+      }
+    } catch (/** @type {any} */ err) {      entry.status = 'failed';
       notifyBusy();
       entry.durationMs = Date.now() - entry.startedAt;
       send({ type: 'error', message: `模型 ${runModel} 不可用：${String(err?.message || err)}` });
@@ -823,7 +963,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       // 'failed' —— 同一件事两个说法。统一口径：**capped 不是成功**（任务未真正完成、可续跑）。
       // 这里用 'capped'（前端按非 done 渲染成警示色 + 未完成任务横幅），worker 侧维持其既有词表
       // 里的 'failed'（任务状态机 status 取值受 task-state/schedule 依赖判定约束，不新增取值）。
-      entry.status = r.aborted ? 'aborted' : r.capHit ? 'capped' : 'done';
+      // v0.6.13（A）：无进展中止是**独立结局**（不是 done、也不是 capped）——前端按非 done 呈现
+      entry.status = r.aborted ? 'aborted' : r.stalled ? 'stalled' : r.capHit ? 'capped' : 'done';
       notifyBusy();
       entry.durationMs = Date.now() - entry.startedAt;
       srvlog('chat 发送 done ' + taskId + ' status=' + entry.status + ' 总耗时=' + entry.durationMs + 'ms');
@@ -838,6 +979,10 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         const { resolveModelCaps, safeBudget } = await import('../model-caps.js');
         budgetInfo = { used, total: safeBudget(cfg, resolveModelCaps(cfg, runModel)) };
       } catch {}
+      // v0.6.13（A）：**"0 次工具调用"必须出现在收尾里**——否则端点不返回 tool_calls 时，
+      // 界面看起来一切正常（ok:true + 正文），实际一次工具都没调（"看起来在工作、其实什么都没做"）。
+      const zeroNote = String(r.perf?.zeroToolCalls || '');
+      const baseNote = r.note || (r.text ? '' : `（任务已执行 ${io.stats().toolCount} 步工具操作${io.stats().deliverables.length ? `、交付 ${io.stats().deliverables.length} 个文件` : ''}，自动收尾总结未能生成——可追问「总结一下刚才的工作」）`);
       send({
         type: 'done',
         budget: budgetInfo,
@@ -847,7 +992,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         durationMs: r.durationMs,
         truncated: r.truncated,
         aborted: r.aborted,
-        note: r.note || (r.text ? '' : `（任务已执行 ${io.stats().toolCount} 步工具操作${io.stats().deliverables.length ? `、交付 ${io.stats().deliverables.length} 个文件` : ''}，自动收尾总结未能生成——可追问「总结一下刚才的工作」）`),
+        stalled: Boolean(r.stalled),
+        perf: r.perf ? { llmCalls: r.perf.llmCalls ?? null, toolCalls: r.perf.toolCalls ?? null, ttftMs: r.perf.ttftMs ?? null, noToolCalls: Boolean(r.perf.noToolCalls) } : null,
+        note: [baseNote, zeroNote].filter(Boolean).join('\n'),
         stats: io.stats(),
         session: path.basename(session.file),
       });

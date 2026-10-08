@@ -34,6 +34,170 @@ const MAX_STEPS = 24;
 // 提到与主循环一致（24），只读子任务每步是 read/grep（输入便宜、无输出 token），成本增量可忽略。
 const SUBAGENT_MAX_STEPS = 24;
 
+// ---------------------------------------------------------------------------
+// v0.6.13（A / 真机实测：本地 35B 的审计回合跑了 4+ 小时、界面 0 步、日志零行）
+//
+// 现有三个超时（src/providers/index.js）**全是单请求级**：
+//   · 首帧等待 firstTokenMs：本地 600s / 远程 300s（第一帧到达即解除）
+//   · 流式空闲 streamIdleMs：120s（每收到一帧就重置）
+//   · 单请求总量 totalMs   ：本地 1800s / 远程 600s
+// 而一个回合的最坏规模是 `maxRounds × stepLimit` 次请求（默认 3 × 24 = 72），每次都能耗到
+// totalMs；`task` 子代理**各自**又有同样一整套预算且可递归派生。于是"每十几分钟返回一次、
+// 什么都没做成"的回合能跑掉几小时——单请求超时一次都不会响，日志里一行都不会留。
+//
+// 这里补两件**回合级**的事（与单请求超时互补，不替代）：
+//   ① 无进展看门狗：连续 noProgressTimeoutMs 既没有工具结果返回、也没有新正文/推理增量
+//      → 主动中止并如实报告（默认值依据见下）；
+//   ② 进度可见性：首帧时延（TTFT）/ 帧数 / 字符数 / 模型轮次 / 工具调用数 / 正在等待的工具
+//      挂在 io.turnProgress 上，由 WebUI 服务端（src/web/server.js）定期写 web-server.log
+//      并随状态条下发——"在跑"与"卡死"必须能一眼区分。
+// ---------------------------------------------------------------------------
+
+/** 无进展看门狗默认阈值（ms）= 2 × 现有**单请求总量**上限（本地 1800s，见 providers/index.js）。
+ *
+ *  依据（不拍脑袋，逐条对齐现有超时）：
+ *   · 首帧 600s / 空闲 120s / 总量 1800s 都是**单请求**级；回合级阈值若小于单请求上限，
+ *     一次慢 prefill 就会被误判成"卡死"——那比现有超时更激进，明确不做；
+ *   · 取 2×（60 分钟）而不是 1×：一次请求跑满 1800s 时，报错该由**更具体**的请求级超时给出
+ *     （首帧/空闲/总量各有各的文案、各有各的处置建议），看门狗不抢答；2× 又足以兜住
+ *     "请求都按时返回、整回合零产出"的空转（本次真机就是这一形态：610 次工具调用、
+ *     相邻两次最长只隔 7.1 分钟，却 4+ 小时没有任何交付）；
+ *   · 真干活的回合每隔几秒就有工具结果或正文增量，60 分钟零增量在任何正常回合都不可能。
+ *
+ *  可配置：config.noProgressTimeoutMs（0/负数/NaN/Infinity 一律回落默认——**不能**用它关掉看门狗）。 */
+export const DEFAULT_NO_PROGRESS_TIMEOUT_MS = 3600000;
+
+/** 解析无进展阈值：非正/非有限一律回落默认（fail-safe，防"配置写 0 就静默失去看门狗"）。 */
+export function resolveNoProgressTimeoutMs(/** @type {any} */ cfg) {
+  const v = Number(cfg?.noProgressTimeoutMs);
+  return Number.isFinite(v) && v > 0 ? v : DEFAULT_NO_PROGRESS_TIMEOUT_MS;
+}
+
+/** 上下文占窗口比例的告警线（≥ 此值 → 显式警告"缩小任务/或调大 firstTokenMs"）。 */
+export const PREFILL_WARN_RATIO = 0.8;
+/** 本地端点的 prompt 规模告警线（tokens）：超过即提示 prefill 可能数十分钟。 */
+export const PREFILL_WARN_TOKENS = 60000;
+
+const fmtTok = (/** @type {any} */ n) => Number(n || 0).toLocaleString('en-US');
+
+/**
+ * 发送前的规模预告（纯函数，便于断言/变异）：把"这次要 prefill 多少"在**请求发出前**说出来。
+ * 本地端点尤其重要——它既不提供 prefill 进度，首帧又可能是几十分钟。
+ * @param {{ promptTokens: number, contextWindow?: number, isLocal?: boolean,
+ *           firstTokenMs?: number, budget?: number, probe?: any }} input
+ * @returns {{ text: string, warn: boolean, promptTokens: number, ratio: number }}
+ */
+export function prefillForecast({ promptTokens, contextWindow, isLocal, firstTokenMs, budget, probe = null }) {
+  const p = Math.max(0, Math.round(Number(promptTokens) || 0));
+  const win = Number(contextWindow) > 0 ? Number(contextWindow) : 0;
+  const ratio = win > 0 ? p / win : 0;
+  const pct = Math.round(ratio * 100);
+  const secs = Number(firstTokenMs) > 0 ? Math.round(Number(firstTokenMs) / 1000) : 0;
+  const head = `📏 本轮上下文 ≈ ${fmtTok(p)} tokens${win ? `（${fmtTok(win)} 窗口的 ${pct}%）` : ''}${Number(budget) > 0 ? `，预算 ${fmtTok(budget)}` : ''}`;
+  const timing = isLocal
+    ? `本地端点：prefill 可能需数分钟至数十分钟（该端点不提供进度预告，只能等首帧）；首帧等待上限 ${secs}s（config.timeout.firstTokenMs）`
+    : `远程端点：首帧通常在数十秒内；首帧等待上限 ${secs}s（config.timeout.firstTokenMs）`;
+  // 两条告警线：占窗口 ≥80%（任何端点都危险），或本地端点 + prompt 规模 ≥ PREFILL_WARN_TOKENS。
+  const hitRatio = ratio >= PREFILL_WARN_RATIO;
+  const hitLocal = Boolean(isLocal) && p >= PREFILL_WARN_TOKENS;
+  const warn = hitRatio || hitLocal;
+  const advice = warn
+    ? `\n   ⚠ ${hitRatio ? `上下文已占窗口 ${pct}%（≥${Math.round(PREFILL_WARN_RATIO * 100)}%）` : `本地端点 + 上下文 ${fmtTok(p)} tokens（≥${fmtTok(PREFILL_WARN_TOKENS)}）`}：` +
+      `建议缩小任务（新建会话、只给必要文件、先 /compact）或调大 config.timeout.firstTokenMs——` +
+      `但注意调大它只会让"失败"更晚被发现，不会让 prefill 变快。`
+    : '';
+  // v0.6.13（A 追加）：把**端点预检**结果并进这条预告——"这个端点行不行"与"这次要 prefill 多少"
+  // 必须一起出现在发送前，而不是等出事后翻日志（引擎实际加载的模型名与配置名不一致也在这里说）。
+  const probeLine = probe && probe.note ? `\n   端点预检：${probe.note}` : '';
+  return { text: `${head}\n   ${timing}${probeLine}${advice}`, warn, promptTokens: p, ratio };
+}
+
+/**
+ * 无进展中止文案（纯函数）：必须同时说清「多久没进展」「发生了什么」「下一步怎么办」。
+ * @param {{ waitedMs: number, toolCalls?: number, modelRounds?: number, unproductive?: number }} input
+ */
+export function noProgressNotice({ waitedMs, toolCalls = 0, modelRounds = 0, unproductive = 0 }) {
+  const min = Math.max(1, Math.round(Number(waitedMs) / 60000));
+  const extra = Number(unproductive) > 0 ? `——其中 ${Number(unproductive)} 次工具调用是**重复调用或失败**（没有产生任何新信息）` : '';
+  return (
+    `⏹ 连续 ${min} 分钟没有任何工具调用、也没有新内容（模型请求 ${modelRounds} 轮、工具调用 ${toolCalls} 次${extra}），已中止。\n` +
+    `   常见原因：① 该端点/模型不做 function calling（tool_calls 恒为空）；② 本地引擎的 prefill 已停滞或内存吃紧；③ 上游连接还在但不再产出。\n` +
+    `   下一步：把任务拆小（新建会话、只给必要文件）或换支持工具调用的端点；阈值可调 config.noProgressTimeoutMs（默认 ${Math.round(DEFAULT_NO_PROGRESS_TIMEOUT_MS / 60000)} 分钟）。`
+  );
+}
+
+/**
+ * 回合结束时的「0 次工具调用」提示（纯函数）。
+ * 触发条件：**任务态**（用户消息含写/执行意图）或发了多轮请求，却一次工具调用都没有——
+ * 单轮纯问答本来就不该有工具调用，不该被这条提示打扰。
+ * @param {{ modelRounds: number, steps?: number, taskLike?: boolean }} input
+ */
+export function zeroToolCallNotice({ modelRounds, steps = 0, taskLike = false }) {
+  if (!(Number(modelRounds) > 1) && !taskLike) return '';
+  return (
+    `⚠ 本回合 0 次工具调用（共 ${Number(modelRounds)} 轮模型请求 / ${Number(steps)} 步）：该端点看起来不返回 tool_calls。\n` +
+    `   若任务需要读写文件、执行命令，请换支持 function calling 的模型或端点；纯问答可以忽略本条。`
+  );
+}
+
+/**
+ * 上游/引擎错误的可操作解读（纯函数）：把「HTTP 400 + 一段 Jinja/模板报错」这类原文
+ * 变成「原文 + 这是什么 + 该怎么办」。识别不出时 hint 为 null（**绝不改原文**）。
+ * @param {any} err
+ * @returns {{ message: string, hint: string|null, status: number|null }}
+ */
+export function describeUpstreamError(/** @type {any} */ err) {
+  const raw = String(err?.message ?? err ?? '').trim();
+  const status = Number(err?.status) > 0 ? Number(err.status) : null;
+  const t = raw.toLowerCase();
+  /** @type {string|null} */
+  let hint = null;
+  if (/jinja|template|no user query|parser for this template/.test(t)) {
+    hint =
+      '上游拒绝的是**它的 prompt 模板**（不是网络问题）：该端点的模板不接受当前 messages 形态（典型：按单轮 query 设计的 chatflow/模板，收到的是 OpenAI 多轮 messages）。' +
+      '这类端点通常也**不返回 tool_calls**——请改用支持 function calling 的模型/端点，或让网关把 messages 映射成它要的单轮入参。';
+  } else if (/memory_refusal|insufficient memory|gib|内存不足|内存拒绝/.test(t)) {
+    hint =
+      '本地引擎**内存/显存不足**（在 prefill 前就拒绝了）。处置：压缩上下文（减小 config.contextBudget 或 /compact）、减少并发子任务，或重启模型服务释放内存后重试。';
+  } else if (/首 token 等待超限|流式响应空闲超限|请求总时长超限/.test(raw)) {
+    hint =
+      '这是**内核自己的超时**（不是上游报错）：端点连上了但迟迟不产出。本地大模型长上下文 prefill 很慢——可调大 config.timeout.firstTokenMs/streamIdleMs/totalMs，' +
+      '或把任务拆小（新建会话、只给必要文件）；本地端点还有一种情形是引擎 prefill 停滞（内存吃紧），此时调大超时只会让失败更晚被发现。';
+  } else if (status === 401 || status === 403 || /unauthorized|invalid.*api.?key|鉴权|密钥/.test(t)) {
+    hint = '鉴权失败：请检查该服务商的 API Key（WebUI ⚙ 设置 →「模型与 API Key」，或 mingdao key set）。';
+  } else if (status === 404) {
+    hint = '端点不存在：请确认 baseUrl 指向 OpenAI 兼容入口（通常以 /v1 结尾），且模型名是端点认识的。';
+  } else if (status === 429) {
+    hint = '上游限流（429）：稍后重试，或降低并发/换端点。';
+  } else if (status !== null && status >= 500 && status <= 504) {
+    hint = '上游 5xx：内核已按瞬态错误自动重试过；若原文是确定性错误（模板/参数类），重试不会改变结果，请直接修端点配置。';
+  }
+  // 上游原文可能很长（内核只保留前 400 字）：如实标注它被截断过，避免用户以为这就是全部
+  const truncated = /…|\.\.\.$/.test(raw) || raw.length >= 380;
+  return { message: raw, hint: hint ? `💡 ${hint}${truncated ? '（上面的上游原文可能被截断）' : ''}` : null, status };
+}
+
+/**
+ * 进度行（纯函数）：web-server.log 与界面状态条**共用同一份文案**，口径不会漂移。
+ * @param {{ phase?: string, elapsedMs: number, modelRounds?: number, toolCalls?: number,
+ *           toolExecuted?: number, contentChars?: number, ttftMs?: number|null,
+ *           pendingTool?: { name: string, ms: number }|null, tokensPerSec?: number|null }} p
+ */
+export function formatTurnProgress({ phase, elapsedMs, modelRounds = 0, toolCalls = 0, toolExecuted = 0, contentChars = 0, ttftMs = null, pendingTool = null, tokensPerSec = null }) {
+  const s = Math.max(0, Math.round(Number(elapsedMs) / 1000));
+  const parts = [
+    `已跑 ${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`,
+    `阶段=${phase || '未知'}`,
+    `模型轮次=${modelRounds}`,
+    `工具调用=${toolCalls}${toolCalls === 0 ? '（0 次工具调用）' : `（已执行完 ${toolExecuted}）`}`,
+  ];
+  if (ttftMs != null) parts.push(`首帧=${(Number(ttftMs) / 1000).toFixed(1)}s`);
+  if (tokensPerSec != null) parts.push(`≈${Number(tokensPerSec).toFixed(1)} tok/s`);
+  parts.push(`已收正文=${contentChars} 字`);
+  if (pendingTool) parts.push(`正在等待工具 ${pendingTool.name}（已 ${Math.round(Number(pendingTool.ms) / 1000)}s）`);
+  return parts.join(' · ');
+}
+
 // 只读档工具集（省钱 B1 的「只读阶段」）——**单一来源已移到 `tools-flow.js`**（v0.6.11 / P1-1 第三刀）：
 // 它与「本轮可见哪些工具」的判据是同一条规则，放在一起才能保证"改一处就够"。
 // 这里只做**再导出**：bench/smoke 既有的 `from './agent.js'` 导入面与集合内容都不变（行为零变化）。
@@ -154,6 +318,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // v0.5.0 A4：当前正在执行的 Pack 工具所属 Pack（由 runTool 按 `pack__<pack>__` 前缀设置），
   // 供 ctx.llm 写归因记录时标注来源。
   let currentPack = /** @type {any} */ (null);
+  // v0.6.13（A）：当前回合的进度快照（runTurn 内赋值、finally 清空）。
+  // spawnTask 用它把父回合的"无进展截止时刻"传给子代理：子代理树必须一起收口，
+  // 否则 24 个并行子代理各自跑满自己的看门狗，父回合看起来就是"挂了几小时"。
+  let currentTurnProgress = /** @type {any} */ (null);
   // 会话级共享：调用方传入则复用（/model 切换、子代理均共享，undo 不丢失）
   const undo = undoStore || { backups: new Map() };
   const stepLimit = maxSteps || MAX_STEPS;
@@ -210,7 +378,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       io: subIo,
       modelName: subModel,
       workingDir,
-      cfg: { ...cfg, contextBudget: Math.min(budget, 64000) },
+      // v0.6.13（A）：子代理**继承父回合的无进展截止时刻**——24 个并行子代理各自跑几十分钟时，
+      // 父回合不该等它们把各自的看门狗超时跑完（真机实测：一个回合因此跑了 4+ 小时）。
+      cfg: {
+        ...cfg,
+        contextBudget: Math.min(budget, 64000),
+        ...(currentTurnProgress
+          ? { turnProgressDeadlineAt: currentTurnProgress.lastProgressAt + currentTurnProgress.noProgressMs }
+          : {}),
+      },
       undoStore: undo,
       maxSteps: SUBAGENT_MAX_STEPS,
       mcp,
@@ -448,9 +624,22 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       deliverables: [...deliverables], // v0.3.1：CLI/REPL 续跑检查点复用（此前 artifacts 恒空）
       // v0.6.7（报告一 H-4）：本回合是否出现过"模型有响应但服务端没回 usage"
       usageUnknown: outcome.usageUnknown,
+      // v0.6.13（A/可观测性）：工具调用与首帧时延随 perf 一起回给调用方（WebUI 的 done 事件
+      // 用它写"本回合 0 次工具调用"，状态栏/账本也能读到 TTFT）。
+      toolCalls: turnProgress.toolCalls,
+      noToolCalls: turnProgress.toolCalls === 0,
+      llmCalls: turnProgress.llmCalls,
+      ttftMs: turnProgress.ttftMs,
+      stalled: turnProgress.stalled,
+      // v0.6.13（A）：收尾提示的**单一来源**（服务端直接取这条字符串，不再自己拼一遍文案）。
+      // 注意：return 里的 perf() 先于 finally 求值，所以这里必须**惰性计算**（否则返回值里恒为 null，
+      // 而日志/界面那边却已经打印过——同一事实两个说法，正是本项目反复栽过的那类不一致）。
+      zeroToolCalls: ensureZeroToolCallNotice(),
     });
     let aborted = false;
     let emptyRounds = 0; // 连续空/截断输出计数（防止无限续写）
+    // v0.6.13（A）：本轮用户消息是否为"任务态"（含写/执行意图）——用于收尾时的「0 次工具调用」提示
+    const turnUserTaskLike = hasWriteIntent(String([...messages].reverse().find((m) => m?.role === 'user')?.content ?? ''));
     let currentAc = /** @type {any} */ (null);
     // v0.3.2 边缘检测状态：模型上报 prompt_tokens 逼近窗口 → 下一轮强制压缩（见下方 compactConversation force）
     let windowPressure = false;
@@ -485,6 +674,82 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     const turnStrippedSet = new Set(usedToolNames);
     // 整个回合注册一次 SIGINT：思考、工具执行、权限询问期间都能中断
     const offSigint = io.onSigint ? io.onSigint(() => { aborted = true; currentAc?.abort(); }) : () => {};
+    // ---- v0.6.13（A）：回合级进度快照 + 无进展看门狗 ----
+    // 快照挂在 io 上：WebUI 服务端（src/web/server.js）每 5s 读它下发状态条、每 30s 落一行日志。
+    // 这里不改 web-io.js 的接口（它不在本次改动面内），字段是"只读约定"。
+    const noProgressMs = resolveNoProgressTimeoutMs(cfg);
+    // 子代理共享父回合的"最迟进展时刻"：24 个并行子代理各跑几十分钟时，父回合不该等它们各自的超时。
+    const inheritedDeadline = Number(cfg.turnProgressDeadlineAt) > 0 ? Number(cfg.turnProgressDeadlineAt) : null;
+    /** @type {any} */
+    const turnProgress = {
+      startedAt,
+      phase: '待发请求',
+      llmCalls: 0,
+      modelRounds: 0,
+      toolCalls: 0,
+      toolExecuted: 0,
+      // v0.6.13（A）：**无效**工具调用数（重复调用或失败）——"工具在跑、什么都没做成"的量化依据
+      unproductive: 0,
+      streamFrames: 0,
+      contentChars: 0,
+      ttftMs: null,
+      lastTtftMs: null,
+      pendingTool: null,
+      forecast: null,
+      noProgressMs,
+      lastProgressAt: Date.now(),
+      progressReason: '回合开始',
+      stalled: false,
+      note: null,
+      zeroToolCalls: false,
+    };
+    try {
+      io.turnProgress = turnProgress;
+    } catch {}
+    currentTurnProgress = turnProgress; // 子代理据此继承同一个截止时刻（见 spawnTask）
+    let noProgressTimer = /** @type {any} */ (null);
+    let noProgressFired = false;
+    // 本回合的"调用签名 → 次数"：完全相同（name+args）的重复调用不算进展（见 finishTool）
+    const turnSigCounts = new Map();
+    /** 中止原因（看门狗触发时写，供各处如实报告） */
+    const fireNoProgress = () => {
+      noProgressFired = true;
+      const waited = Date.now() - turnProgress.lastProgressAt;
+      turnProgress.stalled = true;
+      turnProgress.phase = '已中止（无进展）';
+      turnProgress.waitedMs = waited;
+      turnProgress.note = noProgressNotice({
+        waitedMs: waited,
+        toolCalls: turnProgress.toolCalls,
+        modelRounds: turnProgress.modelRounds,
+        unproductive: turnProgress.unproductive,
+      });
+      try { io.print(style(turnProgress.note, C.yellow)); } catch {}
+      try { currentAc?.abort(new Error(`无进展 ${Math.max(1, Math.round(waited / 60000))} 分钟，已中止`)); } catch {}
+    };
+    const armNoProgress = () => {
+      if (noProgressTimer) clearTimeout(noProgressTimer);
+      // 子代理：以父回合的截止时刻为准（取更早的那个），保证整棵子代理树一起收口
+      const left = inheritedDeadline ? Math.min(noProgressMs, Math.max(1000, inheritedDeadline - Date.now())) : noProgressMs;
+      noProgressTimer = setTimeout(fireNoProgress, left);
+      try { noProgressTimer.unref?.(); } catch {} // 不因为这个计时器拖住进程退出
+    };
+    /** 收尾提示：惰性计算一次并缓存（perf() 与 finally 都取它，界面只打印一次）。 */
+    const ensureZeroToolCallNotice = () => {
+      if (turnProgress.zeroToolCallsNote === undefined || turnProgress.zeroToolCallsNote === null) {
+        const n = zeroToolCallNotice({ modelRounds: turnProgress.modelRounds, steps, taskLike: turnUserTaskLike });
+        turnProgress.zeroToolCallsNote = n || null;
+        if (n) turnProgress.zeroToolCalls = true;
+      }
+      return turnProgress.zeroToolCallsNote;
+    };
+    /** 有真实进展才续期：工具结果返回 / 模型正文或推理增量。 */
+    const markProgress = (/** @type {string} */ why) => {
+      turnProgress.lastProgressAt = Date.now();
+      turnProgress.progressReason = why;
+      armNoProgress();
+    };
+    armNoProgress();
     // ⚠ 两个 ctx，别混：
     //   · `ctx`（内核 ctx）——本轮内核自己用（循环里的权限判定走闭包里的 permission 本体）；
     //     它**不裁剪、不冻结**，且**不交给任何工具**。
@@ -586,8 +851,17 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       // v0.6.5（审计 BUG-025，实测复现）：Ctrl+C 落在**工具执行期间**时，此前只把 `aborted`
       // 置真、却没有任何收敛点——工具跑完仍会走回这里发出**下一次请求**（实测：SIGINT 之后
       // chat 仍被调用 2 次）。这里与工具循环里的检查一起把它收口成「立刻停止、如实回报 aborted」。
-      if (aborted) {
+      if (aborted || noProgressFired) {
         stripOrphanCalls();
+        // v0.6.13（A）：无进展看门狗触发——如实报告，而不是当作"正常结束"或"用户中断"。
+        if (noProgressFired) {
+          markOutcome('stalled');
+          return {
+            text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false, stalled: true,
+            note: turnProgress.note || noProgressNotice({ waitedMs: Date.now() - turnProgress.lastProgressAt, toolCalls: turnProgress.toolCalls, modelRounds: turnProgress.modelRounds }),
+            durationMs: Date.now() - startedAt, perf: perf(),
+          };
+        }
         return {
           text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: true,
           note: '已按 Ctrl+C 中断（工具执行期间收到中断信号），本回合未再发出请求。',
@@ -603,6 +877,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       // 把被裁段落压成摘要注入，替代「失忆」；失败/不值得时回退普通裁剪。
       if (cfg.autoCompact !== false) {
         try {
+          if (turnProgress.phase !== '已中止（无进展）') turnProgress.phase = '压缩上下文';
           const compacted = await compactConversation({
             messages,
             budget,
@@ -754,11 +1029,36 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       io.beginTurn();
       io.startSpinner('正在思考…');
 
+      // v0.6.13（A）：**发送前的规模预告**——本地模型"prefill 数十分钟"必须先说出来，
+      // 而不是让用户盯着一个没有任何输出的界面猜。阈值与文案见 prefillForecast()。
+      // 首帧上限与 providers/index.js 同口径（那里没有导出，这里镜像；本地 600s / 远程 300s）。
+      {
+        const effFirstTokenMs =
+          Number(cfg?.timeout?.firstTokenMs) > 0 ? Number(cfg.timeout.firstTokenMs) : caps.isLocal ? 600000 : 300000;
+        try {
+          let promptTokens = 0;
+          for (const m of sanitized) promptTokens += messageTokens(m, count);
+          const f = prefillForecast({
+            promptTokens,
+            contextWindow: caps.contextWindow,
+            isLocal: caps.isLocal,
+            firstTokenMs: Number(cfg?.timeout?.firstTokenMs) > 0 ? Number(cfg.timeout.firstTokenMs) : effFirstTokenMs,
+            budget,
+            probe: cfg?.endpointProbe || null,
+          });
+          turnProgress.forecast = f;
+          // 首次请求一定说；之后只在命中告警线时说（否则每步一条横幅会刷屏）
+          if (turnProgress.llmCalls === 0 || f.warn) io.print(style(f.text, f.warn ? C.yellow : C.dim));
+        } catch {}
+      }
+
       let res;
       // 审计（tsc 扩面发现）：llmT0 此前在 try 内声明、catch 内引用——chat 抛错时
       // catch 自身 ReferenceError，掩盖原始错误且计时丢失；提到 try 外声明。
       const llmT0 = Date.now();
       lastRequestStartAt = llmT0;
+      turnProgress.llmCalls += 1;
+      turnProgress.phase = '发请求（等首帧）';
       try {
         res = await provider.chat({
           model: activeModel,
@@ -771,7 +1071,22 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           signal: ac.signal,
           onDelta(/** @type {any} */ d) {
             io.stopSpinner();
+            // v0.6.13（A）：帧/字符计数 + 首帧时延（TTFT）——本地模型最关键的指标
+            turnProgress.streamFrames += 1;
+            const chunkChars = (d.text ? String(d.text).length : 0) + (d.reasoning ? String(d.reasoning).length : 0);
+            if (chunkChars) turnProgress.contentChars += chunkChars;
             if (firstTokenAt == null) firstTokenAt = Date.now(); // 首个增量即首 token
+            const ttft = firstTokenAt - llmT0;
+            turnProgress.lastTtftMs = ttft;
+            if (turnProgress.ttftMs == null) turnProgress.ttftMs = ttft;
+            turnProgress.phase = '解码中（收到增量）';
+            // TTFT 留一行：首次请求必说；后续请求只在"慢"（≥30s）时说——那正是需要被看见的情形
+            if (turnProgress.llmCalls === 1 || ttft >= 30000) {
+              try {
+                io.print(style(`⏱ 首帧 ${(ttft / 1000).toFixed(1)}s（第 ${turnProgress.llmCalls} 次模型请求；本地模型这一项直接反映 prefill 快慢）`, C.dim));
+              } catch {}
+            }
+            markProgress('模型增量');
             if (d.text) io.writeText(d.text);
             if (d.reasoning) {
               reasoningTokens += approxTokens(d.reasoning); // 省钱 B3：推理 token 估算（分账维度）
@@ -780,10 +1095,25 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           },
         });
         llmMsTotal += Date.now() - llmT0;
+        turnProgress.modelRounds += 1;
+        // v0.6.13（A）：**"轮次返回"本身不算进展**——真机现场就是"每十几分钟返回一次、
+        // 每次都是一模一样的失败工具调用"，若把返回当进展，看门狗永远不会响。
+        // 只有真的产出了正文/推理才算（工具调用的进展由 finishTool 按"成功且不重复"判定）。
+        if (res.text || res.reasoning) markProgress('模型轮次返回（有正文/推理）');
       } catch (err) {
         llmMsTotal += Date.now() - llmT0;
         io.stopSpinner();
         io.endTurn();
+        // v0.6.13（A）：看门狗触发的中止——如实报告"连续 N 分钟无进展"，不冒充 Ctrl+C/正常结束
+        if (noProgressFired) {
+          stripOrphanCalls();
+          markOutcome('stalled');
+          return {
+            text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false, stalled: true,
+            note: turnProgress.note || noProgressNotice({ waitedMs: Date.now() - turnProgress.lastProgressAt, toolCalls: turnProgress.toolCalls, modelRounds: turnProgress.modelRounds }),
+            durationMs: Date.now() - startedAt, perf: perf(),
+          };
+        }
         if (aborted) {
           stripOrphanCalls();
           markOutcome('aborted', { aborted: true });
@@ -808,6 +1138,23 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             durationMs: Date.now() - startedAt,
             perf: perf(),
           };
+        }
+        // v0.6.13（A）：**上游/引擎错误必须透出且可操作**。
+        // 此前这里直接 `throw err`：原文（400 的模板报错、引擎的 memory_refusal、内核自己的三类超时）
+        // 只在最外层变成一条 error 事件，用户看到一坨堆栈式原文却不知道该改什么；子代理路径里
+        // 它更会被压成一行工具结果。现在统一补一条"这是什么 + 该怎么办"，并**同时**在界面上打一条，
+        // 让"错误被谁吞掉"不再可能（原始 message 一字不改地保留在首行）。
+        {
+          const d = describeUpstreamError(e);
+          if (d.hint) {
+            try { io.print(style(`⚠ 上游错误：${d.message}\n   ${d.hint}`, C.yellow)); } catch {}
+            const enriched = new Error(`${d.message}\n   ${d.hint}`);
+            if (e && typeof e === 'object') {
+              if (e.status !== undefined) /** @type {any} */ (enriched).status = e.status;
+              if (e.headers !== undefined) /** @type {any} */ (enriched).headers = e.headers;
+            }
+            throw enriched;
+          }
         }
         throw err;
       }
@@ -876,6 +1223,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       }
 
       if (res.toolCalls?.length) {
+        // v0.6.13（A）：本回合 tool_call 计数（界面/日志/收尾提示的单一来源）
+        turnProgress.toolCalls += res.toolCalls.length;
         // v0.2.8 步数上限收尾（对齐 DSH）：末轮仍返回工具调用（无视收尾指令）时不再执行工具——
         // 有正文直接收尾，无正文跳出循环进入兜底总结，避免再次跑满步数后静默结束。
         if (steps === stepLimit) {
@@ -1034,6 +1383,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 后续相同调用直接复用结果（仍逐个回填 tool 消息以保持 tool_call_id 配对）
         async function runTool(/** @type {any} */ prep) {
           io.renderToolStart?.(prep.name, prep.args);
+          // v0.6.13（A）：登记"正在等待哪个工具"——`task` 子代理/长命令动辄几十分钟，
+          // 界面与日志必须能显示"在等谁、等了多久"，否则与卡死无法区分。
+          const prevPending = turnProgress.pendingTool;
+          turnProgress.pendingTool = { name: String(prep.name || ''), startedAt: Date.now() };
+          turnProgress.phase = `执行工具 ${prep.name}`;
           // Pack 工具名形如 pack__<pack>__<tool>；执行期间标注来源，供 ctx.llm 归因
           const pkMatch = /^pack__([a-z0-9-]+)__/.exec(String(prep.name || ''));
           const prevPack = currentPack;
@@ -1042,6 +1396,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           const dedupKey = !prep.isMcp && READONLY_TOOLS_SET.has(prep.name) ? prep.name + ':' + JSON.stringify(prep.args || {}) : null;
           if (dedupKey && turnToolCache.has(dedupKey)) {
             prep.cached = true;
+            turnProgress.pendingTool = prevPending;
             return turnToolCache.get(dedupKey);
           }
           try {
@@ -1064,6 +1419,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             return JSON.stringify({ ok: false, error: String(err?.message || err) });
           } finally {
             currentPack = prevPack; // 还原（并行只读批次下 finally 保证不乱序）
+            turnProgress.pendingTool = prevPending;
           }
         }
 
@@ -1071,6 +1427,23 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         function finishTool(/** @type {any} */ prep, /** @type {any} */ result, /** @type {any} */ t0) {
           const ms = Date.now() - t0;
           toolMsTotal += ms;
+          // v0.6.13（A）：**只有"成功且不重复"的工具结果才算进展**。
+          // 真机现场（610 次工具调用、4+ 小时零交付）里大量是**完全相同**的重复调用
+          // （`skill {}` 155 次、同一个 `git clone` 43 次…）与失败调用——若把它们也算进展，
+          // 看门狗永远不会响，"工具在跑但什么都没做成"就永远抓不住。
+          turnProgress.toolExecuted += 1;
+          const sig = `${prep.name}|${JSON.stringify(prep.args || {})}`;
+          const repeatedBefore = turnSigCounts.get(sig) || 0;
+          turnSigCounts.set(sig, repeatedBefore + 1);
+          let toolOk = true;
+          if (typeof result === 'string') {
+            toolOk = !result.includes('"ok": false');
+          } else if (result && typeof result === 'object') {
+            toolOk = result.ok !== false;
+          }
+          if (toolOk && repeatedBefore === 0) markProgress(`工具 ${prep.name} 返回`);
+          else if (toolOk) { turnProgress.unproductive += 1; turnProgress.repeatedCalls = (turnProgress.repeatedCalls || 0) + 1; }
+          else turnProgress.unproductive += 1;
           // 省钱 B3：逐工具调用/耗时累加（费用二级分账的 byTool 维度）
           const ts = toolStats.get(prep.name) || { calls: 0, ms: 0 };
           ts.calls += 1;
@@ -1358,7 +1731,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     // v0.4.1 修复：输入轻量化——此前用 trimMessages(messages, budget) 全量历史，本地 q8 量化模型
     // （prefill ~165 tok/s）≈98k token 的 prefill 逼近/超过 600s 首 token 超时 → 总结请求失败被吞 →
     // 表现为「输出截断/子代理无反馈」。改用 system + 交付物清单 + 提示（几 k token），慢 prefill 也能秒出总结。
-    if (!aborted && messages.length) {
+    // v0.6.13（A）：看门狗已判定"整回合无进展"时**不再发兜底总结请求**——
+    // 那正是又一次要等几分钟到几十分钟的请求，而 0 工具调用/0 增量的事实不会因此改变。
+    if (!aborted && !noProgressFired && messages.length) {
       try {
         const sys = messages.find((/** @type {any} */ m) => m.role === 'system');
         const wrapReq = [
@@ -1412,12 +1787,21 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         try { io.print(style(`⚠ 兜底总结失败：${String(err?.message || err)}`, C.yellow)); } catch {}
       }
     }
-    markOutcome('capped', { capHit: true, truncated: true });
-    return { text: null, reasoning: '', usage, steps, finish, truncated: outcome.truncated, aborted: false, capHit: outcome.capHit, upstreamTruncated, durationMs: Date.now() - startedAt, perf: perf() };
+    // v0.6.13（A）：看门狗触发时以 'stalled' 收尾（不是 capped：不是预算用尽，是"零进展"）
+    markOutcome(noProgressFired ? 'stalled' : 'capped', { capHit: !noProgressFired, truncated: !noProgressFired });
+    return {
+      text: null, reasoning: '', usage, steps, finish, truncated: outcome.truncated, aborted: false,
+      capHit: outcome.capHit, upstreamTruncated, ...(noProgressFired ? { stalled: true, note: turnProgress.note || undefined } : {}),
+      durationMs: Date.now() - startedAt, perf: perf(),
+    };
     }
     // 理论不可达（for 循环末轮必 return）；给 tsc 一个兜底，保证 runTurn 恒有返回值
-    markOutcome('capped', { capHit: true, truncated: true });
-    return { text: null, reasoning: '', usage, steps, finish, truncated: outcome.truncated, aborted: false, capHit: outcome.capHit, upstreamTruncated, durationMs: Date.now() - startedAt, perf: perf() };
+    markOutcome(noProgressFired ? 'stalled' : 'capped', { capHit: !noProgressFired, truncated: !noProgressFired });
+    return {
+      text: null, reasoning: '', usage, steps, finish, truncated: outcome.truncated, aborted: false,
+      capHit: outcome.capHit, upstreamTruncated, ...(noProgressFired ? { stalled: true, note: turnProgress.note || undefined } : {}),
+      durationMs: Date.now() - startedAt, perf: perf(),
+    };
     } catch (/** @type {any} */ err) {
       // 审计 P2-6（v0.4.2）：工具管线异常（hooks.pre / permission.check / prepTool 等）沿大 try 上抛时，
       // assistant tool_calls 已 push 进 messages 却无对应 tool 回填——会话恢复后 API 因孤儿 tool_call_id 400。
@@ -1427,6 +1811,19 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     } finally {
       currentAc = null;
       currentUsage = null; // 回合结束：避免 runTurn 之外调用的 spawnTask 写入陈旧累加器
+      // v0.6.13（A）：看门狗计时器必须随回合结束清掉（每回合一个，长驻 WebUI 里不能泄漏）；
+      // 同时把"本回合 0 次工具调用"如实说出来——否则端点不返回 tool_calls 时，界面看起来
+      // 一切正常（有正文、ok:true），实际一次工具都没调，"看起来在工作、其实什么都没做"。
+      if (noProgressTimer) clearTimeout(noProgressTimer);
+      turnProgress.pendingTool = null;
+      currentTurnProgress = null;
+      try {
+        const notice = ensureZeroToolCallNotice();
+        if (notice && !turnProgress.zeroToolCallsPrinted) {
+          turnProgress.zeroToolCallsPrinted = true;
+          io.print(style(notice, C.yellow));
+        }
+      } catch {}
       // v0.6.0 C1：回合收尾事件（状态/步数/费用）。
       // 费用按**发起时刻**计价（lastRequestStartAt）——与 recordUsage 同款口径，跨 12:00/18:00
       // 边界的请求才不会被错记一档。estimateCost 对无价模型返回 null，于是 priced:false 会与

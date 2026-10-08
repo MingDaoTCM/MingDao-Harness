@@ -104,8 +104,10 @@ M.mutate({
 M.mutate({
   name: '⑩ Web 侧 capHit 退回标成 done',
   file: 'src/web/server.js',
-  from: "      entry.status = r.aborted ? 'aborted' : r.capHit ? 'capped' : 'done';",
-  to: "      entry.status = r.aborted ? 'aborted' : 'done';",
+  // v0.6.13：这一行的形状变了（中间插入了 stalled 分支）——锚点同步更新，变异语义不变：
+  // 「capHit 退回标成 done」仍然是把 capped 这一档从状态映射里拿掉。
+  from: "      entry.status = r.aborted ? 'aborted' : r.stalled ? 'stalled' : r.capHit ? 'capped' : 'done';",
+  to: "      entry.status = r.aborted ? 'aborted' : r.stalled ? 'stalled' : 'done';",
   expect: ['Web 侧 capHit 不得再标成 done'],
   run: SEC,
 });

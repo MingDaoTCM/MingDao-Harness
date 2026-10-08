@@ -10,6 +10,11 @@
 //   · 内置预设把 permission 写回来            → 契约必须红（沉默覆盖用户选择的老毛病回来了）；
 //   · 删掉 recommendedPermission              → 契约必须红（"建议"没了，只剩覆盖或什么都没有）；
 //   · listPresets 不再透出 recommendedPermission → 契约必须红（字段纪律在代码里被抹掉）；
+//
+// v0.6.15（C）：内置预设按语义拆成 local-model（只放参数）+ readonly-audit（审计人格 + 只读白名单
+//   + recommendedPermission）。本批 ①② 的承载文件随之从 presets/local-audit.json 改指
+//   presets/readonly-audit.json（"建议只读"这条表达现在只该出现在这里），⑤ 的关键词改成新契约的
+//   断言原文——语义不变，锚点与新文件对齐。
 //   · 把 recommendedPermission 冒充 permission 透出 → 契约必须红（"建议"被偷偷变成"覆盖"）；
 //   · 字段白名单不再认 recommendedPermission  → 契约必须红（内置预设直接被跳过，列表里都没有了）；
 //   · presetPermissionOverride 放松反提权     → §137 必须红（第三方/老预设又能提权）。
@@ -22,7 +27,7 @@ const CONTRACTS = () => M.suite('test/api-contracts.js');
 
 M.mutate({
   name: '① 内置预设把 permission:"readonly" 写回来（回到"沉默覆盖用户选择"的老毛病）',
-  file: 'presets/local-audit.json',
+  file: 'presets/readonly-audit.json',
   from: '  "recommendedPermission": "readonly",',
   to: '  "recommendedPermission": "readonly",\n  "permission": "readonly",',
   expect: ['内置预设不得带 permission 字段'],
@@ -31,7 +36,7 @@ M.mutate({
 
 M.mutate({
   name: '② 内置预设删掉 recommendedPermission（"建议只读"这个表达没了）',
-  file: 'presets/local-audit.json',
+  file: 'presets/readonly-audit.json',
   from: '  "recommendedPermission": "readonly",\n',
   to: '',
   expect: ['必须透出 recommendedPermission=readonly'],
@@ -61,7 +66,7 @@ M.mutate({
   file: 'src/presets.js',
   from: "  'permission', 'recommendedPermission', 'model', 'temperature', 'maxOutputTokens', 'maxRounds', 'contextBudget',",
   to: "  'permission', 'model', 'temperature', 'maxOutputTokens', 'maxRounds', 'contextBudget',",
-  expect: ['内置 local-audit 应列出'],
+  expect: ['内置 local-model 应列出', '内置 readonly-audit 应列出'],
   run: CONTRACTS,
 });
 

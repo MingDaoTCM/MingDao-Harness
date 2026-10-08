@@ -444,7 +444,19 @@ async function send(){
     await handleEvents(resp.body, ev=>{
       if(ev.taskId){ taskId=ev.taskId; curTaskId=taskId; } // 质检 L1：主停止按钮只断本任务
       if(ev.type==='ask') disarm(); else arm(); // 有活动→重置；权限等待→暂停计时
-      if(ev.type==='progress'){ const p=ev.seconds||0; if(ev.phase) curPhase=String(ev.phase); curTools=Number(ev.steps)||0; curTasks=Number(ev.tasks)||0; showThink(); think.textContent='💭 正在工作 '+Math.floor(p/60)+' 分 '+Math.round(p%60)+' 秒 · 第 '+msg._steps+' 回合 · '+curPhase+' · 已执行 '+ev.steps+' 步…'; renderWorkStatus(); }
+      if(ev.type==='progress'){ const p=ev.seconds||0; if(ev.phase) curPhase=String(ev.phase); curTools=Number(ev.steps)||0; curTasks=Number(ev.tasks)||0; showThink();
+        // v0.6.13（A）：本地模型场景把「在等首帧 / 在解码 / 在等哪个工具 / TTFT / tok/s / 0 次工具调用」直接摆在状态行上——
+        // 真机实测的痛点是"跑了几小时，界面上什么都看不出来"。0 次工具调用必须显式显示为 0，不能省略。
+        const bits=[];
+        bits.push('模型请求 '+(ev.modelRounds||0)+' 轮');
+        bits.push('工具调用 '+(ev.toolCalls||0)+' 次');
+        if(ev.ttftMs!=null) bits.push('首帧 '+(ev.ttftMs/1000).toFixed(1)+'s');
+        if(ev.tokensPerSec!=null) bits.push('≈'+Number(ev.tokensPerSec).toFixed(1)+' tok/s');
+        if(ev.contentChars) bits.push('正文 '+ev.contentChars+' 字');
+        if(ev.pendingTool) bits.push('等待工具 '+ev.pendingTool.name+' 已 '+Math.round((ev.pendingTool.ms||0)/1000)+'s');
+        if(ev.stalled) bits.push('已判定无进展，正在中止');
+        think.textContent='💭 正在工作 '+Math.floor(p/60)+' 分 '+Math.round(p%60)+' 秒 · 第 '+msg._steps+' 回合 · '+curPhase+' · '+bits.join(' · ')+'…';
+        renderWorkStatus(); }
       if(ev.type==='text'){ curPhase='模型输出中'; onActivity(); raw+=ev.delta; update(); }
       else if(ev.type==='reasoning'){ if(!reason){ reason=addReasoning(msg); reason.dataset.full=''; } if(!reason.parentElement.open) reason.parentElement.open=true; reason.parentElement.querySelector('summary').classList.add('live'); reason.dataset.full+=ev.delta; const full=reason.dataset.full; reason.textContent=(full.length>9000?full.slice(-9000)+'\n…（思考内容较长，仅显示末尾；已 '+full.length+' 字符）':full); reason.scrollTop=reason.scrollHeight; scroll(); }
       else if(ev.type==='turnStart'){ stepsCount+=1; curSteps+=1; msg._steps=curSteps; curPhase='模型推理中'; msg._traj.push({kind:'turn', t:Date.now()}); showThink(); think.textContent='💭 第 '+msg._steps+' 回合：模型推理中…'; renderWorkStatus(); scroll(); }

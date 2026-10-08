@@ -25,6 +25,43 @@ import { fileURLToPath } from 'node:url';
 import { mingdaoHome, ensureHome } from './config.js';
 
 const PRESET_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+// ---------------------------------------------------------------------------
+// v0.6.15（C，负责人实测定位纠偏）：内置预设的**名字要与内容一致**。
+//
+// 原来的内置 local-audit 一个名字扛了三件事：本地模型的保守参数 + 审计人格 + 只读工具白名单。
+// 负责人的原话："本地模型只是用来代替云模型 API 而已，功能是一样的；预设的目的是预设上下文窗口/
+// 最大输出 tokens 等，让本地模型正常工作——它并不是专为代码审计而设。" 于是拆成两个：
+//   · local-model     —— 只放"让本地模型跑得动"的参数（contextBudget/maxOutputTokens/maxRounds）
+//   · readonly-audit  —— 审计人格 + 只读工具白名单 + recommendedPermission（建议，不覆盖）
+//
+// 老名字 `local-audit` 的兼容：**保留为别名**（不是删掉、也不是不再提）。
+// 为什么选"别名"而不是"只在加载时提示已更名"：
+//   · 下游与测试按名引用过它（config.preset / 计划任务 / 会话粘滞 / 脚本），改成"报个提示然后不给"
+//     等于把这些调用点从"能用"变成"用不了"——一个改名不该造成运行时中断；
+//   · 别名仍然**必须说出来**（loadPreset 里一次性 warn + WebUI banner），所以不会变成静默改名；
+//   · 别名指向 local-model：老名字的语义本来就是"本地模型预设"，审计那部分另有新家。
+// 若用户/项目自己写了同名 `local-audit.json`，**以磁盘上的为准**（别名只在"没找到同名预设"时才生效），
+// 遮蔽语义与既有一致。
+const PRESET_ALIASES = /** @type {Record<string, string>} */ ({ 'local-audit': 'local-model' });
+
+/** 规范名 → 别名列表（listPresets 透出用）。 */
+const PRESET_ALIAS_INDEX = Object.entries(PRESET_ALIASES).reduce((acc, [from, to]) => {
+  (acc[to] = acc[to] || []).push(from);
+  return acc;
+}, /** @type {Record<string, string[]>} */ ({}));
+
+/** 别名 → 规范名（无别名时原样返回）。 */
+export function canonicalPresetName(/** @type {any} */ name) {
+  const n = String(name ?? '');
+  return PRESET_ALIASES[n] || n;
+}
+
+/** 该名字是否是内置别名（供调用方在界面上说明"已更名"）。 */
+export function presetAliasOf(/** @type {any} */ name) {
+  const n = String(name ?? '');
+  return PRESET_ALIASES[n] ? { from: n, to: PRESET_ALIASES[n] } : null;
+}
 // 合法字段白名单：未知字段报错（防拼写错误静默失效——契约化核心）
 const KNOWN_FIELDS = new Set([
   'name', 'label', 'description', 'systemPrompt', 'tools',
@@ -110,7 +147,7 @@ export function listPresets(/** @type {any} */ workingDir) {
       if (!v.ok) continue; // 非法预设跳过并静默（不阻塞会话）；diagnose 可查
       const key = String(obj.name);
       if (seen.has(key)) continue; // 同名遮蔽：项目 → 用户 → 内置（先发现者胜）
-      seen.set(key, { obj, source, file });
+      seen.set(key, { obj, source, file, aliases: PRESET_ALIAS_INDEX[key] || undefined });
       // v0.6.3（M-8）：记录"这个名字是否把更低优先级来源遮蔽了"——静默遮蔽是注入面
       // （项目级预设可以按名顶掉内置预设，同时注入自己的 systemPrompt/tools）
       const shadowedFrom = [];
@@ -131,13 +168,16 @@ export function listPresets(/** @type {any} */ workingDir) {
       if (shadowedFrom.length) seen.get(key).shadowed = shadowedFrom;
     }
   }
-  return [...seen.values()].map(({ obj, source, file, shadowed }) => ({
+  return [...seen.values()].map(({ obj, source, file, shadowed, aliases }) => ({
     name: String(obj.name),
     label: String(obj.label || obj.name),
     description: String(obj.description || ''),
     source,
     file,
     ...(shadowed ? { shadowed } : {}),
+    // v0.6.15（C）：老名字以别名形式保留时，列表里写出来（UI 可显示"别名：local-audit"），
+    // 免得用户到处找不到曾经用过的名字、或以为它被静默删了。
+    ...(aliases ? { aliases } : {}),
     ...(obj.systemPrompt ? { systemPrompt: obj.systemPrompt } : {}),
     ...(Array.isArray(obj.tools) ? { tools: obj.tools } : {}),
     ...(obj.permission ? { permission: String(obj.permission) } : {}),
@@ -155,7 +195,13 @@ export function listPresets(/** @type {any} */ workingDir) {
 const shadowWarned = new Set();
 export function loadPreset(/** @type {any} */ workingDir, /** @type {any} */ name) {
   const all = listPresets(workingDir);
-  const hit = all.find((/** @type {any} */ p) => p.name === name || path.basename(String(p.file), '.json') === name);
+  let hit = all.find((/** @type {any} */ p) => p.name === name || path.basename(String(p.file), '.json') === name);
+  // v0.6.15（C）：老名字 → 别名解析（磁盘上有同名预设时以磁盘为准，别名不生效）
+  const alias = presetAliasOf(name);
+  if (!hit && alias) {
+    hit = all.find((/** @type {any} */ p) => p.name === alias.to);
+    if (hit) warnPresetAlias(alias);
+  }
   if (!hit) return null;
   // v0.6.3（M-8）：项目级预设按名遮蔽内置/用户级预设时**必须说出来**。
   // 场景：clone 一个仓库 → cd 进去 → `mingdao --preset reviewer`：拿到的是仓库里那份
@@ -173,10 +219,21 @@ export function loadPreset(/** @type {any} */ workingDir, /** @type {any} */ nam
     }
   }
   try {
-    return JSON.parse(fs.readFileSync(hit.file, 'utf8'));
+    const obj = JSON.parse(fs.readFileSync(hit.file, 'utf8'));
+    // 别名调用：把"实际用的是哪一份"标在返回值上，调用方（WebUI banner）据此告诉用户已更名
+    return alias && hit.name === alias.to ? { ...obj, aliasedFrom: alias.from } : obj;
   } catch {
     return null;
   }
+}
+
+/** 别名提示只打一次（同一个 from→to 不重复刷屏，但要留下痕迹）。 */
+const aliasWarned = new Set();
+function warnPresetAlias(/** @type {{from: string, to: string}} */ alias) {
+  const key = `${alias.from}->${alias.to}`;
+  if (aliasWarned.has(key)) return;
+  aliasWarned.add(key);
+  console.warn(`[MingDao] ⚠ 预设「${alias.from}」已更名为「${alias.to}」（本次已按 ${alias.to} 执行；老名字保留为别名，建议尽快改用新名字）。`);
 }
 
 /**

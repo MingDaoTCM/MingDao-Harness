@@ -25,7 +25,13 @@
 
 1. `<项目>/.mingdao/presets/<名>.json` — 项目级（随项目走）
 2. `~/.mingdao/presets/<名>.json` — 用户级（本机全局）
-3. `presets/`（随 npm 包分发）— 内置参考（已内置 `local-audit` 示例）
+3. `presets/`（随 npm 包分发）— 内置参考，现内置两个**语义单一**的示例：
+   - `local-model` —— **只放"让本地模型跑得动"的参数**（`contextBudget`/`maxOutputTokens`/`maxRounds`）。
+     本地模型只是替换云模型 API，**功能一致**：所以它不带人格、不限制工具、不建议权限档。
+   - `readonly-audit` —— 审计人格 + 只读工具白名单（`tools`）+ `recommendedPermission: "readonly"`（只是**建议**）。
+   - 老名字 `local-audit` 保留为**别名**（指向 `local-model`）：按老名字调用仍可用，且会打印一次
+     「已更名」提示（CLI/内核日志）并在 WebUI 用 banner 说明——改名兼容，但不静默。
+     若你自己在项目级/用户级写了 `local-audit.json`，**以你的文件为准**（别名只在没找到同名预设时兜底）。
 
 ### 1.2 格式
 
@@ -37,6 +43,7 @@
   "systemPrompt": "你是代码审查员。只读审查，按严重度分级输出，每条带文件:行号证据。",
   "tools": ["read", "ls", "glob", "grep", "skill", "git", "fetch", "todo"],
   "permission": "auto",
+  "recommendedPermission": "readonly",
   "model": "deepseek-v4-flash",
   "temperature": 0.3,
   "maxOutputTokens": 4096,
@@ -48,6 +55,32 @@
 字段全部可选（缺省保持当前配置）。`tools` 白名单外的工具对模型不可见、调用会被硬拦。
 未知字段会**校验报错**（防拼写错误静默失效）。
 `model` 是**建议**：CLI 在未显式 `-m` 时采纳；WebUI 以用户当前选择的模型为准（预设不覆盖）。
+
+`permission` 与 `recommendedPermission` **不是一回事**（v0.6.14 起）：
+
+| 字段 | 语义 | 谁该用 |
+| --- | --- | --- |
+| `permission` | **覆盖**本回合的权限档（仍受反提权规则约束：只能更保守，不能更宽松） | 第三方/老预设；**内置预设不得声明** |
+| `recommendedPermission` | **建议**：只透出给界面/诊断，**不参与判定、不覆盖用户选择** | 内置预设想表达"建议只读"时用它 |
+
+只读的**硬约束**是 `tools` 白名单（不含 `write`/`edit`，模型连写工具都看不到），不是权限档。
+
+#### 参数怎么给"本地模型"用（v0.6.15）
+
+给本地部署模型写预设时，**只调参数、别加人格**——本地模型与云模型功能一致，它需要的是
+"预算合适"，不是"换个角色"：
+
+```json
+{ "name": "my-local", "label": "我的本地模型", "contextBudget": 65536, "maxOutputTokens": 4096, "maxRounds": 4 }
+```
+
+- `contextBudget` 是**最要紧的一个**：本地引擎的 prefill 时间与内存随上下文线性上涨
+  （本机 35B Q4_K_M 实测约 4.9ms/token：2 万 tokens ≈ 1.6 分钟、13 万窗口 ≈ 10 分钟以上，
+  且大上下文会顶满引擎内存预算）。给 32k–65k 通常就够单个模块级任务。
+- 模型窗口/最大输出等**能力声明**请写在 `config.customModels.<模型名>`
+  （`contextWindow`/`maxOutputTokens`/`local`），不要再写一份进预设——两处会漂移。
+- 想让"本地模型 + 只读审计"同时生效：两个预设**不能叠加**（一次只能选一个）。
+  要么用 `readonly-audit` 并自己把 `contextBudget` 调小，要么复制一份按需合并。
 
 ### 1.3 使用
 

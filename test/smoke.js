@@ -2976,9 +2976,13 @@ const ctx = { cwd: tmp };
   const { listPresets, loadPreset, validatePreset, presetConfigOverrides, presetSystemBlock, presetDirs } = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
   const { builtinPresetDir } = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
   // 内置预设（随包分发）
-  assert.ok(fs.existsSync(path.join(builtinPresetDir(), 'local-audit.json')), '内置示例预设应随包分发');
+  // v0.6.15（C）：内置预设按语义拆成两份（local-model = 参数；readonly-audit = 审计人格 + 只读白名单），
+  // 老名字 local-audit 保留为**别名**——这里只钉"随包分发 + 被发现"，别名行为见 §139。
+  assert.ok(fs.existsSync(path.join(builtinPresetDir(), 'local-model.json')), '内置 local-model 预设应随包分发');
+  assert.ok(fs.existsSync(path.join(builtinPresetDir(), 'readonly-audit.json')), '内置 readonly-audit 预设应随包分发');
   const builtin = listPresets(null);
-  assert.ok(builtin.some((/** @type {any} */ p) => p.name === 'local-audit' && p.source === 'builtin'), '内置 local-audit 应被发现');
+  assert.ok(builtin.some((/** @type {any} */ p) => p.name === 'local-model' && p.source === 'builtin'), '内置 local-model 应被发现');
+  assert.ok(builtin.some((/** @type {any} */ p) => p.name === 'readonly-audit' && p.source === 'builtin'), '内置 readonly-audit 应被发现');
   // 校验：合法/非法字段/坏 permission
   assert.equal(validatePreset({ name: 'ok', systemPrompt: 'x' }).ok, true, '最小合法预设应通过');
   assert.equal(validatePreset({}).ok, false, '缺 name 应拒绝');
@@ -13511,6 +13515,604 @@ process.exit(0);
 
   safeRmSync(helperDir, { recursive: true, force: true });
   ok('v0.6.13 WebUI 停止：流式中/无首帧/等权限确认三种形态均数秒内真停（SSE 关闭 + aborted 落定 + abortHandler 真的 abort + 解除挂起确认优先于 120s 超时）+ 停止单源与反馈结构守卫 + 设置面板「登记」目录选择器接线守卫（结构 + 行为）+ 打包 preload.cjs/update-verify.js 配置守卫');
+}
+
+// ---------- 139. v0.6.13：本地模型的"零信号长回合"必须可中止、可解释、可观察（负责人真机实测） ----------
+// 真机证据（负责人 2026-10-08 现场 + 本机复核）：
+//   · ~/.mingdao/logs/web-server.log 最后一行 `2026-10-08T02:53:27 chat 开始 t8b907… 消息长度=376`，
+//     此后**没有任何收尾**（没有「回合完成」、没有「chat 错误」、没有「客户端断连」）；
+//     桌面壳日志同刻 `send 点击 text=376 → 生成中：防睡眠已开启`，之后同样再无任何行。
+//   · 会话 ~/.mingdao/sessions/2026-10-08T02-53-27-9ezp.jsonl 只有那一条 user 消息（941 字节）——
+//     回合结束才会整段追加，说明该回合**确实一直没结束**（观察时已 4 小时 20 分，还在跑）。
+//   · ~/.mingdao/audit.jsonl（同一 session）却有 **610 条工具调用**：skill 310（其中 `{}` 155 次、
+//     `{"name":"bash"}` 134 次——**逐字相同**）、task 150、git 85（同一个 clone 命令 43+41 次）、
+//     ls 40（同一路径）、glob 23；相邻两次工具调用最长间隔仅 7.1 分钟——**没有任何一次"挂住的 await"**。
+//   · 引擎侧（llama-server, 127.0.0.1:60091, /slots）实测 `n_prompt_tokens=4304 / processed=95`：
+//     本地 35B 在 131k 窗口下的 prefill 可以慢到十几分钟一帧。
+// 结论（本节的回归点）：**不是某个 await 挂了，而是"回合级零进展"没有任何判据与出口**——
+//   既有超时（首帧 600s / 流式空闲 120s / 单请求总量 1800s，见 src/providers/index.js）**全是单请求级**，
+//   而一个回合最坏是 maxRounds×stepLimit=72 次请求、`task` 子代理各自还有一整套且可递归派生；
+//   日志又只在回合首尾落行 → "在跑"与"卡死"事后完全无法区分（这才是"8 小时零信号"的真实机制）。
+// 本节钉死四件事（桩 provider 全部**尊重 signal**，与真实 provider 同形，否则测的是不会挂的假桩）：
+//   ① 无进展看门狗：长期既无"成功且不重复的工具结果"、也无正文/推理增量 → 必须自行中止并如实报告；
+//      默认阈值不得比既有单请求超时更激进（≥ 本地单请求总量 1800s）；0/负数/NaN/Infinity 不得关掉它；
+//      子代理共享父回合的截止时刻；真在干活的回合**不得**被误杀。
+//   ② 上游/引擎错误必须透出**原文 + 可操作解读**（模板/内存/三类超时/鉴权/404/429/5xx），且不得改原文。
+//   ③ 回合结束必须如实说"0 次工具调用"（端点不返回 tool_calls 时最容易被误读为"一切正常"）。
+//   ④ 发送前规模预告 + 运行中 TTFT/吞吐/工具计数（web-server.log 定期落行，界面状态条同源）。
+{
+  const {
+    resolveNoProgressTimeoutMs,
+    DEFAULT_NO_PROGRESS_TIMEOUT_MS,
+    prefillForecast,
+    noProgressNotice,
+    zeroToolCallNotice,
+    describeUpstreamError,
+    formatTurnProgress,
+    PREFILL_WARN_RATIO,
+    PREFILL_WARN_TOKENS,
+  } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
+  const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+  const serverSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+  const appSrc = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-smoke139-'));
+  // 本小节需要 <home>（预检基线 / 模型缓存 / 预设发现都落在 MINGDAO_HOME）：前面的小节可能已把它
+  // 清成 undefined，这里显式指向**本小节自己的临时 home**（不复用 smokeHome：变异脚手架会把本节
+  // 抽成独立脚本运行，那时 smokeHome 并不存在），结束时恢复——绝不落到真实 ~/.mingdao。
+  const prevHome139 = process.env.MINGDAO_HOME;
+  const home139Main = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sec139-home-'));
+  process.env.MINGDAO_HOME = home139Main;
+  const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
+
+  // 假 io：只实现 agent.js 真正会调的那些方法；prints 收全部面向用户的行（"必须打到界面上"的断言靠它）
+  const mkIo = () => {
+    const prints = /** @type {string[]} */ ([]);
+    return {
+      prints,
+      /** @param {any} t */
+      print: (t = '') => prints.push(String(t)),
+      writeText() {}, writeReasoning() {}, beginTurn() {}, endTurn() {},
+      startSpinner() {}, stopSpinner() {}, renderToolStart() {}, renderTool() {},
+      renderTodo() {}, renderToolDenied() {}, confirm: async () => true,
+      onSigint: () => () => {},
+    };
+  };
+  const perm = { mode: 'auto', async check() { return true; } };
+  const mkAgent = (/** @type {any} */ provider, /** @type {any} */ io, /** @type {any} */ cfg) =>
+    createAgent({
+      provider, permission: perm, io, modelName: 'local-x', workingDir: tmp,
+      cfg: { permission: 'auto', audit: false, ledger: false, ...cfg },
+    });
+  const msgs = (/** @type {string} */ text) => [{ role: 'system', content: '系统' }, { role: 'user', content: text }];
+  /** 硬超时兜底：断言"必须中止"时，变异版（删掉看门狗）会挂住——挂住必须表现为**失败**而不是卡死套件 */
+  const withDeadline = (/** @type {any} */ p, /** @type {number} */ ms) =>
+    Promise.race([p, sleep(ms).then(() => 'HANG')]);
+  /** 永不回包、但尊重 signal 的上游（真实 provider 会把 signal 转给 fetch） */
+  const hangingProvider = () => ({
+    chat: (/** @type {any} */ { signal }) =>
+      new Promise((_, reject) => {
+        const onAbort = () => reject(signal?.reason instanceof Error ? signal.reason : new Error('已中止'));
+        if (signal?.aborted) onAbort();
+        else signal?.addEventListener('abort', onAbort, { once: true });
+      }),
+  });
+
+  // —— ① 看门狗：默认阈值与解析（"别比现有超时更激进"是硬约束） ——
+  {
+    // 依据：providers/index.js 的本地单请求总量上限 1800s；阈值必须是它的整数倍（这里 2×）
+    const provSrc = fs.readFileSync(path.join(srcDir, 'providers', 'index.js'), 'utf8');
+    assert.ok(/isLocal \? 1800000 : 600000/.test(provSrc), '（前置）providers/index.js 的本地单请求总量上限应仍为 1800s——看门狗默认值的依据就是它');
+    assert.equal(DEFAULT_NO_PROGRESS_TIMEOUT_MS, 3600000, '默认阈值 = 2 × 本地单请求总量上限（1800s）');
+    assert.ok(DEFAULT_NO_PROGRESS_TIMEOUT_MS >= 1800000, '默认阈值不得比既有单请求总量超时更激进（否则一次慢 prefill 就被误判成卡死）');
+    assert.equal(resolveNoProgressTimeoutMs({}), DEFAULT_NO_PROGRESS_TIMEOUT_MS, '未配置 → 默认');
+    assert.equal(resolveNoProgressTimeoutMs({ noProgressTimeoutMs: 1234 }), 1234, '显式配置必须生效');
+    // 关键：**不能通过配置关掉看门狗**（0/负数/NaN/Infinity 一律回落默认，fail-safe）
+    for (const bad of [0, -1, NaN, Infinity, -Infinity, 'abc', null, undefined]) {
+      assert.equal(resolveNoProgressTimeoutMs({ noProgressTimeoutMs: bad }), DEFAULT_NO_PROGRESS_TIMEOUT_MS,
+        `noProgressTimeoutMs=${String(bad)} 必须回落默认（不得静默失去看门狗）`);
+    }
+    // 文案与阈值单源：notice 里写的分钟数必须等于默认阈值的分钟数
+    assert.ok(noProgressNotice({ waitedMs: DEFAULT_NO_PROGRESS_TIMEOUT_MS }).includes(`${DEFAULT_NO_PROGRESS_TIMEOUT_MS / 60000} 分钟`),
+      '中止文案里的"默认 N 分钟"必须与默认阈值同源（否则用户按文案调参会调错）');
+  }
+
+  // —— ② 看门狗：上游连上但**一帧不发**（本机 35B 大 prefill 的真实形态）——
+  // 修前：单请求级超时要等 600s（首帧）才第一次有反应，且 5-20 分钟一轮的慢回合能累积数小时；
+  // 修后：连续 noProgressTimeoutMs 无任何增量 → 立刻中止并说明原因（界面 + 返回值 + 日志同名文案）。
+  {
+    const io = mkIo();
+    const agent = mkAgent(hangingProvider(), io, { noProgressTimeoutMs: 300 });
+    const t0 = Date.now();
+    const res = await withDeadline(agent.runTurn(msgs('请审计这个仓库并给出结论')), 6000);
+    const ms = Date.now() - t0;
+    assert.notEqual(res, 'HANG', '看门狗没生效：上游一帧不发时回合会一直挂着（这正是"跑了几小时、日志零行"的回归点）');
+    assert.equal(res.stalled, true, '无进展中止必须以 stalled 结局返回（不能冒充 done/capped/aborted）');
+    assert.ok(/没有任何工具调用/.test(String(res.note)), `收尾说明必须讲清"没有任何工具调用/没有新内容"，实际：${res.note}`);
+    assert.ok(/工具调用 0 次/.test(String(res.note)), `说明里必须带上 0 次工具调用，实际：${res.note}`);
+    assert.ok(/已中止/.test(String(res.note)), '必须明确"已中止"，而不是让用户以为还在跑');
+    assert.ok(res.perf && res.perf.stalled === true, 'perf.stalled 必须为真（账本/状态栏/收尾提示共用）');
+    assert.ok(ms < 4000, `中止必须及时（阈值 300ms，实测 ${ms}ms）`);
+    assert.ok(io.prints.some((t) => /没有任何工具调用/.test(t)), '中止原因必须同时打到界面上（不能只留给返回值）');
+    // 计时器必须随回合收尾清掉（长驻 WebUI 每回合一个，泄漏会累积）
+    assert.ok(/if \(noProgressTimer\) clearTimeout\(noProgressTimer\)/.test(agentSrc), '回合收尾必须清掉看门狗计时器（每回合一个，不得泄漏）');
+  }
+
+  // —— ③ 看门狗：模型**一直在调工具**、但都是重复/失败（真机 610 次调用、4 小时零交付的形态）——
+  // 这条是"看起来在工作、其实什么都没做"的本体：若把"轮次返回/工具返回"一律当进展，看门狗永远不会响。
+  {
+    const io = mkIo();
+    let calls = 0;
+    const provider = {
+      async chat() {
+        calls += 1;
+        await sleep(120);
+        return {
+          text: '',
+          toolCalls: [{ id: `c${calls}`, type: 'function', function: { name: 'no_such_tool_xyz', arguments: '{"same":"args"}' } }],
+          usage: { prompt_tokens: 10, completion_tokens: 5 },
+          finish: 'tool_calls',
+        };
+      },
+    };
+    const agent = mkAgent(provider, io, { noProgressTimeoutMs: 400 });
+    const res = await withDeadline(agent.runTurn(msgs('把这个仓库审计完并交付报告')), 8000);
+    assert.notEqual(res, 'HANG', '重复失败的工具循环必须被看门狗收口：重复/失败的工具调用不算进展');
+    assert.equal(res.stalled, true, '重复/失败的工具调用不算进展——必须判为无进展并中止');
+    assert.ok(/重复调用或失败/.test(String(res.note)), `说明里必须点出"重复调用或失败"这一事实，实际：${res.note}`);
+    assert.ok((res.perf?.toolCalls || 0) >= 2, `必须如实记下已发生的工具调用次数，实际：${res.perf?.toolCalls}`);
+    assert.ok(calls >= 2, '（前置）桩必须真的被调用过多次，否则这条断言没意义');
+  }
+
+  // —— ④ 看门狗**不得误杀**真在干活的回合（每步都是不同参数的成功工具调用） ——
+  {
+    const io = mkIo();
+    let n = 0;
+    const provider = {
+      async chat() {
+        n += 1;
+        await sleep(120);
+        if (n <= 4) {
+          return {
+            text: `第 ${n} 步。`,
+            toolCalls: [{ id: `c${n}`, type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: `echo step-${n}` }) } }],
+            usage: { prompt_tokens: 10, completion_tokens: 5 },
+            finish: 'tool_calls',
+          };
+        }
+        return { text: '全部完成。', toolCalls: null, usage: { prompt_tokens: 10, completion_tokens: 5 }, finish: 'stop' };
+      },
+    };
+    const agent = mkAgent(provider, io, { noProgressTimeoutMs: 400, maxRounds: 1 });
+    const res = await withDeadline(agent.runTurn(msgs('分四步把这件事做完')), 8000);
+    assert.notEqual(res, 'HANG', '正常回合不得被看门狗收口');
+    assert.ok(!res.stalled, '每步都是不同参数的成功工具调用 = 有进展，看门狗不得误杀');
+    assert.equal(res.text, '全部完成。', '正常回合必须正常收尾');
+    assert.equal(res.perf?.toolCalls, 4, '工具调用计数必须是 4');
+    assert.equal(res.perf?.noToolCalls, false, '有工具调用时 noToolCalls 必须为 false');
+  }
+
+  // —— ⑤ 子代理继承父回合的截止时刻（否则 24 个并行子代理各跑几个小时，父回合看起来就是"挂死"） ——
+  {
+    const io = mkIo();
+    const agent = mkAgent(hangingProvider(), io, { turnProgressDeadlineAt: Date.now() + 300 });
+    const t0 = Date.now();
+    const res = await withDeadline(agent.runTurn(msgs('继续')), 6000);
+    assert.notEqual(res, 'HANG', '带截止时刻的回合必须自行收口（子代理继承机制就靠它）');
+    assert.equal(res.stalled, true, '截止时刻到点必须按 stalled 收尾');
+    assert.ok(Date.now() - t0 < 4000, '截止时刻到点必须及时收口');
+    assert.ok(/turnProgressDeadlineAt: currentTurnProgress\.lastProgressAt \+ currentTurnProgress\.noProgressMs/.test(agentSrc),
+      'spawnTask 必须把父回合的截止时刻传给子代理（cfg.turnProgressDeadlineAt）');
+  }
+
+  // —— ⑥ 上游/引擎错误：原文 + 可操作解读（识别不出时**绝不改原文**） ——
+  {
+    const jinja = describeUpstreamError({ status: 400, message: 'Unable to generate parser for this template. … Error: Jinja Exception: No user query found in messages.' });
+    assert.ok(jinja.message.includes('Jinja Exception'), '上游原文必须一字不改地保留');
+    assert.ok(jinja.hint && /模板|tool_calls/.test(jinja.hint), `模板类错误必须给出可操作判断，实际：${jinja.hint}`);
+    const mem = describeUpstreamError({ status: 500, message: 'insufficient memory: this prompt projects 49.7 GiB against the engine\'s 48.0 GiB limit' });
+    assert.ok(mem.hint && /内存/.test(mem.hint), '内存类错误必须给出降级建议');
+    const first = describeUpstreamError({ message: '首 token 等待超限（600s，本地模型长上下文 prefill 可能很慢）——可调大 config.timeout.firstTokenMs' });
+    assert.ok(first.hint && /config\.timeout\.firstTokenMs/.test(first.hint), '内核三类超时必须给出"调哪个配置/怎么拆任务"的指引');
+    assert.ok(describeUpstreamError({ message: '流式响应空闲超限（120s 无新数据）' }).hint, '流式空闲超时同样要有解读');
+    assert.ok(describeUpstreamError({ status: 401, message: 'Unauthorized' }).hint, '鉴权失败要有解读');
+    assert.ok(describeUpstreamError({ status: 404, message: 'Not Found' }).hint, '404 要有解读');
+    assert.ok(describeUpstreamError({ status: 429, message: 'rate limited' }).hint, '429 要有解读');
+    assert.ok(describeUpstreamError({ status: 502, message: 'Bad Gateway' }).hint, '5xx 要有解读（且说明重试过）');
+    assert.equal(describeUpstreamError({ message: 'something utterly unknown' }).hint, null, '识别不出时必须返回 null（不得编造解读、不得改原文）');
+    assert.equal(describeUpstreamError({ message: 'something utterly unknown' }).message, 'something utterly unknown', '识别不出时原文必须原样返回');
+
+    // 行为级：provider.chat 抛 Jinja 400 → runTurn 抛出的错误里既有原文又有解读，且界面上有一条
+    const io = mkIo();
+    const provider = { async chat() { const e = /** @type {any} */ (new Error('Unable to generate parser for this template. Error: Jinja Exception: No user query found in messages.')); e.status = 400; throw e; } };
+    const agent = mkAgent(provider, io, {});
+    let caught = /** @type {any} */ (null);
+    try { await agent.runTurn(msgs('审计')); } catch (e) { caught = e; }
+    assert.ok(caught, '上游 400 必须让回合失败（不得被当成空响应吞掉）');
+    assert.ok(String(caught.message).includes('Jinja Exception'), '错误消息必须保留上游原文（用户要看到原文才能判断）');
+    assert.ok(/模板/.test(String(caught.message)), '错误消息必须带上可操作解读，而不是把原文原样丢给用户');
+    assert.equal(caught.status, 400, 'HTTP 状态必须保留（调用方/日志仍要能读到）');
+    assert.ok(io.prints.some((t) => /上游错误/.test(t) && /Jinja Exception/.test(t)), '上游错误必须同时在界面上可见（子代理路径里它只会成为一行工具结果）');
+  }
+
+  // —— ⑦ 回合结束必须如实说"0 次工具调用"（否则"看起来在工作、其实什么都没做"） ——
+  {
+    assert.equal(zeroToolCallNotice({ modelRounds: 1, steps: 1 }), '', '单轮纯问答不该被这条提示打扰');
+    const multi = zeroToolCallNotice({ modelRounds: 3, steps: 3 });
+    assert.ok(/0 次工具调用/.test(multi) && /3 轮/.test(multi), `多轮却零工具调用必须如实说明"0 次工具调用"，实际：${multi}`);
+    assert.ok(/0 次工具调用/.test(zeroToolCallNotice({ modelRounds: 1, steps: 1, taskLike: true })), '任务态（含写/执行意图）即使只有一轮也必须说');
+    // 行为级：本地端点"只回正文、永不吐 tool_calls"——任务态一轮也要把这句话说出来
+    const io = mkIo();
+    const provider = { async chat() { return { text: '我建议这样做：先看 src/agent.js。', toolCalls: null, usage: { prompt_tokens: 30, completion_tokens: 12 }, finish: 'stop' }; } };
+    const agent = mkAgent(provider, io, {});
+    const res = await agent.runTurn(msgs('把这个仓库的缺陷修掉并提交'));
+    assert.ok(io.prints.some((t) => /0 次工具调用/.test(t)), '端点不返回 tool_calls 时，界面必须在回合结束时明确说"0 次工具调用"');
+    assert.ok(/0 次工具调用/.test(String(res.perf?.zeroToolCalls)), 'perf.zeroToolCalls 必须携带"0 次工具调用"这句收尾提示（WebUI 的 done 事件直接取它，是单一来源）');
+    assert.equal(res.perf?.noToolCalls, true, 'perf.noToolCalls 必须为真');
+    // 服务端确实把它放进了 done 事件（结构守卫：口径单源，不在服务端再拼一份文案）
+    assert.ok(/const zeroNote = String\(r\.perf\?\.zeroToolCalls \|\| ''\)/.test(serverSrc), 'WebUI 的 done 事件必须带上这条收尾提示');
+    assert.ok(/\[baseNote, zeroNote\]\.filter\(Boolean\)\.join/.test(serverSrc), '收尾提示必须与既有 note 合并而不是互相覆盖');
+  }
+
+  // —— ⑧ 发送前的规模预告（本地 prefill 必须先说出来，而不是让用户猜） ——
+  {
+    const local = prefillForecast({ promptTokens: 100000, contextWindow: 131072, isLocal: true, firstTokenMs: 600000, budget: 98304 });
+    assert.equal(local.warn, true, '本地端点 + 10 万 tokens 必须告警');
+    assert.ok(local.text.includes('100,000') && local.text.includes('131,072'), `预告必须写出估算值与窗口，实际：${local.text}`);
+    assert.ok(/prefill 可能需数分钟至数十分钟/.test(local.text), '本地端点必须预告 prefill 量级');
+    assert.ok(local.text.includes('600s'), '预告必须写出实际生效的首帧上限（用户据此决定调不调）');
+    assert.ok(/调大.*firstTokenMs.*更晚被发现/s.test(local.text), '必须点明"调大超时只会让失败更晚被发现"（否则用户只会一路调大）');
+    const ratio = prefillForecast({ promptTokens: 120000, contextWindow: 131072, isLocal: false, firstTokenMs: 300000 });
+    assert.equal(ratio.warn, true, `占比 ≥${Math.round(PREFILL_WARN_RATIO * 100)}% 必须告警（与是否本地无关）`);
+    const small = prefillForecast({ promptTokens: 500, contextWindow: 131072, isLocal: false, firstTokenMs: 300000 });
+    assert.equal(small.warn, false, '小上下文远程请求不得刷告警');
+    assert.ok(/远程端点/.test(small.text), '远程端点文案必须与本地区分');
+    assert.ok(PREFILL_WARN_TOKENS > 0 && PREFILL_WARN_RATIO > 0 && PREFILL_WARN_RATIO < 1, '两条告警线必须是有意义的阈值');
+    // 行为级：发请求前必须真的打过这条预告，且挂在 io.turnProgress 上（服务端据此落日志）
+    const io = mkIo();
+    const provider = { async chat() { return { text: '好的。', toolCalls: null, usage: { prompt_tokens: 30, completion_tokens: 3 }, finish: 'stop' }; } };
+    const agent = mkAgent(provider, io, {});
+    await agent.runTurn(msgs('你好'));
+    assert.ok(io.prints.some((t) => /本轮上下文 ≈ /.test(t)), '发送前必须打出一条上下文规模预告');
+    assert.ok(io.turnProgress && io.turnProgress.forecast && io.turnProgress.forecast.promptTokens > 0, 'io.turnProgress.forecast 必须可用（web-server.log 的预告行取它）');
+  }
+
+  // —— ⑨ 运行中的进度：TTFT / 帧数 / 字符数 / 工具计数（"在跑"与"卡死"必须能区分） ——
+  {
+    const line = formatTurnProgress({ phase: '解码中', elapsedMs: 125000, modelRounds: 2, toolCalls: 0, toolExecuted: 0, contentChars: 1200, ttftMs: 98000, tokensPerSec: 3.2 });
+    assert.ok(/0 次工具调用/.test(line), `工具调用为 0 时必须显式写出来，实际：${line}`);
+    assert.ok(/首帧=98\.0s/.test(line) && /3\.2 tok\/s/.test(line), `进度行必须含 TTFT 与吞吐，实际：${line}`);
+    assert.ok(/已跑 2m05s/.test(line) && /模型轮次=2/.test(line), `进度行必须含时长与轮次，实际：${line}`);
+    const waiting = formatTurnProgress({ phase: '执行工具 task', elapsedMs: 600000, modelRounds: 1, toolCalls: 1, toolExecuted: 0, contentChars: 0, ttftMs: 1000, pendingTool: { name: 'task', ms: 300000 } });
+    assert.ok(/正在等待工具 task（已 300s）/.test(waiting), `等待长工具必须看得见（真机里的 task 单次要 20+ 分钟），实际：${waiting}`);
+    // 行为级：桩流式吐 3 个增量 → ttftMs / contentChars / streamFrames 必须落账
+    const io = mkIo();
+    const provider = {
+      async chat(/** @type {any} */ { onDelta }) {
+        await sleep(60);
+        onDelta?.({ text: '第一段' });
+        onDelta?.({ reasoning: '想一想' });
+        onDelta?.({ text: '第二段' });
+        return { text: '第一段第二段', reasoning: '想一想', toolCalls: null, usage: { prompt_tokens: 30, completion_tokens: 8 }, finish: 'stop' };
+      },
+    };
+    const agent = mkAgent(provider, io, {});
+    const res = await agent.runTurn(msgs('你好'));
+    const tp = /** @type {any} */ (io.turnProgress);
+    assert.equal(typeof tp.ttftMs, 'number', 'TTFT 必须是数字（本地模型最关键的指标）');
+    assert.equal(tp.ttftMs, res.perf.ttftMs, 'perf.ttftMs 与 io.turnProgress.ttftMs 必须同源');
+    assert.equal(tp.streamFrames, 3, '增量帧数必须如实统计');
+    assert.ok(tp.contentChars >= 9, `已收字符数必须如实统计，实际：${tp.contentChars}`);
+    assert.equal(tp.llmCalls, 1, '模型请求次数必须如实统计');
+    assert.equal(tp.modelRounds, 1, '模型轮次必须如实统计');
+    assert.ok(io.prints.some((t) => /首帧/.test(t)), '首帧到达必须在界面上留一行（TTFT）');
+    // 服务端必须定期把这些写进 web-server.log（真机"4 小时零行"的直接回归点）
+    assert.ok(/srvlog\(\s*`chat 进度 \$\{taskId\} `/.test(serverSrc) || /chat 进度 \$\{taskId\}/.test(serverSrc), '服务端必须定期往 web-server.log 落"chat 进度"行');
+    assert.ok(/formatTurnProgress\(\{/.test(serverSrc), '进度行文案必须与 agent 共用同一份纯函数（口径不漂移）');
+    assert.ok(/lastProgressLogAt < 30000/.test(serverSrc), '进度日志必须限频（约 30s 一行，不能每帧都写）');
+    assert.ok(/chat 预告 \$\{taskId\}/.test(serverSrc), '发送前的规模预告必须落进 web-server.log');
+    assert.ok(/chat 首帧 \$\{taskId\}/.test(serverSrc), '首帧时延必须落进 web-server.log');
+    assert.ok(/toolCalls: tp\?\.toolCalls \?\? 0/.test(serverSrc), 'progress 事件必须带上工具调用数（0 也要带）');
+    assert.ok(/pendingTool: tp\?\.pendingTool/.test(serverSrc), 'progress 事件必须带上"正在等待哪个工具/多久"');
+    assert.ok(/工具调用 '\+\(ev\.toolCalls\|\|0\)\+' 次/.test(appSrc), '界面状态条必须显示工具调用次数（0 次也要显示）');
+    assert.ok(/stalled: Boolean\(r\.stalled\)/.test(serverSrc), 'done 事件必须带 stalled（前端据此区别于"正常完成"）');
+    assert.ok(/r\.stalled \? 'stalled'/.test(serverSrc), '无进展中止的任务状态必须是 stalled（不得冒充 done）');
+  }
+
+  // —— ⑩ 端点能力/延迟预检（A 追加）：三态判定 + 模型名不一致提示 + 自适应超时 ——
+  // 负责人本机实测：60091（MLocalModel3.6.2 / llama.cpp）带 tools 的极小请求 200 + tool_calls，2.7s；
+  // 而 8081/8082（mtplx-qwen38-27b）当时**连接被拒**。三态必须在长任务前几秒内就有答案。
+  {
+    const { probeEndpoint, modelNameMismatch, adaptiveTimeouts, PROGRESS_MIN_MS, PROGRESS_MAX_MS, customSourceOf, availableModels, endpointLabel } =
+      await import(pathToFileURL(path.join(srcDir, 'model-discovery.js')).href);
+    const mkRes = (/** @type {any} */ { ok = true, status = 200, json = null, text = '', body = null, frames = [] }) => ({
+      ok, status,
+      json: async () => json,
+      text: async () => text,
+      body: body || {
+        getReader() {
+          let i = 0;
+          return {
+            async read() {
+              if (i >= frames.length) return { done: true, value: undefined };
+              const v = new TextEncoder().encode(frames[i++]);
+              return { done: false, value: v };
+            },
+            cancel() {},
+          };
+        },
+      },
+    });
+    const sseOf = (/** @type {any[]} */ objs) => objs.map((o) => `data: ${JSON.stringify(o)}\n\n`).concat(['data: [DONE]\n\n']);
+    const chunkWithTool = { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'mingdao_probe', arguments: '{"v":1}' } }] }, finish_reason: null }] };
+    const chunkWithText = { choices: [{ index: 0, delta: { content: '我不调用工具，直接回答。' }, finish_reason: null }] };
+    const cfgProbe = { model: 'local-x', customModels: { 'local-x': { label: '本地部署', baseUrl: 'http://127.0.0.1:60091/v1' } } };
+
+    // ⑩-1 可达 + **稳定**支持工具调用（引擎名与配置名不一致 → 必须提示两者）
+    {
+      const seen = [];
+      let toolRuns = 0;
+      const fetchImpl = async (/** @type {any} */ url, /** @type {any} */ init) => {
+        seen.push(String(url));
+        const body = JSON.parse(String(init.body));
+        if (Array.isArray(body.tools)) {
+          toolRuns += 1;
+          // 256 而不是 16：思考型模型（本机 MLocalModel3.6.2）会先输出思考，16 个 token 必被
+          // finish_reason=length 截断 —— 那样"没测出来"会被误报成"不支持工具调用"（真机实测踩到过）
+          assert.equal(body.max_tokens, 256, '工具探针必须是**极小**请求（max_tokens 256：给思考内容留余量）');
+          assert.ok(body.tools.length === 1, '探针必须带一个工具声明（否则测不出 function calling）');
+          assert.equal(body.stream, true, '探针必须走流式（要量的是首帧 TTFT，不是总时长）');
+          assert.ok(/请调用 mingdao_probe 工具/.test(JSON.stringify(body.messages)), '提示词必须**明确要求调用工具**（否则"恰好直接回答"会被误判成不支持）');
+          return mkRes({ frames: sseOf([{ choices: [], model: '/Users/x/models/mLocalModel3.6.2.gguf' }, chunkWithTool]) });
+        }
+        assert.equal(body.max_tokens, 8, '参考 prefill 请求同样要是极小的输出（max_tokens 8）');
+        return mkRes({ frames: sseOf([chunkWithText]) });
+      };
+      const p = await probeEndpoint(cfgProbe, 'local-x', { fetchImpl, force: true, persist: false });
+      assert.equal(p.state, 'ok-tools', `3/3 返回 tool_calls 必须判为 ok-tools，实际 ${p.state}`);
+      assert.equal(p.toolState, 'stable-tools', '三态必须是"稳定支持"');
+      assert.equal(p.toolCallHits, 3, '必须重复 3 次并如实记命中次数（单次结果不得当结论）');
+      assert.equal(p.toolCallInconclusive, 0, '有明显结论（tool_calls）的样本不得计入"不可判定"');
+      assert.equal(p.toolCallRuns, 3, '样本数必须是 3');
+      assert.equal(typeof p.ttftMs, 'number', '必须量出首帧时延（中位数）');
+      assert.equal(p.ttftSamples.length, 3, '三次样本都要留痕（TTFT 跳变本身就是"引擎被占住"的信号）');
+      assert.equal(typeof p.prefillMs, 'number', '必须测一次参考 prefill（固定 ~2000 tokens）');
+      assert.equal(p.prefillTokens, 2000, '参考 prefill 的规模必须写明（2000 tokens）');
+      assert.equal(p.nameMismatch, true, '引擎回 mLocalModel3.6.2.gguf vs 配置 local-x → 必须判为不一致（当时配的是 A、引擎报的是 B）');
+      assert.ok(/不一致/.test(p.note) && /mLocalModel3.6.2.gguf/.test(p.note) && /local-x/.test(p.note), `不一致时提示里必须同时写出两个名字，实际：${p.note}`);
+      assert.ok(/稳定支持工具调用（3\/3）/.test(p.note), `结论必须写进 note（界面/日志直接用），实际：${p.note}`);
+      assert.ok(/参考 prefill 2000 tokens/.test(p.note), 'note 里必须同时给出 TTFT 与参考 prefill');
+      // v0.6.13：**不**额外打 GET /models——引擎真正加载的模型名来自 chat 响应的 `model` 字段
+      // （llama.cpp 直接回完整文件路径）。少一次请求、也不要求端点实现 /models（只实现 chat 的端点不该被预检打扰）。
+      assert.ok(!seen.some((u) => u.endsWith('/models')), '预检不得额外打 GET /models（端点可能没实现它；model 字段已足够）');
+      assert.ok(/引擎实际加载的是|引擎加载/.test(p.note), `结论里必须写出引擎实际加载的模型名，实际：${p.note}`);
+      assert.equal(toolRuns, 3, '工具探针必须跑满 3 次');
+    }
+    // ⑩-2 可达 + **不稳定**（负责人实测：同一端点同一请求两次结果相反：2.7s 有 / 23.9s 无）
+    {
+      let i = 0;
+      const fetchImpl = async (/** @type {any} */ url, /** @type {any} */ init) => {
+        const body = JSON.parse(String(init.body));
+        if (!Array.isArray(body.tools)) return mkRes({ frames: sseOf([chunkWithText]) });
+        i += 1;
+        return mkRes({ frames: sseOf([i % 2 === 1 ? chunkWithTool : chunkWithText]) }); // 有 / 无 / 有
+      };
+      const p = await probeEndpoint(cfgProbe, 'local-x', { fetchImpl, force: true, persist: false });
+      assert.equal(p.toolState, 'unstable-tools', `2/3 命中必须判为"不稳定"，实际 ${p.toolState}`);
+      assert.equal(p.state, 'unstable-tools', '粗三态也要能看出不稳定（不能与"稳定支持"混为一谈）');
+      assert.equal(p.toolCallHits, 2, '命中次数必须如实记录');
+      assert.ok(/不稳定/.test(p.note) && /2\/3/.test(p.note), `不稳定态必须显式提示（"任务可能步数为 0"），实际：${p.note}`);
+      assert.ok(/步数为 0/.test(p.note), '不稳定态必须说清后果');
+    }
+    // ⑩-3 可达但**不返回 tool_calls**（chatflow 类端点：只吐正文）
+    {
+      const fetchImpl = async (/** @type {any} */ url, /** @type {any} */ init) => {
+        const body = JSON.parse(String(init.body));
+        return mkRes({ frames: sseOf([Array.isArray(body.tools) ? chunkWithText : chunkWithText]) });
+      };
+      const p = await probeEndpoint(cfgProbe, 'local-x', { fetchImpl, force: true, persist: false });
+      assert.equal(p.state, 'ok-textonly', `0/3 不返回 tool_calls 必须判为 ok-textonly，实际 ${p.state}`);
+      assert.equal(p.toolState, 'no-tools', '三态必须是"不支持"');
+      assert.equal(p.toolCallHits, 0, '命中次数为 0');
+      assert.equal(p.nameMismatch, false, '名字一致时不得误报不一致');
+      assert.ok(/未返回 tool_calls（0\/3/.test(p.note), `必须明确"没返回 tool_calls"，实际：${p.note}`);
+    }
+    // ⑩-3b 样本被 max_tokens 截断（真机 60091 实测：思考型模型先输出思考，finish_reason=length）——
+    // 这种样本既不是"命中"也不是"未命中"，必须判为**不可判定**，绝不能据此说"不支持工具调用"
+    {
+      const truncated = { choices: [{ index: 0, delta: { reasoning_content: '我先想想…' }, finish_reason: null }], model: 'local-x' };
+      const finishLen = { choices: [{ index: 0, delta: {}, finish_reason: 'length' }] };
+      const fetchImpl = async (/** @type {any} */ url, /** @type {any} */ init) => {
+        const body = JSON.parse(String(init.body));
+        return mkRes({ frames: sseOf(Array.isArray(body.tools) ? [truncated, finishLen] : [truncated, finishLen]) });
+      };
+      const p = await probeEndpoint(cfgProbe, 'local-x', { fetchImpl, force: true, persist: false });
+      assert.equal(p.toolState, 'unknown', `被截断的样本不能当结论：必须是"不可判定"，实际 ${p.toolState}`);
+      assert.equal(p.toolCallRuns, 0, '不可判定的样本不得计入有效样本数');
+      assert.ok((p.toolCallInconclusive || 0) >= 1, '不可判定的样本数必须如实记录');
+      assert.ok(/未能判定/.test(p.note) && /max_tokens/.test(p.note), `必须说明"未能判定"及其原因（被 max_tokens 截断），实际：${p.note}`);
+      assert.ok(/不要.*据此判定/.test(p.note), '必须明确"不要据此判定不支持工具调用"（真机上这条误判会直接把可用端点否掉）');
+      assert.equal(p.state, 'unreachable', '工具调用不可判定时，粗三态不得谎报 ok-tools');
+    }
+    // ⑩-4 不可达（连接被拒）——8081/8082 当时的形态
+    {
+      const fetchImpl = async () => { throw new Error('fetch failed: ECONNREFUSED'); };
+      const p = await probeEndpoint({ ...cfgProbe, customModels: { 'local-x': { baseUrl: 'http://127.0.0.1:8081/v1' } } }, 'local-x', { fetchImpl, force: true, persist: false });
+      assert.equal(p.state, 'unreachable', '连不上必须判为 unreachable');
+      assert.ok(/不可达/.test(p.note) && /ECONNREFUSED|不可达/.test(p.note), `不可达必须写明原因，实际：${p.note}`);
+    }
+    // ⑩-4b "同端点突然变慢 = 引擎可能还被上一个请求占着"（负责人实测 2.7s → 23.9s）
+    {
+      const home139 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-probe-base-'));
+      const prevHome139 = process.env.MINGDAO_HOME;
+      process.env.MINGDAO_HOME = home139;
+      try {
+        fs.mkdirSync(home139, { recursive: true });
+        // 基线存在 model-cache.json 的保留键里（复用既有写路径，不新增静默吞写）
+        fs.writeFileSync(path.join(home139, 'model-cache.json'), JSON.stringify({ __probeBaseline: { 'http://127.0.0.1:60091/v1|local-x': { at: Date.now(), ttftMs: 20, prefillMs: 20 } } }));
+        const fetchImpl = async (/** @type {any} */ url, /** @type {any} */ init) => {
+          await sleep(120); // 本次"明显变慢"
+          const body = JSON.parse(String(init.body));
+          return mkRes({ frames: sseOf([Array.isArray(body.tools) ? chunkWithTool : chunkWithText]) });
+        };
+        const p = await probeEndpoint(cfgProbe, 'local-x', { fetchImpl, force: true });
+        assert.ok(p.ttftBaselineMs === 20, '必须读到本机历史基线（<home>/model-probe.json）');
+        assert.ok(p.slowdown && p.slowdown.ttftRatio >= 3, `本次比历史慢 3 倍以上必须算出来，实际 ${JSON.stringify(p.slowdown)}`);
+        assert.ok(/可能仍在处理上一个请求/.test(p.note) && /重启引擎/.test(p.note), `显著变慢必须提示"可能被旧请求占着、建议重启引擎"，实际：${p.note}`);
+      } finally {
+        if (prevHome139 === undefined) delete process.env.MINGDAO_HOME; else process.env.MINGDAO_HOME = prevHome139;
+        safeRmSync(home139, { recursive: true, force: true });
+      }
+    }
+    // ⑩-4 名称比对（纯函数）：路径/量化后缀/大小写差异不算不一致；完全不同的名字必须算
+    {
+      assert.equal(modelNameMismatch('MLocalModel3.6.2', ['/Users/x/models/mLocalModel3.6.2.gguf']), false, '大小写 + 路径 + .gguf 后缀不算不一致');
+      assert.equal(modelNameMismatch('MLocalModel3.6.2', ['qwen3-27b.gguf']), true, '完全不同的名字必须判为不一致');
+      assert.equal(modelNameMismatch('', ['x']), false, '配置名为空时不误报');
+    }
+    // ⑩-5 自适应超时：地板=既有默认（不得更激进）、慢端点放宽、封顶、显式配置优先
+    {
+      const fast = adaptiveTimeouts({ probeTtftMs: 2700, probePrefillMs: 1800, isLocal: true, timeoutCfg: {}, noProgressCfg: null });
+      assert.equal(fast.firstTokenMs, 600000, '快端点（2.7s）首帧上限仍是既有默认 600s（不得更激进）');
+      assert.equal(fast.noProgressTimeoutMs, PROGRESS_MIN_MS, `快端点的看门狗取 10 分钟下限，实际 ${fast.noProgressTimeoutMs}`);
+      assert.equal(fast.adapted, true, '有实测数据时必须标记为"已自适应"');
+      const slow = adaptiveTimeouts({ probeTtftMs: 60000, isLocal: true, timeoutCfg: {}, noProgressCfg: null });
+      assert.equal(adaptiveTimeouts({ probePrefillMs: 60000, isLocal: true, timeoutCfg: {}, noProgressCfg: null }).firstTokenMs, 600000, '参考 prefill 60s × 5 = 300s，低于既有地板 600s → 仍取地板（不得更激进）');
+      assert.equal(adaptiveTimeouts({ probePrefillMs: 200000, isLocal: true, timeoutCfg: {}, noProgressCfg: null }).firstTokenMs, 1000000, '参考 prefill 200s × 5 = 1000s > 地板 → 放宽到 1000s');
+      assert.ok(/参考 prefill/.test(adaptiveTimeouts({ probePrefillMs: 60000, isLocal: true }).basis), '自适应依据里必须写明用了参考 prefill（可追溯）');
+      assert.equal(slow.firstTokenMs, 1200000, '实测首帧 60s → 上限 20 倍 = 1200s（给真实大上下文留余量）');
+      assert.ok(slow.noProgressTimeoutMs > fast.noProgressTimeoutMs, '慢端点的看门狗必须更宽（否则会误杀）');
+      assert.equal(adaptiveTimeouts({ probeTtftMs: 600000, isLocal: true, timeoutCfg: {}, noProgressCfg: null }).firstTokenMs, 1800000, '首帧上限封顶 1800s（= 既有单请求总量）');
+      assert.equal(adaptiveTimeouts({ probeTtftMs: 600000, isLocal: false, timeoutCfg: {}, noProgressCfg: null }).firstTokenMs, 1800000, '远程同样封顶');
+      assert.equal(adaptiveTimeouts({}).firstTokenMs, 300000, '无预检数据的远程端点：既有默认 300s');
+      assert.equal(adaptiveTimeouts({ isLocal: true }).firstTokenMs, 600000, '无预检数据的本地端点：既有默认 600s');
+      assert.equal(adaptiveTimeouts({ probeTtftMs: 60000, isLocal: true, timeoutCfg: { firstTokenMs: 12345 } }).firstTokenMs, 12345, '用户显式配置**优先于**自适应（显式 > 自动）');
+      assert.equal(adaptiveTimeouts({ probeTtftMs: 2700, isLocal: true, noProgressCfg: 999 }).noProgressTimeoutMs, 999, '用户显式配的看门狗阈值优先');
+      assert.equal(PROGRESS_MAX_MS, DEFAULT_NO_PROGRESS_TIMEOUT_MS, '看门狗自适应上限必须与 agent.js 的默认值同源（否则"默认 60 分钟"会两处漂移）');
+      assert.ok(PROGRESS_MIN_MS >= 600000, '自适应下限不得低于 10 分钟（避免误杀一次正常的长回复/长工具）');
+    }
+    // ⑩-6 预检结果必须**被用上**（否则"预检"只是个装饰——变异把结果丢掉时这条会红）
+    {
+      const io = mkIo();
+      const provider = { async chat() { return { text: '好的。', toolCalls: null, usage: { prompt_tokens: 30, completion_tokens: 3 }, finish: 'stop' }; } };
+      const agent = mkAgent(provider, io, { endpointProbe: { state: 'ok-tools', toolCalls: true, ttftMs: 2700, note: '✅ 可达 · 支持工具调用 · 实测首帧 2.7s · 引擎加载模型 mLocalModel3.6.2.gguf' } });
+      await agent.runTurn(msgs('你好'));
+      assert.ok(io.prints.some((t) => /端点预检：/.test(t) && /支持工具调用/.test(t)), '发送前的规模预告里必须带上端点预检结论（cfg.endpointProbe）');
+      assert.ok(/firstTokenMs: adapt\.firstTokenMs/.test(serverSrc) || /adapt\.firstTokenMs/.test(serverSrc), '服务端必须把自适应首帧上限真的交给 provider（不能只打印不生效）');
+      assert.ok(/chatCfg\.noProgressTimeoutMs = adapt\.noProgressTimeoutMs/.test(serverSrc), '服务端必须把自适应看门狗阈值交给本回合（否则快端点仍会拖到 60 分钟）');
+      assert.ok(/probeEndpoint\(cfg, m, \{ timeoutMs: 15000 \}\)/.test(serverSrc), '建 provider 前必须做一次预检（缓存 10 分钟）');
+      assert.ok(/chat 预检 \$\{taskId\}/.test(serverSrc), '预检结论必须落进 web-server.log（事后可查"当时端点是什么状态"）');
+      assert.ok(/chatCfg = \{ \.\.\.chatCfg, endpointProbe: probe \}/.test(serverSrc),
+        '服务端必须把端点预检结论交给本回合（否则"发送前的规模预告里必须带上端点预检结论"这条就只是装饰）');
+    }
+  }
+
+  // —— ⑪ B：自定义端点的来源标注（下拉里不能把 chatflow 应用名/本地端点名当成官方模型） ——
+  {
+    const { customSourceOf: cso, availableModels: am } = await import(pathToFileURL(path.join(srcDir, 'model-discovery.js')).href);
+    const cfgB = {
+      provider: 'deepseek',
+      model: 'clinical-flow-v3',
+      customModels: {
+        'clinical-flow-v3': { label: '下游 Dify 应用', baseUrl: 'https://dify.example.com/v1' },
+        'cap-only': { label: '只补能力', contextWindow: 131072, vision: true },
+        'custom:weird': { label: '老式前缀名', baseUrl: 'http://127.0.0.1:9999/v1' },
+      },
+    };
+    const ep = cso(cfgB, 'clinical-flow-v3');
+    assert.equal(ep.source, 'custom-endpoint', '声明了 baseUrl 的条目必须标为自定义端点');
+    assert.ok(/自定义端点/.test(ep.sourceLabel) && /dify\.example\.com/.test(ep.sourceLabel), `自定义条目必须标出"自定义端点"并写出端点，实际：${ep.sourceLabel}`);
+    assert.ok(/不是内置官方模型/.test(ep.note), '必须显式说明它不是官方模型');
+    const cap = cso(cfgB, 'cap-only');
+    assert.equal(cap.source, 'custom-capability', '只写能力字段的条目不得被当成端点');
+    assert.ok(/不改变请求去向/.test(cap.note), '能力覆盖必须说明"请求去向不变"（否则用户以为换了端点）');
+    assert.equal(cso(cfgB, 'custom:weird').source, 'custom-endpoint', '`custom:<名>` 形态同样必须标为自定义端点');
+
+    // 行为级：availableModels 的每一项都必须带来源标注（结构级 + 行为级各一）
+    fs.writeFileSync(path.join(home139Main, 'model-cache.json'), JSON.stringify({ deepseek: { models: ['deepseek-v4-pro', 'deepseek-v9-experimental'], fetchedAt: Date.now() } }));
+    const oldKey = process.env.DEEPSEEK_API_KEY;
+    process.env.DEEPSEEK_API_KEY = 'probe-key';
+    let list = [];
+    try {
+      list = await am(cfgB, 'clinical-flow-v3');
+    } finally {
+      if (oldKey === undefined) delete process.env.DEEPSEEK_API_KEY; else process.env.DEEPSEEK_API_KEY = oldKey;
+      safeRmSync(path.join(home139Main, 'model-cache.json'), { force: true });
+    }
+    assert.ok(list.length >= 4, `官方 + 自定义都必须在列表里，实际 ${list.length}`);
+    for (const m of list) {
+      assert.ok(m.sourceLabel && m.source, `每一条都必须带来源标注（source/sourceLabel），实际：${JSON.stringify(m)}`);
+    }
+    const customItem = list.find((m) => m.name === 'clinical-flow-v3');
+    assert.ok(customItem, '（前置）自定义条目必须在列表里');
+    assert.equal(customItem.official, false, '自定义条目必须 official:false');
+    assert.equal(customItem.source, 'custom-endpoint', '自定义条目必须标出"自定义端点"');
+    assert.ok(/自定义端点/.test(customItem.providerLabel) && /dify\.example\.com/.test(customItem.providerLabel), `下拉分组名必须带端点（分组即来源），实际：${customItem.providerLabel}`);
+    assert.ok(/自定义端点/.test(customItem.label), '自定义条目必须标出"自定义端点"：展示名里也要带来源，避免与官方模型混在一起');
+    // 官方/线上条目：明确标为服务商自己的模型（不是自定义端点）
+    const official = list.find((m) => m.name === 'deepseek-v4-pro');
+    assert.ok(official && official.source === 'preset' && official.official === true, '内置预设条目必须标为官方预设');
+    // 不在内置预设表里的线上模型（厂家上新/改名）必须标成"线上名单 · 服务商"，而不是与自定义端点混为一谈
+    const dyn = /** @type {any} */ (list.find((m) => m.name === 'deepseek-v9-experimental') || {});
+    assert.ok(dyn.source === 'discovered' && /线上名单/.test(String(dyn.sourceLabel)), `线上拉到的名单必须标为"线上名单 · 服务商"，实际：${JSON.stringify(dyn)}`);
+    assert.equal(dyn.official, false, '未收录预设的线上模型不得标成 official:true');
+    // 下拉的分组/后缀必须真的用上来源（前端结构守卫）
+    assert.ok(/const g=m\.providerLabel\|\|'其他'/.test(appSrc), '下拉必须按 providerLabel（现在含端点）分组——分组即来源');
+    assert.ok(/o\.title=m\.label/.test(appSrc), '下拉每一行的 title 必须带来源说明（含端点）');
+  }
+
+  // —— ⑫ C：预设按语义拆分（本地模型只是"参数预设"，不是审计专用）+ 老名字走别名且**说出来** ——
+  {
+    const { listPresets, loadPreset, presetAliasOf, canonicalPresetName } = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
+    const homeC = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sec139-preset-'));
+    const prevHomeC = process.env.MINGDAO_HOME;
+    process.env.MINGDAO_HOME = homeC;
+    try {
+      const all = listPresets(null).filter((p) => p.source === 'builtin');
+      const lm = all.find((p) => p.name === 'local-model');
+      const ra = all.find((p) => p.name === 'readonly-audit');
+      assert.ok(lm && ra, '内置预设必须同时有 local-model 与 readonly-audit');
+      // 契约级：本地模型预设**不得**携带审计人格 / 工具白名单 / 权限字段（负责人原话：本地模型只是代替云模型 API）
+      assert.ok(!lm.systemPrompt, '本地模型预设不得携带审计人格（它只是参数预设）');
+      assert.ok(!lm.tools, '本地模型预设不得限制工具白名单（否则本地模型"功能不一致"）');
+      assert.ok(!('permission' in lm) && !lm.recommendedPermission, '本地模型预设不得建议/覆盖权限档');
+      // 参数（maxRounds/maxOutputTokens/contextBudget）不在列表字段里，必须从磁盘整份读回来断言
+      const lmFull = loadPreset(null, 'local-model');
+      assert.ok(Number(lmFull.maxRounds) > 0 && Number(lmFull.maxOutputTokens) > 0 && Number(lmFull.contextBudget) > 0,
+        `本地模型预设必须真的带上保守参数（maxRounds/maxOutputTokens/contextBudget），实际：${JSON.stringify(lmFull)}`);
+      // 审计人格与只读白名单搬到 readonly-audit，且 recommendedPermission 只在这里（仍是"建议"）
+      const raFull = loadPreset(null, 'readonly-audit');
+      assert.ok(raFull.systemPrompt && /审计/.test(String(raFull.systemPrompt)), 'readonly-audit 必须携带审计人格');
+      assert.ok(Array.isArray(ra.tools) && ra.tools.length && !ra.tools.includes('write') && !ra.tools.includes('edit'), 'readonly-audit 的只读白名单必须存在且不含写入类工具');
+      assert.equal(ra.recommendedPermission, 'readonly', 'recommendedPermission 只能放在 readonly-audit（且是建议）');
+      assert.ok(!('permission' in ra), '内置预设不得声明 permission（覆盖语义）');
+      assert.ok(Array.isArray(lm.aliases) && lm.aliases.includes('local-audit'), 'local-model 必须透出别名 local-audit（不得静默消失）');
+      // 行为级：老名字真的能加载到新预设，并且**标出**它是别名来的
+      const viaAlias = loadPreset(null, 'local-audit');
+      assert.ok(viaAlias && viaAlias.name === 'local-model', `老名字 local-audit 必须解析到 local-model，实际：${viaAlias && viaAlias.name}`);
+      assert.equal(viaAlias.aliasedFrom, 'local-audit', '别名调用必须留下"从哪个老名字来的"标记（WebUI banner 据此提示已更名）');
+      assert.deepEqual(presetAliasOf('local-audit'), { from: 'local-audit', to: 'local-model' }, '别名表单源');
+      assert.equal(canonicalPresetName('readonly-audit'), 'readonly-audit', '没有别名的名字原样返回');
+      // 磁盘上有同名预设时**以磁盘为准**（别名不抢本地文件）
+      const projC = path.join(homeC, 'proj');
+      fs.mkdirSync(path.join(projC, '.mingdao', 'presets'), { recursive: true });
+      fs.writeFileSync(path.join(projC, '.mingdao', 'presets', 'local-audit.json'), JSON.stringify({ name: 'local-audit', label: '我自己的', systemPrompt: '自家的' }));
+      const mine = loadPreset(projC, 'local-audit');
+      assert.ok(mine && mine.name === 'local-audit' && !mine.aliasedFrom, '磁盘上有同名预设时必须以磁盘为准（别名只兜底）');
+      // 服务端必须把"已更名"说出来（结构守卫：别名提示不能只在库里）
+      assert.ok(/chatPreset\.aliasedFrom/.test(serverSrc) && /已更名为/.test(serverSrc), 'WebUI 必须在用到别名时给出"已更名"提示（兼容不等于静默）');
+      assert.ok(/PRESET_ALIASES/.test(agentSrc) === false, '（口径）别名表只在 presets.js 一处定义');
+      const presetsSrc = fs.readFileSync(path.join(srcDir, 'presets.js'), 'utf8');
+      assert.ok(/'local-audit': 'local-model'/.test(presetsSrc), '别名表必须是一处显式映射（便于日后加新别名）');
+    } finally {
+      if (prevHomeC === undefined) delete process.env.MINGDAO_HOME; else process.env.MINGDAO_HOME = prevHomeC;
+      safeRmSync(homeC, { recursive: true, force: true });
+    }
+  }
+
+  if (prevHome139 === undefined) delete process.env.MINGDAO_HOME; else process.env.MINGDAO_HOME = prevHome139;
+  safeRmSync(home139Main, { recursive: true, force: true });
+  safeRmSync(tmp, { recursive: true, force: true });
+  ok('v0.6.13 本地模型零信号长回合：无进展看门狗（阈值=2×单请求总量上限、0/NaN/Infinity 不得关掉、子代理继承截止时刻、不误杀真干活）+ 上游错误原文与可操作解读 + 回合收尾如实报"0 次工具调用" + 发送前规模预告 + TTFT/吞吐/工具计数进度行（日志定期留痕、口径单源）+ 端点预检三态/不稳定态/参考 prefill/变慢告警 + 预设按语义拆分（local-model 不带人格白名单权限、readonly-audit 独立、local-audit 走别名且说出来）');
 }
 
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket

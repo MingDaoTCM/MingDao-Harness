@@ -11,8 +11,486 @@ import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { PROVIDERS, MODELS } from './models.js';
 import { getStoredKey } from './credentials.js';
+import { isLocalBaseUrl } from './model-caps.js';
+import { resolveProviderConfig } from './providers/index.js';
 
 const TTL_MS = 60 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// v0.6.13（A/B）：自定义端点的**来源标注**（B）与**能力/延迟预检**（A 追加）
+//
+// B（负责人实测：模型下拉里出现下游环境的东西，看不出是不是官方模型）：
+//   下拉数据来源核实（本函数即唯一来源）：GET /api/state → availableModels() →
+//     · 内置服务商：PROVIDERS 名单 + 该服务商 /models 的线上名单（缓存在 model-cache.json，TTL 1h）；
+//     · 自定义：**只来自 config.customModels** —— fetchProviderModels 显式跳过 'custom'，
+//       自定义端点的 /models 从不写进 model-cache.json，因此**不存在跨环境运行时串数据**。
+//   也就是说：下拉里那些条目是"配置驱动"的（谁往 config.customModels 里写了什么，就列什么），
+//   但此前它们只标了 providerLabel='自定义'、**看不出来自哪个端点**，于是容易被当成官方模型。
+//   现在每条自定义条目都带 source/sourceLabel/endpoint，并把 providerLabel 直接写成
+//   「自定义端点 · host」——下拉按 providerLabel 分组，分组名本身就是来源。
+//
+// A（负责人本机 35B 卡住 4 小时、日志零行）：光有超时不够，"这个端点到底行不行"必须在
+//   长任务开始前几秒内就有答案。probeEndpoint() 打一次**极小**请求（1 条 user + 1 个工具声明 +
+//   max_tokens 16，流式取首帧），给出三态判定 + 实测 TTFT + 引擎实际加载的模型名。
+// ---------------------------------------------------------------------------
+
+/** 预检结果缓存 TTL（10 分钟）：端点能力/延迟变化不快，但也不能一辈子不重测。 */
+const PROBE_TTL_MS = 10 * 60 * 1000;
+/** 无进展看门狗的自适应下限/上限（见 adaptiveTimeouts）。
+ *  上限与 agent.js 的 DEFAULT_NO_PROGRESS_TIMEOUT_MS 相同——由冒烟断言钉住两者一致（单源守卫）。 */
+export const PROGRESS_MIN_MS = 600000;
+export const PROGRESS_MAX_MS = 3600000;
+
+/**
+ * 从 baseUrl 取一个给人看的端点标识（host + 路径前缀）。
+ * @param {any} baseUrl
+ */
+export function endpointLabel(/** @type {any} */ baseUrl) {
+  try {
+    const u = new URL(String(baseUrl || ''));
+    if (!u.hostname) return '';
+    const p = u.pathname && u.pathname !== '/' ? u.pathname.replace(/\/+$/, '') : '';
+    return `${u.host}${p}`;
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 自定义条目的来源描述（纯函数，**B 的核心**）。
+ * 判据走 resolveProviderConfig（`custom:<名>` = 声明了传输字段的端点；否则只是能力覆盖）——
+ * 不在本文件再抄一份"哪些字段算端点声明"的键表（那正是本项目反复栽过的"同一规则多份实现"）。
+ * @param {any} cfg @param {string} cmName
+ * @returns {{ source: 'custom-endpoint'|'custom-capability', sourceLabel: string, endpoint: string,
+ *            providerLabel: string, isLocalEndpoint: boolean, note: string }}
+ */
+export function customSourceOf(/** @type {any} */ cfg, /** @type {string} */ cmName) {
+  const cm = (cfg?.customModels || {})[cmName] || {};
+  let pc = /** @type {any} */ (null);
+  try {
+    pc = resolveProviderConfig(cfg, cmName);
+  } catch {}
+  const endpoint = endpointLabel(pc?.baseUrl || cm.baseUrl || '');
+  // `custom:<名>` 是 providers/index.js 对"声明式端点"的命名；`custom:`/`custom/` 前缀的名字同理。
+  const isEndpoint = Boolean(pc && /^custom[:/]/.test(String(pc.name || ''))) || /^custom[:/]/i.test(String(cmName));
+  const local = isLocalBaseUrl(pc?.baseUrl || cm.baseUrl || '');
+  if (isEndpoint) {
+    const where = endpoint || '（未写明 baseUrl）';
+    const sourceLabel = `自定义端点 · ${where}`;
+    return {
+      source: 'custom-endpoint',
+      sourceLabel,
+      endpoint,
+      providerLabel: sourceLabel,
+      isLocalEndpoint: local,
+      note: `该条目来自 config.customModels，是**你自己配置的端点**（${where}）${local ? '（本机/内网地址）' : ''}——不是内置官方模型，也不随内核发版变化。`,
+    };
+  }
+  const via = String(cm.provider || pc?.name || '').trim();
+  const sourceLabel = `自定义（能力覆盖${via ? ` · 沿用 ${via} 端点` : ''}）`;
+  return {
+    source: 'custom-capability',
+    sourceLabel,
+    endpoint,
+    providerLabel: sourceLabel,
+    isLocalEndpoint: local,
+    note:
+      `该条目只声明能力（contextWindow/maxOutputTokens/vision 等），**不改变请求去向**` +
+      `${via ? `——请求仍走 ${via}` : ''}；它来自 config.customModels，不是内置官方模型。`,
+  };
+}
+
+/** @type {Map<string, {at: number, value: any}>} */
+const probeCache = new Map();
+/** @type {Map<string, Promise<any>>} */
+const probeInflight = new Map();
+
+/** 引擎加载的模型名与配置项名是否"对不上"（纯函数，便于断言）。
+ *  归一化：小写 + 取 basename + 去掉 .gguf 后缀；一边包含另一边即视为同一个（引擎常带路径/量化后缀）。 */
+export function modelNameMismatch(/** @type {any} */ configured, /** @type {any} */ loaded) {
+  const norm = (/** @type {any} */ s) =>
+    String(s || '')
+      .trim()
+      .toLowerCase()
+      .split(/[\\/]/)
+      .pop()
+      ?.replace(/\.gguf$/i, '')
+      .replace(/[^a-z0-9._-]+/g, '');
+  const c = norm(configured);
+  const list = /** @type {string[]} */ ((Array.isArray(loaded) ? loaded : [loaded]).map(norm).filter(Boolean));
+  if (!c || !list.length) return false; // 无从比较时不误报
+  return !list.some((/** @type {string} */ l) => l.includes(c) || c.includes(l));
+}
+
+/**
+ * 端点能力/延迟预检（三态：ok-tools / ok-textonly / unreachable）。
+ * 结果按「端点 + 模型名」缓存 10 分钟，并发去重。
+ * @param {any} cfg @param {string} modelName
+ * @param {{ timeoutMs?: number, force?: boolean, fetchImpl?: any, credentialProbe?: boolean }} [opts]
+ */
+/**
+ * 端点能力/延迟预检（A 追加；三态 × 三样本，**不允许一次结果当结论**）。
+ *
+ * 设计依据（负责人本机三端点实测）：
+ *   · 60091 MLocalModel3.6.2（llama.cpp 35B Q4_K_M）：同一请求同一端点两次结果相反——
+ *     第一次 2.7s 且 tool_calls=有，第二次 23.9s 且 tool_calls=无；引擎回的 model 是**完整文件路径**
+ *     （/Users/…/mLocalModel3.6.2.gguf），与配置项名 MLocalModel3.6.2 不一致。
+ *     → 所以：① 工具调用必须重复 N 次取"稳定/不稳定/不支持"三态，不能一次定论；
+ *            ② TTFT 必须落账（2.7s→23.9s 这种跳变就是"引擎被占住/排队"的信号）；
+ *            ③ 配置名与引擎名不一致要写出来（避免"配的是 A、跑的是 B"）。
+ *   · 8081 mtplx-qwen38-27b-optimized-quality：小请求 2.9s、**不返回 tool_calls**；2009 tokens 长提示 5.5s。
+ *   · 长提示实测 1.8-5.5s（2009 tokens）——"35B prefill 要几小时"**不成立**：慢/卡不是模型体量的问题，
+ *     更像引擎 slot 被占/排队或请求形态让引擎进了异常态；因此预检除了 TTFT，还要测一次**参考 prefill**
+ *     （固定 ~2000 tokens），并与**本机历史值**比对，显著变慢就提示"可能仍有旧请求占着，建议重启引擎"。
+ *
+ * 返回（关键字段）：
+ *   state        'ok-tools' | 'unstable-tools' | 'ok-textonly' | 'unreachable'（粗三态，兼容旧调用）
+ *   toolState    'stable-tools' | 'unstable-tools' | 'no-tools' | 'unknown'（细三态，N/3）
+ *   toolCallHits / toolCallRuns        命中次数 / 实际样本数
+ *   ttftMs       三次小请求的首帧中位数（ms）
+ *   prefillMs    参考 prefill（prefillTokens 个 token）的耗时（ms）
+ *   baseline / slowdown                历史基线（持久化在 <home>/model-probe.json）与本次倍数
+ *   nameMismatch / loadedModel         引擎实际加载的模型名与配置项名是否对不上
+ *   note         一行给人看的结论（UI + web-server.log 直接用）
+ *
+ * @param {any} cfg @param {string} modelName
+ * @param {{ timeoutMs?: number, force?: boolean, fetchImpl?: any, repeats?: number,
+ *           prefillTokens?: number, budgetMs?: number, persist?: boolean }} [opts]
+ */
+export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} */ modelName, opts = {}) {
+  const {
+    timeoutMs = 10000,
+    force = false,
+    fetchImpl = null,
+    repeats = 3,
+    prefillTokens = 2000,
+    budgetMs = 35000,
+    persist = true,
+  } = opts;
+  const pc = /** @type {any} */ (resolveProviderConfig(cfg, modelName) || {});
+  const base = String(pc.baseUrl || '').replace(/\/+$/, '');
+  const key = `${base}|${modelName}`;
+  const hit = probeCache.get(key);
+  if (!force && hit && Date.now() - hit.at < PROBE_TTL_MS) return hit.value;
+  if (!force && probeInflight.has(key)) return probeInflight.get(key);
+  const doFetch = fetchImpl || globalThis.fetch;
+  const run = (async () => {
+    const startedAt = Date.now();
+    const left = () => Math.max(1500, Math.min(timeoutMs, budgetMs - (Date.now() - startedAt)));
+    const info = /** @type {any} */ ({
+      at: Date.now(),
+      endpoint: endpointLabel(base),
+      isLocal: isLocalBaseUrl(base),
+      provider: String(pc.name || ''),
+      configuredModel: modelName,
+      loadedModels: [],
+      loadedModel: null,
+      nameMismatch: false,
+      ttftSamples: [],
+      ttftMs: null,
+      prefillTokens,
+      prefillMs: null,
+      toolCallHits: 0,
+      toolCallRuns: 0,
+      toolCallInconclusive: 0,
+      toolCallFinishes: [],
+      toolState: 'unknown',
+      ttftBaselineMs: null,
+      prefillBaselineMs: null,
+      slowdown: null,
+      state: /** @type {string} */ ('unreachable'),
+      error: /** @type {string|null} */ (null),
+      note: '',
+      partial: false,
+    });
+    if (!base) {
+      return { ...info, error: '该模型没有可用的 baseUrl（未配置端点）', note: '端点未配置：请先在 ⚙ 设置里填 baseUrl/API Key。' };
+    }
+    const headers = { 'Content-Type': 'application/json', ...(pc.apiKey ? { Authorization: `Bearer ${pc.apiKey}` } : {}) };
+    /** 单次 HTTP（带超时）；返回 { ok, status, text } 或抛错 */
+    const once = async (/** @type {any} */ url, /** @type {any} */ init, /** @type {any} */ ms) => {
+      const ac = new AbortController();
+      const t = setTimeout(() => ac.abort(new Error(`预检超时（${Math.round(ms / 1000)}s）`)), ms);
+      try {
+        return await fetchImplOr(doFetch, url, { ...init, signal: ac.signal });
+      } finally {
+        clearTimeout(t);
+      }
+    };
+    // ① 引擎"实际加载的是什么"——**从 chat 响应的 `model` 字段读**，不额外打 `GET /models`。
+    // 为什么不打 /models（v0.6.13 实测取舍）：
+    //   · 有的端点根本没实现它（chatflow 网关常见 404）；
+    //   · 更要紧的是"只实现了 chat 的端点"不该因为一次探测请求而报错——预检必须无可侵入；
+    //   · 流式响应里就带着引擎真正的模型名：llama.cpp 直接回**完整文件路径**
+    //     （/Users/…/mLocalModel3.6.2.gguf，负责人实测），语义与 /models 等价；
+    //   · 少一次请求、少一个超时点。
+    // 名字对不上（配置项名 ≠ 引擎回的模型名）时把两者都写进结论——避免"配的是 A、跑的是 B"。
+
+    // ② 工具调用探针（重复 N 次取三态）：提示词**明确要求调用工具**，同时看 tool_calls 与 finish_reason
+    const probeTool = {
+      type: 'function',
+      function: {
+        name: 'mingdao_probe',
+        description: '预检探针：确认该端点是否支持 function calling',
+        parameters: { type: 'object', properties: { v: { type: 'integer', description: '任意整数' } }, required: ['v'] },
+      },
+    };
+    const chunkHasTool = (/** @type {string} */ s) => /"tool_calls"\s*:/.test(s);
+    let lastError = /** @type {string|null} */ (null);
+    let connected = false;
+    for (let i = 0; i < Math.max(1, repeats); i++) {
+      if (Date.now() - startedAt > budgetMs) { info.partial = true; break; }
+      const t0 = Date.now();
+      try {
+        const res = await once(
+          `${base}/chat/completions`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              model: modelName,
+              // 提示词必须**明确要求工具**：否则"模型恰好直接回答"会被误判成不支持工具调用
+              messages: [{ role: 'user', content: `请调用 mingdao_probe 工具，参数 v=${i + 1}。只调用工具，不要输出任何解释文字。` }],
+              tools: [probeTool],
+              tool_choice: 'auto',
+              // 256 而不是 16：思考型模型（本机 MLocalModel3.6.2 就是）会先输出思考内容，
+              // 16 个 token 必然被 finish_reason=length 截断 —— 那样探针会把"没测出来"误报成"不支持工具调用"。
+              max_tokens: 256,
+              stream: true,
+            }),
+          },
+          left()
+        );
+        connected = true;
+        if (!res || !res.ok) {
+          const status = Number(res?.status) || 0;
+          let detail = '';
+          try { detail = String(await res.text()).slice(0, 300); } catch {}
+          lastError = `HTTP ${status || '（无响应）'}${detail ? `：${detail}` : ''}`;
+          info.toolCallFinishes.push(`http-${status}`);
+          continue;
+        }
+        const r = await readProbeStream(res, { hasTool: chunkHasTool, t0 });
+        if (r.model && !info.loadedModel) {
+          info.loadedModel = String(r.model);
+          info.loadedModels = [String(r.model)];
+          info.nameMismatch = modelNameMismatch(modelName, [String(r.model)]);
+        }
+        if (r.ttftMs != null) info.ttftSamples.push(r.ttftMs);
+        const finish = String(r.finish || (r.toolCalls ? 'tool_calls' : 'stop'));
+        info.toolCallFinishes.push(finish);
+        // 样本必须**有结论**才算数：`length`（被 max_tokens 截断，思考型模型常见）既不是命中也不是未命中
+        const conclusive = r.toolCalls || finish === 'tool_calls' || finish === 'stop';
+        if (conclusive) {
+          info.toolCallRuns += 1;
+          if (r.toolCalls || finish === 'tool_calls') info.toolCallHits += 1;
+        } else {
+          info.toolCallInconclusive = (info.toolCallInconclusive || 0) + 1;
+        }
+      } catch (/** @type {any} */ e) {
+        lastError = String(e?.name === 'AbortError' || /aborted/i.test(String(e?.message)) ? `预检超时（${Math.round(left() / 1000)}s 内没有任何响应）` : e?.message || e);
+        info.toolCallFinishes.push('error');
+      }
+    }
+    if (!connected) {
+      info.state = 'unreachable';
+      info.error = lastError || '连接失败';
+      info.note = `❌ 不可达：${info.error}${info.isLocal ? '（本地引擎没起来？先确认端口/进程）' : ''}`;
+      return info;
+    }
+    info.ttftMs = median(info.ttftSamples);
+    const n = info.toolCallRuns;
+    info.toolState = n === 0 ? 'unknown' : info.toolCallHits === n ? 'stable-tools' : info.toolCallHits === 0 ? 'no-tools' : 'unstable-tools';
+    info.state = info.toolState === 'stable-tools' ? 'ok-tools' : info.toolState === 'unstable-tools' ? 'unstable-tools' : info.toolState === 'unknown' ? 'unreachable' : 'ok-textonly';
+    // ③ 参考 prefill：固定 ~2000 tokens 的**每次不同**前缀（防引擎前缀缓存把耗时抹平）
+    {
+      const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      const filler = Array.from({ length: Math.max(8, Math.round(prefillTokens / 4)) }, (_, i) => `第${i}段：${nonce}`).join('；');
+      const t0 = Date.now();
+      try {
+        const res = await once(
+          `${base}/chat/completions`,
+          {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              model: modelName,
+              messages: [{ role: 'user', content: `${filler}\n以上编号只用于占位，请只回复"ok"。` }],
+              max_tokens: 8,
+              stream: true,
+            }),
+          },
+          Math.min(20000, left())
+        );
+        if (res && res.ok) {
+          const r = await readProbeStream(res, { hasTool: chunkHasTool, t0 });
+          if (r.model && !info.loadedModel) {
+            info.loadedModel = String(r.model);
+            info.loadedModels = [String(r.model)];
+            info.nameMismatch = modelNameMismatch(modelName, [String(r.model)]);
+          }
+          info.prefillMs = r.ttftMs ?? Date.now() - t0;
+        } else {
+          info.prefillMs = null;
+        }
+      } catch {
+        info.prefillMs = null;
+      }
+    }
+    // ④ 与本机历史值比对：显著变慢 = "引擎可能还被上一个请求占着"（负责人实测 2.7s → 23.9s）
+    {
+      const hist = persist ? loadProbeBaseline() : {};
+      const prev = hist[key] || null;
+      info.ttftBaselineMs = prev?.ttftMs ?? null;
+      info.prefillBaselineMs = prev?.prefillMs ?? null;
+      const ratio = (/** @type {any} */ cur, /** @type {any} */ base0) =>
+        Number(cur) > 0 && Number(base0) > 0 ? Number(cur) / Number(base0) : null;
+      const ttftRatio = ratio(info.ttftMs, prev?.ttftMs);
+      const prefillRatio = ratio(info.prefillMs, prev?.prefillMs);
+      info.slowdown = { ttftRatio, prefillRatio };
+      if (persist && info.ttftMs != null) {
+        hist[key] = { at: Date.now(), ttftMs: info.ttftMs, prefillMs: info.prefillMs ?? prev?.prefillMs ?? null };
+        saveProbeBaseline(hist);
+      }
+    }
+    const nameNote = info.nameMismatch
+      ? `⚠ 引擎实际加载的是 ${info.loadedModel}，与配置项名 ${modelName} **不一致**（配的是 A、跑的可能不是 A）`
+      : info.loadedModel
+        ? `引擎加载 ${info.loadedModel}`
+        : '（引擎未回报名）';
+    const toolNote =
+      info.toolState === 'stable-tools'
+        ? `✅ 稳定支持工具调用（${info.toolCallHits}/${n}）`
+        : info.toolState === 'unstable-tools'
+          ? `⚠ 工具调用**不稳定**（${info.toolCallHits}/${n} 次返回 tool_calls，finish_reason=${info.toolCallFinishes.join('/')}）——agent 任务可能步数为 0，建议换端点或重试预检`
+          : info.toolState === 'no-tools'
+            ? `❌ 未返回 tool_calls（0/${n}，finish_reason=${info.toolCallFinishes.join('/')}）——该端点很可能不做 function calling`
+            : `⚠ 工具调用**未能判定**（${info.toolCallInconclusive || 0} 次样本不可判定：finish_reason=${info.toolCallFinishes.join('/')}）` +
+              `——多为"被 max_tokens 截断"（思考型模型先输出思考）或请求异常${lastError ? `：${lastError}` : ''}；` +
+              `agent 任务可能步数为 0，**不要**据此判定"不支持工具调用"`;
+    const ttftNote = info.ttftMs != null ? `首帧 ${(info.ttftMs / 1000).toFixed(2)}s` : '首帧未测到';
+    const prefillNote = info.prefillMs != null ? `参考 prefill ${prefillTokens} tokens ${(info.prefillMs / 1000).toFixed(2)}s` : `参考 prefill 未测到`;
+    const slowNote =
+      (info.slowdown?.ttftRatio != null && info.slowdown.ttftRatio >= 3) || (info.slowdown?.prefillRatio != null && info.slowdown.prefillRatio >= 3)
+        ? `\n   ⚠ 与上次预检相比明显变慢（首帧 ${info.ttftBaselineMs != null ? (info.ttftBaselineMs / 1000).toFixed(2) + 's → ' : '？'}${info.ttftMs != null ? (info.ttftMs / 1000).toFixed(2) + 's' : '？'}）：该端点**可能仍在处理上一个请求**（引擎 slot 被占/排队），建议重启引擎后再跑长任务。`
+        : '';
+    info.note = `${toolNote} · ${ttftNote} · ${prefillNote}${info.partial ? ' ·（预检超过时间预算，样本未跑满）' : ''} · ${nameNote}${slowNote}`;
+    return info;
+  })();
+  probeInflight.set(key, run);
+  try {
+    const value = await run;
+    probeCache.set(key, { at: Date.now(), value });
+    return value;
+  } finally {
+    if (probeInflight.get(key) === run) probeInflight.delete(key);
+  }
+}
+
+/** 读一次探针的流式响应：取首帧时延 + 是否出现 tool_calls + finish_reason；拿到结论就主动关流（省 token）。
+ *  t0 必须由调用方传入（= **请求发起**时刻）：TTFT 的定义是"发出→第一帧"，在这里取 Date.now()
+ *  会把"引擎排队 + prefill"整段抹掉（实测过：真值 120ms 会被量成 0ms）。 */
+async function readProbeStream(/** @type {any} */ res, /** @type {{ hasTool: (s: string) => boolean, t0: number }} */ { hasTool, t0 }) {
+  let ttftMs = /** @type {number|null} */ (null);
+  let toolCalls = false;
+  let finish = /** @type {string|null} */ (null);
+  let model = /** @type {string|null} */ (null);
+  const reader = res?.body?.getReader?.();
+  if (!reader) return { ttftMs: null, toolCalls: false, finish: null };
+  const dec = new TextDecoder();
+  let buf = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (ttftMs == null && value && value.length) ttftMs = Date.now() - t0;
+      buf += dec.decode(value, { stream: true });
+      if (hasTool(buf)) toolCalls = true;
+      const fm = /"finish_reason"\s*:\s*"([a-z_]+)"/.exec(buf);
+      if (fm) finish = fm[1];
+      if (!model) {
+        const mm = /"model"\s*:\s*"([^"]+)"/.exec(buf);
+        if (mm) model = mm[1];
+      }
+      if (toolCalls || finish) break; // 已能判定：立刻收手
+      if (buf.length > 65536) buf = buf.slice(-4096); // 防无界增长（异常端点狂吐）
+    }
+  } catch {
+    /* 读失败按"没拿到结论"处理（上层按 unreachable/unknown 归类） */
+  }
+  try { reader.cancel(); } catch {}
+  return { ttftMs, toolCalls, finish, model };
+}
+
+/** 中位数（偶数量取中间两个的平均；空数组回 null）。 */
+function median(/** @type {number[]} */ arr) {
+  const a = (Array.isArray(arr) ? arr : []).filter((n) => Number.isFinite(n)).sort((x, y) => x - y);
+  if (!a.length) return null;
+  const mid = Math.floor(a.length / 2);
+  return a.length % 2 ? a[mid] : Math.round((a[mid - 1] + a[mid]) / 2);
+}
+
+/** 本机历史基线：用于识别"同端点突然变慢 = 可能被旧请求占着"（负责人实测 2.7s → 23.9s）。
+ *  存放位置复用既有的 <home>/model-cache.json 里的**保留键** `__probeBaseline`
+ *  ——不新开文件、不新增加一处"静默吞写"（写路径复用已审阅的 saveCache）。 */
+export const PROBE_BASELINE_KEY = '__probeBaseline';
+function loadProbeBaseline() {
+  const b = loadCache()?.[PROBE_BASELINE_KEY];
+  return b && typeof b === 'object' ? b : {};
+}
+function saveProbeBaseline(/** @type {any} */ data) {
+  const cache = loadCache();
+  cache[PROBE_BASELINE_KEY] = data;
+  saveCache(cache);
+}
+
+function fetchImplOr(/** @type {any} */ f, /** @type {any} */ url, /** @type {any} */ init) {
+  return f(url, init);
+}
+
+/**
+ * 按预检结果**自适应**超时（纯函数，取舍写在下面）。
+ *
+ * 事实依据：现状是"一刀切 600s 首帧 + 60 分钟无进展看门狗"。实测 2.7s 就能出首帧的端点，
+ * 卡 10 分钟已经异常；而实测首帧 30s 的端点，600s 上限是合理的。于是：
+ *   · 首帧上限 = clamp(max(实测 TTFT × 20, 参考 prefill × 5), 既有默认(本地 600s/远程 300s), 1800s)
+ *     —— ×20 是"给长上下文 prefill 留 20 倍余量"（实测 TTFT 是极小请求，真实任务上下文大得多）；
+ *     地板取既有默认（**不比现状更激进**）；天花板取既有单请求总量上限 1800s（首帧不可能超过它）。
+ *     用户显式配了 config.timeout.firstTokenMs 时**一律以用户为准**（显式 > 自适应）。
+ *   · 无进展看门狗 = clamp(max(实测 TTFT × 100, 参考 prefill × 20), 10 分钟, 60 分钟)
+ *     —— ×100 让"慢端点"（TTFT 30s → 50 分钟）不至于被误杀，"快端点"（2.7s → 4.5 分钟→取 10 分钟）
+ *     能更早被判为异常并报错。下限 10 分钟保证不误杀一次正常的工具执行/一次长回复。
+ *     同样：用户显式配了 config.noProgressTimeoutMs 就听用户的。
+ * @param {{ probeTtftMs?: number|null, probePrefillMs?: number|null, isLocal?: boolean, timeoutCfg?: any, noProgressCfg?: any }} input
+ */
+export function adaptiveTimeouts({ probeTtftMs = null, probePrefillMs = null, isLocal = false, timeoutCfg = null, noProgressCfg = null } = {}) {
+  const explicitFirst = Number(timeoutCfg?.firstTokenMs) > 0 ? Number(timeoutCfg.firstTokenMs) : null;
+  const explicitNoProgress = Number(noProgressCfg) > 0 ? Number(noProgressCfg) : null;
+  const measured = Number(probeTtftMs) > 0 ? Number(probeTtftMs) : null;
+  const prefill = Number(probePrefillMs) > 0 ? Number(probePrefillMs) : null;
+  const floorFirst = isLocal ? 600000 : 300000;
+  // 两个实测量一起用：小请求首帧（×20）+ 参考 prefill（×5，2000 tokens 的实测值越慢、真实任务越危险）
+  const firstTokenMs =
+    explicitFirst ?? (measured || prefill ? Math.min(1800000, Math.max(floorFirst, Math.round(Math.max(measured ? measured * 20 : 0, prefill ? prefill * 5 : 0)))) : floorFirst);
+  const noProgressTimeoutMs =
+    explicitNoProgress ??
+    (measured || prefill
+      ? Math.min(PROGRESS_MAX_MS, Math.max(PROGRESS_MIN_MS, Math.round(Math.max(measured ? measured * 100 : 0, prefill ? prefill * 20 : 0))))
+      : PROGRESS_MAX_MS);
+  const bits = [];
+  if (measured) bits.push(`首帧 ${Math.round(measured)}ms`);
+  if (prefill) bits.push(`参考 prefill ${prefillTokensLabel()} ${Math.round(prefill)}ms`);
+  return {
+    firstTokenMs,
+    noProgressTimeoutMs,
+    adapted: (measured != null || prefill != null) && explicitFirst == null,
+    basis: bits.length ? `预检实测 ${bits.join(' + ')}` : '无预检数据：用既有默认（本地 600s / 远程 300s）',
+  };
+}
+/** 参考 prefill 的样本规模（文案用；与 probeEndpoint 的 prefillTokens 默认一致）。 */
+function prefillTokensLabel() {
+  return '2000 tokens';
+}
 
 export function modelCacheFile() {
   return path.join(mingdaoHome(), 'model-cache.json');
@@ -154,6 +632,12 @@ export function isDiscoveredModel(/** @type {any} */ name, /** @type {string} */
 }
 
 // 合并可用模型列表：只含已设置 Key 的服务商；动态名单优先、预设回退；自定义模型恒在。
+//
+// v0.6.13（B）：**每个条目都要能看出"来自哪个服务商/端点"**。此前自定义条目只有
+// providerLabel='自定义'，而下拉是按 providerLabel 分组的——于是 config.customModels 里的
+// chatflow 应用名/本地端点模型名与官方模型长得一样，容易被当成官方模型（负责人实测）。
+// 现在：自定义端点条目带 source/sourceLabel/endpoint（providerLabel 直接写成「自定义端点 · host」），
+// 官方/线上条目带 source/sourceLabel（providerLabel 仍是服务商名）。
 export async function availableModels(/** @type {any} */ cfg, /** @type {any} */ currentModel) {
   const out = [];
   const seen = new Set();
@@ -172,18 +656,31 @@ export async function availableModels(/** @type {any} */ cfg, /** @type {any} */
         provider: pname,
         providerLabel: pp.label,
         dynamic: !(/** @type {any} */ (MODELS))[n],
+        // 来源标注（B）：内置预设 vs 服务商线上名单——两者都是"该服务商自己的模型"
+        official: Boolean(preset),
+        source: preset ? 'preset' : 'discovered',
+        sourceLabel: preset ? `内置预设 · ${pp.label}` : `线上名单 · ${pp.label}`,
       });
     }
   }
   for (const [cmName, cm] of Object.entries(cfg?.customModels || {})) {
     if (seen.has(cmName)) continue;
     seen.add(cmName);
+    const src = customSourceOf(cfg, cmName);
     out.push({
       name: cmName,
-      label: `${cmName} — ${cm.label || '自定义模型'}`,
+      // 展示名里也带上来源（不只是 title/tooltip）：下拉标题行、设置面板、日志三处一致
+      label: `${cmName} — ${cm.label || '自定义模型'}（${src.sourceLabel}）`,
       provider: 'custom',
-      providerLabel: '自定义',
+      providerLabel: src.providerLabel,
       custom: true,
+      // v0.6.13（B）：来源标注的结构化字段（前端/测试都读它，不靠解析 label 文本）
+      official: false,
+      source: src.source,
+      sourceLabel: src.sourceLabel,
+      endpoint: src.endpoint || null,
+      isLocalEndpoint: src.isLocalEndpoint,
+      note: src.note,
     });
   }
   if (currentModel && !out.some((m) => m.name === currentModel)) {
@@ -192,6 +689,10 @@ export async function availableModels(/** @type {any} */ cfg, /** @type {any} */
       label: `${currentModel}（当前配置）`,
       provider: 'current',
       providerLabel: '当前',
+      official: false,
+      source: 'current',
+      sourceLabel: '当前配置（不在任何已知名单里）',
+      note: '该名称不在任何服务商名单/自定义条目里——只是 config.json 里当前写着的模型名。',
     });
   }
   return out;

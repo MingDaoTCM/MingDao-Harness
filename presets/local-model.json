@@ -1,0 +1,8 @@
+{
+  "name": "local-model",
+  "label": "本地模型（保守参数）",
+  "description": "给**本地部署模型**用的保守参数预设。先说清两件事：① 本地模型与云模型**功能一致**——本预设不加人格、不限制工具、不建议权限档，只把「上下文预算 / 单次最大输出 / 轮次」调到本地推理跑得动的量级；② 它**不是**代码审计预设（审计人格与只读工具白名单在另一个预设 readonly-audit 里）。为什么只调这几个数：本地引擎的瓶颈在 prefill 与显存/内存预算（本机实测 35B Q4_K_M：约 4.9ms/token，2 万 tokens 上下文的 prefill ≈ 1.6 分钟，13 万窗口 ≈ 10 分钟以上，还会把引擎的内存预算顶满）——预算给小一点，任务跑得完、也更容易看清是哪一步慢。模型窗口/最大输出等**能力声明**请写在 config.customModels.<模型名>（contextWindow/maxOutputTokens），本预设只覆盖本回合参数。",
+  "contextBudget": 65536,
+  "maxOutputTokens": 4096,
+  "maxRounds": 4
+}
