@@ -2639,3 +2639,32 @@ permission=readonly，已按你的显式选择 auto 执行`。
   仍照常加载——那是用户自己的文件，不属于内置预设的范畴。
 - **不带 `permission` 的第三方预设仍是"只读"的唯一硬保证靠 `tools` 白名单**：本轮只收窄内置预设，
   反提权规则与 `recommendedPermission` 的建议语义**一字未改**。
+
+## 3.59 待修（已知，按负责人要求**暂不动刀**，待下一轮真机测试后一并处理）
+
+**记录（真机，v0.6.14，macOS，`mtplx-qwen38-27b-optimized-quality`）**：长任务中途出现上游拒绝——
+
+```
+[流式响应错误] insufficient memory: the request exceeded available GPU memory
+(sustained critical memory pressure during prefill; aborted before the allocator wall).
+The engine shed its caches and stays up; this request failed.
+Reduce --context-window, close other apps, or try q8 KV quantization.
+💡 本地引擎内存/显存不足（在 prefill 前就拒绝了）。处置：压缩上下文（减小 config.contextBudget 或
+   /compact）、减少并发子任务，或重启模型服务释放内存后重试。
+```
+
+**为什么值得单独记**（与之前 60091/35B 那次不同）：
+1. 这次是 **8081 的 qwen 模型**（此前 `MLocalModel3.6.2` 报过同类错误）→ 说明**不是某个模型的问题**，是**本机内存压力**：同时加载多个本地模型、各自声明 131k 窗口（KV cache 巨大），再叠加长任务 + 并发子代理。
+2. 上游文案出现新措辞：`aborted before the allocator wall`、`engine shed its caches and stays up`（引擎**没有崩**、自己丢了缓存）→ 与我们既有的 `describeUpstreamError` 分型（"内存/显存不足"）匹配，**处置建议也正确**（压上下文 / 减少并发子任务 / 重启引擎）。
+3. 引擎自己给的三条建议里，**`--context-window` 与 q8 KV 量化是引擎侧参数**，harness 改不了；我们能做的是**发得更少**（`contextBudget` / `/compact` / 减少子代理并发）。
+4. 观测点：该回合此前 19 分钟里有**子代理在跑**（「深读核心 agent 循环与编排模块」13 轮 / 17 次调用）→ **父回合 + 子代理同时向同一引擎发请求**是内存压力的重要来源，后续修法应优先考虑**本地端点的并发上限**（例如同一本地端点串行化或限制并发子代理数），而不是只提示用户手动压上下文。
+
+**待办（下一轮真机测试后一并做）**：
+- [ ] 本地端点并发控制：同一 baseUrl 的**在途请求数上限**（默认 1？可配置），或限制并发子代理数，并在日志/UI 说明"因本地端点内存压力，已串行化"。
+- [ ] 错误分型补一条"**引擎活着但丢缓存**"的语义（`engine shed its caches and stays up`），与"引擎崩了"区分，避免用户误判要不要重启。
+- [ ] 评估是否在 `chat 预告` 里**结合显存/内存压力**给更强的警告（例如检测到同一 baseUrl 已有在途请求时说清"并发会加剧内存压力"）。
+- [ ] 文档：`docs/CONFIG.md` 的本地模型一节补"并发与内存"的说明。
+
+**同时冻结的队列（同一批处理）**：P1-1 第四刀（`parseToolArgs` 前置门抽取）、`serializeToolResult(undefined)` 微修、M-8 剩余单行文本守卫收口、账本权限**来源**字段、变异框架 fail-safe（开跑前检测残留）。
+
+**另**：`tcm.mingdao.ai` 的反向链接由**下游自行添加**，本仓不做。
