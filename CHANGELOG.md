@@ -3,6 +3,86 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.14（2026-10-09）— 预检误报"不可达"修复（失败分型 + 失败结论只保鲜 60s）+ 内置预设精简为唯一 local-model
+
+> 补丁版，两件事都来自**负责人真机使用 v0.6.13 的过程**，不是代码审查的推演。
+> ① 内核把一条 **7 小时 10 分钟前**的失败结论原样念给用户、并据此把用户引去重启引擎，
+> 而**同一回合其实完全可用**（首帧 8.7s）；② 发行版面向普通大众，**不替用户决定任务类型**，
+> 于是内置预设收窄为只提供参数类默认值的唯一一个 `local-model`。
+> 逐条现场证据、根因与取舍见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` §3.56 / §3.57。
+> 变异验证 **19 批 219 条全中**（数字由 `scripts/doc-lint.mjs` ⑥ 守卫）。
+
+### 一、端点预检误报"不可达"：失败分型 + 超时覆盖首帧 + 退避 + **失败结论只保鲜 60s**（§3.56）
+
+- 现场（真机 `~/.mingdao/logs/web-server.log`，可复核）：`:413`（07:03:02）**进程启动**时引擎还没起来，
+  唯一一次真实探测得到 `unreachable`，**这条结论进了进程内备忘且没有任何 TTL**；
+  `:415/:416`（07:08:13.912/.931，相距 **19ms**）与 `:798/:799`（10:13:58.877/.900，相距 **23ms**）
+  两次 `chat 预检 … ❌ 不可达：fetch failed（本地引擎没起来？先确认端口/进程）`，
+  两次都**没有** `预检 <模型>` 行 ⇒ **没重测，直接念旧结论**。而 `:419`（07:08:59）引擎已 `ok-tools`、
+  `:803` 同一回合 `chat 首帧 … 8.7s`、`:844` 已跑 21m06s——`:799` 距 `:413` 已 **7h10m**。
+  **用户照这句话去重启了引擎。**
+- 根因（改前行号）：①`src/web/server.js:312/337` 的 `probeByModel` 备忘**只按"有没有"判**，
+  短路了 `model-discovery` 的 10 分钟缓存（`probeCache` / `PROBE_TTL_MS`）；
+  ②`src/model-discovery.js:306-310` 所有网络层失败（超时/被断开/HTTP 4xx/裸 `fetch failed`）**共用一句"不可达"**；
+  ③`:222-230` `once()` 在**响应头**到达时就 `clearTimeout`，而探针是 `stream:true` ⇒ **超时不覆盖首帧**
+  （引擎"回了头、卡在 prefill"时探针一直挂着，而它在回合发起前被 `await`）；
+  ④`:252-274` 三次尝试**无退避**（引擎"正在启动"时 1ms 内连撞 3 次判不可达）；
+  ⑤`:346/410` `toolState=unknown → state=unreachable` + "多为被 max_tokens 截断" ⇒ **HTTP 404 的真实原因被盖住**。
+- **修法**：
+  - **失败结论只保鲜 60s**：新增 `PROBE_FAIL_TTL_MS = 60 * 1000` + 纯函数 `probeVerdictFailed()` /
+    `probeMemoUsable()`，模块级 `probeCache` 与 `server.js` 的 `probeByModel` **两处统一按它判**；
+    **成功结论仍按 `PROBE_TTL_MS`（10 分钟）复用**。这是"7h10m 重放"的根治点。
+  - **失败原因分型 + 文案分叉**：`classifyProbeError()` → `refused`（连接被拒 / `ECONNREFUSED`）/
+    `reset`（被对端断开）/ `timeout` / `other`；`classifyProbeHttp()` → `http-unimplemented`（404/405/501）/
+    `http-auth`（401/403）/ `http`；结论带 `probe.reason`，**日志与文案都跟着判据走**（`probeFailureNote()`）。
+    **只有连接被拒 / 被断开才说"不可达"**；超时说"⏱ 探针超时：1.5s 内没有首帧（端口是通的，引擎在
+    prefill 或**正在启动**）"；404 说"❌ 探针被拒绝：HTTP 404（端点未实现该探针请求）"；**不再出现裸 `fetch failed`**。
+  - **超时覆盖到首帧**：`timeoutMs` 改为**整个探针的时间预算**（`server.js` 仍传 15000），单次
+    `attemptMs = PROBE_ATTEMPT_MS`（**1.5s**）且**只在读到首帧后才 clear**（body 阶段触发首帧超时会被抛出
+    并按"超时"归类）；参考 prefill 单独放宽到 20s（本机 35B 实测 6.6~7.8s / 2000 tokens），
+    样本数仍 `PROBE_ATTEMPTS = 3`（工具三态判据不变）。
+  - **退避重试** `PROBE_BACKOFF_MS = [300, 700]`；**降级语义显式化**（`ensureProbe` 吞掉一切探针异常，
+    只留一行"失败（忽略，按默认超时继续）"，回合级预检整段 try/catch，每句失败文案都带
+    "**预检是尽力而为，失败只降级、不阻断本回合**"）。
+  - **新增复核日志行**：`chat 预检复核 <taskId> 预检曾判不可达（reason=…），但本回合实际可用（首帧 Xs）
+    ——预检判据需复核`——**判错了要留痕**。
+  - **不打扰"只实现 chat 的端点"**：探针只打 `POST {base}/chat/completions`（与主请求同构），
+    `GET /props` 仍只在引擎自报模型名后才打 ⇒ 桩验证 GET 次数 = **0**。
+- 回归：`test/smoke.js` §141（真桩服务 + 桩引擎：拒连 / 只实现 chat / 首帧慢 / 永不回帧 / 404 /
+  启动中 / 保鲜期 / 探针异常只降级 / 结构守卫）；`test/mutate/batch30-preflight.mjs` **10 条全中**。
+
+### 二、内置预设精简：**只剩 `local-model` 一个参数预设**（§3.57）
+
+- **删除** `presets/readonly-audit.json`；内置预设只剩 `presets/local-model.json`，定位收窄为
+  **只提供参数类默认值**（`contextBudget` / `maxOutputTokens` / `maxRounds`）——
+  **不携带人格、不限制工具、不涉及权限**。需要"只读"请自行组合**权限档**（`readonly`）
+  与**工具白名单**（`tools`）。
+- 老名 `local-audit` **保留为别名**并指向 `local-model`，加载时打印
+  「已更名为 local-model（本次已按 local-model 执行；建议尽快改用新名字）」。
+- 决策理由（负责人原话，登记 §3.57）：代码审计只是他作为一项较大型较长任务对 MDH 做的**测试**；
+  **发行版面向普通大众**，不是某种任务的定制——用户可能执行不同任务、不一定用本地模型、
+  也不一定用来审计代码。**发行版不替用户决定任务类型。**
+- `src/presets.js`：文件头新增「内置预设的定位」整段；`PRESET_ALIASES` 保持
+  `{ 'local-audit': 'local-model' }`；`KNOWN_FIELDS` 保留 `recommendedPermission`
+  并注明"内置预设不使用它"（第三方预设声明它仍应通过校验）。
+- `test/api-contracts.js`：契约改为——内置预设（`source === 'builtin'`）**深比较等于 `['local-model']`**、
+  **不得含** `permission` / `recommendedPermission`、`local-audit` 解析到 `local-model` 且带 `aliasedFrom`、
+  **`readonly-audit` 必须已不存在**（`loadPreset` 为 `null` + 无别名 + 文件不存在）。
+
+### 三、同批测试残留清理
+
+- `test/smoke.js` §47 / §139 断言按新契约改写（内置**只应有 `local-model`**、`readonly-audit`
+  必须不存在 / 加载为空、项目级遮蔽用例改用 `local-model.json`）。
+- `test/mutate/batch28-stall.mjs` 删 ㉖（随 `readonly-audit` 删除），条数 **26 → 25**；
+  `batch27-preset.mjs` 锚点改指 `presets/local-model.json`，条数**保持 6 条**。
+- 变异总数 **210 → 219**（新增 `batch30-preflight.mjs` 10 条）。
+
+### 四、本次未纳入的既有内容（核对结论）
+
+- `aa76304`《桌面版自动更新实现指南》**已在 v0.6.13 的 tag 内**（`git merge-base --is-ancestor` 已确认），
+  本版**不重复计入**。
+
+
 ## v0.6.13（2026-10-09）— 真机四问题：预告由预检推导 + 引擎自述上下文 + 子代理进展算父回合进展 + stalled 用户可见
 
 > 补丁版，全部内容来自**负责人用 v0.6.12 做的一轮真机测试**（本机 llama.cpp 端点，跑"用本地模型
