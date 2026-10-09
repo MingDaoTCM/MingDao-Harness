@@ -299,7 +299,7 @@ src/               CLI / Agent 循环 / 工具 / 权限 / 技能库 / MCP / 云�
 skills/            14 个内置常驻技能
 skills-lib/        22 个可安装技能库预设
 registry/          线上技能 registry 索引
-presets/           内置 Agent 预设（如 local-audit）
+presets/           内置 Agent 预设（只 `local-model`：只调参数，不含人格/工具白名单/权限）
 packs/             内置示例 Pack（example-hello）
 assets/            内置分词器数据（tokenizer-data.json.gz，约 762 KB，`src/tokenizer.js` 使用）
 desktop/           Electron 桌面版外壳（含自动更新、原生目录选择器）

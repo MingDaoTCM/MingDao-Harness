@@ -95,42 +95,57 @@ const post = async (p, body, opts) => {
   await post('/api/config', { timeout: { firstTokenMs: null, streamIdleMs: null, totalMs: null } });
   const toCleared = await get('/api/state');
   assert.ok(!(toCleared.j.timeout && Object.keys(toCleared.j.timeout).length), '超时覆盖删除后回退自适应');
-  // v0.4.0：Agent Preset 列表契约（内置 local-audit 应恒在）
+  // v0.4.0：Agent Preset 列表契约。
+  // v0.6.16（负责人产品决策）：**删除内置「只读代码审计」预设**。负责人的原话：
+  //   "代码审计只是他作为一项较大型较长的任务对 MDH 进行的**测试**；发行版面向**普通大众**，
+  //    不是某种任务的定制——用户可能执行不同任务、不一定用本地模型、也不一定用来审计代码。"
+  // 因此内置预设**只保留 local-model**，它的定位是：**只提供参数类默认值——不携带人格、
+  // 不限制工具、不涉及权限**。需要"只读"的用户请自行组合**权限档**（readonly）与**工具白名单**
+  // （tools），而不是靠内置预设。`local-audit` 老名字仍以**别名**指向 local-model（改名兼容但不静默）；
+  // `readonly-audit` 必须已不存在（加载为空、且不设别名——删除就是删除）。
   const presets = await get('/api/presets');
   assert.equal(presets.status, 200, '/api/presets 应 200');
   assert.ok(presets.j.ok && Array.isArray(presets.j.presets), '/api/presets 结构');
-  // v0.6.14 契约：**内置预设不得覆盖用户的权限选择**。
-  // 内置 local-audit 曾声明 `permission: "readonly"`（覆盖语义）——用户实测：界面「权限模式」选「自动」，
-  // 预设仍把会话按 readonly 跑，每调用一次非只读工具都弹「只读模式将拦截 …，是否本次放行？」。
-  // 现在：只读的硬约束交给 tools 白名单（没有 write/edit），要表达"建议只读"只能用 recommendedPermission
-  // （建议，不参与权限判定、不覆盖档位）。以下三条就是这条契约的机械判据——注意顺序：
-  // 「在列表里」→「不带 permission」→「透出 recommendedPermission」，先钉最硬的那条。
-  // v0.6.15（C，负责人纠偏）：内置预设**拆成两个语义清楚的名字**——
-  //   local-model    = 只放"让本地模型跑得动"的参数（本地模型与云模型功能一致，不是审计专用）
-  //   readonly-audit = 审计人格 + 只读工具白名单（recommendedPermission 只在这里，且仍是"建议"）
-  // 老名字 local-audit 保留为别名（api-contracts 只做 HTTP 层契约，别名行为在 smoke §139 里钉）。
+  const builtin = presets.j.presets.filter((/** @type {any} */ p) => p.source === 'builtin');
+  const builtinNames = builtin.map((/** @type {any} */ p) => p.name).sort();
+  assert.deepEqual(builtinNames, ['local-model'], '内置预设只应有 local-model（发行版不做任务定制：只读代码审计预设已删除）');
+  assert.ok(!presets.j.presets.some((/** @type {any} */ p) => p.name === 'readonly-audit'), '内置 readonly-audit 必须已不存在（加载应为空）');
   const lm = presets.j.presets.find((/** @type {any} */ p) => p.name === 'local-model');
   assert.ok(lm, '内置 local-model 应列出');
+  // 内置预设不得携带**任何**权限字段：`permission` 是覆盖语义（会沉默压过用户在界面上选的档），
+  // `recommendedPermission` 是权限偏好暗示——发行版的内置预设两者都不用，权限选择权完全在用户。
   assert.ok(!('permission' in lm), '内置预设不得带 permission 字段（覆盖语义，只会造成"沉默覆盖用户权限选择"）');
-  assert.ok(!('recommendedPermission' in lm), '本地模型预设不得携带权限建议——它只是参数预设，不该替用户表达权限偏好');
+  assert.ok(!('recommendedPermission' in lm), '内置预设不得带 recommendedPermission 字段：本地模型预设不得携带权限建议——它只是参数预设，不该替用户表达权限偏好');
   assert.ok(!('systemPrompt' in lm), '本地模型预设不得携带审计人格（负责人原话：本地模型只是代替云模型 API，功能一样，不是审计专用）');
   assert.ok(!('tools' in lm), '本地模型预设不得限制工具白名单（那会让本地模型"功能不一致"）');
+  // 上面这条"权限字段纪律"对**每一个**内置预设都必须成立（现在只有 local-model；将来新增内置预设时由这里兜底）。
+  for (const p of builtin) {
+    assert.ok(!('permission' in p), `内置预设不得带 permission 字段：${p.name}`);
+    assert.ok(!('recommendedPermission' in p), `内置预设不得带 recommendedPermission 字段：${p.name}`);
+  }
   // 参数（maxRounds/maxOutputTokens/contextBudget）不在 /api/presets 的透出字段里——直接读**随包分发的那份文件**，
   // 钉住"这个名字下的内容确实是保守参数"（只透出 name/label 的空壳预设会在这里红）。
   const lmFile = JSON.parse(fs.readFileSync(path.join(root, 'presets', 'local-model.json'), 'utf8'));
   assert.ok(Number(lmFile.maxRounds) > 0 && Number(lmFile.maxOutputTokens) > 0 && Number(lmFile.contextBudget) > 0,
     `本地模型预设必须真的带上"让本地模型跑得动"的参数（maxRounds/maxOutputTokens/contextBudget），实际：${JSON.stringify(lmFile)}`);
   assert.ok(Array.isArray(lm.aliases) && lm.aliases.includes('local-audit'), '老名字 local-audit 必须以**别名**形式写在新预设上（不得静默消失：下游与测试都引用过它）');
-  const ra = presets.j.presets.find((/** @type {any} */ p) => p.name === 'readonly-audit');
-  assert.ok(ra, '内置 readonly-audit 应列出');
-  assert.ok(!('permission' in ra), '内置预设不得带 permission 字段（同上）');
-  assert.equal(ra.recommendedPermission, 'readonly', '只读审计预设必须透出 recommendedPermission=readonly（"建议"是建议，不是覆盖）');
-  assert.ok(Array.isArray(ra.tools) && ra.tools.length > 0 && !ra.tools.includes('write') && !ra.tools.includes('edit'), '只读审计预设的 tools 白名单必须存在且不含写入类工具');
-  assert.ok(typeof ra.systemPrompt === 'string' && ra.systemPrompt.length > 0, '只读审计预设必须带审计人格');
+  // 别名解析（HTTP 层已透出 aliases，这里再钉内核行为）：老名字 local-audit → local-model，
+  // 且返回值带 `aliasedFrom`（WebUI banner/日志据此告诉用户"已更名"，改名兼容但不静默）。
+  const presetsMod = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
+  const viaAlias = presetsMod.loadPreset(null, 'local-audit');
+  assert.ok(viaAlias && viaAlias.name === 'local-model', `老名字 local-audit 必须解析到 local-model，实际：${viaAlias && viaAlias.name}`);
+  assert.equal(viaAlias.aliasedFrom, 'local-audit', '别名调用必须留下"从哪个老名字来的"标记（改名兼容但不静默）');
+  // readonly-audit 必须已删除：同名预设加载为空，且**不设别名**（不得悄悄指到别的预设）。
+  assert.equal(presetsMod.loadPreset(null, 'readonly-audit'), null, 'readonly-audit 必须已不存在：加载应为空（内置只读代码审计预设已删除）');
+  assert.equal(presetsMod.canonicalPresetName('readonly-audit'), 'readonly-audit', 'readonly-audit 不得有别名（删除就是删除，不悄悄指到别的预设）');
+  assert.ok(!fs.existsSync(path.join(root, 'presets', 'readonly-audit.json')), 'presets/readonly-audit.json 必须已删除（随包分发目录里不得再有它）');
+  // 字段支持保留：第三方预设仍可声明 recommendedPermission（仍是"建议"，不参与判定、不改档）；
+  // **内置预设不使用它**（避免任何形式的权限覆盖/偏好暗示）。这条防"顺手把字段从白名单里删掉"。
+  assert.ok(presetsMod.validatePreset({ name: 'third-party-demo', recommendedPermission: 'readonly' }).ok, '第三方预设声明 recommendedPermission 仍应被接受（字段支持保留，只是内置预设不使用）');
   // 列表本身的结构契约（放在上面三条之后：内置预设缺失时先报"应列出"，而不是"列表为空"）
   assert.ok(presets.j.presets.length >= 1, '/api/presets 至少列出一个预设');
   assert.ok(presets.j.presets.every((/** @type {any} */ p) => p.name && p.label && p.source), '预设条目字段完整');
-  ok('config：state/config/models-config/presets 契约（含 v0.3.2 分层超时 + v0.4.0 预设 + v0.6.14 内置预设不覆盖权限选择 + v0.6.15 预设按语义拆分 local-model/readonly-audit）');
+  ok('config：state/config/models-config/presets 契约（含 v0.3.2 分层超时 + v0.4.0 预设 + v0.6.14/16 内置预设不涉及权限（不覆盖、不建议）+ v0.6.16 内置只留 local-model、readonly-audit 已删除、local-audit 走别名）');
 }
 
 // —— sessions 域 ——

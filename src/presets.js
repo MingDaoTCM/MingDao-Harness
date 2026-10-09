@@ -6,6 +6,14 @@
 //   2. 用户级  <mingdao-home>/presets/*.json
 //   3. 内置    随 npm 包分发的 presets/ 目录（只读参考实现）
 //
+// ---------------------------------------------------------------------------
+// 内置预设的定位（v0.6.16，负责人产品决策）：
+//   **只提供参数类默认值——不携带人格、不限制工具、不涉及权限。**
+// 发行版面向**普通大众**，不为某种任务做定制：用户可能执行各种任务、不一定用本地模型、
+// 也不一定用来审计代码。因此内置只保留 `presets/local-model.json`
+// （contextBudget / maxOutputTokens / maxRounds 这三个"让本地模型跑得动"的参数）。
+// 需要"只读"的用户请自行组合**权限档**（readonly）与**工具白名单**（tools），而不是依赖内置预设。
+//
 // 预设字段（全部可选，缺省时保持当前配置不变）：
 //   name          唯一名（必填，字母/数字/-/_，1-64）
 //   label         展示名（可选，默认 name）
@@ -15,8 +23,9 @@
 //                 模型连写工具都看不到，比任何权限档都硬
 //   permission    权限模式 ask/auto/readonly（省略=当前配置）——**覆盖**语义：会改本回合的档位，
 //                 因此**内置预设不得声明它**（v0.6.14：它只会造成"沉默覆盖用户选择"，见 presetPermissionOverride）
-//   recommendedPermission  建议权限模式（**只是建议**：只做展示/透出，绝不参与判定、绝不改档；
-//                 内置预设要表达"建议只读"就用它，第三方/老预设的 permission 仍按反提权规则生效）
+//   recommendedPermission  建议权限模式（**只是建议**：只做展示/透出，绝不参与判定、绝不改档）。
+//                 字段支持**保留**（第三方预设可能想用它），但**内置预设不使用它**——
+//                 避免任何形式的权限覆盖/权限偏好暗示（v0.6.16）。第三方/老预设的 permission 仍受反提权约束。
 //   model         建议模型（省略=当前模型）
 //   temperature / maxOutputTokens / maxRounds / contextBudget  参数覆盖
 import fs from 'node:fs';
@@ -31,16 +40,22 @@ const PRESET_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 //
 // 原来的内置 local-audit 一个名字扛了三件事：本地模型的保守参数 + 审计人格 + 只读工具白名单。
 // 负责人的原话："本地模型只是用来代替云模型 API 而已，功能是一样的；预设的目的是预设上下文窗口/
-// 最大输出 tokens 等，让本地模型正常工作——它并不是专为代码审计而设。" 于是拆成两个：
+// 最大输出 tokens 等，让本地模型正常工作——它并不是专为代码审计而设。" 于是当时拆成两个：
 //   · local-model     —— 只放"让本地模型跑得动"的参数（contextBudget/maxOutputTokens/maxRounds）
 //   · readonly-audit  —— 审计人格 + 只读工具白名单 + recommendedPermission（建议，不覆盖）
+//
+// v0.6.16（负责人产品决策）：**删除 readonly-audit**，内置预设只留 local-model。负责人的原话：
+//   "代码审计只是他作为一项较大型较长的任务对 MDH 进行的**测试**；发行版面向**普通大众**，
+//    不是某种任务的定制——用户可能执行不同任务、不一定用本地模型、也不一定用来审计代码。"
+// 所以内置预设的定位收窄为：**只提供参数类默认值，不携带人格、不限制工具、不涉及权限**。
+// 需要"只读"的效果请由用户用**权限档**（readonly）+ **工具白名单**（tools）自行组合。
 //
 // 老名字 `local-audit` 的兼容：**保留为别名**（不是删掉、也不是不再提）。
 // 为什么选"别名"而不是"只在加载时提示已更名"：
 //   · 下游与测试按名引用过它（config.preset / 计划任务 / 会话粘滞 / 脚本），改成"报个提示然后不给"
 //     等于把这些调用点从"能用"变成"用不了"——一个改名不该造成运行时中断；
 //   · 别名仍然**必须说出来**（loadPreset 里一次性 warn + WebUI banner），所以不会变成静默改名；
-//   · 别名指向 local-model：老名字的语义本来就是"本地模型预设"，审计那部分另有新家。
+//   · 别名指向 local-model：老名字的语义本来就是"本地模型预设"，审计那部分已随 readonly-audit 删除。
 // 若用户/项目自己写了同名 `local-audit.json`，**以磁盘上的为准**（别名只在"没找到同名预设"时才生效），
 // 遮蔽语义与既有一致。
 const PRESET_ALIASES = /** @type {Record<string, string>} */ ({ 'local-audit': 'local-model' });
@@ -63,6 +78,12 @@ export function presetAliasOf(/** @type {any} */ name) {
   return PRESET_ALIASES[n] ? { from: n, to: PRESET_ALIASES[n] } : null;
 }
 // 合法字段白名单：未知字段报错（防拼写错误静默失效——契约化核心）
+//
+// `recommendedPermission` **保留字段支持**：第三方/用户自写的预设可能想用它表达"建议档"（只是建议，
+// 不参与判定、不改档，见 validatePreset 与 presetConfigOverrides）。**内置预设不使用它**——
+// 发行版面向普通大众、不做任务定制，也不做任何形式的权限覆盖/权限偏好暗示（v0.6.16）。
+// 之所以不删这个字段：删掉会让第三方预设从"能校验通过"变成"未知字段报错"（一次白名单收紧会造成
+// 下游中断），而它本身没有覆盖语义、不会造成"沉默覆盖用户选择"。
 const KNOWN_FIELDS = new Set([
   'name', 'label', 'description', 'systemPrompt', 'tools',
   'permission', 'recommendedPermission', 'model', 'temperature', 'maxOutputTokens', 'maxRounds', 'contextBudget',
@@ -107,6 +128,7 @@ export function validatePreset(/** @type {any} */ obj) {
   }
   // recommendedPermission 与 permission 同一取值域，但**语义完全不同**：前者是建议（不参与判定），
   // 后者是覆盖。校验一并做，避免拼错的值（如 'read-only'）静默躺在预设里当装饰。
+  // 字段支持保留给第三方预设；**内置预设不使用它**（v0.6.16）。
   if (obj.recommendedPermission !== undefined && !PERMISSION_MODES.includes(String(obj.recommendedPermission))) {
     errors.push(`recommendedPermission 必须是 ${PERMISSION_MODES.join('/')}`);
   }
@@ -182,7 +204,8 @@ export function listPresets(/** @type {any} */ workingDir) {
     ...(Array.isArray(obj.tools) ? { tools: obj.tools } : {}),
     ...(obj.permission ? { permission: String(obj.permission) } : {}),
     // v0.6.14：**建议**权限档也透出（WebUI 列表/诊断可读），但它与 permission 不是一回事——
-    // 透出字段名分开，谁都不会把它当覆盖用（覆盖只认 permission，且内置预设不得声明 permission）。
+    // 透出字段名分开，谁都不会把它当覆盖用（覆盖只认 permission；且**内置预设不使用任何权限字段**，
+    // 这里透出的只可能是第三方/用户自写预设声明的值——v0.6.16）。
     ...(obj.recommendedPermission ? { recommendedPermission: String(obj.recommendedPermission) } : {}),
     ...(obj.model ? { model: String(obj.model) } : {}),
   }));
@@ -260,10 +283,12 @@ const PERM_RANK = /** @type {Record<string, number>} */ ({ readonly: 0, ask: 1, 
  * （如当前 ask → 预设 auto 属提权，忽略并返回当前值）。clone 恶意仓库含 .mingdao/presets/*.json
  * 声明 auto 时，不能静默跳过用户全部确认。返回 { permission, escalated }：escalated=true 表示已拦截提权。
  *
- * 纪律（v0.6.14）：**内置预设不得声明 `permission`**——它是"覆盖"语义，只会造成"沉默覆盖用户选择"
- * （负责人实测：界面上选了「自动」，内置 local-audit 仍把会话按 readonly 跑，每调用一次非只读工具
- * 都弹「只读模式将拦截 …」）。内置预设要表达"建议只读"用 `recommendedPermission`（只透出、不参与判定），
- * 只读的硬约束交给 `tools` 白名单（没有 write/edit）。
+ * 纪律（v0.6.14，v0.6.16 收窄到"内置预设不涉及权限"）：**内置预设不使用任何权限字段**——
+ * `permission` 是"覆盖"语义，只会造成"沉默覆盖用户选择"（负责人实测：界面上选了「自动」，
+ * 当时的内置 local-audit 仍把会话按 readonly 跑，每调用一次非只读工具都弹「只读模式将拦截 …」）；
+ * `recommendedPermission` 虽只是建议，但同样是"替用户表达权限偏好"的暗示，内置预设也不用。
+ * 内置预设只提供参数类默认值（见文件头"内置预设的定位"）；只读的硬约束交给**工具白名单**
+ * （tools 里没有 write/edit），或由用户显式选权限档。
  * 第三方/老预设仍可声明 `permission`，本节的反提权语义**不放松**（只拦"变宽松"，不放行 readonly→auto）。
  * @param {any} preset @param {string} currentPermission
  */

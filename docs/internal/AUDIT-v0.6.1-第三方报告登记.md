@@ -2477,3 +2477,77 @@ permission=readonly，已按你的显式选择 auto 执行`。
 - **`stalled` 的 UI 呈现只做了 WebUI/桌面壳共用的 `src/web/app.js`**：CLI/REPL 仍只有一行 `io.print` 文案，
   没有额外的 TUI 状态条改动；`desktop/**` 本轮未改动（桌面壳日志里的 `status=` 来自渲染进程 console）。
 - **进度日志仍是 30s 一行**（沿用 §3.54 的取舍），本轮只往里加了子代理字段，未做自适应频率。
+
+## 3.57 已决（v0.6.16 开发线：删除内置「只读代码审计」预设——发行版不做任务定制）
+
+**决策（负责人原话，逐字登记）**
+
+> 代码审计只是他作为一项较大型较长的任务对 MDH 进行的**测试**；发行版面向**普通大众**，
+> 不是某种任务的定制——用户可能执行不同任务、不一定用本地模型、也不一定用来审计代码。
+
+因此删除内置预设 `presets/readonly-audit.json`，内置预设**只保留 `presets/local-model.json`**，
+并把内置预设的定位收窄为：**只提供参数类默认值——不携带人格、不限制工具、不涉及权限**。
+需要"只读"的用户请自行组合**权限档**（`readonly`）与**工具白名单**（`tools`），而不是靠内置预设。
+
+**改了哪些文件**
+
+- `presets/readonly-audit.json`：**删除**（`git rm`）。
+- `presets/local-model.json`：仅微调 `description`（去掉"审计人格与只读白名单在 readonly-audit 里"
+  的指路，改为"内置预设只提供参数类默认值，需要只读请自行组合权限档与工具白名单"）；参数值
+  （`contextBudget`/`maxOutputTokens`/`maxRounds`）**一字未动**，无人格、无工具白名单、无权限字段。
+- `src/presets.js`：文件头新增「内置预设的定位」整段（只提供参数类默认值，不携带人格、不限制工具、
+  不涉及权限）；v0.6.15 的拆分注释补上 v0.6.16 的删除决策与负责人原话；`PRESET_ALIASES` **保持**
+  `{ 'local-audit': 'local-model' }`（读代码确认它本来就指向 `local-model`，不需改）；
+  `KNOWN_FIELDS` **保留** `recommendedPermission`（见下"判断"）并注明"内置预设不使用它"。
+- `test/api-contracts.js`：契约改为——内置预设（`source === 'builtin'`）列表**深比较等于
+  `['local-model']`**；**不得含** `permission` 与 `recommendedPermission`（逐内置预设循环兜底）；
+  `local-audit` 经 `loadPreset` **解析到 `local-model`** 且带 `aliasedFrom`；
+  **`readonly-audit` 必须已不存在**（`loadPreset` 为 `null` + 无别名 + 文件不存在 + 不设别名）；
+  另加一条"字段支持保留"断言（第三方预设声明 `recommendedPermission` 仍应通过校验）。
+- `test/mutate/batch27-preset.mjs`：锚点从 `presets/readonly-audit.json` 改指 `presets/local-model.json`，
+  断言关键词改指**新契约原文**，条数**保持 6 条**（`test/mutate/README.md` 的计数行未动，
+  仍与 `doc-lint` 的"实际 210 条"一致）。本批 6/6 全中。
+- 文档：`docs/CONFIG.md`（"权限优先级与预设"整节改为 v0.6.16 口径 + "内置预设只提供参数类默认值"
+  说明块）、`docs/CONFIG.en.md`（新增 `### Permission priority and presets` 英文同步节）、
+  `docs/DEVELOPER.md`（§1.1 内置预设只剩一个；§1.2 字段表改"内置预设不使用"；§1.2 末段改为
+  "复制 local-model 自行合并"）、`README.md`（目录树 `presets/` 行）。
+- 本机用户级预设：检查 `~/.mingdao/presets/`——**不存在** `readonly-audit.json`（无需删除）；
+  `local-audit.json.bak-20261009`（早先备份）与 `local-model.json`（负责人的 32k 覆盖）**保留不动**。
+
+**`recommendedPermission` 去留判断：保留字段支持**
+
+保留（不从 `KNOWN_FIELDS` 删）。理由：① 它**没有覆盖语义**——`presetConfigOverrides` 的键表里没有它，
+`presetPermissionOverride` 只读 `permission`，它只随 `GET /api/presets` 透出，不会造成 §3.53 那种
+"沉默覆盖用户选择"；② 第三方/用户自写预设可能正在用它表达"建议档"，从白名单里删掉会把它们从
+"校验通过"变成"未知字段报错"——一次白名单收紧造成下游中断，与本轮"删除内置预设"是两件事；
+③ 契约里用"内置预设不得带 recommendedPermission 字段"把**内置侧**的纪律钉死，字段本身留给第三方。
+注释已写清：**内置预设不使用它（避免任何形式的权限覆盖/权限偏好暗示）**。
+
+**兼容处理**
+
+- 老名字 `local-audit` **仍可用**：`PRESET_ALIASES` 指向 `local-model`，`loadPreset` 返回值带
+  `aliasedFrom: 'local-audit'`，内核打一次「已更名」warn、WebUI 用 banner 说明——改名兼容，但不静默
+  （磁盘上若存在同名 `local-audit.json`，仍以磁盘上的为准，别名只兜底）。
+- `readonly-audit` **不设别名**：删除就是删除，不悄悄指到别的预设；`loadPreset` 返回 `null`。
+- 契约方向从"两个预设各钉各的字段"变成"内置只有 local-model + 任何内置预设都不得带权限字段"，
+  测试与文档同批对齐。
+
+**断言与变异**
+
+- `test/api-contracts.js`：内置预设唯一性/权限字段纪律/别名解析/删除确认/字段支持保留，5 组断言。
+- `test/mutate/batch27-preset.mjs`：6 条（内置把 `permission` 写回来 / 内置把 `recommendedPermission`
+  写回来 / 内置改回 `readonly-audit` 这个名字 / `listPresets` 合成 `recommendedPermission` /
+  白名单不再认 `recommendedPermission` / 放松反提权走 §137）。**6/6 全中**。
+
+**未做边界（如实登记）**
+
+- **`test/smoke.js` 未改**（另一执行者正在同一文件追加 §141）：其中 §47 与 §139 仍断言内置
+  `readonly-audit` 存在——现在会红。逐条位置与改法已在交付说明里列出，由负责人统一修改。
+- **`test/mutate/batch28-stall.mjs` 未改**（不在本轮允许改动清单内）：其 ㉖ 仍以
+  `presets/readonly-audit.json` 为承载文件，文件删除后会因读不到文件而中断；本轮只报告、未动。
+- **`test/mutate/README.md` 的计数行未改**：本轮 batch27 条数不变，总数仍是 210，无需改。
+- **不做自动迁移/删除提示**：用户级或项目级存在的 `readonly-audit.json` 不会被程序删除或改写，
+  也不会在加载时提示"这个内置预设已删除"（只有 `local-audit` 有改名别名提示）。用户自写的同名预设
+  仍照常加载——那是用户自己的文件，不属于内置预设的范畴。
+- **不带 `permission` 的第三方预设仍是"只读"的唯一硬保证靠 `tools` 白名单**：本轮只收窄内置预设，
+  反提权规则与 `recommendedPermission` 的建议语义**一字未改**。

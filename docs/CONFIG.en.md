@@ -249,6 +249,27 @@ Additional `denyStrict` semantics (`src/permissions.js:130-147`):
 Unattended / compliance-sensitive deployments (scheduled jobs, CI gates, containers) are the intended
 audience. Interactive daily use should keep the default.
 
+### Permission priority and presets (v0.6.14; narrowed in v0.6.16)
+
+Priority of the *intent*: **explicit choice > preset suggestion (`recommendedPermission`) > `config.json`**.
+Only two things actually change the mode: your explicit choice, and a `permission` field declared by a
+legacy/third-party preset (subject to the anti-escalation rule — it may only be *more* conservative).
+
+* **Built-in presets never carry any permission field.** `permission` is an *override* and would silently
+  beat the mode you picked in the UI; `recommendedPermission` is merely a suggestion but is still a
+  permission-preference hint, so built-in presets do not use it either. The field itself is retained so
+  third-party/self-written presets can still declare it (suggestion only: never judged, never changes the mode).
+* **Want read-only? Combine a permission mode with a tool allow-list yourself.** A preset's `tools`
+  allow-list is the hard constraint (no `write`/`edit` means the model never even sees the write tools);
+  pinning the session to the `readonly` mode is the second layer. Built-in presets decide neither for you.
+* **Built-in presets only ship parameter defaults.** The distribution targets the general public and does
+  not customize for any particular task, so the only built-in preset is `local-model` — it only tunes
+  `contextBudget` / `maxOutputTokens` / `maxRounds` and carries **no persona, no tool allow-list and no
+  permission fields**. The former built-in read-only code-audit preset `readonly-audit` was **removed** in
+  v0.6.16; the old name `local-audit` still works but prints a "renamed to `local-model`" notice.
+* The tool-call audit log / ledger has nothing to do with presets: that is `config.audit` plus
+  `mingdao audit` / `mingdao ledger`. Do not treat any preset as a compliance audit switch.
+
 ### File access boundary
 
 `read` / `write` / `edit` / `ls` / `glob` / `grep` / `undo` are confined to the working directory.
