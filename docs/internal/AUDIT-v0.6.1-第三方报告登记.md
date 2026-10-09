@@ -2478,6 +2478,94 @@ permission=readonly，已按你的显式选择 auto 执行`。
   没有额外的 TUI 状态条改动；`desktop/**` 本轮未改动（桌面壳日志里的 `status=` 来自渲染进程 console）。
 - **进度日志仍是 30s 一行**（沿用 §3.54 的取舍），本轮只往里加了子代理字段，未做自适应频率。
 
+## 3.56 已修复（v0.6.13 开发线：端点预检**误报"不可达"**——真机判不可达、同一回合首帧 8.7s 正常跑）
+
+**真机证据（`~/.mingdao/logs/web-server.log`，844 行；本节所有行号都是该文件的）**
+
+| 行 | 时间 | 内容（节选） | 说明 |
+| --- | --- | --- | --- |
+| :413 | 07:03:02.928 | `预检 mtplx-qwen38-27b-optimized-quality unreachable ttft=n/a prefill2000=n/a tools=未知/不可判定 endpoint=127.0.0.1:8081/v1 引擎自述上下文=未读到 配置=131072` | **进程启动**时引擎还没起来 → 这是唯一一次真实探测，结论"不可达" |
+| :415 / :416 | 07:08:13.912 / .931 | `chat 开始 t01c78ffc9a8fb72e` → `chat 预检 t01c78ffc9a8fb72e unreachable ❌ 不可达：fetch failed（本地引擎没起来？先确认端口/进程）` | 距"开始"只 **19ms**，且**没有** `预检 <模型>` 行 ⇒ 没重测，直接念旧结论 |
+| :417 | 07:08:16.963 | `chat 错误 t01c78ffc9a8fb72e 网络请求失败：fetch failed` | 这一回合**确实**失败（引擎仍没起来）——旧结论与事实一致，掩盖了问题 |
+| :798 / :799 | 10:13:58.877 / .900 | `chat 开始 tf91d8ab0ddfec0bd` → `chat 预检 tf91d8ab0ddfec0bd unreachable ❌ 不可达：fetch failed（本地引擎没起来？先确认端口/进程）` | 距"开始"只 **23ms**，同样**没有** `预检 <模型>` 行 |
+| :800 / :803 / :844 | 10:14:03.883 / 10:14:08.887 / 10:43 | `chat 预告 …` / `chat 首帧 tf91d8ab0ddfec0bd 8.7s` / `chat 进度 … 已跑 21m06s · 工具调用=20` | **同一回合完全可用**（首帧 8.7s），与"不可达"直接矛盾 |
+| :419 | 07:08:59.466 | `预检 MLocalModel3.6.2 ok-tools ttft=324ms prefill2000=6796ms tools=支持（3/3）` | 引擎自 07:08:59 起就是可用的（用户被这句话支去重启了引擎） |
+
+节点核对：`~/.mingdao/config.json` 里 `model = mtplx-qwen38-27b-optimized-quality`（`baseUrl=http://127.0.0.1:8081/v1`，
+`contextWindow=131072`），而 :800 的预告写的是"131,072 窗口" ⇒ 10:13:58 的 run model 就是 **mtplx**，
+与 :413 那条失败结论**同一个缓存键**。也就是说：**同一条 7 小时 10 分钟前的失败结论，被 10:13:58 的新回合原样重放。**
+
+**根因（改前代码 + 行号）**
+
+1. **进程内备忘没有 TTL**（主因）：`src/web/server.js:312` `if (probeByModel.has(m)) return probeByModel.get(m);` +
+   `:337` `probeByModel.set(m, probe)`——只按"有没有"判，不看"多久了"。`model-discovery.js` 那层本来有
+   10 分钟 TTL（`probeCache` / `PROBE_TTL_MS`），但被这一层**短路**了：07:03 存进去的失败结论一直念到 10:13。
+   日志里 `.877 → .900` 只差 23ms、且没有 `预检 <模型>` 行（那是**唯一**会写"刚测出来"的地方，`server.js:328`），
+   正是"命中备忘、没重测"的指纹。
+2. **失败原因被合并成一句话**（`src/model-discovery.js` 改前 `:306-310`）：`if (!connected)` 一律
+   `state='unreachable'` + `❌ 不可达：${error}${isLocal?'（本地引擎没起来？先确认端口/进程）':''}`——
+   超时、被断开、HTTP 4xx、原始 `fetch failed` 全都套这句；用户只能照字面去重启引擎。
+3. **"超时"覆盖不到首帧**（改前 `:222-230` `once()` 在 `finally` 里 clearTimeout）：探针是 `stream:true`，
+   `fetch` 在**响应头**到达时就 resolve ⇒ 引擎"正在启动/卡在 prefill"时探针**没有任何超时**（桩复现：给 1.5s
+   超时，6s 后仍在跑），而它在回合发起前被 `await`（`server.js:840`）⇒ 把回合发起拖死。
+4. **重试没有退避**（改前 `:252-274`：`for` 循环里背靠背 `await once(...)`）：端口只要还没 bind，
+   3 次尝试会在 ~1ms 内全部撞上同一个瞬间 ⇒ 判"不可达"（桩复现：端口 700ms 后才监听 → 判不可达；
+   同一现场加退避后能测通）。
+5. **HTTP 4xx 被说成工具能力问题**：`connected=true`（收到过响应）但 `toolState='unknown'` → `state='unreachable'`
+   （改前 `:346`），文案落到"工具调用**未能判定**（…多为被 max_tokens 截断）"（改前 `:410`）——
+   真正的原因（HTTP 404：端点没实现这条探针请求）被埋掉。
+6. **同一引擎上的并发预检没有跨键去重**：`probeInflight` 只按 `base|modelName` 去重（改前 `:172/175`），
+   同一 baseUrl 的两个模型条目会同时打同一台引擎；且每回合的预检都在发送前 `await`，探针耗时直接加在首帧之前
+   （改前最坏：单次 15s × 3 + 参考 prefill ≈ 35s）。
+
+**修法**
+
+- **判据分类（纯函数，新增）**：`classifyProbeError()` → `refused`（连接被拒/`ECONNREFUSED`）/ `reset`（被对端断开）/
+  `timeout`（超时）/ `other`；`classifyProbeHttp()` → `http-unimplemented`（404/405/501，"端点未实现该探针请求"）/
+  `http-auth`（401/403）/ `http`。失败结论新增字段 `probe.reason`，**日志与文案都跟着判据走**。
+- **文案分叉**（`probeFailureNote()`，纯函数）：只有 `refused` 才说"❌ 不可达：连接被拒（端口没人监听）"；
+  超时说"⏱ 探针超时：1.5s 内没有首帧（端口是通的，引擎在 prefill 或**正在启动**）"；
+  404 说"❌ 探针被拒绝：HTTP 404（端点未实现该探针请求）"；每句都带"**预检是尽力而为，失败只降级、不阻断本回合**"。
+  不再出现裸 `fetch failed`。
+- **超时口径**：`timeoutMs` 改为**整个探针的时间预算**（server.js 仍传 15000），单次尝试 `attemptMs = PROBE_ATTEMPT_MS (1.5s)`，
+  且**计时覆盖到首帧**（`open()` 只在读完首帧后 clear；body 读取阶段触发首帧超时会被抛出并按"超时"归类）。
+  参考 prefill 单独放宽（20000ms，本地 35B 实测 6.6~7.8s），样本数仍是 `PROBE_ATTEMPTS = 3`（三态判据不变）。
+- **退避重试**：`PROBE_BACKOFF_MS = [300, 700]`——引擎"正在启动"时给端口留出 bind 时间。
+- **失败结论只保鲜 60s**：`PROBE_FAIL_TTL_MS = 60s` + `probeVerdictFailed()` + `probeMemoUsable()`，
+  `probeCache`（模块级）与 `probeByModel`（server.js 进程内备忘）**两处都按它判**；成功结论仍 10 分钟。
+- **降级语义显式化**：`ensureProbe` 吞掉一切探针异常（只留一行"失败（忽略，按默认超时继续）"），
+  回合级预检整段包在 try/catch 里；注释写明"尽力而为：失败只降级、不阻断"。
+- **复核行**：`chat 预检` 日志加 `reason=`；回合结束（长回合在首帧时）写一行
+  `chat 预检复核 <taskId> 预检曾判不可达（reason=…），但本回合实际可用（首帧 Xs）——预检判据需复核`。
+- **不打扰"只实现 chat 的端点"**：探针只打 `POST {base}/chat/completions`（与主请求同构：`providers/openai-compatible.js:24`），
+  `GET /props` 仍只在引擎自报模型名后才打 ⇒ 桩验证 GET 次数 = 0。
+- **回归**：`test/smoke.js` §141（桩服务 + 桩引擎：拒连 / 只实现 chat / 首帧慢 / 永不回帧 / 404 / 启动中 / 保鲜期 /
+  探针异常只降级 / 结构守卫）；`test/mutate/batch30-preflight.mjs` 10 条变异全中。
+- **顺带修复（同一提交）**：另一个执行者已删 `presets/readonly-audit.json`（见 §3.57），但它留下的
+  `test/smoke.js` §47/§139 与 `test/mutate/batch28-stall.mjs` ㉖ 仍指向该文件（smoke 与全批次变异必红）。
+  已按新契约改为：内置预设**只应有 `local-model`**、`readonly-audit` 必须不存在/加载为空、
+  项目级遮蔽用例改用 `local-model.json`、batch28 26→25 条（语义由 batch27 ②③ 承接）。
+
+**未做边界**
+
+- **只覆盖 OpenAI 兼容协议**：探针固定打 `POST {base}/chat/completions`。当**自定义 Provider 模块**
+  （`~/.mingdao/providers/<name>.mjs`，例如 Anthropic 原生 `/v1/messages`）配的是**本机/内网** `baseUrl` 时，
+  探针会打到那条并不存在的 `/chat/completions` ⇒ 结论是"HTTP 404（端点未实现该探针请求）"（原因写对了，
+  但那条**不适用于该端点的探针**本身没有意义）。这类端点应视为"探针不适用"，本轮**未做**按 provider kind
+  跳过预检——主请求不受影响（不阻断），但界面上会多一条无意义的不可达 banner。这是下一个该收的口子。
+- **失败结论 60s 是固定值**：没有按失败形态自适应（例如"拒连"可以更短、"超时"可以更长），
+  也没有"连续 N 次'判不可达但回合可用'就自动降低预检频率/自动跳过"的自愈。
+- **预检仍在回合发起前 `await`**（未改成与首帧并行）：只是把最坏耗时从 ~35s 压到 ~6s。
+  真要做到零干扰，应把探针与首帧请求并行、以首帧为准——本轮没做，因为 banner 与"发送前规模预告"
+  需要在发送前就拿到结论。
+- **不区分引擎启动阶段**：只按错误码 + 首帧超时区分"拒连/超时/被断开/HTTP"，没有读引擎侧
+  "加载模型中/bind 完成/首次 prefill"的状态（llama.cpp 也没有稳定接口）。
+- **只跑了桩与端到端桩复现**：`/tmp` 桩服务 + 桩引擎 + **真 web 服务器**（真 `/api/chat`、真 `web-server.log`）
+  端到端复现了"引擎没起来→判不可达→引擎起来→新回合仍念旧结论→本回合成功"这条时间线（改前）；
+  改后同一条时间线在 61s 后重测为 `ok-tools`、并落"预检复核"行。**真机（llama.cpp @60091/8081/8082）
+  未复跑**——留给负责人下一轮真机验证。
+- **`presets/**`、`desktop/**`、`ide/**` 未动**（另一执行者的 §3.57 范围）。
+
 ## 3.57 已决（v0.6.16 开发线：删除内置「只读代码审计」预设——发行版不做任务定制）
 
 **决策（负责人原话，逐字登记）**

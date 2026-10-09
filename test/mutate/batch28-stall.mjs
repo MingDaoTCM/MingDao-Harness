@@ -146,7 +146,9 @@ M.mutate({
 M.mutate({
   name: '⑬ 工具探针只跑一次就当结论（负责人实测同一端点两次结果相反：2.7s 有 / 23.9s 无）',
   file: 'src/model-discovery.js',
-  from: '    repeats = 3,',
+  // v0.6.13 探针误报修复：默认样本数从字面量 3 改成具名常量 PROBE_ATTEMPTS（=3），锚点随之更新；
+  // 语义不变——"把样本数减到 1"必须被 §139 抓住（单次结果不得当结论）。
+  from: '    repeats = PROBE_ATTEMPTS,',
   to: '    repeats = 1,',
   expect: ['必须重复 3 次并如实记命中次数'],
   run: SEC,
@@ -262,13 +264,9 @@ M.mutate({
   run: SEC,
 });
 
-M.mutate({
-  name: '㉖ 只读审计预设不再透出 recommendedPermission（"建议"没了）',
-  file: 'presets/readonly-audit.json',
-  from: '  "recommendedPermission": "readonly",\n',
-  to: '',
-  expect: ['必须透出 recommendedPermission=readonly'],
-  run: CONTRACTS,
-});
+// 原 ㉖（"只读审计预设不再透出 recommendedPermission"，承载文件 presets/readonly-audit.json）
+// 已随 `04433d4` 删除 readonly-audit 而移除——该文件不存在了，锚点必然"变异点未找到"（假红）。
+// 它的语义（内置预设不得携带人格/白名单/权限、删掉的名字不许回来）由 batch27 ②③ 承接。
+// 因此本批 26 → 25 条；总数变化见 test/mutate/README.md 的计数行（由 scripts/doc-lint.mjs 守卫）。
 
 if (!M.report()) process.exit(1);

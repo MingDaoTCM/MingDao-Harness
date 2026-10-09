@@ -35,7 +35,119 @@ const TTL_MS = 60 * 60 * 1000;
 // ---------------------------------------------------------------------------
 
 /** 预检结果缓存 TTL（10 分钟）：端点能力/延迟变化不快，但也不能一辈子不重测。 */
-const PROBE_TTL_MS = 10 * 60 * 1000;
+export const PROBE_TTL_MS = 10 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// v0.6.13（探针误报修复）：预检的**超时/重试/退避**与**失败原因分类**
+//
+// 真机证据（web-server.log:799，2026-10-09T10:13:58.900）：
+//   `chat 预检 tf91d8ab0ddfec0bd unreachable ❌ 不可达：fetch failed（本地引擎没起来？先确认端口/进程）`
+//   ——同一回合随后完全可用（web-server.log:800 预告、:803 首帧 8.7s、:844 已跑 21m）。用户照这句话
+//   去重启了引擎。三种形态都必须**分开判、分开说**（桩服务复现见 test/smoke.js §141）：
+//     ① 端口没人监听        → 连接被拒（ECONNREFUSED）：确实是"引擎没起来"
+//     ② 只实现 chat 的网关  → 可用（探针只打 POST {base}/chat/completions，**一个 GET 都不多发**）
+//     ③ 首帧很慢（prefill/启动中）→ 超时：端口是通的，不能说"引擎没起来"
+//     ④ HTTP 404/405        → 端点没实现这条探针请求（探针被拒绝，不是"不可达"）
+//
+// 三条硬约束（都是真机踩出来的）：
+//   · **单次尝试必须短**（1.5s）：本地 35B 的"极小请求"实测 0.2~3.0s，1.5s 足够"活着"的引擎答出来；
+//     此前单次 15s、最坏 3 次 + 参考 prefill ≈ 35s，而它在**回合发起之前**被 await（server.js:840），
+//     等于把回合发起拖住（更糟：被 abort 的请求还占着引擎 slot）。
+//   · **超时必须覆盖到"首帧"**：此前 `once()` 在响应头到达时就 clearTimeout，而探针是 stream:true ——
+//     引擎"回了头、卡在 prefill"时探针**没有任何超时**（实测 ③b：给了 1.5s 超时，6s 后仍在跑），
+//     把回合发起无限期拖住。现在计时一直盖到首帧/响应结束。
+//   · **必须退避重试**：此前 3 次尝试背靠背，全部在同一个瞬间撞上"端口还没 bind"的引擎
+//     （实测 ④：端口 800ms 后才监听 → 1ms 内连撞 3 次 → 判"不可达"）。退避 300/700ms 后同一现场能测通。
+// ---------------------------------------------------------------------------
+
+/** 单次探针请求的超时（秒级：短，避免与首帧抢资源）。 */
+export const PROBE_ATTEMPT_MS = 1500;
+/** 工具探针的样本数（N/3 三态：稳定/不稳定/不支持——这是既有判据，不得为了"更快"减样本）。 */
+export const PROBE_ATTEMPTS = 3;
+/** 尝试之间的退避（第 i 次失败后用 BACKOFF[i-1]，最后一项复用）：给"正在启动"的引擎留出 bind 时间。 */
+export const PROBE_BACKOFF_MS = [300, 700];
+/** 参考 prefill 的单独超时：本地 35B 实测 6.6~7.8s/2000 tokens，用 1.5s 会永远测不到
+ *  （§140 的"预告由预检实测推导"就会失去依据）。它只有成功连通后才发一次。 */
+const PREFILL_ATTEMPT_MS = 20000;
+/** **失败**结论的保鲜期：失败可能是"引擎正在启动"的瞬时态，绝不能长期复用。 */
+export const PROBE_FAIL_TTL_MS = 60 * 1000;
+
+/** 这条预检结论是不是"失败结论"（纯函数）：失败结论不得长期缓存/备忘（见 PROBE_FAIL_TTL_MS）。
+ *  **只**把"没打通/没结论"算失败；`ok-textonly`、`unstable-tools` 是**结论**（端点答了，只是不/不稳定
+ *  支持工具调用），按完整 TTL 缓存——否则每个回合都要再往慢引擎上打 4 个探针请求，正好是反效果。
+ *  @param {any} v */
+export function probeVerdictFailed(/** @type {any} */ v) {
+  if (!v) return true; // 压根没拿到结论（抛错/无端点）——同样不能长期当"可用"
+  return v.state === 'unreachable';
+}
+
+/** 服务端"进程内预检备忘"是否还能用（纯函数，便于断言/变异）。
+ *
+ *  真机误报的**主因**就在这里：v0.6.13 的备忘**没有任何 TTL**——
+ *  进程启动时引擎还没起来，留下一条 `❌ 不可达：fetch failed（本地引擎没起来？…）`，
+ *  之后**每一个新回合**都把它原样重放（web-server.log:413 07:03:02 的真实探测 → :416 07:08:13、
+ *  :799 10:13:58 两次重放，间隔 7 小时 10 分钟），而同一回合其实完全可用（首帧 8.7s）。
+ *  所以：成功结论按 PROBE_TTL_MS 复用，**失败结论只按 PROBE_FAIL_TTL_MS（60s）**复用。
+ *  @param {{ at?: number, value?: any }|null} memo @param {number} [now] */
+export function probeMemoUsable(/** @type {any} */ memo, /** @type {number} */ now = Date.now()) {
+  if (!memo || !Number.isFinite(Number(memo.at))) return false;
+  const ttl = probeVerdictFailed(memo.value) ? PROBE_FAIL_TTL_MS : PROBE_TTL_MS;
+  return now - Number(memo.at) < ttl;
+}
+
+/** 探针失败的分类（纯函数，便于断言/变异）——**不许**把超时、拒连、HTTP 4xx 混成一句"fetch failed"。
+ * @param {any} err
+ * @returns {{ kind: 'refused'|'reset'|'timeout'|'other', detail: string, label: string, hint: string }}
+ */
+export function classifyProbeError(/** @type {any} */ err) {
+  const code = String(err?.cause?.code || err?.code || '');
+  const msg = String(err?.message || err || '');
+  if (code === 'ECONNREFUSED' || /ECONNREFUSED/i.test(msg)) {
+    return { kind: 'refused', detail: 'ECONNREFUSED', label: '连接被拒（端口没人监听）', hint: '本地引擎没起来/端口不对：先确认端口与进程。' };
+  }
+  if (code === 'ECONNRESET' || code === 'UND_ERR_SOCKET' || /socket hang up|other side closed|terminated/i.test(msg)) {
+    return { kind: 'reset', detail: code || msg.slice(0, 80), label: '连接被对端断开', hint: '引擎可能刚崩/正在重启（连接是通的，只是被断开）。' };
+  }
+  if (err?.probeTimeout === true || err?.name === 'AbortError' || code === 'UND_ERR_HEADERS_TIMEOUT' || code === 'UND_ERR_BODY_TIMEOUT' || /超时|timed?\s?out|aborted/i.test(msg)) {
+    return { kind: 'timeout', detail: code || 'timeout', label: '超时', hint: '端口是通的，但没在探针上限内等到首帧：引擎在 prefill，或**正在启动**——不代表主请求会失败。' };
+  }
+  return { kind: 'other', detail: code || msg.slice(0, 120) || '未知错误', label: '其它错误', hint: '不是"引擎没起来"的形态，按这个错误码排查（探针只打 POST {base}/chat/completions）。' };
+}
+
+/** 探针拿到 HTTP 响应但不是 2xx 时的分类（纯函数）。 */
+export function classifyProbeHttp(/** @type {any} */ status) {
+  const s = Number(status) || 0;
+  if (s === 404 || s === 405 || s === 501) {
+    return { kind: 'http-unimplemented', detail: `HTTP ${s}`, label: `HTTP ${s}（端点未实现该探针请求）`, hint: `该端点没有实现 POST {base}/chat/completions（探针打的与主请求是同一个 URL）。` };
+  }
+  if (s === 401 || s === 403) {
+    return { kind: 'http-auth', detail: `HTTP ${s}`, label: `HTTP ${s}（鉴权被拒）`, hint: '端口与端点都在，是 API Key/鉴权的问题（检查 ⚙ 设置里的密钥）。' };
+  }
+  return { kind: 'http', detail: `HTTP ${s || '（无响应）'}`, label: `HTTP ${s || '（无响应）'}（探针请求被拒绝）`, hint: '端口是通的，但这条请求被端点拒绝：按返回值排查。' };
+}
+
+/** 失败结论的**一行文案**（纯函数）：判据（kind）先定，文案跟着判据走。
+ *  既要说清"是什么"，也要说清"下一步怎么办"，并且**永远**写明"预检失败不阻断本回合"。
+ * @param {{ kind: string, detail?: string, label?: string, hint?: string }} failure
+ * @param {{ attemptMs?: number, tries?: number }} [ctx]
+ */
+export function probeFailureNote(/** @type {any} */ failure, /** @type {any} */ ctx = {}) {
+  const kind = String(failure?.kind || 'other');
+  const detail = failure?.detail ? `（${failure.detail}）` : '';
+  const label = failure?.label || kind;
+  const hint = failure?.hint || '按上面的原因排查。';
+  const attemptSec = Number(ctx.attemptMs) > 0 ? (Number(ctx.attemptMs) / 1000).toFixed(1) : '1.5';
+  const tries = Number(ctx.tries) > 0 ? Number(ctx.tries) : PROBE_ATTEMPTS;
+  // 前缀本身就要分开：只有"连接被拒/被断开"才配说"不可达"；超时是"端口通、没等到首帧"，
+  // HTTP 4xx 是"端点拒绝了这条探针请求"——三者混为一谈正是真机误报的文案根源。
+  const head =
+    kind === 'refused' ? `❌ 不可达：${label}${detail}` :
+    kind === 'reset' ? `❌ 连接被断开：${label}${detail}` :
+    kind === 'timeout' ? `⏱ 探针超时：${attemptSec}s 内没有首帧${detail ? `（${failure.detail}）` : ''}` :
+    kind.startsWith('http') ? `❌ 探针被拒绝：${label}${detail ? '' : ''}` :
+    `❌ 探针失败：${label}${detail}`;
+  return `${head}——${hint}（探针：${tries} 次尝试 × ${attemptSec}s、含退避；**预检是尽力而为，失败只降级、不阻断本回合**）`;
+}
 /** 无进展看门狗的自适应下限/上限（见 adaptiveTimeouts）。
  *  上限与 agent.js 的 DEFAULT_NO_PROGRESS_TIMEOUT_MS 相同——由冒烟断言钉住两者一致（单源守卫）。 */
 export const PROGRESS_MIN_MS = 600000;
@@ -145,16 +257,25 @@ export function modelNameMismatch(/** @type {any} */ configured, /** @type {any}
  *
  * 返回（关键字段）：
  *   state        'ok-tools' | 'unstable-tools' | 'ok-textonly' | 'unreachable'（粗三态，兼容旧调用）
+ *   reason       失败原因（v0.6.13 修复新增）：'refused'（连接被拒）/ 'reset'（被断开）/
+ *                'timeout'（超时）/ 'inconclusive'（样本不可判定）/ 'http-404' 等 / null（可用）
  *   toolState    'stable-tools' | 'unstable-tools' | 'no-tools' | 'unknown'（细三态，N/3）
  *   toolCallHits / toolCallRuns        命中次数 / 实际样本数
  *   ttftMs       三次小请求的首帧中位数（ms）
  *   prefillMs    参考 prefill（prefillTokens 个 token）的耗时（ms）
  *   baseline / slowdown                历史基线（持久化在 <home>/model-probe.json）与本次倍数
  *   nameMismatch / loadedModel         引擎实际加载的模型名与配置项名是否对不上
- *   note         一行给人看的结论（UI + web-server.log 直接用）
+ *   note         一行给人看的结论（UI + web-server.log 直接用）——**文案跟着 reason 走**，
+ *                不得把超时/HTTP 4xx/拒连一律写成"本地引擎没起来"
+ *
+ * 语义（v0.6.13 修复）：
+ *   · `timeoutMs` 是**整个探针的时间预算**（默认 10s；server.js 传 15000），**不是**单次尝试超时；
+ *     单次尝试超时 = `attemptMs`（默认 PROBE_ATTEMPT_MS = 1.5s），并且**覆盖到首帧**（不只是响应头）。
+ *   · `repeats` 默认 3（工具调用三态需要 N/3，不得减）；尝试之间有退避（PROBE_BACKOFF_MS）。
+ *   · 探针是**尽力而为**：任何失败都只降级为"没有预检数据"，绝不影响主请求/回合发起。
  *
  * @param {any} cfg @param {string} modelName
- * @param {{ timeoutMs?: number, force?: boolean, fetchImpl?: any, repeats?: number,
+ * @param {{ timeoutMs?: number, force?: boolean, fetchImpl?: any, repeats?: number, attemptMs?: number,
  *           prefillTokens?: number, budgetMs?: number, persist?: boolean }} [opts]
  */
 export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} */ modelName, opts = {}) {
@@ -162,7 +283,8 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
     timeoutMs = 10000,
     force = false,
     fetchImpl = null,
-    repeats = 3,
+    repeats = PROBE_ATTEMPTS,
+    attemptMs = PROBE_ATTEMPT_MS,
     prefillTokens = 2000,
     budgetMs = 35000,
     persist = true,
@@ -171,12 +293,19 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
   const base = String(pc.baseUrl || '').replace(/\/+$/, '');
   const key = `${base}|${modelName}`;
   const hit = probeCache.get(key);
-  if (!force && hit && Date.now() - hit.at < PROBE_TTL_MS) return hit.value;
+  // v0.6.13 修复：**失败**结论的保鲜期只有 60s——失败可能是"引擎正在启动"的瞬时态，
+  // 用 10 分钟 TTL 复用会把"当时打不通"当成"现在也不行"（真机 07:03 的失败结论被 10:13 的
+  // 新回合原样重放，见 web-server.log:413 → :799）。成功结论仍按 10 分钟。
+  if (!force && hit && Date.now() - hit.at < (probeVerdictFailed(hit.value) ? PROBE_FAIL_TTL_MS : PROBE_TTL_MS)) return hit.value;
   if (!force && probeInflight.has(key)) return probeInflight.get(key);
   const doFetch = fetchImpl || globalThis.fetch;
   const run = (async () => {
     const startedAt = Date.now();
-    const left = () => Math.max(1500, Math.min(timeoutMs, budgetMs - (Date.now() - startedAt)));
+    // v0.6.13 修复：`timeoutMs` 是**整个探针的时间预算**（不是单次尝试的超时——此前语义正是单次，
+    // 于是"3 次 × 15s + prefill"最坏 35s 都堆在回合发起之前）。单次尝试用 attemptMs（1.5s）。
+    const budget = Math.min(Number(timeoutMs) > 0 ? Number(timeoutMs) : 10000, Number(budgetMs) > 0 ? Number(budgetMs) : Infinity);
+    const deadline = startedAt + budget;
+    const left = () => Math.max(0, deadline - Date.now());
     const info = /** @type {any} */ ({
       at: Date.now(),
       endpoint: endpointLabel(base),
@@ -210,22 +339,36 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
         }
       })(),
       state: /** @type {string} */ ('unreachable'),
+      // v0.6.13 修复：失败**原因**（判据）与文案分开记——日志/界面都能看出"是哪一种失败"
+      reason: /** @type {string|null} */ (null),
+      attemptMs,
       error: /** @type {string|null} */ (null),
       note: '',
       partial: false,
     });
     if (!base) {
-      return { ...info, error: '该模型没有可用的 baseUrl（未配置端点）', note: '端点未配置：请先在 ⚙ 设置里填 baseUrl/API Key。' };
+      return { ...info, reason: 'no-base-url', error: '该模型没有可用的 baseUrl（未配置端点）', note: '端点未配置：请先在 ⚙ 设置里填 baseUrl/API Key。' };
     }
     const headers = { 'Content-Type': 'application/json', ...(pc.apiKey ? { Authorization: `Bearer ${pc.apiKey}` } : {}) };
-    /** 单次 HTTP（带超时）；返回 { ok, status, text } 或抛错 */
-    const once = async (/** @type {any} */ url, /** @type {any} */ init, /** @type {any} */ ms) => {
+    /**
+     * 单次 HTTP：返回 `{ res, cleanup, timeoutErr }`——**计时不在这里清**，由调用方"读完首帧"之后清。
+     * 为什么（v0.6.13 修复）：探针是 `stream: true`，`fetch` 在**响应头**到达时就 resolve；此前
+     * clearTimeout 就在那时执行，于是"引擎回了头、卡在 prefill"这种情况**没有任何超时**
+     * （桩复现：给 1.5s 超时，6s 后探针仍在跑），而它在回合发起之前被 await —— 把回合发起拖死。
+     */
+    const open = async (/** @type {any} */ url, /** @type {any} */ init, /** @type {any} */ ms) => {
       const ac = new AbortController();
-      const t = setTimeout(() => ac.abort(new Error(`预检超时（${Math.round(ms / 1000)}s）`)), ms);
+      const terr = /** @type {any} */ (new Error(`预检超时（${(ms / 1000).toFixed(1)}s）`));
+      terr.probeTimeout = true;
+      terr.probeTimeoutMs = ms;
+      const t = setTimeout(() => ac.abort(terr), ms);
+      const cleanup = () => clearTimeout(t);
       try {
-        return await fetchImplOr(doFetch, url, { ...init, signal: ac.signal });
-      } finally {
-        clearTimeout(t);
+        const res = await fetchImplOr(doFetch, url, { ...init, signal: ac.signal });
+        return { res, cleanup, timeoutErr: terr };
+      } catch (e) {
+        cleanup(); // 失败路径立刻清计时器（成功路径由调用方读完后清）
+        throw e;
       }
     };
     // ① 引擎"实际加载的是什么"——**从 chat 响应的 `model` 字段读**，不额外打 `GET /models`。
@@ -247,13 +390,24 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
       },
     };
     const chunkHasTool = (/** @type {string} */ s) => /"tool_calls"\s*:/.test(s);
-    let lastError = /** @type {string|null} */ (null);
+    /** @type {any[]} 每次尝试的失败（已分类）——用来判"是哪一种失败" */
+    const failures = [];
     let connected = false;
+    let attemptsMade = 0;
     for (let i = 0; i < Math.max(1, repeats); i++) {
-      if (Date.now() - startedAt > budgetMs) { info.partial = true; break; }
+      // 退避：引擎"正在启动"（端口还没 bind）时立刻重试 = 3 次全撞在同一个瞬间 → 误判"不可达"。
+      // 桩复现（test/smoke.js §141 ④）：端口 800ms 后才监听，无退避时 1ms 内连撞 3 次判不可达。
+      if (i > 0) {
+        const backoff = PROBE_BACKOFF_MS[Math.min(i - 1, PROBE_BACKOFF_MS.length - 1)];
+        if (left() > backoff) await new Promise((r) => setTimeout(r, backoff));
+      }
+      const slice = Math.min(attemptMs, left());
+      if (slice <= 0) { info.partial = true; break; }
+      attemptsMade += 1;
       const t0 = Date.now();
+      let opened = /** @type {any} */ (null);
       try {
-        const res = await once(
+        opened = await open(
           `${base}/chat/completions`,
           {
             method: 'POST',
@@ -270,18 +424,20 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
               stream: true,
             }),
           },
-          left()
+          slice
         );
         connected = true;
+        const res = opened.res;
         if (!res || !res.ok) {
-          const status = Number(res?.status) || 0;
+          const f = classifyProbeHttp(Number(res?.status) || 0);
+          failures.push(f);
           let detail = '';
           try { detail = String(await res.text()).slice(0, 300); } catch {}
-          lastError = `HTTP ${status || '（无响应）'}${detail ? `：${detail}` : ''}`;
-          info.toolCallFinishes.push(`http-${status}`);
+          info.error = `${f.detail}${detail ? `：${detail}` : ''}`;
+          info.toolCallFinishes.push(`http-${Number(res?.status) || 0}`);
           continue;
         }
-        const r = await readProbeStream(res, { hasTool: chunkHasTool, t0 });
+        const r = await readProbeStream(res, { hasTool: chunkHasTool, t0, timeoutErr: opened.timeoutErr });
         if (r.model && !info.loadedModel) {
           info.loadedModel = String(r.model);
           info.loadedModels = [String(r.model)];
@@ -299,14 +455,36 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
           info.toolCallInconclusive = (info.toolCallInconclusive || 0) + 1;
         }
       } catch (/** @type {any} */ e) {
-        lastError = String(e?.name === 'AbortError' || /aborted/i.test(String(e?.message)) ? `预检超时（${Math.round(left() / 1000)}s 内没有任何响应）` : e?.message || e);
-        info.toolCallFinishes.push('error');
+        const f = classifyProbeError(e);
+        failures.push(f);
+        // "超时上限"必须写**实际**等的时间（此前在 catch 里用当时的 left() 反推，会印出错的秒数）
+        info.error = f.kind === 'timeout' ? `预检超时（${(slice / 1000).toFixed(1)}s 内没有${connected ? '首帧' : '任何响应'}）` : `${f.label}（${f.detail}）`;
+        info.toolCallFinishes.push(f.kind === 'timeout' ? 'timeout' : 'error');
+      } finally {
+        // 计时器等"读完首帧"再清；失败路径 open() 已清（重复 clear 无害）
+        try { opened?.cleanup?.(); } catch {}
       }
     }
+    /** 多数票：同因 ≥2 次取它，否则取最后一次；混合失败也如实写进 error */
+    const tally = () => {
+      const by = new Map();
+      for (const f of failures) by.set(f.kind, (by.get(f.kind) || 0) + 1);
+      let best = /** @type {any} */ (failures[failures.length - 1] || null);
+      for (const f of failures) if ((by.get(f.kind) || 0) > (by.get(best.kind) || 0)) best = f;
+      return { best, by: Object.fromEntries(by) };
+    };
     if (!connected) {
+      // v0.6.13 修复：**不connected 不等于"引擎没起来"**——超时（端口通、没等到首帧）、被断开、
+      // 未知错误都必须各自成句。判据（reason）与文案都由分类函数给出，这里只负责落账。
+      const { best, by } = tally();
+      const f = best || classifyProbeError(null);
+      const kinds = Object.entries(by);
       info.state = 'unreachable';
-      info.error = lastError || '连接失败';
-      info.note = `❌ 不可达：${info.error}${info.isLocal ? '（本地引擎没起来？先确认端口/进程）' : ''}`;
+      info.reason = f.kind;
+      info.error = info.error || `${f.label}（${f.detail}）`;
+      // 混合原因（例如"拒连 1 次 + 超时 2 次"）必须如实写出来，否则用户没法判断该做什么
+      const mix = kinds.length > 1 ? `（${failures.length} 次尝试的失败构成：${kinds.map(([k, v]) => `${k}×${v}`).join('、')}）` : '';
+      info.note = probeFailureNote(f, { attemptMs, tries: failures.length }) + mix;
       return info;
     }
     // ⑤ 引擎自述上下文（v0.6.13 问题 2）：**本地端点**额外读一次 `GET /props`。
@@ -326,14 +504,18 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
       const propsUrls = strippedBase !== base ? [`${strippedBase}/props`, `${base}/props`] : [`${base}/props`];
       for (const u of propsUrls) {
         try {
-          const res = await once(u, { method: 'GET', headers }, Math.min(5000, left()));
-          if (!res || !res.ok) continue;
-          const raw = String(await res.text()).slice(0, 65536);
-          const ctx = engineContextFromProps(JSON.parse(raw));
-          if (ctx != null) {
-            info.engineCtx = ctx;
-            info.engineCtxSource = u;
-            break;
+          const got = await open(u, { method: 'GET', headers }, Math.min(5000, Math.max(1, left())));
+          try {
+            if (!got.res || !got.res.ok) continue;
+            const raw = String(await got.res.text()).slice(0, 65536);
+            const ctx = engineContextFromProps(JSON.parse(raw));
+            if (ctx != null) {
+              info.engineCtx = ctx;
+              info.engineCtxSource = u;
+              break;
+            }
+          } finally {
+            got.cleanup();
           }
         } catch {
           /* 读不到就跳过（端点没实现 /props、返回非 JSON、超时）——结论里会如实写"未读到" */
@@ -344,13 +526,31 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
     const n = info.toolCallRuns;
     info.toolState = n === 0 ? 'unknown' : info.toolCallHits === n ? 'stable-tools' : info.toolCallHits === 0 ? 'no-tools' : 'unstable-tools';
     info.state = info.toolState === 'stable-tools' ? 'ok-tools' : info.toolState === 'unstable-tools' ? 'unstable-tools' : info.toolState === 'unknown' ? 'unreachable' : 'ok-textonly';
+    // v0.6.13 修复：**连上了、但一个有效样本都没拿到**时必须分清是哪一种——
+    //   · 每一次尝试都以失败告终（HTTP 4xx 拒掉 / 首帧超时 / 连接被拒）→ 用**分类后的失败原因**出结论
+    //     （404 → "探针被拒绝：HTTP 404（端点未实现该探针请求）"；首帧超时 → "探针超时：1.5s 内没有首帧"），
+    //     **不许**再说成"工具调用未能判定（多为被 max_tokens 截断）"，更不许一律说"引擎没起来"；
+    //   · 拿到过响应但样本"不可判定"（被 max_tokens 截断等）→ reason=inconclusive，保留既有文案。
+    const failedAll = n === 0 && failures.length > 0 && (info.toolCallInconclusive || 0) === 0 && failures.length >= attemptsMade;
+    if (failedAll) {
+      const { best, by } = tally();
+      const f = best || failures[failures.length - 1];
+      info.reason = f.kind;
+      const kinds = Object.entries(by);
+      const mix = kinds.length > 1 ? `（${failures.length} 次尝试：${kinds.map(([k, v]) => `${k}×${v}`).join('、')}）` : '';
+      info.note = probeFailureNote(f, { attemptMs, tries: failures.length }) + mix;
+      return info;
+    }
+    if (n === 0) info.reason = 'inconclusive';
     // ③ 参考 prefill：固定 ~2000 tokens 的**每次不同**前缀（防引擎前缀缓存把耗时抹平）
     {
       const nonce = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
       const filler = Array.from({ length: Math.max(8, Math.round(prefillTokens / 4)) }, (_, i) => `第${i}段：${nonce}`).join('；');
       const t0 = Date.now();
       try {
-        const res = await once(
+        // 参考 prefill 单独放宽（PREFILL_ATTEMPT_MS）：本地 35B 实测 6.6~7.8s/2000 tokens，
+        // 用 1.5s 会永远测不到 → §140 的"预告由预检实测推导"就失去依据。它只在连通后发一次。
+        const got = await open(
           `${base}/chat/completions`,
           {
             method: 'POST',
@@ -362,18 +562,22 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
               stream: true,
             }),
           },
-          Math.min(20000, left())
+          Math.min(PREFILL_ATTEMPT_MS, Math.max(1, left()))
         );
-        if (res && res.ok) {
-          const r = await readProbeStream(res, { hasTool: chunkHasTool, t0 });
-          if (r.model && !info.loadedModel) {
-            info.loadedModel = String(r.model);
-            info.loadedModels = [String(r.model)];
-            info.nameMismatch = modelNameMismatch(modelName, [String(r.model)]);
+        try {
+          if (got.res && got.res.ok) {
+            const r = await readProbeStream(got.res, { hasTool: chunkHasTool, t0, timeoutErr: got.timeoutErr });
+            if (r.model && !info.loadedModel) {
+              info.loadedModel = String(r.model);
+              info.loadedModels = [String(r.model)];
+              info.nameMismatch = modelNameMismatch(modelName, [String(r.model)]);
+            }
+            info.prefillMs = r.ttftMs ?? Date.now() - t0;
+          } else {
+            info.prefillMs = null;
           }
-          info.prefillMs = r.ttftMs ?? Date.now() - t0;
-        } else {
-          info.prefillMs = null;
+        } finally {
+          got.cleanup();
         }
       } catch {
         info.prefillMs = null;
@@ -408,7 +612,7 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
           : info.toolState === 'no-tools'
             ? `❌ 未返回 tool_calls（0/${n}，finish_reason=${info.toolCallFinishes.join('/')}）——该端点很可能不做 function calling`
             : `⚠ 工具调用**未能判定**（${info.toolCallInconclusive || 0} 次样本不可判定：finish_reason=${info.toolCallFinishes.join('/')}）` +
-              `——多为"被 max_tokens 截断"（思考型模型先输出思考）或请求异常${lastError ? `：${lastError}` : ''}；` +
+              `——多为"被 max_tokens 截断"（思考型模型先输出思考）或请求异常${info.error ? `：${info.error}` : ''}；` +
               `agent 任务可能步数为 0，**不要**据此判定"不支持工具调用"`;
     const ttftNote = info.ttftMs != null ? `首帧 ${(info.ttftMs / 1000).toFixed(2)}s` : '首帧未测到';
     const prefillNote = info.prefillMs != null ? `参考 prefill ${prefillTokens} tokens ${(info.prefillMs / 1000).toFixed(2)}s` : `参考 prefill 未测到`;
@@ -426,7 +630,15 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
       (info.slowdown?.ttftRatio != null && info.slowdown.ttftRatio >= 3) || (info.slowdown?.prefillRatio != null && info.slowdown.prefillRatio >= 3)
         ? `\n   ⚠ 与上次预检相比明显变慢（首帧 ${info.ttftBaselineMs != null ? (info.ttftBaselineMs / 1000).toFixed(2) + 's → ' : '？'}${info.ttftMs != null ? (info.ttftMs / 1000).toFixed(2) + 's' : '？'}）：该端点**可能仍在处理上一个请求**（引擎 slot 被占/排队），建议重启引擎后再跑长任务。`
         : '';
-    info.note = `${toolNote} · ${ttftNote} · ${prefillNote}${info.partial ? ' ·（预检超过时间预算，样本未跑满）' : ''} · ${nameNote} · ${engineNote}${slowNote}`;
+    // v0.6.13 修复：三态是"N/3"判据，样本没跑满就必须写明（真机现场：引擎正在启动，
+    // 前两次尝试被拒、只有第 3 次拿到样本 → 结论会是"（1/1）"，看着像"测全了"）。
+    const wantSamples = Math.max(1, repeats);
+    const fewSamples = n > 0 && n < wantSamples;
+    if (fewSamples) info.partial = true;
+    info.note =
+      `${toolNote} · ${ttftNote} · ${prefillNote}` +
+      (fewSamples ? ` ·（工具样本只跑满 ${n}/${wantSamples}：前面的尝试失败过——三态按现有样本计，可复跑预检复核）` : '') +
+      `${info.partial && !fewSamples ? ' ·（预检超过时间预算，样本未跑满）' : ''} · ${nameNote} · ${engineNote}${slowNote}`;
     return info;
   })();
   probeInflight.set(key, run);
@@ -441,13 +653,23 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
 
 /** 读一次探针的流式响应：取首帧时延 + 是否出现 tool_calls + finish_reason；拿到结论就主动关流（省 token）。
  *  t0 必须由调用方传入（= **请求发起**时刻）：TTFT 的定义是"发出→第一帧"，在这里取 Date.now()
- *  会把"引擎排队 + prefill"整段抹掉（实测过：真值 120ms 会被量成 0ms）。 */
-async function readProbeStream(/** @type {any} */ res, /** @type {{ hasTool: (s: string) => boolean, t0: number }} */ { hasTool, t0 }) {
+ *  会把"引擎排队 + prefill"整段抹掉（实测过：真值 120ms 会被量成 0ms）。
+ *
+ *  v0.6.13 修复两点：
+ *   · `timeoutErr` 是本次请求的首帧超时错误——**在 body 读取阶段触发时必须抛出去**
+ *     （此前一律吞掉，于是"引擎回了头、卡在 prefill"会退化成"样本不可判定"，
+ *      最终被归成"不可达"，也就是把"引擎在启动/prefill"说成"引擎没起来"）；
+ *   · 关流必须 `.catch()`——`reader.cancel()` 的 rejection 此前无人接
+ *     （桩复现：把引擎在探针读流中途杀掉 → 泄漏一个 `TypeError: terminated` unhandledRejection，
+ *      长驻的 web 进程会因此被判为未处理异常）。
+ * @param {any} res @param {{ hasTool: (s: string) => boolean, t0: number, timeoutErr?: any }} opts */
+async function readProbeStream(/** @type {any} */ res, /** @type {{ hasTool: (s: string) => boolean, t0: number, timeoutErr?: any }} */ { hasTool, t0, timeoutErr = null }) {
   let ttftMs = /** @type {number|null} */ (null);
   let toolCalls = false;
   let finish = /** @type {string|null} */ (null);
   let model = /** @type {string|null} */ (null);
   const reader = res?.body?.getReader?.();
+  const close = () => { try { const p = reader?.cancel?.(); if (p && typeof p.catch === 'function') p.catch(() => {}); } catch {} };
   if (!reader) return { ttftMs: null, toolCalls: false, finish: null };
   const dec = new TextDecoder();
   let buf = '';
@@ -467,10 +689,13 @@ async function readProbeStream(/** @type {any} */ res, /** @type {{ hasTool: (s:
       if (toolCalls || finish) break; // 已能判定：立刻收手
       if (buf.length > 65536) buf = buf.slice(-4096); // 防无界增长（异常端点狂吐）
     }
-  } catch {
-    /* 读失败按"没拿到结论"处理（上层按 unreachable/unknown 归类） */
+  } catch (/** @type {any} */ e) {
+    close();
+    // 首帧超时（我们自己的 abort）必须上报：它是"超时"判据，不是"样本不可判定"
+    if (timeoutErr && (e === timeoutErr || e?.probeTimeout === true)) throw timeoutErr;
+    /* 其它读失败按"没拿到结论"处理（上层按 unreachable/unknown 归类） */
   }
-  try { reader.cancel(); } catch {}
+  close();
   return { ttftMs, toolCalls, finish, model };
 }
 

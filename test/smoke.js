@@ -2976,13 +2976,14 @@ const ctx = { cwd: tmp };
   const { listPresets, loadPreset, validatePreset, presetConfigOverrides, presetSystemBlock, presetDirs } = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
   const { builtinPresetDir } = await import(pathToFileURL(path.join(srcDir, 'presets.js')).href);
   // 内置预设（随包分发）
-  // v0.6.15（C）：内置预设按语义拆成两份（local-model = 参数；readonly-audit = 审计人格 + 只读白名单），
-  // 老名字 local-audit 保留为**别名**——这里只钉"随包分发 + 被发现"，别名行为见 §139。
+  // v0.6.16（负责人产品决策）：内置预设**只剩 local-model**（只提供参数类默认值，不携带人格/不限制工具/
+  // 不涉及权限）；readonly-audit 已随 `04433d4` 删除，老名字 local-audit 保留为**别名**（别名行为见 §139）。
   assert.ok(fs.existsSync(path.join(builtinPresetDir(), 'local-model.json')), '内置 local-model 预设应随包分发');
-  assert.ok(fs.existsSync(path.join(builtinPresetDir(), 'readonly-audit.json')), '内置 readonly-audit 预设应随包分发');
+  assert.ok(!fs.existsSync(path.join(builtinPresetDir(), 'readonly-audit.json')), '内置 readonly-audit 预设必须已删除（负责人产品决策：内置只留参数预设）');
   const builtin = listPresets(null);
   assert.ok(builtin.some((/** @type {any} */ p) => p.name === 'local-model' && p.source === 'builtin'), '内置 local-model 应被发现');
-  assert.ok(builtin.some((/** @type {any} */ p) => p.name === 'readonly-audit' && p.source === 'builtin'), '内置 readonly-audit 应被发现');
+  assert.deepEqual(builtin.map((/** @type {any} */ p) => p.name), ['local-model'], '内置预设**只**应有 local-model（readonly-audit 不得回来）');
+  assert.ok(!builtin.some((/** @type {any} */ p) => p.name === 'readonly-audit'), '内置 readonly-audit 不得再被发现（删掉的名字不许悄悄回来）');
   // 校验：合法/非法字段/坏 permission
   assert.equal(validatePreset({ name: 'ok', systemPrompt: 'x' }).ok, true, '最小合法预设应通过');
   assert.equal(validatePreset({}).ok, false, '缺 name 应拒绝');
@@ -2998,8 +2999,8 @@ const ctx = { cwd: tmp };
   const mine = listed.find((/** @type {any} */ p) => p.name === 'my-agent');
   assert.ok(mine && mine.source === 'project', '项目级预设应被发现且标 project');
   // 项目级同名遮蔽内置
-  fs.writeFileSync(path.join(projDir, '.mingdao', 'presets', 'local-audit.json'), JSON.stringify({ name: 'local-audit', label: '项目级覆盖', systemPrompt: 'override' }));
-  const overridden = listPresets(projDir).filter((/** @type {any} */ p) => p.name === 'local-audit');
+  fs.writeFileSync(path.join(projDir, '.mingdao', 'presets', 'local-model.json'), JSON.stringify({ name: 'local-model', label: '项目级覆盖', systemPrompt: 'override' }));
+  const overridden = listPresets(projDir).filter((/** @type {any} */ p) => p.name === 'local-model');
   assert.equal(overridden.length, 1, '同名预设应只留一个（遮蔽）');
   assert.equal(overridden[0].source, 'project', '项目级应遮蔽内置');
   // loadPreset + 覆盖 + 系统提示段
@@ -14069,8 +14070,9 @@ process.exit(0);
     try {
       const all = listPresets(null).filter((p) => p.source === 'builtin');
       const lm = all.find((p) => p.name === 'local-model');
-      const ra = all.find((p) => p.name === 'readonly-audit');
-      assert.ok(lm && ra, '内置预设必须同时有 local-model 与 readonly-audit');
+      assert.ok(lm, '内置预设必须列出 local-model');
+      // v0.6.16（负责人产品决策）：内置只留 local-model——readonly-audit 已删除，不得再出现
+      assert.ok(!all.some((p) => p.name === 'readonly-audit'), '内置不得再有 readonly-audit（已随 04433d4 删除）');
       // 契约级：本地模型预设**不得**携带审计人格 / 工具白名单 / 权限字段（负责人原话：本地模型只是代替云模型 API）
       assert.ok(!lm.systemPrompt, '本地模型预设不得携带审计人格（它只是参数预设）');
       assert.ok(!lm.tools, '本地模型预设不得限制工具白名单（否则本地模型"功能不一致"）');
@@ -14079,19 +14081,15 @@ process.exit(0);
       const lmFull = loadPreset(null, 'local-model');
       assert.ok(Number(lmFull.maxRounds) > 0 && Number(lmFull.maxOutputTokens) > 0 && Number(lmFull.contextBudget) > 0,
         `本地模型预设必须真的带上保守参数（maxRounds/maxOutputTokens/contextBudget），实际：${JSON.stringify(lmFull)}`);
-      // 审计人格与只读白名单搬到 readonly-audit，且 recommendedPermission 只在这里（仍是"建议"）
-      const raFull = loadPreset(null, 'readonly-audit');
-      assert.ok(raFull.systemPrompt && /审计/.test(String(raFull.systemPrompt)), 'readonly-audit 必须携带审计人格');
-      assert.ok(Array.isArray(ra.tools) && ra.tools.length && !ra.tools.includes('write') && !ra.tools.includes('edit'), 'readonly-audit 的只读白名单必须存在且不含写入类工具');
-      assert.equal(ra.recommendedPermission, 'readonly', 'recommendedPermission 只能放在 readonly-audit（且是建议）');
-      assert.ok(!('permission' in ra), '内置预设不得声明 permission（覆盖语义）');
+      // 审计人格与只读白名单**随 readonly-audit 一起删除**：那个名字现在必须加载为空（不再有内置承载）
+      assert.equal(loadPreset(null, 'readonly-audit'), null, 'readonly-audit 加载应为空（内置预设已删除，且它没有别名）');
       assert.ok(Array.isArray(lm.aliases) && lm.aliases.includes('local-audit'), 'local-model 必须透出别名 local-audit（不得静默消失）');
       // 行为级：老名字真的能加载到新预设，并且**标出**它是别名来的
       const viaAlias = loadPreset(null, 'local-audit');
       assert.ok(viaAlias && viaAlias.name === 'local-model', `老名字 local-audit 必须解析到 local-model，实际：${viaAlias && viaAlias.name}`);
       assert.equal(viaAlias.aliasedFrom, 'local-audit', '别名调用必须留下"从哪个老名字来的"标记（WebUI banner 据此提示已更名）');
       assert.deepEqual(presetAliasOf('local-audit'), { from: 'local-audit', to: 'local-model' }, '别名表单源');
-      assert.equal(canonicalPresetName('readonly-audit'), 'readonly-audit', '没有别名的名字原样返回');
+      assert.equal(canonicalPresetName('some-unknown-preset'), 'some-unknown-preset', '没有别名的名字原样返回');
       // 磁盘上有同名预设时**以磁盘为准**（别名不抢本地文件）
       const projC = path.join(homeC, 'proj');
       fs.mkdirSync(path.join(projC, '.mingdao', 'presets'), { recursive: true });
@@ -14112,7 +14110,7 @@ process.exit(0);
   if (prevHome139 === undefined) delete process.env.MINGDAO_HOME; else process.env.MINGDAO_HOME = prevHome139;
   safeRmSync(home139Main, { recursive: true, force: true });
   safeRmSync(tmp, { recursive: true, force: true });
-  ok('v0.6.13 本地模型零信号长回合：无进展看门狗（阈值=2×单请求总量上限、0/NaN/Infinity 不得关掉、子代理继承截止时刻、不误杀真干活）+ 上游错误原文与可操作解读 + 回合收尾如实报"0 次工具调用" + 发送前规模预告 + TTFT/吞吐/工具计数进度行（日志定期留痕、口径单源）+ 端点预检三态/不稳定态/参考 prefill/变慢告警 + 预设按语义拆分（local-model 不带人格白名单权限、readonly-audit 独立、local-audit 走别名且说出来）');
+  ok('v0.6.13 本地模型零信号长回合：无进展看门狗（阈值=2×单请求总量上限、0/NaN/Infinity 不得关掉、子代理继承截止时刻、不误杀真干活）+ 上游错误原文与可操作解读 + 回合收尾如实报"0 次工具调用" + 发送前规模预告 + TTFT/吞吐/工具计数进度行（日志定期留痕、口径单源）+ 端点预检三态/不稳定态/参考 prefill/变慢告警 + 预设按语义拆分（内置只留 local-model 参数预设、readonly-audit 已删除、local-audit 走别名且说出来）');
 }
 
 // ---------- 140. v0.6.13（问题 1–4）：预告必须由预检推导 + 引擎自述上下文必须与配置对照 + 子代理进展必须算父回合进展 + stalled 必须用户可见 ----------
@@ -14477,6 +14475,257 @@ process.exit(0);
 
   safeRmSync(tmp140, { recursive: true, force: true });
   ok('v0.6.13 真机四问题：预告由预检实测外推（并如实说明长上下文会低估，附 16k/53.7s 实测）+ 无实测才退回保守文案 + 慢端点按阈值告警写依据 + 引擎自述上下文（/props）与配置并排、超出即告警且说清"换预设没用" + 读不到要说明 + 子代理进展算父回合进展（父回合不再误杀正在干活的子代理）+ 继承截止时刻随父回合前移 + 子代理自己的看门狗先响并区分收口原因 + stalled 文案含"在等哪个工具/怎么调"且与 capped/aborted 区分（内核 banner + done.note + 前端控制台）');
+}
+
+// ---------- 141. v0.6.13（探针误报）：失败原因必须分开判/分开说 + 探针绝不阻断回合 + 超时覆盖到首帧 ----------
+// 真机证据（~/.mingdao/logs/web-server.log，负责人 v0.6.13 真机）：
+//   :413 2026-10-09T07:03:02.928Z `预检 mtplx-qwen38-27b-optimized-quality unreachable …`（**进程启动**时引擎还没起来，
+//        这条失败结论被存进进程内备忘）；
+//   :416 07:08:13.931Z `chat 预检 t01c78ffc9a8fb72e unreachable ❌ 不可达：fetch failed（本地引擎没起来？先确认端口/进程）`
+//        —— 距 `chat 开始` 只 19ms，且**没有** `预检 <模型>` 行（= 没重测，直接念旧结论）；本回合确实失败（:417）。
+//   :799 10:13:58.900Z `chat 预检 tf91d8ab0ddfec0bd unreachable ❌ 不可达：fetch failed（本地引擎没起来？先确认端口/进程）`
+//        —— 距 `chat 开始`（:798 .877Z）**只 23ms**，同样没有 `预检 <模型>` 行；而引擎从 07:08:59 起就是可用的，
+//        本回合随后完全正常（:800 预告、:803 `chat 首帧 … 8.7s`、:844 已跑 21m）——**同一条 7h10m 前的失败结论被原样重放**。
+//   用户照这句话去重启了引擎（这条文案把"探针自己打不通"说成了"引擎没起来"）。
+// 本节钉死五件事（桩服务形态全部可复跑：`node test/smoke.js`；端到端复现见本轮登记 §3.56）：
+//   ① 失败原因分开判：连接被拒（端口没人监听）/ 超时（N 秒内无首帧）/ HTTP 404（端点未实现该探针请求）/ 其它；
+//      文案跟着判据变，**不许**再一律"不可达：fetch failed（本地引擎没起来？）"。
+//   ② 超时与拒绝不得混为一谈：端口通、只是没等到首帧 → "超时"，且不得出现"引擎没起来"。
+//   ③ 探针**不打扰只实现 chat 的端点**：探针只打 POST {base}/chat/completions（与主请求同一个 URL），
+//      不实现 GET 的网关**一个 GET 都不该收到**；工具三态样本照旧 N/3。
+//   ④ 引擎"正在启动"（端口几百毫秒后才监听）不得被误判不可达 —— 必须退避重试；
+//      失败结论（进程内备忘/缓存）只保鲜 60s，**不得**像真机那样 7 小时后还在重放。
+//   ⑤ 降级语义：探针自身任何异常都只降级（resolve 成"没有预检数据"），绝不抛给回合；
+//      且"预检曾判不可达、但本回合实际可用"必须在回合结束后留一行复核日志。
+{
+  const {
+    probeEndpoint,
+    classifyProbeError,
+    classifyProbeHttp,
+    probeFailureNote,
+    probeMemoUsable,
+    probeVerdictFailed,
+    PROBE_ATTEMPT_MS,
+    PROBE_ATTEMPTS,
+    PROBE_BACKOFF_MS,
+    PROBE_FAIL_TTL_MS,
+    PROBE_TTL_MS,
+  } = await import(pathToFileURL(path.join(srcDir, 'model-discovery.js')).href);
+  const http141 = await import('node:http');
+  const serverSrc141 = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+  const discoverySrc141 = fs.readFileSync(path.join(srcDir, 'model-discovery.js'), 'utf8');
+  const openaiSrc141 = fs.readFileSync(path.join(srcDir, 'providers', 'openai-compatible.js'), 'utf8');
+
+  // —— 桩引擎（真 HTTP / 真 socket）：chat-only / slow-first / hang-body / http-404 ——
+  const stats141 = { get: 0, post: 0, getPaths: /** @type {string[]} */ ([]) };
+  const sse141 = (/** @type {any} */ res, /** @type {any} */ obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`);
+  const toolFrame141 = { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'call_1', type: 'function', function: { name: 'mingdao_probe', arguments: '{"v":1}' } }] }, finish_reason: null }] };
+  const textFrame141 = { choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] };
+  const mkStub141 = (/** @type {string} */ mode, /** @type {number} */ slowMs = 0) =>
+    http141.createServer((/** @type {any} */ req, /** @type {any} */ res) => {
+      if (req.method === 'GET') {
+        // "只实现 chat 的端点"：任何 GET 都不实现（404 + 空体）——探针一个字节都不该多发
+        stats141.get += 1;
+        stats141.getPaths.push(String(req.url));
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      stats141.post += 1;
+      // "只实现 chat 的端点"：除 POST /v1/chat/completions 之外的一切请求都不实现（404 + 空体）
+      if (!String(req.url).endsWith('/chat/completions')) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end('{}');
+        return;
+      }
+      if (mode === 'http-404') {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end('{"error":{"message":"not found"}}');
+        return;
+      }
+      let body = '';
+      req.on('data', (/** @type {any} */ d) => (body += d));
+      req.on('end', () => {
+        const parsed = (() => { try { return JSON.parse(body); } catch { return {}; } })();
+        const withTools = Array.isArray(parsed.tools);
+        const frame = withTools && mode !== 'text-only' ? toolFrame141 : textFrame141;
+        res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+        const send = () => { if (!res.writableEnded) { sse141(res, frame); res.end('data: [DONE]\n\n'); } };
+        if (mode === 'hang-body') { res.write(': probe\n\n'); return; } // 只回 headers，永不回帧（引擎卡在 prefill）
+        if (mode === 'slow-first') { res.write(': probe\n\n'); setTimeout(send, slowMs); return; }
+        send();
+      });
+    });
+  const listen141 = (/** @type {any} */ srv, /** @type {number} */ port = 0) => new Promise((r) => srv.listen(port, '127.0.0.1', () => r(srv.address().port)));
+  const close141 = (/** @type {any} */ srv) => new Promise((r) => { try { srv.close(() => r(null)); } catch { r(null); } });
+  /** 取一个"先 bind 再交还"的端口：用来造"端口没人监听"和"几百毫秒后才监听"两种现场 */
+  const freePort141 = async () => { const s = http141.createServer(); const p = await listen141(s); await close141(s); return Number(p); };
+  const cfg141 = (/** @type {number} */ port, /** @type {string} */ name) => ({ model: name, customModels: { [name]: { baseUrl: `http://127.0.0.1:${port}/v1` } } });
+  const probe141 = (/** @type {number} */ port, /** @type {string} */ name, /** @type {any} */ opts = {}) =>
+    probeEndpoint(cfg141(port, name), name, { force: true, persist: false, ...opts });
+
+  // —— ① 判据（纯函数）：四种失败必须各自成类，文案跟着判据走 ——
+  {
+    assert.equal(classifyProbeError({ cause: { code: 'ECONNREFUSED' } }).kind, 'refused', 'ECONNREFUSED 必须判为"连接被拒"');
+    assert.ok(/连接被拒/.test(classifyProbeError({ cause: { code: 'ECONNREFUSED' } }).label), '连接被拒的文案必须写"连接被拒"');
+    assert.equal(classifyProbeError({ cause: { code: 'ECONNRESET' } }).kind, 'reset', 'ECONNRESET 必须判为"被断开"（不是"没起来"也不是"超时"）');
+    assert.equal(classifyProbeError(Object.assign(new Error('x'), { probeTimeout: true })).kind, 'timeout', '探针自己的首帧超时必须判为 timeout');
+    assert.equal(classifyProbeError({ name: 'AbortError' }).kind, 'timeout', 'AbortError 也算超时');
+    assert.equal(classifyProbeError(new Error('fetch failed')).kind, 'other', '裸 fetch failed 归"其它"，不得猜成"连接被拒"或"超时"（真机就是被它一句带过）');
+    assert.equal(classifyProbeHttp(404).kind, 'http-unimplemented', '404 必须判为"端点未实现该探针请求"');
+    assert.equal(classifyProbeHttp(405).kind, 'http-unimplemented', '405 同理');
+    assert.ok(/HTTP 404（端点未实现该探针请求）/.test(classifyProbeHttp(404).label), '404 文案必须写明"端点未实现该探针请求"');
+    assert.equal(classifyProbeHttp(401).kind, 'http-auth', '401/403 是鉴权问题，必须与"没实现"分开');
+    assert.equal(classifyProbeHttp(500).kind, 'http', '5xx 归"探针请求被拒绝"');
+    const noteRefused = probeFailureNote(classifyProbeError({ cause: { code: 'ECONNREFUSED' } }), { attemptMs: 1500, tries: 3 });
+    const noteTimeout = probeFailureNote(classifyProbeError(Object.assign(new Error('t'), { probeTimeout: true })), { attemptMs: 1500, tries: 3 });
+    const note404 = probeFailureNote(classifyProbeHttp(404), { attemptMs: 1500, tries: 3 });
+    assert.ok(/不可达/.test(noteRefused) && /端口没人监听/.test(noteRefused), `"连接被拒"才配说不可达：${noteRefused}`);
+    assert.ok(/超时/.test(noteTimeout) && /首帧/.test(noteTimeout) && !/不可达/.test(noteTimeout), `超时文案不得说"不可达"：${noteTimeout}`);
+    assert.ok(!/引擎没起来/.test(noteTimeout), `超时≠引擎没起来（真机现场是"引擎在 prefill/启动"）：${noteTimeout}`);
+    assert.ok(/HTTP 404/.test(note404) && /端点未实现该探针请求/.test(note404) && !/引擎没起来/.test(note404), `404 文案必须说"端点未实现"：${note404}`);
+    for (const [k, n] of [['refused', noteRefused], ['timeout', noteTimeout], ['404', note404]]) {
+      assert.ok(/不阻断/.test(n), `失败文案必须写明"预检失败不阻断本回合"（${k}）：${n}`);
+    }
+  }
+
+  // —— ② 真桩：端口没人监听（真机 07:03/07:08 的形态） ——
+  {
+    const port = await freePort141();
+    const p = await probe141(port, 'sec141-refused', { timeoutMs: 4000 });
+    assert.equal(p.state, 'unreachable', '端口没人监听必须判为不可达');
+    assert.equal(p.reason, 'refused', `必须把"连接被拒"单独判出来（reason=refused），实际 ${p.reason}`);
+    assert.ok(/不可达/.test(p.note) && /连接被拒/.test(p.note) && /端口没人监听/.test(p.note), `文案必须写清"连接被拒（端口没人监听）"，实际：${p.note}`);
+    assert.ok(!/^❌ 不可达：fetch failed/.test(p.note), '不得再把原始 undici 文案 fetch failed 直接丢给用户（真机就是这句把人支去重启引擎）');
+    assert.ok(/不阻断/.test(p.note), '文案必须写明"预检失败不阻断本回合"');
+  }
+
+  // —— ③ 真桩：只实现 POST /v1/chat/completions、不实现任何 GET（"只实现 chat 的网关"） ——
+  {
+    const srv = mkStub141('chat-only');
+    const port = Number(await listen141(srv));
+    const before = stats141.get;
+    const p = await probe141(port, 'sec141-chatonly');
+    assert.equal(p.state, 'ok-tools', `只实现 chat 的端点必须判为可用（探针不得打扰它），实际 ${p.state}：${p.note}`);
+    assert.ok(/稳定支持工具调用（3\/3）/.test(p.note), `工具三态样本照旧要跑满 N/3，实际：${p.note}`);
+    assert.equal(stats141.get - before, 0, `只实现 chat 的端点：探针一个 GET 都不该发（/models、/props 都不打），实际收到 ${stats141.get - before} 次：${stats141.getPaths.join(',')}`);
+    await close141(srv);
+  }
+
+  // —— ④ 真桩：POST 可达但首帧很慢（> 探针单次上限）——超时不得混成"不可达/引擎没起来" ——
+  {
+    const srv = mkStub141('slow-first', 5000);
+    const port = Number(await listen141(srv));
+    const t0 = Date.now();
+    const p = await probe141(port, 'sec141-slow', { timeoutMs: 3000, attemptMs: 300 });
+    const ms = Date.now() - t0;
+    assert.equal(p.reason, 'timeout', `首帧超过探针上限必须判为"超时"，实际 ${p.reason}（${p.note}）`);
+    assert.ok(/超时/.test(p.note) && /首帧/.test(p.note), `文案必须说"超时 + 首帧"，实际：${p.note}`);
+    assert.ok(!/连接被拒/.test(p.note) && !/引擎没起来/.test(p.note), `超时与"连接被拒"必须分开（真机现场是引擎在启动/prefill）：${p.note}`);
+    assert.ok(ms < 3000, `必须在时间预算内返回（首帧超时必须覆盖 body 读取），实际 ${ms}ms`);
+    await close141(srv);
+  }
+
+  // —— ⑤ 真桩：回了 headers、永不回帧（引擎卡在 prefill）——探针必须自己超时，不许挂着 ——
+  {
+    const srv = mkStub141('hang-body');
+    const port = Number(await listen141(srv));
+    const t0 = Date.now();
+    const p = await probe141(port, 'sec141-hang', { timeoutMs: 2000, attemptMs: 300 });
+    const ms = Date.now() - t0;
+    assert.equal(p.reason, 'timeout', `"回了头、卡在 prefill"的引擎必须判超时，实际 ${p.reason}（${p.note}）`);
+    assert.ok(ms < 2500, `首帧超时必须覆盖 body 读取（此前会一直挂着，把回合发起拖死），实际 ${ms}ms`);
+    assert.ok(/超时/.test(p.note), `文案必须是超时，实际：${p.note}`);
+    await close141(srv);
+  }
+
+  // —— ⑥ 真桩：POST 返回 HTTP 404（端点未实现这条探针请求）——不许说成"工具调用未能判定"或"引擎没起来" ——
+  {
+    const srv = mkStub141('http-404');
+    const port = Number(await listen141(srv));
+    const p = await probe141(port, 'sec141-404', { timeoutMs: 4000 });
+    assert.equal(p.reason, 'http-unimplemented', `POST 404 必须单独判出来（端点未实现该探针请求），实际 ${p.reason}`);
+    assert.ok(/HTTP 404/.test(p.note) && /端点未实现该探针请求/.test(p.note), `文案必须写"HTTP 404（端点未实现该探针请求）"，实际：${p.note}`);
+    assert.ok(!/未能判定/.test(p.note) && !/max_tokens/.test(p.note), `404 不得再说成"工具调用未能判定（多为被 max_tokens 截断）"：${p.note}`);
+    assert.ok(!/引擎没起来/.test(p.note), `HTTP 404 是"端点没实现"，不是"引擎没起来"：${p.note}`);
+    await close141(srv);
+  }
+
+  // —— ⑦ 真桩：引擎**正在启动**（端口 700ms 后才监听）——退避重试必须救回来（真机最可能的现场） ——
+  {
+    const port = await freePort141();
+    const srv = mkStub141('chat-only');
+    const timer = setTimeout(() => { try { srv.listen(port, '127.0.0.1'); } catch {} }, 700);
+    const t0 = Date.now();
+    const p = await probe141(port, 'sec141-starting', { timeoutMs: 8000 });
+    const ms = Date.now() - t0;
+    assert.notEqual(p.state, 'unreachable', `引擎"正在启动"不得被误判不可达（真机 10:13:58 就是这样），实际 state=${p.state}：${p.note}`);
+    assert.ok(Number(p.toolCallRuns) >= 1, '启动中的引擎必须在退避后测到至少 1 个样本');
+    assert.ok(ms >= 700, `必须真的退避等到端口起来（实际 ${ms}ms）——三次背靠背重试会全撞在同一个瞬间`);
+    assert.ok(PROBE_BACKOFF_MS.length >= 2 && PROBE_BACKOFF_MS.every((x) => x > 0), '必须有退避表（否则"启动中"永远测不出来）');
+    clearTimeout(timer);
+    await close141(srv);
+  }
+
+  // —— ⑧ 失败结论的保鲜期：真机 07:03 的"不可达"被 10:13 的新回合原样重放（7h10m） ——
+  {
+    const now = Date.now();
+    const bad = { state: 'unreachable', reason: 'refused', note: '❌ 不可达：连接被拒（端口没人监听）' };
+    const good = { state: 'ok-tools', reason: null, toolCallRuns: 3 };
+    assert.equal(probeVerdictFailed(bad), true, '"不可达"算失败结论');
+    assert.equal(probeVerdictFailed(good), false, '可用结论不算失败结论');
+    assert.equal(probeMemoUsable({ at: now - 7 * 3600 * 1000, value: bad }), false, '真机根因：7 小时前的"不可达"结论**不得**再复用（web-server.log:413→:799 就是它被原样重放）');
+    assert.equal(probeMemoUsable({ at: now - 9 * 60 * 1000, value: bad }), false, `失败结论只能保鲜 ${PROBE_FAIL_TTL_MS / 1000}s（"引擎正在启动"是瞬时态）`);
+    assert.equal(probeMemoUsable({ at: now - 9 * 60 * 1000, value: good }), true, '成功结论仍按 10 分钟复用（不要每个回合都去打引擎）');
+    assert.ok(PROBE_FAIL_TTL_MS < PROBE_TTL_MS, '失败结论的保鲜期必须短于成功结论');
+    assert.ok(PROBE_ATTEMPT_MS <= 2000, `单次尝试必须短（不与首帧抢资源/不拖长回合发起），实际 ${PROBE_ATTEMPT_MS}ms`);
+    assert.equal(PROBE_ATTEMPTS, 3, '工具三态需要 N/3 个样本，不得为"更快"减样本');
+  }
+
+  // —— ⑨ 降级语义：探针自身任何异常都只降级（resolve），绝不把异常抛给回合 ——
+  {
+    const hostile = [
+      () => { throw new Error('boom'); },
+      () => null,
+      () => ({ ok: true, status: 200, text: async () => '', body: { getReader() { throw new Error('no reader'); } } }),
+    ];
+    for (const fetchImpl of hostile) {
+      const p = await probeEndpoint(
+        { model: 'sec141-hostile', customModels: { 'sec141-hostile': { baseUrl: 'http://127.0.0.1:1/v1' } } },
+        'sec141-hostile',
+        { fetchImpl, force: true, persist: false, timeoutMs: 1500, attemptMs: 300 }
+      );
+      assert.equal(p.state, 'unreachable', `探针必须"失败只降级"（不得抛异常、也不得谎报可用），实际 ${p.state}`);
+      assert.ok(typeof p.note === 'string' && p.note.length > 0, '失败也必须给一行可读文案');
+      assert.ok(typeof p.reason === 'string' && p.reason.length > 0, '失败必须带原因（reason），否则日志里分不清是哪一种');
+    }
+  }
+
+  // —— ⑩ 结构守卫：降级语义 + 复核日志 + 探针 URL 与主请求同构 ——
+  {
+    assert.ok(/probeMemoUsable\(memo\)/.test(serverSrc141), '服务端必须按保鲜期判"这条预检结论还能不能用"（否则真机那条 7h10m 前的结论会被原样重放）');
+    // 降级纪律：探针异常必须被**吞掉**（只留一行"失败（忽略…）"），不许抛给回合
+    assert.ok(
+      /catch \([\s\S]{0,120}预检 \$\{m\} 失败（忽略，按默认超时继续）/.test(serverSrc141),
+      'ensureProbe 必须**吞掉**探针异常（只留一行"失败（忽略，按默认超时继续）"），失败不得抛给回合发起'
+    );
+    assert.ok(
+      /catch \([\s\S]{0,200}chat 预检失败（忽略，按既有默认继续）/.test(serverSrc141),
+      '回合级预检必须自带 try/catch（失败只降级，不得中断本回合发起）'
+    );
+    assert.ok(
+      /chat 预检复核/.test(serverSrc141) && /预检曾判不可达/.test(serverSrc141) && /但本回合实际可用/.test(serverSrc141) && /预检判据需复核/.test(serverSrc141),
+      '回合结束后必须留一行"预检曾判不可达，但本回合实际可用（首帧 Xs）——预检判据需复核"'
+    );
+    assert.ok(/失败只降级、不阻断/.test(serverSrc141), '服务端必须写明"预检是尽力而为：失败只降级、不阻断"（降级语义要能被读到，不是只靠行为）');
+    assert.ok(/reason=\$\{probe\.reason\}/.test(serverSrc141), '失败原因（reason）必须落进 web-server.log（否则事后分不清是哪一种失败）');
+    assert.ok(/prefill2000=/.test(serverSrc141), '（既有口径）预检日志行仍要带参考 prefill 实测值');
+    assert.ok(/String\(baseUrl\)\.replace/.test(openaiSrc141) && /'\/chat\/completions'/.test(openaiSrc141), '主请求 URL = 剥尾斜杠的 baseUrl + /chat/completions');
+    assert.ok(/`\$\{base\}\/chat\/completions`/.test(discoverySrc141), '探针 URL 必须与主请求**同构**（否则"探针说不可达、主请求却成功"就是必然）');
+    assert.ok(/if \(info\.isLocal && info\.loadedModel\)/.test(discoverySrc141), '（既有口径）GET /props 只在引擎自报模型名后才打——不认识它的端点一个字节都不该多发');
+  }
+
+  ok('v0.6.13 探针误报：失败原因分开判/分开说（连接被拒 / 超时（N 秒内无首帧）/ HTTP 404（端点未实现该探针请求）/ 其它，文案跟着判据走，不再一律"不可达：fetch failed（本地引擎没起来？）"）+ 超时覆盖到首帧（不许挂着拖死回合发起）+ 单次 1.5s×3 含退避（引擎"正在启动"不再被误判不可达）+ 只实现 chat 的端点一个 GET 都不发 + 失败结论只保鲜 60s（真机 7h10m 重放根因）+ 探针任何异常只降级不阻断 + 回合结束留"预检曾判不可达但本回合实际可用"复核行');
 }
 
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket

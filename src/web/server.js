@@ -23,7 +23,7 @@ import { createLogWriter } from '../log-writer.js';
 import { createApiDispatch } from './routes/api.js';
 import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
 import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credentials.js';
-import { availableModels, fetchProviderModels, providerHasKey, probeEndpoint, adaptiveTimeouts } from '../model-discovery.js';
+import { availableModels, fetchProviderModels, providerHasKey, probeEndpoint, adaptiveTimeouts, probeMemoUsable } from '../model-discovery.js';
 import { isLocalBaseUrl, resolveModelCaps } from '../model-caps.js';
 import { createProvider, resolveProviderConfig, helperProvider, resolveVisionSupport } from '../providers/index.js';
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
@@ -297,6 +297,14 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   const providerCache = new Map();
   // v0.6.13（A 追加）：本地端点的**能力/延迟预检**结果（每次建 provider / 每轮对话开头的提示都读它）。
   // 只对"本地端点"做：远程服务商不需要（也不该）每次开聊都多打一次请求。
+  //
+  // v0.6.13（探针误报修复）——这里的备忘**必须有 TTL，且失败结论只保鲜 60s**：
+  //   真机误报的根因就是它此前**没有任何 TTL**：进程启动时引擎没起来 → 备忘里留下
+  //   「❌ 不可达：fetch failed（本地引擎没起来？先确认端口/进程）」→ 之后每个新回合原样重放
+  //   （web-server.log:413 07:03:02 那次真实探测 → :416 07:08:13 / :799 10:13:58 两次重放，
+  //   相隔 **7h10m**；10:13:58.877 `chat 开始` → .900 `chat 预检`只差 **23ms**、且没有 `预检 <模型>` 行，
+  //   正是"没重测、直接念旧结论"），而同一回合其实完全可用（:803 首帧 8.7s、:844 已跑 21m）。
+  //   结论：`probeMemoUsable()` 判保鲜期（成功 10 分钟 / 失败 60s），过期就重测。
   const probeByModel = new Map();
   /** 该模型是否属于"本地端点"（baseUrl 是回环/内网，或 customModels 显式声明 local:true）。 */
   const isLocalModel = (/** @type {any} */ m) => {
@@ -307,9 +315,18 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       return false;
     }
   };
-  /** 取（或首次执行）预检；失败绝不影响主流程。 */
+  /**
+   * 取（或首次执行）预检。
+   *
+   * **探针是尽力而为：失败只降级、不阻断**（本函数自己吞掉异常 → 返回 null → 调用方按既有默认继续；
+   * 回合发起绝不受预检影响）。这里的"降级"有三层：
+   *   ① 探针抛错 → 吞掉（下面 try/catch），只是"没有预检数据"；
+   *   ② 探针判"不可达/超时" → 仍然照常开工（状态只用于 banner/日志/自适应超时）；
+   *   ③ 探针慢 → 单次尝试 1.5s + 退避 + 总预算 15s 封顶（见 probeEndpoint），不会把回合发起拖成几十秒。
+   */
   async function ensureProbe(/** @type {any} */ m) {
-    if (probeByModel.has(m)) return probeByModel.get(m);
+    const memo = probeByModel.get(m);
+    if (probeMemoUsable(memo)) return memo.value;
     if (!isLocalModel(m)) return null;
     let probe = null;
     try {
@@ -326,7 +343,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
               ? `不返回 tool_calls（${probe.toolCallHits}/${probe.toolCallRuns}）`
               : '未知/不可判定';
       srvlog(
-        `预检 ${m} ${probe.state} ttft=${probe.ttftMs == null ? 'n/a' : Math.round(probe.ttftMs) + 'ms'} ` +
+        `预检 ${m} ${probe.state}${probe.reason ? ` reason=${probe.reason}` : ''} ttft=${probe.ttftMs == null ? 'n/a' : Math.round(probe.ttftMs) + 'ms'} ` +
           `prefill2000=${probe.prefillMs == null ? 'n/a' : Math.round(probe.prefillMs) + 'ms'} ` +
           `tools=${toolText} endpoint=${probe.endpoint || '（无）'} ` +
           `引擎自述上下文=${probe.engineCtx == null ? '未读到' : probe.engineCtx} 配置=${probe.configuredWindow ?? '？'}`
@@ -334,7 +351,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     } catch (/** @type {any} */ e) {
       srvlog(`预检 ${m} 失败（忽略，按默认超时继续）：${String(e?.message || e)}`);
     }
-    probeByModel.set(m, probe);
+    probeByModel.set(m, { at: Date.now(), value: probe });
     if (probeByModel.size > 50) probeByModel.delete(probeByModel.keys().next().value);
     return probe;
   }
@@ -532,6 +549,28 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     let lastProgressLogAt = 0;
     let forecastLogged = false;
     let ttftLogged = false;
+    // v0.6.13（探针误报修复）：本回合实际用到的预检结论——首帧一到/回合结束就复核它（见下）。
+    let probeForTurn = /** @type {any} */ (null);
+    let probeRecheckLogged = false;
+    /**
+     * 预检判"不可达"、但本回合**真的出过首帧** → 写一行复核日志（只写一次）。
+     * 这是"探针误报"这件事唯一的自动化证据：真机 web-server.log:799 判不可达、:803 首帧 8.7s
+     * （事后只能靠人肉对时间线才能看出来，于是"预检判据有问题"这个结论一直没人能得出）。
+     * 判据取 `ttftMs != null`：**收到过首帧 = 端点确实可用**；回合失败/没出首帧时一个字都不写，
+     * 否则等于替一次真的"引擎没起来"洗白。
+     */
+    const logProbeRecheck = () => {
+      if (probeRecheckLogged) return;
+      if (!probeForTurn || probeForTurn.state !== 'unreachable') return;
+      const tp = /** @type {any} */ (io?.turnProgress);
+      const ttft = tp?.ttftMs;
+      if (ttft == null) return;
+      probeRecheckLogged = true;
+      srvlog(
+        `chat 预检复核 ${taskId} 预检曾判不可达${probeForTurn.reason ? `（reason=${probeForTurn.reason}）` : ''}，` +
+          `但本回合实际可用（首帧 ${(ttft / 1000).toFixed(1)}s）——预检判据需复核`
+      );
+    };
     const logTurnProgress = () => {
       const tp = /** @type {any} */ (io?.turnProgress);
       if (!tp) return;
@@ -542,6 +581,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       if (!ttftLogged && tp.ttftMs != null) {
         ttftLogged = true;
         srvlog(`chat 首帧 ${taskId} ${(tp.ttftMs / 1000).toFixed(1)}s（请求发出→第一帧；本地模型此项直接反映 prefill 快慢）`);
+        // v0.6.13（探针误报修复）：预检判"不可达"但本回合**实际可用**——长回合在首帧时就先留一行
+        // （短回合不会走到这里的进度心跳，回合结束时还有一次复核，见 logProbeRecheck 的调用点）。
+        logProbeRecheck();
       }
       if (Date.now() - lastProgressLogAt < 30000) return;
       lastProgressLogAt = Date.now();
@@ -836,9 +878,14 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       // v0.6.13（A 追加）：**本地端点先预检、再开工**——"这个端点能不能跑这种任务"必须几秒内有答案。
       // 预检结果：① 打到界面上（banner，发送前可见）；② 落 web-server.log；③ 随 chatCfg 传给 agent，
       // 让"发送前规模预告"把实测 TTFT 与本任务上下文一起说出来；④ 没配超时时按它自适应看门狗阈值。
+      //
+      // v0.6.13（探针误报修复）：整段**尽力而为、失败只降级不阻断**——外层 try/catch 兜住一切异常，
+      // 预检判"不可达/超时"也照常开工（只影响 banner 文案与自适应超时取值）；
+      // 探针自身的耗时有硬上限（单次 1.5s × 3 + 退避，总预算 15s，见 probeEndpoint）。
       try {
         const probe = await ensureProbe(runModel);
         if (probe) {
+          probeForTurn = probe;
           const adapt = adaptiveTimeouts({
             probeTtftMs: probe.ttftMs,
             probePrefillMs: probe.prefillMs,
@@ -880,10 +927,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
           });
           chatCfg = { ...chatCfg, endpointProbe: probe };
           if (!(Number(cfg.noProgressTimeoutMs) > 0)) chatCfg.noProgressTimeoutMs = adapt.noProgressTimeoutMs;
-          srvlog(`chat 预检 ${taskId} ${probe.state} ${probe.note}`);
+          srvlog(`chat 预检 ${taskId} ${probe.state}${probe.reason ? ` reason=${probe.reason}` : ''} ${probe.note}`);
         }
       } catch (/** @type {any} */ e) {
-        srvlog(`chat 预检失败（忽略） ${taskId} ${String(e?.message || e)}`);
+        // 预检失败**不得**影响本回合发起（"尽力而为：失败只降级不阻断"）——这里只留一行日志。
+        srvlog(`chat 预检失败（忽略，按既有默认继续） ${taskId} ${String(e?.message || e)}`);
       }
     } catch (/** @type {any} */ err) {      entry.status = 'failed';
       notifyBusy();
@@ -951,6 +999,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     try {
       const r = await agent.runTurn(messages);
       srvlog('chat 回合完成 ' + taskId + ' text=' + String(r.text || '').length + ' ' + (Date.now() - entry.startedAt) + 'ms');
+      // v0.6.13（探针误报修复）：**回合结束后**的复核行——"预检判不可达、但本回合实际可用"必须留痕。
+      // 真机现场（web-server.log:799 判不可达 → :803 首帧 8.7s → :844 已跑 21m）此前只能靠人肉对时间线
+      // 才能看出，于是"探针判据有问题"这个结论一直没人能得出（用户反而去重启了引擎）。
+      // 判据用 `ttftMs != null`：真的收到过首帧 = 端点确实可用（回合失败/没出首帧时不写，避免误导）。
+      logProbeRecheck();
       // 会话级路由统计（Hermes C2 升级检测）：累计工具步数与截断次数，粘滞 flash 会话复杂度上来后自动升 planner
       const st = session.routeStats || { steps: 0, truncated: 0 };
       session.routeStats = { steps: st.steps + (io.stats().toolCount || 0), truncated: st.truncated + (r.truncated ? 1 : 0) };
