@@ -24,7 +24,7 @@ import { createApiDispatch } from './routes/api.js';
 import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
 import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credentials.js';
 import { availableModels, fetchProviderModels, providerHasKey, probeEndpoint, adaptiveTimeouts } from '../model-discovery.js';
-import { isLocalBaseUrl } from '../model-caps.js';
+import { isLocalBaseUrl, resolveModelCaps } from '../model-caps.js';
 import { createProvider, resolveProviderConfig, helperProvider, resolveVisionSupport } from '../providers/index.js';
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { routeTask, routingConfig } from '../routing.js';
@@ -314,9 +314,22 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     let probe = null;
     try {
       probe = await probeEndpoint(cfg, m, { timeoutMs: 15000 });
+      // v0.6.13（问题 2）：这行日志此前用 `probe.toolCalls` 判工具支持——该字段**从来不存在**
+      // （真机日志里恒为 `tools=未知`，见 web-server.log:48/169/303），预检结论等于没落日志。
+      // 现在取真实的四态 toolState，并把**引擎自述上下文 vs 配置**也写进来。
+      const toolText =
+        probe.toolState === 'stable-tools'
+          ? `支持（${probe.toolCallHits}/${probe.toolCallRuns}）`
+          : probe.toolState === 'unstable-tools'
+            ? `不稳定（${probe.toolCallHits}/${probe.toolCallRuns}）`
+            : probe.toolState === 'no-tools'
+              ? `不返回 tool_calls（${probe.toolCallHits}/${probe.toolCallRuns}）`
+              : '未知/不可判定';
       srvlog(
         `预检 ${m} ${probe.state} ttft=${probe.ttftMs == null ? 'n/a' : Math.round(probe.ttftMs) + 'ms'} ` +
-          `tools=${probe.toolCalls === true ? '支持' : probe.toolCalls === false ? '未返回' : '未知'} endpoint=${probe.endpoint || '（无）'}`
+          `prefill2000=${probe.prefillMs == null ? 'n/a' : Math.round(probe.prefillMs) + 'ms'} ` +
+          `tools=${toolText} endpoint=${probe.endpoint || '（无）'} ` +
+          `引擎自述上下文=${probe.engineCtx == null ? '未读到' : probe.engineCtx} 配置=${probe.configuredWindow ?? '？'}`
       );
     } catch (/** @type {any} */ e) {
       srvlog(`预检 ${m} 失败（忽略，按默认超时继续）：${String(e?.message || e)}`);
@@ -547,6 +560,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
             ttftMs: tp.ttftMs ?? null,
             tokensPerSec: decodeS && tp.contentTokens ? tp.contentTokens / decodeS : null,
             pendingTool: tp.pendingTool ? { name: tp.pendingTool.name, ms: Date.now() - tp.pendingTool.startedAt } : null,
+            // v0.6.13（问题 3）：等 `task` 子代理时把子代理自己的进度也写进日志——
+            // 真机现场只有"正在等待工具 task（已 620s）"，看不出子代理是在干活还是卡死。
+            subagent: tp.subagent ?? null,
           })
       );
     };
@@ -572,6 +588,10 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
           contentChars: tp?.contentChars ?? 0,
           tokensPerSec: decodeS && tp?.contentTokens ? Number((tp.contentTokens / decodeS).toFixed(1)) : null,
           pendingTool: tp?.pendingTool ? { name: tp.pendingTool.name, ms: Date.now() - tp.pendingTool.startedAt } : null,
+          // v0.6.13（问题 3）：正在跑的子代理快照——界面状态条据此显示"子 Agent 已跑 N 轮 / M 次工具调用"
+          subagent: tp?.subagent
+            ? { label: tp.subagent.label ?? '', modelRounds: tp.subagent.modelRounds ?? 0, toolCalls: tp.subagent.toolCalls ?? 0, ms: tp.subagent.at ? Date.now() - tp.subagent.at : null }
+            : null,
           stalled: Boolean(tp?.stalled),
         });
       } catch {}
@@ -827,6 +847,31 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
             noProgressCfg: cfg.noProgressTimeoutMs,
           });
           send({ type: 'banner', text: `🔎 本地端点预检：${probe.note}` });
+          // v0.6.13（问题 2）：**配置超出引擎能力**必须是一条独立的告警 banner，而且要在开工前出现。
+          // 真机根因（web-server.log:229）：配置 contextWindow=131072，引擎（llama.cpp）自述 n_ctx=32768，
+          // 长上下文在 prefill 阶段被引擎直接拒绝（insufficient memory）；用户当时反复"换预设"无效——
+          // 因为预设只改 contextBudget，**改不了引擎的 n_ctx**。所以这条要说清"换预设也没用"。
+          try {
+            const capsNow = resolveModelCaps(cfg, runModel);
+            if (Number(probe.engineCtx) > 0 && Number(capsNow.contextWindow) > Number(probe.engineCtx)) {
+              send({
+                type: 'banner',
+                warn: true,
+                text:
+                  `⚠ 引擎自述上下文 ${probe.engineCtx} vs 配置 ${capsNow.contextWindow} —— 配置超出引擎能力，长上下文将直接被引擎拒绝` +
+                  `（真机现场报的是 insufficient memory / 显存不足）。换预设、调 config.contextBudget、调 timeout.* 都**改不了引擎上限**：` +
+                  `要么在引擎侧把上下文窗口调大（llama.cpp 的 --ctx-size / --context-window），要么把 customModels.${runModel}.contextWindow 改成 ≤ ${probe.engineCtx}。`,
+              });
+            } else if (probe.engineProbed && !(Number(probe.engineCtx) > 0)) {
+              // 真的读了却没读到 → 也要说一句（"读不到就跳过并说明"），否则用户会以为内核核对过引擎能力了。
+              // 条件是 engineProbed：压根没读（非本地端点 / 端点未自报模型名）时不刷这条噪音，
+              // 那种情形的原因已经写在 probe.note 的"引擎自述上下文：跳过（…）"里。
+              send({
+                type: 'banner',
+                text: 'ℹ 引擎自述上下文：未读到（该端点不提供 /props 或其中没有 n_ctx 字段）——无法核对配置是否超出引擎能力；不影响继续使用。',
+              });
+            }
+          } catch {}
           send({
             type: 'banner',
             text:
@@ -979,6 +1024,21 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         const { resolveModelCaps, safeBudget } = await import('../model-caps.js');
         budgetInfo = { used, total: safeBudget(cfg, resolveModelCaps(cfg, runModel)) };
       } catch {}
+      // v0.6.13（问题 4）：**stalled 必须有用户可见的说明**。
+      // 真机现场：内核写了 `chat 发送 done … status=stalled`，而桌面壳日志里只有
+      // `[renderer] [MingDao] 回合收尾：generating=false，按钮恢复发送` —— 用户完全不知道
+      // 这一轮是"跑满了步数（可续跑）""我点了停止"还是"再等下去也不会有新东西"。
+      // 这里发一条**告警 banner**（与 done.note 同一份文案，单一来源就是 agent 的 r.note），
+      // 前端 renderBanner 直接渲染；done.note 仍照旧带上，两条通道都不丢。
+      if (r.stalled) {
+        send({
+          type: 'banner',
+          warn: true,
+          text:
+            `⏹ 本轮因**长时间无进展**已中止（不是步数上限 capped、也不是你点的停止 aborted）。\n` +
+            String(r.note || '').trim(),
+        });
+      }
       // v0.6.13（A）：**"0 次工具调用"必须出现在收尾里**——否则端点不返回 tool_calls 时，
       // 界面看起来一切正常（ok:true + 正文），实际一次工具都没调（"看起来在工作、其实什么都没做"）。
       const zeroNote = String(r.perf?.zeroToolCalls || '');
@@ -993,6 +1053,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         truncated: r.truncated,
         aborted: r.aborted,
         stalled: Boolean(r.stalled),
+        // v0.6.13（问题 3/4）：stalled 的**原因**也一并下发——'inherited' = 父回合整轮零进展
+        //（子代理被一起收口），'own' = 本回合自己零进展。前端据此给出不同的处置建议。
+        stallCause: r.perf?.stallCause ?? null,
         perf: r.perf ? { llmCalls: r.perf.llmCalls ?? null, toolCalls: r.perf.toolCalls ?? null, ttftMs: r.perf.ttftMs ?? null, noToolCalls: Boolean(r.perf.noToolCalls) } : null,
         note: [baseNote, zeroNote].filter(Boolean).join('\n'),
         stats: io.stats(),

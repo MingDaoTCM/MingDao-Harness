@@ -707,6 +707,12 @@ Long sessions that would silently drop early messages get those messages summari
 { "timeout": { "firstTokenMs": 600000, "streamIdleMs": 120000, "totalMs": 1800000 } }
 ```
 
+The local-endpoint pre-flight also reads the **engine's own context size** (`GET /props`, e.g. llama.cpp's
+`default_generation_settings.n_ctx`) and prints it next to the configured `contextWindow`; when the
+configuration exceeds the engine, the kernel warns that long contexts will be rejected by the engine
+outright (switching presets or lowering `contextBudget` cannot change the engine's `n_ctx`). If the field
+cannot be read, the pre-flight says so instead of guessing.
+
 Other guard fields: `maxEmptyRounds` (max consecutive empty/truncated output rounds before stopping,
 default **3** — each empty round is billed as a full completion), `maxRounds` (auto-continuation rounds
 after the step limit, default **3**), `maxAgentsMdChars` (cap on injected `AGENTS.md` content, default
@@ -834,6 +840,7 @@ feature is inactive until configured.
 | `timeout.firstTokenMs` | number | local `600000`, remote `300000` | First-token wait |
 | `timeout.streamIdleMs` | number | `120000` | Stream idle timeout |
 | `timeout.totalMs` | number | local `1800000`, remote `600000` | Total request timeout |
+| `noProgressTimeoutMs` | number | `3600000` | Turn-level no-progress watchdog (2× the local single-request cap; `0`/negative/`Infinity` fall back to the default). A `task` sub-agent's real progress counts as the parent turn's progress, a stalled sub-agent is stopped by **its own** watchdog first so the reason travels back, and the ending is reported as `stalled` (distinct from `capped`/`aborted`) via a warning banner plus `done.note` |
 | `audit` | boolean | `true` | Tool-call audit log |
 | `ledger` | boolean | `true` | Per-turn execution ledger |
 | `notify` | boolean | `true` | Desktop notifications when background tasks finish |

@@ -2354,3 +2354,126 @@ permission=readonly，已按你的显式选择 auto 执行`。
   内存预算的经验值，不同量化/显存配置需要自己调。
 - **进度日志 30s 一行**是折中：更密会刷日志、更疏则"看起来像卡住"，本轮未做自适应频率。
 
+
+## 3.55 已修复（v0.6.13 开发线：本地模型长任务真机四问题——预告与预检自相矛盾 / 配置超出引擎上下文 / 等子代理被算作无进展 / `stalled` 在桌面壳上不可见）
+
+本节是 §3.54 之后的**下一轮真机测试**（v0.6.12 桌面壳 + 本机 llama.cpp 端点 127.0.0.1:60091/8081，
+跑的是"本地模型做 MDH 代码审计"这类长任务）。四个问题各自独立、但都由同一份现场证据链复现。
+
+**日志证据（逐条，可复核）**
+
+1. **预告文案与预检数据自相矛盾**（同一行、同一个 taskId）：
+   `~/.mingdao/logs/web-server.log:304`（04:13:27）
+   `chat 预告 t424aaab2aecab8a3 📏 本轮上下文 ≈ 15,983 tokens（131,072 窗口的 12%），预算 98,304
+   ｜ 本地端点：prefill 可能需数分钟至数十分钟（该端点不提供进度预告，只能等首帧）；首帧等待上限 600s
+   ｜ 端点预检：✅ 稳定支持工具调用（3/3）· 首帧 0.07s · 参考 prefill 2000 tokens 0.08s`。
+   52 秒后 `web-server.log:307`：`chat 首帧 t424aaab2aecab8a3 **53.7s**`。
+   按同一份预检线性外推（0.08s × 15983/2000）只有 **0.6s**——文案与数据差 90 倍。
+2. **配置超出引擎能力**：`web-server.log:229`（02:41:48）
+   `chat 错误 t820945ac81c9ce5f [流式响应错误] insufficient memory: the request exceeded available GPU
+   memory (sustained critical memory pressure during prefill; aborted before the allocator wall). …
+   Reduce --context-window, close other apps, or try q8 KV quantization.`
+   而 `~/.mingdao/config.json` 里 `customModels.MLocalModel3.6.2.contextWindow = 131072`，
+   引擎（llama.cpp，60091）自述 `n_ctx = 32768`——配置是引擎能力的 **4 倍**。
+3. **等 `task` 子代理被算作"无进展"**：`web-server.log:292-300`（02:42:31 → 03:13:16，30m45s）：
+   `chat 进度 t64e0a8c3900b1de9 … 阶段=执行工具 task · 模型轮次=12 · 工具调用=17（已执行完 16）· 
+   正在等待工具 task（已 620s…771s）` → `chat 发送 done … status=stalled 总耗时=1845271ms`。
+   同一回合的会话文件 `~/.mingdao/sessions/2026-10-09T02-42-31-qaaa.jsonl:28/29` 里两条 `task` 工具结果写的是
+   `（子任务无输出：⏹ 连续 **1 分钟** 没有任何工具调用、也没有新内容（模型请求 **15 轮、工具调用 18 次**
+   ——其中 4 次工具调用是重复调用或失败），已中止。）`（另一条 14 轮/19 次）
+   ——**子代理一直在干活**，却被判"连续 1 分钟没有进展"。
+4. **`stalled` 在桌面壳上不可见**：`~/Library/Application Support/mingdao-desktop/logs/mingdao.log:2996`（03:13:16.478）
+   只有 `[renderer] [MingDao] 回合收尾：generating=false，按钮恢复发送`；
+   同一时刻内核写的是 `chat 发送 done t64e0a8c3900b1de9 status=stalled 总耗时=1845271ms`。
+
+**根因（四条）**
+
+1. `prefillForecast()`（`src/agent.js`）的本地分支是**与端点无关的固定文案**——"可能需数分钟至数十分钟"
+   对 0.08s 的端点和 20s 的端点一视同仁；预检实测只被当成一句附注拼在后面，从不参与推导。
+   后果不是"数字不准"，而是**同一条横幅自己打自己**，用户学会忽略这条告警。
+2. 预检只测"能不能跑"（工具调用三态 + TTFT + 参考 prefill），**从不问"引擎装得下多少"**；
+   内核按配置的 131072 推导预算（98,304），把 15,983 tokens 的 prompt 发给只装了 32k 的引擎 →
+   引擎在 prefill 阶段直接拒绝。这正是负责人"**换预设也没用**"的根因：预设只改 `contextBudget`，
+   改不了引擎的 `n_ctx`。
+3. 父回合在 `await task` 期间的进展判据只认"工具结果返回 / 正文增量"——**子代理的进展不在其中**
+   （父回合当时拿不到任何中间信号），于是"只有子代理在动"被算成"整轮零进展"。
+   更糟的是子代理**继承的截止时刻是 spawn 那一刻的绝对快照**：它按"父回合剩余时间"倒计时，
+   到点即掐，触发时又拿"子代理自己的最后进展"当等待时长——于是谎报"连续 1 分钟"。
+   判定：**两个原因同时成立**——父回合没算子代理的进展（主因，决定了整轮结局），
+   且子代理自己的看门狗被绝对快照压到了"父回合剩余时间"（次因，决定了子代理被误杀 + 文案说谎）。
+   子代理**不是**自己在本地模型上卡住：它 10 分钟里跑完 15 轮 / 18 次工具调用。
+4. `stalled` 只有内核状态与一条 `done.note`，没有 banner；前端 `done` 处理只 `console.log` 了 session
+   （不打印 status），而桌面壳日志取的就是渲染进程 console——两条日志在现场对不上。
+
+**修法（本轮）**
+
+- `src/agent.js`：新增 `prefillEstimateMs()`（纯函数）——有 `probe.prefillMs` 就按
+  `参考耗时 × 本轮tokens ÷ 参考tokens` **线性外推**；`prefillForecast()` 有实测时改报外推值
+  （`按预检 0.08s/2,000 tokens 外推，本轮 ≈0.6s`）并**如实**附上"长上下文下引擎可能显著变慢：
+  本机实测 16k tokens 首帧 53.7s，而按同一份预检外推只有 0.6s（约 90 倍）"（常量
+  `PREFILL_LONGCTX_EVIDENCE`，与注释同源）；**只有拿不到预检数据**时才退回原保守文案；
+  外推 ≥ `PREFILL_SLOW_WARN_MS`(60s) 才告警且写出依据；"本地端点 + ≥60k tokens"这条规模告警线
+  降级为**仅无实测时的兜底**。
+- `src/model-discovery.js`：预检新增 `engineContextFromProps()` 与 `engineContextNotice()`（均为纯函数），
+  本地端点额外读一次 `GET /props`（baseUrl 带 `/v1` 时先剥前缀再试，失败退回原样；**门槛**：
+  只有引擎**自报了模型名**才多打这一个请求——llama.cpp 家族总会回模型名/文件路径，回不了名的多半是
+  只实现 `/v1/chat/completions` 的网关或测试桩，它们不认识 `/props`；实测教训：`test/e2e-web.js` 的
+  mock 只按 `POST + JSON body` 解析，收到空 body 的 GET 会抛 `JSON.parse('')` 把整条 e2e 打挂——
+  不认识 `/props` 的端点一个字节都不该多发。跳过时结论里写明"跳过（未自报模型名…）"，不假装核对过），
+  抽 `default_generation_settings.n_ctx` / `n_ctx` / `n_ctx_train` / `max_model_len` / `context_length`；
+  **读不到就跳过并说明**（不猜、不据此否定端点）。结论与配置并排进 `probe.note`
+  （`⚠ 引擎自述上下文 32768 vs 配置 131072 —— 配置超出引擎能力，长上下文将直接被引擎拒绝`），
+  并写清"换预设/调 contextBudget 都改不了引擎上限"。
+- `src/web/server.js`：配置超出引擎能力时发一条**独立告警 banner**（附修法：引擎侧调 `--ctx-size`，
+  或把 `contextWindow` 改成 ≤ 引擎值）；读不到时也发一条"未读到"的说明；
+  `预检 <模型> …` 日志行改为带 `prefill2000=`、真实四态 `tools=` 与 `引擎自述上下文=… 配置=…`
+  （此前用的是**从来不存在**的 `probe.toolCalls`，真机日志里恒为 `tools=未知`）。
+- `src/agent.js`（问题 3）：①子代理每次真实进展（成功且不重复的工具结果 / 新正文增量）通过
+  `cfg.onSubagentProgress` **回调父回合**（增量帧节流 1s，工具结果不节流），父回合据此续期；
+  ②`turnProgress.subagent` 保存"在等哪个子任务、它跑到第几轮/几次工具调用/最后进展距今多久"；
+  ③子代理继承的截止时刻改为**活的**——`inheritedDeadlineAt() = max(spawn快照, parentProgress.lastProgressAt +
+  parentProgress.noProgressMs)`，只前移不倒退；④父回合等待子代理时多等 `SUBAGENT_WAIT_GRACE_MS`(15s)，
+  保证**子代理自己的看门狗先响**并把原因回传；⑤看门狗带 `cause`（`own`/`inherited`），
+  `inherited` 走 `inheritedStopNotice()`——明说"父回合整轮无进展，**不是子代理卡住**"，
+  并如实报出子代理自己的轮次/工具调用数；⑥`task` 工具结果带上子代理进度与收口原因；
+  ⑦不足 1 分钟按**秒**说（不再把 300ms 说成"连续 1 分钟"）。
+- `src/web/server.js` + `src/web/app.js`（问题 4）：`stalled` 时内核发**告警 banner**（与 `done.note` 同源）
+  并在 `done` 事件里带 `stallCause`；收尾文案新增"中止时正在等待工具 X（已 Ns）"、"这是整轮零进展
+  （不是 capped、也不是你点的停止 aborted）"；前端把结局（`done`/`capped`/`aborted`/两种 `stalled`）
+  写进控制台，并在消息下方留一条 stalled 说明；进度条显示子代理进度。
+- 文档：`docs/CONFIG.md` 补 `timeout.*` / `noProgressTimeoutMs` 的新语义（子代理进展算父回合进展、
+  活的截止时刻、15s 宽限、"stalled 必须用户可见"）与"预检读引擎自述上下文"整节、
+  "发送前的规模预告由预检实测推导"整节、以及"四类卡住"表新增两行；`docs/CONFIG.en.md` 同步
+  `noProgressTimeoutMs` 一行与引擎自述上下文一段。
+
+**断言与变异**
+
+- `test/smoke.js` 新增 **§140**（四组行为 + 结构断言：预告外推/保守分支/慢端点告警/线性关系、
+  `/props` 读数与三态结论、父回合不误杀有进展的子代理、快照到期但父回合仍活时不收口、
+  父回合真零进展时按 `inherited` 收口、进度行含子代理进度、stalled 文案与 capped/aborted 区分、
+  内核 banner / done `stallCause` / 前端控制台结局）。
+- `test/mutate/batch29-localmodel.mjs`：**27 条**（预告不外推/不乘 tokens/删掉"会低估"的如实说明/
+  无实测也硬编外推/慢端点不告警、预检不读 `/props`/未自报模型名也照样打 `/props`/
+  读不到不说明/只认顶层 `n_ctx`/没超也说超/不从 `/v1` 推根路径/超限不发 banner/日志不带引擎自述、
+  子代理进展不回调父回合/截止时刻退回快照/继承完全失效/收口原因不区分/宽限写成 0/
+  结果不带子代理进度/不区分收口原因/进度行不显示子代理、
+  stalled 不发 banner/不说在等哪个工具/谎报 1 分钟/不与 capped-aborted 区分/不带 stallCause/
+  前端不写控制台）。**27/27 全中**（独立 worktree 跑，见提交信息）。
+- `test/mutate/README.md` 变异总数 183 → **210**（与 `node scripts/doc-lint.mjs` 的"实际 210 条"同一提交）。
+
+**未做边界（如实登记）**
+
+- **线性外推仍然只是外推**：长上下文下引擎会显著变慢（真机 90 倍），内核只在文案里如实标注这条差值，
+  **不**做"按上下文长度分段建模"或按引擎内存压力动态修正——那需要引擎侧的 KV/显存数据，本轮没有。
+- **`/props` 覆盖有限**：本轮只读这一个只读端点，且只认 `n_ctx`/`n_ctx_train`/`max_model_len`/
+  `context_length` 这几个字段名；引擎不实现 `/props` 或字段另有其名时只能"说明未读到"，**不猜**。
+  也没有读 `n_ctx_per_seq`/并发 slot 数——单条请求可用上下文可能因并行 slot 进一步变小。
+- **不做"自动改配置/自动重启引擎"**：内核只告警与给出修法，不会替用户改 `contextWindow`，也不会杀进程。
+- **父回合等待子代理的 15s 宽限是固定值**：没有按子代理数量/历史时延自适应；它只是"让子代理先响"，
+  与看门狗判据、默认阈值无关（默认值仍是 60min，自适应仍是 clamp(max(ttft×100, prefill×20), 10min, 60min)）。
+- **子代理进展靠回调而非"读取子代理状态"**：若某个子代理在**单次**模型请求内部长时间无增量
+  （本地长 prefill），父回合同样看不到进展——那种形态仍由请求级首帧超时（`timeout.firstTokenMs`）负责，
+  不归本轮的看门狗修法管。
+- **`stalled` 的 UI 呈现只做了 WebUI/桌面壳共用的 `src/web/app.js`**：CLI/REPL 仍只有一行 `io.print` 文案，
+  没有额外的 TUI 状态条改动；`desktop/**` 本轮未改动（桌面壳日志里的 `status=` 来自渲染进程 console）。
+- **进度日志仍是 30s 一行**（沿用 §3.54 的取舍），本轮只往里加了子代理字段，未做自适应频率。

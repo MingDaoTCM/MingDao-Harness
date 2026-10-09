@@ -454,6 +454,9 @@ async function send(){
         if(ev.tokensPerSec!=null) bits.push('≈'+Number(ev.tokensPerSec).toFixed(1)+' tok/s');
         if(ev.contentChars) bits.push('正文 '+ev.contentChars+' 字');
         if(ev.pendingTool) bits.push('等待工具 '+ev.pendingTool.name+' 已 '+Math.round((ev.pendingTool.ms||0)/1000)+'s');
+        // v0.6.13（问题 3）：等 `task` 子代理时把**子代理自己的进度**摆出来——
+        // 真机现场界面/日志只有"等待工具 task 已 620s"，与"卡死 620s"完全同形。
+        if(ev.subagent) bits.push('子 Agent'+(ev.subagent.label?'「'+ev.subagent.label+'」':'')+'已跑 '+(ev.subagent.modelRounds||0)+' 轮 / '+(ev.subagent.toolCalls||0)+' 次工具调用'+(ev.subagent.ms!=null?'（最后进展 '+Math.round(ev.subagent.ms/1000)+'s 前）':''));
         if(ev.stalled) bits.push('已判定无进展，正在中止');
         think.textContent='💭 正在工作 '+Math.floor(p/60)+' 分 '+Math.round(p%60)+' 秒 · 第 '+msg._steps+' 回合 · '+curPhase+' · '+bits.join(' · ')+'…';
         renderWorkStatus(); }
@@ -474,7 +477,23 @@ async function send(){
         // 这里把作废的确认收掉：该确认已经死了，界面上不该再留一个能点的假弹窗。
         if(/权限确认超时/.test(String(ev.message||''))) dismissAskModals();
         const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); scroll(); }
-      else if(ev.type==='done'){ console.log('[MingDao] done 事件：session=' + ev.session); onActivity(); if(ev.budget){ const b=ev.budget; if(hintTextEl) hintTextEl.textContent='预算 '+Math.round(b.used/1000)+'K/'+Math.round(b.total/1000)+'K（'+Math.round(b.used/b.total*100)+'%）· 本轮完成 · 提示栏右侧为今日费用与命中率'; } refreshStatusBar(); if(ev.stats&&ev.stats.deliverables&&ev.stats.deliverables.length){ const card=document.createElement('div'); card.className='deliver'; card.innerHTML='<div class="t">📦 交付物（'+ev.stats.deliverables.length+' 个文件）</div>'+ev.stats.deliverables.map(f=>'<div class="i">'+esc(f)+(f.toLowerCase().endsWith('.html')?' <span style="color:var(--accent2)">— 浏览器打开即可运行</span>':'')+'</div>').join(''); msg.appendChild(card); } if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); } currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
+      else if(ev.type==='done'){
+        // v0.6.13（问题 4）：把**结局**写进控制台。桌面壳的日志就是渲染进程的 console（转存到
+        // ~/Library/Application Support/mingdao-desktop/logs/mingdao.log），此前那里只有
+        // 「回合收尾：generating=false，按钮恢复发送」——同一时刻内核写的是 `status=stalled`，
+        // 事后取证完全对不上（真机 2026-10-09T03:13:16 两条日志并列就是证据）。
+        const endStatus=ev.stalled?(ev.stallCause==='inherited'?'stalled(父回合整轮无进展)':'stalled(长时间无进展)'):ev.aborted?'aborted':(ev.truncated?'capped':'done');
+        console.log('[MingDao] done 事件：session=' + ev.session + ' status=' + endStatus + ' durationMs=' + (ev.durationMs||0));
+        onActivity();
+        if(ev.budget){ const b=ev.budget; if(hintTextEl) hintTextEl.textContent='预算 '+Math.round(b.used/1000)+'K/'+Math.round(b.total/1000)+'K（'+Math.round(b.used/b.total*100)+'%）· 本轮完成 · 提示栏右侧为今日费用与命中率'; }
+        refreshStatusBar();
+        if(ev.stats&&ev.stats.deliverables&&ev.stats.deliverables.length){ const card=document.createElement('div'); card.className='deliver'; card.innerHTML='<div class="t">📦 交付物（'+ev.stats.deliverables.length+' 个文件）</div>'+ev.stats.deliverables.map(f=>'<div class="i">'+esc(f)+(f.toLowerCase().endsWith('.html')?' <span style="color:var(--accent2)">— 浏览器打开即可运行</span>':'')+'</div>').join(''); msg.appendChild(card); }
+        // v0.6.13（问题 4）：stalled 必须**用户可见**，而且与 capped/aborted 区分开（复用既有 done.note 渲染）。
+        // 内核已发了一条同文案的告警 banner（服务端 `if (r.stalled) send({type:'banner'…})`），
+        // 这里再在消息下方留一条——用户滚动回看时不必去翻日志才知道"这轮为什么停了"。
+        if(ev.stalled){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent='⏹ 本轮因长时间无进展已中止（不是步数上限 capped、也不是你点的停止 aborted）——'+(ev.note||'详情见上方告警条。'); msg.appendChild(d); }
+        else if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); }
+        currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
     });
   }catch(e){ onActivity(); // 诊断（v0.4.2 network error 排查）：静默中断此前无任何日志，无法区分
     // 「手点停止 / 看门狗 / fetch 流静默断裂」。v0.4.3 修：第二参改 JSON 字符串——Electron 日志

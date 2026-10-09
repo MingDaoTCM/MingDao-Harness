@@ -11,7 +11,7 @@ import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { PROVIDERS, MODELS } from './models.js';
 import { getStoredKey } from './credentials.js';
-import { isLocalBaseUrl } from './model-caps.js';
+import { isLocalBaseUrl, resolveModelCaps } from './model-caps.js';
 import { resolveProviderConfig } from './providers/index.js';
 
 const TTL_MS = 60 * 60 * 1000;
@@ -198,6 +198,17 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
       ttftBaselineMs: null,
       prefillBaselineMs: null,
       slowdown: null,
+      // v0.6.13（问题 2）：引擎自述上下文（本地端点读 GET /props）——读不到就是 null，**不猜**
+      engineCtx: null,
+      engineCtxSource: null,
+      engineProbed: false,
+      configuredWindow: (() => {
+        try {
+          return resolveModelCaps(cfg, modelName).contextWindow;
+        } catch {
+          return null;
+        }
+      })(),
       state: /** @type {string} */ ('unreachable'),
       error: /** @type {string|null} */ (null),
       note: '',
@@ -298,6 +309,37 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
       info.note = `❌ 不可达：${info.error}${info.isLocal ? '（本地引擎没起来？先确认端口/进程）' : ''}`;
       return info;
     }
+    // ⑤ 引擎自述上下文（v0.6.13 问题 2）：**本地端点**额外读一次 `GET /props`。
+    //    · 放在 chat 探测之后、结论拼装之前：chat 通不通与"引擎装得下多少"是两件事；
+    //    · 只打一次、只读不改（GET），失败/非 JSON/没有 n_ctx 一律视为"未读到"，绝不编造；
+    //    · llama.cpp 的 /props 挂在**根**上（`http://host:port/props`），而 baseUrl 通常带 `/v1`，
+    //      所以先试剥掉 `/v\d+` 的根路径，再退回 baseUrl 原样（兼容把 /props 挂在前缀下的网关）。
+    //    · **门槛**：只有引擎**自报了模型名**（`info.loadedModel`）才多打这一个请求。理由有两条：
+    //      ① llama.cpp 家族（含 llama-cpp-python/koboldcpp/LM Studio）总会在响应里回模型名/文件路径，
+    //         回不了名的多半是"只实现了 /v1/chat/completions"的网关或测试桩——它们不认识 /props；
+    //      ② 实测教训：`test/e2e-web.js` 的 mock 只按 POST+JSON body 解析（收到空 body 的 GET 会抛
+    //         `JSON.parse('')`），多打一个 GET 会把整条 e2e 打断——不认识 /props 的端点**一个字节都不该多发**。
+    //      跳过时结论里会写"跳过"（`engineContextNotice` 的 skipReason），不会假装核对过。
+    if (info.isLocal && info.loadedModel) {
+      info.engineProbed = true;
+      const strippedBase = base.replace(/\/v\d+$/, '');
+      const propsUrls = strippedBase !== base ? [`${strippedBase}/props`, `${base}/props`] : [`${base}/props`];
+      for (const u of propsUrls) {
+        try {
+          const res = await once(u, { method: 'GET', headers }, Math.min(5000, left()));
+          if (!res || !res.ok) continue;
+          const raw = String(await res.text()).slice(0, 65536);
+          const ctx = engineContextFromProps(JSON.parse(raw));
+          if (ctx != null) {
+            info.engineCtx = ctx;
+            info.engineCtxSource = u;
+            break;
+          }
+        } catch {
+          /* 读不到就跳过（端点没实现 /props、返回非 JSON、超时）——结论里会如实写"未读到" */
+        }
+      }
+    }
     info.ttftMs = median(info.ttftSamples);
     const n = info.toolCallRuns;
     info.toolState = n === 0 ? 'unknown' : info.toolCallHits === n ? 'stable-tools' : info.toolCallHits === 0 ? 'no-tools' : 'unstable-tools';
@@ -370,11 +412,21 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
               `agent 任务可能步数为 0，**不要**据此判定"不支持工具调用"`;
     const ttftNote = info.ttftMs != null ? `首帧 ${(info.ttftMs / 1000).toFixed(2)}s` : '首帧未测到';
     const prefillNote = info.prefillMs != null ? `参考 prefill ${prefillTokens} tokens ${(info.prefillMs / 1000).toFixed(2)}s` : `参考 prefill 未测到`;
+    // v0.6.13（问题 2）：引擎自述上下文 vs 配置——**必须在结论里**（界面 banner 与 web-server.log 都用这条 note）
+    const engineNote = engineContextNotice({
+      engineCtx: info.engineCtx,
+      configuredWindow: info.configuredWindow,
+      source: info.engineCtxSource,
+      probed: info.engineProbed,
+      isLocal: info.isLocal,
+      // 跳过的**具体**原因要写出来（否则"跳过"与"没读"分不清，等于没说）
+      skipReason: info.isLocal ? (info.loadedModel ? null : '该端点未自报模型名，不确认它实现 /props') : '非本地端点不预检 /props',
+    });
     const slowNote =
       (info.slowdown?.ttftRatio != null && info.slowdown.ttftRatio >= 3) || (info.slowdown?.prefillRatio != null && info.slowdown.prefillRatio >= 3)
         ? `\n   ⚠ 与上次预检相比明显变慢（首帧 ${info.ttftBaselineMs != null ? (info.ttftBaselineMs / 1000).toFixed(2) + 's → ' : '？'}${info.ttftMs != null ? (info.ttftMs / 1000).toFixed(2) + 's' : '？'}）：该端点**可能仍在处理上一个请求**（引擎 slot 被占/排队），建议重启引擎后再跑长任务。`
         : '';
-    info.note = `${toolNote} · ${ttftNote} · ${prefillNote}${info.partial ? ' ·（预检超过时间预算，样本未跑满）' : ''} · ${nameNote}${slowNote}`;
+    info.note = `${toolNote} · ${ttftNote} · ${prefillNote}${info.partial ? ' ·（预检超过时间预算，样本未跑满）' : ''} · ${nameNote} · ${engineNote}${slowNote}`;
     return info;
   })();
   probeInflight.set(key, run);
@@ -490,6 +542,79 @@ export function adaptiveTimeouts({ probeTtftMs = null, probePrefillMs = null, is
 /** 参考 prefill 的样本规模（文案用；与 probeEndpoint 的 prefillTokens 默认一致）。 */
 function prefillTokensLabel() {
   return '2000 tokens';
+}
+
+// ---------------------------------------------------------------------------
+// v0.6.13（问题 2）：**引擎自述上下文** vs **配置上下文**
+//
+// 真机证据（~/.mingdao/logs/web-server.log:229，2026-10-09T02:41:48）：
+//   chat 错误 t820945ac81c9ce5f [流式响应错误] insufficient memory: the request exceeded
+//   available GPU memory (sustained critical memory pressure during prefill … Reduce
+//   --context-window, close other apps, or try q8 KV quantization.
+// 而 ~/.mingdao/config.json 里 customModels.MLocalModel3.6.2.contextWindow = 131072，
+// 引擎（llama.cpp，127.0.0.1:60091）自述 n_ctx = 32768 —— 配置是引擎能力的 **4 倍**。
+// 后果：内核按 131072 推导预算（98,304），把 15,983 tokens 的 prompt 发给一个只装了 32k 的
+// 引擎，长上下文**在 prefill 阶段就被引擎直接拒绝**——此时换预设、调 contextBudget、
+// 调 timeout.firstTokenMs 全都无济于事（那些都改不了引擎的 n_ctx）。这正是负责人"换预设也没用"
+// 的根因，所以它必须在预检阶段就被读出来、并且**在日志与界面上各说一次**。
+//
+// 读法：llama.cpp 的 `GET /props` 返回 `default_generation_settings.n_ctx`（有的版本另有顶层
+// `n_ctx` / `n_ctx_train`）；其他引擎（vLLM 风格 / Ollama 风格 / 自研网关）能读多少读多少，
+// 读不到就**跳过并说明**（不猜、不编造、不把它当成"引擎不行"）。
+// ---------------------------------------------------------------------------
+
+/** 从引擎自述（/props 的 JSON）里抽"真实上下文窗口"（纯函数，便于断言/变异）。
+ *
+ *  候选字段按"越贴近引擎真实装载值越靠前"排序：
+ *    · llama.cpp /props：`default_generation_settings.n_ctx`（服务端实际 n_ctx）、顶层 `n_ctx`、`n_ctx_train`；
+ *    · vLLM 风格：顶层 `max_model_len`；
+ *    · 通用/自研：`context_length`、`model_info.*.context_length`（Ollama /api/show 的形态）。
+ *  一律要求**正整数**（0/负数/字符串/NaN 视为读不到）——绝不拿一个假值去和配置比。 */
+export function engineContextFromProps(/** @type {any} */ json) {
+  if (!json || typeof json !== 'object') return null;
+  const dgs = json.default_generation_settings || {};
+  const candidates = [
+    dgs.n_ctx,
+    json.n_ctx,
+    dgs.params?.n_ctx,
+    json.n_ctx_train,
+    json.max_model_len,
+    json.context_length,
+    json.model_info?.context_length,
+    ...Object.values(json.model_info || {}).map((/** @type {any} */ v) => v?.context_length),
+  ];
+  for (const c of candidates) {
+    const n = Number(c);
+    if (Number.isFinite(n) && n > 0) return Math.round(n);
+  }
+  return null;
+}
+
+/**
+ * 「引擎自述上下文 vs 配置」的**用户可见结论**（纯函数，日志/界面 banner/规模预告共用同一份文案）。
+ *
+ * 三态（不合并、不省略）：
+ *   · 读到了且配置 ≤ 引擎 → 明确说"一致"（用户才知道这条核对**做过**了）；
+ *   · 读到了且配置 > 引擎 → **警告**："配置超出引擎能力，长上下文将直接被引擎拒绝"，
+ *     并点明"换预设/调 contextBudget 都改不了引擎上限"（负责人现场正是卡在这里）；
+ *   · 没读到（端点不提供 /props、字段缺失、非本地端点或不确认实现 /props 而跳过）→ 如实说"未读到/跳过"，
+ *     **不**据此判定端点不行，也不假装核对过。
+ * @param {{ engineCtx?: number|null, configuredWindow?: number|null, source?: string|null, probed?: boolean, isLocal?: boolean, skipReason?: string|null }} input
+ */
+export function engineContextNotice({ engineCtx = null, configuredWindow = null, source = null, probed = false, isLocal = false, skipReason = null } = {}) {
+  const eng = Number(engineCtx) > 0 ? Math.round(Number(engineCtx)) : null;
+  const conf = Number(configuredWindow) > 0 ? Math.round(Number(configuredWindow)) : null;
+  const where = source ? `（读自 ${source}）` : '';
+  if (eng == null) {
+    if (!probed) {
+      return `引擎自述上下文：跳过（${skipReason || (isLocal ? '该端点未自报模型名，不确认它实现 /props' : '非本地端点不预检 /props')}）——无法核对配置的 ${conf ?? '？'} 是否超出引擎能力`;
+    }
+    return `引擎自述上下文：**未读到**（该端点不提供 /props 或其中没有 n_ctx/default_generation_settings.n_ctx 字段）——无法核对配置的 ${conf ?? '？'} 是否超出引擎能力`;
+  }
+  if (conf != null && conf > eng) {
+    return `⚠ 引擎自述上下文 ${eng} vs 配置 ${conf} —— 配置超出引擎能力，长上下文将直接被引擎拒绝${where}。换预设/调小 config.contextBudget 都**改不了引擎上限**：要么在引擎侧把上下文窗口调大（llama.cpp 的 --ctx-size / --context-window），要么把配置改成 ≤ ${eng}。`;
+  }
+  return `引擎自述上下文 ${eng} vs 配置 ${conf ?? '（未声明）'} —— 配置未超出引擎能力${where}`;
 }
 
 export function modelCacheFile() {

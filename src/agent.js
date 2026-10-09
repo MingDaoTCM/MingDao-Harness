@@ -67,6 +67,15 @@ const SUBAGENT_MAX_STEPS = 24;
  *  可配置：config.noProgressTimeoutMs（0/负数/NaN/Infinity 一律回落默认——**不能**用它关掉看门狗）。 */
 export const DEFAULT_NO_PROGRESS_TIMEOUT_MS = 3600000;
 
+/** 父回合在等待 `task` 子代理时额外给的一点点宽限（ms）。
+ *
+ *  v0.6.13（问题 3）：子代理的看门狗与父回合是**同一个阈值**，两者会在同一刻到点；
+ *  必须让**子代理先响**——否则父回合先掐断，`task` 的工具结果里只剩"父回合中止"，
+ *  用户看不出子代理自己卡在哪一步、跑到了第几轮（真机现场正是这种形态）。
+ *  这不是"把阈值调大掩盖问题"：判据没动、默认值没动，只是在"父回合正等子代理"这一种
+ *  形态下多等 15s（相对默认 60 分钟是 0.4%），换"子代理自己的结论能回传父回合"。 */
+export const SUBAGENT_WAIT_GRACE_MS = 15000;
+
 /** 解析无进展阈值：非正/非有限一律回落默认（fail-safe，防"配置写 0 就静默失去看门狗"）。 */
 export function resolveNoProgressTimeoutMs(/** @type {any} */ cfg) {
   const v = Number(cfg?.noProgressTimeoutMs);
@@ -75,17 +84,69 @@ export function resolveNoProgressTimeoutMs(/** @type {any} */ cfg) {
 
 /** 上下文占窗口比例的告警线（≥ 此值 → 显式警告"缩小任务/或调大 firstTokenMs"）。 */
 export const PREFILL_WARN_RATIO = 0.8;
-/** 本地端点的 prompt 规模告警线（tokens）：超过即提示 prefill 可能数十分钟。 */
+/** 本地端点的 prompt 规模告警线（tokens）：**只在没有预检数据时**用它兜底（有实测就不用规模猜）。 */
 export const PREFILL_WARN_TOKENS = 60000;
+/** 由预检外推的 prefill 超过它就显式告警（ms）。依据见下面 prefillForecast 的注释。 */
+export const PREFILL_SLOW_WARN_MS = 60000;
+/** "线性外推会低估"的**实测证据**（写进文案，让用户知道外推值不是承诺）。
+ *
+ *  真机（负责人 2026-10-09，同一个 taskId t424aaab2aecab8a3）：
+ *    04:13:27 预告 本轮上下文 ≈ 15,983 tokens；预检「参考 prefill 2000 tokens 0.08s」
+ *    04:14:17 chat 首帧 t424aaab2aecab8a3 **53.7s**
+ *  线性外推 = 0.08s × 15983/2000 ≈ 0.6s，实测 53.7s —— **差约 90 倍**。
+ *  原因：2000 tokens 的参考样本落在引擎的短上下文快路径上；真实任务把 KV cache 占满后，
+ *  dequant/内存压力会让 prefill 显著变慢（真机现场还有 `insufficient memory … during prefill`）。
+ *  所以文案**只报外推值是不够的**，必须同时说出这条实测差值。 */
+export const PREFILL_LONGCTX_EVIDENCE = '本机实测 16k tokens 首帧 53.7s，而按同一份预检外推只有 0.6s（约 90 倍）';
+
+/** 把毫秒格式化成给人看的时长（<60s 用秒、否则 m分s秒）。 */
+const fmtDur = (/** @type {number} */ ms) => {
+  const s = Number(ms) / 1000;
+  if (!Number.isFinite(s) || s < 0) return '？';
+  return s < 60 ? `${s.toFixed(1)}s` : `${Math.floor(s / 60)}m${String(Math.round(s % 60)).padStart(2, '0')}s`;
+};
+
+/** 参考 prefill 的耗时格式化：保留两位（76ms → 0.08s），否则"0.1s/2000 tokens 外推"会把
+ *  预检实测值四舍五入到看不出量级（真机预检正是 0.08s 这一档）。 */
+const fmtRefDur = (/** @type {number} */ ms) => {
+  const s = Number(ms) / 1000;
+  if (!Number.isFinite(s) || s < 0) return '？';
+  return s < 60 ? `${s.toFixed(2)}s` : fmtDur(ms);
+};
+
+/**
+ * 由**预检实测**外推本轮 prefill 耗时（纯函数，便于断言/变异）。
+ *
+ * 为什么是线性外推而不是照搬老文案：老文案对任何本地端点都说"prefill 可能需数分钟至数十分钟"，
+ * 而同一条预告的后半句又写着"参考 prefill 2000 tokens 0.08s"——**同一行自相矛盾**，
+ * 结果就是用户学会忽略这条告警（本次真机 04:13:27 的现场）。
+ *
+ * 判据（只认实测，不认规模）：
+ *   · 有 `probe.prefillMs`（预检测过固定参考 prefill）→ `prefillMs × 本轮tokens / 参考tokens`；
+ *   · 没有 → 返回 null，调用方**退回**保守文案（不可达 / 不可判定 / 未预检）。
+ * 外推的已知偏差（长上下文下引擎显著变慢）不由本函数掩盖——由调用方写进文案（见 PREFILL_LONGCTX_EVIDENCE）。
+ * @param {{ promptTokens: number, probe?: any }} input
+ * @returns {{ ms: number, refTokens: number, refMs: number, tokens: number }|null}
+ */
+export function prefillEstimateMs({ promptTokens, probe = null }) {
+  const p = Math.max(0, Math.round(Number(promptTokens) || 0));
+  const refMs = Number(probe?.prefillMs);
+  if (!(refMs > 0) || p <= 0) return null;
+  const refTokens = Number(probe?.prefillTokens) > 0 ? Number(probe.prefillTokens) : 2000;
+  return { ms: Math.round((refMs * p) / refTokens), refTokens, refMs, tokens: p };
+}
 
 const fmtTok = (/** @type {any} */ n) => Number(n || 0).toLocaleString('en-US');
 
 /**
  * 发送前的规模预告（纯函数，便于断言/变异）：把"这次要 prefill 多少"在**请求发出前**说出来。
  * 本地端点尤其重要——它既不提供 prefill 进度，首帧又可能是几十分钟。
+ *
+ * v0.6.13（问题 1 修法）：**有预检实测就必须由它推导**，并在文案里如实标注
+ * ①这是外推、②长上下文下外推会低估（附实测差值）；只有在**没有预检数据**时才退回保守文案。
  * @param {{ promptTokens: number, contextWindow?: number, isLocal?: boolean,
  *           firstTokenMs?: number, budget?: number, probe?: any }} input
- * @returns {{ text: string, warn: boolean, promptTokens: number, ratio: number }}
+ * @returns {{ text: string, warn: boolean, promptTokens: number, ratio: number, estimateMs: number|null }}
  */
 export function prefillForecast({ promptTokens, contextWindow, isLocal, firstTokenMs, budget, probe = null }) {
   const p = Math.max(0, Math.round(Number(promptTokens) || 0));
@@ -94,35 +155,94 @@ export function prefillForecast({ promptTokens, contextWindow, isLocal, firstTok
   const pct = Math.round(ratio * 100);
   const secs = Number(firstTokenMs) > 0 ? Math.round(Number(firstTokenMs) / 1000) : 0;
   const head = `📏 本轮上下文 ≈ ${fmtTok(p)} tokens${win ? `（${fmtTok(win)} 窗口的 ${pct}%）` : ''}${Number(budget) > 0 ? `，预算 ${fmtTok(budget)}` : ''}`;
-  const timing = isLocal
-    ? `本地端点：prefill 可能需数分钟至数十分钟（该端点不提供进度预告，只能等首帧）；首帧等待上限 ${secs}s（config.timeout.firstTokenMs）`
-    : `远程端点：首帧通常在数十秒内；首帧等待上限 ${secs}s（config.timeout.firstTokenMs）`;
-  // 两条告警线：占窗口 ≥80%（任何端点都危险），或本地端点 + prompt 规模 ≥ PREFILL_WARN_TOKENS。
+  const est = prefillEstimateMs({ promptTokens: p, probe });
+  const estNote = est ? `按预检 ${fmtRefDur(est.refMs)}/${fmtTok(est.refTokens)} tokens 外推，本轮 ≈${fmtDur(est.ms)}` : '';
+  // 三个分支（顺序即优先级）：
+  //   ① 有预检实测 → 报外推值 + **如实**说明长上下文会低估（附真机差值）；
+  //   ② 无预检数据（不可达/不可判定/未预检）→ 退回既有保守文案（真机 01:26 那次就是这一支）；
+  //   ③ 远程端点 → 各自一句。
+  const timing = est
+    ? `${isLocal ? '本地端点' : '远程端点'}：${estNote}` +
+      `（**线性外推**，只作量级参考——长上下文下引擎可能显著变慢：${PREFILL_LONGCTX_EVIDENCE}；` +
+      `外推低估时以首帧等待为准）；首帧等待上限 ${secs}s（config.timeout.firstTokenMs）`
+    : isLocal
+      ? `本地端点：prefill 可能需数分钟至数十分钟（该端点不提供进度预告，只能等首帧）；首帧等待上限 ${secs}s（config.timeout.firstTokenMs）`
+      : `远程端点：首帧通常在数十秒内；首帧等待上限 ${secs}s（config.timeout.firstTokenMs）`;
+  // 三条告警线：
+  //   · 占窗口 ≥80%：任何端点都危险（与 prefill 快慢无关，这是"上下文压力"）；
+  //   · **外推** prefill ≥ PREFILL_SLOW_WARN_MS：端点实测明显慢，依据 = 预检实测 × 本轮 tokens；
+  //   · 本地端点 + prompt ≥ PREFILL_WARN_TOKENS：**仅在拿不到预检数据时**兜底
+  //     （有实测就不再用规模猜——那正是"0.08s 的端点被说成需要数十分钟"的来源）。
   const hitRatio = ratio >= PREFILL_WARN_RATIO;
-  const hitLocal = Boolean(isLocal) && p >= PREFILL_WARN_TOKENS;
-  const warn = hitRatio || hitLocal;
+  const hitSlow = est != null && est.ms >= PREFILL_SLOW_WARN_MS;
+  const hitLocal = est == null && Boolean(isLocal) && p >= PREFILL_WARN_TOKENS;
+  const warn = hitRatio || hitSlow || hitLocal;
+  const why = hitRatio
+    ? `上下文已占窗口 ${pct}%（≥${Math.round(PREFILL_WARN_RATIO * 100)}%）`
+    : hitSlow
+      ? `按预检外推本轮 prefill ≈${fmtDur(est ? est.ms : 0)}（${est ? fmtRefDur(est.refMs) : '？'}/${est ? fmtTok(est.refTokens) : '？'} tokens × ${fmtTok(p)} tokens，≥${Math.round(PREFILL_SLOW_WARN_MS / 1000)}s 告警线）`
+      : `本地端点 + 上下文 ${fmtTok(p)} tokens（≥${fmtTok(PREFILL_WARN_TOKENS)}），且本次没有任何预检实测可外推`;
   const advice = warn
-    ? `\n   ⚠ ${hitRatio ? `上下文已占窗口 ${pct}%（≥${Math.round(PREFILL_WARN_RATIO * 100)}%）` : `本地端点 + 上下文 ${fmtTok(p)} tokens（≥${fmtTok(PREFILL_WARN_TOKENS)}）`}：` +
+    ? `\n   ⚠ ${why}：` +
       `建议缩小任务（新建会话、只给必要文件、先 /compact）或调大 config.timeout.firstTokenMs——` +
       `但注意调大它只会让"失败"更晚被发现，不会让 prefill 变快。`
     : '';
   // v0.6.13（A 追加）：把**端点预检**结果并进这条预告——"这个端点行不行"与"这次要 prefill 多少"
   // 必须一起出现在发送前，而不是等出事后翻日志（引擎实际加载的模型名与配置名不一致也在这里说）。
   const probeLine = probe && probe.note ? `\n   端点预检：${probe.note}` : '';
-  return { text: `${head}\n   ${timing}${probeLine}${advice}`, warn, promptTokens: p, ratio };
+  return { text: `${head}\n   ${timing}${probeLine}${advice}`, warn, promptTokens: p, ratio, estimateMs: est ? est.ms : null };
 }
 
 /**
- * 无进展中止文案（纯函数）：必须同时说清「多久没进展」「发生了什么」「下一步怎么办」。
- * @param {{ waitedMs: number, toolCalls?: number, modelRounds?: number, unproductive?: number }} input
+ * 无进展中止文案（纯函数）：必须同时说清「多久没进展」「发生了什么」「在等谁」「下一步怎么办」，
+ * 并且**与 capped/aborted 区分开**（v0.6.13 问题 4：真机上用户只看到一句"回合收尾"，
+ * 分不清"跑满了步数（可续跑）""我点了停止"和"再等下去也不会有新东西"）。
+ * @param {{ waitedMs: number, toolCalls?: number, modelRounds?: number, unproductive?: number,
+ *           pendingTool?: { name: string, ms: number }|null,
+ *           subagent?: { label?: string, modelRounds?: number, toolCalls?: number, at?: number }|null }} input
  */
-export function noProgressNotice({ waitedMs, toolCalls = 0, modelRounds = 0, unproductive = 0 }) {
+export function noProgressNotice({ waitedMs, toolCalls = 0, modelRounds = 0, unproductive = 0, pendingTool = null, subagent = null }) {
+  // v0.6.13（问题 3 附带修）：不足 1 分钟必须按**秒**说。原实现 Math.max(1, round(ms/60000)) 会把
+  // 600ms 说成"连续 1 分钟"——真机上子代理被掐时就谎报过"连续 1 分钟"（它其实一直在干活）。
   const min = Math.max(1, Math.round(Number(waitedMs) / 60000));
+  const howLong = Number(waitedMs) >= 60000 ? `${min} 分钟` : `${Math.max(1, Math.round(Number(waitedMs) / 1000))} 秒`;
   const extra = Number(unproductive) > 0 ? `——其中 ${Number(unproductive)} 次工具调用是**重复调用或失败**（没有产生任何新信息）` : '';
+  const waiting = pendingTool
+    ? `\n   ⏳ 中止时**正在等待工具 ${pendingTool.name}**（已 ${Math.round(Number(pendingTool.ms) / 1000)}s）` +
+      (subagent
+        ? `；该子代理最后进展：第 ${Number(subagent.modelRounds) || 0} 轮 / ${Number(subagent.toolCalls) || 0} 次工具调用` +
+          (Number(subagent.at) > 0 ? `（${Math.max(0, Math.round((Date.now() - Number(subagent.at)) / 1000))}s 前）` : '') +
+          '。子代理自己的看门狗会先于父回合中止它并回传原因；这里先响说明**连子代理也没有新进展**。'
+        : '。')
+    : '';
   return (
-    `⏹ 连续 ${min} 分钟没有任何工具调用、也没有新内容（模型请求 ${modelRounds} 轮、工具调用 ${toolCalls} 次${extra}），已中止。\n` +
-    `   常见原因：① 该端点/模型不做 function calling（tool_calls 恒为空）；② 本地引擎的 prefill 已停滞或内存吃紧；③ 上游连接还在但不再产出。\n` +
+    `⏹ 连续 ${howLong}没有任何工具调用、也没有新内容（模型请求 ${modelRounds} 轮、工具调用 ${toolCalls} 次${extra}），已中止。\n` +
+    `   ⓘ 这是**整轮零进展**（不是步数上限 capped、也不是你点的停止 aborted）：capped 的回合可以接着续跑，本条是"再等下去也不会产出新东西"。` +
+    waiting +
+    `\n   常见原因：① 该端点/模型不做 function calling（tool_calls 恒为空）；② 本地引擎的 prefill 已停滞或内存吃紧；③ 上游连接还在但不再产出。\n` +
     `   下一步：把任务拆小（新建会话、只给必要文件）或换支持工具调用的端点；阈值可调 config.noProgressTimeoutMs（默认 ${Math.round(DEFAULT_NO_PROGRESS_TIMEOUT_MS / 60000)} 分钟）。`
+  );
+}
+
+/**
+ * 子代理因**父回合的截止时刻**收口时的文案（纯函数）。
+ *
+ * 为什么必须与 noProgressNotice 分开：真机现场（~/.mingdao/sessions/2026-10-09T02-42-31-qaaa.jsonl
+ * 第 28/29 行）两条 `task` 结果都写「连续 1 分钟没有任何工具调用」，而同一句话里又写着
+ * 「模型请求 15 轮、工具调用 18 次」——子代理**一直在干活**。原因是继承的截止时刻是
+ * spawn 那一刻的**绝对快照**，到点即掐，触发时又拿"子代理自己的最后进展"当等待时长，于是谎报。
+ * 修法：①截止时刻随父回合进展前移（不再掐正在干活的子代理）；②真到点时必须如实说
+ * "是父回合判定整轮无进展、不是子代理卡住"。
+ * @param {{ waitedMs?: number, toolCalls?: number, modelRounds?: number }} input
+ */
+export function inheritedStopNotice({ waitedMs = 0, toolCalls = 0, modelRounds = 0 }) {
+  const secs = Math.max(0, Math.round(Number(waitedMs) / 1000));
+  const ago = secs >= 60 ? `${Math.round(secs / 60)} 分钟` : `${secs} 秒`;
+  return (
+    `⏹ 父回合已判定**整轮无进展**，子代理随整棵子代理树一起收口，已中止。\n` +
+    `   子代理自身最后一次真实进展在 ${ago}前（模型请求 ${modelRounds} 轮、工具调用 ${toolCalls} 次）——` +
+    `即**不是子代理卡住**，而是父回合整体零进展（父回合没有把子代理的进展计为进展时就会走到这里）。\n` +
+    `   下一步：把子任务拆小、减少并行子代理数，或调大 config.noProgressTimeoutMs（默认 ${Math.round(DEFAULT_NO_PROGRESS_TIMEOUT_MS / 60000)} 分钟）。`
   );
 }
 
@@ -181,9 +301,10 @@ export function describeUpstreamError(/** @type {any} */ err) {
  * 进度行（纯函数）：web-server.log 与界面状态条**共用同一份文案**，口径不会漂移。
  * @param {{ phase?: string, elapsedMs: number, modelRounds?: number, toolCalls?: number,
  *           toolExecuted?: number, contentChars?: number, ttftMs?: number|null,
- *           pendingTool?: { name: string, ms: number }|null, tokensPerSec?: number|null }} p
+ *           pendingTool?: { name: string, ms: number }|null, tokensPerSec?: number|null,
+ *           subagent?: { label?: string, modelRounds?: number, toolCalls?: number, at?: number }|null }} p
  */
-export function formatTurnProgress({ phase, elapsedMs, modelRounds = 0, toolCalls = 0, toolExecuted = 0, contentChars = 0, ttftMs = null, pendingTool = null, tokensPerSec = null }) {
+export function formatTurnProgress({ phase, elapsedMs, modelRounds = 0, toolCalls = 0, toolExecuted = 0, contentChars = 0, ttftMs = null, pendingTool = null, tokensPerSec = null, subagent = null }) {
   const s = Math.max(0, Math.round(Number(elapsedMs) / 1000));
   const parts = [
     `已跑 ${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`,
@@ -195,6 +316,16 @@ export function formatTurnProgress({ phase, elapsedMs, modelRounds = 0, toolCall
   if (tokensPerSec != null) parts.push(`≈${Number(tokensPerSec).toFixed(1)} tok/s`);
   parts.push(`已收正文=${contentChars} 字`);
   if (pendingTool) parts.push(`正在等待工具 ${pendingTool.name}（已 ${Math.round(Number(pendingTool.ms) / 1000)}s）`);
+  // v0.6.13（问题 3）：等 `task` 子代理时必须能看出"这个子任务跑到哪一步"——
+  // 否则"等子代理 620s"与"卡死 620s"在日志上完全同形（真机现场正是如此）。
+  if (subagent) {
+    const label = String(subagent.label || '').trim();
+    const ago = Number(subagent.at) > 0 ? Math.max(0, Math.round((Date.now() - Number(subagent.at)) / 1000)) : null;
+    parts.push(
+      `子代理${label ? `「${label}」` : ''}已跑 ${Number(subagent.modelRounds) || 0} 轮 / ${Number(subagent.toolCalls) || 0} 次工具调用` +
+        (ago != null ? `，最后进展 ${ago}s 前` : '')
+    );
+  }
   return parts.join(' · ');
 }
 
@@ -372,20 +503,36 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       : { check: (/** @type {any} */ name, /** @type {any} */ args) => permission.check(name, args, '（子任务）') };
     // 自动路由：子代理固定走 executor 模型（便宜的执行单元）
     const subModel = subagentModel(cfg, modelName);
+    // v0.6.13（A）：子代理**继承父回合的无进展截止时刻**——24 个并行子代理各自跑几十分钟时，
+    // 父回合不该等它们把各自的看门狗超时跑完（真机实测：一个回合因此跑了 4+ 小时）。
+    // v0.6.13（问题 3 修法）：这个 `turnProgressDeadlineAt` **只是 spawn 时刻的快照兜底**；
+    // 真正的判据在子代理侧取 `parentProgress`（父回合的进度对象，**活的引用**）：
+    //   · 快照版的问题（真机 02:42–03:13）：子代理刚有进展（15 轮 / 18 次工具调用）也被
+    //     "父回合剩余时间"掐掉，而且触发时按子代理自己的最后进展算等待时长 → 谎报"连续 1 分钟"；
+    //   · 现在子代理每次真实进展都会回调父回合（onSubagentProgress）→ 父回合续期 →
+    //     父回合的 lastProgressAt 前移 → 子代理读到的截止时刻随之前移。**真在干活就不收口**。
     const subAgent = createAgent({
       provider,
       permission: subPermission,
       io: subIo,
       modelName: subModel,
       workingDir,
-      // v0.6.13（A）：子代理**继承父回合的无进展截止时刻**——24 个并行子代理各自跑几十分钟时，
-      // 父回合不该等它们把各自的看门狗超时跑完（真机实测：一个回合因此跑了 4+ 小时）。
       cfg: {
         ...cfg,
         contextBudget: Math.min(budget, 64000),
         ...(currentTurnProgress
           ? { turnProgressDeadlineAt: currentTurnProgress.lastProgressAt + currentTurnProgress.noProgressMs }
           : {}),
+        // 下面是 v0.6.13（问题 3）补的两项。**上面三行一个字都不动**：那个 spread 是 §139 与
+        // batch28 ⑥ 共同钉住的形状（改缩进/换写法会让既有变异变成"变异点未找到"——本轮实际踩到过），
+        // 而它现在的语义只当"spawn 时刻的快照兜底"，真正的判据是 parentProgress（活引用）。
+        ...(currentTurnProgress ? { parentProgress: currentTurnProgress } : {}),
+        ...(description ? { subagentLabel: description } : {}),
+        onSubagentProgress: (/** @type {any} */ info) => {
+          try {
+            currentTurnProgress?.onSubagentProgress?.(info);
+          } catch {}
+        },
       },
       undoStore: undo,
       maxSteps: SUBAGENT_MAX_STEPS,
@@ -423,11 +570,22 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     }
     // v0.4.1：子代理空输出给主线程可用的失败信号（含 note 原因），而非笼统「无输出」——
     // 主智能体据此决定是否重试/换法，而非把子代理静默当作「已完成但没说话」。
+    // v0.6.13（问题 3）：把子代理**自己跑到哪一步**一并回传（轮次/工具调用/最后进展距今）——
+    // 真机上父回合只知道"在等 task 620s"，完全看不出子代理是在干活还是卡死；
+    // 而子代理被收口的**原因**（自己无进展 / 父回合整轮无进展）也必须原样带给父回合。
+    const subTp = /** @type {any} */ (/** @type {any} */ (subIo).turnProgress);
+    const subStat = subTp
+      ? `已跑 ${Number(subTp.modelRounds) || 0} 轮 / ${Number(subTp.toolCalls) || 0} 次工具调用` +
+        (Number(subTp.lastProgressAt) > 0 ? `，最后进展 ${Math.max(0, Math.round((Date.now() - Number(subTp.lastProgressAt)) / 1000))}s 前` : '') +
+        (subTp.stallCause === 'inherited' ? '（因父回合整轮无进展而收口）' : subTp.stalled ? '（子代理自身无进展而收口）' : '')
+      : '';
     const text =
       res.text ||
-      (res.truncated ? '（子任务达到步骤上限，未完成' : '（子任务无输出') +
-      (res.note ? '：' + res.note : '') + ')';
-    io.print(style(`  ↳ 子任务完成（${ms}ms）`, C.magenta));
+      `（子任务${res.stalled ? '被无进展看门狗中止' : res.truncated ? '达到步骤上限，未完成' : '无输出'}` +
+        (subStat ? `；${subStat}` : '') +
+        (res.note ? '：' + res.note : '') +
+        ')';
+    io.print(style(`  ↳ 子任务完成（${ms}ms${res.stalled ? '，被无进展看门狗中止' : ''}）`, C.magenta));
     return text;
   }
 
@@ -631,6 +789,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       llmCalls: turnProgress.llmCalls,
       ttftMs: turnProgress.ttftMs,
       stalled: turnProgress.stalled,
+      // v0.6.13（问题 3/4）：stalled 的**原因**（'own' 自己零进展 / 'inherited' 父回合整轮零进展）——
+      // 前端与日志据此区分"子代理卡住"和"父回合没算子代理的进展"（真机上这两者被混成一句）。
+      stallCause: turnProgress.stallCause,
+      subagent: turnProgress.subagent,
       // v0.6.13（A）：收尾提示的**单一来源**（服务端直接取这条字符串，不再自己拼一遍文案）。
       // 注意：return 里的 perf() 先于 finally 求值，所以这里必须**惰性计算**（否则返回值里恒为 null，
       // 而日志/界面那边却已经打印过——同一事实两个说法，正是本项目反复栽过的那类不一致）。
@@ -678,8 +840,6 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     // 快照挂在 io 上：WebUI 服务端（src/web/server.js）每 5s 读它下发状态条、每 30s 落一行日志。
     // 这里不改 web-io.js 的接口（它不在本次改动面内），字段是"只读约定"。
     const noProgressMs = resolveNoProgressTimeoutMs(cfg);
-    // 子代理共享父回合的"最迟进展时刻"：24 个并行子代理各跑几十分钟时，父回合不该等它们各自的超时。
-    const inheritedDeadline = Number(cfg.turnProgressDeadlineAt) > 0 ? Number(cfg.turnProgressDeadlineAt) : null;
     /** @type {any} */
     const turnProgress = {
       startedAt,
@@ -695,11 +855,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       ttftMs: null,
       lastTtftMs: null,
       pendingTool: null,
+      // v0.6.13（问题 3）：当前正在跑的子代理快照（由 onSubagentProgress 刷新）——
+      // 界面/日志据此显示"在等哪个子任务、它跑到第几轮 / 几次工具调用"
+      subagent: null,
       forecast: null,
       noProgressMs,
       lastProgressAt: Date.now(),
       progressReason: '回合开始',
       stalled: false,
+      stallCause: null,
       note: null,
       zeroToolCalls: false,
     };
@@ -711,26 +875,66 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     let noProgressFired = false;
     // 本回合的"调用签名 → 次数"：完全相同（name+args）的重复调用不算进展（见 finishTool）
     const turnSigCounts = new Map();
-    /** 中止原因（看门狗触发时写，供各处如实报告） */
+    /**
+     * 继承来的"整棵树一起收口"截止时刻——**每次都重新取**，不是 spawn 那一刻的快照。
+     *
+     * 真机 bug（02:42–03:13，`status=stalled`）：快照版把子代理的等待压到"父回合剩余时间"，
+     * 子代理刚有进展（会话记录里写着「模型请求 15 轮、工具调用 18 次」）就被掐掉，
+     * 且文案按子代理自己的最后进展算时长 → 谎报"连续 1 分钟没有任何工具调用"。
+     * 现在父回合的 lastProgressAt 会被子代理的进展续期（见 markProgress / onSubagentProgress），
+     * 于是这个截止时刻**只前移不倒退**：真在干活就不收口，真停了才一起收口。
+     */
+    const inheritedDeadlineAt = () => {
+      const snap = Number(cfg.turnProgressDeadlineAt) > 0 ? Number(cfg.turnProgressDeadlineAt) : 0;
+      const pp = /** @type {any} */ (cfg.parentProgress);
+      const live = pp && Number(pp.noProgressMs) > 0 && Number(pp.lastProgressAt) > 0 ? Number(pp.lastProgressAt) + Number(pp.noProgressMs) : 0;
+      const d = Math.max(snap, live);
+      return d > 0 ? d : null;
+    };
+    /**
+     * 看门狗到点。`cause` 必须如实区分（问题 3/4）：
+     *   · 'own'       —— 本回合自己连续 N 没有真实进展；
+     *   · 'inherited' —— 父回合已判定整轮无进展，子代理随整棵树收口（**不是**子代理卡住）。
+     */
+    // 触发原因由 armNoProgress 在**安排计时器前**写入（而不是当参数传进 fireNoProgress）：
+    // `noProgressTimer = setTimeout(fireNoProgress, left);` 这一行的形状被 §139 与 batch28 ① 共同钉住，
+    // 不能为了多带一个参数去改它（那会让既有变异验证变成"变异点未找到"——本轮实际踩到过）。
+    let noProgressCause = /** @type {'own'|'inherited'} */ ('own');
     const fireNoProgress = () => {
+      const cause = noProgressCause;
       noProgressFired = true;
       const waited = Date.now() - turnProgress.lastProgressAt;
       turnProgress.stalled = true;
-      turnProgress.phase = '已中止（无进展）';
+      turnProgress.stallCause = cause;
+      turnProgress.phase = cause === 'inherited' ? '已中止（父回合无进展）' : '已中止（无进展）';
       turnProgress.waitedMs = waited;
-      turnProgress.note = noProgressNotice({
-        waitedMs: waited,
-        toolCalls: turnProgress.toolCalls,
-        modelRounds: turnProgress.modelRounds,
-        unproductive: turnProgress.unproductive,
-      });
+      const pt = turnProgress.pendingTool;
+      turnProgress.note =
+        cause === 'inherited'
+          ? inheritedStopNotice({ waitedMs: waited, toolCalls: turnProgress.toolCalls, modelRounds: turnProgress.modelRounds })
+          : noProgressNotice({
+              waitedMs: waited,
+              toolCalls: turnProgress.toolCalls,
+              modelRounds: turnProgress.modelRounds,
+              unproductive: turnProgress.unproductive,
+              // 问题 4：必须说清"在等哪个工具、等了多久"，否则用户无从判断该调什么
+              pendingTool: pt ? { name: String(pt.name || ''), ms: Date.now() - Number(pt.startedAt || Date.now()) } : null,
+              subagent: turnProgress.subagent,
+            });
       try { io.print(style(turnProgress.note, C.yellow)); } catch {}
       try { currentAc?.abort(new Error(`无进展 ${Math.max(1, Math.round(waited / 60000))} 分钟，已中止`)); } catch {}
     };
     const armNoProgress = () => {
       if (noProgressTimer) clearTimeout(noProgressTimer);
-      // 子代理：以父回合的截止时刻为准（取更早的那个），保证整棵子代理树一起收口
-      const left = inheritedDeadline ? Math.min(noProgressMs, Math.max(1000, inheritedDeadline - Date.now())) : noProgressMs;
+      const ownDeadline = turnProgress.lastProgressAt + noProgressMs;
+      const inh = inheritedDeadlineAt();
+      // 正等子代理时给一点点宽限，保证**子代理自己的看门狗先响**并把原因回传父回合（见常量注释）。
+      const grace = turnProgress.subagent && turnProgress.pendingTool ? SUBAGENT_WAIT_GRACE_MS : 0;
+      // 继承的截止时刻只**提前**（"一整棵树一起收口"）；自己的判据之外只多那点宽限。
+      const useInherited = inh != null && inh < ownDeadline;
+      const target = useInherited ? inh : ownDeadline + grace;
+      const left = Math.max(1000, target - Date.now());
+      noProgressCause = useInherited ? 'inherited' : 'own';
       noProgressTimer = setTimeout(fireNoProgress, left);
       try { noProgressTimer.unref?.(); } catch {} // 不因为这个计时器拖住进程退出
     };
@@ -744,10 +948,46 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       return turnProgress.zeroToolCallsNote;
     };
     /** 有真实进展才续期：工具结果返回 / 模型正文或推理增量。 */
+    let lastSubNotifyAt = 0;
     const markProgress = (/** @type {string} */ why) => {
-      turnProgress.lastProgressAt = Date.now();
+      const now = Date.now();
+      turnProgress.lastProgressAt = now;
       turnProgress.progressReason = why;
       armNoProgress();
+      // v0.6.13（问题 3 的核心修法）：**子代理的进展必须算父回合的进展**。
+      // 真机现场：父回合第 12 轮派出两个只读子代理，子代理在 10 分钟里跑了 15 轮 / 18 次工具调用
+      // （会话记录原文），父回合却只看得到"正在等待工具 task（已 620s）"→ 看门狗判"整轮无进展"
+      // 把父子一起掐了。父回合此刻并不能从工具结果里拿到任何中间信号，所以进展必须由子代理
+      // **主动回传**（onSubagentProgress）——父回合据此续期，并把快照挂到 turnProgress.subagent，
+      // 让界面/日志能写出"在等哪个子任务、它跑到第几轮"。
+      // 节流 1s：增量帧可能成百上千，父回合的续期只需"还在动"这个事实。
+      // 例外：**工具结果**是低频且高价值的进展信号（"子代理跑到第几步"就靠它），一律照原样回传。
+      const isToolStep = /^工具 /.test(why);
+      if (typeof cfg?.onSubagentProgress === 'function' && (isToolStep || now - lastSubNotifyAt >= 1000)) {
+        lastSubNotifyAt = now;
+        try {
+          cfg.onSubagentProgress({
+            label: String(cfg?.subagentLabel || ''),
+            modelRounds: turnProgress.modelRounds,
+            toolCalls: turnProgress.toolCalls,
+            reason: why,
+          });
+        } catch {}
+      }
+    };
+    /** 子代理进展 → 本回合续期 + 记录快照（供 UI/日志"在等哪个子任务、它到哪一步了"）。 */
+    turnProgress.onSubagentProgress = (/** @type {any} */ info) => {
+      const label = String(info?.label || '');
+      const rounds = Number(info?.modelRounds) || 0;
+      const calls = Number(info?.toolCalls) || 0;
+      // 只前进不后退：并行子代理里"后到的旧快照"不得把更靠前的进展覆盖回去
+      const prev = turnProgress.subagent;
+      if (!prev || rounds + calls >= (Number(prev.modelRounds) || 0) + (Number(prev.toolCalls) || 0)) {
+        turnProgress.subagent = { label, modelRounds: rounds, toolCalls: calls, at: Date.now(), reason: String(info?.reason || '') };
+      } else if (prev) {
+        prev.at = Date.now();
+      }
+      markProgress(`子代理进展${label ? `（${label}）` : ''}`);
     };
     armNoProgress();
     // ⚠ 两个 ctx，别混：

@@ -14115,6 +14115,370 @@ process.exit(0);
   ok('v0.6.13 本地模型零信号长回合：无进展看门狗（阈值=2×单请求总量上限、0/NaN/Infinity 不得关掉、子代理继承截止时刻、不误杀真干活）+ 上游错误原文与可操作解读 + 回合收尾如实报"0 次工具调用" + 发送前规模预告 + TTFT/吞吐/工具计数进度行（日志定期留痕、口径单源）+ 端点预检三态/不稳定态/参考 prefill/变慢告警 + 预设按语义拆分（local-model 不带人格白名单权限、readonly-audit 独立、local-audit 走别名且说出来）');
 }
 
+// ---------- 140. v0.6.13（问题 1–4）：预告必须由预检推导 + 引擎自述上下文必须与配置对照 + 子代理进展必须算父回合进展 + stalled 必须用户可见 ----------
+// 真机证据（负责人 v0.6.12 真机测试，同一台机器、同一份 ~/.mingdao/config.json；本轮登记 §3.55）：
+//   ① 文案自相矛盾（web-server.log:304，04:13:27 同一个 taskId t424aaab2aecab8a3）：
+//      「本地端点：prefill 可能需数分钟至数十分钟」，同一行的后半句却是「参考 prefill 2000 tokens 0.08s」；
+//      52 秒后 web-server.log:307 实测 `chat 首帧 t424aaab2aecab8a3 53.7s`——
+//      按 0.08s/2000 tokens 线性外推 15,983 tokens 只有 0.6s，实测 53.7s（约 90 倍）。
+//      后果不是"数字不准"，而是**用户学会忽略这条告警**（同一条横幅里自己打自己）。
+//   ② 配置超出引擎能力（web-server.log:229）：`[流式响应错误] insufficient memory: the request exceeded
+//      available GPU memory (sustained critical memory pressure during prefill …)`；
+//      同一份 config.json 里 `customModels.MLocalModel3.6.2.contextWindow = 131072`，
+//      而引擎（llama.cpp @127.0.0.1:60091）`GET /props` 自述 `default_generation_settings.n_ctx`——
+//      这是"换预设也没用"的根因：预设只改 contextBudget，改不了引擎的 n_ctx。
+//   ③ 等 task 子代理被算成"无进展"（web-server.log:292-300，02:42:31→03:13:16，30m45s，status=stalled）：
+//      日志只有「执行工具 task · 正在等待工具 task（已 620s…771s）」；
+//      而 ~/.mingdao/sessions/2026-10-09T02-42-31-qaaa.jsonl:28/29 两条 `task` 工具结果写着
+//      「（子任务无输出：⏹ 连续 1 分钟没有任何工具调用…（模型请求 15 轮、工具调用 18 次…）已中止。）」
+//      ——子代理**一直在干活**（15/14 轮、18/19 次工具调用），却被"父回合剩余时间"掐掉并谎报时长。
+//   ④ stalled 在桌面壳上不可见（mingdao-desktop/logs/mingdao.log:2996，03:13:16）：
+//      只有 `[renderer] [MingDao] 回合收尾：generating=false，按钮恢复发送`，
+//      同一时刻内核写的是 `chat 发送 done t64e0a8c3900b1de9 status=stalled 总耗时=1845271ms`。
+// 本节钉死四件事（全部可用桩 provider / 桩引擎复现，命令见提交信息）：
+//   ① 预告：有预检实测 → 由它**线性外推**并注明是外推 + 如实说明长上下文会低估（附实测差值）；
+//      没有预检数据 → 才退回保守文案；端点明显慢 → 告警且写出依据；本地规模告警线只在无实测时兜底。
+//   ② 引擎自述上下文：本地端点预检读一次 `GET /props`，与配置并排显示；配置超出引擎能力时**警告**
+//      并说清"换预设/调 contextBudget 都改不了引擎上限"；读不到要**说明**（不静默、不编造、不据此否定端点）。
+//   ③ 子代理进展算父回合进展：父回合等待 task 时不得因"只有子代理在动"被判无进展；界面/日志要能写
+//      "在等哪个子任务、它跑到第几轮"；子代理自己卡住由**它自己的**看门狗先中止并把原因回传父回合；
+//      继承的截止时刻必须随父回合进展前移（快照版会误杀正在干活的子代理）。
+//   ④ stalled：收尾说明必须写清"在等哪个工具/等了多久/怎么调"，并与 capped/aborted 显式区分；
+//      内核发告警 banner + done.note，前端把结局写进控制台（桌面壳日志取的就是它）。
+{
+  const {
+    prefillForecast,
+    prefillEstimateMs,
+    noProgressNotice,
+    inheritedStopNotice,
+    formatTurnProgress,
+    SUBAGENT_WAIT_GRACE_MS,
+    PREFILL_SLOW_WARN_MS,
+    PREFILL_LONGCTX_EVIDENCE,
+    createAgent,
+  } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
+  const { probeEndpoint, engineContextFromProps, engineContextNotice } = await import(pathToFileURL(path.join(srcDir, 'model-discovery.js')).href);
+  const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+  const discoverySrc = fs.readFileSync(path.join(srcDir, 'model-discovery.js'), 'utf8');
+  const serverSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+  const appSrc = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+  const sleep140 = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
+  const tmp140 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-smoke140-'));
+  const mkIo140 = () => {
+    const prints = /** @type {string[]} */ ([]);
+    return {
+      prints,
+      /** @param {any} t */
+      print: (t = '') => prints.push(String(t)),
+      writeText() {}, writeReasoning() {}, beginTurn() {}, endTurn() {},
+      startSpinner() {}, stopSpinner() {}, renderToolStart() {}, renderTool() {},
+      renderTodo() {}, renderToolDenied() {}, confirm: async () => true,
+      onSigint: () => () => {},
+    };
+  };
+  const perm140 = { mode: 'auto', async check() { return true; } };
+  const mkAgent140 = (/** @type {any} */ provider, /** @type {any} */ io, /** @type {any} */ cfg) =>
+    createAgent({
+      provider, permission: perm140, io, modelName: 'local-x', workingDir: tmp140,
+      cfg: { permission: 'auto', audit: false, ledger: false, ...cfg },
+    });
+  const msgs140 = (/** @type {string} */ text) => [{ role: 'system', content: '系统' }, { role: 'user', content: text }];
+  const withDeadline140 = (/** @type {any} */ p, /** @type {number} */ ms) => Promise.race([p, sleep140(ms).then(() => 'HANG')]);
+
+  // —— ① 预告必须由预检实测推导（真机：同一条横幅里"数十分钟"与"0.08s"并存） ——
+  {
+    const probe = {
+      state: 'ok-tools', ttftMs: 68, prefillMs: 76, prefillTokens: 2000,
+      note: '✅ 稳定支持工具调用（3/3） · 首帧 0.07s · 参考 prefill 2000 tokens 0.08s',
+    };
+    const f = prefillForecast({ promptTokens: 15983, contextWindow: 131072, isLocal: true, firstTokenMs: 600000, budget: 98304, probe });
+    assert.ok(/预检/.test(f.text) && /0\.08s/.test(f.text), `有预检实测时必须报出参考值本身，实际：${f.text}`);
+    assert.ok(/2,?000 tokens/.test(f.text), '预告必须写明参考样本规模（2000 tokens），否则外推值无法核对');
+    assert.ok(/外推/.test(f.text), `必须注明这是外推（不是承诺），实际：${f.text}`);
+    assert.equal(f.estimateMs, 607, `外推值必须是 预检ms × 本轮tokens/参考tokens（76×15983/2000≈607ms），实际 ${f.estimateMs}`);
+    assert.ok(/≈0\.6s/.test(f.text), `预告必须写出外推值（≈0.6s），实际：${f.text}`);
+    assert.ok(!/prefill 可能需数分钟至数十分钟/.test(f.text), '有预检实测时**不得**再笼统说"可能需数分钟至数十分钟"（这就是自相矛盾那条）');
+    assert.ok(/53\.7s/.test(f.text) && /90 倍/.test(f.text), `必须如实给出"线性外推会低估"的实测证据，实际：${f.text}`);
+    assert.ok(/16k tokens 首帧 53\.7s/.test(PREFILL_LONGCTX_EVIDENCE), '实测证据必须是常量单一来源（文案与注释同源）');
+    assert.equal(f.warn, false, '外推 0.6s 的端点不得告警（0.08s/2000 tokens 的端点被说成需要数十分钟正是本次的病灶）');
+    // 纯函数：线性关系 + 缺数据即 null（不猜）
+    assert.equal(prefillEstimateMs({ promptTokens: 4000, probe }).ms, 152, '2 倍 tokens 必须外推成 2 倍耗时（线性）');
+    assert.equal(prefillEstimateMs({ promptTokens: 4000, probe: { ...probe, prefillMs: null } }), null, '没有参考 prefill 实测时必须返回 null（由调用方退回保守文案）');
+    assert.equal(prefillEstimateMs({ promptTokens: 0, probe }), null, '本轮 0 tokens 不外推');
+    // 没有预检数据 → **才**退回保守文案（真机 01:26 那次端点不可达就是这一支）
+    const noProbe = prefillForecast({ promptTokens: 15983, contextWindow: 131072, isLocal: true, firstTokenMs: 600000, budget: 98304 });
+    assert.ok(/prefill 可能需数分钟至数十分钟/.test(noProbe.text), '没有预检数据时必须退回既有保守文案（不得凭规模编外推值）');
+    assert.equal(noProbe.estimateMs, null, '没有预检数据时不得给出外推值');
+    const unreachable = prefillForecast({ promptTokens: 2879, contextWindow: 131072, isLocal: true, firstTokenMs: 600000, probe: { state: 'unreachable', note: '❌ 不可达：fetch failed' } });
+    assert.ok(/prefill 可能需数分钟至数十分钟/.test(unreachable.text), '端点不可达（无实测）必须走保守分支');
+    // 端点**明显慢**才告警，且要写清依据
+    const slow = prefillForecast({ promptTokens: 15983, contextWindow: 131072, isLocal: true, firstTokenMs: 600000, probe: { ...probe, prefillMs: 20000 } });
+    assert.equal(slow.warn, true, `外推 ≥ ${PREFILL_SLOW_WARN_MS / 1000}s 必须告警`);
+    assert.ok(/20\.00s/.test(slow.text) && /15,983 tokens/.test(slow.text) && /告警线/.test(slow.text), `慢端点告警必须写出依据（预检实测值 + 本轮 tokens + 阈值），实际：${slow.text}`);
+    assert.equal(PREFILL_SLOW_WARN_MS, 60000, '慢端点告警线必须是一个写明常量（60s）');
+    // 本地规模告警线只在**拿不到实测**时兜底：有实测（且不慢）时不该因为"本地 + 大"就喊数十分钟
+    const bigButFast = prefillForecast({ promptTokens: 90000, contextWindow: 131072, isLocal: true, firstTokenMs: 600000, probe });
+    assert.ok(!/数十分钟/.test(bigButFast.text), '有实测时不按规模喊"数十分钟"（规模只是没有实测时的兜底）');
+    // 行为级：agent 真的把 cfg.endpointProbe 用起来了（预告文本落在 io.prints / io.turnProgress.forecast）
+    const io = mkIo140();
+    const provider = { async chat() { return { text: '好。', toolCalls: null, usage: { prompt_tokens: 30, completion_tokens: 3 }, finish: 'stop' }; } };
+    const agent = mkAgent140(provider, io, { endpointProbe: probe });
+    await agent.runTurn(msgs140('你好'));
+    assert.ok(io.prints.some((t) => /本轮上下文 ≈ /.test(t) && /外推/.test(t)), '发送前的预告必须真的用上预检实测（行为级）');
+    assert.ok(io.turnProgress && Number.isFinite(Number(io.turnProgress.forecast?.estimateMs)), 'io.turnProgress.forecast 必须带上外推值（服务端落日志用；本次 prompt 很小，外推值可以是 0，但**不能是 null**）');
+  }
+
+  // —— ② 引擎自述上下文（/props）vs 配置：读出来、并排说、超了要警告 ——
+  {
+    // 纯函数：llama.cpp 的 /props 形状（n_ctx 在 default_generation_settings 里）+ 其他引擎的字段
+    assert.equal(engineContextFromProps({ default_generation_settings: { n_ctx: 32768 } }), 32768, 'llama.cpp /props 的 default_generation_settings.n_ctx 必须能读出来');
+    assert.equal(engineContextFromProps({ n_ctx: 8192 }), 8192, '顶层 n_ctx 也要读（不同版本字段位置不同）');
+    assert.equal(engineContextFromProps({ n_ctx_train: 4096 }), 4096, 'n_ctx_train 兜底');
+    assert.equal(engineContextFromProps({ max_model_len: 16384 }), 16384, 'vLLM 风格的 max_model_len 也要读（"其他引擎能读多少读多少"）');
+    assert.equal(engineContextFromProps({ model_info: { llama: { context_length: 2048 } } }), 2048, 'Ollama /api/show 形状的 context_length 也要读');
+    for (const bad of [null, {}, { n_ctx: 0 }, { n_ctx: -1 }, { n_ctx: 'abc' }, { default_generation_settings: null }]) {
+      assert.equal(engineContextFromProps(bad), null, `读不到时必须返回 null（不编造）：${JSON.stringify(bad)}`);
+    }
+    // 结论三态
+    const over = engineContextNotice({ engineCtx: 32768, configuredWindow: 131072, source: 'http://127.0.0.1:60091/props', probed: true, isLocal: true });
+    assert.ok(/引擎自述上下文 32768 vs 配置 131072/.test(over), `必须并排写出两个数，实际：${over}`);
+    assert.ok(/配置超出引擎能力/.test(over) && /长上下文将直接被引擎拒绝/.test(over), `必须点明后果，实际：${over}`);
+    assert.ok(/换预设/.test(over) && /改不了引擎上限/.test(over), `必须说清"换预设也没用"（真机根因），实际：${over}`);
+    const okNote = engineContextNotice({ engineCtx: 32768, configuredWindow: 16384, probed: true, isLocal: true });
+    assert.ok(/未超出引擎能力/.test(okNote) && !/将被引擎拒绝/.test(okNote), `配置没超时必须说"没超"（用户才知道这条核对做过），实际：${okNote}`);
+    const missNote = engineContextNotice({ engineCtx: null, configuredWindow: 131072, probed: true, isLocal: true });
+    assert.ok(/未读到/.test(missNote) && /无法核对/.test(missNote), `读不到必须**说明**（不得静默、不得据此否定端点），实际：${missNote}`);
+    assert.ok(/跳过/.test(engineContextNotice({ engineCtx: null, configuredWindow: 131072, probed: false, isLocal: false })), '非本地端点必须写明"跳过"');
+    assert.ok(!/将被引擎拒绝/.test(missNote), '读不到时不得断言"配置超出引擎能力"（那是编造）');
+    // 行为级：桩 llama.cpp 引擎（自带 /props）+ 配置 131072
+    const mkRes = (/** @type {any} */ { ok = true, status = 200, text = '', frames = [] }) => ({
+      ok, status,
+      json: async () => JSON.parse(text),
+      text: async () => text,
+      body: {
+        getReader() {
+          let i = 0;
+          return {
+            async read() {
+              if (i >= frames.length) return { done: true, value: undefined };
+              return { done: false, value: new TextEncoder().encode(frames[i++]) };
+            },
+            cancel() {},
+          };
+        },
+      },
+    });
+    const sse140 = (/** @type {any[]} */ objs) => objs.map((o) => `data: ${JSON.stringify(o)}\n\n`).concat(['data: [DONE]\n\n']);
+    // 引擎**自报模型名**（llama.cpp 家族总会在响应里回模型名/文件路径）——这是"要不要多读一次 /props"的门槛
+    const modelChunk = { model: '/x/mLocalModel3.6.2.gguf' };
+    const toolChunk = { ...modelChunk, choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'mingdao_probe', arguments: '{"v":1}' } }] }, finish_reason: null }] };
+    const textChunk = { ...modelChunk, choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] };
+    // 不回报名的那种（只实现了 /v1/chat/completions 的网关/桩，例如 test/e2e-web.js 的 mock）
+    const toolChunkNoName = { choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: 'c1', type: 'function', function: { name: 'mingdao_probe', arguments: '{"v":1}' } }] }, finish_reason: null }] };
+    const textChunkNoName = { choices: [{ index: 0, delta: { content: 'ok' }, finish_reason: 'stop' }] };
+    const propsJson = JSON.stringify({ default_generation_settings: { n_ctx: 32768, n_predict: 8192 }, total_slots: 1, model_path: '/x/mLocalModel3.6.2.gguf', n_ctx: 32768 });
+    const cfgP = { model: 'local-x', customModels: { 'local-x': { baseUrl: 'http://127.0.0.1:60091/v1', contextWindow: 131072 } } };
+    {
+      const seen = /** @type {string[]} */ ([]);
+      const fetchImpl = async (/** @type {any} */ url, /** @type {any} */ init) => {
+        seen.push(String(url));
+        if (String(url).includes('/props')) return mkRes({ text: propsJson });
+        const body = JSON.parse(String(init.body));
+        return mkRes({ frames: sse140([Array.isArray(body.tools) ? toolChunk : textChunk]) });
+      };
+      const p = await probeEndpoint(cfgP, 'local-x', { fetchImpl, force: true, persist: false });
+      assert.equal(p.engineCtx, 32768, `预检必须真的读出引擎自述上下文，实际 ${p.engineCtx}`);
+      assert.ok(seen.some((u) => u.endsWith('/props')), `/props 必须真的打过（且不得依赖 baseUrl 带 /v1，见下），实际请求：${seen.join(' ')}`);
+      assert.ok(seen.some((u) => u === 'http://127.0.0.1:60091/props'), 'llama.cpp 的 /props 挂在根上，必须能从带 /v1 的 baseUrl 推出来');
+      assert.equal(p.configuredWindow, 131072, '预检必须同时带上配置的 contextWindow（并排显示的前提）');
+      assert.equal(p.engineCtxSource, 'http://127.0.0.1:60091/props', '必须记下读数来自哪个 URL（用户要能自己 curl 复核）');
+      assert.ok(/引擎自述上下文 32768 vs 配置 131072/.test(p.note) && /配置超出引擎能力/.test(p.note), `预检结论（界面 banner / 日志直接用）必须含这条，实际：${p.note}`);
+      assert.ok(!seen.some((u) => u.endsWith('/models')), '仍不得额外打 GET /models（§139 的取舍不变）');
+    }
+    {
+      // 引擎**没有回报名** → **一个字节都不该多发**：那种服务多半不认识 /props，
+      // 多打一个 GET 会把它打断（实测教训：`test/e2e-web.js` 的 mock 只按 POST+JSON body 解析，
+      // 收到空 body 的 GET 会抛 `JSON.parse('')`，整条 e2e 当场挂掉）。
+      const seen2 = /** @type {string[]} */ ([]);
+      const fetchImpl2 = async (/** @type {any} */ url, /** @type {any} */ init) => {
+        seen2.push(String(url));
+        const body = JSON.parse(String(init.body));
+        return mkRes({ frames: sse140([Array.isArray(body.tools) ? toolChunkNoName : textChunkNoName]) });
+      };
+      const p2 = await probeEndpoint(cfgP, 'local-x', { fetchImpl: fetchImpl2, force: true, persist: false });
+      assert.ok(!seen2.some((u) => u.includes('/props')), `端点未自报模型名时不得多打 /props（会把只实现 chat 的网关/桩打断），实际请求：${seen2.join(' ')}`);
+      assert.ok(/引擎自述上下文：跳过/.test(p2.note) && /未自报模型名/.test(p2.note), `跳过必须写明具体原因（"跳过"与"没读到"分不清等于没说），实际：${p2.note}`);
+      assert.ok(!/将被引擎拒绝/.test(p2.note), '跳过时不得断言"配置超出引擎能力"（那是编造）');
+    }
+    {
+      // 引擎没实现 /props（404）→ 必须"说明读不到"，且**不得**因此判定端点不可用
+      const fetchImpl = async (/** @type {any} */ url, /** @type {any} */ init) => {
+        if (String(url).includes('/props')) return mkRes({ ok: false, status: 404, text: 'not found' });
+        const body = JSON.parse(String(init.body));
+        return mkRes({ frames: sse140([Array.isArray(body.tools) ? toolChunk : textChunk]) });
+      };
+      const p = await probeEndpoint(cfgP, 'local-x', { fetchImpl, force: true, persist: false });
+      assert.equal(p.state, 'ok-tools', '读不到 /props 不得影响能力判定（chat 通路仍然好着）');
+      assert.equal(p.engineCtx, null, '读不到就是 null（不猜）');
+      assert.equal(p.engineProbed, true, '尝试读过就要标 engineProbed（界面据此说"未读到"）');
+      assert.ok(/引擎自述上下文：\*\*未读到\*\*/.test(p.note), `读不到必须在结论里说明，实际：${p.note}`);
+    }
+    // 结构守卫：这条必须同时出现在**日志**与**界面**（真机的教训是"只写在代码里、用户看不到"）
+    assert.ok(/引擎自述上下文=\$\{probe\.engineCtx == null \? '未读到' : probe\.engineCtx\}/.test(serverSrc), '`预检 <模型> …` 日志行必须带上引擎自述上下文');
+    assert.ok(!/tools=\$\{probe\.toolCalls === true/.test(serverSrc), '预检日志不得再用不存在的 probe.toolCalls（真机日志里恒为 tools=未知，结论等于没落盘）');
+    assert.ok(/type: 'banner',\s*warn: true,[\s\S]{0,700}配置超出引擎能力/.test(serverSrc), '配置超出引擎能力必须是一条**告警 banner**（用户一眼看到），不是只在日志里');
+    assert.ok(/probe\.engineProbed && !\(Number\(probe\.engineCtx\) > 0\)/.test(serverSrc), '真读了却没读到时要说明；压根没读（非本地/未自报模型名）时不刷噪音');
+    assert.ok(/insufficient memory/.test(String(fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8'))), '（前置）内存拒绝的可操作解读仍在 agent.js（真机原文 insufficient memory）');
+  }
+
+  // —— ③ 子代理的进展必须算父回合的进展；子代理自己的看门狗必须先响并回传原因 ——
+  {
+    // 行为级：父回合派一个**真在干活**的子代理（每步都是成功且参数不同的工具调用），
+    // 父回合自己的阈值远小于子代理的总时长 —— 修前父回合会判"整轮无进展"把父子一起掐掉。
+    const io = mkIo140();
+    let parentRounds = 0;
+    let subRounds = 0;
+    const provider = {
+      async chat(/** @type {any} */ { messages }) {
+        const isSub = String(messages?.[0]?.content || '').includes('子代理');
+        if (!isSub) {
+          parentRounds += 1;
+          await sleep140(20);
+          if (parentRounds === 1) {
+            return {
+              text: '',
+              toolCalls: [{ id: 'p1', type: 'function', function: { name: 'task', arguments: JSON.stringify({ description: '审计 agent.js', prompt: '读这个仓库并汇报' }) } }],
+              usage: { prompt_tokens: 10, completion_tokens: 5 }, finish: 'tool_calls',
+            };
+          }
+          return { text: '父回合收尾。', toolCalls: null, usage: { prompt_tokens: 10, completion_tokens: 5 }, finish: 'stop' };
+        }
+        subRounds += 1;
+        await sleep140(200);
+        if (subRounds <= 8) {
+          return {
+            text: `子代理第 ${subRounds} 步。`,
+            toolCalls: [{ id: `s${subRounds}`, type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: `echo sub-step-${subRounds}` }) } }],
+            usage: { prompt_tokens: 10, completion_tokens: 5 }, finish: 'tool_calls',
+          };
+        }
+        return { text: '子代理汇报：完成了。', toolCalls: null, usage: { prompt_tokens: 10, completion_tokens: 5 }, finish: 'stop' };
+      },
+    };
+    const agent = mkAgent140(provider, io, { noProgressTimeoutMs: 400, maxRounds: 1 });
+    const t0 = Date.now();
+    const res = await withDeadline140(agent.runTurn(msgs140('派子代理把这个仓库审计完并修好')), 25000);
+    const ms = Date.now() - t0;
+    assert.notEqual(res, 'HANG', '真在干活的子代理不得把父回合拖死（25s 兜底）');
+    assert.ok(!res.stalled, `父回合不得把"子代理在干活"算成"整轮无进展"（真机现场：子代理 15 轮/18 次工具调用被判无进展），实际 note=${res.note}`);
+    // 看门狗对 left 有 1000ms 下限，所以子代理总时长必须真的超过 1000ms 才谈得上"父回合等它"
+    assert.equal(subRounds, 9, `（前置）子代理必须真的跑了 9 轮（8 步工具 + 1 次汇报），实际 ${subRounds}`);
+    assert.ok(ms > 1200, `（前置）子代理总时长必须超过看门狗下限 1000ms，实际 ${ms}ms`);
+    assert.equal(res.text, '父回合收尾。', '父回合必须正常收尾');
+    // 父回合必须**看得见**子代理的进度（否则"在等 task 620s"与"卡死 620s"仍然同形）
+    const tp = /** @type {any} */ (io.turnProgress);
+    assert.ok(tp.subagent && Number(tp.subagent.modelRounds) > 0, `io.turnProgress.subagent 必须被填充（界面/日志据此显示子任务进度），实际 ${JSON.stringify(tp.subagent)}`);
+    assert.ok(Number(tp.subagent.toolCalls) >= 1, '子代理快照必须带工具调用数');
+    // 进度行（日志与界面同一份文案）
+    const line = formatTurnProgress({
+      phase: '执行工具 task', elapsedMs: 620000, modelRounds: 12, toolCalls: 17, toolExecuted: 16,
+      contentChars: 10223, ttftMs: 6900, pendingTool: { name: 'task', ms: 620000 },
+      subagent: { label: '审计 agent.js', modelRounds: 12, toolCalls: 17, at: Date.now() - 3000 },
+    });
+    assert.ok(/正在等待工具 task（已 620s）/.test(line), `既有的"在等哪个工具"必须保留，实际：${line}`);
+    assert.ok(/子代理「审计 agent.js」已跑 12 轮 \/ 17 次工具调用/.test(line) && /最后进展 \d+s 前/.test(line), `必须能看出子任务进行到哪一步，实际：${line}`);
+    const noSub = formatTurnProgress({ phase: '执行工具 bash', elapsedMs: 1000, modelRounds: 1, toolCalls: 1, toolExecuted: 0, contentChars: 0, pendingTool: { name: 'bash', ms: 1000 } });
+    assert.ok(!/子代理/.test(noSub), '没有子代理时不得凭空出现"子代理"字段（口径不漂移）');
+    // 结构守卫：父回合等子代理时的两点（续期 + 让子代理先响）
+    assert.ok(/onSubagentProgress/.test(agentSrc) && /cfg\.onSubagentProgress\(\{/.test(agentSrc), '子代理必须把自己的进展回调给父回合（父回合据此续期）');
+    assert.ok(/parentProgress: currentTurnProgress/.test(agentSrc), 'spawnTask 必须把父回合的**进度对象**（活引用）交给子代理，而不只是 spawn 时刻的快照');
+    assert.ok(/parentProgress/.test(agentSrc) && /Math\.max\(snap, live\)/.test(agentSrc), '子代理继承的截止时刻必须取"快照与活值中更晚的那个"（只前移不倒退）');
+    assert.ok(
+      /turnProgress\.subagent && turnProgress\.pendingTool \? SUBAGENT_WAIT_GRACE_MS : 0/.test(agentSrc) && SUBAGENT_WAIT_GRACE_MS > 0 && SUBAGENT_WAIT_GRACE_MS <= 60000,
+      '父回合等子代理时必须留一点宽限（且只是"一点点"：≤60s），保证子代理自己的看门狗先响——不得把它写成 0，也不得借机放宽阈值'
+    );
+    assert.ok(/stallCause/.test(agentSrc) && /inheritedStopNotice/.test(agentSrc), '收口原因必须区分"自己无进展"与"父回合整轮无进展"');
+    // 子代理被**父回合的截止时刻**收口时：文案必须如实说"不是你卡住"，且不得谎报时长
+    const inh = inheritedStopNotice({ waitedMs: 62000, toolCalls: 18, modelRounds: 15 });
+    assert.ok(/父回合/.test(inh) && /不是子代理卡住/.test(inh), `收口原因必须写明是父回合整轮无进展，实际：${inh}`);
+    assert.ok(/1 分钟/.test(inh) && /15 轮、工具调用 18 次/.test(inh), `必须如实报出子代理自己的进展与真实间隔，实际：${inh}`);
+    // 行为级：快照已过期、但父回合仍在正常进展 → **不得**收口（这正是真机被误杀的形态）
+    // 取值依据：看门狗对"继承来的截止时刻"有一个 1000ms 的下限（避免抖动），所以子代理的
+    // 真实步间隔必须 > 1000ms 才能让"快照版"真的误杀它——真机上子代理每轮模型请求约 40s，
+    // 间隔远大于这个下限（10 分钟里跑完 15 轮），因此这里用 1100ms 忠实复现。
+    {
+      const io2 = mkIo140();
+      let n = 0;
+      const provider2 = {
+        async chat() {
+          n += 1;
+          await sleep140(1100);
+          if (n <= 2) {
+            return { text: `第 ${n} 步。`, toolCalls: [{ id: `x${n}`, type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: `echo live-${n}` }) } }], usage: { prompt_tokens: 5, completion_tokens: 2 }, finish: 'tool_calls' };
+          }
+          return { text: '完成。', toolCalls: null, usage: { prompt_tokens: 5, completion_tokens: 2 }, finish: 'stop' };
+        },
+      };
+      const agentLive = mkAgent140(provider2, io2, {
+        turnProgressDeadlineAt: Date.now() + 300, // 快照很快到期（模拟"父回合剩余时间"越用越少）
+        parentProgress: { lastProgressAt: Date.now(), noProgressMs: 30000 }, // 活的父回合：还在被进展续期
+        noProgressTimeoutMs: 8000, maxRounds: 1,
+      });
+      const resLive = await withDeadline140(agentLive.runTurn(msgs140('继续')), 15000);
+      assert.notEqual(resLive, 'HANG', '活的父回合不得让子代理挂死');
+      assert.ok(!resLive.stalled, '继承的截止时刻必须随父回合进展前移——快照到期不等于整棵树要收口（真机误杀点）');
+      assert.equal(resLive.text, '完成。', '有进展的子代理必须正常跑完');
+    }
+    // 行为级：父回合**确实**零进展 → 子代理按 inherited 收口，且原因写明
+    {
+      const io3 = mkIo140();
+      const provider3 = { chat: (/** @type {any} */ { signal }) => new Promise((_, reject) => { signal?.addEventListener('abort', () => reject(new Error('已中止')), { once: true }); }) };
+      const agentDead = mkAgent140(provider3, io3, {
+        turnProgressDeadlineAt: Date.now() + 250,
+        parentProgress: { lastProgressAt: Date.now() - 100000, noProgressMs: 100000 },
+        noProgressTimeoutMs: 100000, maxRounds: 1,
+      });
+      const resDead = await withDeadline140(agentDead.runTurn(msgs140('继续')), 8000);
+      assert.notEqual(resDead, 'HANG', '父回合整轮无进展时子代理必须收口');
+      assert.equal(resDead.stalled, true, '必须以 stalled 收尾');
+      assert.equal(resDead.perf?.stallCause, 'inherited', `收口原因必须是 inherited（父回合整轮无进展），实际 ${resDead.perf?.stallCause}`);
+      assert.ok(/父回合/.test(String(resDead.note)) && /不是子代理卡住/.test(String(resDead.note)), `必须把原因如实回传，实际：${resDead.note}`);
+      assert.ok(!/没有任何工具调用、也没有新内容/.test(String(resDead.note)), '不得用"自己零进展"的文案冒充父回合收口（真机就谎报过"连续 1 分钟"）');
+    }
+    // 子代理的失败必须**带着自己的进度**回传父回合（父回合才知道"它跑到第几轮"）
+    assert.ok(/已跑 \$\{Number\(subTp\.modelRounds\) \|\| 0\} 轮 \/ \$\{Number\(subTp\.toolCalls\) \|\| 0\} 次工具调用/.test(agentSrc), 'task 工具结果必须带上子代理自己的进度（轮次/工具调用）');
+    assert.ok(/因父回合整轮无进展而收口/.test(agentSrc) && /子代理自身无进展而收口/.test(agentSrc), 'task 工具结果必须区分两种收口原因');
+    // 服务端与前端必须把子代理进度透出去
+    assert.ok(/subagent: tp\?\.subagent/.test(serverSrc), 'progress 事件必须带子代理快照（界面状态条据此显示）');
+    assert.ok(/subagent: tp\.subagent \?\? null/.test(serverSrc), 'chat 进度日志必须带子代理快照');
+    assert.ok(/ev\.subagent/.test(appSrc) && /子 Agent/.test(appSrc), '前端状态条必须显示"子 Agent 已跑 N 轮 / M 次工具调用"');
+  }
+
+  // —— ④ stalled 必须用户可见，且与 capped/aborted 区分 ——
+  {
+    const n1 = noProgressNotice({ waitedMs: 600000, toolCalls: 17, modelRounds: 12, unproductive: 4, pendingTool: { name: 'task', ms: 620000 }, subagent: { label: '审计 agent.js', modelRounds: 15, toolCalls: 18, at: Date.now() - 3000 } });
+    assert.ok(/正在等待工具 task/.test(n1) && /已 620s/.test(n1), `必须写清"在等哪个工具、等了多久"，实际：${n1}`);
+    assert.ok(/第 15 轮 \/ 18 次工具调用/.test(n1), `必须写清子任务进行到哪一步，实际：${n1}`);
+    assert.ok(/不是步数上限 capped、也不是你点的停止 aborted/.test(n1), `必须与 capped/aborted 显式区分（真机上用户分不清），实际：${n1}`);
+    assert.ok(/下一步：/.test(n1), '必须给出"建议怎么调"');
+    // 不足 1 分钟时不得谎报"1 分钟"（真机：子代理刚有进展却被写成"连续 1 分钟"）
+    assert.ok(/连续 3 秒/.test(noProgressNotice({ waitedMs: 3000 })), '不足 1 分钟必须按秒说，不得四舍五入成"1 分钟"');
+    assert.ok(/连续 60 分钟/.test(noProgressNotice({ waitedMs: 3600000 })), '整分钟仍按分钟说（既有口径不变）');
+    assert.ok(/任务拆小/.test(noProgressNotice({ waitedMs: 60000 })), '既有建议必须保留');
+    // 结构守卫：内核发 banner + done.note；前端把结局写进控制台（桌面壳日志就是渲染进程 console）
+    assert.ok(/if \(r\.stalled\) \{[\s\S]{0,400}type: 'banner',\s*warn: true/.test(serverSrc), 'stalled 必须由内核发一条**告警 banner**（用户可见），而不是只写日志');
+    assert.ok(/长时间无进展\*\*已中止（不是步数上限 capped、也不是你点的停止 aborted）/.test(serverSrc), 'banner 文案必须与 capped/aborted 区分');
+    assert.ok(/stallCause: r\.perf\?\.stallCause \?\? null/.test(serverSrc), 'done 事件必须带 stalled 的原因（own / inherited）');
+    assert.ok(/console\.log\('\[MingDao\] done 事件：session=' \+ ev\.session \+ ' status=' \+ endStatus/.test(appSrc), '前端必须把结局（含 stalled）写进控制台——桌面壳日志取的就是它');
+    assert.ok(/ev\.stalled\?\(ev\.stallCause==='inherited'/.test(appSrc), '前端必须区分两种 stalled 原因');
+    assert.ok(/本轮因长时间无进展已中止（不是步数上限 capped、也不是你点的停止 aborted）/.test(appSrc), '前端必须在消息里留下 stalled 说明（复用既有 done.note 渲染路径）');
+    assert.ok(/stalled: Boolean\(r\.stalled\)/.test(serverSrc) && /r\.stalled \? 'stalled'/.test(serverSrc), '（口径）done 事件的 stalled 字段与任务状态必须仍是既有写法');
+  }
+
+  safeRmSync(tmp140, { recursive: true, force: true });
+  ok('v0.6.13 真机四问题：预告由预检实测外推（并如实说明长上下文会低估，附 16k/53.7s 实测）+ 无实测才退回保守文案 + 慢端点按阈值告警写依据 + 引擎自述上下文（/props）与配置并排、超出即告警且说清"换预设没用" + 读不到要说明 + 子代理进展算父回合进展（父回合不再误杀正在干活的子代理）+ 继承截止时刻随父回合前移 + 子代理自己的看门狗先响并区分收口原因 + stalled 文案含"在等哪个工具/怎么调"且与 capped/aborted 区分（内核 banner + done.note + 前端控制台）');
+}
+
 // "永不回包"的那台，以及被大小上限中途掐断的大响应），某些 Node 版本/平台不会立刻回收这些 socket
 // —— 实测 ubuntu/macOS + Node 20 上"断言全过、进程却不退出"，CI 里表现为冒烟步骤永远 in_progress
 // （Node 18/22/Windows 因为拆连接更快而侥幸通过）。这里显式退出，断言本身不受影响；
