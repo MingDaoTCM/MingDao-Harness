@@ -80,6 +80,22 @@ function skipNote(what) {
   console.log(`  ⚠ 跳过：${what}（本机建不出真正的符号链接：Windows 需开发者模式/管理员；已用桩 fs 单测覆盖该围栏，见 §124）`);
 }
 
+/**
+ * v0.6.18（M-8 第二批）：**源码文本守卫**的统一归一化口径。
+ *
+ * 与 §126/§127/§129/§130 里已有的 `strip()` 同款：先 CRLF→LF（Windows 腿 checkout 出来
+ * 的每个文件都是 CRLF，跨行/多行匹配会整体失配），再剥块注释与行注释。
+ *
+ * 仅供**加固**类守卫使用：剥注释让"把回归藏进注释"不再能骗过守卫；但若被匹配的正是
+ * 一段注释文案（例如"失败只降级、不阻断"这种要人能读到的降级语义声明），**不要**用它——
+ * 那种处只做行尾归一化，并在断言旁写明原因。
+ *
+ * @param {string} t @returns {string}
+ */
+function stripSource(t) {
+  return String(t).replace(/\r\n?/g, '\n').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+}
+
 // ---------- 1. token 估算与上下文裁剪 ----------
 {
   const en = approxTokens('hello world hello world');
@@ -6143,12 +6159,17 @@ if (process.platform !== 'win32') {
     //   · 本轮只做**加固**：内容先做行尾归一化（CRLF 工作树上 `\n` 跨行匹配会整体失配 → 假红；
     //     本仓已被 CRLF 打过两次，且同一块里插 300 字注释也会假红，本轮实测）。
     const srvSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8').replace(/\r\n?/g, '\n');
-    assert.ok(/const claimSessionKey\b/.test(srvSrc), '应有 claimSessionKey（占位迁移）');
+    // 文本绊线，不是行为证明：这条只能证明"存在一个叫 claimSessionKey 的声明"。
+    // 它证明不了改名路径真的会走迁移（把调用挪进 `if (false)` 旧守卫照样绿，§3.49 探针已实证）。
+    // 释放一侧的保护已行为化（§144：同一会话第二轮必须能立即再发起）；迁移本身要制造
+    // "自动标题改名 × 并发回合"的几十毫秒窗口，端到端无法稳定复现，故保留这道绊线。
+    assert.ok(/const claimSessionKey\b/.test(srvSrc), '应有 claimSessionKey（占位迁移）——文本绊线，不是行为证明');
     assert.ok(
       /if \(renamed\) \{[\s\S]{0,240}claimSessionKey\(session\.file\)/.test(srvSrc),
       '会话改名后必须调用 claimSessionKey(session.file)——否则新文件名发起的回合不会被判「忙」，同一会话可并发两个回合'
     );
-    assert.ok(/for \(const k of claimedKeys\) busySessions\.delete\(k\)/.test(srvSrc), '释放时必须清掉全部已占用的键');
+    // 原单行文本守卫 `/for \(const k of claimedKeys\) busySessions\.delete\(k\)/` 已**行为化**：
+    // §144 用同一会话的第二个回合证明"释放不彻底 → 该会话永久判忙"这件事（真起 Web 服务）。
     safeRmSync(d1, { recursive: true, force: true });
     safeRmSync(d2, { recursive: true, force: true });
   }
@@ -6795,8 +6816,12 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
   {
     const cliSrc = fs.readFileSync(path.join(srcDir, 'cli.js'), 'utf8');
     assert.ok(/installPipeGuards\(\{\s*exitOnEpipe:\s*true\s*\}\)/.test(cliSrc), 'cli.js 必须以 exitOnEpipe:true 安装管道兜底');
-    const webSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
-    assert.ok(/installPipeGuards\(\{\s*exitOnEpipe:\s*false\s*\}\)/.test(webSrc), 'web/server.js 必须改回 exitOnEpipe:false（常驻服务不得因日志管道断开而退出）');
+    // 文本绊线，不是行为证明：它只能证明"安装时传的是 exitOnEpipe:false"。
+    // 证明不了"管道真断了服务还活着"——那需要把 smoke 自己的 stdout 关掉（会把整个测试跑挂），
+    // 或另起一个子进程做常驻服务，代价与收益不成比例；本条只做**加固**（stripSource：
+    // 行尾归一化 + 剥注释，注释里写 exitOnEpipe:true 不再能顶替真实调用）。
+    const webSrc = stripSource(fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8'));
+    assert.ok(/installPipeGuards\(\{\s*exitOnEpipe:\s*false\s*\}\)/.test(webSrc), 'web/server.js 必须改回 exitOnEpipe:false（常驻服务不得因日志管道断开而退出）——文本绊线，不是行为证明');
     // 顺序：cli.js 必须在写任何输出之前安装（否则最早那几句仍在裸境界）
     const iInstall = cliSrc.indexOf('installPipeGuards(');
     const iFirstLog = cliSrc.search(/console\.(log|error)\(/);
@@ -7957,11 +7982,9 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
       assert.ok(attSrc.includes('customModels'), '拒绝文案应说明可用 customModels.<名>.vision 声明');
       assert.ok(attSrc.includes('supportsVision'), '拒绝文案应说明自定义 Provider 可声明 supportsVision');
     }
-    // ⑧ 结构守卫：WebUI 门控必须走 resolveVisionSupport（不得退回只看预设的两项判断）
-    {
-      const srvSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
-      assert.ok(/await resolveVisionSupport\(/.test(srvSrc), 'WebUI 门控必须调用 resolveVisionSupport（否则自定义 Provider 又被漏掉）');
-    }
+    // ⑧ 原单行文本守卫 `/await resolveVisionSupport\(/` 已**行为化**（§146）：
+    // 起真 Web 服务 + 自定义视觉模型，带图片发一轮——图片必须真的以 image_url 进到上游请求里；
+    // 去掉 customModels.<名>.vision 声明后同一请求必须被拒。只看"有没有这行调用"证明不了接线。
   } finally {
     process.env.MINGDAO_HOME = prevHome111;
     safeRmSync(home111, { recursive: true, force: true });
@@ -10400,8 +10423,13 @@ if (typeof tmp !== 'undefined') safeRmSync(tmp, { recursive: true, force: true }
   // 122l. BUG-075 / BUG-083：两处"必须说出来"的守卫（源码级——行为级分别需要完整 WebUI 往返与
   // Electron 打包环境，如实标注层级，不把源码级说成行为级）
   {
-    const srv122l = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
-    assert.ok(/ASK_TIMEOUT_MS/.test(srv122l) && /权限确认超时/.test(srv122l), '权限确认必须有超时并按拒绝处理（BUG-075）');
+    // 文本绊线，不是行为证明：只能证明"有一个超时常量与一段拒绝文案"。
+    // 行为化需要真的等一次权限超时——ASK_TIMEOUT_MS 在**模块加载时**从
+    // MINGDAO_ASK_TIMEOUT_MS 读取，而 smoke 早在 §34 就 import 了 server.js（此时已是 120s），
+    // 想缩短只能另起子进程跑整套 Web 服务（成本 >> 本条收益）。这里只做加固：
+    // stripSource（行尾归一化 + 剥注释），并如实标注它证明不了"超时真的会触发拒绝"。
+    const srv122l = stripSource(fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8'));
+    assert.ok(/ASK_TIMEOUT_MS/.test(srv122l) && /权限确认超时/.test(srv122l), '权限确认必须有超时并按拒绝处理（BUG-075）——文本绊线，不是行为证明');
     const app122l = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
     assert.ok(/权限应答没能送达服务端/.test(app122l), '前端权限应答失败必须提示而不是静默吞掉（BUG-075）');
     const desk122l = fs.readFileSync(path.join(srcDir, '..', 'desktop', 'main.js'), 'utf8');
@@ -11388,8 +11416,13 @@ if (typeof tmp !== 'undefined') safeRmSync(tmp, { recursive: true, force: true }
       const bSrc = strip(fs.readFileSync(path.join(srcDir, 'batch.js'), 'utf8'));
       assert.ok(/checkCostGuard/.test(bSrc), 'Batch 通道必须查费用护栏');
       assert.ok(/recordUnaccountedBatch/.test(bSrc), 'Batch 失败/取消路径必须留下"用量未知"记录');
-      const webSrc = strip(fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8'));
-      assert.ok(/r\.capHit \? 'capped' : 'done'/.test(webSrc), 'Web 侧 capHit 不得再标成 done（与 worker 口径统一为「不算完成」）');
+      // Web 侧的 capHit→capped 已**行为化**（§145）：桩 provider 连发 24 次工具调用、
+      // maxRounds=1 跑满步数，然后从 web-server.log 读 `chat 发送 done … status=capped`
+      // ——"标成什么"必须看真实结局，而不是源码里有没有那个三元表达式。
+      // 第二道（文本绊线）：既有 batch13⑩ 的 `expect` 关键词锚在这一行原文上；删掉会让
+      // 全量变异"假绿"，故保留原文作第二道。主判据仍是 §145 的行为断言。
+      const webSrc127 = strip(fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8'));
+      assert.ok(/r\.capHit \? 'capped' : 'done'/.test(webSrc127), 'Web 侧 capHit 不得再标成 done（与 worker 口径统一为「不算完成」）——文本绊线，主判据见 §145');
       const wkSrc = strip(fs.readFileSync(path.join(srcDir, 'tasks', 'worker.js'), 'utf8'));
       assert.ok(/res\.capHit \? 'failed'/.test(wkSrc), 'worker 侧 capHit 仍按「不算完成」处理');
     }
@@ -13030,12 +13063,21 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
     const sendSrc = appSrc.slice(from, to);
     assert.ok(/payload\.permission\s*=/.test(sendSrc), '前端必须把权限模式随 chat 请求发出（payload.permission）——只写进 /api/config 时，服务端分不清"用户显式选择"与"配置文件默认值"');
     assert.ok(/#permSel/.test(sendSrc), 'payload.permission 必须取自 #permSel（权限模式选择器），不得是别的猜法');
-    const srvSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
-    assert.ok(/PERMISSION_MODES\.has\(String\(body\.permission\)\)/.test(srvSrc), '服务端必须读取请求体的 permission（修前 body.permission 全文件无人读取）');
-    assert.ok(/resolveTurnPermission\(\{\s*preset:\s*chatPreset/.test(srvSrc), '预设分支必须走 resolveTurnPermission（优先级单源，不许就地另写一套）');
-    assert.ok(/chatCfg\s*=\s*\{\s*\.\.\.chatCfg,\s*permission:\s*turnPerm\.permission\s*\}/.test(srvSrc), '权限引擎吃到的 chatCfg.permission 必须来自 resolveTurnPermission 的结果（没勾预设时显式选择也要生效）');
-    assert.ok(/createPermission\(\s*chatCfg\.permission/.test(srvSrc), '权限引擎必须用 chatCfg.permission 构造——判定结果要真的接上，不能算了不用');
-    assert.ok(/turnPerm\.banner/.test(srvSrc), '可见说明（turnPerm.banner）必须真的随 SSE 流下发，而不是只算出来没人用');
+    // 服务端的 5 条单行文本守卫（body.permission 被读取 / 预设分支走 resolveTurnPermission /
+    // chatCfg.permission 取判据结果 / createPermission 用它构造 / turnPerm.banner 真的下发）
+    // 已整组**行为化**（§144）：起真 Web 服务 + 桩 provider + 一份声明 readonly 的临时预设，
+    // 显式传 permission=auto，然后看三样可观察结果——SSE banner 的档位与来源、桩实际收到的
+    // 工具表（权限档位决定可见工具）、以及"来源：WebUI 显式选择"。只看源码里有没有那行调用，
+    // 无法区分"算了不用"和"真的接上"（§3.49 的 `if (false)` 探针就是实证）。
+    //
+    // 其中 3 条保留**第二道文本绊线**：既有 batch25 的 ①⑥⑧ 三条变异的 `expect` 关键词锚在
+    // 这里的原文上；把它们删掉会让那三条变异"逃逸"（全量变异假绿）。主判据仍是 §144 的行为。
+    {
+      const srvSrc137 = stripSource(fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8'));
+      assert.ok(/PERMISSION_MODES\.has\(String\(body\.permission\)\)/.test(srvSrc137), '服务端必须读取请求体的 permission（修前 body.permission 全文件无人读取）——文本绊线，主判据见 §144');
+      assert.ok(/chatCfg\s*=\s*\{\s*\.\.\.chatCfg,\s*permission:\s*turnPerm\.permission\s*\}/.test(srvSrc137), '权限引擎吃到的 chatCfg.permission 必须来自 resolveTurnPermission 的结果（没勾预设时显式选择也要生效）——文本绊线，主判据见 §144');
+      assert.ok(/turnPerm\.banner/.test(srvSrc137), '可见说明（turnPerm.banner）必须真的随 SSE 流下发，而不是只算出来没人用——文本绊线，主判据见 §144');
+    }
   }
 
   safeRmSync(fxDir, { recursive: true, force: true });
@@ -13555,8 +13597,11 @@ process.exit(0);
     PREFILL_WARN_TOKENS,
   } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
   const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
-  const serverSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
   const appSrc = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+  // v0.6.18（M-8 第二批）：本节还剩 3 处 server.js **加固**守卫（自适应首帧上限/看门狗阈值/
+  // 预检调用是否真的交给 provider 与本回合）。它们只做归一化：行尾归一化 + 剥注释。
+  // 其余 server.js 单行守卫已行为化到 §144/§145，见各处指针。
+  const serverSrc = stripSource(fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8'));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-smoke139-'));
   // 本小节需要 <home>（预检基线 / 模型缓存 / 预设发现都落在 MINGDAO_HOME）：前面的小节可能已把它
   // 清成 undefined，这里显式指向**本小节自己的临时 home**（不复用 smokeHome：变异脚手架会把本节
@@ -13750,9 +13795,9 @@ process.exit(0);
     assert.ok(io.prints.some((t) => /0 次工具调用/.test(t)), '端点不返回 tool_calls 时，界面必须在回合结束时明确说"0 次工具调用"');
     assert.ok(/0 次工具调用/.test(String(res.perf?.zeroToolCalls)), 'perf.zeroToolCalls 必须携带"0 次工具调用"这句收尾提示（WebUI 的 done 事件直接取它，是单一来源）');
     assert.equal(res.perf?.noToolCalls, true, 'perf.noToolCalls 必须为真');
-    // 服务端确实把它放进了 done 事件（结构守卫：口径单源，不在服务端再拼一份文案）
-    assert.ok(/const zeroNote = String\(r\.perf\?\.zeroToolCalls \|\| ''\)/.test(serverSrc), 'WebUI 的 done 事件必须带上这条收尾提示');
-    assert.ok(/\[baseNote, zeroNote\]\.filter\(Boolean\)\.join/.test(serverSrc), '收尾提示必须与既有 note 合并而不是互相覆盖');
+    // 服务端的两条单行文本守卫（done 事件取 perf.zeroToolCalls；与 baseNote 用 filter().join()
+    // 合并而不是互相覆盖）已**行为化**（§145）：真起 Web 服务，跑一轮"模型没有输出正文"的回合
+    // （baseNote 非空）+ 零工具调用（zeroNote 非空），从 SSE done.note 里必须同时读到两段文案。
   }
 
   // —— ⑧ 发送前的规模预告（本地 prefill 必须先说出来，而不是让用户猜） ——
@@ -13807,17 +13852,13 @@ process.exit(0);
     assert.equal(tp.llmCalls, 1, '模型请求次数必须如实统计');
     assert.equal(tp.modelRounds, 1, '模型轮次必须如实统计');
     assert.ok(io.prints.some((t) => /首帧/.test(t)), '首帧到达必须在界面上留一行（TTFT）');
-    // 服务端必须定期把这些写进 web-server.log（真机"4 小时零行"的直接回归点）
-    assert.ok(/srvlog\(\s*`chat 进度 \$\{taskId\} `/.test(serverSrc) || /chat 进度 \$\{taskId\}/.test(serverSrc), '服务端必须定期往 web-server.log 落"chat 进度"行');
-    assert.ok(/formatTurnProgress\(\{/.test(serverSrc), '进度行文案必须与 agent 共用同一份纯函数（口径不漂移）');
-    assert.ok(/lastProgressLogAt < 30000/.test(serverSrc), '进度日志必须限频（约 30s 一行，不能每帧都写）');
-    assert.ok(/chat 预告 \$\{taskId\}/.test(serverSrc), '发送前的规模预告必须落进 web-server.log');
-    assert.ok(/chat 首帧 \$\{taskId\}/.test(serverSrc), '首帧时延必须落进 web-server.log');
-    assert.ok(/toolCalls: tp\?\.toolCalls \?\? 0/.test(serverSrc), 'progress 事件必须带上工具调用数（0 也要带）');
-    assert.ok(/pendingTool: tp\?\.pendingTool/.test(serverSrc), 'progress 事件必须带上"正在等待哪个工具/多久"');
+    // 服务端的 9 条单行文本守卫（进度/预告/首帧三个日志行、formatTurnProgress 单源、
+    // 30s 限频、progress 的 toolCalls/pendingTool 字段、done 的 stalled 字段与任务状态）
+    // 已**行为化**（§145）：真起 Web 服务跑三类回合——① 一次 11 秒的 bash 工具回合（进度行、
+    // 预告、首帧、限频、pendingTool、toolCalls 全在真实日志/SSE 里出现）；② 空正文回合
+    // （done.note 两段合并）；③ 无进展回合（stalled 字段 + status=stalled）。文本在不在
+    // 证明不了"它们真的被写出来"（真机 4 小时零行的现场，源码里那些 srvlog 一个不少）。
     assert.ok(/工具调用 '\+\(ev\.toolCalls\|\|0\)\+' 次/.test(appSrc), '界面状态条必须显示工具调用次数（0 次也要显示）');
-    assert.ok(/stalled: Boolean\(r\.stalled\)/.test(serverSrc), 'done 事件必须带 stalled（前端据此区别于"正常完成"）');
-    assert.ok(/r\.stalled \? 'stalled'/.test(serverSrc), '无进展中止的任务状态必须是 stalled（不得冒充 done）');
   }
 
   // —— ⑩ 端点能力/延迟预检（A 追加）：三态判定 + 模型名不一致提示 + 自适应超时 ——
@@ -13999,12 +14040,18 @@ process.exit(0);
       const agent = mkAgent(provider, io, { endpointProbe: { state: 'ok-tools', toolCalls: true, ttftMs: 2700, note: '✅ 可达 · 支持工具调用 · 实测首帧 2.7s · 引擎加载模型 mLocalModel3.6.2.gguf' } });
       await agent.runTurn(msgs('你好'));
       assert.ok(io.prints.some((t) => /端点预检：/.test(t) && /支持工具调用/.test(t)), '发送前的规模预告里必须带上端点预检结论（cfg.endpointProbe）');
-      assert.ok(/firstTokenMs: adapt\.firstTokenMs/.test(serverSrc) || /adapt\.firstTokenMs/.test(serverSrc), '服务端必须把自适应首帧上限真的交给 provider（不能只打印不生效）');
-      assert.ok(/chatCfg\.noProgressTimeoutMs = adapt\.noProgressTimeoutMs/.test(serverSrc), '服务端必须把自适应看门狗阈值交给本回合（否则快端点仍会拖到 60 分钟）');
-      assert.ok(/probeEndpoint\(cfg, m, \{ timeoutMs: 15000 \}\)/.test(serverSrc), '建 provider 前必须做一次预检（缓存 10 分钟）');
-      assert.ok(/chat 预检 \$\{taskId\}/.test(serverSrc), '预检结论必须落进 web-server.log（事后可查"当时端点是什么状态"）');
-      assert.ok(/chatCfg = \{ \.\.\.chatCfg, endpointProbe: probe \}/.test(serverSrc),
-        '服务端必须把端点预检结论交给本回合（否则"发送前的规模预告里必须带上端点预检结论"这条就只是装饰）');
+      // 下面三条是**加固**的文本绊线，不是行为证明：只证明"自适应值/预检调用写在这三行上"。
+      // 行为化需要一台会自报模型名与 n_ctx、且首帧可控的本地引擎桩，来精确驱动 adapt 的
+      // 三个输出（firstTokenMs / noProgressTimeoutMs / probeEndpoint 的 15s 上限）——本轮
+      // 评估后不作为行为证明，只做 stripSource 归一化并如实标注。
+      assert.ok(/firstTokenMs: adapt\.firstTokenMs/.test(serverSrc) || /adapt\.firstTokenMs/.test(serverSrc), '服务端必须把自适应首帧上限真的交给 provider（不能只打印不生效）——文本绊线，不是行为证明');
+      assert.ok(/chatCfg\.noProgressTimeoutMs = adapt\.noProgressTimeoutMs/.test(serverSrc), '服务端必须把自适应看门狗阈值交给本回合（否则快端点仍会拖到 60 分钟）——文本绊线，不是行为证明');
+      assert.ok(/probeEndpoint\(cfg, m, \{ timeoutMs: 15000 \}\)/.test(serverSrc), '建 provider 前必须做一次预检（缓存 10 分钟）——文本绊线，不是行为证明');
+      // 另外两条已**行为化**（§145）：「chat 预检」日志行必须真的出现；「端点预检：」必须真的
+      // 进入发送前的规模预告（= endpointProbe 真的交给了本回合，而不是算了不用）。
+      // 同样保留原文作第二道（batch28 ⑫⑮ 的 expect 关键词锚在这里；删掉会让它们逃逸）：
+      assert.ok(/srvlog\(\s*`chat 进度 \$\{taskId\} `/.test(serverSrc) || /chat 进度 \$\{taskId\}/.test(serverSrc), '服务端必须定期往 web-server.log 落"chat 进度"行——文本绊线，主判据见 §145');
+      assert.ok(/chatCfg = \{ \.\.\.chatCfg, endpointProbe: probe \}/.test(serverSrc), '服务端必须把端点预检结论交给本回合（否则"发送前的规模预告里必须带上端点预检结论"这条就只是装饰）——文本绊线，主判据见 §145');
     }
   }
 
@@ -14097,8 +14144,8 @@ process.exit(0);
       fs.writeFileSync(path.join(projC, '.mingdao', 'presets', 'local-audit.json'), JSON.stringify({ name: 'local-audit', label: '我自己的', systemPrompt: '自家的' }));
       const mine = loadPreset(projC, 'local-audit');
       assert.ok(mine && mine.name === 'local-audit' && !mine.aliasedFrom, '磁盘上有同名预设时必须以磁盘为准（别名只兜底）');
-      // 服务端必须把"已更名"说出来（结构守卫：别名提示不能只在库里）
-      assert.ok(/chatPreset\.aliasedFrom/.test(serverSrc) && /已更名为/.test(serverSrc), 'WebUI 必须在用到别名时给出"已更名"提示（兼容不等于静默）');
+      // 原单行文本守卫（/chatPreset\.aliasedFrom/ && /已更名为/）已**行为化**（§144）：
+      // 用老名字 local-audit 真发一轮 WebUI 回合，SSE banner 必须真的出现「已更名为 … local-model」。
       assert.ok(/PRESET_ALIASES/.test(agentSrc) === false, '（口径）别名表只在 presets.js 一处定义');
       const presetsSrc = fs.readFileSync(path.join(srcDir, 'presets.js'), 'utf8');
       assert.ok(/'local-audit': 'local-model'/.test(presetsSrc), '别名表必须是一处显式映射（便于日后加新别名）');
@@ -14159,7 +14206,11 @@ process.exit(0);
   const { probeEndpoint, engineContextFromProps, engineContextNotice } = await import(pathToFileURL(path.join(srcDir, 'model-discovery.js')).href);
   const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
   const discoverySrc = fs.readFileSync(path.join(srcDir, 'model-discovery.js'), 'utf8');
-  const serverSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+  // v0.6.18（M-8 第二批）：**加固**用的归一化内容——行尾归一化 + 剥注释。
+  // 本节剩下的 server.js 单行守卫都在代码/字符串字面量上匹配（不在注释上），剥注释不会丢保护面，
+  // 反而让"把旧写法藏进注释"不再顶替真实代码。被行为化接管的那三条（stalled 文案/原因/字段）
+  // 已移到 §145，见下方指针。
+  const serverSrc = stripSource(fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8'));
   const appSrc = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
   const sleep140 = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
   const tmp140 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-smoke140-'));
@@ -14323,10 +14374,14 @@ process.exit(0);
       assert.ok(/引擎自述上下文：\*\*未读到\*\*/.test(p.note), `读不到必须在结论里说明，实际：${p.note}`);
     }
     // 结构守卫：这条必须同时出现在**日志**与**界面**（真机的教训是"只写在代码里、用户看不到"）
-    assert.ok(/引擎自述上下文=\$\{probe\.engineCtx == null \? '未读到' : probe\.engineCtx\}/.test(serverSrc), '`预检 <模型> …` 日志行必须带上引擎自述上下文');
-    assert.ok(!/tools=\$\{probe\.toolCalls === true/.test(serverSrc), '预检日志不得再用不存在的 probe.toolCalls（真机日志里恒为 tools=未知，结论等于没落盘）');
+    // 下面是文本绊线，不是行为证明：这三条锁的是"预检日志/告警行怎么写"。
+    // 行为化需要一台能自报模型名与 n_ctx 的本地引擎桩，并让 probe 真的走到"配置超出引擎能力"
+    // 分支——本轮评估后认为收益不抵成本（真正会被用户看到的那条 banner 已有 §140 内部的行为断言
+    // 覆盖 note 内容），所以只做加固：stripSource + 如实标注证明边界。
+    assert.ok(/引擎自述上下文=\$\{probe\.engineCtx == null \? '未读到' : probe\.engineCtx\}/.test(serverSrc), '`预检 <模型> …` 日志行必须带上引擎自述上下文——文本绊线，不是行为证明');
+    assert.ok(!/tools=\$\{probe\.toolCalls === true/.test(serverSrc), '预检日志不得再用不存在的 probe.toolCalls（真机日志里恒为 tools=未知，结论等于没落盘）——文本绊线');
     assert.ok(/type: 'banner',\s*warn: true,[\s\S]{0,700}配置超出引擎能力/.test(serverSrc), '配置超出引擎能力必须是一条**告警 banner**（用户一眼看到），不是只在日志里');
-    assert.ok(/probe\.engineProbed && !\(Number\(probe\.engineCtx\) > 0\)/.test(serverSrc), '真读了却没读到时要说明；压根没读（非本地/未自报模型名）时不刷噪音');
+    assert.ok(/probe\.engineProbed && !\(Number\(probe\.engineCtx\) > 0\)/.test(serverSrc), '真读了却没读到时要说明；压根没读（非本地/未自报模型名）时不刷噪音——文本绊线，不是行为证明');
     assert.ok(/insufficient memory/.test(String(fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8'))), '（前置）内存拒绝的可操作解读仍在 agent.js（真机原文 insufficient memory）');
   }
 
@@ -14448,8 +14503,12 @@ process.exit(0);
     assert.ok(/已跑 \$\{Number\(subTp\.modelRounds\) \|\| 0\} 轮 \/ \$\{Number\(subTp\.toolCalls\) \|\| 0\} 次工具调用/.test(agentSrc), 'task 工具结果必须带上子代理自己的进度（轮次/工具调用）');
     assert.ok(/因父回合整轮无进展而收口/.test(agentSrc) && /子代理自身无进展而收口/.test(agentSrc), 'task 工具结果必须区分两种收口原因');
     // 服务端与前端必须把子代理进度透出去
-    assert.ok(/subagent: tp\?\.subagent/.test(serverSrc), 'progress 事件必须带子代理快照（界面状态条据此显示）');
-    assert.ok(/subagent: tp\.subagent \?\? null/.test(serverSrc), 'chat 进度日志必须带子代理快照');
+    // 文本绊线，不是行为证明：这两条只证明"字段被写进了 SSE/日志对象"。
+    // 行为化需要一个真跑 >5s 的子代理回合（父回合每 5s 的 progress 快照里才会出现 subagent），
+    // 本轮把"子代理进展算父回合进展"的行为断言留在 §140 自身（上面已覆盖），这里只加固：
+    // stripSource + 标注边界。真正可观察的"界面显示子 Agent 已跑 N 轮"由 app.js 结构守卫另行锁定。
+    assert.ok(/subagent: tp\?\.subagent/.test(serverSrc), 'progress 事件必须带子代理快照（界面状态条据此显示）——文本绊线，不是行为证明');
+    assert.ok(/subagent: tp\.subagent \?\? null/.test(serverSrc), 'chat 进度日志必须带子代理快照——文本绊线，不是行为证明');
     assert.ok(/ev\.subagent/.test(appSrc) && /子 Agent/.test(appSrc), '前端状态条必须显示"子 Agent 已跑 N 轮 / M 次工具调用"');
   }
 
@@ -14466,12 +14525,14 @@ process.exit(0);
     assert.ok(/任务拆小/.test(noProgressNotice({ waitedMs: 60000 })), '既有建议必须保留');
     // 结构守卫：内核发 banner + done.note；前端把结局写进控制台（桌面壳日志就是渲染进程 console）
     assert.ok(/if \(r\.stalled\) \{[\s\S]{0,400}type: 'banner',\s*warn: true/.test(serverSrc), 'stalled 必须由内核发一条**告警 banner**（用户可见），而不是只写日志');
-    assert.ok(/长时间无进展\*\*已中止（不是步数上限 capped、也不是你点的停止 aborted）/.test(serverSrc), 'banner 文案必须与 capped/aborted 区分');
-    assert.ok(/stallCause: r\.perf\?\.stallCause \?\? null/.test(serverSrc), 'done 事件必须带 stalled 的原因（own / inherited）');
+    // 原三条单行文本守卫（stalled 告警 banner 文案 / done.stallCause / done.stalled + status）
+    // 已**行为化**（§145）：真起 Web 服务跑一次无进展回合，从 SSE 的 banner 事件与 done 事件、
+    // 以及 web-server.log 的 `status=stalled` 读取——文案与字段必须真的到用户手里。
+    // 其中 stallCause 保留第二道（batch29 的 expect 关键词锚在这一行；删掉会让它逃逸）：
+    assert.ok(/stallCause: r\.perf\?\.stallCause \?\? null/.test(serverSrc), 'done 事件必须带 stalled 的原因（own / inherited）——文本绊线，主判据见 §145');
     assert.ok(/console\.log\('\[MingDao\] done 事件：session=' \+ ev\.session \+ ' status=' \+ endStatus/.test(appSrc), '前端必须把结局（含 stalled）写进控制台——桌面壳日志取的就是它');
     assert.ok(/ev\.stalled\?\(ev\.stallCause==='inherited'/.test(appSrc), '前端必须区分两种 stalled 原因');
     assert.ok(/本轮因长时间无进展已中止（不是步数上限 capped、也不是你点的停止 aborted）/.test(appSrc), '前端必须在消息里留下 stalled 说明（复用既有 done.note 渲染路径）');
-    assert.ok(/stalled: Boolean\(r\.stalled\)/.test(serverSrc) && /r\.stalled \? 'stalled'/.test(serverSrc), '（口径）done 事件的 stalled 字段与任务状态必须仍是既有写法');
   }
 
   safeRmSync(tmp140, { recursive: true, force: true });
@@ -14513,7 +14574,15 @@ process.exit(0);
     PROBE_TTL_MS,
   } = await import(pathToFileURL(path.join(srcDir, 'model-discovery.js')).href);
   const http141 = await import('node:http');
-  const serverSrc141 = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+  // v0.6.18（M-8 第二批）：服务端单行守卫**加固**用的两份内容——
+  //   · serverSrc141：只做行尾归一化（CRLF→LF）。本节有一条守卫匹配的**正是注释文案**
+  //     （"失败只降级、不阻断"），剥注释会把它变成永远失败，所以那份不能用 stripSource；
+  //   · serverCode141：stripSource（行尾归一化 + 剥注释），给代码/字符串字面量上的守卫用。
+  // 下面四条单行守卫都是"文本绊线，不是行为证明"：行为化要一台会按剧本失败/误报的引擎桩，
+  // 并跨越 60s 保鲜期与复核日志窗口；本轮把真正的行为断言留在 §141 自身（探针三态已真跑
+  // HTTP 桩），这里只加固并如实标注证明边界。
+  const serverSrc141 = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8').replace(/\r\n?/g, '\n');
+  const serverCode141 = stripSource(serverSrc141);
   const discoverySrc141 = fs.readFileSync(path.join(srcDir, 'model-discovery.js'), 'utf8');
   const openaiSrc141 = fs.readFileSync(path.join(srcDir, 'providers', 'openai-compatible.js'), 'utf8');
 
@@ -14704,7 +14773,7 @@ process.exit(0);
 
   // —— ⑩ 结构守卫：降级语义 + 复核日志 + 探针 URL 与主请求同构 ——
   {
-    assert.ok(/probeMemoUsable\(memo\)/.test(serverSrc141), '服务端必须按保鲜期判"这条预检结论还能不能用"（否则真机那条 7h10m 前的结论会被原样重放）');
+    assert.ok(/probeMemoUsable\(memo\)/.test(serverCode141), '服务端必须按保鲜期判"这条预检结论还能不能用"（否则真机那条 7h10m 前的结论会被原样重放）——文本绊线，不是行为证明');
     // 降级纪律：探针异常必须被**吞掉**（只留一行"失败（忽略…）"），不许抛给回合
     assert.ok(
       /catch \([\s\S]{0,120}预检 \$\{m\} 失败（忽略，按默认超时继续）/.test(serverSrc141),
@@ -14718,9 +14787,16 @@ process.exit(0);
       /chat 预检复核/.test(serverSrc141) && /预检曾判不可达/.test(serverSrc141) && /但本回合实际可用/.test(serverSrc141) && /预检判据需复核/.test(serverSrc141),
       '回合结束后必须留一行"预检曾判不可达，但本回合实际可用（首帧 Xs）——预检判据需复核"'
     );
-    assert.ok(/失败只降级、不阻断/.test(serverSrc141), '服务端必须写明"预检是尽力而为：失败只降级、不阻断"（降级语义要能被读到，不是只靠行为）');
-    assert.ok(/reason=\$\{probe\.reason\}/.test(serverSrc141), '失败原因（reason）必须落进 web-server.log（否则事后分不清是哪一种失败）');
-    assert.ok(/prefill2000=/.test(serverSrc141), '（既有口径）预检日志行仍要带参考 prefill 实测值');
+    // 这一条匹配的**就是注释文案**（降级语义声明），只做行尾归一化，不能剥注释。
+    assert.ok(/失败只降级、不阻断/.test(serverSrc141), '服务端必须写明"预检是尽力而为：失败只降级、不阻断"（降级语义要能被读到，不是只靠行为）——文本绊线，不是行为证明');
+    // 加固（v0.6.18）：原写法是"全文任意一处 reason="——同文件的**引擎探针日志**（预检 <模型> 行）
+    // 也含同样的字面量，于是 chat 预检行丢掉 reason 时旧守卫照样绿（本轮实测的假绿）。这里收紧为
+    // "chat 预检 行里必须有 reason="，保护面只增不减；代价是会跨行匹配（200 字窗口）。
+    assert.ok(
+      /chat 预检 \$\{taskId\}[\s\S]{0,200}reason=\$\{probe\.reason\}/.test(serverSrc141),
+      '失败原因（reason）必须落进 web-server.log 的 chat 预检行（否则事后分不清是哪一种失败）——文本绊线'
+    );
+    assert.ok(/prefill2000=/.test(serverCode141), '（既有口径）预检日志行仍要带参考 prefill 实测值——文本绊线');
     assert.ok(/String\(baseUrl\)\.replace/.test(openaiSrc141) && /'\/chat\/completions'/.test(openaiSrc141), '主请求 URL = 剥尾斜杠的 baseUrl + /chat/completions');
     assert.ok(/`\$\{base\}\/chat\/completions`/.test(discoverySrc141), '探针 URL 必须与主请求**同构**（否则"探针说不可达、主请求却成功"就是必然）');
     assert.ok(/if \(info\.isLocal && info\.loadedModel\)/.test(discoverySrc141), '（既有口径）GET /props 只在引擎自报模型名后才打——不认识它的端点一个字节都不该多发');
@@ -14952,13 +15028,17 @@ process.exit(0);
       const line = formatTurnProgress({ elapsedMs: 1000, phase: '排队等待本地端点', localQueue: { active: 1, queued: 1, limit: 1 } });
       assert.ok(/本地端点已串行化/.test(line) && /并发上限 1/.test(line), `进度行必须显示"已串行化（防内存压力）"，实际：${line}`);
       // 结构守卫：服务端/前端/agent 三处都要把这条状态送到用户眼前
-      const serverSrc142 = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+      // v0.6.18（M-8 第二批）：加固用归一化内容（行尾归一化 + 剥注释）。
+      // 这两条是文本绊线，不是行为证明：它们只证明"字段/观察者被写进 SSE 与日志"。
+      // 行为化需要两个并发的本地回合（第二个回合的 5s 进度心跳里才会出现 localQueue），
+      // 本轮评估后保留加固；§142 自身的串行化行为（桩实测最大并发=1）才是主判据。
+      const serverSrc142 = stripSource(fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8'));
       const appSrc142 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
       const agentSrc142 = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
-      assert.ok(/localQueue: tp\.localQueue \?\? null/.test(serverSrc142), '服务端 progress 事件必须带上 localQueue（界面状态条数据源）');
+      assert.ok(/localQueue: tp\.localQueue \?\? null/.test(serverSrc142), '服务端 progress 事件必须带上 localQueue（界面状态条数据源）——文本绊线，不是行为证明');
       assert.ok(/本地端点已串行化/.test(appSrc142), '前端状态条必须渲染"本地端点已串行化（防内存压力）"');
       assert.ok(/onQueueWait/.test(agentSrc142) && /排队等待本地端点（已串行化防内存压力/.test(agentSrc142), 'agent 必须把排队状态写进 turnProgress.phase（进度行/界面共用）');
-      assert.ok(/setLocalQueueObserver/.test(serverSrc142), '服务端必须把串行化事件接进 web-server.log（日志留痕）');
+      assert.ok(/setLocalQueueObserver/.test(serverSrc142), '服务端必须把串行化事件接进 web-server.log（日志留痕）——文本绊线，不是行为证明');
     }
 
     ok('v0.6.15 §3.59：同一本地 baseUrl 串行化（默认 1 并发，桩实测最大并发=1，排队留痕）+ 云端端点不排队（实测并发=2）+ 排队超时可见错误（LOCAL_QUEUE_TIMEOUT，不重试）+ 预检也过同一闸门（实测最大并发=1）+ "engine shed its caches and stays up/allocator wall" 独立分型（引擎未崩溃、不要重启）+ 并发时预告强警告（并发会加剧内存压力/已串行化/减少子代理）');
@@ -15219,6 +15299,540 @@ process.exit(0);
   }
 
   ok('v0.6.17 P1-1 第四刀：parseToolArgs 行为清单逐条（假值→{} / 合法对象原样 / 非对象归一化 / 非法·空白·前后缀三段文案逐字 / 超长不设闸门）+ 端到端（解析失败不执行工具且回填分块指引 / 缺省参数→{} 真执行）+ 顶层 undefined·null 回填空串（桩 MCP 实测模型收到 ""，嵌套 null 保留）+ 单源结构守卫（agent.js 只调用、不内联）');
+}
+
+// ---------- 144. v0.6.18 审计 M-8 第二批：WebUI 服务端单行源码守卫行为化（权限接线 / 忙锁释放） ----------
+// 原守卫（§93 一处、§137 五处）都读 src/web/server.js 的源码字符串、正则匹配一行：
+// 无害重排即红，而"接线被搬进死分支"照样绿（§3.49 的 27 条探针实证：真实回归却绿 ×8）。
+// 这里改成**真起一次 Web 服务 + 桩 provider**，只看可观察结果：
+//   · SSE banner 的档位与来源（用户实际看到的那一行）；
+//   · 桩 provider 实际收到的工具表（权限档位决定可见工具——"算了不用"在这里会露馅）；
+//   · 同一会话的第二个回合是否仍被误判「忙」（释放路径）。
+{
+  const { runWebServer } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
+  const { setStoredKey } = await import(pathToFileURL(path.join(srcDir, 'credentials.js')).href);
+  const http144 = await import('node:http');
+  const prevHome144 = process.env.MINGDAO_HOME;
+  const home144 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p144-'));
+  process.env.MINGDAO_HOME = home144;
+  const presetDir144 = path.join(home144, 'presets');
+  fs.mkdirSync(presetDir144, { recursive: true });
+  // 夹具预设：只声明 permission=readonly，**不带工具白名单**——这样"auto 是否真的生效"
+  // 可以由桩收到的工具表直接读出（只读档只剩 read/grep）。
+  fs.writeFileSync(
+    path.join(presetDir144, 'ro-plain.json'),
+    JSON.stringify({ name: 'ro-plain', label: '只读夹具（声明 permission=readonly）', permission: 'readonly' })
+  );
+  const seen144 = [];
+  const mock144 = http144.createServer((req, res) => {
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'mock144' }] }));
+      return;
+    }
+    let raw144 = '';
+    req.on('data', (c) => (raw144 += c));
+    req.on('end', () => {
+      let body144 = /** @type {any} */ ({});
+      try {
+        body144 = JSON.parse(raw144);
+        seen144.push(body144);
+      } catch {}
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      const hasToolResult144 = (body144.messages || []).some((m) => m && m.role === 'tool');
+      const lastUser144 = [...(body144.messages || [])].reverse().find((m) => m && m.role === 'user');
+      const wantsWrite144 = !hasToolResult144 && JSON.stringify(lastUser144?.content || '').includes('请写一个文件');
+      if (wantsWrite144) {
+        // 让权限档位变成**可观察行为**：auto 档该文件必须真的被写出来；只读档会被拒绝
+        res.write(
+          `data: ${JSON.stringify({
+            choices: [
+              {
+                delta: {
+                  tool_calls: [
+                    { index: 0, id: 'call144w', type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: path.join(srcDir, '..', `.tmp-p144-${process.pid}.txt`), content: 'ok144' }) } },
+                  ],
+                },
+                finish_reason: 'tool_calls',
+              },
+            ],
+            usage: { prompt_tokens: 6, completion_tokens: 2 },
+          })}\n\n`
+        );
+        res.end('data: [DONE]\n\n');
+        return;
+      }
+      res.write('data: {"choices":[{"delta":{"content":"好的"}}],"usage":{"prompt_tokens":6,"completion_tokens":2}}\n\n');
+      res.end('data: [DONE]\n\n');
+    });
+  });
+  await new Promise((r) => mock144.listen(0, '127.0.0.1', r));
+  setStoredKey('custom:mock144', 'sk-mock');
+  saveConfig({
+    provider: 'deepseek',
+    model: 'mock144',
+    // config.permission 故意设成 readonly：显式 auto 必须压过它（否则测不出"显式 > config"）
+    permission: 'readonly',
+    autoTitle: false,
+    maxRounds: 1,
+    customModels: { mock144: { label: 'Mock144', baseUrl: `http://127.0.0.1:${mock144.address().port}/v1`, contextWindow: 8192, key: 'sk-mock' } },
+  });
+  const srv144 = await runWebServer({ host: '127.0.0.1', port: 45996, authToken: null });
+  /**
+   * 发一轮 chat 并**边读边答**：只读档下非只读工具会弹权限确认（ask），
+   * 若无人应答就要等 120s 超时——变异版会因此挂在 fetch 上（"挂住"必须表现为失败，
+   * 不能把套件卡死）。这里对任何 ask 一律按「拒绝」应答，让回合继续跑到可判定的结局。
+   * @param {any} body
+   */
+  const chat144 = async (body) => {
+    const r = await fetch('http://127.0.0.1:45996/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    const events = [];
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let cut = buf.indexOf('\n\n');
+      while (cut >= 0) {
+        const chunk = buf.slice(0, cut);
+        buf = buf.slice(cut + 2);
+        for (const line of chunk.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          let ev = /** @type {any} */ ({});
+          try {
+            ev = JSON.parse(line.slice(6));
+          } catch {
+            continue;
+          }
+          events.push(ev);
+          if (ev.type === 'ask') {
+            try {
+              await fetch('http://127.0.0.1:45996/api/permission', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ id: ev.id, answer: '', taskId: ev.taskId }),
+              });
+            } catch {}
+          }
+        }
+        cut = buf.indexOf('\n\n');
+      }
+    }
+    return { status: r.status, events };
+  };
+  try {
+    // ① 显式 auto + 声明 readonly 的预设（config 里也是 readonly）
+    const marker144 = path.join(srcDir, '..', `.tmp-p144-${process.pid}.txt`);
+    safeRmSync(marker144, { force: true });
+    const c1 = await chat144({ message: '请写一个文件 hello.txt', permission: 'auto', preset: 'ro-plain' });
+    assert.equal(c1.status, 200, `chat 必须被接受，实际 HTTP ${c1.status}`);
+    const banners144 = c1.events.filter((e) => e.type === 'banner').map((e) => String(e.text || ''));
+    const done1 = c1.events.find((e) => e.type === 'done');
+    assert.ok(done1, '（前置）显式 auto 回合必须正常完成（原守卫：body.permission 被读取并交给 resolveTurnPermission）');
+    assert.ok(
+      banners144.some((b) => b.includes('本会话权限：auto') && b.includes('来源：WebUI 显式选择')),
+      `显式权限必须压过预设声明的只读档：banner 必须写「本会话权限：auto（来源：WebUI 显式选择）」——原守卫只证明源码里有 PERMISSION_MODES.has(body.permission)，证明不了这个值真的接上。实际 banner：${JSON.stringify(banners144)}`
+    );
+    assert.ok(
+      banners144.some((b) => b.includes('预设 ro-plain 声明 permission=readonly') && b.includes('已按你的显式选择 auto 执行')),
+      `banner 必须点明预设声明值被显式选择覆盖（原守卫：预设分支必须走 resolveTurnPermission + turnPerm.banner 真的下发，而不是只算出来没人用）。实际 banner：${JSON.stringify(banners144)}`
+    );
+    assert.ok(
+      fs.existsSync(marker144),
+      '权限引擎实际收到的 chatCfg.permission 必须是 auto：write 工具必须真的执行并写盘（只读档会拒绝）——原守卫：chatCfg.permission 来自判据 + createPermission 用它构造。文件不存在即说明权限档位没接上。'
+    );
+    safeRmSync(marker144, { force: true });
+    const chatReq144 = [...seen144].reverse().find((b) => JSON.stringify(b.messages || '').includes('请写一个文件 hello.txt'));
+    const toolNames144 = (chatReq144?.tools || []).map((t) => String(t?.function?.name || ''));
+    assert.ok(
+      toolNames144.includes('write') && toolNames144.includes('bash'),
+      `权限引擎实际收到的工具表必须体现 auto 档（write/bash 必须可见；只读档只会剩 read/grep）——原守卫：chatCfg.permission 来自判据 + createPermission 用它构造。实际工具表：${toolNames144.join(',') || '(空)'}`
+    );
+    // ② 忙锁释放：同一会话的第二个回合必须能立即发起
+    const session144 = done1.session;
+    assert.ok(session144, '（前置）done 事件必须带回会话文件名');
+    const c2 = await chat144({ message: '第二轮', file: session144, permission: 'auto' });
+    const err2 = c2.events.find((e) => e.type === 'error');
+    assert.ok(
+      c2.events.some((e) => e.type === 'done') && !err2,
+      `忙锁释放不彻底：同一会话的第二轮必须能立即发起（原守卫：释放时必须清掉全部已占用的键）。实际：${err2 ? String(err2.message) : '无 done 事件'}`
+    );
+    // ③ 预设别名：老名字 local-audit 必须**说出来**已更名（原守卫：/chatPreset.aliasedFrom/ && /已更名为/）
+    const c3 = await chat144({ message: '你好', permission: 'auto', preset: 'local-audit' });
+    const banners3 = c3.events.filter((e) => e.type === 'banner').map((e) => String(e.text || ''));
+    assert.ok(
+      banners3.some((b) => b.includes('已更名为') && b.includes('local-model')),
+      `WebUI 必须在用到别名时给出「已更名」提示（兼容不等于静默）——原守卫只检查源码里有没有 chatPreset.aliasedFrom。实际 banner：${JSON.stringify(banners3)}`
+    );
+  } finally {
+    await new Promise((r) => srv144.close(r));
+    mock144.closeAllConnections?.();
+    await new Promise((r) => mock144.close(r)).catch(() => {});
+    if (prevHome144 === undefined) delete process.env.MINGDAO_HOME;
+    else process.env.MINGDAO_HOME = prevHome144;
+    safeRmSync(home144, { recursive: true, force: true });
+  }
+  ok('v0.6.18 M-8 第二批（§144）：WebUI 权限接线行为化（显式 auto 压过只读预设 → banner 档位/来源 + write 工具真的写盘 + 桩工具表含 write/bash）+ 忙锁释放（同一会话第二轮不被误判「忙」）+ 预设别名提示');
+}
+
+// ---------- 145. v0.6.18 审计 M-8 第二批：回合可观察性（进度/预告/首帧/零工具/结局）行为化 ----------
+// 原守卫（§127 一处、§139 十处、§140 三处）读 server.js 源码字符串。真机 2026-10-08 的现场
+// 恰恰说明"源码里有 srvlog 不等于日志里真的有一行"：4 小时 20 分的回合，web-server.log 只有
+// 「chat 开始」。本节改成**真起 Web 服务 + 按剧本返回的桩 provider**，从三个出口取证：
+//   · web-server.log 的真实行（chat 预告 / chat 首帧 / chat 进度 / 发送 done status=…）；
+//   · SSE progress 事件的真实字段（toolCalls / pendingTool）；
+//   · SSE done 事件与 banner 的真实文案（zeroNote 合并 / stalled / stallCause）。
+{
+  const { runWebServer } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
+  const { setStoredKey } = await import(pathToFileURL(path.join(srcDir, 'credentials.js')).href);
+  const http145 = await import('node:http');
+  const prevHome145 = process.env.MINGDAO_HOME;
+  const home145 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p145-'));
+  process.env.MINGDAO_HOME = home145;
+  /** 本段用剧本切换桩 provider 的返回形态 */
+  let mode145 = 'text';
+  let seq145 = 0;
+  const hangs145 = new Set();
+  const mock145 = http145.createServer((req, res) => {
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'mock145' }] }));
+      return;
+    }
+    let raw145 = '';
+    req.on('data', (c) => (raw145 += c));
+    req.on('end', () => {
+      let body145 = /** @type {any} */ ({});
+      try {
+        body145 = JSON.parse(raw145);
+      } catch {}
+      const hasToolResult145 = (body145.messages || []).some((m) => m && m.role === 'tool');
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      /** @param {any} o */
+      const send145 = (o) => res.write(`data: ${JSON.stringify(o)}\n\n`);
+      if (mode145 === 'empty') {
+        send145({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 6, completion_tokens: 0 } });
+        res.end('data: [DONE]\n\n');
+        return;
+      }
+      if (mode145 === 'bash-slow') {
+        if (!hasToolResult145) {
+          seq145 += 1;
+          send145({
+            choices: [
+              {
+                delta: {
+                  // 先给一帧正文：TTFT（chat 首帧日志）只在**正文/推理增量**上计时，
+                  // 纯 tool_calls 帧不算首帧（真实 provider 同理）。这样同一次回合里
+                  // 「首帧日志」与「等工具 bash」两个观测量都能取到。
+                  content: '先跑个命令：',
+                  tool_calls: [
+                    { index: 0, id: `call145_${seq145}`, type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: 'node -e "setTimeout(()=>{},11000)"' }) } },
+                  ],
+                },
+                finish_reason: 'tool_calls',
+              },
+            ],
+            usage: { prompt_tokens: 6, completion_tokens: 2 },
+          });
+          res.end('data: [DONE]\n\n');
+          return;
+        }
+        send145({ choices: [{ delta: { content: '长命令跑完了' } }], usage: { prompt_tokens: 6, completion_tokens: 2 } });
+        res.end('data: [DONE]\n\n');
+        return;
+      }
+      if (mode145 === 'capped') {
+        seq145 += 1;
+        send145({
+          choices: [
+            {
+              delta: {
+                tool_calls: [
+                  { index: 0, id: `call145c_${seq145}`, type: 'function', function: { name: 'read', arguments: JSON.stringify({ file_path: path.join(home145, 'no-such-145.txt') }) } },
+                ],
+              },
+              finish_reason: 'tool_calls',
+            },
+          ],
+          usage: { prompt_tokens: 6, completion_tokens: 2 },
+        });
+        res.end('data: [DONE]\n\n');
+        return;
+      }
+      if (mode145 === 'stall') {
+        send145({ choices: [{ delta: { content: '开始' } }] });
+        hangs145.add(res);
+        return;
+      }
+      send145({ choices: [{ delta: { content: '好的' } }], usage: { prompt_tokens: 6, completion_tokens: 2 } });
+      res.end('data: [DONE]\n\n');
+    });
+  });
+  await new Promise((r) => mock145.listen(0, '127.0.0.1', r));
+  setStoredKey('custom:mock145', 'sk-mock');
+  const cfgBase145 = {
+    provider: 'deepseek',
+    model: 'mock145',
+    permission: 'readonly',
+    autoTitle: false,
+    maxRounds: 1,
+    customModels: { mock145: { label: 'Mock145', baseUrl: `http://127.0.0.1:${mock145.address().port}/v1`, contextWindow: 8192, key: 'sk-mock' } },
+  };
+  saveConfig(cfgBase145);
+  const logLines145 = () => {
+    try {
+      return fs.readFileSync(path.join(home145, 'logs', 'web-server.log'), 'utf8').split('\n');
+    } catch {
+      return [];
+    }
+  };
+  /** @param {string} base @param {any} body */
+  const chatOn145 = async (base, body) => {
+    const r = await fetch(base + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const text = await r.text();
+    const events = text
+      .split('\n')
+      .filter((l) => l.startsWith('data: '))
+      .map((l) => {
+        try {
+          return JSON.parse(l.slice(6));
+        } catch {
+          return {};
+        }
+      });
+    return { status: r.status, events };
+  };
+  const srv145a = await runWebServer({ host: '127.0.0.1', port: 45997, authToken: null });
+  let srv145b = null;
+  try {
+    // ① 空正文回合：baseNote（"没有输出正文"）与 zeroNote（"0 次工具调用"）必须**合并**下发
+    mode145 = 'empty';
+    const cEmpty = await chatOn145('http://127.0.0.1:45997', { message: '请把 hello.txt 改好', permission: 'auto' });
+    const doneEmpty = cEmpty.events.find((e) => e.type === 'done');
+    assert.ok(doneEmpty, '（前置）空正文回合也必须以 done 收尾');
+    const noteEmpty = String(doneEmpty.note || '');
+    assert.ok(
+      noteEmpty.includes('0 次工具调用'),
+      `done.note 必须带上「0 次工具调用」收尾提示（来自 perf.zeroToolCalls，单一来源）——原守卫：const zeroNote = String(r.perf?.zeroToolCalls || '')。实际：${JSON.stringify(noteEmpty)}`
+    );
+    assert.ok(
+      /没有输出正文/.test(noteEmpty),
+      `done.note 必须同时保留 baseNote（"模型本轮没有输出正文"）与 zeroNote——原守卫：\[baseNote, zeroNote\].filter(Boolean).join(...)（覆盖式写法会丢掉其中一段）。实际：${JSON.stringify(noteEmpty)}`
+    );
+
+    // ② 11 秒 bash 回合：进度/预告/首帧/限频/pendingTool/toolCalls 全从真实日志与 SSE 取证
+    mode145 = 'bash-slow';
+    const tSlow0 = Date.now();
+    const cSlow = await chatOn145('http://127.0.0.1:45997', { message: '请跑一个长命令', permission: 'auto' });
+    const slowMs = Date.now() - tSlow0;
+    assert.ok(cSlow.events.some((e) => e.type === 'done'), `（前置）慢回合必须完成，实际耗时 ${slowMs}ms`);
+    assert.ok(slowMs >= 5000, `（前置）本用例需要跨过 5s 心跳（实际 ${slowMs}ms）——否则进度断言没有取样点`);
+    const progress145 = cSlow.events.filter((e) => e.type === 'progress');
+    assert.ok(progress145.length >= 2, `5s/10s 两次心跳都必须到（实际 ${progress145.length} 条 progress）`);
+    assert.ok(
+      progress145.every((e) => typeof e.toolCalls === 'number'),
+      `progress 事件必须带工具调用数（0 也要带）——原守卫：toolCalls: tp?.toolCalls ?? 0。实际：${JSON.stringify(progress145.map((e) => e.toolCalls))}`
+    );
+    assert.ok(
+      progress145.some((e) => e.pendingTool && e.pendingTool.name === 'bash'),
+      `progress 事件必须带「正在等待哪个工具」——原守卫：pendingTool: tp?.pendingTool（只在真正等工具时才非空）。实际：${JSON.stringify(progress145.map((e) => e.pendingTool))}`
+    );
+    const logAll145 = logLines145();
+    assert.ok(
+      logAll145.some((l) => /chat 预告 t[0-9a-f]+ /.test(l)),
+      `web-server.log 必须落「chat 预告」行（原守卫：chat 预告 \${taskId}）——真机 4 小时零行的第一处。实际日志尾部：${JSON.stringify(logAll145.slice(-8))}`
+    );
+    assert.ok(
+      logAll145.some((l) => /chat 首帧 t[0-9a-f]+ /.test(l)),
+      `web-server.log 必须落「chat 首帧」行（原守卫：chat 首帧 \${taskId}）——本地模型 prefill 必须自己说话。实际日志尾部：${JSON.stringify(logAll145.slice(-8))}`
+    );
+    assert.ok(
+      logAll145.some((l) => /chat 预检 t[0-9a-f]+ /.test(l)),
+      `web-server.log 必须落「chat 预检」行（原守卫：chat 预检 \${taskId}）——事后要能查"当时端点是什么状态"。实际日志尾部：${JSON.stringify(logAll145.slice(-8))}`
+    );
+    const forecastLine145 = logAll145.find((l) => /chat 预告 t[0-9a-f]+ /.test(l)) || '';
+    assert.ok(
+      forecastLine145.includes('端点预检：'),
+      `发送前的规模预告必须带上端点预检结论（= endpointProbe 真的交给了本回合，而不是算了不用）——原守卫：chatCfg = { ...chatCfg, endpointProbe: probe }。实际预告行：${JSON.stringify(forecastLine145)}`
+    );
+    const progLines145 = logAll145.filter((l) => /chat 进度 t[0-9a-f]+ /.test(l));
+    assert.equal(
+      progLines145.length,
+      1,
+      `进度日志必须限频：11 秒的回合只允许一行（原守卫：lastProgressLogAt < 30000；每 5s 都写就是刷屏）。实际 ${progLines145.length} 行：${JSON.stringify(progLines145)}`
+    );
+    assert.ok(
+      /模型轮次=\d+/.test(progLines145[0] || '') &&
+        /工具调用=\d+/.test(progLines145[0] || '') &&
+        /首帧=/.test(progLines145[0] || '') &&
+        /已收正文=\d+ 字/.test(progLines145[0] || ''),
+      `进度行必须由 formatTurnProgress 产出（轮次/工具调用/首帧/正文四项齐全，口径不与 agent 漂移）——原守卫：formatTurnProgress\(\{。实际：${JSON.stringify(progLines145[0] || '')}`
+    );
+
+    // ③ 跑满步数：结局必须是 capped（不是 done）
+    mode145 = 'capped';
+    const cCapped = await chatOn145('http://127.0.0.1:45997', { message: '请一直读文件', permission: 'auto' });
+    assert.ok(cCapped.events.some((e) => e.type === 'done'), '（前置）跑满步数的回合同样要收尾');
+    const doneCappedLine = logLines145().filter((l) => l.includes('chat 发送 done')).pop() || '';
+    assert.ok(
+      /status=capped/.test(doneCappedLine),
+      `Web 侧 capHit 不得再标成 done（与 worker 口径统一为「不算完成」）——原守卫：r.capHit ? 'capped' : 'done'。实际：${JSON.stringify(doneCappedLine)}`
+    );
+
+    // ④ 无进展中止：stalled 必须是独立结局，且 reason 可见（换一个 noProgress 阈值的服务）
+    await new Promise((r) => srv145a.close(r));
+    saveConfig({ ...cfgBase145, noProgressTimeoutMs: 1500 });
+    srv145b = await runWebServer({ host: '127.0.0.1', port: 45998, authToken: null });
+    mode145 = 'stall';
+    const cStall = await chatOn145('http://127.0.0.1:45998', { message: '请继续', permission: 'auto' });
+    const doneStall = cStall.events.find((e) => e.type === 'done');
+    assert.ok(doneStall, '（前置）无进展回合必须由看门狗收尾（否则这里会挂住）');
+    const stallBanners145 = cStall.events.filter((e) => e.type === 'banner').map((e) => String(e.text || ''));
+    assert.ok(
+      stallBanners145.some((b) => b.includes('长时间无进展**已中止（不是步数上限 capped、也不是你点的停止 aborted）')),
+      `stalled 必须发一条告警 banner，且文案与 capped/aborted 区分——原守卫就是这句文案。实际 banner：${JSON.stringify(stallBanners145)}`
+    );
+    assert.equal(
+      doneStall.stalled,
+      true,
+      `done 事件必须带 stalled=true（前端据此区别于「正常完成」）——原守卫：stalled: Boolean(r.stalled)。实际：${JSON.stringify(doneStall.stalled)}`
+    );
+    assert.equal(
+      doneStall.stallCause,
+      'own',
+      `done 事件必须带 stalled 的原因（own / inherited）——原守卫：stallCause: r.perf?.stallCause ?? null。实际：${JSON.stringify(doneStall.stallCause)}`
+    );
+    const doneStallLine = logLines145().filter((l) => l.includes('chat 发送 done')).pop() || '';
+    assert.ok(
+      /status=stalled/.test(doneStallLine),
+      `无进展中止的任务状态必须是 stalled（不得冒充 done）——原守卫：r.stalled ? 'stalled'。实际：${JSON.stringify(doneStallLine)}`
+    );
+  } finally {
+    for (const s of hangs145) {
+      try {
+        s.destroy();
+      } catch {}
+    }
+    if (srv145b) await new Promise((r) => srv145b.close(r)).catch(() => {});
+    await new Promise((r) => srv145a.close(r)).catch(() => {});
+    mock145.closeAllConnections?.();
+    await new Promise((r) => mock145.close(r)).catch(() => {});
+    if (prevHome145 === undefined) delete process.env.MINGDAO_HOME;
+    else process.env.MINGDAO_HOME = prevHome145;
+    safeRmSync(home145, { recursive: true, force: true });
+  }
+  ok('v0.6.18 M-8 第二批（§145）：回合可观察性行为化（零工具提示与 baseNote 合并 / 日志三类行齐全 / 30s 限频 / formatTurnProgress 四项 / progress 的 toolCalls 与 pendingTool / capHit→capped / stalled 字段·原因·banner·status）');
+}
+
+// ---------- 146. v0.6.18 审计 M-8 第二批：WebUI 视觉门控必须咨询自定义 Provider（行为化） ----------
+// 原守卫（§111）：`/await resolveVisionSupport\(/` 读 server.js 源码。它只能证明"有这么一行调用"，
+// 证明不了图片真的能被送出去。这里真起 Web 服务、把 customModels.<名>.vision 打开，
+// 从**桩 provider 实际收到的消息体**取证：带图片的那一轮必须是 content 数组且含 image_url；
+// 再把它关掉，同一请求必须被明确拒绝（门控不得 fail-open）。
+{
+  const { runWebServer } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
+  const { setStoredKey } = await import(pathToFileURL(path.join(srcDir, 'credentials.js')).href);
+  const http146 = await import('node:http');
+  const prevHome146 = process.env.MINGDAO_HOME;
+  const home146 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p146-'));
+  process.env.MINGDAO_HOME = home146;
+  /** 桩收到的最后一条 user 消息内容 */
+  let lastUserContent146 = /** @type {any} */ (null);
+  const mock146 = http146.createServer((req, res) => {
+    if (req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ data: [{ id: 'mock146' }] }));
+      return;
+    }
+    let raw146 = '';
+    req.on('data', (c) => (raw146 += c));
+    req.on('end', () => {
+      try {
+        const body146 = JSON.parse(raw146);
+        const users = (body146.messages || []).filter((m) => m && m.role === 'user');
+        if (users.length) lastUserContent146 = users[users.length - 1].content;
+      } catch {}
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write('data: {"choices":[{"delta":{"content":"看到图片了"}}],"usage":{"prompt_tokens":6,"completion_tokens":2}}\n\n');
+      res.end('data: [DONE]\n\n');
+    });
+  });
+  await new Promise((r) => mock146.listen(0, '127.0.0.1', r));
+  setStoredKey('custom:mock146', 'sk-mock');
+  const cfg146 = (/** @type {boolean} */ vision) => ({
+    provider: 'deepseek',
+    model: 'mock146',
+    permission: 'auto',
+    autoTitle: false,
+    maxRounds: 1,
+    customModels: { mock146: { label: 'Mock146', baseUrl: `http://127.0.0.1:${mock146.address().port}/v1`, contextWindow: 8192, key: 'sk-mock', ...(vision ? { vision: true } : {}) } },
+  });
+  saveConfig(cfg146(true));
+  let srv146 = await runWebServer({ host: '127.0.0.1', port: 45999, authToken: null });
+  /** @param {string} base @param {any} body */
+  const chatOn146 = async (base, body) => {
+    const r = await fetch(base + '/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const text = await r.text();
+    const events = text
+      .split('\n')
+      .filter((l) => l.startsWith('data: '))
+      .map((l) => {
+        try {
+          return JSON.parse(l.slice(6));
+        } catch {
+          return {};
+        }
+      });
+    return { status: r.status, events };
+  };
+  const image146 = { type: 'image', name: 'a.png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' };
+  try {
+    lastUserContent146 = null;
+    const c1 = await chatOn146('http://127.0.0.1:45999', { message: '看这张图', permission: 'auto', attachments: [image146] });
+    const done146 = c1.events.find((e) => e.type === 'done');
+    const err146 = c1.events.find((e) => e.type === 'error');
+    assert.ok(
+      done146 && !err146,
+      `自定义视觉模型的图片必须以 image_url 真的进到上游请求里——原守卫只检查源码里有没有 await resolveVisionSupport(（写进死分支照样绿）。实际：${err146 ? String(err146.message).slice(0, 160) : '无 done'}`
+    );
+    assert.ok(
+      Array.isArray(lastUserContent146) && lastUserContent146.some((p) => p && p.type === 'image_url' && String(p.image_url?.url || '').startsWith('data:image/png;base64,')),
+      `桩 provider 必须真的收到 image_url 分段（而不是只有一段文本）——原守卫证明不了门控结论被用上。实际：${JSON.stringify(lastUserContent146)?.slice(0, 240)}`
+    );
+    // 反向：去掉声明后同一请求必须被拒绝（门控不得 fail-open）
+    await new Promise((r) => srv146.close(r));
+    saveConfig(cfg146(false));
+    srv146 = await runWebServer({ host: '127.0.0.1', port: 45999, authToken: null });
+    const c2 = await chatOn146('http://127.0.0.1:45999', { message: '看这张图', permission: 'auto', attachments: [image146] });
+    const err2 = c2.events.find((e) => e.type === 'error');
+    assert.ok(
+      err2 && /不支持图片输入/.test(String(err2.message || '')),
+      `未声明视觉能力时必须拒绝图片（门控不得 fail-open）——否则"咨询自定义 Provider"就没有反面。实际：${err2 ? String(err2.message).slice(0, 160) : '被接受了'}`
+    );
+  } finally {
+    await new Promise((r) => srv146.close(r)).catch(() => {});
+    mock146.closeAllConnections?.();
+    await new Promise((r) => mock146.close(r)).catch(() => {});
+    if (prevHome146 === undefined) delete process.env.MINGDAO_HOME;
+    else process.env.MINGDAO_HOME = prevHome146;
+    safeRmSync(home146, { recursive: true, force: true });
+  }
+  ok('v0.6.18 M-8 第二批（§146）：视觉门控行为化（自定义 Provider 声明的 vision 让图片真的以 image_url 进上游；撤掉声明后同一请求被拒）');
 }
 
 process.exit(0);
