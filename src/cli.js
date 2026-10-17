@@ -403,7 +403,16 @@ async function main() {
     }
   }
   // agent 使用的配置 = cfg + 预设 overlay（presetTools/permission/参数按预设生效，cfg 本体保持干净）
-  const agentCfg = Object.keys(presetOverlay).length ? { ...cfg, ...presetOverlay } : cfg;
+  const agentCfgBase = Object.keys(presetOverlay).length ? { ...cfg, ...presetOverlay } : cfg;
+  // v0.6.17 §3.64：本进程的权限来源随 cfg 进账本（`run.start.permissionSource`）。
+  // 顺序与生效值一致：预设 overlay 里有 permission > config.json 的 permission > 内置缺省。
+  // 注意**不写回 cfg**（agentCfg 是副本）：repl 的 saveConfig(cfg) 绝不能把来源字段持久化。
+  const permissionSource = Object.prototype.hasOwnProperty.call(presetOverlay, 'permission')
+    ? 'preset'
+    : cfg.permission !== undefined && cfg.permission !== null
+      ? 'config'
+      : 'default';
+  const agentCfg = { ...agentCfgBase, permissionSource };
 
   const pc0 = resolveProviderConfig(cfg, modelName);
   // v0.6.0 C4：内网/本机端点（vLLM、Ollama、OneAPI 等）通常不校验密钥，很多也不发放密钥。

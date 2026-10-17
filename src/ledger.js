@@ -36,6 +36,21 @@ import { redactSecrets, redactSensitive } from './redact.js';
  * 不是「新读者多了字段」。
  */
 export const LEDGER_VERSION = 1;
+/**
+ * `run.start.permissionSource` 的合法取值（v0.6.17 §3.64）。
+ *
+ * 为什么只增字段不动 `LEDGER_VERSION`：`permission` 仍然是**生效值**，本字段只是补上
+ * 「这个生效值是谁定的」——旧读者按原样忽略它，旧账本（没有它）也照常校验通过。
+ * 一次"来源不可见"的坑（界面选了自动、却被只读预设压着跑）迫使我们把来源写进账本：
+ * 事后自查时，`permission:"auto"` 单看无法区分"用户显式选的"与"config 里本来就是 auto"。
+ *
+ * - `explicit`：用户/调用方在本回合显式选择（WebUI 的权限档、CLI 的显式参数）；
+ * - `preset`：由预设声明的 permission 生效（反提权判定已通过）；
+ * - `config`：来自 `config.json` 的 `permission`；
+ * - `cli`：后台/调度任务由 CLI 参数指定（`mingdao run --permission ...`）；
+ * - `default`：以上都没有，落到内置缺省（`ask`）。
+ */
+export const PERMISSION_SOURCES = Object.freeze(['explicit', 'preset', 'config', 'cli', 'default']);
 /** 默认保留最近多少次运行（超出按 mtime 删最旧） */
 const DEFAULT_MAX_RUNS = 200;
 const GENESIS = '0'.repeat(16);
@@ -560,6 +575,10 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
         session: f.session ?? null,
         cwd: f.cwd ?? null,
         permission: f.permission ?? null,
+        // v0.6.17 §3.64：生效值（permission）与来源分开记——只记生效值无法回答
+        // "这是用户选的、预设压的，还是 config 默认的"。非法/缺失一律 null（诚实：来源未知），
+        // 不猜、不落成 'config'（猜错比缺失更难自查）。
+        permissionSource: PERMISSION_SOURCES.includes(String(f.permissionSource)) ? String(f.permissionSource) : null,
         preset: f.preset ?? null,
         packs: Array.isArray(f.packs) ? f.packs : [],
       });
@@ -876,6 +895,9 @@ export function exportRun(/** @type {any} */ runId, { format = 'json' } = {}) {
   lines.push(`# 执行账本 ${runId}`);
   lines.push('');
   lines.push(`- 模型：${start?.model ?? '—'} · 会话：${start?.session ?? '—'} · 权限：${start?.permission ?? '—'}`);
+  // v0.6.17 §3.64：来源是**可选**字段——旧账本没有它，这一行就整行不出现（输出契约不变）；
+  // 新账本才有，且只增行、不改上面那行「权限：…」的既有形状。
+  if (start?.permissionSource) lines.push(`- 权限来源：${start.permissionSource}（explicit=显式选择 / preset=预设 / config=配置 / cli=命令行 / default=内置缺省）`);
   lines.push(`- 开始：${start?.at ? new Date(start.at).toISOString() : '—'}`);
   lines.push(`- 结束：${end ? `${end.status}（${end.ms}ms，${end.steps} 步）` : '未结束'}`);
   lines.push(`- 费用：${end?.priced ? `¥${Number(end.yuanTotal ?? 0).toFixed(4)}` : '**无法估算**（模型无价，不是 0 元）'}`);

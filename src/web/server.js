@@ -85,6 +85,13 @@ const PERM_HINT = /** @type {Record<string, string>} */ ({
   auto: '不再逐次确认，工具直接执行',
   readonly: '仅只读工具直接放行，其余逐次询问是否本次放行',
 });
+/**
+ * v0.6.17 §3.64：`resolveTurnPermission().source` → 账本 `run.start.permissionSource`。
+ * 两套名字必须分开：`webui` 是「本模块内部从哪来」的措辞（既有测试与 banner 都依赖它），
+ * 账本枚举是跨入口的公共契约，显式选择统一叫 `explicit`（CLI/调度同样适用）。
+ * 这里是唯一的翻译点——不要在别处再写一份映射。
+ */
+const LEDGER_PERMISSION_SOURCE = /** @type {Record<string, string>} */ ({ webui: 'explicit', preset: 'preset', config: 'config' });
 
 /**
  * 解析「本回合的有效权限」——把"谁说了算"收成**单源纯函数**（v0.6.12，用户实测 bug）。
@@ -803,7 +810,12 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     }
     // v0.6.12：**无论有没有预设，本回合生效的权限都以 turnPerm 为准**——显式选择在"没勾预设"这一格
     // 同样必须生效（此前 createPermission 读的是 chatCfg.permission，即 config.json 的值）。
+    // v0.6.17 §3.64：来源也随 cfg 进账本（`run.start.permissionSource`）。用户那次"选自动却按只读跑"
+    // 之所以难自查，一部分原因正是账本只留下生效值、看不出这个值是显式选的还是预设/配置压的。
     chatCfg = { ...chatCfg, permission: turnPerm.permission };
+    // 来源单独赋值：上面这一行是 smoke §137 的结构守卫锚点（chatCfg 的 permission 必须单源来自
+    // resolveTurnPermission），不要为了少一行把它并进对象字面量。
+    chatCfg.permissionSource = LEDGER_PERMISSION_SOURCE[turnPerm.source] ?? null;
     // v0.6.12：**把"本会话的有效权限"说出来**。这次用户困惑的根源不是权限算错了，而是
     // 「我选了自动、它按只读跑、而且没有任何一处告诉我」——预设是会话级粘滞的（下拉一直选着），
     // 用户以为换个权限档就覆盖了它。新会话开始与档位变更各说一次，不刷屏。

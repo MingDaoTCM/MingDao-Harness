@@ -790,6 +790,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       session: sessionRef?.name ?? null,
       cwd: workingDir,
       permission: cfg.permission ?? permission?.mode ?? null,
+      // v0.6.17 §3.64：来源由入口（WebUI/CLI）算好随 cfg 传入；agent 只透传，不猜。
+      // 后台任务/REPL 内切换预设等未传来源的路径写 null（来源未知），绝不冒充 config。
+      permissionSource: cfg.permissionSource ?? null,
       preset: preset?.name ?? cfg.preset ?? null,
       // v0.6.7（报告二 P3-1）：activeCtx 的形状是 { mounted, warnings, promptSections, constraints, toolCount }，
       // **没有 `.packs` 键** —— 这里此前恒为 []，账本里"本次运行挂了哪些 Pack"永远记空。

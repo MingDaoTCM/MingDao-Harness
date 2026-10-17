@@ -699,6 +699,11 @@ mingdao ledger verify <runId> --key <文件>     # 用指定公钥验签（本�
   顺手一次就会把签名密钥清掉、让全部历史账本变成"另一把密钥签发"。
 - **默认开启**：新账本在首次收尾时若本机还没有密钥会**自动生成**并签名（可选签名在合规上等于
   没有签名）。封条里带 `sig{alg,keyId,value}`，`run.end` 链内带 `sigKey`（公钥指纹）。
+- **`run.start.permissionSource`（v0.6.17 §3.64）**：记录本回合生效权限的**来源**——`explicit`
+  （用户/调用方显式选择，如 WebUI 权限档）/ `preset`（预设声明生效）/ `config`（`config.json`
+  的 `permission`）/ `cli`（后台/调度任务由 CLI 参数指定）/ `default`（以上都没有，落到内置缺省
+  `ask`；WebUI 的 `config` 分支在缺字段时也归 `config`）。`permission` 仍是生效值、`LEDGER_VERSION`
+  不变；旧账本没有该字段照样 `verify` 通过（`show` 只是少一行可选的「权限来源」）。
 - **`ledger verify` 的三种结论**（前两者退出码 0，第三者非 0）：
 
   | 结论 | 含义 | 退出码 |
