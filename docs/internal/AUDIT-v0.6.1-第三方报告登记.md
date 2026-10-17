@@ -2895,3 +2895,130 @@ Reduce --context-window, close other apps, or try q8 KV quantization.
   本节的把握来自 **10 条变异全部命中**，而不是"守卫穷尽了所有写法"。
 - **未动** `src/providers/**`、`src/model-discovery.js`、`src/web/**`、`presets/**`、`desktop/**`、`ide/**`、
   `test/mutate/lib.mjs`；未 tag、未改版本号、未 publish、未动官网。
+
+## 3.64 已修复（v0.6.17 开发线：`run.start` 补上权限**来源** `permissionSource`）
+
+**来源**：负责人那次「界面选了自动，却按只读跑」的自查复盘。§3.45 之后账本已有来源签名（证明"谁写的"），
+但 `run.start` 里仍只有**生效值** `permission`——单看它分不清"用户显式选的 auto / 只读预设压的 / config
+里本来就是 auto"。v0.6.12 的 `resolveTurnPermission()` 早已算出 `source`，只是没进账本。
+
+### 一、现状（先复现）
+
+桩 provider + 真 WebUI（`POST /api/chat {permission:"auto", preset:"只读预设"}`）跑一轮，落盘的
+`run.start` 是：
+
+```json
+{"v":1,"type":"run.start","model":"test-model","permission":"auto","preset":null,"packs":["example-hello"],...}
+```
+
+同一回合的 SSE banner 已明说「来源：WebUI 显式选择」，**账本里却查不到**。事后只看账本时，
+`permission:"auto"` 无法区分三种来源——这正是"选了自动却按只读跑"难以自查的原因之一。
+
+### 二、修法（只增字段，不动 `LEDGER_VERSION`）
+
+- `src/ledger.js`：新增导出常量 `PERMISSION_SOURCES = ['explicit','preset','config','cli','default']`；
+  `runStart()` 写 `permissionSource`（合法枚举原样落盘，缺失/非法一律 `null`，**不猜成 config**）。
+  `permission` 字段原样保留；`LEDGER_VERSION` 仍为 `1`。`show` 只在字段存在时多一行可选的
+  「权限来源：…」，既有「权限：…」行、`verify` 的输出契约与 `ok` 语义一律不变（旧账本整行不出现）。
+- **三条入口**：
+  - WebUI（`src/web/server.js`）：唯一的翻译点 `LEDGER_PERMISSION_SOURCE = {webui:'explicit', preset:'preset',
+    config:'config'}`，随 `chatCfg.permissionSource` 交给 agent（保留 `resolveTurnPermission().source`
+    的既有 `webui` 措辞，不破坏该函数的契约）。
+  - CLI/REPL（`src/cli.js`）：预设 overlay 有 `permission` → `preset`；`cfg.permission` 存在 → `config`；
+    都没有 → `default`。写进 `agentCfg` 的**副本**（`repl` 的 `saveConfig(cfg)` 不会把来源持久化）。
+  - 调度/后台任务：`src/tasks/worker.js` 不在本轮允许改动清单内，未接入（见"未做边界"）。
+- `src/agent.js`：只在 `runStart` 里透传 `cfg.permissionSource ?? null`，不推导、不猜测。
+
+### 三、断言与变异
+
+- 新建独立套件 **`test/ledger-source.js`**（`node test/ledger-source.js` 可直接跑，失败非 0），7 组断言：
+  ① 显式 auto + 只读预设 → `permission=auto` / `permissionSource=explicit`；
+  ② 只发预设 → `readonly` / `preset`；③ 都不发 → WebUI 记 `config`（`resolveTurnPermission` 的既有分支，
+  含内置缺省 ask）；④ CLI 无 `permission` 字段 → `ask` / `default`；⑤ CLI 预设 → `readonly` / `preset`；
+  ⑥ CLI `config.permission` → `auto` / `config`；⑦ **旧账本（`run.start` 无该字段）仍 verify 通过**，
+  且 `show` 不凭空出现「权限来源」行（向后兼容红线）。
+- 已接入 `test/run-all.mjs` 与 `.github/workflows/ci.yml`（按现有套件写法，CI 只加 Linux 腿，带失败注解）。
+- 新建 `test/mutate/batch34-ledger-source.mjs`：**7/7 全中**——① 写死 `config`；② explicit 映射成 preset；
+  ③ WebUI 不传；④ agent 不通传；⑤ 删字段；⑥ CLI 不传；⑦ verify 把旧账本判失败。
+
+### 四、未做边界（如实登记）
+
+- **后台/调度任务未接入**：`src/tasks/worker.js`、`src/schedule.js` 不在允许改动清单；worker 目前不读
+  CLI 的 `--permission` 来源，故后台账本的 `permissionSource` 为 `null`（来源未知），不冒充 `config`。
+  要补齐需改 worker 的 `createAgent` 传参（下一轮可单独做）。
+- **REPL 内 `/preset` 切换后来源可能为 `null`**：`src/commands/repl.js` 同样不在清单内，它重建
+  `agentCfg` 时不会带上来源；启动时的来源是正确的。未在 REPL 内"猜"来源（猜错比缺失更难自查）。
+- **WebUI 的 `config` 分支包含"内置缺省"**：`resolveTurnPermission()` 在无显式/预设时统一报 `config`，
+  即使 `config.json` 缺 `permission`（值来自 `ask` 缺省）。本项只如实映射，不改变该函数的既有语义；
+  CLI 侧才区分 `config` 与 `default`。
+- 未动 `test/smoke.js`、`test/mutate/README.md` 的计数行（后者按 M-8 提交后的 `doc-lint` 实际值统一校正）、
+  `src/providers/**`、`src/model-discovery.js`、`src/web/app.js`、`presets/**`、`desktop/**`、`ide/**`、
+  `test/mutate/lib.mjs`。
+
+## 3.65 已补（v0.6.15 开发线：英文文档同步——新增配置项/行为补齐 + 文档债）
+
+### 一、补了哪些节（`docs/CONFIG.en.md`，逐条回代码核实，不转述中文文档）
+
+- **Timeout 新语义**：三定时器对照表（各自从哪起算、被什么重置、到点什么），写明 `totalMs` 在重试循环
+  **外层**、覆盖本地排队 + 退避 + 全部 attempt（`src/providers/index.js:461-466`、`:477-488`）；首帧计时在
+  **取得本地名额之后**才起（`:513-524`）；已收到任何帧不重试、`LOCAL_QUEUE_TIMEOUT` 不重试（`:548-559`）；
+  默认重试 2 次、退避 1s/2s 封顶 30s 并尊重 `Retry-After`。
+- **回合级无进展看门狗**（新节）：只有"成功且不重复的工具结果"或新正文/推理算进展，重复调用（name+args
+  相同）、失败调用、无正文/推理的模型轮次**都不算**（`src/agent.js:markProgress`、`finishTool`）；默认
+  `3600000` = 2× 本地单请求上限；`0`/负数/`NaN`/`Infinity` 关不掉（`:resolveNoProgressTimeoutMs`）；
+  子代理继承**活的**截止时刻（`:inheritedDeadlineAt`），父回合等 `task` 时多让 15s 让子代理先响；结局
+  `stalled` 区分 own/inherited。
+- **本地端点预检**（新节）：成功结论缓存 10min、**失败只保鲜 60s**（`src/model-discovery.js:38`、`:73`）、
+  in-flight 去重；只打 `POST {base}/chat/completions`（不发 `GET /models`）；3 次 × 1.5s + 300/700ms 退避、
+  WebUI 总预算 15s、参考 prefill 2000 tokens（20s 上限）；失败原因表
+  `refused`/`reset`/`timeout`/`http-unimplemented`/`http-auth`/`http`/`other`/`inconclusive`
+  （`:99-149`）；`GET /props` 引擎自述上下文与 `customModels[x].contextWindow` 三态比对
+  （`:514-545`、`:822-870`）；`chat 预检` 行（`src/web/server.js` 的 `srvlog`）与
+  `chat 预检复核` 行（`logProbeRecheck`，判"不可达"但本回合真有首帧时写一次）。
+- **本地端点串行化**（新节）：同一本地 `baseUrl` 的父回合/子代理/预检共用进程级 Promise 队列；
+  `localConcurrency` 默认 1、`0` 退出、上限 16、非法/负数回落 1（`src/providers/index.js:66-71`）；
+  `localQueueTimeoutMs` 默认 1800000、`0`/负数回落默认（不是无限）、上限 24h（`:79-82`）；排队超时
+  `LOCAL_QUEUE_TIMEOUT` 可见且不重试（`:225-233`、`:555-559`）；云端直接放行（`:175`）；
+  附"引擎活着但丢缓存 → 不要重启"与四行排查表。
+- **内置预设**：仅 `local-model`（`contextBudget 65536`/`maxOutputTokens 4096`/`maxRounds 4`，
+  `presets/local-model.json`），无人格/无工具白名单/无权限字段；`readonly-audit` v0.6.16 已删除；
+  `local-audit` 是别名并提示一次更名、磁盘同名预设优先（`src/presets.js:61`、`:255-259`）。
+- **账本来源签名**（新节）：`--sign-key` / `--generate` / `--force`、`verify --key`；ed25519、
+  `<home>/ledger-key.json`（600、首次封条自动生成、不进 config/凭证库）；`verify` **四态**与退出码
+  （`src/commands/ledger.js:153-190`）；诚实边界（私钥与账本同机同权限、无可信时间戳、换钥后旧账本报
+  "另一把密钥签发"）。`run.start` 只写生效 `permission`；`permissionSource` 仅一句"随 §3.64 落地，
+  见 RELEASE-NOTES"，未描述其取值。
+- **`MINGDAO_REQUIRE_UPDATE_SIGNATURE=1`**：环境变量表新增该行（默认 `warn-and-install`、`1` 拒绝无签名、
+  有签名但验不过一律拒绝；`desktop/update-verify.js:74`、`:189-195`），并注明
+  `MINGDAO_UPDATE_PUBKEY_PEM` + `MINGDAO_UPDATE_ALLOW_PUBKEY_OVERRIDE` 仅开发/测试可用。
+- 全字段表补 `localConcurrency`/`localQueueTimeoutMs`，并重写 `timeout.*`、`noProgressTimeoutMs` 的描述。
+
+### 二、修正的"文档与代码不一致"
+
+1. 头部"re-verified … **v0.6.10**"→ 当前 v0.6.15 开发线（写文件时 `package.json` 为 0.6.14，
+   v0.6.16 预设改动已在树内）。
+2. 全字段表 `customModels.<name>.local` 原写 "compaction, **serialization**, **timeouts**"——**错**：
+   串行化闸门与 provider 超时默认只认 `isLocalBaseUrl(baseUrl)`（`src/providers/index.js:175`、`:462`），
+   该标志只影响能力默认/压缩/是否预检（`src/model-caps.js:82-83`；`src/web/server.js` 的 `isLocalModel`）。
+   新节已如实写"公网反代 URL **不**进队列"。
+3. `README.en.md` 账本行原写 "no signature (optional signing is not implemented)"——**错**：v0.6.11 已实现且
+   默认开启。改为四态 + 同机同权限边界。
+4. `SECURITY.md` Known boundaries #3 原写 "update-package signature verification are not done"——**错**：
+   校验已实现（`desktop/update-verify.js`），只是发布链路尚未签。改为"代码签名/公证未做；更新包来源签名
+   校验已实现，默认 warn-and-install，`MINGDAO_REQUIRE_UPDATE_SIGNATURE=1` fail-closed"。
+5. `SECURITY.md` #5 原写 "optional signing (`--sign-key`) is not implemented"——同上，已改。
+6. `README.en.md` 与 `SECURITY.md` 的当前版本号停在 **0.6.8** → **0.6.14**（`package.json` 实际值）。
+7. 预检 `max_tokens`：`src/model-discovery.js` 头部注释写 16、代码是 **256**（`:447`，注释是旧值）——
+   英文文档按代码写 256。
+
+### 三、未覆盖 / 边界（如实登记）
+
+- **`permissionSource` 的取值与语义未写**：实现仍在另一执行者工作树（`src/ledger.js` 未提交），英文文档
+  只有一句"随 §3.64 落地，见 RELEASE-NOTES"；不写可能还会调整的字段细节。
+- **只改英文文档**：`docs/CONFIG.md`、`src/**`、`test/**`、`presets/**`、`desktop/**`、`ide/**` 未动。
+- **`customModels.local: true` 是否应把公网反代端点纳入串行化**是产品决策：本轮只如实写"当前不纳入"，
+  没有改代码，也没有替该行为背书。
+- **预检只在 WebUI 服务端触发**（`src/web/server.js`），CLI 不预检；英文文档按"WebUI server"限定，
+  未声称 CLI 也预检。
+- 未验证其它执行者正在改的 `test/smoke.js`、`test/mutate/**`、`docs/CONFIG.md`；`node scripts/doc-lint.mjs`
+  在本轮改动后全绿（相对链接 86 条、未改他人文件）。

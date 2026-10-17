@@ -3,10 +3,13 @@
 > **Language policy.** Canonical docs are Chinese (`docs/CONFIG.md`). When this English file and the
 > Chinese docs or the code disagree, **the code wins** — please open an issue.
 >
-> Every statement below was re-verified against the source tree at `package.json` **v0.6.10**
-> (`src/config.js`, `src/permissions.js`, `src/tools/bash.js`, `src/net-guard.js`, `src/net-policy.js`,
-> `src/audit.js`, `src/ledger.js`, `src/web/server.js`, `src/web/routes/api.js`, `src/cost-guard.js`,
-> `src/constraints.js`, `src/packs.js`, `src/credentials.js`, `src/model-caps.js`, `src/hooks.js`).
+> Every statement below was re-verified against the source tree at the **v0.6.15 development line**
+> (the `package.json` version at the time of writing was 0.6.14; the v0.6.16 preset changes were already
+> present). Files consulted:
+> `src/config.js`, `src/permissions.js`, `src/tools/bash.js`, `src/net-guard.js`, `src/net-policy.js`,
+> `src/audit.js`, `src/ledger.js`, `src/providers/index.js`, `src/model-discovery.js`, `src/presets.js`,
+> `src/web/server.js`, `src/web/routes/api.js`, `src/cost-guard.js`, `src/constraints.js`,
+> `src/packs.js`, `src/credentials.js`, `src/model-caps.js`, `src/hooks.js`, `desktop/update-verify.js`.
 > Where the Chinese document and the code disagree, the code's behaviour is written here and the
 > difference is called out inline.
 
@@ -27,6 +30,8 @@ API keys live in a separate credential store, `~/.mingdao/credentials.json` (mod
 | Session journal | `$MINGDAO_HOME/journal.jsonl` |
 | Egress log | `$MINGDAO_HOME/net.jsonl` (mode `600`) |
 | Execution ledgers | `$MINGDAO_HOME/ledger/<runId>.jsonl` + `.seal.json` (mode `700`) |
+| Ledger signing key | `$MINGDAO_HOME/ledger-key.json` (mode `600`, never in `config.json`) |
+| Model cache / probe baseline | `$MINGDAO_HOME/model-cache.json` (the reserved `__probeBaseline` key) |
 | Sessions / search index | `$MINGDAO_HOME/sessions/`, `$MINGDAO_HOME/sessions-index/` |
 | Per-session workspace map | `$MINGDAO_HOME/session-workspaces.json` |
 | Global memory | `$MINGDAO_HOME/memory.md` |
@@ -263,10 +268,15 @@ legacy/third-party preset (subject to the anti-escalation rule — it may only b
   allow-list is the hard constraint (no `write`/`edit` means the model never even sees the write tools);
   pinning the session to the `readonly` mode is the second layer. Built-in presets decide neither for you.
 * **Built-in presets only ship parameter defaults.** The distribution targets the general public and does
-  not customize for any particular task, so the only built-in preset is `local-model` — it only tunes
-  `contextBudget` / `maxOutputTokens` / `maxRounds` and carries **no persona, no tool allow-list and no
-  permission fields**. The former built-in read-only code-audit preset `readonly-audit` was **removed** in
-  v0.6.16; the old name `local-audit` still works but prints a "renamed to `local-model`" notice.
+  not customize for any particular task, so the only built-in preset is `local-model`. It sets three
+  values — `contextBudget: 65536`, `maxOutputTokens: 4096`, `maxRounds: 4` (`presets/local-model.json`) —
+  and carries **no persona, no tool allow-list and no permission fields**. The former built-in read-only
+  code-audit preset `readonly-audit` was **removed** in v0.6.16 and has no replacement: compose a mode and
+  a `tools` allow-list yourself (previous bullet).
+* **`local-audit` is kept as an alias of `local-model`.** Calling it resolves to `local-model` and prints a
+  one-time "renamed to `local-model`" warning (`src/presets.js:61`, `:255-259`); the API also returns
+  `aliasedFrom` so the WebUI can show the rename banner. The alias only applies when no preset of that
+  name exists on disk — a user/project `local-audit.json` shadows it, same as any other name.
 * The tool-call audit log / ledger has nothing to do with presets: that is `config.audit` plus
   `mingdao audit` / `mingdao ledger`. Do not treat any preset as a compliance audit switch.
 
@@ -661,6 +671,47 @@ are kept, and the directory runs it in mode `700`. `"ledger": false` disables it
 because `audit.jsonl` rotation would silently truncate a compliance record — a truncated ledger is worse
 than none.
 
+`run.start` records the **effective `permission` mode** used for that turn (`src/ledger.js:runStart`). The
+separate `permissionSource` field (where that mode came from) lands with §3.64 — see RELEASE-NOTES for the
+released semantics; do not rely on its exact value before that release.
+
+### Ledger provenance signing (`--sign-key`)
+
+The hash chain and seal answer "was this ledger changed or truncated after it was written?" — but their
+inputs all come from the ledger itself, and SHA-256 is public. Recomputing the chain after editing a line
+would still verify. The **source signature** answers the other half: "was this ledger written by the
+holder of this machine's key?" (`src/ledger.js:verifyRun`).
+
+```bash
+mingdao ledger --sign-key                      # show key status (public key + fingerprint only; never the private key)
+mingdao ledger --sign-key --generate           # create <home>/ledger-key.json (mode 600)
+mingdao ledger --sign-key --generate --force   # replace the key (old ledgers become "signed by another key" — back up first)
+mingdao ledger verify <runId>                  # chain + seal + provenance, verified with the local key
+mingdao ledger verify <runId> --key <file>     # verify with a given public key (key file, or PEM/SPKI)
+```
+
+* **ed25519** (`node:crypto`, no new dependency): asymmetric, so a public key can be handed to a third
+  party for verification without giving them the ability to sign a new ledger. The signature lives in the
+  seal (`sig{alg, keyId, value}`) and the key fingerprint is also written into `run.end` (`sigKey`).
+* **Key file** `<home>/ledger-key.json`, mode `600`, atomic write — never in `config.json`, never in
+  `credentials.json`, never in the repository (the credential store is rewritten wholesale by
+  `key remove` / `key import`, which would silently destroy the signing key).
+* **On by default.** A new ledger generates a key on its first seal if none exists, then signs
+  (`src/ledger.js:generateLedgerKey` / `ensureLedgerKey`). Optional signing is treated as no signing.
+* `verify` has **four** outcomes (`src/commands/ledger.js:153-190`):
+
+  | Outcome | Meaning | Exit code |
+  | --- | --- | --- |
+  | Chain + seal intact, signature **valid** | Written by the holder of that key; content and seal unchanged since signing | `0` |
+  | Chain + seal intact, **no signature** | A ledger written before signing was enabled, or the signature evidence was stripped (these two cannot be distinguished by this check) | `0` |
+  | Chain + seal intact, signature **invalid** | Content rewritten and the chain recomputed, or signed by a different key (including "this ledger came from another machine") | non-zero |
+  | Chain + seal intact, **unverifiable** | No matching public key on this machine / in `--key` — "cannot confirm the source" is **not** a pass | non-zero |
+
+* **Honest boundary**: the private key and the ledger live on the same machine with the same permissions,
+  so this layer does not defend against a local attacker who can already rewrite the ledger; there is no
+  trusted timestamp; and if the key is lost or replaced, old ledgers can only report "signed by another
+  key". It is provenance, not audit-grade non-repudiation.
+
 ### Session journal
 
 At the end of each session a one-line entry (first user message + result summary) is appended to
@@ -728,17 +779,164 @@ Long sessions that would silently drop early messages get those messages summari
 { "timeout": { "firstTokenMs": 600000, "streamIdleMs": 120000, "totalMs": 1800000 } }
 ```
 
-The local-endpoint pre-flight also reads the **engine's own context size** (`GET /props`, e.g. llama.cpp's
-`default_generation_settings.n_ctx`) and prints it next to the configured `contextWindow`; when the
-configuration exceeds the engine, the kernel warns that long contexts will be rejected by the engine
-outright (switching presets or lowering `contextBudget` cannot change the engine's `n_ctx`). If the field
-cannot be read, the pre-flight says so instead of guessing.
+All three are **per request** (one `provider.chat` call), but they do not measure the same thing
+(`src/providers/index.js:461-466`, `:477-534`):
 
-Local endpoints are **serialized per `baseUrl`** (parent turn, sub-agents and pre-flight probes share one
-queue): `localConcurrency` defaults to `1` (`0` opts out) and `localQueueTimeoutMs` defaults to `1800000`
-(30 min, after which the queued request fails with a visible `LOCAL_QUEUE_TIMEOUT`). Cloud endpoints are
-not affected. Upstream wording such as `engine shed its caches and stays up` / `allocator wall` means the
-engine **did not crash** — compact context and reduce concurrency instead of restarting it.
+| Field | What it measures | Reset / cleared by | On expiry |
+| --- | --- | --- | --- |
+| `firstTokenMs` | Wait for the **first stream frame** of an attempt | The first frame of that attempt | Abort ("first token timed out"); retryable only if no frame had arrived |
+| `streamIdleMs` | Gap between frames **after** the first one | Every new frame | Abort ("stream idle"); **not** retried, because bytes already arrived |
+| `totalMs` | The **entire request**, from before the retry loop | — (one timer per request) | Abort ("total request time exceeded (no more retries)"); no further attempt |
+
+* `totalMs` deliberately sits **outside** the retry loop, so it covers the local-endpoint queue wait,
+  every backoff sleep and all attempts together. (Before v0.4.5 each attempt got its own timer, so the
+  worst case was `retries + 1` × `totalMs`.)
+* Transient failures (HTTP 429, 500-504, network timeouts) are retried up to **2** extra times with
+  backoff 1 s / 2 s, capped at 30 s and raised to `Retry-After` when present. Two things are never
+  retried: a request that has already produced **any** frame (the POST is non-idempotent — a retry bills
+  a second completion) and `LOCAL_QUEUE_TIMEOUT` (retrying only queues again). A `totalMs` expiry also
+  ends the sequence immediately.
+* An explicit `timeout.*` value always beats pre-flight adaptation. For a local WebUI turn with probe
+  data and **no** explicit value, `adaptiveTimeouts()` derives
+  `firstTokenMs = clamp(max(TTFT × 20, reference-prefill × 5), local 600 s / remote 300 s, 1800 s)` and a
+  no-progress watchdog of 10–60 min (`src/model-discovery.js:753-800`).
+
+### Turn-level no-progress watchdog (`noProgressTimeoutMs`)
+
+```json
+{ "noProgressTimeoutMs": 3600000 }
+```
+
+The three timeouts above are per **request**; a turn can issue `maxRounds × stepLimit` requests, and each
+`task` sub-agent gets its own budget. A turn that keeps returning "something" but produces nothing can
+therefore run for hours without tripping any request-level timer. This watchdog is the turn-level
+counterpart (`src/agent.js:DEFAULT_NO_PROGRESS_TIMEOUT_MS`, `resolveNoProgressTimeoutMs`):
+
+* **Only real progress renews it**: a **successful and non-duplicate** tool result, or new text/reasoning
+  from the model. A repeated call (identical name + arguments), a failed call, and a model round that
+  returns neither text nor reasoning are all **not** progress (`src/agent.js:markProgress`,
+  `finishTool`) — that is exactly the "hundreds of calls, zero delivery" failure mode this catches.
+* **Default `3600000` ms (60 min)** = 2× the local single-request cap. A slow prefill is therefore always
+  reported by the more specific request-level timeout first; the watchdog only catches the "every request
+  returns on time, the whole turn produces nothing" shape.
+* **It cannot be disabled.** `0`, negative values, `NaN` and `Infinity` are all rejected and fall back to
+  the default (`src/agent.js:resolveNoProgressTimeoutMs`). In the local WebUI path a probe-derived
+  10–60 min value may be used when the configured value is not a positive number; an explicit positive
+  value always wins.
+* **Sub-agents inherit it, with a live deadline.** A `task` sub-agent reads the parent's
+  `lastProgressAt + noProgressMs` each time it arms the timer, so a genuinely working sub-agent keeps the
+  whole tree alive; the deadline only moves forward (`src/agent.js:inheritedDeadlineAt`). A sub-agent's
+  real progress also renews the parent turn, so "waiting on a busy sub-agent" is not mistaken for
+  "stalled".
+* When the parent is waiting on a `task` call it grants a **15 s** grace (`SUBAGENT_WAIT_GRACE_MS`) so the
+  sub-agent's **own** watchdog fires first and its verdict travels back, instead of the parent cutting in
+  with a generic "parent aborted".
+* The ending is reported as **`stalled`** (distinct from `capped` — step limit reached, resumable — and
+  `aborted` — you pressed stop), with the cause ("own" vs "inherited") in a warning banner and `done.note`.
+
+### Local-endpoint pre-flight (probe)
+
+Before a turn against a **local** endpoint (loopback/private `baseUrl`, or a model marked
+`customModels.<name>.local: true`), the WebUI server runs a lightweight, read-only probe and caches the
+verdict (`src/model-discovery.js:38`, `:73`, `:281-300`).
+
+* **Cache**: a successful verdict is reused for **10 minutes**; a **failure verdict only for 60 seconds**.
+  The short failure TTL is intentional: "engine not up yet / still loading" is a transient state, and a
+  stale "unreachable" replayed for hours was the real-world false alarm this fixes. An in-flight probe is
+  shared, not duplicated.
+* **Traffic**: only `POST {base}/chat/completions` (the same URL as the real request) — no `GET /models`.
+  It sends **3** tiny requests (one user message + one tool declaration, `max_tokens: 256`, streaming),
+  then one ~2000-token **reference prefill** request and compares against the local history baseline.
+  Each tool sample is capped at **1.5 s** with 300/700 ms backoff; the reference prefill may wait up to
+  20 s, but everything is bounded by the probe's overall budget — **15 s** in the WebUI
+  (`src/model-discovery.js:64-71`, `:405-455`, `:568-600`).
+* **Never blocks the turn**: any probe failure is swallowed and logged; the verdict only drives banners,
+  logs and adaptive timeouts. It cannot stop a request from being sent.
+* **Tool support** is reported as stable (`N/N`), unstable (`N/3`), unsupported (`0/N`) or inconclusive
+  (samples truncated by `max_tokens`, which is **not** the same as "does not support tools").
+
+**Failure reasons** — the classifier drives both the log line and the wording
+(`src/model-discovery.js:99-149`, `:487-512`):
+
+| `reason` | Criterion | What it means for you |
+| --- | --- | --- |
+| `refused` | `ECONNREFUSED` | The classic "engine is not up / wrong port" case |
+| `reset` | Connection reset / socket hang-up | The engine is reachable but dropped the connection (crash or restart in progress) |
+| `timeout` | No first frame within 1.5 s | Port is open; the engine is prefilling or still starting — not proof the real request will fail |
+| `http-unimplemented` | HTTP 404 / 405 / 501 | The endpoint does not implement the probe URL (same URL as the real request) |
+| `http-auth` | HTTP 401 / 403 | Endpoint and port are fine — check the API key |
+| `http` | Any other non-2xx | The endpoint rejected the request; go by the status code |
+| `other` | Other network errors | Investigate the error code; do not read it as "engine not up" |
+| `inconclusive` | Responses arrived, no usable tool sample | Samples were truncated (thinking models); do not conclude "no tool calling" |
+
+**Log lines** (the messages themselves are Chinese):
+
+* probe-time line: `预检 <model> <state> reason=<reason> ttft=… prefill2000=… tools=… 引擎自述上下文=… 配置=…`;
+* per-turn line: `chat 预检 <taskId> <state> reason=<reason> <note>`;
+* **recheck line**: if the probe said `unreachable` but this turn really received a first frame, the server
+  writes `chat 预检复核 <taskId> 预检曾判不可达（reason=…），但本回合实际可用（首帧 Xs）——预检判据需复核`
+  (`src/web/server.js:logProbeRecheck`). Seeing it means "question the probe verdict", **not** "restart the
+  engine"; it is written once per turn and only when a first frame actually arrived.
+
+**Engine context vs configured window (local only).** After the chat probe, if the endpoint reported a
+model name, the probe also reads `GET /props` (first with a `/v\d+` suffix stripped, then the raw
+`baseUrl`). It accepts `default_generation_settings.n_ctx`, `n_ctx`, `n_ctx_train`, `max_model_len`,
+`context_length` and `model_info.*.context_length` — a positive integer, otherwise "not read" (no
+guessing). The result is printed next to the configured `contextWindow`
+(`src/model-discovery.js:514-545`, `:822-870`):
+
+* configured **≤** engine → stated as consistent;
+* configured **>** engine → warning banner: the engine will reject long contexts outright, and switching
+  presets / lowering `contextBudget` / raising `timeout.*` cannot change the engine's `n_ctx`. Either
+  raise the engine's window (llama.cpp `--ctx-size` / `--context-window`) or set
+  `customModels.<name>.contextWindow` ≤ the engine value;
+* not read / skipped (no `/props`, no `n_ctx`, non-local, or no self-reported model name) → says so
+  instead of pretending the check happened.
+
+### Local-endpoint serialization (`localConcurrency`, `localQueueTimeoutMs`)
+
+Concurrent large prefills from a parent turn and a sub-agent are the main cause of local-engine
+"insufficient memory … during prefill" failures (each needs its own KV cache). The kernel therefore
+**serializes in-flight requests to the same local `baseUrl`** through a process-wide Promise queue
+(`src/providers/index.js:176-233`).
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `localConcurrency` | `1` | Max in-flight requests per local `baseUrl`. `0` explicitly opts out (no queue); a positive value is capped at **16**; invalid/negative values fall back to `1` |
+| `localQueueTimeoutMs` | `1800000` (30 min) | Max time a request may wait in the queue. Expiry fails with a visible `LOCAL_QUEUE_TIMEOUT` (never retried, never waits forever). `0`/negative/invalid fall back to the default — they do **not** mean "wait forever"; the value is capped at 24 h |
+
+```json
+{ "localConcurrency": 1, "localQueueTimeoutMs": 1800000 }
+```
+
+* **Coverage**: the parent turn, `task` sub-agents and the endpoint pre-flight all pass the same gate
+  (the pre-flight additionally caps its queue wait to the remaining probe budget). Slots are handed
+  directly to the next waiter on release, and released in `finally` on success, failure, timeout and
+  interrupt — no busy-waiting.
+* **Cloud endpoints are unaffected**: a non-local `baseUrl` returns immediately — no queue, no log line,
+  no added latency.
+* **The first-token clock starts after the slot is acquired.** Queueing is kernel scheduling, not "the
+  engine is slow to produce a first frame"; the wait is still counted by `totalMs`.
+* **Queue timeout** carries `code: "LOCAL_QUEUE_TIMEOUT"` and a message such as
+  `本地端点排队超时（等待 1800.0s，仍有 1 个在途请求，并发上限 1）：…`. It is not retried, because a retry
+  would simply queue again.
+* **Visibility**: entering the queue writes `本地端点串行化：等待 N 个在途请求（端点，并发上限 1）`
+  (`web-server.log` in the WebUI, stderr in the CLI); the status line shows that the endpoint is
+  serialized, and the pre-send forecast adds a stronger warning when a request is already in flight.
+
+The gate keys on the **`baseUrl` itself** (loopback / private address / a hostname that resolves to a
+private address). `customModels.<name>.local: true` affects capability defaults, compaction and whether
+the WebUI runs the pre-flight, but it does **not** put a publicly routed reverse-proxy URL into this
+queue — for such a deployment set `timeout.*` explicitly and reduce parallelism yourself.
+
+Troubleshooting a local engine under memory pressure:
+
+| Symptom | Signal | What to do |
+| --- | --- | --- |
+| Requests are slower, one at a time | `本地端点串行化：等待 N 个在途请求` in `web-server.log` | Working as intended; the queue is protecting the engine |
+| `LOCAL_QUEUE_TIMEOUT` | Queue wait exceeded `localQueueTimeoutMs` | Raise `localQueueTimeoutMs` (or `localConcurrency` within engine memory) and reduce sub-agents / parallel sessions |
+| Still `insufficient memory … during prefill` | A single request already exceeds engine memory | Lower `contextBudget`, and keep `customModels.<name>.contextWindow` ≤ the engine's self-reported `n_ctx` |
+| `engine shed its caches and stays up` / `allocator wall` | The engine **did not crash**; it dropped caches and kept serving | Do **not** restart it — compact context, reduce concurrency, retry after it recovers |
 
 Other guard fields: `maxEmptyRounds` (max consecutive empty/truncated output rounds before stopping,
 default **3** — each empty round is billed as a full completion), `maxRounds` (auto-continuation rounds
@@ -821,6 +1019,8 @@ tampered Packs are refused and flagged).
 | `MINGDAO_WEB_TOKEN` | `mingdao web` | WebUI access token (below `--auth-token`, above `web.token`) |
 | `MINGDAO_NO_WEB_AUTOSTART` | REPL | Do not auto-start the WebUI even if `web.autoStart` is true |
 | `MINGDAO_ASK_TIMEOUT_MS` | WebUI | Permission-prompt wait limit (default 120 000 ms) |
+| `MINGDAO_REQUIRE_UPDATE_SIGNATURE` | packaged desktop app | `1` = reject an update package that lacks a valid source signature. Default is `warn-and-install` (install, but state that the signature was not verified) because the release pipeline does not sign builds yet; a present-but-invalid signature is always rejected (`desktop/update-verify.js:74`, `:189-195`) |
+| `MINGDAO_UPDATE_PUBKEY_PEM` + `MINGDAO_UPDATE_ALLOW_PUBKEY_OVERRIDE` | packaged desktop app (**development/testing only**) | Both must be set for the override to apply; replaces the pinned ed25519 public key used to verify update packages. Never set this in a release build |
 | `MINGDAO_DEBUG` | CLI | Print stack traces / extra warnings on failures |
 | `MINGDAO_REGISTRY_URL` | skill registry | Point at a self-hosted `index.json` (HTTPS, or HTTP only on loopback) |
 | `MINGDAO_NO_DAEMON` | `mingdao schedule` | `1` disables the scheduler daemon and uses the per-task sleeper fallback |
@@ -864,10 +1064,12 @@ feature is inactive until configured.
 | `maxRounds` | number | `3` | Auto-continuation rounds after the step limit |
 | `maxAgentsMdChars` | number | `4000` | Cap on injected `AGENTS.md` characters; `0` disables injection |
 | `schemaTier` | boolean | `true` | `false` disables tiered tool-schema injection |
-| `timeout.firstTokenMs` | number | local `600000`, remote `300000` | First-token wait |
-| `timeout.streamIdleMs` | number | `120000` | Stream idle timeout |
-| `timeout.totalMs` | number | local `1800000`, remote `600000` | Total request timeout |
-| `noProgressTimeoutMs` | number | `3600000` | Turn-level no-progress watchdog (2× the local single-request cap; `0`/negative/`Infinity` fall back to the default). A `task` sub-agent's real progress counts as the parent turn's progress, a stalled sub-agent is stopped by **its own** watchdog first so the reason travels back, and the ending is reported as `stalled` (distinct from `capped`/`aborted`) via a warning banner plus `done.note` |
+| `timeout.firstTokenMs` | number | local `600000`, remote `300000` | Per-attempt wait for the first frame; the clock starts **after** the local queue slot is acquired |
+| `timeout.streamIdleMs` | number | `120000` | Max gap between frames after the first one; reset by every frame |
+| `timeout.totalMs` | number | local `1800000`, remote `600000` | Whole request, **including** local queue wait, retry backoff and every attempt; expiry is not retried |
+| `localConcurrency` | number | `1` | Max in-flight requests per local `baseUrl`. `0` disables serialization; positive values capped at 16; invalid/negative → `1` |
+| `localQueueTimeoutMs` | number | `1800000` | Max queue wait before `LOCAL_QUEUE_TIMEOUT` (not retried). `0`/negative/invalid → default (not "forever"); capped at 24 h |
+| `noProgressTimeoutMs` | number | `3600000` | Turn-level no-progress watchdog (2× the local single-request cap). Only a successful **non-duplicate** tool result or new text/reasoning counts as progress; repeated/failed calls and empty model rounds do not. Cannot be disabled (`0`/negative/`NaN`/`Infinity` fall back to the default); a sub-agent inherits a **live** deadline that moves forward with real progress, and a stalled turn ends as `stalled` (distinct from `capped`/`aborted`) via a warning banner plus `done.note` |
 | `audit` | boolean | `true` | Tool-call audit log |
 | `ledger` | boolean | `true` | Per-turn execution ledger |
 | `notify` | boolean | `true` | Desktop notifications when background tasks finish |
@@ -907,7 +1109,7 @@ feature is inactive until configured.
 | `customModels.<name>.contextWindow` | number | local `32768` / remote `128000` | Real context window |
 | `customModels.<name>.maxOutputTokens` | number | preset or `min(8192, window/8)` | Output cap |
 | `customModels.<name>.maxOutputCeiling` | number | preset | Hard ceiling for an explicitly configured output size |
-| `customModels.<name>.local` / `.isLocal` | boolean | inferred from `baseUrl` | Force local-model treatment (compaction, serialization, timeouts) |
+| `customModels.<name>.local` / `.isLocal` | boolean | inferred from `baseUrl` | Force the local capability defaults (32 k window fallback, output cap, compaction ratio) and whether the WebUI pre-flights the endpoint. The serialization gate and per-request timeout defaults still key on `baseUrl` itself — a publicly routed reverse proxy is **not** queued |
 | `mcpServers.<name>` | object | — | `{command, args, env, trusted}`; only `trusted: true` servers have their `readOnlyHint` believed |
 | `hooks.PreToolUse` | array | — | `[{matcher, cmd}]`; empty output allows, JSON `{"decision":"block"}` blocks, unparsable output blocks fail-closed |
 | `hooks.PostToolUse` | array | — | `[{matcher, cmd}]`; observation only, never blocks |

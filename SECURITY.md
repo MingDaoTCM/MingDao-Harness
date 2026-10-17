@@ -11,7 +11,7 @@ Security fixes are provided for the **latest minor release only**.
 
 | Version | Supported |
 | --- | --- |
-| **0.6.x** (current: **0.6.8**) | Yes |
+| **0.6.x** (current: **0.6.14**) | Yes |
 | 0.5.x and older | No |
 
 Upgrade with `npm i -g mingdao-harness@latest` (npm installs), or `mingdao update` / `mingdao rollback`
@@ -48,7 +48,8 @@ Please do not open a public issue for an unfixed vulnerability. Credit is offere
 - `src/permissions.js` — the permission decision engine: `allow` / `deny` / `denyStrict` matching and
   the `readonly` / `ask` / `auto` modes.
 - `desktop/**` — the Electron shell: window navigation and `openExternal` handling, the contextBridge
-  preload surface, IPC handlers.
+  preload surface, IPC handlers, and update-package signature verification (a bypass of the pinned key or
+  of the fail-closed policy is in scope).
 
 Reports that affect anything else in `src/` are welcome too; the list above is where the trust
 boundaries live.
@@ -90,14 +91,18 @@ boundaries live.
 5. **Treat Packs as untrusted code.** Run `mingdao pack verify <dir>` (static; `--runtime` executes the
    Pack) and read `pack.mjs` before `mingdao pack trust`; never trust a freshly cloned repository you
    have not reviewed.
-6. **Enable the audit trail and the ledger.** Keep `config.audit` on, review `mingdao audit`
-   periodically, and run `mingdao ledger verify` on turns you care about. For unattended jobs, prefer
+6. **Enable the audit trail and the ledger, and keep the signing key.** Keep `config.audit` on,
+   review `mingdao audit` periodically, and run `mingdao ledger verify` on turns you care about; a new
+   ledger is signed automatically with `<home>/ledger-key.json` (mode 600). Back that file up: replacing
+   it turns every previously signed ledger into "signed by another key". For unattended jobs, prefer
    `readonly` or `denyStrict` over `auto`.
 7. **Sandbox shell execution where you can.** On Linux with `bubblewrap` installed, set
    `config.sandbox` to `readonly` or `safe` (no network). Elsewhere the sandbox downgrades to `off` and
    says so — compensate with OS-level isolation or a container.
 8. **Run the desktop build only from a source you trust** and verify the checksum published on the
-   Release page; current desktop builds are unsigned (see below).
+   Release page; current desktop builds are unsigned. If you require update provenance, set
+   `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1` so an update package without a valid signature is **rejected**
+   (the default is to install but explicitly report that the signature was not verified).
 
 ## Known boundaries
 
@@ -114,15 +119,23 @@ price them in.
 2. **Packs have no isolation.** `pack.mjs` runs in the host process with full Node privileges, and
    `manifest.permissions` is not enforced by the kernel. Capability brokering or subprocess isolation
    for Packs requires an architectural change and is not implemented.
-3. **Electron code signing and update-package signature verification are not done.** Current builds
-   are unsigned (see [`docs/CODE-SIGNING.md`](docs/CODE-SIGNING.md), which describes the steps to sign);
-   the auto-updater does not verify a signature on the downloaded update package beyond the transport.
+3. **Electron code signing / notarization is still not done.** Current builds are unsigned (see
+   [`docs/CODE-SIGNING.md`](docs/CODE-SIGNING.md), which describes the steps to sign). Update-package
+   **source-signature verification is implemented** (`desktop/update-verify.js`: ed25519 over the
+   installer bytes, public key pinned in the source; a present-but-invalid signature is always rejected),
+   but the release pipeline does not sign builds yet. Consequently the default policy is
+   `warn-and-install` (install, and state that the signature was not verified); set
+   `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1` to make unsigned updates fail closed.
 4. **IDE plugin token storage needs hardening.** The VS Code and JetBrains plugins drive the local
    WebUI over loopback; the broader item (secure token storage, and distinguishing HTTP 401 from
    "server unreachable") is registered as open work.
-5. **Ledger events are tamper-evident but not signed.** The hash chain plus the `run.end` seal detect
-   modification and truncation after the fact, but there is no trusted timestamp and optional signing
-   (`--sign-key`) is not implemented — so the ledger is not audit-grade non-repudiation, and
-   `mingdao ledger verify` says exactly that in its own output.
+5. **Ledger provenance has the same limits as the machine it runs on.** The hash chain plus the
+   `run.end` seal detect modification and truncation after the fact, and since v0.6.11 the seal also
+   carries an **ed25519 source signature** (auto-generated key at `<home>/ledger-key.json`, mode 600;
+   `mingdao ledger --sign-key` to inspect/rotate; `verify` reports valid / unsigned / invalid /
+   unverifiable, with "unverifiable" also failing). The boundary: the private key and the ledger share
+   the same machine and permissions, so this does not defend against a local attacker who can already
+   rewrite the ledger; there is no trusted timestamp; and replacing the key makes old ledgers report
+   "signed by another key". It is provenance, not audit-grade non-repudiation.
 
 We do not claim this project is vulnerability-free, and this document is not a marketing statement.
