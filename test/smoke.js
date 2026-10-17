@@ -15533,7 +15533,12 @@ process.exit(0);
                   // 「首帧日志」与「等工具 bash」两个观测量都能取到。
                   content: '先跑个命令：',
                   tool_calls: [
-                    { index: 0, id: `call145_${seq145}`, type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: 'node -e "setTimeout(()=>{},11000)"' }) } },
+                    // 慢命令必须**可移植**：此前用 `node -e "setTimeout(...)"`，
+                    //   · Linux 的 `bash -lc` 会重读 login profile，CI 的 toolcache PATH 可能被覆盖 → node 找不到，14ms 就返回；
+                    //   · Windows 走 `cmd.exe /d /s /c`，嵌套双引号被 cmd 吃掉 → node 立即报错。
+                    // 两种都让「11 秒回合」退化成 14ms/107ms，进度断言失去取样点（CI ubuntu-18 与 windows 红）。
+                    // 改用各平台自带的等待命令：Unix `sleep`、Windows `ping -n`（约 11s），不依赖 PATH 里的 node。
+                    { index: 0, id: `call145_${seq145}`, type: 'function', function: { name: 'bash', arguments: JSON.stringify({ command: process.platform === 'win32' ? 'ping -n 12 127.0.0.1 >nul' : 'sleep 11' }) } },
                   ],
                 },
                 finish_reason: 'tool_calls',
