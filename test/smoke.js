@@ -12299,7 +12299,20 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
   const spawnCalls134 = [];
   let startOnSpawn134 = null;
   const origLoad134 = Module134._load;
-  const realSpawn134 = cp134.spawn;
+  // v0.6.15 修复（CI ubuntu-18/windows 的 §145 假红根因）：**不再改全局 cp134.spawn**。
+  // 此前把全局 spawn 换成桩、等 IDE 扩展 require('child_process') 时取到它；但同进程里
+  // ESM 导入的 bash 工具（src/tools/bash.js）在 Node 18 上会拿到这个桩 child（只有 kill、
+  // 没有 stdout）→ runBash 抛 "Cannot read properties of undefined (reading 'on')"，
+  // §145 的「11 秒 bash 回合」退化成 15ms，进度断言没有取样点。
+  // 现在只经 Module._load 把桩**注入给被加载的扩展**（见 loadExt134），全局 spawn 保持原样。
+  const fakeSpawn134 = (/** @type {string} */ bin, /** @type {string[]} */ args, /** @type {any} */ opts) => {
+    spawnCalls134.push({ bin, args, opts });
+    const child = new EventEmitter134();
+    // @ts-ignore 只实现扩展用到的那几个成员
+    child.kill = () => {};
+    if (startOnSpawn134) startOnSpawn134();
+    return child;
+  };
   let currentStub134 = null;
   const makeHost134 = (/** @type {{user?: any, workspace?: any}} */ opts) => {
     const calls = { sendText: [], messages: [], commands: /** @type {any} */ ({}), openExternal: [], updated: [] };
@@ -12379,6 +12392,9 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
     if (require134.cache) delete require134.cache[extPath134];
     Module134._load = function (/** @type {any} */ request) {
       if (request === 'vscode') return currentStub134;
+      // 扩展在模块顶层 `const { spawn } = require('child_process')`：只给它注入桩 spawn，
+      // 不动全局模块对象（否则会波及同进程的 bash 工具，见 fakeSpawn134 的说明）。
+      if (request === 'child_process' || request === 'node:child_process') return { ...cp134, spawn: fakeSpawn134 };
       return origLoad134.apply(this, arguments);
     };
     try {
@@ -12396,14 +12412,6 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
     return cond();
   };
 
-  cp134.spawn = (/** @type {string} */ bin, /** @type {string[]} */ args, /** @type {any} */ opts) => {
-    spawnCalls134.push({ bin, args, opts });
-    const child = new EventEmitter134();
-    // @ts-ignore 只实现扩展用到的那几个成员
-    child.kill = () => {};
-    if (startOnSpawn134) startOnSpawn134();
-    return child;
-  };
   const servers134 = [];
   try {
     // ② 迁移：用户级旧令牌 → SecretStorage 并清空设置；**工作区级旧令牌绝不迁移**（那是仓库写的）
@@ -12609,7 +12617,6 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
     }
     ok('v0.6.11 IDE 令牌：SecretStorage/PasswordSafe + 工作区级旧令牌一律忽略 + 三态（200/401/403/拒连/超时/5xx）+ 401 不启动第二个服务 + 端口注入收口 + 旧「只认 200」判据清零');
   } finally {
-    cp134.spawn = realSpawn134;
     Module134._load = origLoad134;
     for (const s of servers134) {
       try {
