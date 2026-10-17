@@ -3,6 +3,99 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.15（2026-10-17）— 变异框架 fail-safe + 本地端点并发串行化 + 工具参数解析纯函数（含空值回填修复）
+
+> 补丁版，三件事分别来自**两次真实事故**与两轮已登记的审计债：① 变异在飞被扫描误报成"残留"、
+> 进程被强杀后补丁留在工作树（曾差点把"停止键失效"发进版本）→ 变异框架补 fail-safe（§3.61）；
+> ② v0.6.14 真机上本地引擎在长任务中途报内存不足 → 同一 baseUrl 串行化、并区分"引擎活着丢缓存"（§3.59/§3.60）；
+> ③ P1-1 前置门的第四刀：工具参数解析抽成纯函数，并修掉顶层空值被回填成字面量 `"undefined"`/`"null"`（§3.62）。
+> 逐条根因与取舍见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` §3.60–§3.62。
+> 变异验证 **23 批 271 条全中**（数字由 `scripts/doc-lint.mjs` ⑥ 守卫）。
+
+### 一、变异框架 fail-safe：残留标记 + 互斥锁 + 开跑前字节级自愈（§3.61）
+
+两次真实事故：① 变异**在飞**时被扫描误报成"残留"；② 进程被**强杀**后补丁留在工作树，
+看起来像"有意改动"（曾差点把"停止键失效"发进版本）。
+
+- **持久残留标记**：`mutate()` 写补丁前先落 `test/mutate/.generated/pending/<hash>.json`
+  （`file` / `from` / `to` / `pid` / 时间戳 + **原始字节** + 补丁全文），还原后删除；
+  **原子写**，强杀不留半截 JSON。
+- **开跑前自检 `check.mjs`**：文件仍等于 patched → **按原始字节自动还原**（含 CRLF）；
+  文件被第三方改过 / 标记里的 pid 还活着（**在飞**）→ **拒绝运行并列清单**，绝不误碰。
+- **互斥锁** `.generated/mutate.lock`（pid + 启动时间）：第二个 mutator 被告知"已有 mutator 在跑"；
+  陈旧锁自动清理；`run.mjs` 全程持锁、批次子进程继承；`exit`/`SIGINT`/`SIGTERM` 清锁并**还原在途补丁**。
+- **强杀可感知**：`run.mjs` 启动时与**每批之间**自检；脏工作树（`src/**`、`test/**`）默认拒绝，
+  `--allow-dirty` 放行。stdout/journal 落「变异进行中：<file>」/「已还原：<file>」——**在飞与残留可区分**。
+- 新增 `test/mutate/selfcheck.mjs` **8/8**：干净启动 / 残留自愈 / 冲突拒绝 + 在飞不误治 / 活锁 /
+  脏树 / SIGTERM（143 还原）/ **SIGKILL（标记 + 陈旧锁留下 → 下次 check 自愈）**。
+  文档：新增 `test/mutate/FAILSAFE.md`，`docs/CONFIG.md` 加指路。
+
+### 二、本地端点并发与内存：同一 baseUrl 串行化 + "引擎活着丢缓存"独立分型（§3.60，§3.59 收口）
+
+复现：v0.6.14 真机 8081 qwen 长任务中途被引擎拒绝（`insufficient memory` / `allocator wall` /
+`engine shed its caches and stays up`）；同错在 60091 的 35B 上也出现 → 不是模型问题，是**本机内存压力**；
+该回合此前有子代理在跑（13 轮 / 17 次调用）→ **父回合 + 子代理同时向同一本地引擎发大 prefill** 是主要来源。
+
+- **进程级 `acquireLocalSlot` 串行化**（`src/providers/index.js`）：默认 `localConcurrency=1`，
+  `0` 关闭、上限 **16**；`localQueueTimeoutMs` 默认 **30 分钟**，排队超时报 `LOCAL_QUEUE_TIMEOUT`
+  （**可见错误、不重试**）。覆盖**父回合 / 子代理 / 预检**（`model-discovery.js` 的 `open()` 同过闸门）；
+  **云端 baseUrl 直接放行**。
+- **计时口径**：首帧计时在**取得名额后**起算；**总时长含排队**且可中断（Ctrl-C 排队中也能停）。
+- **四处可见"已串行化（防内存压力）"**：入队日志、进度行、界面状态条、发送前预告。
+- **错误分型**：`describeUpstreamError` 新增 `shed-caches` 独立分支——明确"**引擎未崩溃、不要重启**"；
+  `agent` 的 507 早退排除该措辞。`prefillForecast` 在本地端点已有在途请求时给**并发强警告**
+  （"并发会加剧内存压力 / 已串行化 / 减少子代理"）。
+- 文档：`docs/CONFIG.md` 新增「本地模型：并发与内存」；`docs/CONFIG.en.md` 同步。
+- 回归：`test/smoke.js` §142（真桩实测最大并发=1、云端并发=2、排队超时可见、预检串行化、
+  shed-caches 分型、并发预告强警告、配置/进度行/结构守卫）；`batch31-localconcurrency.mjs` **8 条全中**。
+
+### 三、P1-1 第四刀：`parseToolArgs` 抽成纯函数 + 顶层空值回填修复（§3.62）
+
+第三刀刻意否决了整个前置门（hooks → 白名单 → 权限 → 约束确认的顺序与短路、账本 `toolCall`
+内容依赖门的结果）；本刀只取门前最前端、**零 await 零副作用**的一步。
+
+- `src/tools-flow.js` 新增 `export parseToolArgs(raw)`，**行为清单 8 条**（原表达式逐条对照钉在 §143）：
+  假值 raw（`undefined`/`null`/`''`/`0`/`false`/`NaN`）→ `{}`；合法 JSON 对象 → 原样；
+  合法但非对象（`'null'`/`'[]'`/`'42'`/`'"s"'`/`'true'`）→ `{}`；空白串 / 非法 JSON → 三段文案逐字一致；
+  **不做前后缀宽容**（代码围栏、多余尾巴都失败）；**不做长度上限**；非字符串走 `JSON.parse` 的隐式 ToString。
+- `src/agent.js` 不再内联 `JSON.parse` / `|| '{}'` / 非对象归一化与三段文案，改为调用；
+  三条副作用（`renderToolDenied` / 审计 / `messages.push` 分块指引）按原顺序保留。
+- **空值回填修复**：`serializeToolResult(undefined)` 此前经 `clampText` 的 `String()` 变成字面量
+  `"undefined"`（顶层 `null` 则是 `"null"`），模型会把它们当成工具输出。现在顶层
+  `undefined`/`null`/**函数**/**符号**统一回填**空串**；**嵌套 null 与字符串 `"null"` 保留**。
+- 回归：`test/smoke.js` §143（21 个输入与抽取前表达式逐条对照、三段文案逐字、超长不设闸门、
+  空值回填、三条端到端、单源结构守卫）；`batch32-toolargs.mjs` **10 条全中**；`batch22` 锚点随新实现同步。
+- 变异总数 **219 → 271**（`batch31` 8 条 + `batch32` 10 条 + `batch34` 7 条 + 并行道 `batch33` 27 条），README 与 `doc-lint` ⑥ 同一提交一致。
+
+### 四、同批确认（核对结论，不重复计入）
+
+- `docs/DESKTOP-AUTO-UPDATE.md`、`test/mutate/FAILSAFE.md` 等文档**已在库内**；
+- 前置门整体仍未抽（`prepTool` 里的顺序/短路仍是原样）——本版只切了 `parseToolArgs`，见发布说明「已知边界」。
+
+### 五、同批并入的并行道（§3.63 / §3.64 / §3.65）
+
+- **账本 `run.start.permissionSource`（§3.64）**：把"生效的权限值"与"这个值是谁定的"分开记——
+  `explicit`（用户显式选择）/ `preset`（预设声明的 permission 生效）/ `config` / `cli` / `default`；
+  **非法或缺失一律 `null`**（来源未知，不猜成 `config`）。`LEDGER_VERSION` 仍为 1，旧账本照常校验，
+  `ledger show` 只在字段存在时多一行（输出契约不变）。
+- 回归：新增独立套件 `test/ledger-source.js`（7 组，已接 `run-all` 与 CI 的 Linux 腿）、
+  `batch34-ledger-source.mjs` **7 条全中**。边界：`worker.js` / `schedule.js` / `repl.js` 不在本轮
+  改动清单，**后台任务与 REPL 内 `/preset` 切换的来源暂为 `null`**（来源未知）。
+- **英文文档同步（§3.65）**：`README.en.md` / `SECURITY.md` / `docs/CONFIG.en.md` 与中文文档、代码对齐
+  （本地串行化、无进展看门狗、端点预检、账本签名）。
+- **M-8 源码守卫收口（§3.63）**：`src/web/server.js` 的全部 **43 处**单行源码文本守卫**整簇处理**
+  （25 处改为行为化断言，真起 Web 服务 + 桩 provider 从 SSE/日志取证；18 处加固为行尾归一化并标注
+  "文本绊线，不是行为证明"）。新增 `batch33-guards2.mjs` **27 条全中**，并修掉一处
+  「守卫被同文件另一处字面量满足」的假绿（§141 的 `reason=` 被引擎探针日志行顶替）。
+- **测试可移植性修复（两处）**：① `test/smoke.js` §145 的 11 秒慢命令改为平台自带等待
+  （Unix `sleep 11` / Windows `ping -n 12`）——原命令 `node -e "…"` 在 `bash -lc` 下可能丢 toolcache PATH、
+  在 `cmd.exe /d /s /c` 下嵌套引号被吃掉；② §134 不再改**全局** `child_process.spawn`，改为经
+  `Module._load` 只把桩 spawn 注入给被加载的 IDE 扩展——Node 18 下同进程 ESM 导入的 bash 工具
+  （`src/tools/bash.js`）会拿到桩 child（只有 `kill`、没有 `stdout`），把 §145 的 11 秒回合打成 **15ms**，
+  这就是 CI ubuntu-18 与 windows 上「本用例需要跨过 5s 心跳」假红的真正根因。
+- **UI 设计提案 v1（§3.66，仅文档）**：`docs/DESIGN-UI-v1.md` + `docs/design/ui-preview.html`，**不改产品代码**。
+- 本版全批次 **23 批 271 条全中**（含 `batch33` 27 条与 `batch34` 7 条）。
+
 ## v0.6.14（2026-10-09）— 预检误报"不可达"修复（失败分型 + 失败结论只保鲜 60s）+ 内置预设精简为唯一 local-model
 
 > 补丁版，两件事都来自**负责人真机使用 v0.6.13 的过程**，不是代码审查的推演。
