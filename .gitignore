@@ -20,6 +20,10 @@ desktop/package-lock.json
 # 项目级自动记忆（本地私有，不入库）
 .mingdao/
 test/mutate/.generated/
+# 变异 fail-safe（v0.6.17）：在途补丁的持久标记、互斥锁与 journal 都是本地产物，绝不入库
+test/mutate/.generated/pending/
+test/mutate/.generated/mutate.lock
+test/mutate/.generated/mutate.journal
 # 审计/排查用的临时产物（v0.6.8：此前散落在工作树里污染 git status）
 _audit_*
 _AUDIT_*

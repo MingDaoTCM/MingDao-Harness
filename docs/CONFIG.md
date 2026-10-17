@@ -671,3 +671,9 @@ mingdao ledger verify <runId> --key <文件>     # 用指定公钥验签（本�
 （按模型分账、每日费用柱状图、缓存命中率、Batch 子项），文件落当前目录
 `mingdao-cost-report-<月>.md`。数据源为 cache-stats.jsonl（含缓存折扣与 Batch 半价的真实口径）。
 
+
+## 开发工具：变异验证的 fail-safe
+
+`node test/mutate/run.mjs` 启动时会先自检残留标记（能自愈的自愈，冲突/在飞则拒绝），
+并用 `test/mutate/.generated/mutate.lock` 做互斥；详见 `test/mutate/FAILSAFE.md`。
+手工自检：`node test/mutate/check.mjs`（`--allow-dirty` 可放行脏工作树）。

@@ -2668,3 +2668,76 @@ Reduce --context-window, close other apps, or try q8 KV quantization.
 **同时冻结的队列（同一批处理）**：P1-1 第四刀（`parseToolArgs` 前置门抽取）、`serializeToolResult(undefined)` 微修、M-8 剩余单行文本守卫收口、账本权限**来源**字段、变异框架 fail-safe（开跑前检测残留）。
 
 **另**：`tcm.mingdao.ai` 的反向链接由**下游自行添加**，本仓不做。
+
+## 3.61 已修复（v0.6.17 开发线：变异工具 fail-safe——在飞被误报成残留 / 强杀后补丁留在工作树）
+
+**事故（两次，均来自开发期间的实际踩坑；§3.59 的冻结队列已点名「变异框架 fail-safe（开跑前检测残留）」）**
+
+1. **在飞被误报成残留**：变异正在跑时，另一条扫描线看到工作树里有"看起来像缺陷"的文本，
+   就把它当残留处理——"在飞"与"残留"当时没有任何可区分的凭据（没有标记、没有锁、日志里两者同形）。
+2. **强杀后补丁留在工作树**：`mutate()` 的还原写在 `finally` 里，`Ctrl-C` / 超时 `kill -9` 时
+   `finally` **不执行**，补丁留在 `src/**`；git 看起来像"有意改动"，曾差点把"停止键失效"的
+   变异形态当成正常改动发进版本（与 §3.52 那轮停止键修复直接相关）。
+
+**修法（只动 `test/mutate/*`、`.gitignore` 与文档；`mutate()` 现有控制流形状不变，"只加行"）**
+
+- **持久标记**（`test/mutate/.generated/pending/<hash>.json`）：`mutate()` 在**写补丁之前**先落标记，
+  含 `file/from/to/pid/startedAt`，另存 `originalRaw`（原始字节）与 `patched`（补丁全文）——
+  自愈用**内容判据**，不靠扫描源码文本猜；还原成功后删除。原子上报（`.tmp` → rename），
+  强杀也不会留下半截 JSON。
+- **开跑前自检**（新建 `test/mutate/check.mjs`；`run.mjs` 启动时也跑，每批之间再跑一次）：
+  ① 文件仍等于 `patched` → **自动还原成 `originalRaw`**（字节级，Windows 上就是 CRLF 原样），
+  打印「已自愈 1 处残留变异」并删标记；② 文件既不是 `patched` 也不是 `originalRaw` → **拒绝运行**，
+  列出冲突文件、sha 指纹与标记路径，标记保留等人工；③ 标记 `pid` 还活着 → 视为"**在飞**"，
+  **绝不触碰**、拒绝运行（事故①的回归）。
+- **脏工作树**：`src/**`、`test/**`（排除 `test/mutate/`）有未提交改动时**默认拒绝**并列出清单；
+  `--allow-dirty` 显式放行（只放行、不回滚用户改动）。判据是"变异会写回文件，脏改动被碰过之后
+  就无法区分用户改动与残留"。
+- **强杀可感知**：每次变异在 stdout 与 `.generated/mutate.journal`（JSONL）落
+  `变异进行中：<file>（pid N，标记 …）` / `已还原：<file>`；journal 另记 `lock-*` / `heal` / `abort`。
+- **并发互斥**：`.generated/mutate.lock`（pid + 启动时间）。第二个 mutator 启动即拒绝
+  「已有 mutator 在跑（pid N）」；持有者已死的陈旧锁自动清理。`run.mjs` 全程持锁、批次子进程经
+  `MINGDAO_MUTATE_LOCK` 继承；`process.once('exit'/'SIGINT'/'SIGTERM')` 清锁并尝试还原
+  **自己的/已死进程的**在途补丁（活着的其它 pid 不碰）。
+- **文档**：新建 `test/mutate/FAILSAFE.md`（机制 / 用法 / 强杀模拟 / 边界），`docs/CONFIG.md`
+  末尾加一段指路。**`test/mutate/README.md` 的计数行未动**（本轮不新增/不删变异条目，总数仍与
+  `scripts/doc-lint.mjs` 的实际条数一致）。
+
+**验证**
+
+- `node test/mutate/selfcheck.mjs`：**8/8 场景通过**（三场景 ① 干净启动 / ② 残留自愈 / ③ 冲突拒绝，
+  加 ④ 在飞不误治 / ⑤ 活锁拒绝 / ⑥ 脏工作树 `--allow-dirty` / ⑦ SIGTERM / ⑧ SIGKILL）。
+  自验用临时目录复制**同一份** `lib.mjs` / `check.mjs` 模拟整棵树，不碰真实工作树。
+- **强杀模拟（真跑 mutate，不是手工造假）**：子进程跑到「变异进行中」后——
+  - `SIGTERM` → `process.once` 处理器执行：补丁还原、标记与锁清掉，退出码 143；
+  - `SIGKILL` → 处理器**不可能**执行：断言"文件仍是 MUTATED + 标记存在 + 锁是陈旧的"（这就是残留），
+    随后 `check.mjs` 自动**自愈 1 处**并清陈旧锁，退出 0，文件按原始字节（CRLF）还原。
+- `node test/mutate/run.mjs`（独立 worktree `/tmp/mut-failsafe`，基于 `6634f5a` + 本轮改动）：
+  **19/19 批次全中、219/219 条变异被抓到**（既有批次的 `from` 锚点一条未失效）；跑完 worktree 里
+  `pending/` 为空、无锁残留，`git status --short` 只剩被拷入的工具文件（**无 `src/**` 改动**）——
+  这本身就是 fail-safe 的实证。主工作树的 `git status --short` 亦无变异产物。
+- `npm run typecheck` 0 错；`node scripts/doc-lint.mjs` 全绿（本地工作树含另一执行者未提交的
+  `batch31` 时，⑥ 打印"实际 227 / README 227"；本条提交自身不改计数行）。
+
+**未做边界（如实登记）**
+
+- **SIGKILL 期间没有任何代码能执行**：补丁一定先留在工作树里，直到下一次 `check` / `run.mjs`
+  自愈。若这期间有人 `git commit -a`，仍可能把补丁当"有意改动"提交——所以 `run.mjs` 每批之间
+  自检，且**不要把变异与提交放在同一条流水线**。
+- **Node 信号派发的边界**：进程阻塞在 `spawnSync` 中、且脚本结束时没有任何活动句柄时，排队的
+  信号回调可能不被派发（进程正常退出 0）；此时 `finally` 已还原、`process.on('exit')` 仍清锁，
+  不会留下"锁 + 补丁"。selfcheck ⑦ 用保活句柄**确定性**验证 `process.once` 路径。
+- **pid 复用**：标记里的 pid 被系统回收给无关进程时会误判为"在飞"（安全侧：拒绝运行）。
+  输出带 `startedAt` 与标记路径；确认 pid 不是 mutator 后再人工删标记。
+- **跨 worktree 不互斥**：锁是每个工作树自己的 `.generated/mutate.lock`，并行跑多个 worktree
+  仍可能同时变异；跑前先 `pgrep -f "test/mutate"`。
+- **未改 CI**（按要求）：`check` 未加进 `.github/workflows/ci.yml`，只在 `run.mjs` 启动时隐式执行；
+  手工命令写在 `test/mutate/FAILSAFE.md` 与 `docs/CONFIG.md`。
+- **未在真实 Windows 上跑**：CRLF 还原只用 selfcheck 里的人工 CRLF 文件验证（字节级写回），
+  未在 windows-latest 实机核对；`spawnSync` 阻塞下的信号语义也未跨平台实测。
+- **`test/mutate/README.md` 计数行 / `test/smoke.js` / `src/**` / `presets/**` / `desktop/**` /
+  `ide/**` / `.github/**` 均未动**（另一执行者正在同一工作树改 README、smoke 与 batch31；
+  本条提交只含自己的文件）。
+- **标记体积**：为字节级还原，标记存原文与补丁全文（大文件可能数百 KB）；正常情况下还原即删，
+  只在被强杀时短暂留下。
+- **不防"用户手工改 `src/**`"**：那属于脏工作树检查的范围，不是本机制能自动判断的。
