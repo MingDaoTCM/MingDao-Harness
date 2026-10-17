@@ -2783,3 +2783,115 @@ Reduce --context-window, close other apps, or try q8 KV quantization.
 - **标记体积**：为字节级还原，标记存原文与补丁全文（大文件可能数百 KB）；正常情况下还原即删，
   只在被强杀时短暂留下。
 - **不防"用户手工改 `src/**`"**：那属于脏工作树检查的范围，不是本机制能自动判断的。
+
+## 3.62 已修复（v0.6.17 开发线：P1-1 第四刀——工具参数"前置门"最前端的纯判据 + 顶层空值回填）
+
+**来源**：报告一 **P1-1**（`runTurn` 职责过载）。§3.48（第三刀）的"未做边界"点名下一刀最干净的入口是
+`parseToolArgs(raw)`；§3.59 / §3.60 的冻结队列同时点名「P1-1 第四刀（`parseToolArgs` 前置门抽取）、
+`serializeToolResult(undefined)` 微修」——本条把两件一起收口。
+
+### 一、这一刀切的是哪条缝（以及为什么仍不切整个前置门）
+
+前置门在 `prepTool()` 里可分四段，本刀只取**门前最前端**的纯判据：
+
+| 段落 | 本刀 | 理由 |
+| --- | --- | --- |
+| 第 0 段：参数 `JSON.parse` + 容错 + 非对象归一化 + 错误文案 | ✅ 切 | 零副作用、零 `await`；输出就是"参数对象"或"三段错误文案"，边界可逐条钉死 |
+| ① `hooks.pre`（PreToolUse） | ❌ | `await` + 可改写参数；顺序在解析之后、权限之前 |
+| ② 预设白名单硬拦 + 权限检查（含 `mcp.isReadonly` / `task readOnly` / `permission.check`） | ❌ | 三个判据共享 `isMcp`，且拒绝时要写账本的 `permission` 事件（内容依赖判定结果） |
+| ③ 领域约束确认（`checkPreTool` + `io.confirm` + `fail-closed`）与账本 `toolCall` | ❌ | `await` 与副作用交错；账本内容依赖"权限放行但约束拦住"这类结果 |
+
+**仍然否决"一次搬走整个前置门"**：第三刀的理由一字未变——顺序与短路是这一段最该保住的东西，
+硬抽只能拆成"决策前 / 确认后 / 终态"三个半截门，或把回调塞进模块（那是搬循环，不是抽判据）。
+本刀只把门前那一步拿出去，`io.renderToolDenied` / 审计 / `messages.push` 三条副作用**仍留在
+`agent.js`**，由 `ok:false` 分支按原顺序执行。
+
+### 二、行为清单（`parseToolArgs(raw)`，抽取前逐条抄下来；§143 逐条钉死）
+
+1. `raw` 为**假值**（`undefined` / `null` / `''` / `0` / `false` / `NaN`）→ 按 `'{}'` 解析 → `{ ok:true, args:{} }`；
+2. `raw` 是**合法 JSON 对象**文本 → 原样作为 `args`（不增删键、不做类型转换、不 trim 字段值）；
+3. `raw` 是合法 JSON 但**非对象**（`'null'` / `'[]'` / `'42'` / `'"s"'` / `'true'`）→ 归一化为 `{}`
+   （数组也算非对象：工具参数必须是对象）；
+4. `raw` 是空白串 / **非法 JSON** → `{ ok:false, deniedReason:'参数解析失败（输出超限被截断？建议分块）',
+   auditReason:'参数解析失败', message:'工具参数 JSON 解析失败（…单个 write 的参数总长控制在 6000 字符以内…）' }`
+   ——三段文案与抽取前逐字一致；
+5. **不做**前后缀宽容：```` ```json\n{"a":1}\n``` ````、`'{"a":1} trailing'` 都是解析失败（严格 `JSON.parse`）；
+6. **不做**长度上限：20000 字符的合法参数照常解析；"6000 字符以内"只是失败文案里的分块建议，
+   不是解析器的闸门；
+7. 非字符串 `raw` 走 `JSON.parse` 的隐式 `ToString`：`42` → `42` → 非对象 → `{}`；
+   `{}` → `'[object Object]'` → 解析失败；解析器抛出的任何异常（含 `TypeError`）都归入第 4 条；
+8. **纯函数**：不渲染、不审计、不写消息、不执行工具，也不读全局。
+
+### 三、修法（A：单源；B：顶层空值）
+
+- **A**：`src/tools-flow.js` 新增 `export function parseToolArgs(raw)`（继续用第三刀的模块，不新建文件）；
+  `src/agent.js` 改为 `const parsedArgs = parseToolArgs(tc.function?.arguments)`，`ok:false` 分支只负责
+  按原顺序调用 `renderToolDenied` / 审计 / `messages.push`，**不再内联** `JSON.parse`、`|| '{}'`、
+  非对象归一化或三段文案。`docs` 与注释里的行为清单是同一份（模块注释 + §143）。
+- **B（先复现）**：直调（与 `finishTool` 里两行同源）——
+
+  ```text
+  serializeToolResult(undefined) = undefined
+  messages.push(...) = {"role":"tool","tool_call_id":"call_repro","content":"undefined"}
+  模型最终读到的 content 字面量 = "undefined"
+  ```
+
+  定级：可达性低（`dispatch()` 的 default 返回错误对象、自定义工具返回值被包成
+  `{ok:true,output:String(r ?? '')}`、MCP `callTool` 返回 `{ok,...}`，内置工具也都不返回顶层 `undefined`），
+  但**语义错误**——模型会把 `"undefined"` 当作工具输出。修法：`JSON.stringify` 结果为 `undefined`
+  （`undefined` / 函数 / 符号）或 `'null'`（**顶层** `null`）→ **空串**；**不**省略字段（保留字符串契约）。
+- **`null` 为什么一并改空串**：先读了既有实现——它此前被序列化成字面量 `'null'`。核查了全部真实返回路径
+  （`dispatch()` 的 `default` / 自定义工具包装 / MCP `callTool` / 内置工具），**没有一条返回顶层 `null`**；
+  顶层 `null` 与 `undefined` 语义上都是"没有输出"，模型看到 `'null'` 与看到 `'undefined'` 是同一类噪声。
+  故两者一并空串。**嵌套** `null` 不受影响（如 `{"a":null}` 原样保留），字符串 `"null"` 也原样回填。
+- **§136 的旧钉住（必要的最小改动，已报备）**：第三刀在 §136 用断言钉住了旧行为
+  （`serializeToolResult(undefined) === undefined`、`serializeToolResult(null) === 'null'`、
+  `toolResultMessage(...) === 'undefined'`）。B 修复后这三条必然红，已把 §136 对应三行改为新口径并注明
+  "由 §143 收口"——这是**需求变更后更新现状钉住**，不是削弱保护面；§143 另有独立的行为与端到端断言。
+
+### 四、断言与变异
+
+- `test/smoke.js` **末尾追加 §143**（接 §142；新节）：① 与抽取前表达式做**逐输入对照**
+  （21 个输入，含假值 / 非对象 / 前缀后缀 / 超长）；② 空参与假值 → `{}`；③ 合法对象原样；
+  ④ 非对象 JSON 归一化；⑤ 三段错误文案**逐字**；⑥ 超长不设闸门（20000 合法参数照常解析）；
+  ⑦ 非字符串 `raw` 的隐式转换；⑧ B 修复（undefined / null / 函数 / 符号 → `''`，字符串 `"null"` 与嵌套 null 不受影响）；
+  ⑨ 端到端（桩 provider）解析失败**不执行工具**、拒绝可见、回填分块指引、回合继续；
+  ⑩ 端到端缺省参数 → `{}` 真的进入权限检查并执行 `ls`；⑪ 端到端（桩 MCP 返回 `undefined`）模型收到的
+  `tool` 消息正文是 **`''`**；⑫ 单源结构守卫（按特征表达式查 `agent.js` 不得再出现
+  `JSON.parse(arguments)`、`arguments || '{}'`、三段文案、非对象归一化的改名写法，且必须调用/导入
+  `parseToolArgs`；全仓错误文案与实现只允许 `tools-flow.js` 一份）。
+- 新建 `test/mutate/batch32-toolargs.mjs`：**10/10 全中**——①② 两个归一化分支（`!args` / `Array.isArray`）、
+  ③ 拒绝文案改短、④ 回填文案丢掉分块指引、⑤ 加"从文本里抠 JSON"的宽容、⑥ 解析器加 6000 字符闸门、
+  ⑦/⑧ `agent.js` 又抄回内联实现（含"行为不变但判据出现第二份"）、⑨/⑩ 丢掉 `undefined` / `null` 回填分支。
+- `test/mutate/batch22-toolsflow.mjs` 的 ⑥⑦ 锚点随 `serializeToolResult` 新实现同步更新
+  （⑥ 改为"字符串原样"分支、⑦ 改为"undefined 归一化"分支），避免"变异点未找到"。
+- `test/mutate/README.md` 变异总数同步为 **237**（= `scripts/doc-lint.mjs` 打印的"实际 237 条"）。
+
+### 五、验证
+
+- `npm run typecheck` 0 错；`node scripts/doc-lint.mjs` 全绿（实际 237 / README 237）。
+- `node test/smoke.js`（单独跑）通过（§143 新增一节）；`node test/api-contracts.js`、
+  `node test/e2e-local.js`、`node test/e2e-web.js` 通过。
+- `node test/mutate/batch32-toolargs.mjs`：**10/10**；独立 worktree（`git worktree add --detach /tmp/mut-p1 HEAD`
+  + 本轮改动快照）跑 `node test/mutate/run.mjs`：**21/21 批次、237/237 条变异全中**（既有 227 条锚点无失效）。
+  worktree 的 `mutate.journal` 记到 **237 次 `start` / 237 次 `restore`、0 次 `heal`**，`pending/` 为空、
+  无锁残留（跑完 worktree 已 `git worktree remove --force`，主工作树无变异产物）。
+
+### 六、未做边界（如实登记）
+
+- **前置门整体仍未抽**：hooks → 预设白名单硬拦 → 权限 → 约束确认的顺序与短路仍完整留在 `runTurn` 的
+  `prepTool()` 里，仍只能端到端验证。本刀只切了门前那一步；下一刀若要继续，最自然的候选是"拒绝终态"
+  的三件套（render / audit / messages.push），但它同样与账本 `toolCall` 的内容耦合，需要单独设计。
+- **A 是零行为变化，不顺手改可疑点**：`parseToolArgs` **不**宽容代码围栏/前后缀、**不**设长度上限、
+  `null` 参数归一化成 `{}`——这些都与抽取前逐字一致，§143 钉住现状；是否要"宽容抠 JSON"是产品决策，
+  不在重构刀里做。
+- **B 的可达性**：内置 / 自定义 / MCP 的真实路径都不会返回顶层 `undefined` 或 `null`（见上），
+  所以它是"语义正确的防御性修复"，不是线上已发生的事故；桩 MCP 走的是真实 `finishTool` 回填路径，
+  用来证明"万一有工具这么返回，模型收到的是空串"。
+- **`toolResultMessage(undefined)` 直接调用仍是 `'undefined'`**：它的契约是接收
+  `serializeToolResult()` 的产物（顶层空值已是 `''`）；agent.js 唯一调用点满足契约。没有把归一化再复制
+  一份到 `toolResultMessage`（那会让"单源"出现两处）。
+- **结构守卫是"绊线"不是"证明"**：它按特征表达式逐族拦截已知的抄回写法，理论上仍有绕过空间；
+  本节的把握来自 **10 条变异全部命中**，而不是"守卫穷尽了所有写法"。
+- **未动** `src/providers/**`、`src/model-discovery.js`、`src/web/**`、`presets/**`、`desktop/**`、`ide/**`、
+  `test/mutate/lib.mjs`；未 tag、未改版本号、未 publish、未动官网。

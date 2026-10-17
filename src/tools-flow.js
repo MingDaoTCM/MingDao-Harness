@@ -17,6 +17,33 @@
 // 回填之所以拆成"序列化 → 正文"两个函数，而不是合成一个大函数，正是为了**保持原来的求值顺序**：
 // 原来 `JSON.stringify(result)` 发生在 `checkPostTool()` **之前**（约束检查抛错/慢的差异都被保留），
 // agent.js 里 `const text = serializeToolResult(result);` 就是原来那一行，位置一字未动。
+//
+// v0.6.17（审计 P1-1 第四刀）：在同一个模块上继续切**前置门最前端的纯判据**——工具参数解析
+// `parseToolArgs(raw)`。第三刀刻意否决了"整个前置门"（hooks → 白名单 → 权限 → 约束确认的顺序与
+// 短路、账本内容依赖门的结果），本刀只取门**之前**、零副作用的那一步：JSON 解析 + 容错 + 归一化 +
+// 错误文本。`io.renderToolDenied` / 审计 / `messages.push` 三条副作用仍留在 `agent.js`，
+// 由 `ok:false` 分支按原顺序执行——顺序与短路一字未动，只是把"判据"从 1500 行的 `runTurn` 里拿了出来。
+//
+// `parseToolArgs()` 的**行为清单**（抽取前逐条抄下来；每个分支与抽取前逐字同源）：
+//   1. `raw` 为**假值**（`undefined` / `null` / `''` / `0` / `false` / `NaN`）→ 按 `'{}'` 解析
+//      → `{ ok:true, args:{} }`（模型没给参数 = 空参数对象；不会把假值当 JSON 去解析）；
+//   2. `raw` 是**合法 JSON 对象**文本（`'{"path":"a.txt","limit":3}'`）→ 原样作为 `args`
+//      （不增删键、不做类型转换、不 trim 字段值）；
+//   3. `raw` 是合法 JSON 但**不是对象**——JSON 字面量 `'null'`、数组 `'[]'`、数字 `'42'`、
+//      字符串 `'"s"'`、布尔 `'true'` → **归一化为 `{}`**（数组也算非对象：工具参数必须是对象）；
+//   4. `raw` 是空白串（`'   '`）或**非法 JSON**（`'{bad'`）→ 解析失败终态：
+//      `{ ok:false, deniedReason:'参数解析失败（输出超限被截断？建议分块）',
+//         auditReason:'参数解析失败',
+//         message:'工具参数 JSON 解析失败（大概率是输出超过模型单次上限被截断）。请把内容拆分成多个
+//                  较小文件或多次调用逐步写入：单个 write 的参数总长控制在 6000 字符以内；先写核心
+//                  骨架，再逐文件补充。' }`（三段文案与抽取前逐字一致）；
+//   5. **不做**前后缀宽容：```` ```json\n{"a":1}\n``` ````、`'{"a":1} trailing'` 都是解析失败
+//      （用的是严格 `JSON.parse`，不是"从文本里抠一段 JSON"）；
+//   6. **不做**长度上限：一个 20000 字符的合法参数照样解析成功；"6000 字符以内"只是失败文案里的
+//      分块建议，**不是**解析器的闸门；
+//   7. 非字符串 `raw` 走 `JSON.parse` 的隐式 `ToString`：`42` → `42` → 非对象 → `{}`；
+//      `{}` → `'[object Object]'` → 解析失败；解析器抛出的任何异常（含 `TypeError`）都归入第 4 条；
+//   8. **纯函数**：不渲染、不审计、不写消息、不执行工具，也不读全局；同一输入永远同一输出。
 
 import { clampText } from './context.js';
 
@@ -93,14 +120,20 @@ export function visibleToolsFor(schemas, { readOnlyPhase = false, usedNames = ne
  *   1. `result` 是字符串 → **原样**使用（工具已经返回了给模型看的文本，不再包一层 JSON 引号）；
  *   2. 否则 → `JSON.stringify(result)` 紧凑 JSON（评估 B3：嵌套结果省 10~20% 回填 token，
  *      且这些 token 下一轮按 prompt 重复计费）；
- *   3. 不做任何兜底/异常处理：`JSON.stringify` 抛错（循环引用）照旧上抛，
- *      `undefined`/函数仍返回 `undefined`（见 `toolResultMessage` 的第 1 条边界）。
+ *   3. 顶层 `null` / `undefined`（以及函数、符号——`JSON.stringify` 对它们也返回 `undefined`）
+ *      → **空串**（v0.6.17 第四刀附带 B，§143 收口）。理由：顶层空值都表示"没有输出"；
+ *      不归一化时 `undefined` 会经 `clampText` 的 `String()` 变成字面量 `'undefined'`、`null`
+ *      变成 `'null'`，模型会把这两段噪声当成工具输出。**嵌套**的 null/undefined 不受影响
+ *      （仍在 JSON 里按标准语义保留）；
+ *   4. 不做其它兜底/异常处理：`JSON.stringify` 抛错（循环引用、BigInt）照旧上抛。
  *
  * @param {any} result `dispatch()` / `mcp.call()` 的返回（多数是 `{ok, output|error}` 对象或 JSON 字符串）
- * @returns {string} 待回填文本（运行时可能是 `undefined`，与抽取前一致）
+ * @returns {string} 待回填文本（顶层空值 → `''`；其余与抽取前一致）
  */
 export function serializeToolResult(result) {
-  return typeof result === 'string' ? result : JSON.stringify(result);
+  if (typeof result === 'string') return result;
+  const text = JSON.stringify(result);
+  return text === undefined || text === 'null' ? '' : text;
 }
 
 /**
@@ -110,8 +143,9 @@ export function serializeToolResult(result) {
  * **行为清单**：
  *   1. 截断：`clampText(text, cap)`——`cap` 是 `toolResultCap`（按模型窗口 1/16，2000~20000 字）；
  *      超长时尾部附 `…[输出过长已截断，原文共 N 字符]`。传 `undefined` 时用 `clampText` 自己的默认值。
- *      边界（与抽取前一致，本节只负责钉住、不负责改）：`text` 为 `undefined` 时 `clampText` 内部
- *      `String()` 得到字符串 `'undefined'`；
+ *      边界：本函数的**契约**是 `text` 已经过 `serializeToolResult()`（顶层空值已是空串）；
+ *      若调用方违约直接传 `undefined`，`clampText` 的 `String()` 仍会得到字面量 `'undefined'`——
+ *      这是调用方违约的边界，不是回填路径（agent.js 唯一调用点走的是序列化后的文本）。
  *   2. 复用前缀：`cached` 为真（同回合相同参数的回调命中只读去重缓存）→ 正文前缀
  *      `（与同回合相同调用结果一致，已复用）\n`，**且该前缀不计入 `cap`**（先截断、后加前缀）；
  *   3. 领域约束（PostToolUse，v0.5.0 A3②）：`post.rejected` 为真 → 正文**整段替换**为
@@ -128,4 +162,56 @@ export function toolResultMessage(text, { cached = false, cap = undefined, post 
   const prefix = cached ? '（与同回合相同调用结果一致，已复用）\n' : '';
   const body = post?.rejected ? `【领域约束】${post.reason}` : text;
   return prefix + clampText(body, cap);
+}
+
+/** `parseToolArgs()` 失败时的三段文案（与抽取前 `agent.js` 里的三处字面量逐字一致）。 */
+const TOOL_ARGS_PARSE_DENIED = '参数解析失败（输出超限被截断？建议分块）';
+const TOOL_ARGS_PARSE_AUDIT = '参数解析失败';
+const TOOL_ARGS_PARSE_MESSAGE =
+  '工具参数 JSON 解析失败（大概率是输出超过模型单次上限被截断）。请把内容拆分成多个较小文件或多次调用逐步写入：单个 write 的参数总长控制在 6000 字符以内；先写核心骨架，再逐文件补充。';
+
+/**
+ * 工具调用参数的**解析 / 容错 / 归一化**（v0.6.17，审计 P1-1 第四刀——前置门最前端的纯判据）。
+ *
+ * 抽取前是 `agent.js` 的 `prepTool()` 里这一段（`JSON.parse` + `catch` + 非对象归一化）：
+ * ```js
+ * let args = null;
+ * try {
+ *   args = JSON.parse(tc.function?.arguments || '{}');
+ * } catch {
+ *   io.renderToolDenied(name, {}, '参数解析失败（输出超限被截断？建议分块）');
+ *   if (auditOn) auditEntry({ denied: true, reason: '参数解析失败' });
+ *   messages.push({ role: 'tool', tool_call_id: tc.id, content: '工具参数 JSON 解析失败（…）' });
+ *   return null;
+ * }
+ * if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
+ * ```
+ * 本函数只接管**判据**；上面那三条副作用仍留在 `agent.js` 的 `ok:false` 分支里，顺序与短路不变。
+ *
+ * 行为清单（逐条与抽取前一致；§143 逐条钉死）：
+ *   1. `raw` 为假值（`undefined` / `null` / `''` / `0` / `false` / `NaN`）→ 按 `'{}'` 解析
+ *      → `{ ok:true, args:{} }`；
+ *   2. `raw` 是合法 JSON 对象文本 → 原样作为 `args`（不增删键、不做类型转换）；
+ *   3. `raw` 是合法 JSON 但非对象（`'null'` / `'[]'` / `'42'` / `'"s"'` / `'true'`）→ 归一化为 `{}`
+ *      （数组也算非对象：工具参数必须是对象）；
+ *   4. 空白串 / 非法 JSON → `{ ok:false, deniedReason, auditReason, message }`（三段文案见上）；
+ *   5. 不做前后缀宽容（严格 `JSON.parse`）：```` ```json\n{"a":1}\n``` ```` 与 `'{"a":1} trailing'`
+ *      都是解析失败；
+ *   6. 不做长度上限：20000 字符的合法参数照常解析（6000 只是失败文案里的分块建议）；
+ *   7. 非字符串 `raw` 走隐式 `ToString`：`42` → `42` → `{}`；`{}` → `'[object Object]'` → 解析失败；
+ *      任何解析异常都归入第 4 条；
+ *   8. 纯函数：不渲染、不审计、不写消息、不执行工具。
+ *
+ * @param {any} raw `tc.function?.arguments`（协议上是字符串；非字符串按 `JSON.parse` 的隐式转换处理）
+ * @returns {{ ok: true, args: any } | { ok: false, deniedReason: string, auditReason: string, message: string }}
+ */
+export function parseToolArgs(raw) {
+  let args;
+  try {
+    args = JSON.parse(raw || '{}');
+  } catch {
+    return { ok: false, deniedReason: TOOL_ARGS_PARSE_DENIED, auditReason: TOOL_ARGS_PARSE_AUDIT, message: TOOL_ARGS_PARSE_MESSAGE };
+  }
+  if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
+  return { ok: true, args };
 }

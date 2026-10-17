@@ -12862,13 +12862,14 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
   assert.equal(serializeToolResult({ ok: false, error: 'boom' }), '{"ok":false,"error":"boom"}',
     '错误结果（ok:false）必须原样回填给模型——回填路径不做任何"美化"或兜底改写');
   assert.equal(serializeToolResult(0), '0', '数字结果走 JSON 序列化');
-  assert.equal(serializeToolResult(null), 'null', 'null 结果走 JSON 序列化');
+  // v0.6.17（P1-1 第四刀附带 B，由 §143 收口）：顶层空值都是"没有输出"→ 空串。
+  // 旧口径（null → "null"；undefined → undefined，再被 clampText 的 String() 成字面量 "undefined"）
+  // 是缺陷现状，已废弃——下面三行就是本轮 B 的回归断言（旧行为不再被钉住）。
+  assert.equal(serializeToolResult(null), '', 'null 结果必须序列化为空串（顶层空值都是"没有输出"）');
   assert.equal(serializeToolResult([1, 2]), '[1,2]', '数组结果走紧凑 JSON');
-  // 边界（抽取前就是这口径，本节只负责钉住）：JSON.stringify(undefined) 返回 undefined，
-  // clampText 内部 String() 之后回填正文是字符串 'undefined'
-  assert.equal(serializeToolResult(undefined), undefined, '`undefined` 结果仍返回 `undefined`（JSON.stringify 的固有行为）');
-  assert.equal(toolResultMessage(serializeToolResult(undefined), {}), 'undefined',
-    '`undefined` 结果最终回填成字符串 undefined（与抽取前一致，本次不改）');
+  assert.equal(serializeToolResult(undefined), '', 'undefined 结果必须序列化为空串（不得再回填字面量 "undefined"）');
+  assert.equal(toolResultMessage(serializeToolResult(undefined), {}), '',
+    '空的工具结果必须回填成空串（`String(undefined)` 不得变成字面量 "undefined"）');
 
   // ⑨ 回填正文：复用前缀逐字一致；领域约束拒绝整段替换；超长截断且**前缀不计入上限**
   const PREFIX136 = '（与同回合相同调用结果一致，已复用）\n';
@@ -14964,6 +14965,260 @@ process.exit(0);
   } finally {
     setLocalQueueObserver(null);
   }
+}
+
+// ---------- 143. v0.6.17（审计 P1-1 第四刀）：工具参数解析的前置判据 + 顶层空值回填修复 ----------
+// 第三刀把"工具可见性 / 结果回填"抽成纯函数时刻意否决了**整个前置门**（hooks → 白名单 → 权限 →
+// 约束确认的顺序与短路、账本内容依赖门的结果）。本刀只取门**最前端、零副作用**的一步：
+// 参数 JSON 解析 + 容错 + 归一化 + 错误文案（`parseToolArgs`）。三条副作用（渲染拒绝 / 审计 /
+// 回填分块指引）仍留在 agent.js，顺序与短路未动。
+// 行为清单（抽取前逐条抄下来的）写在 `src/tools-flow.js` 的模块注释里；本节把每一条钉死，并加一道
+// 单源结构守卫。顺带收口上一轮只登记、未修的 B：顶层 `undefined`/`null` 回填成字面量 "undefined"/"null"。
+{
+  const { parseToolArgs, serializeToolResult, toolResultMessage } =
+    await import(pathToFileURL(path.join(srcDir, 'tools-flow.js')).href);
+
+  // ① 零行为变化：与抽取前的表达式做**逐输入对照**（reference 就是旧代码去掉三条副作用后的纯判据）
+  const legacyParse143 = (/** @type {any} */ raw) => {
+    let args = null;
+    try {
+      args = JSON.parse(raw || '{}');
+    } catch {
+      return { ok: false };
+    }
+    if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
+    return { ok: true, args };
+  };
+  const INPUTS143 = [
+    undefined, null, '', '{}', '   ', '{bad', '```json\n{"a":1}\n```', '{"a":1} trailing',
+    'null', '[]', '42', '"s"', 'true', 42, 0, false, {},
+    '{"path":"a.txt","limit":3}', '{"nested":{"a":null},"list":[1,2]}',
+    `{"x":"${'a'.repeat(20000)}"}`, `{"x":${'a'.repeat(20000)}}`,
+  ];
+  for (const raw of INPUTS143) {
+    const got = parseToolArgs(raw);
+    const want = legacyParse143(raw);
+    assert.equal(got.ok, want.ok, `parseToolArgs 的成败判定必须与抽取前一致：input=${String(raw).slice(0, 40)}`);
+    if (want.ok) assert.deepEqual(got.args, want.args, `parseToolArgs 的归一化必须与抽取前一致：input=${String(raw).slice(0, 40)}`);
+  }
+
+  // ② 空参 / 假值：模型没给参数 = 空对象（不得把 undefined 当 JSON 去解析）
+  assert.deepEqual(parseToolArgs(undefined), { ok: true, args: {} }, 'undefined 参数必须归一化为空对象');
+  assert.deepEqual(parseToolArgs(null), { ok: true, args: {} }, 'null 参数必须归一化为空对象');
+  assert.deepEqual(parseToolArgs(''), { ok: true, args: {} }, '空串参数必须归一化为空对象');
+  assert.deepEqual(parseToolArgs(0), { ok: true, args: {} }, '假值（0）按缺省参数处理，不得当 JSON 解析');
+  assert.deepEqual(parseToolArgs(false), { ok: true, args: {} }, '假值（false）按缺省参数处理');
+
+  // ③ 合法对象：原样（不增删键、不做类型转换）
+  assert.deepEqual(parseToolArgs('{"path":"a.txt","limit":3}').args,
+    { path: 'a.txt', limit: 3 }, '合法 JSON 对象必须原样作为工具参数');
+  assert.deepEqual(parseToolArgs('{"nested":{"a":null},"list":[1,2]}').args,
+    { nested: { a: null }, list: [1, 2] }, '嵌套结构不得被改写（嵌套 null 仍按 JSON 保留）');
+
+  // ④ 非对象 JSON 字面量：一律归一化为空对象（数组也算非对象——工具参数必须是对象）
+  for (const raw of ['null', '[]', '42', '"s"', 'true']) {
+    assert.deepEqual(parseToolArgs(raw), { ok: true, args: {} }, `合法 JSON 但非对象（${raw}）必须归一化为空对象`);
+  }
+
+  // ⑤ 解析失败：三段文案**逐字**钉死（拒绝渲染 / 审计原因 / 回填正文）
+  const PARSE_FAIL143 = {
+    ok: false,
+    deniedReason: '参数解析失败（输出超限被截断？建议分块）',
+    auditReason: '参数解析失败',
+    message:
+      '工具参数 JSON 解析失败（大概率是输出超过模型单次上限被截断）。请把内容拆分成多个较小文件或多次调用逐步写入：单个 write 的参数总长控制在 6000 字符以内；先写核心骨架，再逐文件补充。',
+  };
+  assert.deepEqual(parseToolArgs('   '), PARSE_FAIL143, '空白串必须走解析失败终态，且三段文案逐字一致');
+  assert.deepEqual(parseToolArgs('{bad'), PARSE_FAIL143, '非法 JSON 必须走解析失败终态');
+  const fenced143 = parseToolArgs('```json\n{"a":1}\n```');
+  assert.deepEqual(fenced143, PARSE_FAIL143, '带代码围栏前后缀的 JSON **不得**宽容抠取（严格 JSON.parse）');
+  const trailing143 = parseToolArgs('{"a":1} trailing');
+  assert.deepEqual(trailing143, PARSE_FAIL143, 'JSON 后带多余尾巴必须解析失败（不做前缀/后缀宽容）');
+
+  // ⑥ 超长：解析器**没有**长度闸门（6000 只是失败文案里的分块建议），合法超长参数照样解析
+  const bigOk143 = parseToolArgs(`{"x":"${'a'.repeat(20000)}"}`);
+  assert.equal(bigOk143.ok, true, '20000 字符的合法参数必须照常解析（不得在解析器里设 6000 字符上限）');
+  assert.equal(bigOk143.args.x.length, 20000, '超长参数内容不得被截断');
+  assert.deepEqual(parseToolArgs(`{"x":${'a'.repeat(20000)}}`), PARSE_FAIL143, '超长但非法 → 仍走解析失败终态');
+
+  // ⑦ 非字符串 raw：走 JSON.parse 的隐式 ToString（42 → 非对象 → {}；对象 → "[object Object]" → 失败）
+  assert.deepEqual(parseToolArgs(42), { ok: true, args: {} }, '数字 42 经隐式转换后是非对象 → 空对象');
+  assert.deepEqual(parseToolArgs({}), PARSE_FAIL143, '对象 raw 隐式转成 "[object Object]" → 解析失败（与抽取前一致）');
+
+  // ⑧ B 修复：顶层 undefined/null 一律空串（模型不得再收到字面量 "undefined"/"null"）
+  assert.equal(serializeToolResult(undefined), '', 'undefined 结果必须序列化为空串（旧行为是回填 "undefined"）');
+  assert.equal(serializeToolResult(null), '', 'null 结果必须序列化为空串（顶层空值都表示"没有输出"）');
+  assert.equal(serializeToolResult(() => {}), '', '函数结果（JSON.stringify 返回 undefined）也必须归一化为空串');
+  assert.equal(serializeToolResult(Symbol('s')), '', '符号结果（JSON.stringify 返回 undefined）也必须归一化为空串');
+  assert.equal(typeof serializeToolResult(undefined), 'string', '不得改成省略字段/返回 undefined（会破坏字符串契约）');
+  assert.equal(serializeToolResult('null'), 'null', '**字符串** "null" 必须原样回填（归一化只针对顶层空值，不吞字符串）');
+  assert.equal(serializeToolResult({ a: null, b: undefined }), '{"a":null}', '嵌套 null 保留、嵌套 undefined 按 JSON 省略');
+  assert.equal(toolResultMessage(serializeToolResult(undefined), {}), '', 'undefined 结果回填给模型的正文必须是空串');
+  assert.equal(toolResultMessage(serializeToolResult(null), {}), '', 'null 结果回填给模型的正文必须是空串');
+
+  // ⑨ 端到端（桩 provider）：参数解析失败 → 不执行工具、拒绝可见、回填分块指引；模型按指引收尾
+  {
+    const io143a = createIO({ quiet: true });
+    const denied143a = /** @type {any[]} */ ([]);
+    io143a.renderToolDenied = (/** @type {any} */ n, /** @type {any} */ a, /** @type {any} */ r) => denied143a.push({ n, a, r });
+    const perm143a = /** @type {any[]} */ ([]);
+    let round143a = 0;
+    const provider143a = {
+      async chat() {
+        round143a += 1;
+        if (round143a === 1) {
+          return {
+            text: '',
+            toolCalls: [{ id: 'call_bad143', type: 'function', function: { name: 'read', arguments: '{"path": "' } }],
+            usage: { prompt_tokens: 3, completion_tokens: 2 },
+            finish: 'tool_calls',
+          };
+        }
+        return { text: '参数被截断，改为分块重写', toolCalls: null, usage: { prompt_tokens: 3, completion_tokens: 2 }, finish: 'stop' };
+      },
+    };
+    const work143a = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-args143a-'));
+    try {
+      const agent143a = createAgent({
+        provider: provider143a,
+        permission: { async check(/** @type {any} */ n, /** @type {any} */ a) { perm143a.push({ n, a }); return true; } },
+        io: io143a,
+        modelName: 'deepseek-v4-flash',
+        workingDir: work143a,
+        cfg: { permission: 'auto', audit: false, ledger: false },
+      });
+      const msgs143a = [{ role: 'user', content: '读取一个被输出上限截断的工具参数' }];
+      const res143a = await agent143a.runTurn(msgs143a);
+      const toolMsg143a = msgs143a.find((m) => m.role === 'tool' && m.tool_call_id === 'call_bad143');
+      assert.ok(toolMsg143a, '参数解析失败必须回填 tool 消息（否则模型不知道要分块重试）');
+      assert.equal(toolMsg143a.content, PARSE_FAIL143.message, '回填正文必须逐字等于清单里的分块指引');
+      assert.equal(perm143a.length, 0, '参数解析失败不得进入权限检查，更不得执行工具');
+      assert.equal(denied143a.length, 1, '参数解析失败必须渲染一次"拒绝"（否则用户看不出为什么没执行）');
+      assert.equal(denied143a[0].r, PARSE_FAIL143.deniedReason, '拒绝理由必须逐字等于清单里的 deniedReason');
+      assert.equal(res143a.text, '参数被截断，改为分块重写', '解析失败不应中断回合，模型应能继续收尾');
+    } finally {
+      safeRmSync(work143a, { recursive: true, force: true });
+    }
+  }
+
+  // ⑩ 端到端（桩 provider）：假值参数 → 带空对象进入权限检查并真的执行
+  {
+    const io143b = createIO({ quiet: true });
+    const perm143b = /** @type {any[]} */ ([]);
+    let round143b = 0;
+    const provider143b = {
+      async chat() {
+        round143b += 1;
+        if (round143b === 1) {
+          return {
+            text: '',
+            // arguments 缺省（undefined）：抽取前就是 `|| '{}'` → 空参数对象
+            toolCalls: [{ id: 'call_empty143', type: 'function', function: { name: 'ls' } }],
+            usage: { prompt_tokens: 3, completion_tokens: 2 },
+            finish: 'tool_calls',
+          };
+        }
+        return { text: '已列出目录', toolCalls: null, usage: { prompt_tokens: 3, completion_tokens: 2 }, finish: 'stop' };
+      },
+    };
+    const work143b = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-args143b-'));
+    try {
+      fs.writeFileSync(path.join(work143b, 'only.txt'), 'x');
+      const agent143b = createAgent({
+        provider: provider143b,
+        permission: { async check(/** @type {any} */ n, /** @type {any} */ a) { perm143b.push({ n, a }); return true; } },
+        io: io143b,
+        modelName: 'deepseek-v4-flash',
+        workingDir: work143b,
+        cfg: { permission: 'auto', audit: false, ledger: false },
+      });
+      const msgs143b = [{ role: 'user', content: '列一下目录内容' }];
+      await agent143b.runTurn(msgs143b);
+      assert.equal(perm143b.length, 1, '缺省参数必须正常进入权限检查（不得被当成解析失败）');
+      assert.deepEqual(perm143b[0].a, {}, '缺省参数必须归一化为空对象后再交给工具');
+      const toolMsg143b = msgs143b.find((m) => m.role === 'tool' && m.tool_call_id === 'call_empty143');
+      assert.ok(toolMsg143b, '缺省参数必须真的执行并回填 tool 消息');
+      assert.ok(!String(toolMsg143b.content).includes('参数解析失败'), '缺省参数不得触发解析失败文案');
+      assert.ok(String(toolMsg143b.content).includes('only.txt'), '空参数执行 ls 应真的看到工作目录内容');
+    } finally {
+      safeRmSync(work143b, { recursive: true, force: true });
+    }
+  }
+
+  // ⑪ 端到端（桩 MCP）：工具返回 undefined → 模型收到的是**空串**，不是字面量 "undefined"
+  {
+    const io143c = createIO({ quiet: true });
+    let round143c = 0;
+    const provider143c = {
+      async chat() {
+        round143c += 1;
+        if (round143c === 1) {
+          return {
+            text: '',
+            toolCalls: [{ id: 'call_undef143', type: 'function', function: { name: 'mcp__stub__echo', arguments: '{}' } }],
+            usage: { prompt_tokens: 3, completion_tokens: 2 },
+            finish: 'tool_calls',
+          };
+        }
+        return { text: '该工具没有输出', toolCalls: null, usage: { prompt_tokens: 3, completion_tokens: 2 }, finish: 'stop' };
+      },
+    };
+    const mcpStub143 = {
+      toolSchemas: () => [{ type: 'function', function: { name: 'mcp__stub__echo', description: 'stub', parameters: { type: 'object', properties: {} } } }],
+      isReadonly: () => true,
+      call: async () => undefined,
+    };
+    const work143c = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-args143c-'));
+    try {
+      const agent143c = createAgent({
+        provider: provider143c,
+        permission: { async check() { return true; } },
+        io: io143c,
+        mcp: mcpStub143,
+        modelName: 'deepseek-v4-flash',
+        workingDir: work143c,
+        cfg: { permission: 'auto', audit: false, ledger: false },
+      });
+      const msgs143c = [{ role: 'user', content: '调用一个不返回内容的 MCP 工具' }];
+      await agent143c.runTurn(msgs143c);
+      const toolMsg143c = msgs143c.find((m) => m.role === 'tool' && m.tool_call_id === 'call_undef143');
+      assert.ok(toolMsg143c, 'MCP 工具结果必须回填 tool 消息');
+      assert.equal(toolMsg143c.content, '', '不返回内容的工具，模型必须收到空串（不得是字面量 "undefined"）');
+    } finally {
+      safeRmSync(work143c, { recursive: true, force: true });
+    }
+  }
+
+  // ⑫ 单源结构守卫：agent.js 必须调用 parseToolArgs()，且不得再内联 JSON.parse + 容错 + 归一化
+  {
+    const agentSrc143 = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+    const flowSrc143 = fs.readFileSync(path.join(srcDir, 'tools-flow.js'), 'utf8');
+    // 先查"有没有抄回去"（它才是单源被破坏的现场）；再查"有没有真的调用"。
+    // 按**特征表达式逐族**检查，防止"换一种写法又抄回去"：
+    const ARGS_FORBIDDEN143 = [
+      ['工具参数的 JSON.parse（arguments 直接解析）', /JSON\s*\.\s*parse\s*\([^\n;]{0,200}\barguments\b/],
+      ['缺省空对象（arguments || "{}"）', /\barguments\s*\|\|\s*['"]\{\}['"]/],
+      ['解析失败拒绝文案', /参数解析失败（输出超限被截断？建议分块）/],
+      ['解析失败回填文案', /工具参数 JSON 解析失败/],
+      ['非对象归一化（含变量改名写法）', /if\s*\(\s*!\s*[A-Za-z_$][\w$]*\s*\|\|\s*typeof\s+[A-Za-z_$][\w$]*\s*!==\s*['"]object['"]\s*\|\|\s*Array\.isArray\s*\(\s*[A-Za-z_$][\w$]*\s*\)\s*\)/],
+    ];
+    for (const [what, re] of ARGS_FORBIDDEN143) {
+      assert.ok(!re.test(agentSrc143), `agent.js 里不得再内联工具参数解析判据（${what}）——那正是抽到 tools-flow.js 的 parseToolArgs()：${re}`);
+    }
+    assert.ok(/parseToolArgs\s*\(/.test(agentSrc143), 'agent.js 必须调用 tools-flow.js 的 parseToolArgs()（参数解析判据）');
+    assert.ok(/import\s*\{[^}]*\bparseToolArgs\b[^}]*\}\s*from\s*'\.\/tools-flow\.js'/.test(agentSrc143),
+      'parseToolArgs 必须从 tools-flow.js 导入（单源），不得在 agent.js 里另立一份');
+    // 全仓只有一份实现与一份错误文案（agent.js 之外的模块也不得复制）
+    const dup143 = fs.readdirSync(srcDir).filter((f) => f.endsWith('.js')).filter((f) => {
+      if (f === 'tools-flow.js') return false;
+      const t = fs.readFileSync(path.join(srcDir, f), 'utf8');
+      return /参数解析失败（输出超限被截断？建议分块）|工具参数 JSON 解析失败|export function parseToolArgs\s*\(/.test(t);
+    });
+    assert.deepEqual(dup143, [], `工具参数解析判据只允许出现在 tools-flow.js，实际还有：${dup143.join('、')}`);
+    assert.ok(/export function parseToolArgs\s*\(/.test(flowSrc143), 'tools-flow.js 必须导出 parseToolArgs()');
+  }
+
+  ok('v0.6.17 P1-1 第四刀：parseToolArgs 行为清单逐条（假值→{} / 合法对象原样 / 非对象归一化 / 非法·空白·前后缀三段文案逐字 / 超长不设闸门）+ 端到端（解析失败不执行工具且回填分块指引 / 缺省参数→{} 真执行）+ 顶层 undefined·null 回填空串（桩 MCP 实测模型收到 ""，嵌套 null 保留）+ 单源结构守卫（agent.js 只调用、不内联）');
 }
 
 process.exit(0);

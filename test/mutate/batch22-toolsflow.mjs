@@ -56,18 +56,18 @@ M.mutate({
 M.mutate({
   name: '⑥ 字符串结果也被 JSON 序列化（回填正文被包一层引号/转义，模型看到的是 JSON 字符串）',
   file: 'src/tools-flow.js',
-  from: "  return typeof result === 'string' ? result : JSON.stringify(result);",
-  to: '  return JSON.stringify(result);',
+  from: "  if (typeof result === 'string') return result;",
+  to: '  if (false) return result; /* 变异：字符串不再原样回填 */',
   expect: ['字符串结果必须原样回填'],
   run: SEC,
 });
 
 M.mutate({
-  name: '⑦ `undefined` 结果被兜底成 "null"（把既有口径悄悄改掉）',
+  name: '⑦ `undefined` 结果没有归一化成空串（回填成字面量 "undefined"）',
   file: 'src/tools-flow.js',
-  from: "  return typeof result === 'string' ? result : JSON.stringify(result);",
-  to: "  return typeof result === 'string' ? result : (JSON.stringify(result) ?? 'null');",
-  expect: ['undefined'],
+  from: "  return text === undefined || text === 'null' ? '' : text;",
+  to: "  return text === 'null' ? '' : text; /* 变异：丢掉 undefined 分支 */",
+  expect: ['undefined 结果必须序列化为空串'],
   run: SEC,
 });
 

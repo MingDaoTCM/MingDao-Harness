@@ -25,8 +25,9 @@ import { registerEgressSink } from './net-guard.js';
 import { getActivePackContext } from './packs.js';
 // v0.6.11（审计 P1-1 拆分第三刀）：工具编排两端的判据单源在 tools-flow.js——
 // ① 本轮可见哪些工具（只读档 × 预设白名单 × 已用工具快照 × MCP 只读标注）；
-// ② 工具结果怎么回填（序列化 / 复用前缀 / 约束拒绝文案 / 按窗口截断）。
-import { READONLY_TIER_SET, visibleToolsFor, serializeToolResult, toolResultMessage } from './tools-flow.js';
+// ② 工具结果怎么回填（序列化 / 复用前缀 / 约束拒绝文案 / 按窗口截断）；
+// ③ 工具参数怎么解析（v0.6.17 第四刀：JSON + 容错 + 归一化 + 错误文案）。
+import { READONLY_TIER_SET, visibleToolsFor, serializeToolResult, toolResultMessage, parseToolArgs } from './tools-flow.js';
 
 const MAX_STEPS = 24;
 // 子代理步数上限：审计/精读类只读子任务需要读多个文件 + 交叉引用，12 步易在「读不全」时被截断
@@ -1593,22 +1594,18 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               ...extra,
             });
           let args = /** @type {any} */ (null);
-          try {
-            args = JSON.parse(tc.function?.arguments || '{}');
-          } catch {
+          // 参数解析/容错/归一化单源在 tools-flow.js 的 parseToolArgs()（v0.6.17，P1-1 第四刀）：
+          // 本函数只返回判据，下面三条副作用（渲染拒绝 / 审计 / 回填分块指引）仍按原顺序执行。
+          const parsedArgs = parseToolArgs(tc.function?.arguments);
+          if (!parsedArgs.ok) {
             // 参数 JSON 解析失败：回填错误给模型，不拿空参数去执行工具
-            io.renderToolDenied(name, {}, '参数解析失败（输出超限被截断？建议分块）');
-            if (auditOn) auditEntry({ denied: true, reason: '参数解析失败' });
+            io.renderToolDenied(name, {}, parsedArgs.deniedReason);
+            if (auditOn) auditEntry({ denied: true, reason: parsedArgs.auditReason });
             // 审计（长生成截断循环）：给出明确分块指引，避免模型反复用单个超大 write 撞输出上限
-            messages.push({
-              role: 'tool',
-              tool_call_id: tc.id,
-              content:
-                '工具参数 JSON 解析失败（大概率是输出超过模型单次上限被截断）。请把内容拆分成多个较小文件或多次调用逐步写入：单个 write 的参数总长控制在 6000 字符以内；先写核心骨架，再逐文件补充。',
-            });
+            messages.push({ role: 'tool', tool_call_id: tc.id, content: parsedArgs.message });
             return null;
           }
-          if (!args || typeof args !== 'object' || Array.isArray(args)) args = {};
+          args = parsedArgs.args;
 
           // PreToolUse 钩子
           const hook = await hooks.pre(name, args);
