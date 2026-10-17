@@ -1,0 +1,1649 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MingDao 桌面版 · 界面设计稿 v1（静态示意）</title>
+<!--
+  ============================================================================
+  这是设计稿，不是产品代码，未接入真实内核。
+
+  · 全部数据为静态假数据；不请求任何 /api/*，不读写令牌，不写 localStorage
+    （只记住主题偏好，且仅在本页内存里）。
+  · 不引用任何外部资源（无 CDN、无外链字体、无远程图标），双击 file:// 即可打开。
+  · 样式刻意独立于 src/web/index.html，避免被误认为"已经落地的产品样式"。
+  · 对应的设计说明：docs/DESIGN-UI-v1.md
+  · 交互仅为示意：⌘/Ctrl+K 命令面板、⌘/Ctrl+/ 快捷键表、Esc 分层关闭、
+    工具时间线展开、内联权限确认、错误卡折叠、右栏收起、明暗切换。
+  ============================================================================
+-->
+<style>
+/* ============================================================
+   0. 设计令牌：暗色沿用产品现有取值（src/web/index.html:12-21），
+      亮色为同一语言的另一套映射；不新造色相。
+   ============================================================ */
+:root{
+  --fs-caption:12px; --fs-meta:13px; --fs-body:14px; --fs-body-lg:16px; --fs-title:20px;
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px; --sp-5:24px; --sp-6:32px;
+  --r-chip:6px; --r-card:10px; --r-field:12px; --r-sheet:14px; --r-pill:999px;
+  --dur-fast:150ms; --dur-slow:200ms; --ease:cubic-bezier(.2,.8,.2,1);
+  --sans:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+  --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,"Liberation Mono",monospace;
+}
+:root[data-theme="dark"]{
+  --surface-0:#151517; --surface-1:#1B1B1C; --surface-2:#2C2C2E; --surface-3:#353638;
+  --line:rgba(255,255,255,.12); --line-strong:rgba(255,255,255,.18);
+  --t1:#F9FAFB; --t2:#ADB2B8; --t3:#81858C;
+  --accent:#3ddc97; --accent-2:#22b8cf; --warn:#F59E0B; --err:#F25A5A; --ok:#3ddc97;
+  --user-bubble:#2C2C2E; --code-bg:#1B1B1C;
+  --tint-warn:rgba(245,158,11,.08); --tint-err:rgba(242,90,90,.08); --tint-ok:rgba(61,220,151,.08);
+  --sh-panel:0 8px 24px rgba(0,0,0,.35); --sh-overlay:0 16px 48px rgba(0,0,0,.55);
+  --scroll:#3C3C3D; --scroll-hover:#545557;
+  color-scheme:dark;
+}
+:root[data-theme="light"]{
+  --surface-0:#FFFFFF; --surface-1:#F7F7F8; --surface-2:#FFFFFF; --surface-3:#EFEFF1;
+  --line:#E4E4E7; --line-strong:#D4D4D8;
+  --t1:#18181B; --t2:#52525B; --t3:#71717A;
+  --accent:#0E9F6E; --accent-2:#0E7490; --warn:#B45309; --err:#DC2626; --ok:#0E9F6E;
+  --user-bubble:#F4F4F5; --code-bg:#F4F4F5;
+  --tint-warn:rgba(180,83,9,.07); --tint-err:rgba(220,38,38,.06); --tint-ok:rgba(14,159,110,.08);
+  --sh-panel:0 8px 24px rgba(24,24,27,.10); --sh-overlay:0 16px 48px rgba(24,24,27,.18);
+  --scroll:#D4D4D8; --scroll-hover:#A1A1AA;
+  color-scheme:light;
+}
+*{box-sizing:border-box}
+*::-webkit-scrollbar{width:10px;height:10px}
+*::-webkit-scrollbar-thumb{background:var(--scroll);border-radius:6px;border:2px solid transparent;background-clip:content-box}
+*::-webkit-scrollbar-thumb:hover{background:var(--scroll-hover);border:2px solid transparent;background-clip:content-box}
+*::-webkit-scrollbar-track{background:transparent}
+html,body{height:100%}
+body{
+  margin:0;background:var(--surface-0);color:var(--t1);
+  font:var(--fs-body)/1.65 var(--sans);
+  overflow:hidden;-webkit-font-smoothing:antialiased;
+}
+button,input,select,textarea{font-family:inherit}
+button{cursor:pointer}
+a{color:var(--accent-2)}
+:focus-visible{outline:2px solid var(--accent-2);outline-offset:2px;border-radius:var(--r-chip)}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;border:0}
+
+/* ============================================================
+   1. 三列布局：顶栏 / 左栏会话 / 主区对话 / 右栏本轮运行
+   ============================================================ */
+.app{
+  height:100vh;display:grid;
+  grid-template-columns:264px minmax(0,1fr) 300px;
+  grid-template-rows:48px minmax(0,1fr) auto;
+  grid-template-areas:"top top top" "side main run" "side foot run";
+  transition:grid-template-columns var(--dur-slow) var(--ease);
+}
+body.run-collapsed .app{grid-template-columns:264px minmax(0,1fr) 0px}
+body.run-collapsed .runpanel{border-left:0}
+
+/* ---------- 顶栏 ---------- */
+.topbar{
+  grid-area:top;display:flex;align-items:center;gap:var(--sp-3);
+  padding:0 var(--sp-4);background:var(--surface-1);
+  border-bottom:1px solid var(--line);min-width:0;
+}
+.brand{display:flex;align-items:center;gap:var(--sp-2);font-weight:700;letter-spacing:.2px;white-space:nowrap}
+.brand .mark{
+  width:22px;height:22px;border-radius:7px;display:grid;place-items:center;flex:none;
+  background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#06121a;font-size:12px;font-weight:800;
+}
+.brand .mark svg{width:13px;height:13px}
+.brand em{font-style:normal;color:var(--t2);font-weight:600}
+.crumb{
+  display:flex;align-items:center;gap:6px;min-width:0;margin-left:var(--sp-2);
+  font-size:var(--fs-meta);color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.crumb b{color:var(--t1);font-weight:600}
+.crumb .sep{opacity:.6}
+.draft-badge{
+  margin-left:var(--sp-2);flex:none;font-size:11px;line-height:18px;padding:0 8px;border-radius:var(--r-pill);
+  color:var(--warn);border:1px solid color-mix(in srgb,var(--warn) 45%,transparent);
+  background:var(--tint-warn);white-space:nowrap;
+}
+.top-actions{margin-left:auto;display:flex;align-items:center;gap:var(--sp-2);min-width:0}
+.kbtn{
+  display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 10px;
+  background:var(--surface-3);color:var(--t2);border:1px solid var(--line);
+  border-radius:var(--r-field);font-size:var(--fs-meta);white-space:nowrap;
+  transition:border-color var(--dur-fast),color var(--dur-fast),background var(--dur-fast);
+}
+.kbtn:hover{border-color:var(--accent-2);color:var(--t1)}
+.kbtn svg{width:14px;height:14px;flex:none}
+.kbtn .kbd{margin-left:2px}
+.kbtn.icon{width:30px;padding:0;justify-content:center}
+.run-chip{display:none}
+body.run-collapsed .run-chip{display:inline-flex}
+.run-chip .dot{width:7px;height:7px;border-radius:50%;background:var(--warn)}
+.kbd{
+  display:inline-block;font-family:var(--mono);font-size:10.5px;line-height:16px;
+  padding:0 5px;border-radius:5px;border:1px solid var(--line-strong);
+  background:var(--surface-2);color:var(--t2);
+}
+
+/* ---------- 左栏：会话 ---------- */
+.sidebar{
+  grid-area:side;background:var(--surface-1);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;min-height:0;min-width:0;
+}
+.ws-row{
+  display:flex;align-items:center;gap:8px;margin:var(--sp-3) var(--sp-3) var(--sp-2);
+  padding:7px 9px;border:1px solid var(--line);border-radius:var(--r-field);
+  background:var(--surface-2);cursor:pointer;transition:border-color var(--dur-fast);
+}
+.ws-row:hover{border-color:var(--accent-2)}
+.ws-row .ico{width:16px;height:16px;color:var(--accent-2);flex:none}
+.ws-row .name{flex:1;min-width:0;font-size:var(--fs-meta);font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ws-row .chev{color:var(--t3);flex:none}
+.side-search{position:relative;margin:0 var(--sp-3) var(--sp-2)}
+.side-search svg{position:absolute;left:9px;top:8px;width:14px;height:14px;color:var(--t3)}
+.side-search input{
+  width:100%;height:32px;padding:0 10px 0 30px;background:var(--surface-2);color:var(--t1);
+  border:1px solid var(--line);border-radius:var(--r-field);font-size:var(--fs-meta);
+}
+.side-search input::placeholder{color:var(--t3)}
+.side-search input:focus{border-color:var(--accent-2);outline:none;box-shadow:0 0 0 2px color-mix(in srgb,var(--accent-2) 30%,transparent)}
+.new-chat{
+  margin:0 var(--sp-3) var(--sp-2);height:34px;display:flex;align-items:center;justify-content:center;gap:6px;
+  background:color-mix(in srgb,var(--accent) 14%,transparent);color:var(--accent);
+  border:1px solid color-mix(in srgb,var(--accent) 35%,transparent);
+  border-radius:var(--r-field);font-size:var(--fs-meta);font-weight:600;
+  transition:background var(--dur-fast);
+}
+.new-chat:hover{background:color-mix(in srgb,var(--accent) 22%,transparent)}
+.new-chat svg{width:14px;height:14px}
+.session-scroll{flex:1;overflow-y:auto;padding:0 var(--sp-2) var(--sp-3);min-height:0}
+.group-label{
+  font-size:11px;letter-spacing:.4px;color:var(--t3);text-transform:uppercase;
+  padding:10px 10px 4px;
+}
+.sess{
+  display:block;width:100%;text-align:left;padding:7px 10px;border-radius:9px;border:1px solid transparent;
+  background:transparent;color:var(--t2);margin-bottom:1px;
+}
+.sess:hover{background:var(--surface-2);color:var(--t1)}
+.sess.active{
+  background:var(--surface-2);color:var(--t1);border-color:var(--line);
+  box-shadow:inset 2px 0 0 var(--accent);
+}
+.sess .abbr{display:none}
+.sess .t{font-size:var(--fs-meta);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sess .m{font-size:11px;color:var(--t3);margin-top:2px;display:flex;gap:6px;align-items:center}
+.sess .m .dot{width:5px;height:5px;border-radius:50%;background:var(--t3)}
+.sess.active .m .dot{background:var(--accent)}
+.side-foot{
+  border-top:1px solid var(--line);padding:8px 10px;display:flex;align-items:center;gap:8px;
+  font-size:11.5px;color:var(--t3);
+}
+.side-foot .avatar{
+  width:22px;height:22px;border-radius:50%;background:var(--surface-3);display:grid;place-items:center;
+  color:var(--t2);font-size:11px;font-weight:700;flex:none;
+}
+.side-foot .grow{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* ---------- 主区：对话流 ---------- */
+.main{
+  grid-area:main;min-width:0;min-height:0;overflow-y:auto;scroll-behavior:smooth;
+  background:var(--surface-0);position:relative;
+}
+.stream{max-width:820px;margin:0 auto;padding:12px 20px 12px}
+.divider{
+  display:flex;align-items:center;gap:10px;margin:2px 0 12px;
+  font-size:11.5px;color:var(--t3);
+}
+.divider::before,.divider::after{content:"";height:1px;background:var(--line);flex:1}
+
+/* 消息 */
+.msg-user{display:flex;flex-direction:column;align-items:flex-end;margin:0 0 14px}
+.msg-user .who{font-size:11.5px;color:var(--t3);margin:0 4px 4px}
+.bubble{
+  background:var(--user-bubble);border:1px solid var(--line);border-radius:16px 16px 4px 16px;
+  padding:10px 15px;max-width:min(560px,88%);font-size:var(--fs-body-lg);line-height:1.6;
+  white-space:pre-wrap;word-break:break-word;
+}
+.turn{display:flex;flex-direction:column;gap:8px;margin:0 0 16px}
+.turn-head{display:flex;align-items:center;gap:8px;font-size:11.5px;color:var(--t3)}
+.turn-head .ai-dot{
+  width:18px;height:18px;border-radius:50%;display:grid;place-items:center;flex:none;
+  background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#06121a;font-size:10px;font-weight:800;
+}
+.turn-head b{color:var(--t2);font-weight:600}
+.chip{
+  display:inline-flex;align-items:center;gap:5px;height:21px;padding:0 7px;border-radius:var(--r-pill);
+  border:1px solid var(--line);background:var(--surface-2);color:var(--t2);font-size:11px;white-space:nowrap;
+}
+.chip.mono{font-family:var(--mono);font-size:10.5px}
+.chip.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,transparent);background:var(--tint-warn)}
+.chip.err{color:var(--err);border-color:color-mix(in srgb,var(--err) 40%,transparent);background:var(--tint-err)}
+.chip.ok{color:var(--ok);border-color:color-mix(in srgb,var(--ok) 35%,transparent);background:var(--tint-ok)}
+
+/* 正文排版 */
+.content{font-size:var(--fs-body);line-height:1.75;color:var(--t1);max-width:100%}
+.content p{margin:0 0 10px}
+.content p:last-child{margin-bottom:0}
+.content ul{margin:0 0 10px;padding-left:20px}
+.content li{margin:3px 0}
+.content li::marker{color:var(--accent-2)}
+.content code{
+  font-family:var(--mono);font-size:12.5px;background:var(--surface-2);border:1px solid var(--line);
+  border-radius:5px;padding:1px 5px;
+}
+.content .inline-k{color:var(--accent-2)}
+.deliver{
+  display:flex;align-items:center;gap:8px;padding:6px 10px;border:1px solid var(--line);
+  border-left:3px solid var(--accent);border-radius:var(--r-card);background:var(--surface-2);
+  font-size:var(--fs-meta);color:var(--t2);
+}
+.deliver svg{width:14px;height:14px;color:var(--accent);flex:none}
+.deliver code{font-family:var(--mono);font-size:12px;color:var(--t1);margin-left:4px}
+
+/* 折叠（思考 / 原文） */
+details.fold{border:1px dashed var(--line);border-radius:var(--r-card);background:var(--surface-1)}
+details.fold>summary{
+  list-style:none;cursor:pointer;padding:6px 12px;font-size:var(--fs-meta);color:var(--t2);
+  display:flex;align-items:center;gap:8px;
+}
+details.fold>summary::-webkit-details-marker{display:none}
+details.fold>summary .tri{
+  width:0;height:0;border-left:5px solid currentColor;border-top:4px solid transparent;border-bottom:4px solid transparent;
+  transition:transform var(--dur-fast) var(--ease);color:var(--t3);flex:none;
+}
+details.fold[open]>summary .tri{transform:rotate(90deg)}
+details.fold>summary .sum-meta{margin-left:auto;color:var(--t3);font-size:11.5px}
+details.fold .fold-body{padding:8px 12px 11px;border-top:1px solid var(--line);color:var(--t2);font-size:var(--fs-meta);line-height:1.7}
+details.fold .fold-body p{margin:0 0 6px}
+details.fold .fold-body p:last-child{margin:0}
+
+/* 工具时间线卡片 */
+.toolcard{
+  border:1px solid var(--line);border-radius:var(--r-card);background:var(--surface-1);overflow:hidden;
+}
+.toolcard-head{
+  display:flex;align-items:center;gap:9px;padding:7px 12px;background:var(--surface-2);
+  font-size:var(--fs-meta);color:var(--t2);
+}
+.toolcard-head .tl-ico{width:15px;height:15px;color:var(--accent-2);flex:none}
+.toolcard-head b{color:var(--t1);font-weight:600}
+.toolcard-head .sep{color:var(--t3)}
+.toolcard-head .sum{margin-left:auto;color:var(--t3);font-size:11.5px;font-variant-numeric:tabular-nums}
+.iconbtn{
+  width:24px;height:24px;display:grid;place-items:center;border:1px solid transparent;border-radius:var(--r-chip);
+  background:transparent;color:var(--t3);
+}
+.iconbtn:hover{background:var(--surface-3);color:var(--t1)}
+.iconbtn svg{width:13px;height:13px;transition:transform var(--dur-fast) var(--ease)}
+.toolcard.collapsed .iconbtn svg{transform:rotate(-90deg)}
+.toolcard.collapsed .steps,.toolcard.collapsed .more{display:none}
+.steps{list-style:none;margin:0;padding:0}
+.step{border-top:1px solid var(--line)}
+.step:first-child{border-top:0}
+.step-row{
+  display:grid;grid-template-columns:20px 20px 62px minmax(0,1fr) 52px 12px;align-items:center;gap:8px;
+  width:100%;padding:3px 12px;background:transparent;border:0;color:var(--t2);text-align:left;
+  font-size:var(--fs-meta);transition:background var(--dur-fast);
+}
+.step-row:hover{background:var(--surface-2)}
+.step-row .st{width:16px;height:16px;display:grid;place-items:center;flex:none}
+.step-row .st svg{width:13px;height:13px}
+.step-row .st.ok{color:var(--ok)}
+.step-row .st.bad{color:var(--err)}
+.step-row .no{font-family:var(--mono);font-size:11px;color:var(--t3);font-variant-numeric:tabular-nums}
+.step-row .tool{font-family:var(--mono);font-size:12px;color:var(--accent-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.step-row .args{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--t2);font-family:var(--mono);font-size:12px}
+.step-row .dur{text-align:right;color:var(--t3);font-family:var(--mono);font-size:11px;font-variant-numeric:tabular-nums}
+.step-row .tri{width:0;height:0;border-left:4px solid currentColor;border-top:3px solid transparent;border-bottom:3px solid transparent;color:var(--t3);transition:transform var(--dur-fast) var(--ease)}
+.step.open .step-row .tri{transform:rotate(90deg)}
+.step.fail{box-shadow:inset 3px 0 0 var(--err);background:var(--tint-err)}
+.step.fail .tool{color:var(--err)}
+.step-out{display:none;padding:0 12px 10px 138px}
+.step.open .step-out{display:block}
+.step-out pre{
+  margin:0;padding:8px 10px;background:var(--code-bg);border:1px solid var(--line);
+  border-radius:8px;max-height:190px;overflow:auto;
+  font-family:var(--mono);font-size:12px;line-height:1.55;color:var(--t2);white-space:pre-wrap;word-break:break-word;
+}
+.step-out .bad-line{color:var(--err)}
+.more{
+  display:block;width:100%;padding:6px 12px;border:0;border-top:1px solid var(--line);
+  background:transparent;color:var(--t3);font-size:11.5px;text-align:center;
+}
+.more:hover{background:var(--surface-2);color:var(--t1)}
+.more[hidden]{display:none}
+
+/* 内联权限确认 */
+.permcard{
+  border:1px solid color-mix(in srgb,var(--warn) 45%,var(--line));
+  border-left:3px solid var(--warn);border-radius:var(--r-card);
+  background:var(--tint-warn);padding:9px 12px;display:flex;flex-direction:column;gap:7px;
+}
+.permcard-head{display:flex;align-items:center;gap:8px;font-size:var(--fs-meta);color:var(--warn);font-weight:600}
+.permcard-head svg{width:15px;height:15px;flex:none}
+.permcard-head .scope{margin-left:auto;font-weight:400;color:var(--t3);font-size:11.5px;font-variant-numeric:tabular-nums}
+.permcard .cmd{
+  font-family:var(--mono);font-size:12.5px;color:var(--t1);background:var(--code-bg);
+  border:1px solid var(--line);border-radius:8px;padding:7px 10px;overflow-x:auto;white-space:pre;
+}
+.permcard .why{font-size:var(--fs-meta);color:var(--t2);display:flex;gap:6px;align-items:flex-start}
+.permcard .why svg{width:13px;height:13px;margin-top:3px;color:var(--t3);flex:none}
+.permcard .acts{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.btn{
+  height:30px;padding:0 12px;border-radius:9px;border:1px solid var(--line);
+  background:var(--surface-2);color:var(--t1);font-size:var(--fs-meta);
+  display:inline-flex;align-items:center;gap:6px;transition:background var(--dur-fast),border-color var(--dur-fast);
+}
+.btn:hover{border-color:var(--accent-2)}
+.btn svg{width:13px;height:13px}
+.btn.primary{background:var(--t1);color:var(--surface-0);border-color:transparent;font-weight:600}
+:root[data-theme="dark"] .btn.primary{background:#F9FAFB;color:#0F1115}
+.btn.primary:hover{opacity:.9}
+.btn.danger{background:transparent;color:var(--err);border-color:color-mix(in srgb,var(--err) 45%,transparent)}
+.btn.danger:hover{background:var(--tint-err)}
+.btn.ghost{background:transparent}
+.btn.small{height:26px;padding:0 9px;font-size:12px}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.perm-resolved{
+  display:none;align-items:center;gap:7px;font-size:var(--fs-meta);color:var(--t2);
+  padding:9px 12px;border:1px solid var(--line);border-radius:var(--r-card);background:var(--surface-2);
+}
+.perm-resolved svg{width:14px;height:14px;flex:none}
+.perm-resolved.show{display:flex}
+.perm-resolved.deny svg{color:var(--err)}
+.perm-resolved.allow svg{color:var(--ok)}
+.perm-more{display:none;margin-top:8px;font-size:11.5px;color:var(--t3)}
+.perm-more.show{display:block}
+
+/* 错误卡 */
+.err-card{
+  border:1px solid color-mix(in srgb,var(--err) 38%,var(--line));
+  border-left:3px solid var(--err);border-radius:var(--r-card);
+  background:var(--tint-err);padding:9px 12px;display:flex;flex-direction:column;gap:7px;
+}
+.err-head{display:flex;align-items:center;gap:8px;font-size:var(--fs-meta);font-weight:600;color:var(--err);flex-wrap:wrap}
+.err-head svg{width:15px;height:15px;flex:none}
+.err-head .tag{font-weight:500;color:var(--t2);border:1px solid var(--line);background:var(--surface-2);border-radius:var(--r-pill);padding:0 7px;font-size:10.5px;line-height:18px}
+.err-head .retry-note{margin-left:auto;font-weight:400;font-size:11.5px;color:var(--t3)}
+.err-hint{font-size:var(--fs-meta);line-height:1.7;color:var(--t1);white-space:pre-line;margin:0}
+.err-hint .lead{color:var(--t2)}
+details.raw{border-top:0;padding-top:0;min-width:0;flex:1}
+.err-foot{display:flex;align-items:center;gap:10px;border-top:1px dashed var(--line);padding-top:7px;flex-wrap:wrap}
+.err-foot .err-acts{margin-left:auto;padding-top:0}
+details.raw>summary{
+  list-style:none;cursor:pointer;font-size:11.5px;color:var(--t3);display:flex;align-items:center;gap:6px;
+}
+details.raw>summary::-webkit-details-marker{display:none}
+details.raw>summary .tri{width:0;height:0;border-left:4px solid currentColor;border-top:3px solid transparent;border-bottom:3px solid transparent;transition:transform var(--dur-fast) var(--ease)}
+details.raw[open]>summary .tri{transform:rotate(90deg)}
+details.raw pre{
+  margin:7px 0 0;padding:8px 10px;max-height:170px;overflow:auto;background:var(--code-bg);
+  border:1px solid var(--line);border-radius:8px;font-family:var(--mono);font-size:11.5px;
+  line-height:1.55;color:var(--t2);white-space:pre-wrap;word-break:break-word;
+}
+.err-acts{display:flex;gap:8px;flex-wrap:wrap}
+
+/* ---------- 底部：运行状态条 + 输入区 ---------- */
+.foot{
+  grid-area:foot;background:var(--surface-1);border-top:1px solid var(--line);
+  padding:8px 20px 12px;
+}
+.foot-inner{max-width:820px;margin:0 auto}
+.runstrip{
+  display:flex;align-items:center;gap:10px;min-height:26px;margin-bottom:8px;
+  font-size:var(--fs-caption);color:var(--t2);font-variant-numeric:tabular-nums;white-space:nowrap;
+  overflow:hidden;
+}
+.runstrip .phase{display:inline-flex;align-items:center;gap:6px;color:var(--t1);font-weight:600;flex:none}
+.runstrip .pdot{width:7px;height:7px;border-radius:50%;background:var(--accent-2);flex:none}
+.runstrip .pdot.acting{background:var(--accent)}
+.runstrip .pdot.wait{background:var(--warn);animation:pulse 1.6s infinite}
+.runstrip .pdot.stop{background:var(--t3);animation:none}
+.runstrip .pdot.idle{background:var(--t3)}
+.runstrip .metric{color:var(--t2);overflow:hidden;text-overflow:ellipsis}
+.runstrip .metric b{color:var(--t1);font-weight:600}
+.runstrip .sep{color:var(--t3);opacity:.7;flex:none}
+.runstrip .ctx{display:inline-flex;align-items:center;gap:5px;flex:none}
+.runstrip .bar{width:44px;height:4px;border-radius:2px;background:var(--surface-3);overflow:hidden;display:inline-block}
+.runstrip .bar i{display:block;height:100%;width:62%;background:var(--accent-2);border-radius:2px}
+.runstrip .grow{flex:1;min-width:8px}
+.stopbtn{
+  flex:none;display:inline-flex;align-items:center;gap:5px;height:26px;padding:0 10px;
+  border-radius:8px;border:1px solid color-mix(in srgb,var(--err) 45%,transparent);
+  background:transparent;color:var(--err);font-size:12px;
+}
+.stopbtn:hover{background:var(--tint-err)}
+.stopbtn svg{width:11px;height:11px}
+.stopbtn[disabled]{opacity:.45;cursor:not-allowed}
+.composer{display:flex;gap:8px;align-items:flex-end}
+.attach{
+  width:38px;height:38px;flex:none;display:grid;place-items:center;border-radius:10px;
+  background:var(--surface-3);border:1px solid var(--line);color:var(--t2);
+}
+.attach:hover{border-color:var(--accent-2);color:var(--t1)}
+.attach svg{width:16px;height:16px}
+.input-wrap{flex:1;min-width:0;display:flex;flex-direction:column;gap:6px}
+#input{
+  width:100%;min-height:40px;max-height:160px;resize:none;overflow-y:auto;
+  background:var(--surface-3);color:var(--t1);border:1px solid var(--line);
+  border-radius:var(--r-field);padding:9px 12px;font-size:var(--fs-body);line-height:1.55;
+}
+#input::placeholder{color:var(--t3)}
+#input:focus{outline:none;border-color:var(--accent-2);box-shadow:0 0 0 2px color-mix(in srgb,var(--accent-2) 28%,transparent)}
+.input-meta{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--t3);padding:0 2px}
+.input-meta .grow{flex:1}
+.settings-btn{
+  height:38px;flex:none;display:inline-flex;align-items:center;gap:7px;padding:0 11px;
+  background:var(--surface-2);color:var(--t2);border:1px solid var(--line);border-radius:10px;
+  font-size:12.5px;white-space:nowrap;max-width:250px;
+}
+.settings-btn:hover{border-color:var(--accent-2);color:var(--t1)}
+.settings-btn b{color:var(--t1);font-weight:600;overflow:hidden;text-overflow:ellipsis}
+.settings-btn .sep{color:var(--t3)}
+.settings-btn svg{width:14px;height:14px;flex:none}
+.send{
+  height:38px;flex:none;min-width:74px;padding:0 16px;border:0;border-radius:10px;
+  background:var(--t1);color:var(--surface-0);font-weight:600;font-size:var(--fs-meta);
+}
+:root[data-theme="dark"] .send{background:#F9FAFB;color:#0F1115}
+.send:hover{opacity:.9}
+
+/* ---------- 右栏：本轮运行 ---------- */
+.runpanel{
+  grid-area:run;background:var(--surface-1);border-left:1px solid var(--line);
+  display:flex;flex-direction:column;min-height:0;min-width:0;overflow:hidden;
+  transition:opacity var(--dur-slow) var(--ease);
+}
+body.run-collapsed .runpanel{opacity:0;pointer-events:none}
+.runpanel-head{
+  display:flex;align-items:center;gap:8px;padding:11px 13px;border-bottom:1px solid var(--line);
+  font-size:var(--fs-meta);font-weight:600;color:var(--t1);flex:none;
+}
+.runpanel-head .live{
+  width:6px;height:6px;border-radius:50%;background:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 18%,transparent);
+}
+.runpanel-head .sub{font-size:11px;color:var(--t3);font-weight:400}
+.runpanel-head .iconbtn{margin-left:auto}
+.runpanel-body{flex:1;overflow-y:auto;padding:11px 13px 14px;min-height:0}
+.rsec{margin-bottom:var(--sp-4)}
+.rsec:last-child{margin-bottom:0}
+.rsec-title{
+  font-size:10.5px;letter-spacing:.5px;color:var(--t3);text-transform:uppercase;
+  margin-bottom:7px;display:flex;align-items:center;gap:6px;
+}
+.rsec-title .line{flex:1;height:1px;background:var(--line)}
+.kv{display:grid;grid-template-columns:56px minmax(0,1fr);gap:5px 8px;font-size:12.5px;align-items:baseline}
+.kv dt{color:var(--t3)}
+.kv dd{margin:0;color:var(--t1);min-width:0;display:flex;align-items:center;gap:5px;flex-wrap:wrap}
+.kv dd .src{
+  font-size:10px;color:var(--t3);border:1px solid var(--line);border-radius:var(--r-pill);
+  padding:0 5px;line-height:16px;white-space:nowrap;
+}
+.kv dd .edit{margin-left:auto;font-size:11px;color:var(--accent-2);background:none;border:0;padding:0}
+.kv dd .edit:hover{text-decoration:underline}
+.metrics{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+.metric-box{
+  border:1px solid var(--line);border-radius:9px;background:var(--surface-2);padding:7px 9px;
+  display:flex;flex-direction:column;gap:1px;
+}
+.metric-box .l{font-size:10.5px;color:var(--t3)}
+.metric-box .v{font-size:15px;font-weight:650;font-variant-numeric:tabular-nums;color:var(--t1)}
+.metric-box .v small{font-size:10.5px;font-weight:400;color:var(--t3);margin-left:2px}
+.metric-box.wide{grid-column:1/-1}
+.ctxbar{height:5px;border-radius:3px;background:var(--surface-3);overflow:hidden;margin-top:5px}
+.ctxbar i{display:block;height:100%;width:62%;background:linear-gradient(90deg,var(--accent-2),var(--accent));border-radius:3px}
+.ctx-legend{display:flex;justify-content:space-between;font-size:10.5px;color:var(--t3);margin-top:3px;font-variant-numeric:tabular-nums}
+.run-link{
+  display:flex;align-items:center;gap:7px;width:100%;padding:7px 9px;border:1px solid var(--line);
+  border-radius:9px;background:transparent;color:var(--t2);font-size:12.5px;margin-top:6px;text-align:left;
+}
+.run-link:hover{border-color:var(--accent-2);color:var(--t1)}
+.run-link svg{width:13px;height:13px;color:var(--t3);flex:none}
+.run-link .grow{flex:1}
+.run-foot{
+  border-top:1px solid var(--line);padding:8px 13px;font-size:11px;color:var(--t3);
+  display:flex;align-items:center;gap:6px;flex:none;
+}
+.run-foot .grow{flex:1}
+
+/* ============================================================
+   2. 浮层：命令面板 / 会话设置 / 快捷键表 / toast
+   ============================================================ */
+.mask{
+  position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:80;
+  display:flex;align-items:flex-start;justify-content:center;
+}
+:root[data-theme="light"] .mask{background:rgba(24,24,27,.28)}
+.mask[hidden]{display:none}
+.mask.center{align-items:center}
+.palette{
+  width:min(600px,92vw);margin-top:12vh;background:var(--surface-2);
+  border:1px solid var(--line-strong);border-radius:var(--r-sheet);box-shadow:var(--sh-overlay);
+  overflow:hidden;display:flex;flex-direction:column;max-height:66vh;
+}
+.palette-input{
+  display:flex;align-items:center;gap:9px;padding:12px 14px;border-bottom:1px solid var(--line);flex:none;
+}
+.palette-input svg{width:17px;height:17px;color:var(--t3);flex:none}
+.palette-input input{
+  flex:1;min-width:0;background:transparent;border:0;outline:none;color:var(--t1);
+  font-size:15px;
+}
+.palette-input input::placeholder{color:var(--t3)}
+.palette-input .kbd{flex:none}
+.palette-list{overflow-y:auto;padding:6px;min-height:0}
+.pgroup{padding:4px 4px 2px}
+.pgroup-label{font-size:10.5px;letter-spacing:.5px;color:var(--t3);padding:6px 9px 3px;text-transform:uppercase}
+.pitem{
+  display:flex;align-items:center;gap:9px;width:100%;padding:7px 9px;border:1px solid transparent;
+  border-radius:8px;background:transparent;color:var(--t2);text-align:left;font-size:var(--fs-meta);
+}
+.pitem svg{width:14px;height:14px;color:var(--t3);flex:none}
+.pitem .label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pitem .label b{color:var(--t1);font-weight:600}
+.pitem .hint{font-size:11px;color:var(--t3);white-space:nowrap}
+.pitem .scope{
+  font-size:10px;color:var(--t3);border:1px solid var(--line);border-radius:var(--r-pill);
+  padding:0 5px;line-height:15px;white-space:nowrap;
+}
+.pitem[aria-selected="true"]{background:var(--surface-3);border-color:var(--line);color:var(--t1);box-shadow:inset 2px 0 0 var(--accent-2)}
+.pitem[aria-selected="true"] svg{color:var(--accent-2)}
+.palette-foot{
+  border-top:1px solid var(--line);padding:7px 12px;display:flex;align-items:center;gap:12px;
+  font-size:11px;color:var(--t3);flex:none;flex-wrap:wrap;
+}
+.palette-foot .grow{flex:1}
+.palette-empty{padding:26px 16px;text-align:center;color:var(--t3);font-size:var(--fs-meta)}
+
+/* 会话设置 popover */
+.popover{
+  position:fixed;right:320px;bottom:96px;width:400px;max-width:calc(100vw - 32px);
+  background:var(--surface-2);border:1px solid var(--line-strong);border-radius:var(--r-sheet);
+  box-shadow:var(--sh-overlay);z-index:70;overflow:hidden;
+}
+body.run-collapsed .popover{right:24px}
+.popover[hidden]{display:none}
+.pop-head{display:flex;align-items:center;gap:8px;padding:11px 13px;border-bottom:1px solid var(--line);font-size:var(--fs-meta);font-weight:600}
+.pop-head .sub{margin-left:auto;font-size:11px;color:var(--t3);font-weight:400}
+.pop-body{padding:11px 13px;max-height:min(62vh,470px);overflow-y:auto}
+.field{margin-bottom:12px}
+.field:last-child{margin-bottom:0}
+.field label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--t2);margin-bottom:5px}
+.field label .scope{
+  margin-left:auto;font-size:10px;color:var(--t3);border:1px solid var(--line);
+  border-radius:var(--r-pill);padding:0 6px;line-height:16px;
+}
+.field select{
+  width:100%;height:32px;padding:0 8px;background:var(--surface-3);color:var(--t1);
+  border:1px solid var(--line);border-radius:8px;font-size:var(--fs-meta);
+}
+.field select:focus{border-color:var(--accent-2);outline:none}
+.field .src-line{font-size:11px;color:var(--t3);margin-top:4px;display:flex;gap:5px;align-items:center}
+.field .src-line svg{width:11px;height:11px;flex:none}
+.seg{display:flex;gap:4px;background:var(--surface-3);border:1px solid var(--line);border-radius:9px;padding:3px}
+.seg button{
+  flex:1;height:26px;border:0;border-radius:6px;background:transparent;color:var(--t2);font-size:12px;
+}
+.seg button.on{background:var(--surface-2);color:var(--t1);box-shadow:0 1px 3px rgba(0,0,0,.18);font-weight:600}
+.field .inline-chk{display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--t3);margin-top:6px}
+.field .inline-chk input{accent-color:var(--accent-2)}
+.pop-effective{
+  margin:0 13px 11px;padding:8px 10px;border:1px dashed var(--line);border-radius:8px;
+  font-size:11.5px;color:var(--t2);line-height:1.65;
+}
+.pop-effective b{color:var(--t1)}
+.pop-foot{display:flex;align-items:center;gap:8px;padding:9px 13px;border-top:1px solid var(--line)}
+.pop-foot .grow{flex:1;font-size:11px;color:var(--t3)}
+
+/* 快捷键表 */
+.sheet{
+  width:min(560px,92vw);background:var(--surface-2);border:1px solid var(--line-strong);
+  border-radius:var(--r-sheet);box-shadow:var(--sh-overlay);overflow:hidden;margin:auto;
+}
+.sheet-head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--line);font-weight:600}
+.sheet-head .iconbtn{margin-left:auto}
+.sheet-body{padding:12px 14px;display:grid;grid-template-columns:1fr 1fr;gap:8px 18px}
+.sheet-row{display:flex;align-items:center;gap:8px;font-size:var(--fs-meta);color:var(--t2)}
+.sheet-row .grow{flex:1}
+.sheet-row .kbd{font-size:10.5px}
+.sheet-note{grid-column:1/-1;font-size:11.5px;color:var(--t3);border-top:1px solid var(--line);padding-top:9px;margin-top:3px}
+
+/* toast */
+#toastWrap{position:fixed;left:50%;top:60px;transform:translateX(-50%);z-index:120;display:flex;flex-direction:column;gap:8px;align-items:center;pointer-events:none}
+.toast{
+  pointer-events:none;background:var(--surface-3);color:var(--t1);border:1px solid var(--line-strong);
+  border-radius:var(--r-pill);padding:7px 14px;font-size:12.5px;box-shadow:var(--sh-panel);
+  opacity:0;transform:translateY(-6px);transition:opacity var(--dur-slow),transform var(--dur-slow);
+  max-width:min(560px,90vw);text-align:center;
+}
+.toast.show{opacity:1;transform:translateY(0)}
+.toast.warn{color:var(--warn);border-color:color-mix(in srgb,var(--warn) 40%,var(--line))}
+
+@keyframes pulse{50%{opacity:.4}}
+@keyframes blink{50%{opacity:.35}}
+.caret{display:inline-block;width:7px;height:15px;background:var(--accent-2);vertical-align:-2px;margin-left:2px;animation:blink 1.1s infinite;border-radius:1px}
+
+/* ============================================================
+   3. 响应式：1180 收右栏 / 900 侧栏图标化
+   ============================================================ */
+@media (max-width:1180px){
+  .app{grid-template-columns:232px minmax(0,1fr) 0px}
+  .runpanel{border-left:0;opacity:0;pointer-events:none}
+  .run-chip{display:inline-flex}
+  .popover{right:24px}
+  .stream,.foot-inner{max-width:760px}
+  /* 窄屏：右栏变成覆盖式抽屉，不挤压正文 */
+  body.run-drawer .runpanel{
+    position:fixed;right:0;top:48px;bottom:0;width:300px;opacity:1;pointer-events:auto;
+    border-left:1px solid var(--line);z-index:60;box-shadow:var(--sh-panel);
+    background:var(--surface-1);transition:none;
+  }
+  body.run-drawer .runpanel-head{background:var(--surface-1)}
+  body.run-drawer .runpanel-head .iconbtn svg{transform:rotate(180deg)}
+}
+@media (max-width:980px){
+  .app{grid-template-columns:64px minmax(0,1fr) 0px}
+  .sidebar .ws-row .name,.sidebar .ws-row .chev,.side-search,.new-chat span,.sess .m,.group-label,.side-foot .grow,.side-foot .ver{display:none}
+  .ws-row{justify-content:center;padding:7px 0;margin:10px 8px}
+  .new-chat{margin:0 8px 8px;height:34px}
+  .new-chat svg{margin:0}
+  .session-scroll{padding:0 6px 8px}
+  .sess{padding:8px 0;text-align:center}
+  .sess .t{display:none}
+  .sess .abbr{display:inline-grid;place-items:center;width:26px;height:26px;border-radius:7px;background:var(--surface-3);font-size:11px;color:var(--t2)}
+  .side-foot{justify-content:center;padding:8px 4px}
+  .draft-badge{display:none}
+  .stream{padding:var(--sp-4) var(--sp-3) var(--sp-3)}
+  .foot{padding:8px 12px 10px}
+  .runstrip .metric.optional{display:none}
+  .settings-btn .model-label{max-width:88px}
+  .settings-btn .perm-label,.settings-btn .sep{display:none}
+}
+@media (max-width:720px){
+  .topbar{padding:0 10px;gap:6px}
+  .crumb{display:none}
+  .settings-btn{max-width:150px}
+  .bubble{max-width:100%}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ================= 顶栏：只留“我在哪 / 怎么跳 / 去哪改” ================= -->
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M4 18 12 5l8 13"/><path d="M8 18h8"/></svg>
+      </span>
+      <span>MingDao</span><em>Harness</em>
+    </div>
+    <div class="crumb" title="当前工作空间 › 当前会话">
+      <span>MingDao-Harness</span><span class="sep">›</span><b>修复登录 5s 超时</b>
+    </div>
+    <span class="draft-badge" title="这是设计稿，不是产品代码，未接内核">设计稿 · 静态数据</span>
+    <div class="top-actions">
+      <button class="kbtn" id="paletteBtn" aria-haspopup="dialog" title="搜索或运行命令">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+        <span>搜索或运行命令</span><span class="kbd" id="paletteKbd">⌘K</span>
+      </button>
+      <button class="kbtn run-chip" id="runChip" title="展开本轮运行面板">
+        <span class="dot"></span><span>运行</span>
+      </button>
+      <button class="kbtn icon" id="themeBtn" title="切换明暗（示意）" aria-label="切换明暗主题">
+        <svg id="themeIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19"/></svg>
+      </button>
+      <button class="kbtn icon" id="settingsBtn" title="设置" aria-label="打开设置">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <!-- ================= 左栏：工作空间 + 会话 ================= -->
+  <aside class="sidebar" aria-label="会话与工作空间">
+    <div class="ws-row" role="button" tabindex="0" title="切换工作空间（示意）">
+      <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+      <span class="name">MingDao-Harness</span>
+      <svg class="chev" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m6 9 6 6 6-6"/></svg>
+    </div>
+    <div class="side-search">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input type="search" placeholder="搜索会话…" aria-label="搜索会话">
+    </div>
+    <button class="new-chat" id="newChat">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 5v14M5 12h14"/></svg>
+      <span>新对话</span>
+    </button>
+    <nav class="session-scroll" aria-label="会话列表">
+      <div class="group-label">今天</div>
+      <button class="sess active" aria-current="true">
+        <span class="abbr" aria-hidden="true">修</span>
+        <span class="t">修复登录 5s 超时</span>
+        <span class="m"><span class="dot"></span>7 步 · 3 分钟前</span>
+      </button>
+      <button class="sess">
+        <span class="abbr" aria-hidden="true">补</span>
+        <span class="t">补齐 e2e 登录用例</span>
+        <span class="m"><span class="dot"></span>12 步 · 1 小时前</span>
+      </button>
+      <div class="group-label">昨天</div>
+      <button class="sess">
+        <span class="abbr" aria-hidden="true">重</span>
+        <span class="t">重构路由层的错误处理</span>
+        <span class="m"><span class="dot"></span>23 步 · 昨天</span>
+      </button>
+      <button class="sess">
+        <span class="abbr" aria-hidden="true">升</span>
+        <span class="t">升级依赖并跑全量测试</span>
+        <span class="m"><span class="dot"></span>8 步 · 昨天</span>
+      </button>
+      <div class="group-label">更早</div>
+      <button class="sess">
+        <span class="abbr" aria-hidden="true">初</span>
+        <span class="t">初始化仓库与 CI</span>
+        <span class="m"><span class="dot"></span>5 步 · 10 月 12 日</span>
+      </button>
+      <button class="sess">
+        <span class="abbr" aria-hidden="true">写</span>
+        <span class="t">写一份 CONFIG 说明</span>
+        <span class="m"><span class="dot"></span>4 步 · 10 月 11 日</span>
+      </button>
+    </nav>
+    <div class="side-foot">
+      <span class="avatar" aria-hidden="true">M</span>
+      <span class="grow">本地模式 · 不上传</span>
+      <span class="ver">v0.6.18</span>
+    </div>
+  </aside>
+
+  <!-- ================= 主区：对话流 ================= -->
+  <main class="main" id="main">
+    <div class="stream">
+
+      <div class="divider"><span>今天 14:05 · MingDao-Harness</span></div>
+
+      <!-- 用户消息 -->
+      <div class="msg-user">
+        <div class="who">你</div>
+        <div class="bubble">修一下登录 5s 超时：查 e2e 里超时的常量，跑一遍测试。</div>
+      </div>
+
+      <!-- 一轮助手回复 -->
+      <article class="turn" aria-label="助手回复">
+        <div class="turn-head">
+          <span class="ai-dot" aria-hidden="true">M</span>
+          <b>助手</b>
+          <span>14:05</span>
+          <span class="chip mono">deepseek-v4-flash</span>
+          <span class="chip">询问</span>
+        </div>
+
+        <!-- 思考过程：默认折叠 -->
+        <details class="fold">
+          <summary>
+            <span class="tri" aria-hidden="true"></span>
+            <span>思考过程</span>
+            <span class="sum-meta">12s</span>
+          </summary>
+          <div class="fold-body">
+            <p>先找 e2e 目录里跟 timeout 有关的常量；再看看 login.spec 的等待方式。超时值可能在测试里硬编码，也可能是应用侧配置。</p>
+            <p>跑测试时注意：`bash` 会写 coverage/，按当前权限档需要确认。</p>
+          </div>
+        </details>
+
+        <!-- 工具时间线：一张卡，默认 3 步 + 失败步，可展开其余 -->
+        <section class="toolcard" id="toolcard" aria-label="工具调用时间线">
+          <div class="toolcard-head">
+            <svg class="tl-ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/><circle cx="19" cy="18" r="2"/></svg>
+            <b>工具时间线</b>
+            <span class="sep">·</span>
+            <span>7 步</span>
+            <span class="sep">·</span>
+            <span>42s</span>
+            <span class="sum">1 个失败</span>
+            <button class="iconbtn" id="toolToggle" aria-expanded="true" aria-controls="toolSteps" title="收起/展开时间线">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m6 9 6 6 6-6"/></svg>
+            </button>
+          </div>
+          <ul class="steps" id="toolSteps">
+            <li class="step">
+              <button class="step-row" aria-expanded="false">
+                <span class="no">1</span>
+                <span class="st ok" aria-label="成功"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="m5 13 4 4L19 7"/></svg></span>
+                <span class="tool">read</span>
+                <span class="args">e2e/login.spec.ts</span>
+                <span class="dur">12ms</span>
+                <span class="tri" aria-hidden="true"></span>
+              </button>
+              <div class="step-out"><pre>1  import { test, expect } from '@playwright/test';
+2  test('login redirects', async ({ page }) =&gt; {
+3    await page.goto('/login');
+4    await expect(page).toHaveURL(/dashboard/, { timeout: 5000 });
+5  });</pre></div>
+            </li>
+            <li class="step">
+              <button class="step-row" aria-expanded="false">
+                <span class="no">2</span>
+                <span class="st ok" aria-label="成功"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="m5 13 4 4L19 7"/></svg></span>
+                <span class="tool">grep</span>
+                <span class="args">"timeout: 5000"</span>
+                <span class="dur">340ms</span>
+                <span class="tri" aria-hidden="true"></span>
+              </button>
+              <div class="step-out"><pre>e2e/login.spec.ts:4:  timeout: 5000
+e2e/session.spec.ts:12: timeout: 5000
+src/auth/session.ts:31: const TIMEOUT_MS = 5000</pre></div>
+            </li>
+            <li class="step fail">
+              <button class="step-row" aria-expanded="true">
+                <span class="no">3</span>
+                <span class="st bad" aria-label="失败"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="M6 6l12 12M18 6 6 18"/></svg></span>
+                <span class="tool">bash</span>
+                <span class="args">npm test -- login</span>
+                <span class="dur">1.2s</span>
+                <span class="tri" aria-hidden="true"></span>
+              </button>
+              <div class="step-out"><pre>FAIL e2e/login.spec.ts
+  ● login redirects
+    Timed out 5000ms waiting for expect(page).toHaveURL(/dashboard/)
+    <span class="bad-line">exit code 1 · 1 failed, 3 passed</span></pre></div>
+            </li>
+            <li class="step extra" hidden>
+              <button class="step-row" aria-expanded="false">
+                <span class="no">4</span>
+                <span class="st ok" aria-label="成功"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="m5 13 4 4L19 7"/></svg></span>
+                <span class="tool">read</span>
+                <span class="args">src/auth/session.ts</span>
+                <span class="dur">9ms</span>
+                <span class="tri" aria-hidden="true"></span>
+              </button>
+              <div class="step-out"><pre>28  // 登录成功后等待 dashboard 渲染
+29  export const SESSION_TIMEOUT_MS = 5000;
+30  export async function waitForSession() {
+31    return waitFor(() =&gt; hasSession(), SESSION_TIMEOUT_MS);
+32  }</pre></div>
+            </li>
+            <li class="step extra" hidden>
+              <button class="step-row" aria-expanded="false">
+                <span class="no">5</span>
+                <span class="st ok" aria-label="成功"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="m5 13 4 4L19 7"/></svg></span>
+                <span class="tool">grep</span>
+                <span class="args">"SESSION_TIMEOUT_MS"</span>
+                <span class="dur">210ms</span>
+                <span class="tri" aria-hidden="true"></span>
+              </button>
+              <div class="step-out"><pre>src/auth/session.ts:29
+src/auth/session.ts:31
+src/app/login/page.tsx:44</pre></div>
+            </li>
+            <li class="step extra" hidden>
+              <button class="step-row" aria-expanded="false">
+                <span class="no">6</span>
+                <span class="st ok" aria-label="成功"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="m5 13 4 4L19 7"/></svg></span>
+                <span class="tool">edit</span>
+                <span class="args">src/auth/session.ts</span>
+                <span class="dur">18ms</span>
+                <span class="tri" aria-hidden="true"></span>
+              </button>
+              <div class="step-out"><pre>- export const SESSION_TIMEOUT_MS = 5000;
++ export const SESSION_TIMEOUT_MS = 15000;
+  // 慢网络下 5s 会在 dashboard 首次渲染前超时</pre></div>
+            </li>
+            <li class="step extra" hidden>
+              <button class="step-row" aria-expanded="false">
+                <span class="no">7</span>
+                <span class="st ok" aria-label="成功"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6"><path d="m5 13 4 4L19 7"/></svg></span>
+                <span class="tool">todo</span>
+                <span class="args">更新任务清单</span>
+                <span class="dur">3ms</span>
+                <span class="tri" aria-hidden="true"></span>
+              </button>
+              <div class="step-out"><pre>✓ 定位硬编码 5000ms
+✓ 修改 SESSION_TIMEOUT_MS
+○ 重跑 e2e 验证</pre></div>
+            </li>
+          </ul>
+          <button class="more" id="showMore">展开其余 4 步</button>
+        </section>
+
+        <!-- 上游错误：折叠原文 + 处置建议 -->
+        <section class="err-card" aria-label="上游错误">
+          <div class="err-head">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v6M12 17h.01"/></svg>
+            <span>上游拒绝了本轮总结请求（HTTP 400）</span>
+            <span class="tag">上游</span>
+            <span class="retry-note">已自动重试 1 次并成功</span>
+          </div>
+          <p class="err-hint"><span class="lead">💡 端点模板不接受多轮 messages：</span>换成标准 chat 端点，或改用支持多轮的模板端点。</p>
+          <div class="err-foot">
+            <details class="raw">
+              <summary><span class="tri" aria-hidden="true"></span><span>上游原文（400 字，已被截断）</span></summary>
+              <pre id="rawText">{"error":{"message":"jinja2.exceptions.TemplateError: conversation template expects a single 'query' string, but received messages[] with 7 items","type":"invalid_request_error","param":null,"code":null}}</pre>
+            </details>
+            <div class="err-acts">
+              <button class="btn small" id="copyRaw" title="复制上游原文">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h8"/></svg>
+                <span id="copyRawLabel">复制</span>
+              </button>
+              <button class="btn small" id="retryBtn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 4v5h-5"/></svg>
+                重试
+              </button>
+              <button class="btn small ghost" id="errSettings">相关设置</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- 正文 -->
+        <div class="content">
+          <p>定位到 <b>3 处</b>硬编码的 <code>5000ms</code>；应用侧真实原因在 <code>src/auth/session.ts:29</code>。</p>
+          <ul>
+            <li>已把 <code>SESSION_TIMEOUT_MS</code> 调整为 15s，测试里的两处等待值同步修改；</li>
+            <li>下一步：重跑 e2e，确认 4 条用例全绿（下方等待你的确认）。</li>
+          </ul>
+        </div>
+
+        <!-- 内联权限确认：不遮挡输入区，三档动作 -->
+        <section class="permcard" id="permCard" aria-label="权限确认">
+          <div class="permcard-head">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3 5 6v5c0 4.4 3 8.3 7 9 4-0.7 7-4.6 7-9V6z"/><path d="M12 8v4M12 15h.01"/></svg>
+            <span>需要你确认 · bash</span>
+            <span class="scope" id="permCountdown">剩余 01:47 后按「拒绝」处理</span>
+          </div>
+          <div class="cmd">npm test -- --runInBand</div>
+          <div class="why">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+            <span>在工作空间内执行测试，会写 <code>coverage/</code> 并可能联网下载浏览器；沙箱 off。</span>
+          </div>
+          <div class="acts" id="permActs">
+            <button class="btn primary" data-answer="allow" id="allowOnce">本次放行</button>
+            <button class="btn danger" data-answer="deny" id="denyOnce">拒绝</button>
+            <button class="btn ghost" data-answer="always" id="allowAlways" title="需内核支持（P1）">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="10" width="16" height="10" rx="2"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/></svg>
+              始终允许本会话
+            </button>
+            <span style="font-size:11px;color:var(--t3);margin-left:auto">Esc = 拒绝</span>
+          </div>
+          <div class="perm-more" id="permMore">同一轮还有 1 个待确认（串行展示，不再叠加遮罩）</div>
+        </section>
+
+        <div class="perm-resolved" id="permResolved" role="status">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m5 13 4 4L19 7"/></svg>
+          <span id="permResolvedText">已放行（本次）：继续执行…</span>
+        </div>
+      </article>
+
+    </div>
+  </main>
+
+  <!-- ================= 底部：常驻状态条 + 输入区 ================= -->
+  <footer class="foot">
+    <div class="foot-inner">
+      <div class="runstrip" id="runStrip" role="status" aria-live="polite" aria-atomic="true">
+        <span class="phase"><span class="pdot wait" id="phaseDot"></span><span id="phaseText">等待权限确认</span></span>
+        <span class="sep">·</span>
+        <span class="metric">首帧 <b id="mTtft">2.4s</b></span>
+        <span class="sep">·</span>
+        <span class="metric">吞吐 <b id="mTps">18.6</b> tok/s</span>
+        <span class="sep">·</span>
+        <span class="ctx metric">上下文
+          <span class="bar" aria-hidden="true"><i id="ctxBar"></i></span>
+          <b id="mCtx">62%</b>
+        </span>
+        <span class="sep">·</span>
+        <span class="metric optional">工具 <b id="mTools">7</b></span>
+        <span class="sep">·</span>
+        <span class="metric"><b id="mTime">3m12s</b></span>
+        <span class="grow"></span>
+        <button class="stopbtn" id="stopBtn">
+          <svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>
+          停止
+        </button>
+      </div>
+
+      <div class="composer">
+        <button class="attach" title="上传图片或文本文件（示意）" aria-label="添加附件">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 11.5 12 20a6 6 0 0 1-8.5-8.5L12 3a4 4 0 0 1 5.7 5.7L9 17.4a2 2 0 0 1-2.8-2.8l7.8-7.8"/></svg>
+        </button>
+        <div class="input-wrap">
+          <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送，Shift+Enter 换行）" aria-label="输入任务"></textarea>
+          <div class="input-meta">
+            <span>Enter 发送 · Shift+Enter 换行</span>
+            <span class="grow"></span>
+            <span>⌘K 命令 · ⌘/ 快捷键</span>
+          </div>
+        </div>
+        <button class="settings-btn" id="sessSettingsBtn" aria-haspopup="dialog" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/></svg>
+          <b class="model-label" id="chipModel">deepseek-v4-flash</b>
+          <span class="sep">·</span>
+          <span class="perm-label" id="chipPerm">询问</span>
+        </button>
+        <button class="send" id="sendBtn">发送</button>
+      </div>
+    </div>
+  </footer>
+
+  <!-- ================= 右栏：本轮运行 ================= -->
+  <aside class="runpanel" id="runPanel" aria-label="本轮运行">
+    <div class="runpanel-head">
+      <span class="live" aria-hidden="true"></span>
+      <span>本轮运行</span>
+      <span class="sub">第 4 轮</span>
+      <button class="iconbtn" id="runCollapse" title="收起右栏" aria-label="收起右栏">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m9 6 6 6-6 6"/></svg>
+      </button>
+    </div>
+    <div class="runpanel-body">
+
+      <section class="rsec">
+        <div class="rsec-title">会话配置<span class="line"></span></div>
+        <dl class="kv">
+          <dt>模型</dt>
+          <dd><span id="rpModel">deepseek-v4-flash</span><span class="src">设置</span><button class="edit" data-open-settings>改</button></dd>
+          <dt>预设</dt>
+          <dd><span id="rpPreset">无预设</span><span class="src">本轮</span></dd>
+          <dt>权限</dt>
+          <dd><span id="rpPerm">询问</span><span class="src" id="rpPermSrc">你的显式选择</span><button class="edit" data-open-settings>改</button></dd>
+        </dl>
+      </section>
+
+      <section class="rsec">
+        <div class="rsec-title">本轮数据<span class="line"></span></div>
+        <div class="metrics">
+          <div class="metric-box"><span class="l">首帧 TTFT</span><span class="v" id="rpTtft">2.4<small>s</small></span></div>
+          <div class="metric-box"><span class="l">吞吐</span><span class="v" id="rpTps">18.6<small>tok/s</small></span></div>
+          <div class="metric-box wide">
+            <span class="l">上下文占用 <span style="float:right;color:var(--t3)">79K / 128K</span></span>
+            <div class="ctxbar"><i id="rpCtxBar"></i></div>
+            <div class="ctx-legend"><span>估算值 · 超 75% 提醒</span><span id="rpCtx">62%</span></div>
+          </div>
+          <div class="metric-box"><span class="l">工具步数</span><span class="v" id="rpTools">7<small>步</small></span></div>
+          <div class="metric-box"><span class="l">本轮用时</span><span class="v" id="rpTime">3m12s</span></div>
+          <div class="metric-box wide"><span class="l">本轮费用（估算）</span><span class="v" id="rpCost">≈ ¥0.0132</span></div>
+        </div>
+      </section>
+
+      <section class="rsec">
+        <div class="rsec-title">产出<span class="line"></span></div>
+        <dl class="kv">
+          <dt>交付物</dt><dd><span id="rpDeliver">2 个文件</span></dd>
+          <dt>子 Agent</dt><dd><span id="rpSubs">0 个</span></dd>
+        </dl>
+        <button class="run-link" id="openTools">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+          <span class="grow">工具明细（7 步）</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+        <button class="run-link" id="openSubs">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="8" r="3"/><path d="M5 20a7 7 0 0 1 14 0"/></svg>
+          <span class="grow">子 Agent 记录</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m9 6 6 6-6 6"/></svg>
+        </button>
+      </section>
+
+    </div>
+    <div class="run-foot">
+      <span>指标口径：本轮（非累计）</span>
+      <span class="grow"></span>
+      <button class="edit" id="openCost" style="background:none;border:0;color:var(--accent-2);font-size:11.5px">费用详情</button>
+    </div>
+  </aside>
+</div>
+
+<!-- ================= 命令面板 ================= -->
+<div class="mask" id="paletteMask" hidden>
+  <div class="palette" role="dialog" aria-modal="true" aria-label="命令面板">
+    <div class="palette-input">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="paletteInput" type="text" placeholder="搜索会话、工作空间、模型、权限、设置项…" role="combobox" aria-expanded="true" aria-controls="paletteList" aria-activedescendant="" autocomplete="off">
+      <span class="kbd">Esc</span>
+    </div>
+    <div class="palette-list" id="paletteList" role="listbox" aria-label="命令">
+      <!-- JS 渲染 -->
+    </div>
+    <div class="palette-foot">
+      <span><span class="kbd">↑</span><span class="kbd">↓</span> 选择</span>
+      <span><span class="kbd">↵</span> 执行</span>
+      <span><span class="kbd">esc</span> 关闭</span>
+      <span class="grow"></span>
+      <span>作用域标签 = 改动影响范围</span>
+    </div>
+  </div>
+</div>
+
+<!-- ================= 会话设置 popover ================= -->
+<div class="popover" id="sessPopover" role="dialog" aria-modal="false" aria-label="会话设置" hidden>
+  <div class="pop-head">
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/></svg>
+    会话设置
+    <span class="sub">收编原来的三个下拉</span>
+  </div>
+  <div class="pop-body">
+    <div class="field">
+      <label for="setModel">模型<span class="scope">全局</span></label>
+      <select id="setModel">
+        <option value="deepseek-v4-flash" selected>deepseek-v4-flash</option>
+        <option value="deepseek-v4-pro">deepseek-v4-pro</option>
+        <option value="deepseek-v4-flash-vision-exp">deepseek-v4-flash-vision-exp</option>
+      </select>
+      <div class="src-line">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7h18v12H3z"/><path d="M3 7l3-3h12l3 3"/></svg>
+        来源：设置 › 模型与密钥 · 写入 config.json，下一轮生效
+      </div>
+    </div>
+    <div class="field">
+      <label for="setPreset">预设<span class="scope">仅本轮</span></label>
+      <select id="setPreset">
+        <option value="" selected>无预设（恢复默认）</option>
+        <option value="local-audit">本地审计（项目）· 声明 readonly</option>
+        <option value="reviewer">代码评审（内置）</option>
+      </select>
+      <div class="src-line">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 4h16v16H4z"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>
+        来源：你的选择 · 只影响本次发送（工具白名单/参数）
+      </div>
+    </div>
+    <div class="field">
+      <label>权限<span class="scope">全局 + 本轮</span></label>
+      <div class="seg" role="group" aria-label="权限模式">
+        <button type="button" class="on" data-perm="ask">询问</button>
+        <button type="button" data-perm="auto">自动</button>
+        <button type="button" data-perm="readonly">只读</button>
+      </div>
+      <label class="inline-chk"><input type="checkbox" id="permThisTurnOnly"> 仅本轮（不写入全局配置）</label>
+      <div class="src-line" id="permSrcLine">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>
+        当前来源：你的显式选择。若预设声明更严，预设不会提权，也不会静默压低你的选择。
+      </div>
+    </div>
+  </div>
+  <div class="pop-effective" id="effectiveLine">
+    本轮实际生效：<b>deepseek-v4-flash</b> · 权限 <b>ask</b>（你的显式选择） · 预设 <b>无</b>
+  </div>
+  <div class="pop-foot">
+    <span class="grow">改动作用域已标在每项右侧</span>
+    <button class="btn small ghost" id="popCancel">取消</button>
+    <button class="btn small primary" id="popDone">完成</button>
+  </div>
+</div>
+
+<!-- ================= 快捷键表 ================= -->
+<div class="mask center" id="sheetMask" hidden>
+  <div class="sheet" role="dialog" aria-modal="true" aria-label="快捷键">
+    <div class="sheet-head">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/></svg>
+      键盘快捷键
+      <button class="iconbtn" id="sheetClose" aria-label="关闭">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M6 6l12 12M18 6 6 18"/></svg>
+      </button>
+    </div>
+    <div class="sheet-body">
+      <div class="sheet-row"><span class="kbd">⌘K</span><span class="grow">命令面板（搜索/切换/执行）</span></div>
+      <div class="sheet-row"><span class="kbd">⌘/</span><span class="grow">打开本表</span></div>
+      <div class="sheet-row"><span class="kbd">Esc</span><span class="grow">分层关闭：浮层 › 确认卡 › 停止本轮</span></div>
+      <div class="sheet-row"><span class="kbd">↵</span><span class="grow">发送</span></div>
+      <div class="sheet-row"><span class="kbd">⇧↵</span><span class="grow">换行</span></div>
+      <div class="sheet-row"><span class="kbd">⌘↵</span><span class="grow">发送（与 ↵ 等价）</span></div>
+      <div class="sheet-note">设计稿示意：实际实现会忽略输入法组合（isComposing）期间的快捷键；⌘/Ctrl 在 Windows/Linux 上互换。</div>
+    </div>
+  </div>
+</div>
+
+<div id="toastWrap" aria-live="polite" aria-atomic="false"></div>
+
+<script>
+/* ============================================================================
+   设计稿交互（全部本地假数据，无网络请求）
+   ========================================================================== */
+(function(){
+  'use strict';
+  const $ = (s, r) => (r || document).querySelector(s);
+  const $$ = (s, r) => Array.from((r || document).querySelectorAll(s));
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || '');
+  const modKey = isMac ? '⌘' : 'Ctrl';
+  $('#paletteKbd').textContent = modKey + 'K';
+
+  /* ---------- toast ---------- */
+  const toastWrap = $('#toastWrap');
+  function toast(text, opts){
+    const el = document.createElement('div');
+    el.className = 'toast' + (opts && opts.warn ? ' warn' : '');
+    el.textContent = text;
+    toastWrap.appendChild(el);
+    requestAnimationFrame(() => el.classList.add('show'));
+    setTimeout(() => { el.classList.remove('show'); setTimeout(() => el.remove(), 220); }, opts && opts.ms ? opts.ms : 2400);
+  }
+
+  /* ---------- 状态（本轮运行） ---------- */
+  const state = {
+    phase: 'wait',
+    phaseText: '等待权限确认',
+    ttft: 2.4, tps: 18.6, ctx: 62, tools: 7, time: '3m12s',
+    model: 'deepseek-v4-flash', preset: '无预设', presetName: '',
+    perm: 'ask', permLabel: '询问', permSource: '你的显式选择',
+    running: true
+  };
+  const PHASE = {
+    think:  { dot: '',       text: '模型推理中' },
+    acting: { dot: 'acting', text: '执行工具中' },
+    wait:   { dot: 'wait',   text: '等待权限确认' },
+    stop:   { dot: 'stop',   text: '已停止' },
+    idle:   { dot: 'idle',   text: '空闲' }
+  };
+  function render(){
+    const p = PHASE[state.phase] || PHASE.idle;
+    $('#phaseDot').className = 'pdot ' + p.dot;
+    $('#phaseText').textContent = state.phaseText || p.text;
+    $('#mTtft').textContent = state.ttft.toFixed(1) + 's';
+    $('#mTps').textContent = state.tps.toFixed(1);
+    $('#mCtx').textContent = state.ctx + '%';
+    $('#ctxBar').style.width = state.ctx + '%';
+    $('#mTools').textContent = state.tools;
+    $('#mTime').textContent = state.time;
+    $('#rpModel').textContent = state.model;
+    $('#rpPreset').textContent = state.preset;
+    $('#rpPerm').textContent = state.permLabel;
+    $('#rpPermSrc').textContent = state.permSource;
+    $('#rpTtft').innerHTML = state.ttft.toFixed(1) + '<small>s</small>';
+    $('#rpTps').innerHTML = state.tps.toFixed(1) + '<small>tok/s</small>';
+    $('#rpCtx').textContent = state.ctx + '%';
+    $('#rpCtxBar').style.width = state.ctx + '%';
+    $('#rpTools').innerHTML = state.tools + '<small>步</small>';
+    $('#rpTime').textContent = state.time;
+    $('#chipModel').textContent = state.model;
+    $('#chipPerm').textContent = state.permLabel;
+    $('#stopBtn').disabled = !state.running;
+    $('#stopBtn').innerHTML = state.running
+      ? '<svg viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="2"/></svg>停止'
+      : '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 13 4 4L19 7"/></svg>已停止';
+    $('#effectiveLine').innerHTML = '本轮实际生效：<b>' + esc(state.model) + '</b> · 权限 <b>' +
+      esc(state.perm === 'ask' ? 'ask' : state.perm) + '</b>（' + esc(state.permSource) + '） · 预设 <b>' +
+      esc(state.preset) + '</b>';
+  }  function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+
+  /* ---------- 主题 ---------- */
+  const root = document.documentElement;
+  $('#themeBtn').addEventListener('click', () => {
+    const next = root.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    root.setAttribute('data-theme', next);
+    $('#themeIcon').innerHTML = next === 'dark'
+      ? '<circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5 19 19M19 5l-1.5 1.5M6.5 17.5 5 19"/>'
+      : '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5z"/>';
+    toast(next === 'dark' ? '暗色（沿用现有 token）' : '亮色（同一语言的另一套映射）');
+  });
+
+  /* ---------- 工具时间线 ---------- */
+  const toolcard = $('#toolcard');
+  $('#toolToggle').addEventListener('click', () => {
+    const collapsed = toolcard.classList.toggle('collapsed');
+    $('#toolToggle').setAttribute('aria-expanded', String(!collapsed));
+  });
+  $('#showMore').addEventListener('click', () => {
+    $$('.step.extra', toolcard).forEach(el => el.hidden = false);
+    $('#showMore').hidden = true;
+    toast('展开其余 4 步：默认折叠是"证据可折"，不是丢失信息');
+  });
+  $$('.step-row', toolcard).forEach(btn => {
+    btn.addEventListener('click', () => {
+      const li = btn.closest('.step');
+      const open = li.classList.toggle('open');
+      btn.setAttribute('aria-expanded', String(open));
+    });
+  });
+
+  /* ---------- 内联权限确认 ---------- */
+  let countdown = 107;
+  let countdownTimer = null;
+  let permPending = true;
+  function fmt(n){ return '剩余 ' + String(Math.floor(n/60)).padStart(2,'0') + ':' + String(n%60).padStart(2,'0') + ' 后按「拒绝」处理'; }
+  function startCountdown(){
+    clearInterval(countdownTimer);
+    $('#permCountdown').textContent = fmt(countdown);
+    countdownTimer = setInterval(() => {
+      countdown -= 1;
+      if (countdown <= 0){ clearInterval(countdownTimer); resolvePerm('timeout'); return; }
+      $('#permCountdown').textContent = fmt(countdown);
+    }, 1000);
+  }
+  function resolvePerm(kind){
+    if (!permPending) return;
+    permPending = false;
+    clearInterval(countdownTimer);
+    $('#permActs').style.display = 'none';
+    $('#permCard').style.borderLeftColor = kind === 'deny' || kind === 'timeout' ? 'var(--err)' : 'var(--accent)';
+    $('#permCard').style.background = kind === 'deny' || kind === 'timeout' ? 'var(--tint-err)' : 'var(--tint-ok)';
+    const box = $('#permResolved');
+    box.classList.add('show');
+    box.classList.toggle('deny', kind === 'deny' || kind === 'timeout');
+    box.classList.toggle('allow', kind === 'allow' || kind === 'always');
+    const text = $('#permResolvedText');
+    if (kind === 'allow'){ text.textContent = '已放行（本次）：继续执行测试…'; state.phase = 'acting'; state.phaseText = '执行工具中'; state.running = true; }
+    else if (kind === 'always'){ text.textContent = '已选择「始终允许本会话」——设计稿：该能力需要内核配合（P1），当前产品版本不生效。'; state.phase = 'acting'; state.phaseText = '执行工具中'; }
+    else if (kind === 'timeout'){ text.textContent = '等待超时（120s），本次操作已按「拒绝」处理。'; state.phase = 'stop'; state.phaseText = '已超时 · 按拒绝处理'; state.running = false; }
+    else { text.textContent = '已拒绝：本轮不再执行该命令。'; state.phase = 'stop'; state.phaseText = '已拒绝，本轮结束'; state.running = false; }
+    render();
+    toast(kind === 'allow' ? '已放行（本次）' : kind === 'always' ? '设计稿：始终允许需内核支持' : kind === 'timeout' ? '确认超时，按拒绝处理' : '已拒绝', { warn: kind !== 'allow' });
+    setTimeout(() => $('#permMore').classList.add('show'), 600);
+  }
+  ['allow','deny','always'].forEach(k => {
+    const btn = $('[data-answer="' + k + '"]');
+    if (btn) btn.addEventListener('click', () => resolvePerm(k));
+  });
+  startCountdown();
+
+  /* ---------- 错误卡：复制 / 重试 / 设置 ---------- */
+  $('#copyRaw').addEventListener('click', async () => {
+    const text = $('#rawText').textContent;
+    try { await navigator.clipboard.writeText(text); }
+    catch (e) {
+      const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch (e2) {}
+      ta.remove();
+    }
+    $('#copyRawLabel').textContent = '已复制';
+    setTimeout(() => { $('#copyRawLabel').textContent = '复制原文'; }, 1500);
+  });
+  $('#retryBtn').addEventListener('click', () => toast('设计稿：不会真的重发请求（真实实现重发上一条并复用用户气泡）'));
+  $('#errSettings').addEventListener('click', () => toast('深链到 设置 › 模型与密钥 › API 地址（设计稿示意）'));
+
+  /* ---------- 输入与发送 ---------- */
+  const input = $('#input');
+  function autoGrow(){ input.style.height = 'auto'; input.style.height = Math.min(input.scrollHeight, 160) + 'px'; }
+  input.addEventListener('input', autoGrow);
+  function appendUser(text){
+    const wrap = document.createElement('div');
+    wrap.className = 'msg-user';
+    const who = document.createElement('div'); who.className = 'who'; who.textContent = '你';
+    const bubble = document.createElement('div'); bubble.className = 'bubble'; bubble.textContent = text;
+    wrap.appendChild(who); wrap.appendChild(bubble);
+    $('.stream').appendChild(wrap);
+    $('#main').scrollTop = $('#main').scrollHeight;
+  }
+  function send(){
+    const text = input.value.trim();
+    if (!text) return;
+    appendUser(text);
+    input.value = ''; autoGrow();
+    state.phase = 'think'; state.phaseText = '模型推理中'; state.running = true; render();
+    setTimeout(() => {
+      const ai = document.createElement('div');
+      ai.className = 'turn';
+      ai.innerHTML = '<div class="turn-head"><span class="ai-dot">M</span><b>助手</b><span>刚刚</span>' +
+        '<span class="chip mono">' + esc(state.model) + '</span></div>' +
+        '<div class="content"><p>这是设计稿：未接入真实内核，不会调用模型。真实版本会在这里流式输出，并在上方状态条持续显示阶段、首帧、吞吐与上下文占用。</p></div>';
+      $('.stream').appendChild(ai);
+      $('#main').scrollTop = $('#main').scrollHeight;
+      state.phase = 'idle'; state.phaseText = '空闲'; state.running = false;
+      state.tools = 0;
+      render();
+      toast('设计稿：发送仅示意，不产生真实请求');
+    }, 550);
+  }
+  $('#sendBtn').addEventListener('click', send);
+  input.addEventListener('keydown', e => {
+    if (e.isComposing) return;
+    if (e.key === 'Enter' && !e.shiftKey){ e.preventDefault(); send(); }
+  });
+  $('#newChat').addEventListener('click', () => toast('设计稿：新对话会回到空态三步引导（见文档 4.5）'));
+  $('.ws-row').addEventListener('click', () => toast('设计稿：切换工作空间（目录 + 会话级工作空间）'));
+  $$('.sess').forEach(b => b.addEventListener('click', () => {
+    $$('.sess').forEach(x => x.classList.remove('active'));
+    b.classList.add('active');
+    toast('设计稿：切换到「' + b.querySelector('.t').textContent + '」');
+  }));
+
+  /* ---------- 右栏收起 / 展开 ---------- */
+  function setRunCollapsed(v){
+    document.body.classList.remove('run-drawer');
+    document.body.classList.toggle('run-collapsed', v);
+    if (v) closePopover();
+    $('#runCollapse').setAttribute('aria-label', v ? '展开右栏' : '收起右栏');
+  }
+  function showRun(){
+    if (window.matchMedia('(max-width:1180px)').matches){
+      const on = document.body.classList.toggle('run-drawer');
+      $('#runCollapse').setAttribute('aria-label', on ? '收起右栏' : '展开右栏');
+      if (on) toast('窄屏：右栏以抽屉覆盖，不挤压正文');
+    } else {
+      setRunCollapsed(false);
+    }
+  }
+  $('#runCollapse').addEventListener('click', () => {
+    setRunCollapsed(true);
+    toast('右栏已收起：正文不再被挤压；顶栏出现「运行」chip');
+  });
+  $('#runChip').addEventListener('click', showRun);
+  $('#openTools').addEventListener('click', () => toast('设计稿：打开工具明细抽屉（复用现有轨迹面板数据，不新增第二套渲染）'));
+  $('#openSubs').addEventListener('click', () => toast('设计稿：打开子 Agent 记录（本会话 0 个）'));
+  $('#openCost').addEventListener('click', () => toast('设计稿：打开费用仪表盘（全局累计，与"本轮"分开）'));
+
+  /* ---------- 会话设置 popover ---------- */
+  const pop = $('#sessPopover');
+  let popReturnFocus = null;
+  function openPopover(){
+    popReturnFocus = document.activeElement;
+    pop.hidden = false;
+    $('#sessSettingsBtn').setAttribute('aria-expanded', 'true');
+    $('#setModel').focus();
+  }
+  function closePopover(){
+    if (pop.hidden) return;
+    pop.hidden = true;
+    $('#sessSettingsBtn').setAttribute('aria-expanded', 'false');
+    if (popReturnFocus && popReturnFocus.focus) popReturnFocus.focus();
+  }
+  $('#sessSettingsBtn').addEventListener('click', () => { pop.hidden ? openPopover() : closePopover(); });
+  $('#popCancel').addEventListener('click', closePopover);
+  $('#popDone').addEventListener('click', () => { closePopover(); toast('已保存会话设置（示意）'); });
+  $$('[data-open-settings]').forEach(b => b.addEventListener('click', openPopover));
+  $('#setModel').addEventListener('change', e => {
+    state.model = e.target.value; render();
+    toast('模型已切换为 ' + e.target.value + '（全局，下一轮生效）');
+  });
+  $('#setPreset').addEventListener('change', e => {
+    const v = e.target.value;
+    state.presetName = v;
+    state.preset = v ? (v === 'local-audit' ? '本地审计' : '代码评审') : '无预设';
+    render();
+    if (v === 'local-audit'){
+      toast('预设声明 readonly；你的显式选择 ask 优先——预设不会提权、也不会静默压低', { warn: true, ms: 3200 });
+    } else {
+      toast(v ? '预设仅对下一轮生效（工具白名单/参数）' : '已恢复无预设');
+    }
+  });
+  $$('.seg [data-perm]').forEach(b => b.addEventListener('click', () => {
+    $$('.seg [data-perm]').forEach(x => x.classList.remove('on'));
+    b.classList.add('on');
+    const v = b.dataset.perm;
+    state.perm = v; state.permLabel = ({ask:'询问', auto:'自动', readonly:'只读'})[v];
+    state.permSource = $('#permThisTurnOnly').checked ? '你的显式选择（仅本轮）' : '你的显式选择';
+    $('#permSrcLine').innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>' +
+      '当前来源：你的显式选择。' + (v === 'ask' ? '写文件/执行命令前会逐次询问。' : v === 'auto' ? '工具直接执行，不再逐次确认。' : '仅只读工具放行，其余询问。');
+    render();
+    toast('权限已切换为「' + state.permLabel + '」' + ($('#permThisTurnOnly').checked ? '（仅本轮）' : '（全局 + 本轮）'));
+  }));
+  $('#permThisTurnOnly').addEventListener('change', e => {
+    state.permSource = e.target.checked ? '你的显式选择（仅本轮）' : '你的显式选择';
+    render();
+    toast(e.target.checked ? '仅本轮生效：不写入全局配置' : '写回全局配置（下一轮沿用）');
+  });
+  document.addEventListener('mousedown', e => {
+    if (!pop.hidden && !pop.contains(e.target) && !$('#sessSettingsBtn').contains(e.target)) closePopover();
+  });
+
+  /* ---------- 命令面板 ---------- */
+  const COMMANDS = [
+    { group:'会话', icon:'chat', label:'新建对话', hint:'⌘N', scope:'', run:() => toast('设计稿：新对话（回到空态引导）') },
+    { group:'会话', icon:'chat', label:'修复登录 5s 超时', hint:'当前', scope:'', run:() => toast('已切换到当前会话') },
+    { group:'会话', icon:'chat', label:'补齐 e2e 登录用例', hint:'1 小时前', scope:'', run:() => toast('设计稿：加载会话（含工作空间与断点状态）') },
+    { group:'工作空间', icon:'folder', label:'MingDao-Harness', hint:'当前', scope:'', run:() => toast('已在该工作空间') },
+    { group:'工作空间', icon:'folder', label:'选择目录…', hint:'原生选择器', scope:'', run:() => toast('设计稿：桌面版弹系统目录选择器，默认停在用户家目录') },
+    { group:'模型', icon:'cpu', label:'deepseek-v4-flash', hint:'当前', scope:'全局', run:() => { state.model = 'deepseek-v4-flash'; render(); toast('模型：deepseek-v4-flash（全局）'); } },
+    { group:'模型', icon:'cpu', label:'deepseek-v4-pro', hint:'规划/难题', scope:'全局', run:() => { state.model = 'deepseek-v4-pro'; render(); toast('模型：deepseek-v4-pro（全局，下一轮生效）'); } },
+    { group:'预设', icon:'layers', label:'无预设', hint:'当前', scope:'本轮', run:() => { state.preset = '无预设'; render(); toast('预设：无'); } },
+    { group:'预设', icon:'layers', label:'本地审计（声明 readonly）', hint:'项目', scope:'本轮', run:() => { state.preset = '本地审计'; render(); toast('预设：本地审计（仅本轮）'); } },
+    { group:'权限', icon:'shield', label:'询问', hint:'逐次确认', scope:'全局+本轮', run:() => { state.perm='ask'; state.permLabel='询问'; state.permSource='你的显式选择'; render(); toast('权限：ask（你的显式选择）'); } },
+    { group:'权限', icon:'shield', label:'自动', hint:'直接执行', scope:'全局+本轮', run:() => { state.perm='auto'; state.permLabel='自动'; state.permSource='你的显式选择'; render(); toast('权限：auto（全局 + 本轮）'); } },
+    { group:'权限', icon:'shield', label:'只读', hint:'禁止修改/执行', scope:'全局+本轮', run:() => { state.perm='readonly'; state.permLabel='只读'; state.permSource='你的显式选择'; render(); toast('权限：readonly'); } },
+    { group:'命令', icon:'stop', label:'停止本轮', hint:'Esc', scope:'', run:() => stopTurn() },
+    { group:'命令', icon:'panel', label:'收起 / 展开右栏', hint:'', scope:'', run:() => { setRunCollapsed(!document.body.classList.contains('run-collapsed')); toast('右栏状态已切换'); } },
+    { group:'命令', icon:'keyboard', label:'快捷键表', hint:'⌘/', scope:'', run:() => openSheet() },
+    { group:'设置', icon:'settings', label:'模型与 API Key', hint:'设置项', scope:'', run:() => toast('设计稿：设置 › 模型与密钥（含 Key 状态、baseUrl、上下文窗口）') },
+    { group:'设置', icon:'settings', label:'权限与沙箱', hint:'设置项', scope:'', run:() => toast('设计稿：设置 › 权限与沙箱（sandbox / 超时 / 自动路由）') },
+    { group:'设置', icon:'settings', label:'超时（首帧 / 空闲 / 总量）', hint:'设置项', scope:'', run:() => toast('设计稿：设置 › 高级 › 超时；留空 = 自适应') }
+  ];
+  const ICONS = {
+    chat:'<path d="M21 12a8 8 0 0 1-8 8H5l-2 2V12a8 8 0 0 1 8-8h2a8 8 0 0 1 8 8z"/>',
+    folder:'<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+    cpu:'<rect x="6" y="6" width="12" height="12" rx="2"/><path d="M9 2v2M15 2v2M9 20v2M15 20v2M2 9h2M2 15h2M20 9h2M20 15h2"/>',
+    layers:'<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>',
+    shield:'<path d="M12 3 5 6v5c0 4.4 3 8.3 7 9 4-.7 7-4.6 7-9V6z"/>',
+    stop:'<rect x="6" y="6" width="12" height="12" rx="2"/>',
+    panel:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/>',
+    keyboard:'<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M7 10h.01M11 10h.01M15 10h.01M7 14h10"/>',
+    settings:'<circle cx="12" cy="12" r="3"/><path d="M12 3v2M12 19v2M3 12h2M19 12h2"/>'
+  };
+  const paletteMask = $('#paletteMask');
+  const paletteInput = $('#paletteInput');
+  const paletteList = $('#paletteList');
+  let selected = 0, filtered = COMMANDS.slice(), opener = null;
+  function icon(name){
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9">' + (ICONS[name] || '') + '</svg>';
+  }
+  function filterCmds(q){
+    const s = q.trim().toLowerCase();
+    if (!s) return COMMANDS.slice();
+    return COMMANDS.filter(c => (c.group + ' ' + c.label + ' ' + c.hint).toLowerCase().includes(s));
+  }
+  function renderPalette(){
+    paletteList.innerHTML = '';
+    if (!filtered.length){
+      const empty = document.createElement('div');
+      empty.className = 'palette-empty';
+      empty.textContent = '没有匹配项 —— 试试「模型 / 会话 / 权限 / 设置」';
+      paletteList.appendChild(empty);
+      paletteInput.setAttribute('aria-activedescendant', '');
+      return;
+    }
+    let group = '';
+    filtered.forEach((c, i) => {
+      if (c.group !== group){
+        group = c.group;
+        const g = document.createElement('div'); g.className = 'pgroup';
+        const gl = document.createElement('div'); gl.className = 'pgroup-label'; gl.textContent = group;
+        g.appendChild(gl); paletteList.appendChild(g);
+      }
+      const b = document.createElement('button');
+      b.className = 'pitem'; b.type = 'button'; b.id = 'pitem-' + i;
+      b.setAttribute('role', 'option');
+      b.setAttribute('aria-selected', String(i === selected));
+      b.innerHTML = icon(c.icon) + '<span class="label">' + esc(c.label) + '</span>' +
+        (c.scope ? '<span class="scope">' + esc(c.scope) + '</span>' : '') +
+        (c.hint ? '<span class="hint">' + esc(c.hint) + '</span>' : '');
+      b.addEventListener('click', () => runCmd(i));
+      b.addEventListener('mousemove', () => { if (selected !== i){ selected = i; paint(); } });
+      paletteList.appendChild(b);
+    });
+    paint();
+  }
+  function paint(){
+    $$('.pitem', paletteList).forEach((el, i) => el.setAttribute('aria-selected', String(i === selected)));
+    const active = $('#pitem-' + selected);
+    if (active){
+      paletteInput.setAttribute('aria-activedescendant', active.id);
+      active.scrollIntoView({ block:'nearest' });
+    }
+  }
+  function openPalette(){
+    opener = document.activeElement;
+    paletteMask.hidden = false;
+    paletteInput.value = ''; selected = 0; filtered = COMMANDS.slice();
+    renderPalette();
+    paletteInput.focus();
+  }
+  function closePalette(){
+    if (paletteMask.hidden) return;
+    paletteMask.hidden = true;
+    if (opener && opener.focus) opener.focus();
+  }
+  function runCmd(i){
+    const c = filtered[i];
+    if (!c) return;
+    closePalette();
+    c.run();
+  }
+  $('#paletteBtn').addEventListener('click', openPalette);
+  paletteInput.addEventListener('input', () => { selected = 0; filtered = filterCmds(paletteInput.value); renderPalette(); });
+  paletteInput.addEventListener('keydown', e => {
+    if (e.key === 'ArrowDown'){ e.preventDefault(); selected = Math.min(selected + 1, filtered.length - 1); paint(); }
+    else if (e.key === 'ArrowUp'){ e.preventDefault(); selected = Math.max(selected - 1, 0); paint(); }
+    else if (e.key === 'Enter'){ e.preventDefault(); runCmd(selected); }
+  });
+  paletteMask.addEventListener('mousedown', e => { if (e.target === paletteMask) closePalette(); });
+
+  /* ---------- 快捷键表 ---------- */
+  const sheetMask = $('#sheetMask');
+  let sheetOpener = null;
+  function openSheet(){
+    sheetOpener = document.activeElement;
+    sheetMask.hidden = false;
+    $('#sheetClose').focus();
+  }
+  function closeSheet(){
+    if (sheetMask.hidden) return;
+    sheetMask.hidden = true;
+    if (sheetOpener && sheetOpener.focus) sheetOpener.focus();
+  }
+  $('#sheetClose').addEventListener('click', closeSheet);
+  sheetMask.addEventListener('mousedown', e => { if (e.target === sheetMask) closeSheet(); });
+
+  /* ---------- 停止 ---------- */
+  function stopTurn(){
+    if (!state.running) return;
+    state.running = false; state.phase = 'stop'; state.phaseText = '已停止';
+    render();
+    toast('已停止本轮（服务端确认后才算停止成功——设计稿不接真实接口）');
+    if (permPending) resolvePerm('deny');
+  }
+  $('#stopBtn').addEventListener('click', stopTurn);
+
+  /* ---------- 全局键盘：Esc 分层 / ⌘K / ⌘/ / ⌘↵ ---------- */
+  document.addEventListener('keydown', e => {
+    const mod = e.metaKey || e.ctrlKey;
+    if (mod && (e.key === 'k' || e.key === 'K')){ e.preventDefault(); paletteMask.hidden ? openPalette() : closePalette(); return; }
+    if (mod && e.key === '/'){ e.preventDefault(); sheetMask.hidden ? openSheet() : closeSheet(); return; }
+    if (e.key === 'Escape'){
+      if (!paletteMask.hidden){ e.preventDefault(); closePalette(); return; }
+      if (!sheetMask.hidden){ e.preventDefault(); closeSheet(); return; }
+      if (!pop.hidden){ e.preventDefault(); closePopover(); return; }
+      if (permPending && state.running){ e.preventDefault(); resolvePerm('deny'); return; }
+      if (state.running){ e.preventDefault(); stopTurn(); return; }
+    }
+    if (mod && e.key === 'Enter' && document.activeElement === input){
+      e.preventDefault(); send();
+    }
+  });
+
+  /* 初始：支持 ?theme=light / ?palette=1 / ?sheet=1 直接看某个状态（设计评审用） */
+  const qs = new URLSearchParams(location.search);
+  if (qs.get('theme') === 'light'){
+    root.setAttribute('data-theme', 'light');
+    $('#themeIcon').innerHTML = '<path d="M20 14.5A8.5 8.5 0 0 1 9.5 4 8.5 8.5 0 1 0 20 14.5z"/>';
+  }
+  render();
+  autoGrow();
+  if (qs.get('palette') === '1') setTimeout(openPalette, 60);
+  if (qs.get('sheet') === '1') setTimeout(openSheet, 60);
+  if (qs.get('run') === '1') setTimeout(showRun, 60);
+  if (qs.get('settings') === '1') setTimeout(openPopover, 60);
+  toast('设计稿：静态假数据，未接入真实内核', { ms: 2000 });
+})();
+</script>
+</body>
+</html>
