@@ -457,6 +457,8 @@ async function send(){
         // v0.6.13（问题 3）：等 `task` 子代理时把**子代理自己的进度**摆出来——
         // 真机现场界面/日志只有"等待工具 task 已 620s"，与"卡死 620s"完全同形。
         if(ev.subagent) bits.push('子 Agent'+(ev.subagent.label?'「'+ev.subagent.label+'」':'')+'已跑 '+(ev.subagent.modelRounds||0)+' 轮 / '+(ev.subagent.toolCalls||0)+' 次工具调用'+(ev.subagent.ms!=null?'（最后进展 '+Math.round(ev.subagent.ms/1000)+'s 前）':''));
+        // v0.6.15（§3.59）：本地端点串行化必须在界面上看得见（真机内存压力来自父回合 + 子代理并发）
+        if(ev.localQueue) bits.push('本地端点已串行化（防内存压力）：等待 '+(ev.localQueue.active||0)+' 个在途请求、并发上限 '+(ev.localQueue.limit||1));
         if(ev.stalled) bits.push('已判定无进展，正在中止');
         think.textContent='💭 正在工作 '+Math.floor(p/60)+' 分 '+Math.round(p%60)+' 秒 · 第 '+msg._steps+' 回合 · '+curPhase+' · '+bits.join(' · ')+'…';
         renderWorkStatus(); }

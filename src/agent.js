@@ -18,7 +18,7 @@ import { redactSecrets } from './redact.js';
 import { checkCostGuard, costGuardConfig, todayCost, preflightBlockMessage, roundGuardAction } from './cost-guard.js';
 import { recordCacheStats, packDailyCost } from './cachestats.js';
 import { estimateCost, cacheSplit, isPeakHour } from './pricing.js';
-import { resolveProviderConfig, createProvider } from './providers/index.js';
+import { resolveProviderConfig, createProvider, localGateSnapshot, localConcurrencyLimit } from './providers/index.js';
 import { compileConstraints, checkPreTool, checkPostTool, checkOutput, blockedOutputText } from './constraints.js';
 import { createLedger, newRunId } from './ledger.js';
 import { registerEgressSink } from './net-guard.js';
@@ -144,11 +144,16 @@ const fmtTok = (/** @type {any} */ n) => Number(n || 0).toLocaleString('en-US');
  *
  * v0.6.13（问题 1 修法）：**有预检实测就必须由它推导**，并在文案里如实标注
  * ①这是外推、②长上下文下外推会低估（附实测差值）；只有在**没有预检数据**时才退回保守文案。
+ *
+ * v0.6.15（§3.59 第 3 条）：本地端点**已有在途请求**（父回合/子代理/预检之一）时加一句强警告——
+ * 真机 8081 的内存拒绝就是"父子回合同时 prefill"撞出来的；串行化已经兜住资源，但用户仍应
+ * 知道"并发会加剧内存压力、应减少子代理"。
  * @param {{ promptTokens: number, contextWindow?: number, isLocal?: boolean,
- *           firstTokenMs?: number, budget?: number, probe?: any }} input
+ *           firstTokenMs?: number, budget?: number, probe?: any,
+ *           localBusy?: boolean, localActive?: number, localQueued?: number, localConcurrency?: number }} input
  * @returns {{ text: string, warn: boolean, promptTokens: number, ratio: number, estimateMs: number|null }}
  */
-export function prefillForecast({ promptTokens, contextWindow, isLocal, firstTokenMs, budget, probe = null }) {
+export function prefillForecast({ promptTokens, contextWindow, isLocal, firstTokenMs, budget, probe = null, localBusy = false, localActive = 0, localQueued = 0, localConcurrency = 1 }) {
   const p = Math.max(0, Math.round(Number(promptTokens) || 0));
   const win = Number(contextWindow) > 0 ? Number(contextWindow) : 0;
   const ratio = win > 0 ? p / win : 0;
@@ -187,10 +192,22 @@ export function prefillForecast({ promptTokens, contextWindow, isLocal, firstTok
       `建议缩小任务（新建会话、只给必要文件、先 /compact）或调大 config.timeout.firstTokenMs——` +
       `但注意调大它只会让"失败"更晚被发现，不会让 prefill 变快。`
     : '';
+  // v0.6.15（§3.59 第 3 条）：本地端点已有在途请求 → **强警告**（不是提示）。
+  // 真机证据：父回合 + 子代理同时向同一台 8081 引擎发大 prefill，引擎在 prefill 阶段报
+  // insufficient memory（"engine shed its caches and stays up"）；串行化解决资源冲突，
+  // 但用户仍必须知道"并发会加剧内存压力"，否则会继续开并行子代理/多会话。
+  const limit = Number(localConcurrency) >= 0 ? Math.floor(Number(localConcurrency)) : 1;
+  const active = Math.max(0, Math.floor(Number(localActive) || 0));
+  const queued = Math.max(0, Math.floor(Number(localQueued) || 0));
+  const concurrencyNote = Boolean(isLocal) && Boolean(localBusy)
+    ? `\n   ⚠ 本地端点当前已有 ${active} 个在途请求${queued > 0 ? `、${queued} 个在排队` : ''}（并发上限 ${limit}）：` +
+      `**并发会加剧内存压力**（父子回合同时 prefill 会被引擎以 insufficient memory 拒绝）；` +
+      `${limit <= 1 ? '已串行化，后来的请求会排队等待' : `已限制为 ${limit} 并发，仍可能叠加内存压力`}——建议减少子代理数量、避免多个长任务会话同时跑。`
+    : '';
   // v0.6.13（A 追加）：把**端点预检**结果并进这条预告——"这个端点行不行"与"这次要 prefill 多少"
   // 必须一起出现在发送前，而不是等出事后翻日志（引擎实际加载的模型名与配置名不一致也在这里说）。
   const probeLine = probe && probe.note ? `\n   端点预检：${probe.note}` : '';
-  return { text: `${head}\n   ${timing}${probeLine}${advice}`, warn, promptTokens: p, ratio, estimateMs: est ? est.ms : null };
+  return { text: `${head}\n   ${timing}${probeLine}${advice}${concurrencyNote}`, warn: warn || Boolean(concurrencyNote), promptTokens: p, ratio, estimateMs: est ? est.ms : null };
 }
 
 /**
@@ -276,6 +293,15 @@ export function describeUpstreamError(/** @type {any} */ err) {
     hint =
       '上游拒绝的是**它的 prompt 模板**（不是网络问题）：该端点的模板不接受当前 messages 形态（典型：按单轮 query 设计的 chatflow/模板，收到的是 OpenAI 多轮 messages）。' +
       '这类端点通常也**不返回 tool_calls**——请改用支持 function calling 的模型/端点，或让网关把 messages 映射成它要的单轮入参。';
+  } else if (/engine shed its caches and stays up|allocator wall/.test(t)) {
+    // v0.6.15（§3.59 第 2 条）：**引擎活着但丢了缓存**——与"引擎崩了/连接被拒"是两件事。
+    // 真机原文（8081）：`insufficient memory: … aborted before the allocator wall.
+    // The engine shed its caches and stays up; this request failed.` 引擎自己丢了 KV cache
+    // 并继续服务，**没有崩溃**；此时建议"重启引擎"是错的（重启只会把模型重新加载一遍）。
+    hint =
+      '本地引擎**内存/显存不足**，但它**未崩溃**（原文：engine shed its caches and stays up——引擎自己丢弃缓存后仍在运行）。' +
+      '**不要重启引擎**（重启不会增加显存，反而要重新加载模型）。处置：压缩上下文（减小 config.contextBudget 或 /compact）、' +
+      '减少并发子任务/并行会话（同一本地端点已按 config.localConcurrency 串行化），然后可直接重试——引擎通常会自行恢复。';
   } else if (/memory_refusal|insufficient memory|gib|内存不足|内存拒绝/.test(t)) {
     hint =
       '本地引擎**内存/显存不足**（在 prefill 前就拒绝了）。处置：压缩上下文（减小 config.contextBudget 或 /compact）、减少并发子任务，或重启模型服务释放内存后重试。';
@@ -302,9 +328,10 @@ export function describeUpstreamError(/** @type {any} */ err) {
  * @param {{ phase?: string, elapsedMs: number, modelRounds?: number, toolCalls?: number,
  *           toolExecuted?: number, contentChars?: number, ttftMs?: number|null,
  *           pendingTool?: { name: string, ms: number }|null, tokensPerSec?: number|null,
- *           subagent?: { label?: string, modelRounds?: number, toolCalls?: number, at?: number }|null }} p
+ *           subagent?: { label?: string, modelRounds?: number, toolCalls?: number, at?: number }|null,
+ *           localQueue?: { active?: number, queued?: number, limit?: number }|null }} p
  */
-export function formatTurnProgress({ phase, elapsedMs, modelRounds = 0, toolCalls = 0, toolExecuted = 0, contentChars = 0, ttftMs = null, pendingTool = null, tokensPerSec = null, subagent = null }) {
+export function formatTurnProgress({ phase, elapsedMs, modelRounds = 0, toolCalls = 0, toolExecuted = 0, contentChars = 0, ttftMs = null, pendingTool = null, tokensPerSec = null, subagent = null, localQueue = null }) {
   const s = Math.max(0, Math.round(Number(elapsedMs) / 1000));
   const parts = [
     `已跑 ${Math.floor(s / 60)}m${String(s % 60).padStart(2, '0')}s`,
@@ -316,6 +343,15 @@ export function formatTurnProgress({ phase, elapsedMs, modelRounds = 0, toolCall
   if (tokensPerSec != null) parts.push(`≈${Number(tokensPerSec).toFixed(1)} tok/s`);
   parts.push(`已收正文=${contentChars} 字`);
   if (pendingTool) parts.push(`正在等待工具 ${pendingTool.name}（已 ${Math.round(Number(pendingTool.ms) / 1000)}s）`);
+  // v0.6.15（§3.59）：本地端点因内存压力串行化时，进度行必须能看出来——
+  // 否则"在排队"与"引擎卡住"在事后日志里完全同形（真机取证最缺的就是这一行）。
+  if (localQueue) {
+    parts.push(
+      `本地端点已串行化（防内存压力）：等待 ${Math.max(0, Number(localQueue.active) || 0)} 个在途请求` +
+        (Number(localQueue.queued) > 0 ? `、${Number(localQueue.queued)} 个排队` : '') +
+        `，并发上限 ${Number(localQueue.limit) || 1}`
+    );
+  }
   // v0.6.13（问题 3）：等 `task` 子代理时必须能看出"这个子任务跑到哪一步"——
   // 否则"等子代理 620s"与"卡死 620s"在日志上完全同形（真机现场正是如此）。
   if (subagent) {
@@ -859,6 +895,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       // 界面/日志据此显示"在等哪个子任务、它跑到第几轮 / 几次工具调用"
       subagent: null,
       forecast: null,
+      // v0.6.15（§3.59）：本地端点串行化快照（排队时由 provider 的 onQueueWait 填入）
+      localQueue: null,
+      localQueueNoticed: false,
       noProgressMs,
       lastProgressAt: Date.now(),
       progressReason: '回合开始',
@@ -1278,6 +1317,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         try {
           let promptTokens = 0;
           for (const m of sanitized) promptTokens += messageTokens(m, count);
+          // v0.6.15（§3.59 第 3 条）：本地端点是否已有在途/排队请求（父回合、子代理、预检共用同一队列）。
+          // 这里读的是**进程级闸门快照**（provider.config.baseUrl），不是猜——云端端点恒为 0。
+          let gate = { active: 0, queued: 0, limit: 1 };
+          try {
+            if (caps.isLocal) gate = localGateSnapshot(provider?.config?.baseUrl);
+          } catch {}
           const f = prefillForecast({
             promptTokens,
             contextWindow: caps.contextWindow,
@@ -1285,6 +1330,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             firstTokenMs: Number(cfg?.timeout?.firstTokenMs) > 0 ? Number(cfg.timeout.firstTokenMs) : effFirstTokenMs,
             budget,
             probe: cfg?.endpointProbe || null,
+            localBusy: Boolean(caps.isLocal && (gate.active > 0 || gate.queued > 0)),
+            localActive: gate.active,
+            localQueued: gate.queued,
+            localConcurrency: localConcurrencyLimit(cfg),
           });
           turnProgress.forecast = f;
           // 首次请求一定说；之后只在命中告警线时说（否则每步一条横幅会刷屏）
@@ -1309,6 +1358,31 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           // MiniMax P0：仅当 activeModel 声明支持 reasoning 才发送（否则 400 终止回合）；'off' 显式禁用例外
           reasoningEffort: modelPreset(activeModel)?.supportsReasoning || reasoningEffort === 'off' ? reasoningEffort : undefined,
           signal: ac.signal,
+          // v0.6.15（§3.59 第 1 条）：本地端点串行化必须**在界面上可见**——
+          // 排队时状态条/进度行写"排队等待本地端点（已串行化防内存压力）"，
+          // 拿到名额后恢复"发请求（等首帧）"（onDelta 之后会覆盖成"解码中"）。
+          onQueueWait(/** @type {any} */ ev) {
+            if (!ev) return;
+            if (ev.waiting) {
+              turnProgress.localQueue = { active: ev.active, queued: ev.queued, limit: ev.limit };
+              turnProgress.phase = `排队等待本地端点（已串行化防内存压力：${ev.active} 个在途）`;
+              if (!turnProgress.localQueueNoticed) {
+                turnProgress.localQueueNoticed = true;
+                try {
+                  io.print(
+                    style(
+                      `⏳ 本地端点串行化：等待 ${ev.active} 个在途请求（并发上限 ${ev.limit}）——` +
+                        `本地模型内存压力，父回合与子代理不再同时 prefill`,
+                      C.dim
+                    )
+                  );
+                } catch {}
+              }
+            } else {
+              turnProgress.localQueue = null;
+              if (String(turnProgress.phase || '').startsWith('排队等待本地端点')) turnProgress.phase = '发请求（等首帧）';
+            }
+          },
           onDelta(/** @type {any} */ d) {
             io.stopSpinner();
             // v0.6.13（A）：帧/字符计数 + 首帧时延（TTFT）——本地模型最关键的指标
@@ -1362,7 +1436,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // MacBook 本地 507 memory_refusal 根因（v0.4.5）：服务端内存拒绝不是「空输出」——
         // 直接终结合合并透出降级提示，不计入空轮、不注入续写重试（内存未释放必再 507，空烧请求）。
         const e = /** @type {any} */ (err);
-        if (e?.status === 507 || /memory_refusal|内存不足|内存拒绝/i.test(String(e?.message || ''))) {
+        // v0.6.15（§3.59 第 2 条）：`engine shed its caches and stays up` / `allocator wall`
+        // 说明引擎**活着**（自己丢缓存后继续服务）——不走这条"507 旧文案"（那里建议重启引擎，
+        // 对活着但内存吃紧的引擎是错误处置）；交给下面 describeUpstreamError 的独立分型。
+        const engineShedCaches = /engine shed its caches and stays up|allocator wall/i.test(String(e?.message || ''));
+        if (!engineShedCaches && (e?.status === 507 || /memory_refusal|内存不足|内存拒绝/i.test(String(e?.message || '')))) {
           stripOrphanCalls();
           markOutcome('done');
           return {

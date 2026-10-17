@@ -2669,6 +2669,48 @@ Reduce --context-window, close other apps, or try q8 KV quantization.
 
 **另**：`tcm.mingdao.ai` 的反向链接由**下游自行添加**，本仓不做。
 
+## 3.60 已修（v0.6.15，§3.59 四条待办逐条收口）
+
+**结论**：§3.59 的四条待办**全部完成**；修复按「先复现 → 定级 → 修复 → 回归断言 → 变异验证」落库。
+
+**逐条状态**：
+
+- [x] **本地端点并发控制** —— 实现在 `src/providers/index.js` 的进程级闸门 `acquireLocalSlot()`：
+  同一 `baseUrl` 的**在途请求**走 Promise 队列（**不忙等**，释放即移交名额）。默认 **1 并发**
+  （`config.localConcurrency`，`0` = 显式退出串行化，正整数上限 16）；排队上限
+  `config.localQueueTimeoutMs`（默认 **30 分钟**），超时报 `LOCAL_QUEUE_TIMEOUT`（可见错误、不重试）。
+  覆盖**父回合 `provider.chat` + 子代理（共用同一队列）+ 端点预检**（`src/model-discovery.js` 的
+  `open()` 也过闸门）；**云端 `baseUrl` 直接放行**（不排队、不记日志、不加延迟）。
+  排队时写 `本地端点串行化：等待 N 个在途请求`（WebUI 落 `web-server.log`，CLI 落 stderr），
+  `agent` 把 `turnProgress.localQueue/phase` 写进进度行与界面状态条（"本地端点已串行化（防内存压力）"）。
+- [x] **"引擎活着但丢缓存"分型** —— `describeUpstreamError()` 新增独立分支：命中
+  `engine shed its caches and stays up` / `allocator wall`（且含内存/prefill/显存语义）时，
+  明确「**该引擎未崩溃**（自己丢弃缓存后仍在运行）」、**不要重启引擎**，处置为压上下文/减少并发/直接重试；
+  与普通 `insufficient memory`（仍建议重启释放内存）及连接被拒/连接断开**分开判定**。
+  `agent` 的 507 早退分支同时排除该措辞，避免被旧文案吞掉。
+- [x] **chat 预告结合并发压力** —— `prefillForecast()` 新增 `localBusy/localActive/localQueued/localConcurrency`：
+  本地端点已有在途请求时追加**强警告**（`warn=true`）：
+  「并发会加剧内存压力（父子回合同时 prefill 会被引擎以 insufficient memory 拒绝）；已串行化…建议减少子代理数量」。
+  哨兵来自 `localGateSnapshot()`（进程级真实在途/排队数），云端端点不出现该警告。
+- [x] **文档** —— `docs/CONFIG.md` 新增「本地模型：并发与内存（v0.6.15）」一节（配置项/默认值/队列语义/
+  排队超时文案/shed-caches 分型/排查步骤）；`docs/CONFIG.en.md` 同步一段英文说明。
+
+**回归与变异**：
+- `test/smoke.js` **末尾追加 §142**（只追加，未改既有节）：真 HTTP 桩实测**最大并发=1**、
+  云端实测并发=2 且零串行化事件、排队超时可见错误、预检与在途请求实测最大并发=1、
+  shed-caches 独立分型、并发预告强警告、配置口径/进度行/结构守卫。
+- 新建 `test/mutate/batch31-localconcurrency.mjs`：**8 条全部命中**（去掉串行化、云端也串起来、
+  去掉排队日志、shed-caches 并入重启、删预告警告、排队超时不可识别、预检不过闸门、进度行不显示串行化）。
+- `test/mutate/README.md` 变异总数同步为 **227**（与 `scripts/doc-lint.mjs` 的"实际 227 条"一致）。
+
+**边界（未做）**：不改引擎侧参数（`--context-window` / q8 KV 量化由引擎侧负责）；不限制"并发子代理数量"
+本身（仅让它们在同一本地 `baseUrl` 上排队，云端子代理仍并行）；不同 `baseUrl` 的本地引擎各自独立计数
+（多模型同时加载的内存压力仍靠用户侧减少并发/加载模型数）；预检排队超时按 probe timeout 语义降级
+（只影响 banner/日志，不阻断回合）。
+
+**同时冻结的队列**（本批**未动**）：P1-1 第四刀（`parseToolArgs` 前置门抽取）、`serializeToolResult(undefined)`
+微修、M-8 剩余单行文本守卫收口、账本权限**来源**字段、变异框架 fail-safe（开跑前检测残留）。
+
 ## 3.61 已修复（v0.6.17 开发线：变异工具 fail-safe——在飞被误报成残留 / 强杀后补丁留在工作树）
 
 **事故（两次，均来自开发期间的实际踩坑；§3.59 的冻结队列已点名「变异框架 fail-safe（开跑前检测残留）」）**

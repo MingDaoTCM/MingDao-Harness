@@ -734,6 +734,12 @@ configuration exceeds the engine, the kernel warns that long contexts will be re
 outright (switching presets or lowering `contextBudget` cannot change the engine's `n_ctx`). If the field
 cannot be read, the pre-flight says so instead of guessing.
 
+Local endpoints are **serialized per `baseUrl`** (parent turn, sub-agents and pre-flight probes share one
+queue): `localConcurrency` defaults to `1` (`0` opts out) and `localQueueTimeoutMs` defaults to `1800000`
+(30 min, after which the queued request fails with a visible `LOCAL_QUEUE_TIMEOUT`). Cloud endpoints are
+not affected. Upstream wording such as `engine shed its caches and stays up` / `allocator wall` means the
+engine **did not crash** — compact context and reduce concurrency instead of restarting it.
+
 Other guard fields: `maxEmptyRounds` (max consecutive empty/truncated output rounds before stopping,
 default **3** — each empty round is billed as a full completion), `maxRounds` (auto-continuation rounds
 after the step limit, default **3**), `maxAgentsMdChars` (cap on injected `AGENTS.md` content, default

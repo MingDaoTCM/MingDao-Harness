@@ -25,7 +25,7 @@ import { ensureHome, loadConfig, saveConfig, mingdaoHome } from '../config.js';
 import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credentials.js';
 import { availableModels, fetchProviderModels, providerHasKey, probeEndpoint, adaptiveTimeouts, probeMemoUsable } from '../model-discovery.js';
 import { isLocalBaseUrl, resolveModelCaps } from '../model-caps.js';
-import { createProvider, resolveProviderConfig, helperProvider, resolveVisionSupport } from '../providers/index.js';
+import { createProvider, resolveProviderConfig, helperProvider, resolveVisionSupport, setLocalQueueObserver } from '../providers/index.js';
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { routeTask, routingConfig } from '../routing.js';
 import { buildUserContent } from './attachments.js';
@@ -293,6 +293,13 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   // v0.6.13（A）：定义提前到 provider 创建之前——本地端点的**预检**在 getProviderFor 里就要落日志，
   // 而启动期 `await getProviderFor(cfg.model)` 早于原先的定义位置（TDZ：会直接 ReferenceError）。
   const srvlog = createLogWriter(path.join(mingdaoHome(), 'logs', 'web-server.log'));
+  // v0.6.15（§3.59）：本地端点串行化的日志必须落进 web-server.log（真机取证靠它），
+  // 而不是只打到 stderr。事件由 providers/index.js 的本地端点闸门在**入队时**发出（含在途数/并发上限）。
+  setLocalQueueObserver((/** @type {any} */ ev) => {
+    try {
+      srvlog(`${String(ev?.text || '本地端点串行化')}${ev?.label ? `（模型 ${ev.label}）` : ''}`);
+    } catch {}
+  });
 
   const providerCache = new Map();
   // v0.6.13（A 追加）：本地端点的**能力/延迟预检**结果（每次建 provider / 每轮对话开头的提示都读它）。
@@ -605,6 +612,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
             // v0.6.13（问题 3）：等 `task` 子代理时把子代理自己的进度也写进日志——
             // 真机现场只有"正在等待工具 task（已 620s）"，看不出子代理是在干活还是卡死。
             subagent: tp.subagent ?? null,
+            // v0.6.15（§3.59）：本地端点因内存压力串行化时，进度行必须写"已串行化"
+            localQueue: tp.localQueue ?? null,
           })
       );
     };
@@ -635,6 +644,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
             ? { label: tp.subagent.label ?? '', modelRounds: tp.subagent.modelRounds ?? 0, toolCalls: tp.subagent.toolCalls ?? 0, ms: tp.subagent.at ? Date.now() - tp.subagent.at : null }
             : null,
           stalled: Boolean(tp?.stalled),
+          // v0.6.15（§3.59）：本地端点串行化状态——界面据此显示"已串行化（防内存压力）"
+          localQueue: tp?.localQueue ?? null,
         });
       } catch {}
       try {

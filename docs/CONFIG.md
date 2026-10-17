@@ -531,6 +531,52 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
 既有默认, 1800s)、无进展看门狗 = clamp(max(实测首帧×100, 参考prefill×20), 10min, 60min)；
 **你显式配置的 `timeout.*` / `noProgressTimeoutMs` 永远优先**（显式 > 自适应）。
 
+#### 本地模型：并发与内存（v0.6.15）
+
+真机证据（v0.6.14，8081 的 `mtplx-qwen38-27b-optimized-quality`）：长任务中途被引擎拒绝——
+`insufficient memory: the request exceeded available GPU memory (sustained critical memory pressure
+during prefill; aborted before the allocator wall). The engine shed its caches and stays up; this
+request failed.` 同一错误此前在 60091 的 35B 上也出现过 → **不是模型问题，是本机内存压力**。
+观测到该回合此前有子代理在跑（13 轮 / 17 次工具调用）→ **父回合 + 子代理同时向同一本地引擎
+发大 prefill**（各自要一份 KV cache）是主要来源。所以内核现在对**同一 `baseUrl`** 的本地端点
+在途请求做**串行化/限量**：
+
+- **默认 1 并发**：父回合、子代理（`task`）、**端点预检**（探针打的是同一个 `/chat/completions`）
+  共用同一条**进程级 Promise 队列**，谁先到谁先跑，后到的排队（不是忙等，释放即移交名额）。
+- **配置**（与 `timeout` 同级，写在 `config.json` 顶层）：
+
+  ```json
+  {
+    "localConcurrency": 1,
+    "localQueueTimeoutMs": 1800000
+  }
+  ```
+
+  | 字段 | 默认 | 含义 |
+  | --- | --- | --- |
+  | `localConcurrency` | `1` | 同一本地 `baseUrl` 的同时在途请求上限。`0` = **显式退出串行化**（不限并发）；正整数上限 16；非法/负数回落 1 |
+  | `localQueueTimeoutMs` | `1800000`（30 分钟） | 排队等待上限。超过即报**可见错误**（不重试、不死等），避免"看起来在跑、其实永远排不到" |
+
+- **云端端点不受影响**：`baseUrl` 不是回环/内网（如 `api.deepseek.com`）时直接放行——不排队、
+  不记日志、不增加任何延迟。`customModels.<名>.local: true` 可把经反代的本地端点纳入串行化。
+- **可见性**：入队时写一行 `本地端点串行化：等待 N 个在途请求（端点，并发上限 1）`
+  （WebUI 落 `~/.mingdao/logs/web-server.log`；CLI 写 stderr）；界面状态条/进度行显示
+  `本地端点已串行化（防内存压力）`，发送前的 `📏 本轮上下文` 预告在**已有在途请求**时会加一条强警告
+  `并发会加剧内存压力 … 建议减少子代理数量`。
+- **排队超时的报错**（`code=LOCAL_QUEUE_TIMEOUT`）：
+  `本地端点排队超时（等待 1800.0s，仍有 1 个在途请求，并发上限 1）：为避免内存压力已在本机端点串行化——可调大 config.localQueueTimeoutMs，或减少子代理/并行会话。`
+- **引擎活着但丢了缓存**：上游文案含 `engine shed its caches and stays up` / `allocator wall` 时，
+  错误分型会明确"**该引擎未崩溃**（自己丢弃缓存后继续运行）"、**不要重启引擎**，处置是
+  压上下文（`contextBudget` / `/compact`）、减少并发、等它自行恢复后重试。这与"引擎崩了/连接被拒"
+  （`ECONNREFUSED`、连接被断开）是**不同**的两种判定，后者才需要确认端口与进程。
+- **排查步骤**（还遇到内存拒绝时）：
+  1. 看 `web-server.log` 有没有 `本地端点串行化：等待 N 个在途请求`——有排队说明闸门在工作，
+     若仍被拒绝，说明单请求本身就超了引擎内存（压 `contextBudget`，或让 `customModels.<名>.contextWindow`
+     ≤ 引擎自述的 `n_ctx`，见上一节）；
+  2. 确认没有多个会话/多个本地模型同时跑长任务（每个模型各占一份显存与 KV cache）；
+  3. 临时把 `localConcurrency` 保持 `1`，并减少子代理数量（读只读子代理在本地模型下已不并行）；
+  4. **不要**因为 `engine shed its caches and stays up` 去重启引擎——它没有崩；重启只会重新加载模型。
+
 ### 用本地模型测 harness（测试者步骤清单）
 
 > 这一段是**操作清单**，不是原理说明。按顺序做，能在几分钟内区分"端点不行"和"harness 不行"。

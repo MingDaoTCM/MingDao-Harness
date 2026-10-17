@@ -17,6 +17,241 @@ import { mingdaoHome } from '../config.js';
 import { resolveApiKey, getStoredKey } from '../credentials.js';
 import { isLocalBaseUrl } from '../model-caps.js';
 
+// ---------------------------------------------------------------------------
+// 本地端点并发闸门（v0.6.15，登记 §3.59 四条待办之首）
+//
+// 真机证据（v0.6.14，macOS，`mtplx-qwen38-27b-optimized-quality` @ 8081）：
+//   长任务中途被引擎拒绝——
+//     insufficient memory: the request exceeded available GPU memory
+//     (sustained critical memory pressure during prefill; aborted before the allocator wall).
+//     The engine shed its caches and stays up; this request failed.
+//   同一错误此前在 60091 的 35B 上也出现过 → **不是模型问题，是本机内存压力**；
+//   观测到该回合此前有子代理在跑（13 轮 / 17 次调用）→ 父回合 + 子代理同时向**同一本地引擎**
+//   发请求是内存压力的主要来源（两个大 prefill 各自要一份 KV cache）。
+//
+// 修法：对**同一 baseUrl** 的本地端点在途请求做**串行化/限量**，默认 1 并发。
+// 覆盖三类来源（都必须过同一道闸门，否则等于没修）：
+//   ① 父回合的 provider.chat；
+//   ② 子代理（同一 provider 实例/同一 baseUrl，天然共享本模块的进程级队列）；
+//   ③ 端点预检（model-discovery.js 的探针也打同一个 /chat/completions，抢的是同一份内存）。
+// 云端端点**不受影响**：`isLocalBaseUrl` 为假时直接放行（不排队、不记日志、不加延迟）。
+//
+// 三条硬约束：
+//   · **不许忙等**：Promise 队列 + 释放即移交名额；
+//   · **排队也有上限**：`config.localQueueTimeoutMs`（默认 30 分钟），超时给**可见错误**，
+//     不会让第二个回合永远挂着（真机最怕的正是"看起来在跑、其实永远排不到"）；
+//   · **日志留痕**：入队时记一行「本地端点串行化：等待 N 个在途请求」，并回调 onWait
+//     让 agent/WebUI 把「已串行化（防内存压力）」摆到进度行上。
+
+/** 默认并发上限：本地引擎通常是单进程/单 slot，1 是最安全的默认值。 */
+export const DEFAULT_LOCAL_CONCURRENCY = 1;
+/** 默认排队等待上限：与本地 `timeout.totalMs`（30 分钟）同量级，避免死等。 */
+export const DEFAULT_LOCAL_QUEUE_TIMEOUT_MS = 30 * 60 * 1000;
+
+/**
+ * 归一化 baseUrl（去掉尾部斜杠）：同一端点的不同写法必须命中同一条队列。
+ * @param {any} baseUrl
+ */
+export function normalizeLocalBaseUrl(/** @type {any} */ baseUrl) {
+  return String(baseUrl || '').trim().replace(/\/+$/, '');
+}
+
+/**
+ * 本地端点并发上限（纯函数，便于断言/变异）：`config.localConcurrency`。
+ *   · 未配置 / 非法 / 负数 → 默认 1（fail-safe：宁可串行化，也不要再撞内存墙）；
+ *   · **0 → 不限**（显式退出串行化，用户明确知道自己在意延迟而不是内存）；
+ *   · 正整数 → 该值（上限 16，防手滑写成 999 等于没限制）。
+ * @param {any} cfg
+ */
+export function localConcurrencyLimit(/** @type {any} */ cfg) {
+  const raw = cfg?.localConcurrency;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_LOCAL_CONCURRENCY;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return DEFAULT_LOCAL_CONCURRENCY;
+  return Math.min(16, Math.floor(n));
+}
+
+/**
+ * 排队等待上限（纯函数）：`config.localQueueTimeoutMs`，未配置/非法 → 30 分钟。
+ * 0/负数不表示"无限等"，而是回落默认（死等是这轮要消灭的东西）。
+ * @param {any} cfg
+ */
+export function localQueueTimeoutMs(/** @type {any} */ cfg) {
+  const n = Number(cfg?.localQueueTimeoutMs);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_LOCAL_QUEUE_TIMEOUT_MS;
+  return Math.min(n, 24 * 60 * 60 * 1000);
+}
+
+/** 一条给人看的入队日志（纯函数，日志/UI 共用同一份口径）。 @param {any} ev */
+export function localQueueEventText(/** @type {any} */ ev) {
+  const endpoint = String(ev?.endpoint || ev?.baseUrl || '本地端点');
+  const active = Number(ev?.active) || 0;
+  const queued = Number(ev?.queued) || 0;
+  const limit = Number(ev?.limit) || DEFAULT_LOCAL_CONCURRENCY;
+  return (
+    `本地端点串行化：等待 ${active} 个在途请求（${endpoint}，并发上限 ${limit}` +
+    `${queued > 1 ? `，排在第 ${queued} 位` : ''}）——本地模型内存压力，避免父子回合同时 prefill`
+  );
+}
+
+/** @type {((ev: any) => void)|null} */
+let queueObserver = null;
+/**
+ * 注册串行化事件观察者（WebUI 启动时接到 srvlog；不注册则写 console.error）。
+ * @param {((ev: any) => void)|null} fn
+ */
+export function setLocalQueueObserver(/** @type {any} */ fn) {
+  queueObserver = typeof fn === 'function' ? fn : null;
+}
+
+function emit(/** @type {any} */ ev) {
+  try {
+    if (queueObserver) queueObserver(ev);
+    else console.error(`[MingDao] ${ev.text}`);
+  } catch {
+    /* 日志失败不得影响请求 */
+  }
+}
+
+/** @type {Map<string, { baseUrl: string, limit: number, active: number, waiters: any[] }>} */
+const localGates = new Map();
+
+/** @param {string} baseUrl @param {number} limit */
+function localGateFor(baseUrl, limit) {
+  let g = localGates.get(baseUrl);
+  if (!g) {
+    g = { baseUrl, limit, active: 0, waiters: [] };
+    localGates.set(baseUrl, g);
+  }
+  g.limit = limit;
+  return g;
+}
+
+/** 端点当前状态（纯快照，供预告/进度行/断言用；不参与调度）。 @param {any} baseUrl */
+export function localGateSnapshot(/** @type {any} */ baseUrl) {
+  const key = normalizeLocalBaseUrl(baseUrl);
+  const g = localGates.get(key);
+  if (!g) return { baseUrl: key, active: 0, queued: 0, limit: DEFAULT_LOCAL_CONCURRENCY, known: false };
+  return { baseUrl: key, active: g.active, queued: g.waiters.length, limit: g.limit, known: true };
+}
+
+/** 该端点现在是否已有在途/排队请求（纯查询；云端恒 false）。 @param {any} baseUrl */
+export function localGateBusy(/** @type {any} */ baseUrl) {
+  const snap = localGateSnapshot(baseUrl);
+  return Boolean(snap.known && (snap.active > 0 || snap.queued > 0));
+}
+
+/** 取得名额后的释放函数：把名额**直接移交**给下一个等待者（active 不变），否则 active--。 */
+function makeLocalRelease(/** @type {any} */ g) {
+  let done = false;
+  return () => {
+    if (done) return;
+    done = true;
+    const next = g.waiters.shift();
+    if (next) {
+      // 名额移交：active 不减，等待者的 grant 负责 resolve（不改变 active）
+      next.grant();
+      return;
+    }
+    g.active = Math.max(0, g.active - 1);
+    if (g.active === 0 && g.waiters.length === 0 && localGates.get(g.baseUrl) === g) localGates.delete(g.baseUrl);
+  };
+}
+
+/**
+ * 取得一个本地端点执行名额（云端端点直接返回空释放函数）。
+ *
+ * 返回的 release **必须**在请求真正结束后调用（流读完、finally 里），否则后续请求会
+ * 永远排队——这正是"不能用忙等、也不许忘记释放"的接口约束。
+ *
+ * @param {any} baseUrl
+ * @param {{ cfg?: any, signal?: any, onWait?: (ev: any) => void, queueTimeoutMs?: number,
+ *           endpoint?: string, label?: string }} [opts]
+ * @returns {Promise<() => void>}
+ */
+export async function acquireLocalSlot(/** @type {any} */ baseUrl, opts = {}) {
+  const key = normalizeLocalBaseUrl(baseUrl);
+  // 云端端点不受影响：不排队、不记日志、不增加任何延迟（需求 1 的硬边界）。
+  if (!isLocalBaseUrl(key)) return () => {};
+  const limit = localConcurrencyLimit(opts.cfg);
+  if (limit === 0) return () => {}; // 显式退出串行化
+  const waitMs = Number(opts.queueTimeoutMs) > 0 ? Number(opts.queueTimeoutMs) : localQueueTimeoutMs(opts.cfg);
+  const g = localGateFor(key, limit);
+
+  if (g.active < g.limit) {
+    g.active += 1;
+    return makeLocalRelease(g);
+  }
+
+  // 需要排队：先留痕（日志/UI），再把自己挂到 Promise 队列上。
+  const endpoint = String(opts.endpoint || key);
+  const queued = g.waiters.length + 1;
+  const ev = /** @type {any} */ ({ type: 'wait', baseUrl: key, endpoint, active: g.active, queued, limit: g.limit, label: opts.label || '' });
+  ev.text = localQueueEventText(ev);
+  emit(ev);
+  try {
+    opts.onWait?.(ev);
+  } catch {}
+
+  return await new Promise((resolve, reject) => {
+    /** @type {any} */
+    const waiter = { settled: false, grant: null, timer: null, onAbort: null, signal: opts.signal || null };
+    const settle = (/** @type {boolean} */ ok, /** @type {any} */ value) => {
+      if (waiter.settled) return;
+      waiter.settled = true;
+      if (waiter.timer) clearTimeout(waiter.timer);
+      try {
+        if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort);
+      } catch {}
+      const at = g.waiters.indexOf(waiter);
+      if (at >= 0) g.waiters.splice(at, 1);
+      if (ok) resolve(value);
+      else reject(value);
+    };
+    waiter.grant = () => {
+      if (waiter.settled) return;
+      waiter.settled = true;
+      if (waiter.timer) clearTimeout(waiter.timer);
+      try {
+        if (waiter.signal && waiter.onAbort) waiter.signal.removeEventListener('abort', waiter.onAbort);
+      } catch {}
+      // 名额已从上一个持有者移交过来：active 保持不变
+      try {
+        opts.onWait?.({ ...ev, waiting: false, active: g.active, queued: Math.max(0, g.waiters.length), limit: g.limit });
+      } catch {}
+      resolve(makeLocalRelease(g));
+    };
+    waiter.timer = setTimeout(() => {
+      const err = /** @type {any} */ (
+        new Error(
+          `本地端点排队超时（等待 ${(waitMs / 1000).toFixed(1)}s，仍有 ${g.active} 个在途请求，并发上限 ${g.limit}）：` +
+            `为避免内存压力已在本机端点串行化——可调大 config.localQueueTimeoutMs，或减少子代理/并行会话。`
+        )
+      );
+      err.code = 'LOCAL_QUEUE_TIMEOUT';
+      err.status = 0;
+      err.localEndpoint = key;
+      settle(false, err);
+    }, waitMs);
+    waiter.onAbort = () => settle(false, opts.signal?.reason ?? new Error('已中断（本地端点排队中）'));
+    if (opts.signal) {
+      if (opts.signal.aborted) {
+        waiter.onAbort();
+        return;
+      }
+      try {
+        opts.signal.addEventListener('abort', waiter.onAbort, { once: true });
+      } catch {}
+    }
+    g.waiters.push(waiter);
+  });
+}
+
+/** 仅供测试：清空全部队列（不影响已取得名额的释放函数）。 */
+export function __resetLocalGates() {
+  localGates.clear();
+}
+
 // v0.6.3（下游 Dify 工作流反馈）：`customModels` 的条目其实是**两种东西**，此前混为一谈——
 //   · **声明式端点**：写了 baseUrl / envKey / apiKey / headers 等传输字段 → 确实是"自定义
 //     OpenAI 兼容端点"，优先于内置预设（原行为，不变）；
@@ -254,40 +489,58 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
         }
         const ac = new AbortController();
         currentAc = ac;
-        let timedOut = false; // 审计 P2-6：用标志而非 name/字符串匹配识别内部超时（首 token/流式空闲）
-        // 首 token 等待：prefill 阶段无任何帧到达即断（覆盖长上下文慢 prefill）
-        let firstTokenTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (setTimeout(() => {
-          timedOut = true;
-          ac.abort(new Error(`首 token 等待超限（${Math.round(firstTokenMs / 1000)}s，本地模型长上下文 prefill 可能很慢）——可调大 config.timeout.firstTokenMs，或拆分任务/压缩上下文`));
-        }, firstTokenMs));
-        // 流式空闲：有帧后 120s 无新帧即断；每收到一帧重置
-        let idleTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
-        const armIdle = () => {
-          if (idleTimer) clearTimeout(idleTimer);
-          idleTimer = setTimeout(() => {
-            timedOut = true;
-            ac.abort(new Error(`流式响应空闲超限（${Math.round(streamIdleMs / 1000)}s 无新数据）`));
-          }, streamIdleMs);
-        };
-        const onActivity = () => {
-          sawFrame = true;
-          if (firstTokenTimer) {
-            clearTimeout(firstTokenTimer);
-            firstTokenTimer = null;
-          }
-          armIdle();
-        };
-        // 转发外部信号（用户 Ctrl+C 中断），避免被内部超时信号覆盖
+        // 转发外部信号（用户 Ctrl+C 中断），避免被内部超时信号覆盖。
+        // 必须在**排队之前**挂上：否则用户中断时请求仍卡在本地端点队列里。
         const onUserAbort = () => ac.abort(opts.signal?.reason);
         if (opts.signal?.aborted) onUserAbort();
         else opts.signal?.addEventListener('abort', onUserAbort, { once: true });
+        let timedOut = false; // 审计 P2-6：用标志而非 name/字符串匹配识别内部超时（首 token/流式空闲）
+        let firstTokenTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
+        let idleTimer = /** @type {ReturnType<typeof setTimeout> | null} */ (null);
         let leaving = true; // 本次 attempt 是否退出（成功/不再重试）；将重试则置 false，总量计时器保留覆盖下一 attempt
         // v0.6.3（BUG-028）：**收到过任何一帧就不再重试**。chat 是**非幂等**的 POST：
         // 上游一旦开始生成按量计费，重试等于再买一次（用户只看到一份回答、账本却计两次）。
         // 判据取"有没有帧到达"而不是"有没有正文"——usage-only/角色帧同样说明请求已被受理。
         // 代价如实说明：流式空闲超时（已开始输出）不再重试，失败以错误形式回到用户手里，而不是悄悄多花一份钱。
         let sawFrame = false;
+        let releaseLocal = /** @type {null | (() => void)} */ (null);
         try {
+          // v0.6.15（§3.59）：**本地端点并发闸门**——同一 baseUrl 的父回合 / 子代理 / 预检
+          // 共用一条进程级 Promise 队列（默认 1 并发）。真机 8081：父子回合同时 prefill 时
+          // 引擎报 "insufficient memory … engine shed its caches and stays up"。
+          // 必须在**首 token 计时之前**排队：排队是内核自己的调度，不是"引擎迟迟不出首帧"。
+          // 云端端点由 acquireLocalSlot 内部直接放行（不排队、不记日志、不加延迟）。
+          releaseLocal = await acquireLocalSlot(pc.baseUrl, {
+            cfg,
+            signal: ac.signal,
+            onWait: opts.onQueueWait,
+            endpoint: pc.name || pc.baseUrl,
+            label: modelName,
+          });
+          // 排队期间总量计时器可能已经到点：它会 abort 本 attempt 的 ac（见 totalTimer），
+          // 排队等待因此以「请求总时长超限」拒绝（acquireLocalSlot 透传 signal.reason）；
+          // 这里**不再写一份重复的复查**——循环头那一处是 BUG-029 的单一判据（§119 钉住）。
+          // 首 token 等待：prefill 阶段无任何帧到达即断（覆盖长上下文慢 prefill）
+          firstTokenTimer = setTimeout(() => {
+            timedOut = true;
+            ac.abort(new Error(`首 token 等待超限（${Math.round(firstTokenMs / 1000)}s，本地模型长上下文 prefill 可能很慢）——可调大 config.timeout.firstTokenMs，或拆分任务/压缩上下文`));
+          }, firstTokenMs);
+          // 流式空闲：有帧后 120s 无新帧即断；每收到一帧重置
+          const armIdle = () => {
+            if (idleTimer) clearTimeout(idleTimer);
+            idleTimer = setTimeout(() => {
+              timedOut = true;
+              ac.abort(new Error(`流式响应空闲超限（${Math.round(streamIdleMs / 1000)}s 无新数据）`));
+            }, streamIdleMs);
+          };
+          const onActivity = () => {
+            sawFrame = true;
+            if (firstTokenTimer) {
+              clearTimeout(firstTokenTimer);
+              firstTokenTimer = null;
+            }
+            armIdle();
+          };
           return await openaiChat({
             ...opts,
             baseUrl: pc.baseUrl,
@@ -299,7 +552,9 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
         } catch (err) {
           // 内部超时经 abort 抛出，用标志识别（审计 P2-6）；用户 Ctrl+C 的中断不算超时、不重试。
           // 总量超时（totalExpired）覆盖整个序列，超了直接抛不再重试。
-          const transient = !totalExpired && !sawFrame && ((timedOut && !opts.signal?.aborted) || isTransient(err));
+          // 排队超时（LOCAL_QUEUE_TIMEOUT）**不得**重试：重试只会再排一次队、把等待翻倍。
+          const queueTimeout = (/** @type {any} */ (err))?.code === 'LOCAL_QUEUE_TIMEOUT';
+          const transient = !totalExpired && !queueTimeout && !sawFrame && ((timedOut && !opts.signal?.aborted) || isTransient(err));
           if (!transient || attempt >= retries) throw err;
           leaving = false; // 将重试：本次不退出，总量计时器继续覆盖下一 attempt
           attempt += 1;
@@ -315,6 +570,8 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
           if (firstTokenTimer) clearTimeout(firstTokenTimer);
           if (idleTimer) clearTimeout(idleTimer);
           opts.signal?.removeEventListener('abort', onUserAbort);
+          // 名额必须在这里释放（成功/失败/超时/中断都走 finally），否则队列会永久卡住。
+          try { releaseLocal?.(); } catch {}
         }
       }
     },

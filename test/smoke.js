@@ -14732,4 +14732,238 @@ process.exit(0);
 // —— 实测 ubuntu/macOS + Node 20 上"断言全过、进程却不退出"，CI 里表现为冒烟步骤永远 in_progress
 // （Node 18/22/Windows 因为拆连接更快而侥幸通过）。这里显式退出，断言本身不受影响；
 // 断言失败仍会在抛错处非 0 退出。
+
+// ---------- 142. v0.6.15（§3.59）：本地端点并发上限（父回合/子代理/预检同一队列 + 云端不受影响 + 排队超时可见 + 引擎活着丢缓存分型 + 并发预告强警告） ----------
+// 真机证据（v0.6.14，8081 mtplx-qwen38-27b-optimized-quality）：长任务中途被引擎拒绝——
+//   insufficient memory: the request exceeded available GPU memory
+//   (sustained critical memory pressure during prefill; aborted before the allocator wall).
+//   The engine shed its caches and stays up; this request failed.
+// 同一错误此前也在 60091 的 35B 上出现 → 不是模型问题，是本机内存压力；该回合此前有子代理在跑
+// （13 轮 / 17 次调用）→ 父回合 + 子代理同时向同一本地引擎发请求是主要来源。
+// 本节钉死五件事：
+//   ① 同一本地 baseUrl 的两次并发请求必须串行化（真 HTTP 桩记录最大并发 = 1，且排队留痕）；
+//   ② 云端 baseUrl **不受影响**（不得排队、不得记串行化日志，最大并发 = 2）；
+//   ③ 排队等待有上限，超时给**可见错误**（不重试、不死等）；
+//   ④ `engine shed its caches and stays up` / `allocator wall` 走"引擎未崩溃、不要重启"的独立分型；
+//   ⑤ 本地端点已有在途请求时，发送前预告必须给"并发会加剧内存压力"的强警告。
+{
+  const http142 = await import('node:http');
+  const {
+    createProvider,
+    localGateSnapshot,
+    localConcurrencyLimit,
+    localQueueTimeoutMs,
+    DEFAULT_LOCAL_CONCURRENCY,
+    DEFAULT_LOCAL_QUEUE_TIMEOUT_MS,
+    localQueueEventText,
+    setLocalQueueObserver,
+  } = await import(pathToFileURL(path.join(srcDir, 'providers', 'index.js')).href);
+  const { prefillForecast, describeUpstreamError, formatTurnProgress } = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
+  const { probeEndpoint } = await import(pathToFileURL(path.join(srcDir, 'model-discovery.js')).href);
+  const sleep142 = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
+  const sse142 = (/** @type {any} */ res) => {
+    res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
+    res.write('data: {"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n');
+    res.end('data: [DONE]\n\n');
+  };
+  /** 真 HTTP 桩：记录"同时在处理的请求数"与最大值；每个请求 delayMs 后才回帧。 */
+  const mkStub142 = (/** @type {number} */ delayMs) => {
+    const stats = /** @type {any} */ ({ active: 0, maxActive: 0, hits: 0 });
+    /** @type {any} */ let onStarted;
+    const started = new Promise((r) => { onStarted = r; });
+    const srv = http142.createServer((/** @type {any} */ req, /** @type {any} */ res) => {
+      let body = '';
+      req.on('data', (/** @type {any} */ d) => (body += d));
+      req.on('end', () => {
+        stats.hits += 1;
+        stats.active += 1;
+        stats.maxActive = Math.max(stats.maxActive, stats.active);
+        if (stats.hits === 1) onStarted();
+        setTimeout(() => {
+          stats.active -= 1;
+          try { sse142(res); } catch {}
+        }, delayMs);
+      });
+    });
+    return { srv, stats, started };
+  };
+  const listen142 = (/** @type {any} */ srv) => new Promise((r) => srv.listen(0, '127.0.0.1', () => r(Number(srv.address().port))));
+  const close142 = (/** @type {any} */ srv) => new Promise((r) => { try { srv.close(() => r(null)); } catch { r(null); } });
+  const cfg142 = (/** @type {number} */ port, /** @type {string} */ name, /** @type {any} */ extra = {}) => ({
+    customModels: { [name]: { baseUrl: `http://127.0.0.1:${port}/v1` } },
+    localConcurrency: 1,
+    localQueueTimeoutMs: 5000,
+    ...extra,
+  });
+  const msgs142 = [{ role: 'user', content: '你好' }];
+  /** @type {any[]} */
+  let events142 = [];
+  setLocalQueueObserver((/** @type {any} */ ev) => events142.push(ev));
+  try {
+    // —— ① 同一本地 baseUrl：两次并发请求被串行化（桩实测最大并发 = 1）+ 排队日志 ——
+    {
+      const stub = mkStub142(150);
+      const port = await listen142(stub.srv);
+      const cfg = cfg142(port, 'sec142-local');
+      const p = await createProvider(cfg, 'sec142-local');
+      events142 = [];
+      const t0 = Date.now();
+      const [r1, r2] = await Promise.all([
+        p.chat({ model: 'sec142-local', messages: msgs142 }),
+        p.chat({ model: 'sec142-local', messages: msgs142 }),
+      ]);
+      const ms = Date.now() - t0;
+      assert.equal(r1.text, 'ok', '第一个请求必须正常完成');
+      assert.equal(r2.text, 'ok', '排队的第二个请求也必须正常完成（不是丢弃/失败）');
+      assert.equal(stub.stats.hits, 2, '两次请求都必须真的打到端点');
+      assert.equal(stub.stats.maxActive, 1, `同一本地 baseUrl 的并发请求必须串行化（桩实测最大并发=${stub.stats.maxActive}）`);
+      assert.ok(ms >= 280, `两次各 150ms 的请求必须**依次**执行（实际 ${ms}ms；并发执行会 ≈150ms）`);
+      const waitEv = events142.find((e) => e.type === 'wait');
+      assert.ok(waitEv, '排队时必须发出串行化事件（日志留痕）');
+      assert.ok(/本地端点串行化：等待 1 个在途请求/.test(String(waitEv?.text)), `排队日志必须写明"等待 N 个在途请求"，实际：${waitEv?.text}`);
+      assert.equal(localGateSnapshot(cfg.customModels['sec142-local'].baseUrl).active, 0, '两次请求结束后名额必须全部释放（否则后续请求会永久排队）');
+      await close142(stub.srv);
+    }
+
+    // —— ② 云端 baseUrl 不被串行化：不排队、不记日志、最大并发 = 2 ——
+    {
+      const origFetch = globalThis.fetch;
+      const state = { active: 0, maxActive: 0 };
+      globalThis.fetch = async () => {
+        state.active += 1;
+        state.maxActive = Math.max(state.maxActive, state.active);
+        await sleep142(80);
+        state.active -= 1;
+        return new Response('data: {"choices":[{"index":0,"delta":{"content":"cloud"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n', {
+          status: 200,
+          headers: { 'Content-Type': 'text/event-stream' },
+        });
+      };
+      try {
+        const cfg = {
+          customModels: { 'sec142-cloud': { baseUrl: 'https://api.deepseek.com/v1' } },
+          localConcurrency: 1,
+          localQueueTimeoutMs: 5000,
+        };
+        const p = await createProvider(cfg, 'sec142-cloud');
+        events142 = [];
+        const [c1, c2] = await Promise.all([
+          p.chat({ model: 'sec142-cloud', messages: msgs142 }),
+          p.chat({ model: 'sec142-cloud', messages: msgs142 }),
+        ]);
+        assert.equal(c1.text, 'cloud', '云端请求照常返回');
+        assert.equal(c2.text, 'cloud', '云端请求照常返回');
+        assert.ok(state.maxActive >= 2, `云端 baseUrl 不得被串行化（桩实测最大并发=${state.maxActive}）`);
+        assert.equal(events142.length, 0, `云端端点不得产生"本地端点串行化"事件/日志，实际 ${events142.length} 条`);
+      } finally {
+        globalThis.fetch = origFetch;
+      }
+    }
+
+    // —— ③ 排队超时：等待有上限，超时给可见错误（含"已串行化"与调参指引），且不重试 ——
+    {
+      const stub = mkStub142(400);
+      const port = await listen142(stub.srv);
+      const cfg = cfg142(port, 'sec142-timeout', { localQueueTimeoutMs: 80 });
+      const p = await createProvider(cfg, 'sec142-timeout');
+      const first = p.chat({ model: 'sec142-timeout', messages: msgs142 });
+      await stub.started; // 确认第一个请求已在途，第二个才会排队
+      const t0 = Date.now();
+      /** @type {any} */
+      let qerr = null;
+      try {
+        await p.chat({ model: 'sec142-timeout', messages: msgs142 });
+      } catch (e) {
+        qerr = e;
+      }
+      const ms = Date.now() - t0;
+      assert.ok(qerr, '第二个请求必须在排队上限后失败（不得死等）');
+      assert.equal(qerr?.code, 'LOCAL_QUEUE_TIMEOUT', `排队超时必须可被程序识别（code=LOCAL_QUEUE_TIMEOUT），实际：${qerr?.code}`);
+      assert.ok(/本地端点排队超时/.test(String(qerr?.message)), `排队超时必须是可见错误，实际：${qerr?.message}`);
+      assert.ok(/已在本机端点串行化/.test(String(qerr?.message)), `错误必须说明"已串行化"（否则用户以为是引擎坏了），实际：${qerr?.message}`);
+      assert.ok(/localQueueTimeoutMs/.test(String(qerr?.message)), '错误必须给调参指引（config.localQueueTimeoutMs）');
+      assert.ok(ms < 1000, `排队超时必须在自己的上限附近返回（实际 ${ms}ms，不得等到第一个请求 400ms 结束后再重试）`);
+      await first; // 收尾：第一个请求正常完成
+      await close142(stub.srv);
+    }
+
+    // —— ③b 预检也过同一道闸门：已有在途请求时，探针必须排队（桩实测最大并发仍为 1） ——
+    {
+      const stub = mkStub142(250);
+      const port = await listen142(stub.srv);
+      const cfg = cfg142(port, 'sec142-probe');
+      const p = await createProvider(cfg, 'sec142-probe');
+      events142 = [];
+      const first = p.chat({ model: 'sec142-probe', messages: msgs142 });
+      await stub.started;
+      const probe = await probeEndpoint(cfg, 'sec142-probe', { force: true, persist: false, timeoutMs: 8000, attemptMs: 1500, repeats: 1 });
+      assert.ok(events142.some((e) => e.type === 'wait'), '端点预检也必须纳入本地端点并发闸门（不能一边跑父回合一边插探针抢内存）');
+      assert.equal(stub.stats.maxActive, 1, `预检与在途请求不得同时打到同一本地端点（桩实测最大并发=${stub.stats.maxActive}）`);
+      assert.ok(/首帧|参考 prefill/.test(String(probe.note)), `预检排队后仍要给出结论，实际：${probe.note}`);
+      await first;
+      await close142(stub.srv);
+    }
+
+    // —— ④ 错误分型：engine shed its caches and stays up / allocator wall = 引擎**未崩溃**，不要重启 ——
+    {
+      const real = "[流式响应错误] insufficient memory: the request exceeded available GPU memory (sustained critical memory pressure during prefill; aborted before the allocator wall). The engine shed its caches and stays up; this request failed. Reduce --context-window, close other apps, or try q8 KV quantization.";
+      const shed = describeUpstreamError({ status: 500, message: real });
+      assert.ok(shed.hint, '这段真机原文必须有可操作解读（不得只透出原文）');
+      assert.ok(/未崩溃/.test(String(shed.hint)), `必须明确"该引擎未崩溃"（真机原文 stays up），实际：${shed.hint}`);
+      assert.ok(/engine shed its caches and stays up/.test(String(shed.hint)), '必须引用原文措辞，避免用户以为是另一类错误');
+      assert.ok(/不要重启引擎/.test(String(shed.hint)), `不得建议重启（引擎没崩），实际：${shed.hint}`);
+      assert.ok(!/重启模型服务释放内存后重试/.test(String(shed.hint)), `"引擎活着但丢缓存"不得并进"重启引擎"那一支，实际：${shed.hint}`);
+      assert.ok(/压缩上下文/.test(String(shed.hint)) && /减少并发/.test(String(shed.hint)), '处置必须是压上下文/减少并发/等它自行恢复');
+      assert.ok(/重试/.test(String(shed.hint)), '必须说明可以直接重试（引擎通常会自行恢复）');
+      // 与"引擎崩了/连接被拒"区分：那条不该被套上 shed-caches 文案
+      const refused = describeUpstreamError({ message: 'connect ECONNREFUSED 127.0.0.1:8081' });
+      assert.ok(!/未崩溃/.test(String(refused.hint || '')), '连接被拒（引擎可能真的没起来）不得套用"未崩溃"文案');
+      // 与普通内存拒绝区分：既有分型（建议重启释放内存）仍在，但两条文案不同
+      const mem = describeUpstreamError({ status: 500, message: "insufficient memory: this prompt projects 49.7 GiB against the engine's 48.0 GiB limit" });
+      assert.ok(/重启模型服务释放内存后重试/.test(String(mem.hint)), '普通内存拒绝的既有处置仍在（不得被新分支吞掉）');
+      assert.notEqual(mem.hint, shed.hint, '"引擎活着但丢缓存"与"普通内存拒绝"必须是两套处置');
+    }
+
+    // —— ⑤ chat 预告：本地端点已有在途请求 → 强警告（并发会加剧内存压力） ——
+    {
+      const busy = prefillForecast({
+        promptTokens: 15983, contextWindow: 131072, isLocal: true, firstTokenMs: 600000,
+        localBusy: true, localActive: 1, localQueued: 1, localConcurrency: 1,
+      });
+      assert.ok(/并发会加剧内存压力/.test(busy.text), `本地端点已有在途请求时，预告必须给强警告，实际：${busy.text}`);
+      assert.ok(/已串行化/.test(busy.text), '必须说明已串行化（资源冲突已被兜住）');
+      assert.ok(/减少子代理/.test(busy.text), '必须给出"减少子代理"的可操作建议');
+      assert.equal(busy.warn, true, '并发警告必须置 warn（界面黄色告警，不只是一行灰字）');
+      const idle = prefillForecast({ promptTokens: 15983, contextWindow: 131072, isLocal: true, firstTokenMs: 600000, localBusy: false });
+      assert.ok(!/并发会加剧内存压力/.test(idle.text), '没有在途请求时不得无端告警');
+      const cloud = prefillForecast({ promptTokens: 15983, contextWindow: 131072, isLocal: false, firstTokenMs: 300000, localBusy: true, localActive: 1 });
+      assert.ok(!/并发会加剧内存压力/.test(cloud.text), '云端端点不得出现本地端点串行化警告');
+      // 纯函数配置口径
+      assert.equal(DEFAULT_LOCAL_CONCURRENCY, 1, '默认 1 并发');
+      assert.equal(DEFAULT_LOCAL_QUEUE_TIMEOUT_MS, 1800000, '默认排队上限 30 分钟');
+      assert.equal(localConcurrencyLimit({}), 1, '未配置 localConcurrency → 1');
+      assert.equal(localConcurrencyLimit({ localConcurrency: 0 }), 0, 'localConcurrency=0 → 显式退出串行化');
+      assert.equal(localConcurrencyLimit({ localConcurrency: 3 }), 3, '正整数生效');
+      assert.equal(localConcurrencyLimit({ localConcurrency: -1 }), 1, '负数回落默认 1（fail-safe）');
+      assert.equal(localQueueTimeoutMs({}), DEFAULT_LOCAL_QUEUE_TIMEOUT_MS, '未配置排队上限 → 30 分钟');
+      assert.ok(/等待 1 个在途请求/.test(localQueueEventText({ active: 1, queued: 1, limit: 1, endpoint: '127.0.0.1:8081' })), '入队日志文案必须写"等待 N 个在途请求"');
+      // 进度行可见
+      const line = formatTurnProgress({ elapsedMs: 1000, phase: '排队等待本地端点', localQueue: { active: 1, queued: 1, limit: 1 } });
+      assert.ok(/本地端点已串行化/.test(line) && /并发上限 1/.test(line), `进度行必须显示"已串行化（防内存压力）"，实际：${line}`);
+      // 结构守卫：服务端/前端/agent 三处都要把这条状态送到用户眼前
+      const serverSrc142 = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+      const appSrc142 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+      const agentSrc142 = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+      assert.ok(/localQueue: tp\.localQueue \?\? null/.test(serverSrc142), '服务端 progress 事件必须带上 localQueue（界面状态条数据源）');
+      assert.ok(/本地端点已串行化/.test(appSrc142), '前端状态条必须渲染"本地端点已串行化（防内存压力）"');
+      assert.ok(/onQueueWait/.test(agentSrc142) && /排队等待本地端点（已串行化防内存压力/.test(agentSrc142), 'agent 必须把排队状态写进 turnProgress.phase（进度行/界面共用）');
+      assert.ok(/setLocalQueueObserver/.test(serverSrc142), '服务端必须把串行化事件接进 web-server.log（日志留痕）');
+    }
+
+    ok('v0.6.15 §3.59：同一本地 baseUrl 串行化（默认 1 并发，桩实测最大并发=1，排队留痕）+ 云端端点不排队（实测并发=2）+ 排队超时可见错误（LOCAL_QUEUE_TIMEOUT，不重试）+ 预检也过同一闸门（实测最大并发=1）+ "engine shed its caches and stays up/allocator wall" 独立分型（引擎未崩溃、不要重启）+ 并发时预告强警告（并发会加剧内存压力/已串行化/减少子代理）');
+  } finally {
+    setLocalQueueObserver(null);
+  }
+}
+
 process.exit(0);

@@ -12,7 +12,7 @@ import { mingdaoHome, ensureHome } from './config.js';
 import { PROVIDERS, MODELS } from './models.js';
 import { getStoredKey } from './credentials.js';
 import { isLocalBaseUrl, resolveModelCaps } from './model-caps.js';
-import { resolveProviderConfig } from './providers/index.js';
+import { resolveProviderConfig, acquireLocalSlot, localQueueTimeoutMs } from './providers/index.js';
 
 const TTL_MS = 60 * 60 * 1000;
 
@@ -355,19 +355,43 @@ export async function probeEndpoint(/** @type {any} */ cfg, /** @type {string} *
      * 为什么（v0.6.13 修复）：探针是 `stream: true`，`fetch` 在**响应头**到达时就 resolve；此前
      * clearTimeout 就在那时执行，于是"引擎回了头、卡在 prefill"这种情况**没有任何超时**
      * （桩复现：给 1.5s 超时，6s 后探针仍在跑），而它在回合发起之前被 await —— 把回合发起拖死。
+     *
+     * v0.6.15（§3.59）：**预检也必须过本地端点并发闸门**——探针打的是与主请求同一个
+     * `/chat/completions`，父子回合长 prefill 的同时再插一个探针请求，抢的是同一份内存。
+     * 排队发生在计时器启动**之前**（排队是内核自己的调度，不能报成"引擎 1.5s 没给首帧"），
+     * 但排队本身也有上限（取 min(config.localQueueTimeoutMs, 本探针剩余预算)）；
+     * 名额在 cleanup（读完首帧/失败）时释放，覆盖整个流式读取窗口。
      */
     const open = async (/** @type {any} */ url, /** @type {any} */ init, /** @type {any} */ ms) => {
       const ac = new AbortController();
       const terr = /** @type {any} */ (new Error(`预检超时（${(ms / 1000).toFixed(1)}s）`));
       terr.probeTimeout = true;
       terr.probeTimeoutMs = ms;
+      let releaseLocal = /** @type {null | (() => void)} */ (null);
+      try {
+        releaseLocal = await acquireLocalSlot(base, {
+          cfg,
+          signal: ac.signal,
+          endpoint: `预检 ${endpointLabel(base) || base}`,
+          queueTimeoutMs: Math.max(1, Math.min(localQueueTimeoutMs(cfg), left())),
+        });
+      } catch (e) {
+        // 排队超时/中断也归入探针超时语义（端口是通的，只是本地端点正被其他请求占着）
+        if (e && typeof e === 'object' && /排队超时/.test(String(/** @type {any} */ (e).message || ''))) {
+          /** @type {any} */ (e).probeTimeout = true;
+        }
+        throw e;
+      }
       const t = setTimeout(() => ac.abort(terr), ms);
-      const cleanup = () => clearTimeout(t);
+      const cleanup = () => {
+        clearTimeout(t);
+        try { releaseLocal?.(); } catch {}
+      };
       try {
         const res = await fetchImplOr(doFetch, url, { ...init, signal: ac.signal });
         return { res, cleanup, timeoutErr: terr };
       } catch (e) {
-        cleanup(); // 失败路径立刻清计时器（成功路径由调用方读完后清）
+        cleanup(); // 失败路径立刻清计时器并释放名额（成功路径由调用方读完后清）
         throw e;
       }
     };
