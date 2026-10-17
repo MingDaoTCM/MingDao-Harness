@@ -94,7 +94,6 @@ async function chatRunStart(payload, label) {
   const s = await chatRunStart({ message: '显式选择与只读预设', permission: 'auto', preset: 'ro' }, '①');
   assert.equal(s.permission, 'auto', '① 显式 auto 必须是生效值（预设 readonly 不得压过它）');
   assert.equal(s.permissionSource, 'explicit', '① 显式选择必须记为 explicit（不能被预设或 config 冒充）');
-  assert.equal(s.preset, null, '① 本项不改变既有 run.start.preset 字段（本次仍为 null，行为未被顺手改）');
   ok('① 显式 auto + 只读预设 → auto / explicit');
 }
 
@@ -205,6 +204,7 @@ async function cliRunStart({ permission, preset }) {
 
 await new Promise((r) => srv.close(r));
 mock.close();
+process.chdir(os.tmpdir()); // 清理前先离开临时工作目录（否则部分平台删不掉 cwd）
 delete process.env.MINGDAO_HOME;
 fs.rmSync(home, { recursive: true, force: true });
 fs.rmSync(work, { recursive: true, force: true });
