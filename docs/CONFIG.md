@@ -379,6 +379,9 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
 `deepseek-v4-flash` → `deepseek-flash` → `DeepSeek-V4.1-Flash 1017` → 未来的 V4.2/V5）
 **不需要改代码**：模型名一律以 `GET /v1/models` 实时返回的官方名为准。
 
+> 官方**宣传名**（如 `DeepSeek-V4.1-Flash 1017`）与实际 API id（如 `deepseek-flash`）不一致时，
+> **不要**把它写进请求：用下面的「显示别名 `config.modelLabels`」，请求仍用 API id。
+
 ### 家族模式表
 
 `src/models.js` 的 `MODEL_FAMILIES` 用正则匹配名字，能力（上下文窗口、单次输出上限、工具调用、
@@ -422,6 +425,105 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
   仍可作为 `--model` / `config.model` 的取值；能力与定价照旧按家族解析。
 - 完全不属于任何家族的线上新模型（例如非 DeepSeek 命名）仍会出现在列表里，可直接选中；
   能力未知时按远程模型保守默认（上下文 128k）估算，可用 `customModels` 显式覆盖。
+
+### 显示别名 `config.modelLabels`（v0.6.20，§3.69）
+
+**厂家的「官方宣传名 / 构建名」不等于 API id，不能拿去请求。** 实测（2026-10，真机）：
+
+```text
+GET  https://api.deepseek.com/v1/models
+→ ["deepseek-flash", "deepseek-v4-pro"]
+
+POST /v1/chat/completions {"model":"deepseek-flash"}
+→ 200（响应 model = "deepseek-flash"）
+
+POST /v1/chat/completions {"model":"DeepSeek-V4.1-Flash 1017"}
+→ 400 {"message":"The supported API model names are deepseek-flash, deepseek-v4-pro,
+                    but you passed DeepSeek-V4.1-Flash 1017."}
+```
+
+也就是说：`DeepSeek-V4.1-Flash 1017` **既不会出现在 `/models` 里，也不能用于请求**。
+界面想显示官方宣传名，只能用「显示别名」——它**只影响渲染**，绝不参与出网请求的
+`model` 字段（`config.model` / `config.routing.*` / 请求体 `model` 始终是 API id）。
+
+```json
+{
+  "model": "deepseek-flash",
+  "modelLabels": {
+    "deepseek-flash": "DeepSeek-V4.1-Flash 1017",
+    "deepseek-v4-pro": "DeepSeek-V4.1-Pro 1017"
+  }
+}
+```
+
+校验规则（`src/models.js` 的 `normalizeModelLabels`，在 `loadConfig()` 时执行）：
+
+| 规则 | 非法时的行为 |
+| --- | --- |
+| `modelLabels` 必须是对象（不能是数组 / null / 字符串） | 整个字段忽略 + `console.warn` |
+| key（API id）去空白后必须非空 | 该项忽略 + `console.warn` |
+| value 必须是字符串、去空白后必须非空 | 该项忽略 + `console.warn` |
+| value 长度 ≤ 80 字符（`MODEL_LABEL_MAX_LENGTH`） | 该项忽略 + `console.warn` |
+| key 为 `__proto__` / `constructor` / `prototype` | 该项忽略 + `console.warn`（原型污染防线） |
+
+非法项**不会阻断启动**（配置写坏一个字不该让应用起不来）；同一非法项每个进程只提醒一次。
+合法映射的值会去掉首尾空白后生效。
+
+接口形状（`GET /api/models` 与 `GET /api/state` 的 `models[]`，**服务商线上模型**条目）：
+
+| 字段 | 含义 |
+| --- | --- |
+| `id` | API 实际 id（出网请求用它） |
+| `name` | 同 `id`（保留给现有前端的选择 value，选择逻辑不变） |
+| `label` | 显示名：`modelLabels[id]`；没有映射时**回退 `id`** |
+| `labelSource` | 仅当 `label !== id` 时为 `"config"`（显示名来自 `config.modelLabels`） |
+| `detail` | 能力 / 来源说明（原来的组合标签：离线兜底、能力未知、来源标注） |
+
+`config.customModels` 的条目保持既有的「名字 — 用户标签（来源）」展示——它们不是官方
+API id，不参与 `modelLabels`（其条目仍带 `id`，等于自定义模型名）。
+
+回归：`test/model-names.js` 第 ⑧ 组断言 + `test/mutate/batch37-model-labels.mjs`（10/10 全中）。
+
+### TODO（UI：显示别名落地，待另一道 / 下一轮实现；本次不改 UI 文件）
+
+> 本次（v0.6.20 §3.69）只做内核 / 接口 / 文档；`src/web/app.js`、`src/web/index.html` 由并行
+> UI 线持有（P1 已合入 `878d4cb`），故以下三处**尚未落地**。行号为 `878d4cb` 时；
+> 后续改动会漂移，请以 `o.value=m.name; o.textContent=m.name; o.title=m.label` 等代码锚点为准。
+
+1. **模型选择器显示 `label`、`title` 显示 API id**（只改显示，不改选择逻辑）
+   - 位置：`src/web/app.js` 两处重复的选项渲染（`:1859` 与 `:2189`），锚点
+     `o.value=m.name; o.textContent=m.name; o.title=m.label;`。
+   - 建议改法：
+     ```js
+     const id = m.id || m.name;
+     const label = m.label || id;
+     const o = document.createElement('option');
+     o.value = id;                                   // 选择 / 请求仍用 API id
+     o.textContent = label;                          // 界面显示官方宣传名
+     o.title = 'API id: ' + id + (m.detail ? ' · ' + m.detail : '');
+     if (id === j.model) o.selected = true;
+     ```
+   - 期望效果：下拉显示 `DeepSeek-V4.1-Flash 1017`；悬浮提示能对上
+     `API id: deepseek-flash · （能力/来源说明）`；选择后提交的仍是 id。
+2. **会话设置一行小字（仅当 `label !== id` 时出现）**
+   - `src/web/index.html`：会话设置的模型行（`:653` 已有 `ssModelLabel` / `ssModelId`），
+     在 `ssModelSrc` 后加：
+     ```html
+     <div class="ss-src" id="ssModelAliasHint" hidden>显示名来自 config.modelLabels，请求使用 API id。</div>
+     ```
+   - `src/web/app.js`：`renderSessionSettings()` 中 `set('#ssModelId', ...)` 附近加：
+     ```js
+     const hint = $('#ssModelAliasHint');
+     if (hint) hint.hidden = !(md.label && md.label !== md.name);
+     ```
+     （`md` 即已有的 `modelDisplay(当前模型条目)`，`app.js:966`。）
+   - 期望效果：配了映射的模型显示这行说明，没配时不出现。
+3. **设置页说明文案（不是新表单）**
+   - `src/web/index.html`：`模型与 API Key` 标题下（`:757`）加一条
+     `cfg-hint`（带 `data-kw` 便于设置搜索命中，不新增任何输入框）：
+     ```html
+     <div class="cfg-hint" data-kw="模型 id 官方名 宣传名 modelLabels 显示名">模型 id 以 API 返回为准；官方宣传名可在 <code>config.modelLabels</code> 里映射为显示名（请求仍用 API id）。</div>
+     ```
 
 ## 自定义模型（WebUI 添加后落盘的结构）
 

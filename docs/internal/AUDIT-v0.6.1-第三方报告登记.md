@@ -3370,6 +3370,66 @@ Reduce --context-window, close other apps, or try q8 KV quantization.
 - 未改内核事件协议；`permissionSource` 只读 `resolveTurnPermission()` 的既有返回。
 - 未 tag、未改版本号、未 publish、未动官网。
 
+## 3.69 已修复（v0.6.20 开发线：模型显示别名 `config.modelLabels`——界面显示官方宣传名，请求仍用 API id）
+
+**来源**：负责人真机实测。`GET https://api.deepseek.com/v1/models` 只返回
+`["deepseek-flash", "deepseek-v4-pro"]`；`POST chat {model:"deepseek-flash"}` 正常（响应
+`model="deepseek-flash"`），而 `POST chat {model:"DeepSeek-V4.1-Flash 1017"}` 被 400 拒绝：
+
+```json
+{"message":"The supported API model names are deepseek-flash, deepseek-v4-pro,
+            but you passed DeepSeek-V4.1-Flash 1017."}
+```
+
+即「官方宣传 / 构建名」既不在 `/models` 里，也不能用于请求。负责人希望界面显示官方名，
+因此正确做法只能是**显示别名**：界面看宣传名，出网仍用 API id。
+
+### 一、修了什么（只动允许清单）
+
+- `src/models.js`：新增 `MODEL_LABEL_MAX_LENGTH`（80）、`normalizeModelLabels()`、
+  `modelDisplayLabel()`。校验 key 非空、value 为字符串且去空白后非空、长度 ≤ 80、
+  拦截 `__proto__`/`constructor`/`prototype`；**非法项忽略并 `console.warn`（不阻断启动）**，
+  同一非法项每进程只提醒一次。该模块**不写回** `config.model` / `routing.*`。
+- `src/config.js`：`loadConfig()` / `ensureMinimalConfig()` 读配置时就地归一化
+  `modelLabels`；非法值在内存中被丢弃，磁盘原文不静默改写。
+- `src/model-discovery.js`：`availableModels()` 的服务商线上条目新增 `id`（API 实际 id）
+  与 `detail`（原来的能力/来源组合说明），`label` 改为**显示名**（`modelLabels[id] || id`），
+  `label !== id` 时附 `labelSource: "config"`；`name` 仍是 id（现有前端 `o.value=m.name`
+  的选择逻辑不变）。自定义条目保留既有「名字 — 用户标签（来源）」展示（smoke §139 以此为准）。
+- `/api/models` 与 `/api/state` 都走 `availableModels()`，两个接口的模型项同时获得上述字段，
+  无需改 `src/web/server.js` 或路由层。
+- `docs/CONFIG.md`：新增「显示别名 `config.modelLabels`」一节（含上面 400 的实测证据、
+  校验表、接口字段表），并在「模型名称以 API 为准」开头交叉引用；另附 UI TODO 落地说明。
+
+### 二、请求 `model` 如何保证仍是 id
+
+显示别名只出现在 `label`/`detail`，代码中**没有任何**把 label 写回 `config.model`
+（`routing.*`）的路径；`/api/config` 切换模型仍按 `body.model`（id）校验与落盘，
+agent/provider 的请求体 `model` 只从 `config.model` / `state.modelName` 取。回归用**真的把
+label 写回 `config.model`** 的变异（batch37 ①）证明：一旦这么做，
+`test/model-names.js` ⑧ 的 `/api/chat` 桩会立刻抓到「请求体 model 必须等于 API id」。
+
+### 三、断言与变异
+
+- `test/model-names.js` **只追加第 ⑧ 组**（并把 ⑤/⑦ 中依赖旧「组合 label」的断言改读 `detail`）：
+  ① `/api/models` 与 `/api/state` 的 `label`/`id` 正确分离、`labelSource=config`；
+  ② 空键 / 空显示名 / 超长显示名 / 非字符串 / 非对象整体都忽略且 `console.warn`；
+  ③ `/api/chat` 真实出网，桩收到**全部**请求（含预检）的 `model` 都等于 API id、不等于 label；
+  ④ 无 `modelLabels`（或该 id 无映射）时 `label === id`，且不误标 `labelSource`。
+- 新建 `test/mutate/batch37-model-labels.mjs`：**10/10 全中**（label 写回 config.model /
+  忽略 modelLabels / 超长不校验 / 空值不校验 / 空键不校验 / 不回退 id / labelSource 不标 /
+  非法项不 warn / 丢掉 id 字段 / 把显示名当成下拉 value）。
+
+### 四、未做边界（如实登记）
+
+- **UI 三处未落地**（`src/web/app.js`、`src/web/index.html` 由并行 UI P1 线持有，本道一行未碰）：
+  模型下拉显示 `label` + title 显示 `API id: <id>`、会话设置「显示名来自 config.modelLabels，
+  请求使用 API id」小字、设置页说明文案。精确改法与期望效果见 `docs/CONFIG.md`
+  「TODO（UI：显示别名落地）」。
+- `config.customModels` 条目不参与 `modelLabels`（它们不是官方 API id）；保留原组合展示名。
+- 未 tag、未改版本号、未 publish、未动官网；`test/mutate/README.md` 计数行按提交时
+  `doc-lint` 实际值登记（并行批也拥有该行，后提交者负责校正）。
+
 ## 3.70 已补（v0.6.19 开发线：DESIGN-UI-v1 的 P1 八项——工具时间线 / ⌘K / 快捷键表 / 右栏本轮运行 / 会话设置 / 空态 / 设置分组搜索 / 明暗主题与窄屏断点）
 
 **来源**：`docs/DESIGN-UI-v1.md` §4.1/4.5/4.6/4.7/4.8/4.9/4.10 与 §3.3；版式参照

@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { PROVIDERS, modelPreset, providerPreset, pickFamilyModel, DEFAULT_MODEL, DEFAULT_PLANNER_MODEL, DEFAULT_EXECUTOR_MODEL } from './models.js';
+import { PROVIDERS, modelPreset, providerPreset, pickFamilyModel, normalizeModelLabels, DEFAULT_MODEL, DEFAULT_PLANNER_MODEL, DEFAULT_EXECUTOR_MODEL } from './models.js';
 import { setStoredKey, resolveApiKey, maskKey } from './credentials.js';
 import { atomicWriteFileSync } from './atomic-write.js';
 
@@ -139,6 +139,19 @@ function applyCachedModelDefaults(/** @type {any} */ cfg) {
   return cfg;
 }
 
+/**
+ * 校验显示别名（v0.6.20 §3.69）：`config.modelLabels` 只影响界面显示，**不参与任何出网请求**。
+ * 非法项忽略并 warn（不阻断启动）；非对象/空值也在 normalizeModelLabels 里统一处理。
+ * 返回的是同一个对象（就地归一化），不新建配置副本。
+ * @param {any} cfg
+ */
+function applyModelLabels(/** @type {any} */ cfg) {
+  if (cfg && typeof cfg === 'object' && Object.prototype.hasOwnProperty.call(cfg, 'modelLabels')) {
+    cfg.modelLabels = normalizeModelLabels(cfg.modelLabels);
+  }
+  return cfg;
+}
+
 /** 读取配置对象（不存在/损坏返回 null）；返回值为用户可编辑的任意 JSON 配置，类型不定
  *
  * 注意（v0.6.3 / H-7）：null **同时**表示「不存在」与「读不出来」。凡是要**写**配置的调用点，
@@ -146,7 +159,7 @@ function applyCachedModelDefaults(/** @type {any} */ cfg) {
  * @returns {any} */
 export function loadConfig() {
   const r = readConfigStrict();
-  return r.ok ? applyCachedModelDefaults(r.data) : null;
+  return r.ok ? applyModelLabels(applyCachedModelDefaults(r.data)) : null;
 }
 
 /**
@@ -173,7 +186,7 @@ export function loadConfigForWrite(why = '某个写配置的命令') {
  * 不再要求先去终端跑 mingdao init）。CLI 的 mingdao init 向导不受影响。 */
 export function ensureMinimalConfig() {
   const strict = readConfigStrict();
-  if (strict.ok && strict.data) return strict.data;
+  if (strict.ok && strict.data) return applyModelLabels(strict.data);
   // v0.6.3（H-7）：存在但读不出来 → 先备份再写，绝不让"首启自动建配置"吃掉用户配置
   if (strict.exists && !strict.ok) quarantineCorruptConfig(strict.error || '未知原因');
   ensureHome();

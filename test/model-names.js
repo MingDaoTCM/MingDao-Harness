@@ -40,6 +40,9 @@ const ok = (name) => {
 let upstreamModels = [];
 let upstreamModelsHits = 0;
 let upstreamDown = false;
+// §3.69：捕获所有出网 chat 请求体（含本地端点预检），用来断言 model 字段始终是 API id。
+/** @type {any[]} */
+const chatRequests = [];
 const upstream = http.createServer((req, res) => {
   const u = String(req.url || '');
   if (upstreamDown) {
@@ -53,6 +56,24 @@ const upstream = http.createServer((req, res) => {
     res.end(JSON.stringify({ data: upstreamModels.map((id) => ({ id, object: 'model' })) }));
     return;
   }
+  if (u === '/v1/chat/completions') {
+    let body = '';
+    req.on('data', (d) => (body += d));
+    req.on('end', () => {
+      let parsed = /** @type {any} */ ({});
+      try {
+        parsed = JSON.parse(body);
+      } catch {}
+      chatRequests.push(parsed);
+      // 最简 SSE：一段正文 + finish_reason=stop + [DONE]。探针/正式回合都能正常收尾。
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(
+        `data: ${JSON.stringify({ model: parsed?.model, choices: [{ delta: { content: 'stub reply' }, finish_reason: 'stop' }], usage: { prompt_tokens: 5, completion_tokens: 2 } })}\n\n`
+      );
+      res.end('data: [DONE]\n\n');
+    });
+    return;
+  }
   // 预检/聊天等其余路径：明确 404（probe 会把它当作"不可用"并继续，不影响断言）
   res.writeHead(404, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({ error: 'not found in stub' }));
@@ -63,10 +84,10 @@ const upstreamBase = `http://127.0.0.1:${/** @type {any} */ (upstream.address())
 /** @param {any} [extra] */
 const makeCfg = (extra = {}) => ({ provider: 'deepseek', baseUrl: upstreamBase, permission: 'ask', sandbox: 'off', contextBudget: 128000, ...extra });
 
-const { modelPreset, canonicalModel, familyRepresentative, pickFamilyModel, DEFAULT_MODEL, DEFAULT_PLANNER_MODEL, modelCapabilityUnknown } = await import(pathToFileURL(path.join(srcDir, 'models.js')).href);
+const { modelPreset, canonicalModel, familyRepresentative, pickFamilyModel, DEFAULT_MODEL, DEFAULT_PLANNER_MODEL, modelCapabilityUnknown, normalizeModelLabels, modelDisplayLabel, MODEL_LABEL_MAX_LENGTH } = await import(pathToFileURL(path.join(srcDir, 'models.js')).href);
 const discovery = await import(pathToFileURL(path.join(srcDir, 'model-discovery.js')).href);
 const { fetchProviderModels, availableModels, resolveDefaultModel, resolveRoutingDefaults, modelsCatalogNote, OFFLINE_MODEL_NOTE } = discovery;
-const { saveConfig, ensureMinimalConfig } = await import(pathToFileURL(path.join(srcDir, 'config.js')).href);
+const { saveConfig, ensureMinimalConfig, loadConfig } = await import(pathToFileURL(path.join(srcDir, 'config.js')).href);
 const { runWebServer } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
 
 const OFFICIAL_FLASH = 'DeepSeek-V4.1-Flash 1017';
@@ -185,7 +206,9 @@ try {
       assert.ok(Array.isArray(models.j.models), '/api/models 必须返回模型列表');
       const entry = models.j.models.find((m) => m.name === OFFICIAL_FLASH);
       assert.ok(entry, '列表必须使用 API 返回的官方名（DeepSeek-V4.1-Flash 1017）');
-      assert.ok(String(entry.label).startsWith(OFFICIAL_FLASH), '列表标签必须以前端官方名开头（id/显示名一致）');
+      assert.equal(entry.id, OFFICIAL_FLASH, '列表条目必须带 API 实际 id（出网请求用它）');
+      assert.equal(entry.label, OFFICIAL_FLASH, '未配 modelLabels 时显示名必须回退到 API id');
+      assert.ok(String(entry.detail).startsWith(OFFICIAL_FLASH), '列表标签必须以前端官方名开头（detail 承载能力/来源说明）');
       assert.equal(entry.capabilityUnknown, false, '已核对版本的列表条目不应标能力未知');
       assert.equal(entry.offlineFallback, false, 'API 可达时不得标离线兜底');
       assert.equal(models.j.defaultPlanner, OFFICIAL_PRO, '/api/models 的默认 planner 必须是 API 官方名');
@@ -218,7 +241,7 @@ try {
       const unknownEntry = stUnknown.j.models.find((m) => m.name === UNKNOWN_FAMILY);
       assert.ok(unknownEntry, '模式表不认识的新模型必须出现在列表里');
       assert.equal(unknownEntry.capabilityUnknown, true, '模式表不认识的新模型必须标「能力未知（新版本）」');
-      assert.ok(String(unknownEntry.label).includes('能力未知'), '模式表不认识的新模型标签必须写明能力未知');
+      assert.ok(String(unknownEntry.detail).includes('能力未知'), '模式表不认识的新模型标签必须写明能力未知');
 
       // 旧名仍可选中
       const pickLegacy = await post('/api/config', { model: 'deepseek-v4-flash' });
@@ -268,7 +291,7 @@ try {
     const list = await availableModels(offlineCfg, null);
     assert.ok(list.length > 0, '离线时必须回退到内置家族代表名（不能空列表）');
     assert.ok(list.every((m) => m.offlineFallback === true), '离线回退的每个条目都必须标 offlineFallback');
-    assert.ok(list.every((m) => String(m.label).includes('离线兜底')), '离线列表标签必须写明「离线兜底」');
+    assert.ok(list.every((m) => String(m.detail).includes('离线兜底')), '离线列表标签必须写明「离线兜底」');
     const note = modelsCatalogNote(list);
     assert.ok(note && note.includes('离线兜底'), '离线时必须给出「离线兜底」提示');
     assert.ok(note.includes('不是最新'), '离线提示必须说明「模型名可能不是最新的」');
@@ -297,6 +320,124 @@ try {
     fs.rmSync(offlineHome, { recursive: true, force: true });
     process.env.MINGDAO_HOME = home;
     ok('⑦ 离线兜底走家族代表名并明确提示「模型名可能不是最新的」');
+  }
+
+  // ================= ⑧ 显示别名（v0.6.20 §3.69）：只影响界面，请求仍用 API id =================
+  {
+    await prime([OFFICIAL_PRO, OFFICIAL_FLASH, OFFICIAL_VISION]);
+    const LABEL_FLASH = 'DeepSeek V4.1 Flash（官方宣传名）';
+    const LABEL_PRO = 'DeepSeek V4.1 Pro（官方宣传名）';
+    const tooLong = 'x'.repeat(MODEL_LABEL_MAX_LENGTH + 1);
+
+    // ② 非法项忽略并 warn（不阻断启动）：
+    //    空键 / 空显示名 / 超长显示名 / 非字符串显示名都必须被丢掉，只留合法映射。
+    saveConfig({
+      provider: 'deepseek',
+      baseUrl: upstreamBase,
+      model: OFFICIAL_FLASH,
+      permission: 'ask',
+      sandbox: 'off',
+      contextBudget: 128000,
+      modelLabels: {
+        [OFFICIAL_FLASH]: LABEL_FLASH,
+        [OFFICIAL_PRO]: LABEL_PRO,
+        '   ': '空键的显示名',
+        [OFFICIAL_VISION]: '   ',
+        'too-long-key': tooLong,
+        'non-string-key': 123,
+      },
+    });
+    const warns = [];
+    const origWarn = console.warn;
+    console.warn = (/** @type {any} */ ...args) => warns.push(args.map(String).join(' '));
+    let loaded = null;
+    try {
+      loaded = loadConfig();
+    } finally {
+      console.warn = origWarn;
+    }
+    assert.equal(loaded.modelLabels[OFFICIAL_FLASH], LABEL_FLASH, '合法显示别名必须生效（flash）');
+    assert.equal(loaded.modelLabels[OFFICIAL_PRO], LABEL_PRO, '合法显示别名必须生效（pro）');
+    assert.equal(loaded.modelLabels[OFFICIAL_VISION], undefined, '空显示名必须被忽略（不写进配置）');
+    assert.equal(loaded.modelLabels[''], undefined, '空键必须被忽略');
+    assert.equal(loaded.modelLabels['too-long-key'], undefined, '超长显示名必须被忽略');
+    assert.equal(loaded.modelLabels['non-string-key'], undefined, '非字符串显示名必须被忽略');
+    assert.ok(warns.some((w) => w.includes('config.modelLabels')), '非法 modelLabels 必须 warn（并点名配置项）');
+    assert.ok(warns.some((w) => w.includes('显示名为空')), '空显示名的 warn 必须说清原因');
+    assert.ok(warns.some((w) => w.includes('过长')), '超长显示名的 warn 必须说清原因');
+    assert.ok(warns.some((w) => w.includes('必须是字符串')), '非字符串显示名的 warn 必须说清原因');
+    assert.deepEqual(normalizeModelLabels(null), {}, 'modelLabels 缺省时返回空映射（不报错）');
+    // 整体不是对象：同样只 warn、不抛错
+    const warns2 = [];
+    console.warn = (/** @type {any} */ ...args) => warns2.push(args.map(String).join(' '));
+    let nonObject = null;
+    try {
+      nonObject = normalizeModelLabels(['deepseek-flash'], { warn: true });
+    } finally {
+      console.warn = origWarn;
+    }
+    assert.deepEqual(nonObject, {}, 'modelLabels 不是对象时必须忽略整个字段（不阻断启动）');
+    assert.ok(warns2.some((w) => w.includes('config.modelLabels')), '非对象 modelLabels 也必须 warn');
+    assert.equal(modelDisplayLabel({ [OFFICIAL_FLASH]: LABEL_FLASH }, OFFICIAL_FLASH), LABEL_FLASH, '有映射时用显示名');
+    assert.equal(modelDisplayLabel({ [OFFICIAL_FLASH]: LABEL_FLASH }, OFFICIAL_PRO), OFFICIAL_PRO, '无映射时回退到 API id');
+
+    // ①③④ 起真实 WebUI：/api/models 与 /api/state 的 label/id 分离；
+    //     /api/chat 真实出网，stub 收到的 model 必须仍是 API id。
+    saveConfig({
+      provider: 'deepseek',
+      baseUrl: upstreamBase,
+      model: OFFICIAL_FLASH,
+      permission: 'ask',
+      sandbox: 'off',
+      contextBudget: 128000,
+      modelLabels: { [OFFICIAL_FLASH]: LABEL_FLASH, [OFFICIAL_PRO]: LABEL_PRO },
+    });
+    const srvL = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
+    const baseL = `http://127.0.0.1:${/** @type {any} */ (srvL.address()).port}`;
+    try {
+      const r = await fetch(baseL + '/api/models');
+      assert.equal(r.status, 200, '/api/models 应 200');
+      const j = await r.json();
+      const flash = j.models.find((m) => m.id === OFFICIAL_FLASH && m.provider === 'deepseek');
+      assert.ok(flash, '模型条目必须带 id 字段（API 实际 id）');
+      assert.equal(flash.label, LABEL_FLASH, 'label 必须优先取 config.modelLabels 的显示名');
+      assert.equal(flash.labelSource, 'config', 'label 与 id 不同时必须标 labelSource=config');
+      assert.equal(flash.name, OFFICIAL_FLASH, 'name 必须仍是 API id（选择逻辑不变）');
+      const pro = j.models.find((m) => m.id === OFFICIAL_PRO && m.provider === 'deepseek');
+      assert.equal(pro.label, LABEL_PRO, '第二个显示别名同样生效');
+      const vision = j.models.find((m) => m.id === OFFICIAL_VISION && m.provider === 'deepseek');
+      assert.equal(vision.label, OFFICIAL_VISION, '无 modelLabels 时 label 必须回退到 id');
+      assert.equal(vision.labelSource, undefined, '未映射的条目不得冒充 labelSource=config');
+
+      // ③ 请求体断言：本回合真实出网请求的 model === id，且所有出网请求都不含显示名。
+      //    放在 /api/state 断言之前：如果有人把显示名写进 config.model（最危险的错误实现），
+      //    这里会**先**以「请求体 model 必须等于 API id」当场变红。
+      const marker = 'batch37-model-id-marker';
+      const before = chatRequests.length;
+      const resp = await fetch(baseL + '/api/chat', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ message: marker }),
+      });
+      assert.equal(resp.status, 200, '/api/chat 应 200');
+      await resp.text(); // 读完 SSE，确保整回合已跑完
+      const sent = chatRequests.slice(before);
+      assert.ok(sent.length > 0, '出网 chat 请求必须真的发生（否则这条断言无意义）');
+      const real = sent.find((x) => JSON.stringify(x.messages || []).includes(marker));
+      assert.ok(real, '必须能定位到本回合的正式请求');
+      assert.equal(real.model, OFFICIAL_FLASH, '请求体 model 必须等于 API id');
+      assert.notEqual(real.model, LABEL_FLASH, '请求体 model 绝不能使用显示别名（实测会 400）');
+      assert.ok(sent.every((x) => x.model === OFFICIAL_FLASH), '预检/重试等所有出网请求同样只准用 API id');
+
+      const st = await (await fetch(baseL + '/api/state')).json();
+      const stFlash = st.models.find((m) => m.id === OFFICIAL_FLASH);
+      assert.equal(stFlash.label, LABEL_FLASH, '/api/state 的模型项同样显示别名');
+      assert.equal(stFlash.id, OFFICIAL_FLASH, '/api/state 的模型项同样保留 API id');
+      assert.equal(st.model, OFFICIAL_FLASH, '当前模型（请求用）必须仍是 API id，不是显示名');
+    } finally {
+      await new Promise((r) => srvL.close(r));
+    }
+    ok('⑧ modelLabels 只影响显示：label/id 分离、非法值忽略并 warn、请求 model 仍是 API id');
   }
 
   // 守卫：默认值必须是家族代表名派生，不能在 models.js 之外维护具体版本号

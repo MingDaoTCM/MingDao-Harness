@@ -422,6 +422,100 @@ export function modelPreset(/** @type {any} */ name) {
   return /** @type {any} */ (MODELS)[n] || null;
 }
 
+// ---------- 模型显示别名（v0.6.20 §3.69）：只影响界面，绝不参与出网请求 ----------
+//
+// 为什么要有：厂家的「官方宣传名 / 构建名」与 API 实际 id 可能不是一回事。实测（2026-10）：
+//   GET  https://api.deepseek.com/v1/models  → ["deepseek-flash", "deepseek-v4-pro"]
+//   POST chat {model:"deepseek-flash"}       → 200
+//   POST chat {model:"DeepSeek-V4.1-Flash 1017"} → 400
+//     {"message":"The supported API model names are deepseek-flash, deepseek-v4-pro,
+//                 but you passed DeepSeek-V4.1-Flash 1017."}
+// 也就是说宣传名**既不会出现在 /models 里，也不能用于请求**。想让它显示在界面上，只能用
+// 「显示别名」：`config.modelLabels = { "<API id>": "<显示名>" }`，出网 model 字段一律仍是 id。
+//
+// 约束：非法项**忽略并 warn**，绝不抛错/阻断启动（配置写坏一个字不应让整个应用起不来）。
+/** 显示名长度上限（字符）：够放「DeepSeek-V4.1-Flash 1017（官方宣传名）」，又不撑破下拉。 */
+export const MODEL_LABEL_MAX_LENGTH = 80;
+
+/** 已经告警过的非法项（同一进程只提醒一次，避免每次 loadConfig 都刷屏）。 */
+const warnedModelLabels = new Set();
+
+/** @param {string} detail */
+function warnModelLabel(detail) {
+  if (warnedModelLabels.has(detail)) return;
+  warnedModelLabels.add(detail);
+  console.warn(
+    `[MingDao] ⚠ config.modelLabels 已忽略非法项：${detail}（显示别名只影响界面，不影响请求；非法项不会阻断启动）`
+  );
+}
+
+/**
+ * 校验并归一化 `config.modelLabels`。
+ *
+ * 规则：
+ *  - key（API 实际 id）必须是非空字符串（去空白后）；
+ *  - value（显示名）必须是字符串、去空白后非空、长度 ≤ maxLength；
+ *  - 非法项**忽略并 warn**（同一项只提醒一次），不抛错、不阻断启动。
+ *
+ * 注意：这里只做「显示名」的清洗，**绝不**把结果写回 `config.model` /
+ * `config.routing.*`，也绝不被拼进请求体的 `model` 字段。
+ *
+ * @param {any} raw 用户配置里的原始值（任意类型都安全）
+ * @param {{maxLength?: number, warn?: boolean}} [opts]
+ * @returns {Record<string, string>} 干净的 `{ "<API id>": "<显示名>" }`
+ */
+export function normalizeModelLabels(raw, { maxLength = MODEL_LABEL_MAX_LENGTH, warn = true } = {}) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  if (raw == null) return out;
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    if (warn) warnModelLabel('modelLabels 必须是对象（形如 { "deepseek-flash": "显示名" }）');
+    return out;
+  }
+  for (const [rawKey, rawValue] of Object.entries(raw)) {
+    const key = String(rawKey).trim();
+    if (!key) {
+      if (warn) warnModelLabel(`键为空（原值 ${JSON.stringify(rawKey)}）`);
+      continue;
+    }
+    // 原型污染防线：JSON.parse 出来的 `__proto__` 是 own property，直接写进普通对象会改原型。
+    if (key === '__proto__' || key === 'constructor' || key === 'prototype') {
+      if (warn) warnModelLabel(`键名 "${key}" 不安全`);
+      continue;
+    }
+    if (typeof rawValue !== 'string') {
+      if (warn) warnModelLabel(`"${key}" 的显示名必须是字符串（实际是 ${typeof rawValue}）`);
+      continue;
+    }
+    const value = rawValue.trim();
+    if (!value) {
+      if (warn) warnModelLabel(`"${key}" 的显示名为空`);
+      continue;
+    }
+    if (value.length > maxLength) {
+      if (warn) warnModelLabel(`"${key}" 的显示名过长（${value.length} > ${maxLength} 字符）`);
+      continue;
+    }
+    out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * 取某个 API id 的显示名：命中 `config.modelLabels` 用别名，否则**回退到 id 本身**。
+ * 只用于展示；出网请求的 `model` 字段一律用 id（见 availableModels 的 id/label 分离）。
+ * @param {any} modelLabels 原始或已归一化的 modelLabels（非法值自动回退 id）
+ * @param {any} id API 实际模型 id
+ * @returns {string}
+ */
+export function modelDisplayLabel(/** @type {any} */ modelLabels, /** @type {any} */ id) {
+  const key = String(id ?? '');
+  if (!key) return key;
+  // 归一化一次（warn=false）：既防 `{id: 123}` 之类原始值漏进界面，又不会在此处重复告警
+  const clean = normalizeModelLabels(modelLabels, { warn: false });
+  return Object.prototype.hasOwnProperty.call(clean, key) ? clean[key] : key;
+}
+
 /** 该名字的能力是否**未经验证**（家族能匹配但版本比已核对规格新，或完全不属于任何家族）。 */
 export function modelCapabilityUnknown(/** @type {any} */ name) {
   const preset = modelPreset(name);

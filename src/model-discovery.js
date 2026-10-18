@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import { safeFetchText } from './safe-fetch.js';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
-import { PROVIDERS, modelPreset, familyRepresentative, pickFamilyModel, modelCapabilityUnknown } from './models.js';
+import { PROVIDERS, modelPreset, familyRepresentative, pickFamilyModel, modelCapabilityUnknown, normalizeModelLabels, modelDisplayLabel } from './models.js';
 import { getStoredKey } from './credentials.js';
 import { isLocalBaseUrl, resolveModelCaps } from './model-caps.js';
 import { resolveProviderConfig, acquireLocalSlot, localQueueTimeoutMs } from './providers/index.js';
@@ -1137,6 +1137,11 @@ export async function resolveRoutingDefaults(/** @type {any} */ cfg, { force = f
 export async function availableModels(/** @type {any} */ cfg, /** @type {any} */ currentModel) {
   const out = [];
   const seen = new Set();
+  // v0.6.20（§3.69）：显示别名只用于界面。官方 /models 条目的 `label` 是**显示名**
+  // （`config.modelLabels[id]`，没有映射就回退 id），`id`/`name` 才是 API 实际 id。
+  // 原来的能力/来源说明保留到 `detail` 字段（下拉 title / 提示可读）。
+  // 出网请求的 model 字段只从 config.model / state.modelName 取，**永不**从 label 取。
+  const modelLabels = normalizeModelLabels(cfg?.modelLabels, { warn: false });
   for (const [pname, pp] of Object.entries(PROVIDERS)) {
     if (pname === 'custom') continue;
     if (!providerHasKey(pname)) continue;
@@ -1156,9 +1161,18 @@ export async function availableModels(/** @type {any} */ cfg, /** @type {any} */
         : preset
           ? `${n} — ${preset.label}`
           : `${n}（线上最新；能力未知（新版本），仍可选用）`;
+      // 显示名与 API id 分离：label 可以来自 config.modelLabels，请求仍用 name/id。
+      const displayLabel = modelDisplayLabel(modelLabels, n);
       out.push({
         name: n,
-        label,
+        // v0.6.20（§3.69）：显式保留 API 实际 id（前端 title 用「API id: <id>」随时对上 API）
+        id: n,
+        // label 是**给人看的显示名**；没有配 modelLabels 时就是 id 本身。
+        label: displayLabel,
+        // 原 label 的能力/来源说明（离线兜底、能力未知、来源标注）挪到这里，信息不丢。
+        detail: label,
+        // 只有"映射生效、显示名 != id"时才标来源，避免把自定义条目的组合展示名也误标成 config。
+        ...(displayLabel !== n ? { labelSource: 'config' } : {}),
         provider: pname,
         providerLabel: pp.label,
         // dynamic 的既有语义（前端/旧测试读它）：不在任何内置模式表里。家族命中不等于 dynamic。
@@ -1184,10 +1198,15 @@ export async function availableModels(/** @type {any} */ cfg, /** @type {any} */
     if (seen.has(cmName)) continue;
     seen.add(cmName);
     const src = customSourceOf(cfg, cmName);
+    // 自定义条目保留既有组合展示名（来源必须在展示名里，且 test/smoke §139 以此为准）；
+    // modelLabels 只映射服务商 /models 的官方 id，不改变自定义条目。
+    const customLabel = `${cmName} — ${cm.label || '自定义模型'}（${src.sourceLabel}）`;
     out.push({
       name: cmName,
+      id: cmName,
       // 展示名里也带上来源（不只是 title/tooltip）：下拉标题行、设置面板、日志三处一致
-      label: `${cmName} — ${cm.label || '自定义模型'}（${src.sourceLabel}）`,
+      label: customLabel,
+      detail: customLabel,
       provider: 'custom',
       providerLabel: src.providerLabel,
       custom: true,
@@ -1201,9 +1220,12 @@ export async function availableModels(/** @type {any} */ cfg, /** @type {any} */
     });
   }
   if (currentModel && !out.some((m) => m.name === currentModel)) {
+    const currentLabel = `${currentModel}（当前配置）`;
     out.unshift({
       name: currentModel,
-      label: `${currentModel}（当前配置）`,
+      id: currentModel,
+      label: currentLabel,
+      detail: currentLabel,
       provider: 'current',
       providerLabel: '当前',
       official: false,
