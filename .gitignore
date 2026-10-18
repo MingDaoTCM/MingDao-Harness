@@ -27,3 +27,5 @@ test/mutate/.generated/mutate.journal
 # 审计/排查用的临时产物（v0.6.8：此前散落在工作树里污染 git status）
 _audit_*
 _AUDIT_*
+# §144 测试卫生兜底（v0.6.18 §3.68）：临时写盘标记一度落在仓库根，断言失败即污染工作树
+.tmp-p144-*

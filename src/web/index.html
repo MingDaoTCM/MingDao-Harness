@@ -64,12 +64,22 @@ header select{flex:none}
 @media (max-width:860px){main{padding:14px 0 8px}#chat{padding:0 10px}#envBadge{display:none!important}#sessionSearch{max-width:110px}#modelSel{max-width:110px}#permSel{max-width:120px}#sessions{max-width:110px}#wsSel{max-width:96px}header{gap:6px;padding:8px 8px}header .logo span{display:none}}
 #sessionSearch:focus{outline:none;border-color:var(--accent2)}
 #tasksPanel{position:fixed;right:0;top:52px;bottom:0;width:280px;background:var(--bg2);border-left:1px solid var(--border);z-index:40;display:flex;flex-direction:column}
-/* 输入框上方工作状态条（审计：长任务静默硬伤——实时显示执行步数/耗时与后台任务数）。
-   与输入框同宽对齐（复用 #composer 的居中容器），不再横贯整个聊天窗口 */
-#workStatus{width:fit-content;max-width:100%;margin:0 auto 4px;display:flex;align-items:center;gap:10px;padding:6px 14px;background:var(--panel);border:1px solid var(--border);border-radius:12px;font-size:12.5px;color:var(--dim);flex:none;overflow:hidden}
-#workStatus .ws-busy{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* 状态条 busy 行：承载完整阶段信息（合并原顶部活动条），与输入框同列不遮挡聊天区 */
-#workStatus .ws-phase{color:var(--accent2);font-weight:600;white-space:nowrap}
+/* P0-1 常驻运行状态条（v0.6.18 §3.68）：对话区/输入区上方**唯一**一行运行信息。
+   六个字段：阶段 · 首帧 · tokens/s · 上下文 · 工具步数 · 本轮费用。
+   窄窗口允许换行成两行（flex-wrap），不横贯聊天窗口、不新增轮询——由既有 progress 事件驱动。 */
+#runStrip{max-width:860px;margin:0 auto 6px;display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:5px 12px;background:var(--panel);border:1px solid var(--border);border-radius:10px;font-size:12px;line-height:1.5;color:var(--dim);font-variant-numeric:tabular-nums}
+#runStrip .rs-phase{color:var(--text);font-weight:600;white-space:nowrap}
+#runStrip .rs-dot{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--faint);margin-right:6px;vertical-align:1px}
+#runStrip.rs-busy .rs-dot{background:var(--accent2)}
+#runStrip.rs-acting .rs-dot{background:var(--accent)}
+#runStrip.rs-aborted .rs-dot{background:var(--err)}
+#runStrip .rs-field{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+#runStrip b{color:var(--text);font-weight:600}
+#runStrip .rs-sep{color:var(--faint);opacity:.6}
+#runStrip .rs-detail{display:none}
+#runStrip .rs-bg{cursor:pointer;color:var(--warn);white-space:nowrap}
+#runStrip .rs-bg:hover{color:var(--text)}
+@media (max-width:860px){#runStrip{gap:3px 8px;padding:5px 8px;font-size:11.5px}}
 /* 左侧轨迹固定栏 + 右侧子代理面板（布局重构：轨迹在左、子代理在右） */
 #trajRail{position:fixed;left:0;top:52px;bottom:0;width:42px;background:var(--bg2);border-right:1px solid var(--border);z-index:35;display:flex;flex-direction:column;align-items:center;padding-top:10px;gap:10px}
 #trajRail .rail-btn{width:34px;height:34px;border-radius:10px;border:1px solid var(--border);background:var(--bg3);cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center}
@@ -87,9 +97,7 @@ header select{flex:none}
 .sb-item .sb-meta{color:var(--faint);font-size:11.5px;margin-top:3px}
 .sb-item .sb-body{display:none;color:var(--dim);font-size:11.5px;margin-top:6px;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;border-top:1px dashed var(--border);padding-top:6px}
 .sb-item.open .sb-body{display:block}
-#workStatus .ws-busy{color:var(--accent2);display:flex;align-items:center;gap:8px;flex:1;min-width:0}
-#workStatus .ws-bg{cursor:pointer;color:var(--warn);white-space:nowrap}
-#workStatus .ws-bg:hover{color:var(--text)}
+
 /* 消息顶部轨迹行（DeepSeek-Harness 式：每轮可回溯步骤与子代理） */
 .msg-meta{display:flex;gap:8px;align-items:center;font-size:11.5px;color:var(--faint);padding:0 2px 4px}
 .trajBtn{cursor:pointer;background:var(--bg3);border:1px solid var(--border);color:var(--dim);border-radius:20px;padding:2px 10px;font-size:11.5px}
@@ -193,6 +201,30 @@ main{flex:1;overflow-y:auto;padding:18px 0 12px;min-width:0}
 .banner{text-align:center;color:var(--faint);font-size:12.5px}
 .banner-warn{background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.35);color:var(--warn);border-radius:12px;padding:8px 14px;text-align:left}
 .errline{color:var(--err);background:rgba(229,83,75,.08);border:1px solid rgba(229,83,75,.3);border-radius:10px;padding:10px 14px;font-size:13.5px}
+/* P0-3 错误折叠卡（v0.6.18 §3.68）：首行摘要 + 处置建议独立成行 + 上游原文默认折叠（<pre> 保留换行）+ 复制。
+   不再用 .banner 的 textContent 把 400 字原文和 
+ 建议糊成一段。 */
+.err-card{max-width:min(760px,94%);margin:6px auto;background:rgba(242,90,90,.06);border:1px solid rgba(242,90,90,.32);border-left:3px solid var(--err);border-radius:10px;padding:9px 14px;font-size:12.5px;color:var(--dim);display:flex;flex-direction:column;gap:7px}
+.err-card .err-head{display:flex;align-items:center;gap:8px;color:var(--err);font-weight:600;flex-wrap:wrap}
+.err-card .err-summary{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.err-card .tag{font-weight:500;color:var(--dim);border:1px solid var(--border);border-radius:999px;padding:0 7px;font-size:11px;line-height:18px;flex:none}
+.err-card .err-toggle{margin-left:auto;padding:1px 8px;font-size:11px;flex:none}
+.err-card .err-hint{margin:0;white-space:pre-line;line-height:1.7;color:var(--text);word-break:break-word}
+.err-card .err-raw[hidden]{display:none}
+.err-card .err-raw pre{margin:0;max-height:200px;overflow:auto;white-space:pre-wrap;word-break:break-word;font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--dim);background:var(--code);border:1px solid var(--border);border-radius:8px;padding:8px 10px}
+.err-card .err-foot{display:flex;gap:8px;align-items:center;border-top:1px dashed var(--border);padding-top:6px}
+/* P0-2 内联权限确认（v0.6.18 §3.68）：对话流内的普通卡片，不再 position:fixed 遮罩；
+   输入区 / 停止按钮 / 滚动全程可用。三档动作：本次放行 / 拒绝 / 始终允许本会话。 */
+.perm-card{max-width:min(760px,94%);margin:8px auto;background:rgba(245,158,11,.07);border:1px solid rgba(245,158,11,.38);border-left:3px solid var(--warn);border-radius:10px;padding:10px 14px;display:flex;flex-direction:column;gap:8px;font-size:13px}
+.perm-card .perm-head{display:flex;align-items:center;gap:8px;color:var(--warn);font-weight:600;flex-wrap:wrap}
+.perm-card .perm-head .perm-scope{margin-left:auto;font-weight:400;font-size:11.5px;color:var(--faint);white-space:nowrap}
+.perm-card .perm-q{color:var(--text);white-space:pre-wrap;word-break:break-word;font-size:13.5px;line-height:1.65}
+.perm-card .perm-acts{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.perm-card .perm-acts button{font-size:12.5px;padding:4px 10px}
+.perm-card .perm-acts .perm-always{border-color:var(--warn);color:var(--warn)}
+.perm-card .perm-note{font-size:11.5px;color:var(--faint);white-space:normal;line-height:1.6}
+.perm-card .perm-count{font-size:11.5px;color:var(--faint);font-variant-numeric:tabular-nums}
+.perm-card.perm-timeout{opacity:.72}
 footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);padding:12px 18px}
 #composer{max-width:860px;margin:0 auto;display:flex;gap:10px;align-items:flex-end}
 #composer #permSel{max-width:96px;min-width:64px;flex:none;padding:8px 8px}
@@ -320,11 +352,28 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 </aside>
 <main><div id="chat"></div></main>
 <footer>
-  <div id="workStatus" style="display:none"></div>
+  <!-- P0-1 常驻运行状态条（v0.6.18 §3.68）：唯一刷新出口 renderWorkStatus()。
+       六个 data-k 字段是 smoke §148 的结构锚点：phase / ttft / tps / ctx / tools / cost。
+       数据只来自既有 SSE progress·usage·done 事件与 /api/state（不新增每帧轮询）。 -->
+  <div id="runStrip" class="run-strip" role="status" aria-live="polite" aria-atomic="true">
+    <span class="rs-phase" data-k="phase"><span class="rs-dot" aria-hidden="true"></span><b id="rsPhase">空闲</b></span>
+    <span class="rs-sep" aria-hidden="true">·</span>
+    <span class="rs-field" data-k="ttft">首帧 <b id="rsTtft">—</b></span>
+    <span class="rs-sep" aria-hidden="true">·</span>
+    <span class="rs-field" data-k="tps">吞吐 <b id="rsTps">—</b> tok/s</span>
+    <span class="rs-sep" aria-hidden="true">·</span>
+    <span class="rs-field" data-k="ctx">上下文 <b id="rsCtx">—</b></span>
+    <span class="rs-sep" aria-hidden="true">·</span>
+    <span class="rs-field" data-k="tools">工具 <b id="rsTools">0 次工具调用</b></span>
+    <span class="rs-sep" aria-hidden="true">·</span>
+    <span class="rs-field" data-k="cost">本轮费用 <b id="rsCost">—</b></span>
+    <span class="rs-detail" id="rsDetail"></span>
+    <span class="rs-bg" id="rsBg" style="display:none"></span>
+  </div>
   <input type="file" id="fileInput" accept="image/png,image/jpeg,image/gif,image/webp,.txt,.md,.json,.js,.py,.log,.csv,.html,.css" multiple style="display:none">
   <div id="attachList" style="display:none"></div>
   <div id="composer">
-    <button id="attachBtn" title="上传图片或文本文件（图片需视觉模型，如 deepseek-v4-flash-vision-exp）">📎</button>
+    <button id="attachBtn" title="上传图片或文本文件（图片需支持视觉的模型）">📎</button>
     <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送，Shift+Enter 换行）"></textarea>
     <select id="permSel" title="权限模式：询问＝写文件/执行命令前先确认（推荐） · 自动＝全部直接放行 · 只读＝禁止修改与执行。此处选择随每条消息一起发送，优先于预设声明的权限（预设只能收紧、不能提权）；会话开始时会在对话里标明本轮生效的档位与来源">
       <option value="ask">询问</option>

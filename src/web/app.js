@@ -171,9 +171,32 @@ $('#dirPickNone').onclick = () => { const cb = pickerCb; pickerCb = null; $('#di
 $('#dirPickCancel').onclick = () => { pickerCb = null; $('#dirModal').style.display = 'none'; };
 const chatEl = $('#chat'), input = $('#input'), sendBtn = $('#sendBtn');
 let presetData = []; // v0.4.0 Agent Preset：预设列表缓存（含 description/tools/permission，供下拉提示与选中反馈）
-let activeAiMsg=null, bgRunning=0, curSteps=0, curWorkT0=0, curTools=0, curTasks=0; // 本轮进度（活动条/状态条/轨迹共用）
+let activeAiMsg=null, bgRunning=0, curSteps=0, curWorkT0=0, curTools=0, curTasks=0; // 本轮进度（状态条/轨迹共用）
 let bgTasks=[]; // 后台任务列表快照（chip tooltip 详情用，updateTasksPanel 每 2s 刷新）
 let curPhase='模型推理中'; // 阶段语义（服务端 progress 事件下发）
+// P0-1（v0.6.18 §3.68）：**唯一**的本轮运行状态快照。状态条六个字段全部从这里渲染，
+// 不再各自维护 curTtft/curTps/…（散着放就会出现"两处数字打架"）。
+// 数据只来自既有 SSE（progress/usage/done）+ /api/state 的 contextBudget，不新增轮询。
+const runState = {
+  phase: '空闲',
+  rawPhase: '',
+  aborted: false,
+  ttftMs: null,
+  tokensPerSec: null,
+  toolCalls: 0,
+  contentChars: 0,
+  contextUsed: 0,
+  contextTotal: 128000,
+  contextApprox: true,
+  cost: '',
+  detail: '',
+  permissionSource: '',
+  permissionMode: '',
+};
+let ctxLimit = 128000; // /api/state.contextBudget（上下文上限）
+let lastBudgetUsed = 0; // 上一回合 done.budget.used：生成中用"上一轮 used + 本轮字符估算"（诚实标 ≈）
+// 状态条的悬浮详情：最近一次工具 / 子 Agent / 本地队列 / 权限来源（不占常驻行）
+if ($('#runStrip')) attachTip($('#runStrip'), () => runState.detail || '运行状态：阶段 · 首帧 · 吞吐 · 上下文 · 工具步数 · 本轮费用');
 const sessionSubs=[]; // 本会话全部子代理（task 工具）条目：{seq, question, result, msg}
 // 回到底部悬浮按钮：滚动容器为 main；上滚超过 300px 时出现，点击平滑回底
 (function(){
@@ -281,40 +304,148 @@ function renderTodos(todos,msg){
   for(const t of todos){ const li=document.createElement('li'); li.className=t.status==='completed'?'done':t.status==='in_progress'?'doing':''; li.innerHTML=(t.status==='completed'?'✓ ':'○ ')+esc(t.content); ul.appendChild(li); }
   msg.appendChild(ul);
 }
-function renderBanner(ev){ const d=document.createElement('div'); d.className='banner'+(ev.warn?' banner-warn':''); d.textContent=ev.text||ev.title||''; insertBeforeActiveMsg(d); scrollBottom(); }
+// —— 错误卡：三段式（纯函数；smoke §148 直接 eval 这段做行为断言） ——
+// 上游原文保留换行（<pre> + white-space:pre-wrap），默认折叠只显示首行摘要；
+// 处置建议独立成一行（.err-hint，white-space:pre-line），与原文明分；长错误可一键复制。
+function errCardParts(text){
+  const rawText=String(text||'').replace(/\r\n?/g,'\n');
+  const lines=rawText.split('\n');
+  let hintIdx=-1;
+  for(let i=0;i<lines.length;i++){ if(/^\s*(?:💡|提示[:：]|处置建议[:：])/.test(lines[i])){ hintIdx=i; break; } }
+  const hint=hintIdx>=0?lines[hintIdx].trim():'';
+  const raw=(hintIdx>=0?lines.slice(0,hintIdx):lines).join('\n').trim()||rawText.trim();
+  const head=(lines[0]||'').trim();
+  const tag=/上游|upstream/i.test(rawText)?'上游':/超时|timeout/i.test(rawText)?'内核':'错误';
+  return {head,hint,raw,tag};
+}
+function errCardHtml(text){
+  const p=errCardParts(text);
+  const summary=p.head.length>120?p.head.slice(0,120)+'…':p.head;
+  return '<div class="err-head"><span class="err-summary">'+esc(summary)+'</span><span class="tag">'+esc(p.tag)+'</span>'
+    +'<button class="err-toggle" aria-expanded="false">展开原文</button></div>'
+    +(p.hint?'<p class="err-hint">'+esc(p.hint)+'</p>':'')
+    +'<div class="err-raw" hidden><pre>'+esc(p.raw)+'</pre></div>'
+    +'<div class="err-foot"><button class="err-copy">复制</button></div>';
+}
+function copyToClipboard(text){
+  const t=String(text||'');
+  const fallback=()=>{ try{ const ta=document.createElement('textarea'); ta.value=t; ta.style.cssText='position:fixed;left:-9999px'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); ta.remove(); }catch{} };
+  if(navigator.clipboard?.writeText) return navigator.clipboard.writeText(t).catch(fallback);
+  fallback(); return Promise.resolve();
+}
+function renderErrCard(text, opts){
+  const d=document.createElement('div'); d.className='err-card'; d.innerHTML=errCardHtml(text);
+  const raw=d.querySelector('.err-raw'); const toggle=d.querySelector('.err-toggle');
+  if(toggle&&raw) toggle.onclick=()=>{ const open=raw.hidden; raw.hidden=!open; toggle.setAttribute('aria-expanded',String(open)); toggle.textContent=open?'收起原文':'展开原文'; };
+  const cp=d.querySelector('.err-copy');
+  if(cp) cp.onclick=()=>{ copyToClipboard(raw&&raw.querySelector('pre')?raw.querySelector('pre').textContent:'').then(()=>{ cp.textContent='已复制'; setTimeout(()=>{cp.textContent='复制';},1200); }); };
+  insertBeforeActiveMsg(d); scrollBottom();
+}
+function isFoldableError(text){
+  const t=String(text||'');
+  return /^\s*(?:⚠|✖)/.test(t) && (t.includes('\n') || t.length>160) && !/已停止本轮|停止请求已被服务端确认/.test(t);
+}
+function renderBanner(ev){
+  const text=String(ev.text||ev.title||'');
+  // 长错误走上图的三段式卡；普通横幅（已停止/已保存/预设提示…）保持原样，不制造"满屏都是错误"
+  if(isFoldableError(text)){ renderErrCard(text, ev); return; }
+  const d=document.createElement('div'); d.className='banner'+(ev.warn?' banner-warn':''); d.textContent=text; insertBeforeActiveMsg(d); scrollBottom();
+}
 // 工具卡/横幅/代码块统一插到「本轮 AI 消息」之前：结论与交付物永远位于消息最底部
 function insertBeforeActiveMsg(el){ if(activeAiMsg && activeAiMsg.parentNode){ chatEl.insertBefore(el, activeAiMsg); } else { chatEl.appendChild(el); } }
 
-// 挂起的权限确认弹窗（停止时必须一并收掉——遮罩会盖住输入区的「■ 停止」，
-// 用户点什么都"没反应"；服务端那边也会一直等到 120 秒 ask 超时。审计 §138 Bug A）
-const pendingAskModals=[];
+// P0-2 内联权限确认（v0.6.18 §3.68）：**不再用 .modal-mask 全屏遮罩**。
+// 卡片插在对话流里（普通文档流），输入区 / 附件 / 停止按钮 / 滚动全程可用；
+// 三档动作：本次放行 / 拒绝 / 始终允许本会话。停止仍优先于 120s 超时：
+// dismissAskModals() 以 aborted=true 落定，**不** POST /api/permission（服务端已按拒绝收尾）。
+const ASK_UI_TIMEOUT_MS = 120000;
+const sessionAllowedAsks = new Set(); // 会话级 allow：键 = 确认问题原文（工具 + 参数）
+const askQueue = []; // 同一轮多个确认串行展示（只有队首可点，不再叠加遮罩）
+let activeAsk = null;
+
+// —— 内联权限确认：判据（纯函数；smoke §148 直接 eval 这段做行为断言） ——
+function askSignature(ev){ return String((ev&&ev.question)||'').trim(); }
+function askAnswerPlan(answer){
+  if(answer==='always') return {post:'y', remember:true};
+  if(answer==='allow'||answer==='y'||answer===true) return {post:'y', remember:false};
+  return {post:'n', remember:false}; // deny / Esc / 超时：一律按拒绝回传
+}
+function askCardHtml(ev){
+  const q=String((ev&&ev.question)||'');
+  const opts=Array.isArray(ev&&ev.options)&&ev.options.length?ev.options:null;
+  const acts=opts
+    ? opts.map((/** @type {any} */ o)=>'<button data-a="'+esc(o.value)+'">'+esc(o.label||o.value)+'</button>').join('')+'<button class="danger" data-a="deny">拒绝</button>'
+    : '<button class="primary" data-a="allow">本次放行</button><button class="danger" data-a="deny">拒绝</button><button class="perm-always" data-a="always">始终允许本会话</button>';
+  return '<div class="perm-head">🔐 需要你确认<span class="perm-scope">本会话</span></div>'
+    +'<div class="perm-q">'+esc(q)+'</div>'
+    +'<div class="perm-acts">'+acts+'<button class="perm-stop" data-stop="1" title="停止本轮（与输入区的「■ 停止」同一条出口）">■ 停止本轮</button></div>'
+    +'<div class="perm-note">「始终允许本会话」只对<b>本会话</b>内相同确认（同一工具与参数）自动放行，不写入 config.json；刷新页面或新会话后失效。键盘：y = 本次放行，n = 拒绝，Esc = 拒绝。</div>'
+    +'<div class="perm-count" data-count>等待 02:00 后按「拒绝」处理</div>';
+}
+
+// —— 内联权限确认：队列与渲染（普通文档流，不遮任何东西） ——
 function askModal(ev){
   return new Promise(resolve=>{
-    const root=$('#modalRoot');
-    const mask=document.createElement('div'); mask.className='modal-mask';
-    const m=document.createElement('div'); m.className='modal';
-    m.innerHTML='<h3>权限确认</h3><div class="q">'+esc(ev.question)+'</div><div class="opts"></div><div class="row" data-row="yn"><button class="danger" data-a="n">拒绝</button><button class="primary" data-a="y">允许</button></div><div class="row"><button data-stop="1">■ 停止本轮（不再执行）</button></div>';
-    if(ev.options&&ev.options.length){ m.querySelector('.opts').style.display='flex'; ev.options.forEach(o=>{ const b=document.createElement('button'); b.dataset.a=o.value; b.textContent=o.label||o.value; b.onclick=()=>finish(o.value); m.querySelector('.opts').appendChild(b); }); m.querySelector('[data-row="yn"]').style.display='none'; }
-    let settled=false;
-    const entry={ dismiss:()=>finish('',true) }; // 停止路径：不问自答，按「拒绝」落定
-    function finish(a,aborted){
-      if(settled) return; settled=true;
-      const i=pendingAskModals.indexOf(entry); if(i>=0) pendingAskModals.splice(i,1);
-      mask.remove(); resolve({answer:a, aborted:Boolean(aborted)});
-    }
-    m.querySelectorAll('[data-a]').forEach(b=>{ if(!b.onclick) b.onclick=()=>finish(b.dataset.a); });
-    // 等待确认期间唯一够得着的停止入口（遮罩挡住了输入区的停止按钮）。
-    // 直接调 stopTurnFromButton()：它会同时收掉本弹窗并把停止发给服务端。
-    const sb=m.querySelector('[data-stop]'); if(sb) sb.onclick=()=>stopTurnFromButton();
-    mask.appendChild(m); root.appendChild(mask);
-    pendingAskModals.push(entry);
+    const entry=/** @type {any} */ ({ ev, resolve, settled:false, card:null, timer:null });
+    entry.dismiss=()=>settleAsk(entry,'','aborted'); // 停止路径：不问自答，按「拒绝」落定
+    askQueue.push(entry);
+    mountNextAsk();
   });
 }
-function dismissAskModals(){
-  // 停止优先于权限确认：把挂起的确认弹窗全部收掉（服务端已按「拒绝」落定），
-  // 否则遮罩继续盖住界面，用户看到的就是"界面像卡住、点停止没有任何反应"。
-  while(pendingAskModals.length){ const m=pendingAskModals.pop(); try{ m.dismiss(); }catch{} }
+function settleAsk(entry, answer, kind){
+  if(!entry||entry.settled) return;
+  entry.settled=true;
+  if(entry.timer){ clearInterval(entry.timer); entry.timer=null; }
+  const i=askQueue.indexOf(entry); if(i>=0) askQueue.splice(i,1);
+  if(entry.card){ try{ entry.card.remove(); }catch{} entry.card=null; }
+  if(activeAsk===entry) activeAsk=null;
+  const aborted=kind==='aborted'; const timeout=kind==='timeout';
+  entry.resolve({ answer: aborted?'':(timeout?'deny':answer), aborted, timeout });
+  mountNextAsk();
 }
+function mountNextAsk(){
+  if(activeAsk) return;
+  while(askQueue.length){ const e=askQueue.shift(); if(!e.settled){ activeAsk=e; break; } }
+  const entry=activeAsk; if(!entry) return;
+  const card=document.createElement('div'); card.className='perm-card';
+  card.setAttribute('role','group'); card.setAttribute('aria-label','权限确认（不遮挡输入区）');
+  card.innerHTML=askCardHtml(entry.ev);
+  entry.card=card;
+  const count=card.querySelector('[data-count]');
+  const startedAt=Date.now();
+  const tick=()=>{
+    const left=Math.max(0, Math.ceil((ASK_UI_TIMEOUT_MS-(Date.now()-startedAt))/1000));
+    if(count) count.textContent=left>0
+      ? '等待 '+String(Math.floor(left/60)).padStart(2,'0')+':'+String(left%60).padStart(2,'0')+' 后按「拒绝」处理'
+      : '已超时（120s），本次操作按「拒绝」处理';
+    if(left<=0){
+      card.classList.add('perm-timeout');
+      card.querySelectorAll('button').forEach((/** @type {any} */ b)=>{ b.disabled=true; });
+      settleAsk(entry,'deny','timeout');
+    }
+  };
+  tick(); entry.timer=setInterval(tick,1000);
+  card.querySelectorAll('[data-a]').forEach((/** @type {any} */ b)=>{ b.onclick=()=>settleAsk(entry,b.dataset.a); });
+  const sb=card.querySelector('[data-stop]'); if(sb) sb.onclick=()=>stopTurnFromButton();
+  chatEl.appendChild(card); scrollBottom();
+}
+function dismissAskModals(){
+  // 停止优先于权限确认：把挂起/排队的内联确认全部收掉（aborted=true → 不 POST，服务端按拒绝落定），
+  // 这样既不会残留可点按钮，也不会让停止等到 120s ask 超时。
+  const all=[...askQueue]; if(activeAsk) all.push(activeAsk);
+  for(const e of all){ try{ e.dismiss(); }catch{} }
+}
+// 键盘：y / n 仍可用（焦点不在输入框时），Esc 关卡片并按「拒绝」处理。
+document.addEventListener('keydown', (e)=>{
+  if(e.isComposing) return;
+  const entry=activeAsk; if(!entry) return;
+  const tag=String((e.target&&e.target.tagName)||'').toLowerCase();
+  const typing=/^(input|textarea|select)$/.test(tag)||Boolean(e.target&&e.target.isContentEditable);
+  if(e.key==='Escape'){ e.preventDefault(); settleAsk(entry,'deny','esc'); return; }
+  if(typing) return;
+  if(e.key==='y'||e.key==='Y'){ e.preventDefault(); settleAsk(entry,'allow'); }
+  else if(e.key==='n'||e.key==='N'){ e.preventDefault(); settleAsk(entry,'deny'); }
+});
 
 async function handleEvents(stream, onEvent){
   const reader=stream.getReader(); const dec=new TextDecoder(); let buf='';
@@ -407,7 +538,13 @@ async function send(){
   attachments=[]; renderAttachments();
   addUser(text||(sentAttachments.map(a=>(a.type==='image'?'🖼 ':'📄 ')+a.name).join(' ')));
   const msg=newAiMsg(); const content=aiContent(msg); let raw='';
-  activeAiMsg=msg; msg._traj=[]; msg._steps=0; curSteps=0; curWorkT0=Date.now(); renderWorkStatus();
+  activeAiMsg=msg; msg._traj=[]; msg._steps=0; curSteps=0; curWorkT0=Date.now();
+  // P0-1：本轮开始 → 运行状态条归零（上一轮的费用/首帧/工具数不许泄漏到本轮；上下文基数保留）
+  runState.rawPhase='发请求（等首帧）'; runState.phase='等首帧'; runState.aborted=false;
+  runState.ttftMs=null; runState.tokensPerSec=null; runState.toolCalls=0; runState.contentChars=0;
+  runState.contextApprox=true; runState.contextUsed=lastBudgetUsed; runState.contextTotal=ctxLimit;
+  runState.cost=''; runState.detail='';
+  renderWorkStatus();
   let reason=null; let taskId=null;
   // 等待输出时的可见状态：脉动「正在思考…」（每轮生成重新显示）
   const think=document.createElement('div'); think.className='think'; think.textContent='💭 正在思考…'; msg.appendChild(think);
@@ -430,14 +567,29 @@ async function send(){
   // 权限确认应答（§138）：弹窗返回 {answer, aborted}——`aborted=true` 表示这条确认是被「停止」
   // 解除的（服务端已按「拒绝」落定），此时**不再**回 POST /api/permission：回了只会拿到 409，
   // 而那正是此前"点了允许却什么都没发生"的静默失败形态。
-  const handleAskEvent=(ev)=>{ askModal(ev).then(res=>{
-    if(res.aborted) return;
-    return fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:ev.id,answer:res.answer,taskId:ev.taskId||taskId})})
-      // 「无活动看门狗」在 ask 等待期间是停掉的：无论应答成功与否都要重新武装（与修前一致），
-      // 否则一次应答失败就会让本轮的挂死失去最后一道超时保护
-      .then(r=>{ arm(); if(!r.ok) throw new Error('HTTP '+r.status); })
-      .catch(err=>{ const d=document.createElement('div'); d.className='errline'; d.textContent='✖ 权限应答没能送达服务端（'+((err&&err.message)||'网络错误')+'）——请重新发送上一条消息；服务端在 120 秒无应答后会按「拒绝」处理。'; msg.appendChild(d); scroll(); });
-  }); };
+  // P0-2：内联卡片的应答出口（会话级 allow 也在这里生效）。返回的 answer 已归一化成 y/n：
+  //   allow→y；deny/Esc/超时→n；always→y 并写入 sessionAllowedAsks（同一确认后续不再弹卡）。
+  const postAskAnswer=(ev,answer)=>fetch('/api/permission',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:ev.id,answer,taskId:ev.taskId||taskId})})
+    // 「无活动看门狗」在 ask 等待期间是停掉的：无论应答成功与否都要重新武装（与修前一致），
+    // 否则一次应答失败就会让本轮的挂死失去最后一道超时保护
+    .then(r=>{ arm(); if(!r.ok) throw new Error('HTTP '+r.status); })
+    .catch(err=>{ const d=document.createElement('div'); d.className='errline'; d.textContent='✖ 权限应答没能送达服务端（'+((err&&err.message)||'网络错误')+'）——请重新发送上一条消息；服务端在 120 秒无应答后会按「拒绝」处理。'; msg.appendChild(d); scroll(); });
+  const handleAskEvent=(ev)=>{
+    const key=askSignature(ev);
+    // 「始终允许本会话」= 会话级 allow：同一确认不再弹卡，直接按「本次放行」回传。
+    // 作用域只在本页面/本会话内（不写 config.json）；刷新或新会话后自然失效。
+    if(sessionAllowedAsks.has(key)){
+      renderBanner({text:'✓ 已按「始终允许本会话」自动放行：'+String(ev.question||'').slice(0,80)});
+      return postAskAnswer(ev,'y');
+    }
+    askModal(ev).then(res=>{
+      if(res.aborted) return; // 停止优先于超时/应答：服务端已按拒绝落定，不能再回 POST（只会 409）
+      const plan=askAnswerPlan(res.answer);
+      if(plan.remember) sessionAllowedAsks.add(key);
+      if(res.timeout) renderBanner({text:'⚠ 权限确认等待超时（120s），本次操作已按「拒绝」处理。',warn:true});
+      return postAskAnswer(ev, plan.post);
+    });
+  };
   try{
     const resp=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:turnCtrl.signal});
     if(!resp.ok){ const j=await resp.json().catch(()=>({})); onActivity(); msg.innerHTML='<div class="errline">'+esc(j.error||('HTTP '+resp.status))+'</div>'; updateTasksPanel(); return; }
@@ -445,6 +597,8 @@ async function send(){
       if(ev.taskId){ taskId=ev.taskId; curTaskId=taskId; } // 质检 L1：主停止按钮只断本任务
       if(ev.type==='ask') disarm(); else arm(); // 有活动→重置；权限等待→暂停计时
       if(ev.type==='progress'){ const p=ev.seconds||0; if(ev.phase) curPhase=String(ev.phase); curTools=Number(ev.steps)||0; curTasks=Number(ev.tasks)||0; showThink();
+        // P0-1：同一个 runState 同时喂状态条六字段与悬浮详情（服务端 progress ≈1s 一次，无新增轮询）
+        applyRunProgress(runState, ev, lastBudgetUsed);
         // v0.6.13（A）：本地模型场景把「在等首帧 / 在解码 / 在等哪个工具 / TTFT / tok/s / 0 次工具调用」直接摆在状态行上——
         // 真机实测的痛点是"跑了几小时，界面上什么都看不出来"。0 次工具调用必须显式显示为 0，不能省略。
         const bits=[];
@@ -460,25 +614,27 @@ async function send(){
         // v0.6.15（§3.59）：本地端点串行化必须在界面上看得见（真机内存压力来自父回合 + 子代理并发）
         if(ev.localQueue) bits.push('本地端点已串行化（防内存压力）：等待 '+(ev.localQueue.active||0)+' 个在途请求、并发上限 '+(ev.localQueue.limit||1));
         if(ev.stalled) bits.push('已判定无进展，正在中止');
+        runState.detail=bits.join(' · ');
         think.textContent='💭 正在工作 '+Math.floor(p/60)+' 分 '+Math.round(p%60)+' 秒 · 第 '+msg._steps+' 回合 · '+curPhase+' · '+bits.join(' · ')+'…';
         renderWorkStatus(); }
-      if(ev.type==='text'){ curPhase='模型输出中'; onActivity(); raw+=ev.delta; update(); }
+      if(ev.type==='text'){ curPhase='模型输出中'; runState.rawPhase='解码中（收到增量）'; runState.phase='解码中'; runState.contentChars=raw.length; onActivity(); raw+=ev.delta; update(); }
       else if(ev.type==='reasoning'){ if(!reason){ reason=addReasoning(msg); reason.dataset.full=''; } if(!reason.parentElement.open) reason.parentElement.open=true; reason.parentElement.querySelector('summary').classList.add('live'); reason.dataset.full+=ev.delta; const full=reason.dataset.full; reason.textContent=(full.length>9000?full.slice(-9000)+'\n…（思考内容较长，仅显示末尾；已 '+full.length+' 字符）':full); reason.scrollTop=reason.scrollHeight; scroll(); }
-      else if(ev.type==='turnStart'){ stepsCount+=1; curSteps+=1; msg._steps=curSteps; curPhase='模型推理中'; msg._traj.push({kind:'turn', t:Date.now()}); showThink(); think.textContent='💭 第 '+msg._steps+' 回合：模型推理中…'; renderWorkStatus(); scroll(); }
+      else if(ev.type==='turnStart'){ stepsCount+=1; curSteps+=1; msg._steps=curSteps; curPhase='模型推理中'; runState.rawPhase='发请求（等首帧）'; runState.phase='等首帧'; msg._traj.push({kind:'turn', t:Date.now()}); showThink(); think.textContent='💭 第 '+msg._steps+' 回合：模型推理中…'; renderWorkStatus(); scroll(); }
       else if(ev.type==='turnEnd'){ curPhase='回合完成，进入下一回合'; showThink(); think.textContent='⏸ 第 '+msg._steps+' 回合完成（累计 '+(ev.toolSteps||0)+' 工具步）· 进入下一回合…'; renderWorkStatus(); }
-      else if(ev.type==='toolStart'){ stepsCount+=1; curSteps+=1; curPhase=ev.name==='task'?'子 Agent 执行中':'执行工具中'; msg._steps=curSteps; msg._traj.push({kind:'tool', seq:ev.seq, name:ev.name, args:ev.args, t:Date.now(), done:false}); onActivity(); update(); renderToolStartEvent(ev); renderWorkStatus(); }
+      else if(ev.type==='toolStart'){ stepsCount+=1; curSteps+=1; curPhase=ev.name==='task'?'子 Agent 执行中':'执行工具中'; runState.rawPhase=curPhase; runState.phase='执行工具'; msg._steps=curSteps; msg._traj.push({kind:'tool', seq:ev.seq, name:ev.name, args:ev.args, t:Date.now(), done:false}); onActivity(); update(); renderToolStartEvent(ev); renderWorkStatus(); }
       else if(ev.type==='code'){ onActivity(); const pre=document.createElement('pre'); pre.innerHTML='<code>'+highlight(ev.code,ev.lang)+'</code>'; insertBeforeActiveMsg(pre); scroll(); }
       else if(ev.type==='tool'){ onActivity(); update(); const pending=runningTools.get(ev.seq); if(pending){ pending.remove(); runningTools.delete(ev.seq); } const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.result=ev.result; tj.durationMs=ev.durationMs; tj.card=pending||null; } if(ev.name==='task'){ sessionSubs.push({seq:ev.seq, question:String(ev.args?.question||ev.args?.prompt||''), result:ev.result, durationMs:ev.durationMs, msg}); renderSubPanel(); } renderToolEvent(ev); }
       else if(ev.type==='toolDenied'){ onActivity(); const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.denied=ev.reason||'未授权'; } const d=document.createElement('div'); d.className='errline'; d.textContent='✖ '+(ev.reason==='未授权'||!ev.reason?'未授权':ev.reason)+'：'+ev.name; msg.appendChild(d); scroll(); }
       else if(ev.type==='banner'){ renderBanner(ev); }
-      else if(ev.type==='ask'){ update(); handleAskEvent(ev); }
-      else if(ev.type==='usage'){ onActivity(); const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; msg.insertBefore(u, content); scroll(); }
+      else if(ev.type==='ask'){ runState.rawPhase='等待权限确认'; runState.phase='执行工具'; update(); renderWorkStatus(); handleAskEvent(ev); }
+      else if(ev.type==='usage'){ onActivity(); runState.cost=String(ev.cost||''); renderWorkStatus(); const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; msg.insertBefore(u, content); scroll(); }
       else if(ev.type==='error'){ console.log('[MingDao] error 事件：' + ev.message); onActivity();
         // §138 Bug C：服务端已按超时把这条确认作废（pendingAsk 清空），前端若继续挂着那个弹窗，
         // 用户再点「允许」只会拿到 409 且毫无提示，弹窗还会一个个叠起来（界面"像卡住"）。
         // 这里把作废的确认收掉：该确认已经死了，界面上不该再留一个能点的假弹窗。
         if(/权限确认超时/.test(String(ev.message||''))) dismissAskModals();
-        const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); scroll(); }
+        if(isFoldableError(ev.message)){ renderErrCard(String(ev.message), {warn:true}); }
+        else { const d=document.createElement('div'); d.className='errline'; d.textContent=ev.message; msg.appendChild(d); scroll(); } }
       else if(ev.type==='done'){
         // v0.6.13（问题 4）：把**结局**写进控制台。桌面壳的日志就是渲染进程的 console（转存到
         // ~/Library/Application Support/mingdao-desktop/logs/mingdao.log），此前那里只有
@@ -487,7 +643,12 @@ async function send(){
         const endStatus=ev.stalled?(ev.stallCause==='inherited'?'stalled(父回合整轮无进展)':'stalled(长时间无进展)'):ev.aborted?'aborted':(ev.truncated?'capped':'done');
         console.log('[MingDao] done 事件：session=' + ev.session + ' status=' + endStatus + ' durationMs=' + (ev.durationMs||0));
         onActivity();
-        if(ev.budget){ const b=ev.budget; if(hintTextEl) hintTextEl.textContent='预算 '+Math.round(b.used/1000)+'K/'+Math.round(b.total/1000)+'K（'+Math.round(b.used/b.total*100)+'%）· 本轮完成 · 提示栏右侧为今日费用与命中率'; }
+        if(ev.budget){ const b=ev.budget; lastBudgetUsed=Number(b.used)||0; runState.contextUsed=Math.max(0,Number(b.used)||0); runState.contextTotal=Number(b.total)||runState.contextTotal; runState.contextApprox=false; if(hintTextEl) hintTextEl.textContent='预算 '+Math.round(b.used/1000)+'K/'+Math.round(b.total/1000)+'K（'+Math.round(b.used/b.total*100)+'%）· 本轮完成 · 提示栏右侧为今日费用与命中率'; }
+        // P0-1：结局写进状态条——stalled/aborted 必须显示「已中止」，不得回落成「空闲」冒充正常完成
+        runState.aborted=Boolean(ev.stalled||ev.aborted);
+        runState.rawPhase=runState.aborted?'已中止':'空闲';
+        runState.phase=runState.aborted?'已中止':'空闲';
+        renderWorkStatus();
         refreshStatusBar();
         if(ev.stats&&ev.stats.deliverables&&ev.stats.deliverables.length){ const card=document.createElement('div'); card.className='deliver'; card.innerHTML='<div class="t">📦 交付物（'+ev.stats.deliverables.length+' 个文件）</div>'+ev.stats.deliverables.map(f=>'<div class="i">'+esc(f)+(f.toLowerCase().endsWith('.html')?' <span style="color:var(--accent2)">— 浏览器打开即可运行</span>':'')+'</div>').join(''); msg.appendChild(card); }
         // v0.6.13（问题 4）：stalled 必须**用户可见**，而且与 capped/aborted 区分开（复用既有 done.note 渲染）。
@@ -498,6 +659,7 @@ async function send(){
         currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
     });
   }catch(e){ onActivity(); // 诊断（v0.4.2 network error 排查）：静默中断此前无任何日志，无法区分
+    if((e&&e.name==='AbortError')||killedByWatchdog) runState.aborted=true;
     // 「手点停止 / 看门狗 / fetch 流静默断裂」。v0.4.3 修：第二参改 JSON 字符串——Electron 日志
     // 对对象只会落 [object Object]，异常细节丢失。
     const diag = { name: e && e.name, message: e && e.message, err: String(e), taskId, rawLen: raw.length, steps: stepsCount, elapsedS: Math.round((Date.now() - workT0) / 1000) };
@@ -507,7 +669,7 @@ async function send(){
     // 具体错误形态已进日志（fetch failed 等不再绕开续跑提示）。
     d.textContent=(e&&e.name==='AbortError')?(killedByWatchdog?'响应超时已中断（120 秒无任何响应），请重试':'已中断'):('连接中断，本轮未完成。已执行的工作已保存检查点——直接发送「继续」即可从断点续跑（' + Math.round((Date.now() - workT0) / 1000) + 's · ' + stepsCount + ' 步）。');
     msg.appendChild(d); scroll(); }
-  finally{ clearInterval(hintTimer); disarm(); clearTimeout(stopFallbackTimer); stopFallbackTimer=null; stopping=false; turnAbortCtrl=null; generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); activeAiMsg=null; curWorkT0=0; renderWorkStatus(); scroll(); updateTasksPanel(); }
+  finally{ clearInterval(hintTimer); disarm(); clearTimeout(stopFallbackTimer); stopFallbackTimer=null; stopping=false; turnAbortCtrl=null; generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); activeAiMsg=null; curWorkT0=0; if(!runState.aborted){ runState.rawPhase='空闲'; runState.phase='空闲'; } else { runState.rawPhase='已中止'; runState.phase='已中止'; } renderWorkStatus(); scroll(); updateTasksPanel(); }
 }
 
 let curTaskId=null; // 本轮 SSE 任务 id（质检 L1：主停止按钮只断本任务，不再误伤其他 tab）
@@ -542,6 +704,7 @@ async function stopTurn(taskId){
  */
 async function stopTurnFromButton(){
   if(stopping) return;
+  runState.aborted=true; runState.rawPhase='已中止'; runState.phase='已中止';
   stopping=true; setBtn(); renderWorkStatus();
   dismissAskModals();
   let res=null;
@@ -565,34 +728,87 @@ async function stopTurnFromButton(){
   renderBanner({text:'⚠ 停止失败：'+((res&&res.why)||'未知原因')+'。可再点一次「■ 停止」。', warn:true});
 }
 
-// —— 输入框上方工作状态条（审计：长任务静默硬伤 → 实时进度可见） ——
-function renderWorkStatus(){
-  renderLiveBar();
-  const el=$('#workStatus'); if(!el) return;
-  let html='';
-  let tip='';
-  if(generating){
-    const secs=curWorkT0?Math.round((Date.now()-curWorkT0)/1000):0;
-    html='<span class="ws-busy"><span class="spinner"></span><span class="ws-phase">'+esc(curPhase)+'</span><span>⏳ 第 '+curSteps+' 步 · '+Math.floor(secs/60)+' 分 '+Math.round(secs%60)+' 秒 · '+curTools+' 工具步'+(curTasks>0?' · '+curTasks+' 个子 Agent':'')+'</span></span>';
-  } else if(bgRunning>0){
-    // 后台任务 chip（非顶部，位于输入框上方）：计数 + 最新任务 + 悬浮详情 tooltip，点击打开详情面板
-    const running=bgTasks.filter((/** @type {any} */ t)=>t.status==='running');
-    const latest=running.length?running[running.length-1]:null;
-    tip=bgTasks.map((/** @type {any} */ t)=>(t.kind==='schedule'?'⏰':'🛠')+' '+String(t.message||t.id||'').slice(0,40)+' · '+t.status).join('\n');
-    html='<span class="ws-bg">🛠 '+bgRunning+' 个后台任务运行中'+(latest?' · '+esc(String(latest.message||'').slice(0,22)):'')+' — 点击查看详情</span>';
-  }
-  el.style.display=html?'flex':'none';
-  el.innerHTML=html;
-  const bg=el.querySelector('.ws-bg'); if(bg){ bg.onclick=()=>{ const tp=$('#tasksPanel'); tp.style.display = tp.style.display==='none'?'flex':'none'; if(tp.style.display==='flex'){ $('#trajPanel').style.display='none'; $('#subPanel').style.display='none'; updateTasksPanel(); } syncPanelLayout(); }; attachTip(bg, tip); }
+// —— 输入框上方工作状态条（P0-1 起由下面的 #runStrip 常驻状态条取代；保留本行作为既有守卫的定位锚点）
+// —— 运行状态条：字段口径（纯函数；smoke §148 直接 eval 这段做行为断言） ——
+// 阶段只有五档（等首帧 / 解码中 / 执行工具 / 已中止 / 空闲）——服务端的 phase 文案更细
+// （发请求（等首帧）/ 解码中（收到增量）/ 执行工具 bash / 排队等待本地端点…），这里收敛成用户能一眼读懂的五档。
+function normalizeRunPhase(rawPhase, isGenerating, aborted){
+  if(aborted) return '已中止';
+  if(!isGenerating) return '空闲';
+  const p=String(rawPhase||'');
+  if(/已中止|已停止|aborted|stalled/.test(p)) return '已中止';
+  if(/解码/.test(p)) return '解码中';
+  if(/执行工具|等待权限确认|待发请求|子\s?Agent|工具/.test(p)) return '执行工具';
+  return '等首帧';
 }
-// 顶部常驻活动条（静默完美解决层）：生成期间始终可见，滚动不影响
-function renderLiveBar(){
-  const el=$('#liveBar'); if(!el) return;
-  if(!generating){ el.style.display='none'; el.innerHTML=''; return; }
-  const secs=curWorkT0?Math.round((Date.now()-curWorkT0)/1000):0;
-  el.style.display='flex';
-  el.innerHTML='<span class="spinner"></span><span class="lb-phase">正在执行：'+esc(curPhase)+'</span>'+
-    '<span class="lb-stat">第 '+curSteps+' 步 · 已 '+Math.floor(secs/60)+' 分 '+Math.round(secs%60)+' 秒 · '+curTools+' 工具步'+(curTasks>0?' · '+curTasks+' 个子 Agent':'')+'</span>';
+function fmtRunTtft(ms){ return ms==null || !Number.isFinite(Number(ms)) ? '—' : (Number(ms)/1000).toFixed(1)+'s'; }
+function fmtRunTps(v){ return v==null || !Number.isFinite(Number(v)) ? '—' : Number(v).toFixed(1); }
+function fmtRunTools(n){ const k=Math.max(0,Math.round(Number(n)||0)); return k===0 ? '0 次工具调用' : k+' 次工具调用'; }
+function fmtRunCost(cost){ const m=String(cost||'').match(/≈¥[0-9.]+/); return m ? m[0] : ''; }
+function fmtRunCtx(st){
+  const total=Number(st.contextTotal)||0;
+  const used=Math.max(0,Math.round(Number(st.contextUsed)||0));
+  if(!total && !used) return '—';
+  // 生成中没有实时 used tokens（内核 budget 只在 done 算）：用「上一轮 used + 本轮字符估算」，
+  // 必须标 ≈；done 带回 budget 后才是精确值（去掉 ≈）。
+  const approx=st.contextApprox !== false;
+  return (approx?'≈ ':'')+fmtTok(used)+' / '+(total?fmtTok(total):'?')+' tokens';
+}
+function runStripView(st, isGenerating){
+  return {
+    phase: normalizeRunPhase(st.rawPhase, isGenerating !== false, st.aborted),
+    ttft: fmtRunTtft(st.ttftMs),
+    tps: fmtRunTps(st.tokensPerSec),
+    ctx: fmtRunCtx(st),
+    tools: fmtRunTools(st.toolCalls),
+    cost: fmtRunCost(st.cost) || '—',
+  };
+}
+/** 把一条 progress 事件并进运行状态（桩 SSE 与真实 SSE 走同一条路径）。 */
+function applyRunProgress(st, ev, baseUsed){
+  st.rawPhase=String(ev.phase||'');
+  st.phase=normalizeRunPhase(st.rawPhase, true, false);
+  if(ev.ttftMs!=null) st.ttftMs=Number(ev.ttftMs)||0;
+  st.tokensPerSec=ev.tokensPerSec!=null ? Number(ev.tokensPerSec) : null;
+  st.toolCalls=Number(ev.toolCalls)||0;
+  st.contentChars=Number(ev.contentChars)||0;
+  st.contextApprox=true;
+  st.contextUsed=Math.max(0, Number(baseUsed)||0) + Math.round(st.contentChars/1.5);
+  return st;
+}
+function permissionSourceLabel(source){
+  return ({explicit:'显式选择',preset:'预设',config:'config 默认',cli:'命令行',default:'内置默认'})[String(source||'')] || '未知';
+}
+
+// —— 状态条渲染（**唯一**刷新出口；合并原 #workStatus / 顶部活动条 / 消息内气泡三处） ——
+function renderWorkStatus(){
+  const el=$('#runStrip'); if(!el) return;
+  const view=runStripView(runState, generating);
+  const set=(id,text)=>{ const n=$(id); if(n) n.textContent=text; };
+  set('#rsPhase', view.phase);
+  set('#rsTtft', view.ttft);
+  set('#rsTps', view.tps);
+  set('#rsCtx', view.ctx);
+  set('#rsTools', view.tools);
+  set('#rsCost', view.cost);
+  el.classList.toggle('rs-busy', generating && view.phase!=='已中止');
+  el.classList.toggle('rs-acting', view.phase==='执行工具');
+  el.classList.toggle('rs-aborted', view.phase==='已中止');
+  const detail=[];
+  if(runState.detail) detail.push(runState.detail);
+  if(runState.permissionMode) detail.push('权限 '+runState.permissionMode+'（来源：'+permissionSourceLabel(runState.permissionSource)+'）');
+  const d=$('#rsDetail'); if(d) d.textContent=detail.join(' · ');
+  el.setAttribute('aria-label','运行状态：'+view.phase+' · 首帧 '+view.ttft+' · 吞吐 '+view.tps+' tok/s · 上下文 '+view.ctx+' · 工具 '+view.tools+' · 本轮费用 '+view.cost);
+  // 后台任务 chip：保留原「🛠 N 个后台任务运行中 — 点击查看详情」语义，收进同一行（空闲时才显示）
+  const bg=$('#rsBg');
+  if(bg){
+    if(bgRunning>0 && !generating){
+      const running=bgTasks.filter((/** @type {any} */ t)=>t.status==='running');
+      const latest=running.length?running[running.length-1]:null;
+      bg.style.display=''; bg.textContent='🛠 '+bgRunning+' 个后台任务运行中'+(latest?' · '+String(latest.message||'').slice(0,22):'')+' — 点击查看详情';
+      bg.onclick=()=>{ const tp=$('#tasksPanel'); tp.style.display = tp.style.display==='none'?'flex':'none'; if(tp.style.display==='flex'){ $('#trajPanel').style.display='none'; $('#subPanel').style.display='none'; updateTasksPanel(); } syncPanelLayout(); };
+    } else { bg.style.display='none'; bg.onclick=null; }
+  }
 }
 // 轨迹元行：任务完成后附在本轮消息顶部（步数/子代理数，点击打开轨迹面板）
 function attachTrajMeta(msg){
@@ -831,6 +1047,11 @@ async function init(){
     }
     if(!(j.models||[]).length){ const o=document.createElement('option'); o.value=j.model; o.textContent=j.model; ms.appendChild(o); }
     $('#permSel').value=j.permission||'ask';
+    // P0-4：/api/state 现在带 permissionSource（explicit/preset/config/cli/default）——
+    // 状态条悬浮详情与会话设置里都能显示 "permission=auto（来源：显式选择/预设/config 默认）"。
+    ctxLimit=Number(j.contextBudget)||ctxLimit;
+    runState.contextTotal=ctxLimit; runState.permissionMode=String(j.permission||'ask'); runState.permissionSource=String(j.permissionSource||'');
+    renderWorkStatus();
     $('#sbxSel').value=j.sandbox||'off';
     $('#sbxHint').textContent=j.sandboxSupported?'':'当前环境未检测到 bubblewrap，readonly/safe 将自动降级为 off';
     $('#routeChk').checked=Boolean(j.routing);
@@ -1136,6 +1357,9 @@ async function reloadModels(){
     if(!(j.models||[]).length){ const o=document.createElement('option'); o.value=j.model; o.textContent=j.model; ms.appendChild(o); }
     const env=('路由'+(j.routing?'开':'关')+' · 沙箱'+((j.sandbox&&j.sandbox!=='off')?(j.sandboxSupported?j.sandbox:'降级'):'off'));
     $('#envBadge').textContent=env; $('#envBadge').style.display='';
+    if(j.contextBudget){ ctxLimit=Number(j.contextBudget)||ctxLimit; runState.contextTotal=ctxLimit; }
+    runState.permissionMode=String(j.permission||'ask'); runState.permissionSource=String(j.permissionSource||'');
+    renderWorkStatus();
     applyReasoningUI(j.reasoning);
   }catch(e){}
 }

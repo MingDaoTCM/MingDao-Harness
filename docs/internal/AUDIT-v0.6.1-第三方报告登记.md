@@ -3228,3 +3228,65 @@ Reduce --context-window, close other apps, or try q8 KV quantization.
 - 未跑 smoke / 变异：**本轮没有代码改动**，无行为可断言；设计文档 §7 给出了每项的 smoke 断言
   方式（结构 / DOM slice 行为），供后续实现时补。
 - 未改 `src/**`、`test/**`、`presets/**`、`desktop/**`、`ide/**`；未新增依赖、未改构建。
+
+## 3.68 已修复（v0.6.18 开发线：DESIGN-UI-v1 的 P0 三项界面改造 + 两处配套）
+
+**来源**：`docs/DESIGN-UI-v1.md` §4.2/4.3/4.4 的 P0（状态条 / 内联确认 / 错误卡）与 §3.3 的诚实边界
+（`/api/state` 缺 `permissionSource`），外加 §144 的测试卫生（临时文件落在仓库根）。设计稿
+`docs/design/ui-preview.html` 只作版式参照，本项**没有**改设计稿。
+
+### 一、修了什么（全部只动允许清单）
+
+- **P0-1 常驻运行状态条**：`index.html` 用 `#runStrip` 替换 `#workStatus`（六项 `data-k`：
+  phase/ttft/tps/ctx/tools/cost），`app.js` 删掉查不存在 `#liveBar` 的 `renderLiveBar()` 死代码，
+  把 `renderWorkStatus()` 收成**唯一**刷新出口。数据只来自既有 SSE（`progress` 的
+  phase/toolCalls/ttftMs/tokensPerSec/contentChars、`usage.cost`、`done.budget`）与 `/api/state`
+  的 `contextBudget`——**没有新增轮询**；progress 本身 ≈1s 一次，既有 1s 提示定时器复用。
+  阶段收敛为五档（等首帧/解码中/执行工具/已中止/空闲）；生成中的上下文用「上一轮 used +
+  本轮字符估算」并显式标 `≈`，done 带回 budget 后才显示精确值；工具有 0 时明写
+  `0 次工具调用`。窄窗 `flex-wrap` 换行。
+- **P0-3 错误折叠卡**：`renderBanner` 对多行长错误改走 `.err-card`：首行摘要 + 归属标签、
+  `.err-hint` 独立成行（`white-space:pre-line`）、`.err-raw` 默认 `hidden`、`<pre>` 用
+  `white-space:pre-wrap` 保留上游原文、带「展开原文」与「复制」。普通横幅（已停止/已保存/
+  预设提示）保持原样，不制造"满屏都是错误"。
+- **P0-2 内联权限确认**：`askModal` 改为插在对话流里的 `.perm-card`（普通文档流），不再
+  `position:fixed;inset:0` 遮罩，输入区/附件/停止/滚动全程可用；三键为本次放行/拒绝/
+  始终允许本会话，`y`/`n` 仍可用、`Esc`=拒绝；同一轮多个确认串行展示。
+- **配套 P0-4**：`/api/state` 透出 `permissionSource`（`explicit|preset|config`，与账本
+  `LEDGER_PERMISSION_SOURCE` 共用同一映射）；来源取最近一回合 `resolveTurnPermission()`
+  的返回，尚未跑回合时按 config 现状算，**不另立判定**。前端把 `permission=…（来源：…）`
+  放进状态条悬浮详情。
+- **配套 §144 卫生**：`test/smoke.js` §144 的写盘标记从仓库根改为
+  `fs.mkdtempSync(os.tmpdir())`，并在 `finally` 清理；`.gitignore` 加 `.tmp-p144-*` 兜底。
+- **顺带**：`src/web/index.html` 附件按钮 `title` 去掉具体版本号，改为"需支持视觉的模型"。
+
+### 二、关于「始终允许本会话」的诚实边界
+
+它落的是**前端会话级 allow**（`sessionAllowedAsks`，键 = 确认问题原文，即同一工具与参数），
+不写 `config.json`、不进服务端持久层：刷新页面或新会话后失效。好处是零后端改动即可用、
+作用域与文案一致；代价是**其它标签页/重连后的同会话不会继承**。要跨页面生效需内核在
+`POST /api/permission` 落会话级规则（本轮不在允许改动面内）。
+
+### 三、断言与变异
+
+- `test/smoke.js` **只追加 §148**：六字段桩 progress 行为化（阶段五档/首帧/吞吐/上下文标 ≈/
+  工具 0 次显式文案/费用）+ 死代码已删结构守卫 + 错误卡三段式（默认折叠/`<pre>` 原文/建议
+  独立/复制）+ 内联确认三键与 120s 超时·停止优先·会话级 allow 接线 + 不得再创建 `.modal-mask`
+  且卡片在文档流 + `/api/state.permissionSource` 真起服务端到端（config→explicit→preset）
+  + §144 临时文件 os.tmpdir/`finally`/.gitignore 兜底。
+- 新建 `test/mutate/batch36-ui-p0.mjs`：**12/12 全中**（删 TTFT 字段 / 0 次显示空白 /
+  恢复 renderLiveBar / 错误卡改单行 textContent / 确认改回全屏遮罩 / 始终允许不写 allow /
+  permissionSource 写死 config / §144 改回仓库根 / 删复制按钮 / 超时改 0 / 阶段丢掉执行工具 /
+  上下文去掉 ≈）。
+- 变异总数行由本道执行者更新为 `doc-lint` 的实际值（含并行批 `batch35` 的 9 条）。
+
+### 四、未做边界（如实登记）
+
+- `ui-preview.html` 里 **P1/P2 未做**：命令面板（⌘K）、快捷键表（⌘/）、工具时间线折叠卡、
+  右栏「本轮运行」、会话设置弹层（收编模型/预设/权限三件套）、空态三步引导、设置搜索/
+  三列/危险项、明暗主题、字号圆角与焦点环全量收口、响应式 1180/900 断点重排。本次只做
+  P0 三项 + 两处配套；`docs/DESIGN-UI-v1.md` 仍是设计提案。
+- **不做**每帧轮询；状态条更新仍随既有 progress（≈1s）与 1s 提示定时器。
+- **不改** `desktop/main.js` 的 `minWidth`（720/900 断点矛盾属 desktop 范围）。
+- 未改内核事件协议；`permissionSource` 只读 `resolveTurnPermission()` 的既有返回。
+- 未 tag、未改版本号、未 publish、未动官网。

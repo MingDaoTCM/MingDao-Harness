@@ -15322,6 +15322,11 @@ process.exit(0);
   const prevHome144 = process.env.MINGDAO_HOME;
   const home144 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p144-'));
   process.env.MINGDAO_HOME = home144;
+  // v0.6.18 §3.68（测试卫生）：临时写盘标记必须落在 os.tmpdir()，**不得落在仓库根**——
+  // 原实现 path.join(srcDir, '..', '.tmp-p144-<pid>.txt') 在断言失败时会把文件留在工作树里
+  // （git status 被污染，且 .gitignore 当时没有兜底）。统一由 finally 清理。
+  const markerDir144 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p144-marker-'));
+  const marker144 = path.join(markerDir144, 'write-ok.txt');
   const presetDir144 = path.join(home144, 'presets');
   fs.mkdirSync(presetDir144, { recursive: true });
   // 夹具预设：只声明 permission=readonly，**不带工具白名单**——这样"auto 是否真的生效"
@@ -15357,7 +15362,7 @@ process.exit(0);
               {
                 delta: {
                   tool_calls: [
-                    { index: 0, id: 'call144w', type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: path.join(srcDir, '..', `.tmp-p144-${process.pid}.txt`), content: 'ok144' }) } },
+                    { index: 0, id: 'call144w', type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: marker144, content: 'ok144' }) } },
                   ],
                 },
                 finish_reason: 'tool_calls',
@@ -15382,6 +15387,8 @@ process.exit(0);
     permission: 'readonly',
     autoTitle: false,
     maxRounds: 1,
+    // §3.68 测试卫生：marker 现在落在 os.tmpdir()，必须显式加入 fsAllowDirs（文件工具默认只允许工作目录内）
+    fsAllowDirs: [markerDir144],
     customModels: { mock144: { label: 'Mock144', baseUrl: `http://127.0.0.1:${mock144.address().port}/v1`, contextWindow: 8192, key: 'sk-mock' } },
   });
   const srv144 = await runWebServer({ host: '127.0.0.1', port: 45996, authToken: null });
@@ -15435,7 +15442,6 @@ process.exit(0);
   };
   try {
     // ① 显式 auto + 声明 readonly 的预设（config 里也是 readonly）
-    const marker144 = path.join(srcDir, '..', `.tmp-p144-${process.pid}.txt`);
     safeRmSync(marker144, { force: true });
     const c1 = await chat144({ message: '请写一个文件 hello.txt', permission: 'auto', preset: 'ro-plain' });
     assert.equal(c1.status, 200, `chat 必须被接受，实际 HTTP ${c1.status}`);
@@ -15454,7 +15460,6 @@ process.exit(0);
       fs.existsSync(marker144),
       '权限引擎实际收到的 chatCfg.permission 必须是 auto：write 工具必须真的执行并写盘（只读档会拒绝）——原守卫：chatCfg.permission 来自判据 + createPermission 用它构造。文件不存在即说明权限档位没接上。'
     );
-    safeRmSync(marker144, { force: true });
     const chatReq144 = [...seen144].reverse().find((b) => JSON.stringify(b.messages || '').includes('请写一个文件 hello.txt'));
     const toolNames144 = (chatReq144?.tools || []).map((t) => String(t?.function?.name || ''));
     assert.ok(
@@ -15483,6 +15488,7 @@ process.exit(0);
     await new Promise((r) => mock144.close(r)).catch(() => {});
     if (prevHome144 === undefined) delete process.env.MINGDAO_HOME;
     else process.env.MINGDAO_HOME = prevHome144;
+    safeRmSync(markerDir144, { recursive: true, force: true });
     safeRmSync(home144, { recursive: true, force: true });
   }
   ok('v0.6.18 M-8 第二批（§144）：WebUI 权限接线行为化（显式 auto 压过只读预设 → banner 档位/来源 + write 工具真的写盘 + 桩工具表含 write/bash）+ 忙锁释放（同一会话第二轮不被误判「忙」）+ 预设别名提示');
@@ -15846,5 +15852,226 @@ process.exit(0);
   }
   ok('v0.6.18 M-8 第二批（§146）：视觉门控行为化（自定义 Provider 声明的 vision 让图片真的以 image_url 进上游；撤掉声明后同一请求被拒）');
 }
+
+// ---------- 148. v0.6.18 §3.68：P0 界面改造（常驻状态条 / 错误折叠卡 / 内联权限确认 / permissionSource / §144 卫生） ----------
+// 本节只做**可回归的**部分：纯函数行为（状态条六字段口径、错误卡三段式、确认卡判据）+ 结构守卫
+// （六项字段、死代码已删、无遮罩、会话级 allow 接线）+ 真起 Web 服务的 /api/state.permissionSource
+// 端到端（config → explicit → preset），以及 §144 临时文件卫生。视觉版式本身仍需人工按
+// docs/design/ui-preview.html 对照（截图不可断言）。
+{
+  const appSrc148 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+  const htmlSrc148 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  const repoRoot148 = path.join(srcDir, '..');
+  const { fmtTok } = await import(pathToFileURL(path.join(srcDir, 'web', 'util.js')).href);
+  const { esc } = await import(pathToFileURL(path.join(srcDir, 'web', 'util.js')).href);
+  /** @param {string} a @param {string} b */
+  const slice148 = (a, b) => {
+    const i = appSrc148.indexOf(a);
+    const j = appSrc148.indexOf(b, i + a.length);
+    assert.ok(i >= 0 && j > i, `（前置）应能定位 app.js 切片：${a}`);
+    return appSrc148.slice(i, j);
+  };
+
+  // —— ① 状态条六字段：桩 progress 事件下阶段/首帧/吞吐/上下文/工具数（含 0 次显式文案）/费用 ——
+  {
+    const D = [...htmlSrc148.matchAll(/data-k="([a-z]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(
+      D.sort(),
+      ['cost', 'ctx', 'phase', 'tools', 'tps', 'ttft'].sort(),
+      `常驻状态条必须且只能有六个字段（phase/ttft/tps/ctx/tools/cost），实际：${D.join(',') || '(无)'}`
+    );
+    assert.ok(/id="runStrip"/.test(htmlSrc148) && /role="status"/.test(htmlSrc148) && /aria-live="polite"/.test(htmlSrc148),
+      '状态条必须是常驻的 role=status / aria-live=polite 容器（#runStrip）');
+    assert.ok(!/\$\('#workStatus'\)/.test(appSrc148), '旧的 #workStatus 挂载点必须已收口到 #runStrip（不得两处各渲染一份）');
+    const run = new Function('fmtTok', slice148('// —— 运行状态条：字段口径', '// —— 状态条渲染') +
+      '\nreturn { normalizeRunPhase, fmtRunTtft, fmtRunTps, fmtRunTools, fmtRunCost, fmtRunCtx, runStripView, applyRunProgress, permissionSourceLabel };')(fmtTok);
+    const st = { rawPhase: '发请求（等首帧）', aborted: false, ttftMs: null, tokensPerSec: null, toolCalls: 0, contentChars: 0, contextUsed: 0, contextTotal: 128000, contextApprox: true, cost: '' };
+    // 桩 SSE：与服务端 progress 事件同形的对象（字段名照 server.js 的 send({type:'progress',…})）
+    run.applyRunProgress(st, { type: 'progress', phase: '发请求（等首帧）', ttftMs: 2400, tokensPerSec: 18.6, toolCalls: 0, contentChars: 0 }, 0);
+    let v = run.runStripView(st, true);
+    assert.equal(v.phase, '等首帧', `阶段必须收敛成「等首帧」，实际：${v.phase}`);
+    assert.equal(v.ttft, '2.4s', `首帧（TTFT）必须来自 progress.ttftMs，实际：${v.ttft}`);
+    assert.equal(v.tps, '18.6', `吞吐必须来自 progress.tokensPerSec，实际：${v.tps}`);
+    assert.equal(v.tools, '0 次工具调用', `0 次工具调用必须显式写出来（不能省略成空白），实际：${v.tools}`);
+    assert.match(v.ctx, /^≈ .+ \/ 128\.0K tokens$/, `生成中的上下文占用必须标 ≈ 并带上限，实际：${v.ctx}`);
+    assert.equal(v.cost, '—', `本轮无费用时必须显示 —（有则显示金额），实际：${v.cost}`);
+    // 阶段五档：解码中 / 执行工具 / 已中止 / 空闲
+    run.applyRunProgress(st, { phase: '执行工具 bash', ttftMs: 2400, tokensPerSec: null, toolCalls: 3, contentChars: 120 }, 0);
+    v = run.runStripView(st, true);
+    assert.equal(v.phase, '执行工具', `「执行工具 bash」必须收敛成「执行工具」，实际：${v.phase}`);
+    assert.equal(v.tools, '3 次工具调用', `工具步数必须来自 progress.toolCalls，实际：${v.tools}`);
+    assert.equal(v.tps, '—', '无吞吐时必须显示 —（不能编造）');
+    run.applyRunProgress(st, { phase: '解码中（收到增量）', toolCalls: 3, contentChars: 600 }, 0);
+    assert.equal(run.runStripView(st, true).phase, '解码中');
+    st.aborted = true;
+    assert.equal(run.runStripView(st, false).phase, '已中止', '停止/中止后状态条必须显示「已中止」');
+    st.aborted = false;
+    assert.equal(run.runStripView(st, false).phase, '空闲', '回合结束且正常收尾后必须显示「空闲」');
+    // 精确 budget（done 带回）去掉 ≈；费用只取 ≈¥ 金额（不把缓存命中/价格表提示塞进一行）
+    st.contextApprox = false; st.contextUsed = 79000; st.contextTotal = 128000;
+    assert.match(run.runStripView(st, true).ctx, /^79\.0K \/ 128\.0K tokens$/, 'done 带回 budget 后必须显示精确 budget（不再标 ≈）');
+    assert.equal(run.fmtRunCost(' ≈¥0.0132（高峰 · 缓存命中 50%）'), '≈¥0.0132', '本轮费用必须只取金额部分');
+    assert.equal(run.permissionSourceLabel('explicit'), '显式选择');
+    assert.equal(run.permissionSourceLabel('preset'), '预设');
+    assert.equal(run.permissionSourceLabel('config'), 'config 默认');
+  }
+
+  // —— ② 死代码 renderLiveBar 必须已删（结构守卫：不得再查 #liveBar） ——
+  {
+    assert.ok(!/#liveBar/.test(appSrc148), 'renderLiveBar 查的 #liveBar 在 index.html 里根本不存在——这段死代码必须删除（否则状态展示又会多一条永远不生效的路径）');
+    assert.ok(!/renderLiveBar\s*\(/.test(appSrc148), 'renderLiveBar() 不得再被定义或调用（状态条唯一刷新出口是 renderWorkStatus）');
+    assert.ok(/function renderWorkStatus\(\)\{/.test(appSrc148), '状态条唯一刷新出口 renderWorkStatus() 必须存在');
+  }
+
+  // —— ③ 错误折叠卡：默认折叠 / 展开含原文 / 处置建议独立 / 可复制 ——
+  {
+    const E = new Function('esc', slice148('// —— 错误卡：三段式', 'function copyToClipboard(') +
+      '\nreturn { errCardParts, errCardHtml };')(esc);
+    const errText = '⚠ 上游错误：{"error":{"message":"jinja2.TemplateError: line1\nline2"}}\n   💡 该端点的模板不接受多轮 messages：换 chat 端点，或改用单轮模板端点。';
+    const p = E.errCardParts(errText);
+    assert.ok(p.raw.includes('line1') && p.raw.includes('\n') && !p.raw.includes('💡'),
+      `上游原文必须保留换行且不混入处置建议，实际：${JSON.stringify(p.raw)}`);
+    assert.ok(p.hint.startsWith('💡') && p.hint.includes('chat 端点'), `处置建议必须独立成段，实际：${JSON.stringify(p.hint)}`);
+    assert.equal(p.tag, '上游', '错误卡必须带归属标签（上游/内核/错误）');
+    const card = E.errCardHtml(errText);
+    assert.ok(/class="err-raw" hidden/.test(card), '上游原文必须默认折叠（.err-raw 带 hidden）');
+    assert.ok(/<pre>/.test(card) && card.includes('line1') && card.includes('line2'), '展开后必须含原文，并用 <pre> 保留换行');
+    assert.ok(/class="err-hint"/.test(card) && card.indexOf('err-hint') < card.indexOf('err-raw'),
+      '处置建议必须独立成一行，且与原文视觉分离（在原文之前）');
+    assert.ok(/class="err-copy"/.test(card) && /复制/.test(card), '长错误必须提供「复制」按钮');
+    assert.ok(/class="err-toggle"[^>]*>展开原文/.test(card), '折叠态必须给出「展开原文」入口');
+    assert.ok(!/d\.textContent\s*=\s*ev\.text\s*\|\|\s*ev\.title/.test(appSrc148),
+      'renderBanner 不得再用单行 textContent 塞长错误（换行会被折叠成一段）');
+    assert.ok(/d\.innerHTML=errCardHtml\(text\)/.test(appSrc148),
+      '错误卡必须用三段式 errCardHtml() 渲染（改成单行 textContent 会让原文/建议/折叠全部消失）');
+    assert.ok(/renderErrCard\(text, ev\)/.test(appSrc148), 'renderBanner 必须把长错误交给三段式 renderErrCard');
+    assert.ok(/\.err-hint\{[^}]*white-space:pre-line/.test(htmlSrc148), '.err-hint 必须 white-space:pre-line（处置建议中的换行要真的换行）');
+    assert.ok(/\.err-raw pre\{[^}]*white-space:pre-wrap/.test(htmlSrc148), '.err-raw pre 必须 white-space:pre-wrap（保留上游原文换行）');
+  }
+
+  // —— ④⑤ 内联权限确认：三键 / 会话级 allow / 120s 超时 / 不遮挡输入区 ——
+  {
+    const A = new Function('esc', slice148('// —— 内联权限确认：判据', '// —— 内联权限确认：队列与渲染') +
+      '\nreturn { askSignature, askAnswerPlan, askCardHtml };')(esc);
+    assert.equal(A.askAnswerPlan('allow').post, 'y', '「本次放行」必须回传 y');
+    assert.equal(A.askAnswerPlan('deny').post, 'n', '「拒绝」必须回传 n');
+    assert.equal(A.askAnswerPlan('always').post, 'y', '「始终允许本会话」本次也必须放行');
+    assert.equal(A.askAnswerPlan('always').remember, true, '「始终允许本会话」必须写入会话级 allow');
+    assert.equal(A.askAnswerPlan('deny').remember, false, '拒绝不得写入会话级 allow');
+    assert.equal(A.askSignature({ question: '是否允许执行 bash x' }), A.askSignature({ question: ' 是否允许执行 bash x ' }),
+      '会话级 allow 的键必须对同一确认稳定（同一工具与参数 → 同一条规则）');
+    const card = A.askCardHtml({ question: '是否允许执行 bash npm test -- --runInBand' });
+    assert.ok(/data-a="allow"[^>]*>本次放行/.test(card), '确认卡必须有「本次放行」');
+    assert.ok(/data-a="deny"[^>]*>拒绝/.test(card), '确认卡必须有「拒绝」');
+    assert.ok(/data-a="always"[^>]*>始终允许本会话/.test(card), '确认卡必须有「始终允许本会话」');
+    assert.ok(/作用域|本会话|config\.json/.test(card), '「始终允许本会话」必须写清作用域（仅本会话，不写 config.json）');
+    assert.ok(!/className\s*=\s*['"]modal-mask/.test(card) && !/position:\s*fixed/.test(card), '确认卡本身不得是遮罩');
+    const askBlock = appSrc148.slice(appSrc148.indexOf('// —— 内联权限确认'), appSrc148.indexOf('async function handleEvents'));
+    assert.ok(!/className\s*=\s*['"]modal-mask/.test(askBlock), '内联确认块不得再创建 .modal-mask 全屏遮罩（遮罩会挡住输入区与停止按钮）');
+    assert.ok(!/position:\s*fixed/.test(askBlock) && !/#modalRoot/.test(askBlock), '内联确认不得再挂到 fixed 遮罩 / #modalRoot');
+    assert.ok(/chatEl\.appendChild\(card\)/.test(askBlock), '确认卡必须插进对话流（普通文档流），不是全屏浮层');
+    assert.ok(/if\(sessionAllowedAsks\.has\(key\)\)/.test(appSrc148), '已「始终允许本会话」的确认必须直接放行、不再弹卡');
+    assert.ok(/if\(plan\.remember\) sessionAllowedAsks\.add\(key\)/.test(appSrc148), '「始终允许本会话」必须真的写进 sessionAllowedAsks（不能做成不起作用）');
+    assert.ok(/const ASK_UI_TIMEOUT_MS = 120000;/.test(appSrc148), '前端倒计时必须保留 120s 语义');
+    assert.ok(/settleAsk\(entry,'deny','timeout'\)/.test(appSrc148), '120s 超时必须按「拒绝」落定');
+    assert.ok(/e\.key==='Escape'[^\n]*settleAsk\(entry,'deny','esc'\)/.test(appSrc148), 'Esc 必须关卡片并按「拒绝」处理');
+    assert.ok(/e\.key==='y'/.test(appSrc148) && /e\.key==='n'/.test(appSrc148), 'y / n 键盘必须仍可用');
+    // 停止优先于超时：dismiss 走 aborted=true，handleAskEvent 在这条路径上不 POST /api/permission
+    assert.ok(/entry\.dismiss=\(\)=>settleAsk\(entry,'','aborted'\)/.test(appSrc148), '停止必须能收掉内联确认（aborted 落定）');
+    assert.ok(/if\(res\.aborted\) return;/.test(appSrc148), '停止收掉的确认不得再回 POST /api/permission（服务端已按拒绝落定）');
+    const permCss = (htmlSrc148.match(/\.perm-card\{[^}]*\}/) || [''])[0];
+    assert.ok(permCss && !/position:\s*fixed/.test(permCss), '.perm-card 必须是普通文档流卡片（不得 position:fixed）');
+  }
+
+  // —— ⑥ /api/state.permissionSource：与 resolveTurnPermission 同源（config → explicit → preset） ——
+  {
+    const { runWebServer } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
+    const { resolveTurnPermission } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
+    const { setStoredKey } = await import(pathToFileURL(path.join(srcDir, 'credentials.js')).href);
+    const http148 = await import('node:http');
+    const prevHome148 = process.env.MINGDAO_HOME;
+    const home148 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-p148-'));
+    process.env.MINGDAO_HOME = home148;
+    const mock148 = http148.createServer((req, res) => {
+      if (req.method === 'GET') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: [{ id: 'mock148' }] }));
+        return;
+      }
+      req.resume();
+      req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+        res.write('data: {"choices":[{"delta":{"content":"好"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}\n\n');
+        res.end('data: [DONE]\n\n');
+      });
+    });
+    await new Promise((r) => mock148.listen(0, '127.0.0.1', r));
+    setStoredKey('custom:mock148', 'sk-mock148');
+    saveConfig({
+      provider: 'deepseek',
+      model: 'mock148',
+      permission: 'ask',
+      autoTitle: false,
+      maxRounds: 1,
+      customModels: { mock148: { label: 'Mock148', baseUrl: `http://127.0.0.1:${mock148.address().port}/v1`, contextWindow: 8192, key: 'sk-mock148' } },
+    });
+    fs.mkdirSync(path.join(home148, 'presets'), { recursive: true });
+    fs.writeFileSync(path.join(home148, 'presets', 'ro148.json'), JSON.stringify({ name: 'ro148', label: '只读夹具', permission: 'readonly' }));
+    const base148 = 'http://127.0.0.1:45991';
+    const map148 = { webui: 'explicit', preset: 'preset', config: 'config' };
+    const srv148 = await runWebServer({ host: '127.0.0.1', port: 45991, authToken: null });
+    /** @param {any} body */
+    const chat148 = async (body) => {
+      const r = await fetch(base148 + '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      const text = await r.text();
+      return { status: r.status, text };
+    };
+    try {
+      const st0 = await (await fetch(base148 + '/api/state')).json();
+      assert.ok(['explicit', 'preset', 'config', 'cli', 'default'].includes(st0.permissionSource),
+        `/api/state 必须带 permissionSource（枚举 explicit|preset|config|cli|default），实际：${JSON.stringify(st0.permissionSource)}`);
+      assert.equal(st0.permissionSource, map148[resolveTurnPermission({ configPermission: st0.permission }).source],
+        '/api/state.permissionSource 必须与 resolveTurnPermission 的返回一致（不得另算一套）');
+      const c1 = await chat148({ message: '你好', permission: 'auto' });
+      assert.equal(c1.status, 200, `（前置）显式权限回合必须被接受，实际 HTTP ${c1.status}`);
+      const st1 = await (await fetch(base148 + '/api/state')).json();
+      assert.equal(st1.permissionSource, 'explicit', `显式选择必须被如实标成 explicit（写死 config 会被这条抓住）——实际：${JSON.stringify(st1.permissionSource)}`);
+      assert.equal(st1.permissionSource, map148[resolveTurnPermission({ explicit: 'auto', configPermission: st0.permission }).source],
+        `显式选择 auto 的回合之后，/api/state.permissionSource 必须与 resolveTurnPermission 一致，实际：${JSON.stringify(st1.permissionSource)}`);
+      const c2 = await chat148({ message: '你好', preset: 'ro148' });
+      assert.equal(c2.status, 200, `（前置）预设回合必须被接受，实际 HTTP ${c2.status}`);
+      const st2 = await (await fetch(base148 + '/api/state')).json();
+      assert.equal(st2.permissionSource, 'preset', `预设生效必须被如实标成 preset——实际：${JSON.stringify(st2.permissionSource)}`);
+      assert.equal(st2.permissionSource, map148[resolveTurnPermission({ preset: { name: 'ro148', permission: 'readonly' }, configPermission: st0.permission }).source],
+        `预设只读生效的回合之后，/api/state.permissionSource 必须与 resolveTurnPermission 一致，实际：${JSON.stringify(st2.permissionSource)}`);
+    } finally {
+      await new Promise((r) => srv148.close(r)).catch(() => {});
+      mock148.closeAllConnections?.();
+      await new Promise((r) => mock148.close(r)).catch(() => {});
+      if (prevHome148 === undefined) delete process.env.MINGDAO_HOME;
+      else process.env.MINGDAO_HOME = prevHome148;
+      safeRmSync(home148, { recursive: true, force: true });
+    }
+  }
+
+  // —— ⑦ §144 测试卫生：临时标记必须在 os.tmpdir()，由 finally 清理；.gitignore 有兜底 ——
+  {
+    const smokeSrc148 = fs.readFileSync(path.join(repoRoot148, 'test', 'smoke.js'), 'utf8');
+    const i144 = smokeSrc148.indexOf('// ---------- 144.');
+    const j144 = smokeSrc148.indexOf('// ---------- 145.');
+    assert.ok(i144 >= 0 && j144 > i144, '（前置）应能定位 smoke §144');
+    const s144 = smokeSrc148.slice(i144, j144);
+    assert.ok(/fs\.mkdtempSync\(path\.join\(os\.tmpdir\(\), 'mingdao-p144-marker-'\)\)/.test(s144),
+      '§144 的临时写盘标记必须落在 os.tmpdir()（不得落在仓库根）');
+    assert.ok(/const marker144 = path\.join\(markerDir144, 'write-ok\.txt'\)/.test(s144),
+      '§144 marker 必须来自 os.tmpdir() 下的临时目录（变异回仓库根会在这里红）');
+    assert.ok(/safeRmSync\(markerDir144, \{ recursive: true, force: true \}\)/.test(s144), '§144 必须在 finally 里清理临时目录');
+    assert.ok(/^\.tmp-p144-\*$/m.test(fs.readFileSync(path.join(repoRoot148, '.gitignore'), 'utf8')), '.gitignore 必须加 .tmp-p144-* 兜底');
+    assert.deepEqual(fs.readdirSync(repoRoot148).filter((f) => /^\.tmp-p144-/.test(f)), [], '仓库根不得残留 .tmp-p144-* 临时文件');
+  }
+
+  ok('v0.6.18 §3.68 P0 界面：常驻状态条六字段（阶段/首帧/吞吐/上下文/工具数含 0 次文案/费用，桩 progress 行为化）+ renderLiveBar 死代码已删 + 错误折叠卡（默认折叠/原文 <pre>/建议独立/复制）+ 内联确认三键与 120s 超时·停止优先 + 会话级 allow 接线 + /api/state.permissionSource 与 resolveTurnPermission 同源（config→explicit→preset 端到端）+ §144 临时文件 os.tmpdir/清理/.gitignore 兜底');
+}
+
 
 process.exit(0);

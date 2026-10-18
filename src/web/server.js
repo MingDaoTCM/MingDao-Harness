@@ -239,6 +239,17 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     process.exitCode = 1;
     return;
   }
+  // v0.6.18 §3.68（P0-4）：/api/state 透出 permissionSource——「生效的权限值」与「这个值是谁定的」
+  // 必须成对出现，否则用户看到 permission=auto 仍分不清"我选的 / 预设压的 / config 默认"。
+  // 来源只取 resolveTurnPermission 的返回值（经 LEDGER_PERMISSION_SOURCE 翻译成 explicit/preset/config），
+  // 不在这里另立一套判定；最近一回合优先，尚未跑过回合时按 config.json 的现状算。
+  /** @type {string|null} */
+  let lastTurnPermissionSource = null;
+  /** @returns {string} */
+  const statePermissionSource = () =>
+    lastTurnPermissionSource ??
+    LEDGER_PERMISSION_SOURCE[resolveTurnPermission({ configPermission: cfg.permission ?? 'ask' }).source] ??
+    'config';
   // 访问令牌（P1-3）：非回环绑定时强制——配置的 token / 启动参数 / 环境变量优先，
   // 都没有则本次随机生成并打印带 token 的访问地址。回环绑定且未配置时保持无认证（本机信任）。
   /** @param {any} h */
@@ -816,6 +827,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     // 来源单独赋值：上面这一行是 smoke §137 的结构守卫锚点（chatCfg 的 permission 必须单源来自
     // resolveTurnPermission），不要为了少一行把它并进对象字面量。
     chatCfg.permissionSource = LEDGER_PERMISSION_SOURCE[turnPerm.source] ?? null;
+    lastTurnPermissionSource = chatCfg.permissionSource; // /api/state.permissionSource（同一来源，不另算）
     // v0.6.12：**把"本会话的有效权限"说出来**。这次用户困惑的根源不是权限算错了，而是
     // 「我选了自动、它按只读跑、而且没有任何一处告诉我」——预设是会话级粘滞的（下拉一直选着），
     // 用户以为换个权限档就覆盖了它。新会话开始与档位变更各说一次，不刷屏。
@@ -1165,6 +1177,29 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     refs: { get inflight() { return inflight; }, set inflight(v) { inflight = v; } },
   });
   const server = http.createServer((req, res) => {
+    // v0.6.18 §3.68：/api/state 的响应体在配置域（routes/domains/config.js）里组装，而本轮允许的
+    // 后端改动面只有本文件——在这一层按路径补 permissionSource，避免与并行执行者争同一个文件。
+    // 只补 GET /api/state 的成功响应；其余 API/静态资源原样通过。
+    if (req.method === 'GET' && new URL(String(req.url || '/'), 'http://localhost').pathname === '/api/state') {
+      const rawEnd = res.end.bind(res);
+      /**
+       * @param {any} chunk
+       * @param {any[]} rest
+       */
+      const patchedEnd = (chunk, ...rest) => {
+        try {
+          if (res.statusCode === 200 && (typeof chunk === 'string' || Buffer.isBuffer(chunk))) {
+            const body = JSON.parse(String(chunk));
+            if (body && body.ok === true && Array.isArray(body.permissions)) {
+              body.permissionSource = statePermissionSource();
+              chunk = JSON.stringify(body);
+            }
+          }
+        } catch {}
+        return rawEnd(chunk, ...rest);
+      };
+      /** @type {any} */ (res).end = patchedEnd;
+    }
     dispatch(req, res).catch((e) => {
       if (!res.headersSent) {
         json(res, e?.status || 500, { error: e?.message || '服务器内部错误' });
