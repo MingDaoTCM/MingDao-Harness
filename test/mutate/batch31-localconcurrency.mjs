@@ -25,7 +25,9 @@ M.mutate({
   name: '① 去掉本地端点串行化（两次并发直接同时打在同一个引擎上）',
   file: 'src/providers/index.js',
   from: `          releaseLocal = await acquireLocalSlot(pc.baseUrl, {
-            cfg,
+            // v0.6.18 §3.74：内存降级重试时 agent 传 localConcurrency=1，**临时把该端点压回单并发**
+            // （即便用户把 config.localConcurrency 配成 0/2）——重试期间不允许父回合/子代理再同时 prefill。
+            cfg: opts.localConcurrency != null ? { ...cfg, localConcurrency: opts.localConcurrency } : cfg,
             signal: ac.signal,
             onWait: opts.onQueueWait,
             endpoint: pc.name || pc.baseUrl,

@@ -1151,7 +1151,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         //（子代理被一起收口），'own' = 本回合自己零进展。前端据此给出不同的处置建议。
         stallCause: r.perf?.stallCause ?? null,
         perf: r.perf ? { llmCalls: r.perf.llmCalls ?? null, toolCalls: r.perf.toolCalls ?? null, ttftMs: r.perf.ttftMs ?? null, noToolCalls: Boolean(r.perf.noToolCalls) } : null,
-        note: mergedNote,
+        note: [baseNote, zeroNote].filter(Boolean).join('\n'),
         stats: io.stats(),
         session: path.basename(session.file),
       });
