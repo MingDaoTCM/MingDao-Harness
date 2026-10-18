@@ -3,6 +3,69 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.16（2026-10-18）— 模型名称与能力判定以 API 实时官方名为准 + UI P0（常驻状态条 / 错误折叠卡 / 内联权限确认）
+
+> 功能版，两件事：① 官方升级模型（如 `DeepSeek-V4.1-Flash 1017`）后，默认值与界面提示仍指着旧名 →
+> 模型名称与能力判定改为**以 API 实时返回的官方名为准**（家族正则匹配，精确 id 只作别名；
+> 未知新版本可选中并标"能力未知"，不拒绝；§3.67）；② `docs/DESIGN-UI-v1.md` 的 **P0 三项**落地：
+> 常驻运行状态条、错误折叠卡、对话流内联权限确认，并透出 `/api/state.permissionSource`（§3.68）。
+> 逐条根因与取舍见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` §3.67–§3.68。
+> 变异验证 **25 批 292 条全中**（数字由 `scripts/doc-lint.mjs` ⑥ 守卫）。
+
+### 一、模型名称与能力判定以 API 实时官方名为准（§3.67）
+
+**起因**：负责人反馈"DeepSeek 官方已推出 DeepSeek-V4.1-Flash 1017，API 拉取到的也是该版本，
+模型名称应该相应改为官方名称，或者一步到位，以后版本一律以 API 实时拉取到的官方名称为准"。
+旧实现把 `deepseek-v4-pro` / `deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-flash-vision-exp`
+写成精确键，官方每升一次版本就要改一次代码。
+
+- **家族模式表 `MODEL_FAMILIES`**（`src/models.js`）：用正则匹配 **pro / flash / vision**
+  （大小写、空格/下划线/连字符、`v4`/`v4.1`/`V5` 版本号均兼容）；上下文窗口、输出上限、
+  工具/推理/视觉能力与峰谷定价挂在**模式**上。精确 id 只作已知别名表 `MODELS_KNOWN`，
+  旧名 `deepseek-v4-flash` 仍可用（标签注明"旧名别名"）。
+- **默认值运行时解析**（`src/model-discovery.js`）：新增 `resolveDefaultModel(role)` /
+  `resolveRoutingDefaults(cfg)`，优先级 `config.routing.planner|executor`、`config.model`
+  → 当前 `/v1/models` 名单按家族挑官方名（多版本取最高）→ 内置家族代表名兜底，
+  并同时返回 `fallback`/`offline` 与提示。`ensureMinimalConfig` / `loadConfig` / 向导 /
+  WebUI 路由开关全部接入；新增 `GET /api/models`（含默认 planner/executor、
+  `source=config|api|fallback`、`offlineFallback`、`note`）。
+- **不打扰只实现 chat 的网关**：`provider: custom` 与未内置服务商**不主动探测** `GET /models`
+  （空 body 会 `JSON.parse` 崩，e2e-web 回归即由此而来）；默认值用家族代表名兜底，
+  显式 `config.routing.*` 仍优先。
+- **未知新版本可选、不拒绝**：家族能匹配但比已核对规格新的版本（如 `DeepSeek-V4.2-Flash 1101`）
+  可选中、标"能力未知（新版本）"，按家族规格保守估算；非家族线上新模型同样列在列表里。
+- **离线兜底显式**：API 不可达时列表回退内置家族代表名，每条标 `offlineFallback: true`，
+  并统一提示"离线兜底：模型名可能不是最新的（API 不可达，已使用内置家族代表名）"。
+- **四处文案去版本号**：`cost-guard.js`（pro/flash 家族）、`help.js`（家族 + 以 API 为准）、
+  `web/attachments.js`（vision 家族）、`web/routes/domains/config.js`（路由默认值不再写死版本）。
+- 文档：`docs/CONFIG.md` 新增「模型名称以 API 为准」。
+
+### 二、UI P0：常驻状态条 / 错误折叠卡 / 内联权限确认（§3.68）
+
+- **P0-1 常驻运行状态条**：`index.html` 用 `#runStrip` 替换 `#workStatus`（六项 `data-k`：
+  阶段/首帧/吞吐/上下文/工具数/本轮费用）；删除查不存在 `#liveBar` 的 `renderLiveBar()` 死代码，
+  `renderWorkStatus()` 收成**唯一**刷新出口。数据只来自既有 SSE（progress/usage/done）与
+  `/api/state.contextBudget`，**不新增轮询**。阶段收敛五档；生成中的上下文标 `≈`（done 后才精确）；
+  无工具调用时明写"0 次"；窄窗 `flex-wrap` 换行。
+- **P0-3 错误折叠卡**：多行长错误改走 `.err-card`——首行摘要 + 归属标签、处置建议独立成行
+  （`white-space:pre-line`）、上游原文默认折叠（`<pre>` + `pre-wrap` 保留换行）、带"展开原文"与"复制"。
+  普通横幅（已停止/已保存/预设提示）保持原样。
+- **P0-2 内联权限确认**：`askModal` 改为对话流里的 `.perm-card`（普通文档流），不再
+  `position:fixed;inset:0` 遮罩——输入区、附件、停止键、滚动全程可用；三键为**本次放行 / 拒绝 /
+  始终允许本会话**，`y`/`n` 可用、`Esc`=拒绝；同一轮多个确认串行展示；**120s 超时按拒绝、停止优先于超时**。
+- **P0-4 `/api/state` 透出 `permissionSource`**（`explicit|preset|config`），与账本
+  `LEDGER_PERMISSION_SOURCE` / `resolveTurnPermission()` 同源，不另立判定；前端放进状态条悬浮详情。
+- **§144 测试卫生**：`test/smoke.js` §144 的写盘标记改为 `fs.mkdtempSync(os.tmpdir())` +
+  `finally` 清理，`.gitignore` 加 `.tmp-p144-*` 兜底。
+
+### 三、测试与门禁
+
+- 新套件 `test/model-names.js`（7 组断言）接入 `test/run-all.mjs` 与 `.github/workflows/ci.yml`
+  （仅 Linux 腿，带失败注解）：官方名显示/选中、未知新版本可选、默认值解析顺序、旧名别名、
+  custom 端点 0 次 `/models` 探测、离线兜底提示。
+- 新变异批 `batch35-modelnames` **9 条** + `batch36-ui-p0` **12 条**，总数 271 → **292**
+  （25 批，`doc-lint` ⑥ 守卫）；`smoke` 追加 §148（状态条六字段/错误卡/内联确认/来源/§144 卫生）。
+
 ## v0.6.15（2026-10-17）— 变异框架 fail-safe + 本地端点并发串行化 + 工具参数解析纯函数（含空值回填修复）
 
 > 补丁版，三件事分别来自**两次真实事故**与两轮已登记的审计债：① 变异在飞被扫描误报成"残留"、
