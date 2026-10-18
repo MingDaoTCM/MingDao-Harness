@@ -16734,4 +16734,371 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   ok('v0.6.21 §3.73 轨迹/子代理收纳：对话流每轮仅一行摘要（复用 .trace-row / 无内联 toolcard）+ 摘要与右栏轨迹同源（traceRoundForMsg→traceRoundView）+ 右栏轨迹/子Agent 两块可折叠（子代理行含名称/轮次/工具数/最后进展/状态，运行中随 progress.subagent 实时更新）+ <1180 右栏收起时对话流末尾 #traceDock 可见且与右栏同 views + 点摘要定位/展开该轮 + P0/P1 六项字段/错误卡/内联确认/⌘K/快捷键/会话设置/空态/主题/断点不回归');
 }
 
+// ---------- 153. v0.6.22 §3.78：界面骨架照设计稿重排（三栏 / 右栏四标签 / 顶栏瘦身 / 底部合并 / 设计稿逐值对照） ----------
+// 接 §151：负责人在设计稿（docs/design/ui-preview.html）里看到的是三栏骨架，实际 UI 仍是"顶栏一堆控件 +
+// 5 个并列面板 + 单列正文"。本节守住：①顶栏只留会话名/⌘K/设置（模型/预设/权限只在会话设置弹层里）；
+// ②右栏四个标签页装回原来的轨迹/子Agent/任务/仪表盘（id 与 handler 不丢，显隐由标签切换控制）；
+// ③侧栏 = 会话列表 + 工作空间 + 新建会话 + 搜索；④底部 = composer（含当前值胶囊）+ 状态条；
+// ⑤1280/1000/880 三档断点；⑥布局/组件 CSS 的期望值**从设计稿文件解析**后逐值比对（含颜色变量映射）；
+// ⑦--faint→--dim 的可访问性改动用相对亮度公式算对比度，关键次要文本必须解析出 --dim。
+{
+  const appSrc153 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+  const htmlSrc153 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  const repoRoot153 = path.join(srcDir, '..');
+  const designPath153 = path.join(repoRoot153, 'docs', 'design', 'ui-preview.html');
+  assert.ok(fs.existsSync(designPath153), '（前置）设计稿 docs/design/ui-preview.html 必须存在');
+  const designSrc153 = fs.readFileSync(designPath153, 'utf8');
+  const slice153 = (a, b) => {
+    const i = appSrc153.indexOf(a);
+    const j = appSrc153.indexOf(b, i + a.length);
+    assert.ok(i >= 0 && j > i, `（前置）应能定位 app.js 切片：${a}`);
+    return appSrc153.slice(i, j);
+  };
+  const cut153 = (src, open, close) => {
+    const i = src.indexOf(open);
+    const j = src.indexOf(close, i + open.length);
+    assert.ok(i >= 0 && j > i, `（前置）应能定位 HTML 片段：${open}`);
+    return src.slice(i, j + close.length);
+  };
+  // CSS 解析：selector → 声明表。同名选择器按**层叠**合并（后者同名声明覆盖前者），
+  // @media 里的规则键为 "@media <cond> <selector>"。期望值一律来自设计稿文件，不在断言里手写。
+  const parseDecls153 = (body) => {
+    const out = new Map();
+    for (const part of String(body).split(';')) {
+      const k = part.indexOf(':');
+      if (k < 0) continue;
+      const name = part.slice(0, k).trim();
+      const value = part.slice(k + 1).trim().replace(/\s+/g, ' ');
+      if (name) out.set(name, value);
+    }
+    return out;
+  };
+  const parseCss153 = (css) => {
+    const rules = new Map();
+    const clean = String(css).replace(/\/\*[\s\S]*?\*\//g, '');
+    const walk = (text, media) => {
+      let i = 0;
+      while (i < text.length) {
+        const open = text.indexOf('{', i);
+        if (open < 0) break;
+        const sel = text.slice(i, open).trim().replace(/\s+/g, ' ');
+        let depth = 1, j = open + 1;
+        while (j < text.length && depth) {
+          if (text[j] === '{') depth += 1;
+          else if (text[j] === '}') depth -= 1;
+          j += 1;
+        }
+        const body = text.slice(open + 1, j - 1);
+        if (sel.startsWith('@media') || sel.startsWith('@supports')) {
+          walk(body, sel);
+        } else if (sel && !sel.startsWith('@')) {
+          // 逗号分组选择器必须拆开：否则 `.sess .m,...{color:var(--dim)}` 覆盖不到单独的 .rsec-title。
+          const parts = [];
+          let depthParen = 0, cur = '';
+          for (const ch of sel) {
+            if (ch === '(') depthParen += 1;
+            if (ch === ')') depthParen -= 1;
+            if (ch === ',' && depthParen === 0) { parts.push(cur.trim()); cur = ''; continue; }
+            cur += ch;
+          }
+          if (cur.trim()) parts.push(cur.trim());
+          for (const one of parts) {
+            if (!one || one.startsWith('@')) continue;
+            const key = (media ? media + ' ' : '') + one;
+            const prev = rules.get(key) || new Map();
+            for (const [k2, v2] of parseDecls153(body)) prev.set(k2, v2);
+            rules.set(key, prev);
+          }
+        }
+        i = j;
+      }
+    };
+    walk(clean, '');
+    return rules;
+  };
+  const designCss153 = designSrc153.slice(designSrc153.indexOf('<style>') + 7, designSrc153.indexOf('</style>'));
+  const oursCss153 = htmlSrc153.slice(htmlSrc153.indexOf('<style>') + 7, htmlSrc153.indexOf('</style>'));
+  const D = parseCss153(designCss153);
+  const O = parseCss153(oursCss153);
+  const blockOf = (css, selector) => {
+    // 先去掉注释：:root 的说明注释里可能含 ':'，否则 parseDecls 会把首条声明吞进注释。
+    const clean = String(css).replace(/\/\*[\s\S]*?\*\//g, '');
+    const i = clean.indexOf(selector);
+    assert.ok(i >= 0, `（前置）缺少 ${selector}`);
+    const open = clean.indexOf('{', i);
+    const close = clean.indexOf('}', open);
+    return parseDecls153(clean.slice(open + 1, close));
+  };
+  const marker153 = oursCss153.indexOf('§3.78 布局骨架');
+  assert.ok(marker153 >= 0, 'index.html 必须存在 §3.78「设计稿搬运」样式块（注释可定位）');
+  const oursAfter153 = oursCss153.slice(marker153);
+  const ourTokenBlock = (selector) => blockOf(oursAfter153, selector);
+  const designRoot = (selector) => blockOf(designCss153, selector);
+
+  // —— ① 顶栏瘦身：只留会话名 / ⌘K / 设置；模型/预设/权限只在会话设置弹层 ——
+  {
+    const header = cut153(htmlSrc153, '<header', '</header>');
+    assert.ok(/class="[^"]*\btopbar\b/.test(header), '顶栏必须使用设计稿的 .topbar 骨架');
+    assert.ok(/id="crumbSession"/.test(header), '顶栏必须显示当前会话名（#crumbSession）');
+    assert.ok(/id="paletteBtn"/.test(header), '顶栏必须有 ⌘K 入口（#paletteBtn）');
+    assert.ok(/id="cfgBtn"/.test(header), '顶栏必须有设置入口（#cfgBtn）');
+    for (const id of ['modelSel', 'presetSel', 'permSel', 'wsSel', 'sessionSearch', 'sessions', 'newChat', 'sessMgrBtn', 'tasksBtn', 'costBadge']) {
+      assert.ok(!new RegExp(`id="${id}"`).test(header), `顶栏不得再堆控件：${id} 必须移出 header（模型/预设/权限只留在会话设置弹层）`);
+    }
+    const sheetBlock = htmlSrc153.slice(htmlSrc153.indexOf('id="sessSheet"'), htmlSrc153.indexOf('id="paletteMask"'));
+    for (const id of ['modelSel', 'presetSel', 'permSel']) {
+      assert.ok(new RegExp(`id="${id}"`).test(sheetBlock), `模型/预设/权限选择器必须只在会话设置弹层里（缺 #${id}）`);
+    }
+    assert.ok(/id="runChip"/.test(header), '窄屏右栏收起时顶栏仍需「运行」抽屉入口（#runChip）');
+    assert.ok(/id="crumbSession"/.test(htmlSrc153) && /function updateCrumb\(\)/.test(appSrc153),
+      '顶栏会话名必须由 updateCrumb() 随会话切换更新（不是写死的静态文本）');
+  }
+
+  // —— ② 右栏四个标签页：装回原面板，id/handler 不丢，显隐由标签控制 ——
+  {
+    const rpStart = htmlSrc153.indexOf('<aside id="runPanel"');
+    const rpEnd = htmlSrc153.indexOf('<!-- P1-5 会话设置弹层 -->');
+    assert.ok(rpStart > 0 && rpEnd > rpStart, '（前置）应能定位右栏 #runPanel 区块');
+    const rp = htmlSrc153.slice(rpStart, rpEnd);
+    const tabs = [...rp.matchAll(/data-tab="([a-z]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(tabs, ['traj', 'sub', 'tasks', 'dash'], `右栏必须有四个标签页（轨迹/子Agent/任务/仪表盘），实际：${tabs.join(',') || '(无)'}`);
+    for (const id of ['trajPanel', 'subPanel', 'tasksPanel', 'dashPanel']) {
+      assert.ok(new RegExp(`id="${id}"`).test(rp), `原并列面板 #${id} 必须搬进右栏（不得删除功能）`);
+    }
+    const traj = rp.slice(rp.indexOf('id="trajPanel"'), rp.indexOf('id="subPanel"'));
+    assert.ok(/id="rpTraceList"/.test(traj) && /id="tjList"/.test(traj), '轨迹标签页必须含 #rpTraceList（新视图）与 #tjList（原面板节点）');
+    const sub = rp.slice(rp.indexOf('id="subPanel"'), rp.indexOf('id="tasksPanel"'));
+    assert.ok(/id="sbList"/.test(sub) && /id="rpSubList"/.test(sub), '子Agent 标签页必须含 #sbList 与 #rpSubList');
+    const tasks = rp.slice(rp.indexOf('id="tasksPanel"'), rp.indexOf('id="dashPanel"'));
+    assert.ok(/id="tpList"/.test(tasks) && /id="tpCount"/.test(tasks), '任务标签页必须含 #tpList/#tpCount');
+    const dash = rp.slice(rp.indexOf('id="dashPanel"'));
+    assert.ok(/id="kpiToday"/.test(dash) && /class="[^"]*\bdash-body\b/.test(dash), '仪表盘标签页必须含原仪表盘核心节点');
+    const rks = [...rp.matchAll(/data-rk="([a-z]+)"/g)].map((m) => m[1]).sort();
+    assert.deepEqual(rks, ['cost', 'ctx', 'phase', 'tools', 'tps', 'ttft'], `右栏状态条六项不得被标签页挤掉，实际：${rks.join(',') || '(无)'}`);
+    const displaySrc = slice153('function railPanelDisplay(', 'function showRailTab(');
+    const railDisplay = new Function(displaySrc + '\nreturn railPanelDisplay;')();
+    assert.equal(railDisplay('traj', 'traj', true), 'flex', '选中的标签页必须显示');
+    assert.equal(railDisplay('traj', 'sub', true), 'none', '未选中的标签页必须隐藏（同一时刻只展示一个）');
+    assert.equal(railDisplay('tasks', 'tasks', true), 'flex', '切到任务页时任务面板必须显示');
+    assert.equal(railDisplay('dash', 'tasks', true), 'none', '切到仪表盘时任务面板必须隐藏');
+    assert.equal(railDisplay('traj', 'traj', false), 'none', '右栏收起时任何标签页都不得显示（不叠在正文上）');
+    const syncSrc = slice153('function syncPanelLayout()', "$('#tjClose')");
+    assert.ok(/railPanelDisplay\(railTab, tab, open\)/.test(syncSrc), '标签页显隐必须走 railPanelDisplay(railTab, tab, open)');
+    assert.ok(/RAIL_PANEL_IDS/.test(appSrc153) && /'trajPanel'/.test(appSrc153) && /'dashPanel'/.test(appSrc153),
+      '标签页必须映射到原面板 id（trajPanel/dashPanel…），不得重命名删除');
+    const tabsSrc = slice153('function initRailTabs()', 'function closeSideDrawer()');
+    assert.ok(/#rpTabs \[data-tab\]/.test(tabsSrc) && /showRailTab\(btn\.dataset\.tab\)/.test(tabsSrc), '标签按钮必须接到 showRailTab');
+    assert.ok(/ArrowLeft/.test(tabsSrc) && /ArrowRight/.test(tabsSrc), '标签页必须支持方向键切换（无障碍）');
+    for (const fn of ['openTraj(', 'renderSubPanel(', 'updateTasksPanel(', 'renderDashboard(']) {
+      assert.ok(appSrc153.includes('function ' + fn) || appSrc153.includes('async function ' + fn), `原面板 handler 必须保留：${fn}`);
+    }
+    for (const id of ['#tjList', '#sbList', '#tpList', '#dashPanel']) {
+      assert.ok(appSrc153.includes(`$('${id}')`), `原 handler 仍必须查询 ${id}（节点保留 id）`);
+    }
+    assert.ok(!/id="trajRail"/.test(htmlSrc153), '旧的左侧图标轨必须收编（不再与三栏骨架并列）');
+    assert.ok(/id="runPanel"[^>]*class="[^"]*\brunpanel\b/.test(htmlSrc153) || /class="[^"]*\brunpanel\b[^"]*"[^>]*id="runPanel"/.test(htmlSrc153),
+      '右栏必须使用设计稿的 .runpanel 骨架');
+  }
+
+  // —— ③ 侧栏：会话列表 + 工作空间 + 新建会话 + 搜索 ——
+  {
+    const side = cut153(htmlSrc153, '<aside class="sidebar"', '</aside>');
+    for (const id of ['sessionNav', 'wsSel', 'newChat', 'sessionSearch', 'sessMgrBtn']) {
+      assert.ok(new RegExp(`id="${id}"`).test(side), `侧栏必须有 #${id}（会话列表/工作空间/新建/搜索）`);
+    }
+    assert.ok(/class="[^"]*\bsession-scroll\b/.test(side), '侧栏会话列表必须使用设计稿的 .session-scroll');
+    assert.ok(/class="[^"]*\bws-row\b/.test(side) && /class="[^"]*\bnew-chat\b/.test(side),
+      '侧栏必须有工作空间行与「新对话」按钮（设计稿 .ws-row/.new-chat）');
+    assert.ok(/class="[^"]*\bside-foot\b/.test(side) && /class="[^"]*\bavatar\b/.test(side), '侧栏底部必须使用设计稿的 .side-foot/.avatar');
+    const navSrc = slice153('function renderSessionNav()', 'function updateCrumb()');
+    assert.ok(/sessionsCache/.test(navSrc), '会话列表必须复用既有 sessionsCache（不新造后端）');
+    assert.ok(/dispatchEvent\(new Event\('change'\)\)/.test(navSrc), '点会话必须走既有 #sessions change handler（不重写切换逻辑）');
+    assert.ok(/if\(!list\.length\)/.test(navSrc), '没有会话时必须给空态文案');
+    assert.ok(/renderSessionNav\(\)/.test(slice153('async function refreshSessions(q)', 'let searchTimer=null;')),
+      '会话增删/搜索后必须重绘侧栏列表（renderSessionNav）');
+  }
+
+  // —— ④ 底部：composer + 状态条合并成一条底部区（窄屏状态条折叠成一行） ——
+  {
+    const foot = cut153(htmlSrc153, '<footer class="foot"', '</footer>');
+    assert.ok(/class="[^"]*\bfoot-inner\b/.test(foot), '底部必须有设计稿的 .foot-inner 容器');
+    assert.ok(/id="composer"/.test(foot) && /class="[^"]*\bcomposer\b/.test(foot), '底部必须有 composer（输入区）');
+    assert.ok(/id="runStrip"/.test(foot) && /class="[^"]*\brunstrip\b/.test(foot), '底部必须有运行状态条（与输入区同一块）');
+    assert.ok(/id="statusBar"/.test(foot), '底部必须保留累计统计状态条 #statusBar');
+    const comp = foot.slice(foot.indexOf('id="composer"'), foot.indexOf('</footer>'));
+    assert.ok(/id="sessSettingsBtn"/.test(comp) && /id="chipModel"/.test(comp) && /id="chipPerm"/.test(comp),
+      'composer 必须含模型/权限「当前值」小胶囊（点开是会话设置）');
+    assert.ok(/id="input"/.test(comp) && /id="sendBtn"/.test(comp), 'composer 必须有输入框与发送按钮');
+    assert.ok(/class="[^"]*\binput-wrap\b/.test(comp) && /class="[^"]*\binput-meta\b/.test(comp) && /class="[^"]*\bsettings-btn\b/.test(comp) && /class="[^"]*\bsend\b/.test(comp),
+      'composer 的输入框/说明/会话设置/发送必须使用设计稿的 .input-wrap/.input-meta/.settings-btn/.send');
+    const keys = [...foot.matchAll(/data-k="([a-z]+)"/g)].map((m) => m[1]).sort();
+    assert.deepEqual(keys, ['cost', 'ctx', 'phase', 'tools', 'tps', 'ttft'], '状态条六字段（P0）不得在底部合并时丢失');
+    assert.ok(/class="[^"]*\bbar\b/.test(foot) && /id="rsCtxBar"/.test(foot), '状态条必须含设计稿的上下文进度条 .bar（#rsCtxBar）');
+  }
+
+  // —— ⑤ 三档断点：≥1180 三栏 / 900–1180 右栏抽屉 / <900 侧栏抽屉 ——
+  {
+    const layoutSrc = slice153('function layoutClassesFor(width)', '// P1 DOM 接线');
+    const L = new Function(layoutSrc + '\nreturn layoutClassesFor;')();
+    assert.deepEqual(L(1280), { narrow: false, narrowRun: false }, '≥1180 必须是三栏（右栏常驻、侧栏常驻）');
+    assert.deepEqual(L(1000), { narrow: false, narrowRun: true }, '900–1180 右栏必须收起为抽屉（narrowRun）');
+    assert.deepEqual(L(880), { narrow: true, narrowRun: true }, '<900 侧栏必须收起为抽屉（narrow）');
+    assert.ok(O.has('@media (max-width:1180px) #runPanel'), 'CSS 必须让 <1180 的右栏变成覆盖式抽屉');
+    assert.ok(O.has('@media (max-width:900px) .app'), 'CSS 必须让 <900 退成单列（侧栏抽屉）');
+    assert.ok(O.has('@media (max-width:900px) .sidebar') && /translateX\(-100%\)/.test(O.get('@media (max-width:900px) .sidebar').get('transform') || ''),
+      '<900 侧栏必须移出视口（抽屉），由 body.side-drawer 拉出');
+    assert.ok(O.has('body.side-drawer .sidebar') || O.has('@media (max-width:900px) body.side-drawer .sidebar'), 'CSS 必须有 body.side-drawer 的拉出规则');
+    assert.ok(/classList\.toggle\('run-drawer'/.test(appSrc153) && /classList\.toggle\('narrow-run'/.test(appSrc153),
+      '右栏抽屉必须由 body 类名 run-drawer/narrow-run 切换');
+    assert.ok(/classList\.toggle\('side-drawer'/.test(appSrc153), '侧栏抽屉必须由 body.side-drawer 切换');
+    assert.ok(/@media \(min-width:1181px\)[\s\S]*?body\.rail-collapsed \.app\{grid-template-columns:264px minmax\(0,1fr\) 0px\}/.test(oursCss153),
+      '宽屏收起右栏时列宽必须归零（不留 300px 空列）');
+  }
+
+  // —— ⑥ 设计稿逐值对照：期望值从设计稿解析，不手写 ——
+  {
+    // 6.1 颜色变量：设计稿变量 → 既有变量（映射后数值必须一致）
+    const PAIRS = [
+      ['--surface-0', '--bg'], ['--surface-1', '--bg2'], ['--surface-2', '--panel'], ['--surface-3', '--bg3'],
+      ['--line', '--border'], ['--t1', '--text'], ['--t2', '--dim'], ['--t3', '--faint'],
+      ['--accent', '--accent'], ['--accent-2', '--accent2'], ['--warn', '--warn'], ['--err', '--err'],
+      ['--user-bubble', '--user'], ['--code-bg', '--code'],
+    ];
+    const themes = [
+      ['dark', ':root[data-theme="dark"]', ':root'],
+      ['light', ':root[data-theme="light"]', ':root[data-theme="light"]'],
+    ];
+    for (const [theme, designSel, ourSel] of themes) {
+      const d = designRoot(designSel);
+      // 既有 token 在文件顶部的 :root 里，§3.78 追加块只补别名/新变量——按层叠合并后再比对。
+      const o = new Map([...blockOf(oursCss153, ourSel), ...ourTokenBlock(ourSel)]);
+      for (const [dv, ov] of PAIRS) {
+        assert.ok(d.has(dv), `（前置）设计稿 ${theme} 缺少 ${dv}`);
+        assert.ok(o.has(ov), `实现 ${theme} 缺少 ${ov}（设计稿 ${dv}=${d.get(dv)} 的映射目标）`);
+        assert.equal(o.get(ov), d.get(dv), `${theme}：设计稿 ${dv}=${d.get(dv)} → 实现 ${ov}=${o.get(ov)} 必须数值一致`);
+      }
+      // 设计稿有、既有变量没有的：新增变量照抄数值（不得自己调）
+      for (const v of ['--line-strong', '--ok', '--tint-warn', '--tint-err', '--tint-ok', '--sh-panel', '--sh-overlay', '--scroll', '--scroll-hover']) {
+        assert.ok(d.has(v), `（前置）设计稿 ${theme} 缺少 ${v}`);
+        assert.ok(o.has(v), `实现 ${theme} 缺少新增变量 ${v}`);
+        assert.equal(o.get(v), d.get(v), `${theme}：设计稿 ${v}=${d.get(v)} 必须照抄（实现 ${o.get(v)}）`);
+      }
+      assert.equal(o.get('--faint'), d.get('--t3'), `${theme}：--faint 必须保留设计稿 --t3 原值（不得为对比度偷偷改令牌）`);
+    }
+    // 6.1b 别名必须指向**正确的**既有变量（否则数值对得上、界面却用错层）
+    {
+      const alias = ourTokenBlock(':root');
+      for (const [dv, ov] of PAIRS) {
+        if (dv === ov) continue;
+        assert.equal(alias.get(dv), `var(${ov})`, `设计稿 ${dv} 必须别名到既有 ${ov}（实际 ${alias.get(dv)}）`);
+      }
+    }
+    // 6.2 字号 / 间距 / 圆角 / 动效令牌：照抄
+    const dBase = designRoot(':root');
+    const oBase = new Map([...blockOf(oursCss153, ':root'), ...ourTokenBlock(':root')]);
+    for (const v of ['--fs-caption', '--fs-meta', '--fs-body', '--fs-body-lg', '--fs-title',
+      '--sp-1', '--sp-2', '--sp-3', '--sp-4', '--sp-5', '--sp-6',
+      '--r-chip', '--r-card', '--r-field', '--r-sheet', '--r-pill', '--dur-fast', '--dur-slow', '--ease']) {
+      assert.ok(dBase.has(v), `（前置）设计稿缺少 ${v}`);
+      assert.equal(oBase.get(v), dBase.get(v), `设计稿 ${v}=${dBase.get(v)} 必须照抄（实现 ${oBase.get(v)}）`);
+    }
+    // 6.3 布局/组件规则：设计稿的**每一条声明**都必须在实现里逐字存在。
+    //     （a11y 覆盖的 7 个选择器跳过 color —— 见 ⑦：--faint→--dim 是有意偏离，其余属性仍逐字比对）
+    const A11Y_SKIP_COLOR = new Set(['.sess .m', '.kv dt', '.rsec-title', '.metric-box .l', '.metric-box .v small', '.runpanel-head .sub', '.run-foot', '.side-foot', '.sess .m .dot', '.turn-head .ai-dot', '.palette-foot']);
+    const LAYOUT = [
+      '.app', '.topbar', '.brand', '.crumb', '.top-actions', '.kbtn', '.kbd',
+      '.sidebar', '.ws-row', '.side-search input', '.new-chat', '.session-scroll', '.sess', '.side-foot', '.side-foot .avatar',
+      '.main', '.stream', '.divider', '.msg-user', '.bubble', '.turn', '.turn-head', '.turn-head .ai-dot', '.chip', '.chip.mono',
+      '.content', '.deliver', '.toolcard', '.permcard', '.err-card',
+      '.foot', '.foot-inner', '.runstrip', '.stopbtn', '.composer', '.attach', '.input-wrap', '#input', '.input-meta', '.settings-btn', '.send',
+      '.runpanel', '.runpanel-head', '.runpanel-body', '.rsec', '.rsec-title', '.kv', '.metrics', '.metric-box', '.ctxbar', '.ctx-legend', '.run-link', '.run-foot',
+      '.palette', '.popover', '.field', '.seg', '.sheet', '.draft-badge',
+    ];
+    for (const sel of LAYOUT) {
+      const d = D.get(sel);
+      const o = O.get(sel);
+      assert.ok(d, `（前置）设计稿缺少选择器 ${sel}`);
+      assert.ok(o, `实现缺少设计稿选择器 ${sel}（规则体必须原样搬运）`);
+      for (const [k, v] of d) {
+        if (A11Y_SKIP_COLOR.has(sel) && (k === 'color' || k === 'background' || k === 'background-color')) continue;
+        assert.equal(o.get(k), v, `${sel} 的 ${k} 必须与设计稿逐字一致：设计稿 ${v}，实现 ${o.get(k)}`);
+      }
+    }
+    // 6.4 关键 class 必须在 DOM 里真实使用（不是只抄 CSS）
+    for (const cls of ['.app', '.topbar', '.brand', '.crumb', '.sidebar', '.ws-row', '.session-scroll', '.new-chat', '.side-foot', '.avatar',
+      '.main', '.stream', '.foot', '.foot-inner', '.runstrip', '.composer', '.input-wrap', '.input-meta', '.settings-btn', '.send', '.attach',
+      '.runpanel', '.runpanel-head', '.runpanel-body', '.rsec', '.kv', '.metrics', '.metric-box', '.ctxbar', '.seg', '.chip', '.bubble',
+      '.palette', '.field', '.draft-badge', '.edit', '.popover', '.sheet', '.kbd', '.kbtn', '.deliver', '.cmd', '.ai-dot']) {
+      const name = cls.slice(1);
+      // 静态骨架或动态消息/权限卡都算（addUser / askCardHtml / newAiMsg 会创建 .bubble/.cmd/.ai-dot 等）
+      assert.ok(new RegExp(`className='[^']*\\b${name}\\b|class="[^"]*\\b${name}\\b`).test(appSrc153 + htmlSrc153),
+        `关键 class ${cls} 必须在 DOM 中真实存在（静态骨架或动态渲染，不是只抄 CSS）`);
+    }
+    // 6.5 设计稿规则块必须注明"来自设计稿"，且颜色走变量映射（不引入设计稿的裸色值）
+    assert.ok(/§3\.78 布局骨架[\s\S]*?设计稿/.test(oursCss153), '搬运块必须注明来源（§3.78 / docs/design/ui-preview.html）');
+    // 颜色必须走变量：设计稿选择器的规则体里不得残留裸色值（令牌定义块除外）
+    const ourBlockRules = parseCss153(oursAfter153);
+    for (const [sel] of D) {
+      if (sel === ':root' || sel.startsWith(':root[')) continue;
+      const rule = ourBlockRules.get(sel);
+      if (!rule) continue;
+      for (const [k, v] of rule) {
+        if (k.startsWith('--')) continue;
+        assert.ok(!/#[0-9a-f]{3,8}\b/i.test(v), `§3.78 规则 ${sel} 的 ${k} 不得直接写裸色值（${v}）——必须走变量`);
+      }
+    }
+    // 设计稿有、既有变量没有的颜色：新增变量照抄数值
+    const darkTokens = new Map([...blockOf(oursCss153, ':root'), ...ourTokenBlock(':root')]);
+    assert.equal(darkTokens.get('--on-accent'), '#06121a', '设计稿强调渐变文字色 #06121a 必须新增变量 --on-accent 照抄');
+    assert.equal(darkTokens.get('--btn-primary-bg'), '#F9FAFB', '设计稿主按钮底色 #F9FAFB 必须新增变量 --btn-primary-bg 照抄');
+    assert.equal(darkTokens.get('--btn-primary-fg'), '#0F1115', '设计稿主按钮文字色 #0F1115 必须新增变量 --btn-primary-fg 照抄');
+  }
+
+  // —— ⑦ 可访问性：--faint → --dim 的用法改动 + 用相对亮度公式算对比度 ——
+  {
+    const srgb = (/** @type {string} */ hex) => {
+      const c = String(hex).replace('#', '');
+      return [0, 2, 4].map((i) => parseInt(c.slice(i, i + 2), 16) / 255)
+        .map((x) => (x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4)));
+    };
+    const luminance = (hex) => {
+      const [r, g, b] = srgb(hex);
+      return 0.2126 * r + 0.7152 * g + 0.0722 * b;
+    };
+    const contrast = (a, b) => {
+      const l1 = luminance(a), l2 = luminance(b);
+      return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+    };
+    const dark = new Map([...blockOf(oursCss153, ':root'), ...ourTokenBlock(':root')]);
+    const light = new Map([...blockOf(oursCss153, ':root[data-theme="light"]'), ...ourTokenBlock(':root[data-theme="light"]')]);
+    // 关键次要文本（--dim）在四种底色上都必须 ≥4.5:1
+    for (const [fg, bg, label] of [
+      ['--dim', '--bg3', '--dim on --bg3'], ['--dim', '--panel', '--dim on --panel'],
+      ['--dim', '--bg2', '--dim on --bg2'], ['--dim', '--bg', '--dim on --bg'],
+    ]) {
+      const ratio = contrast(dark.get(fg), dark.get(bg));
+      assert.ok(ratio >= 4.5, `${label} 必须 ≥4.5:1（实际 ${ratio.toFixed(2)}:1；公式：WCAG 相对亮度 (L1+0.05)/(L2+0.05)）`);
+    }
+    for (const [fg, bg, label] of [['--dim', '--bg3', '亮色 --dim on --bg3'], ['--dim', '--panel', '亮色 --dim on --panel']]) {
+      const ratio = contrast(light.get(fg), light.get(bg));
+      assert.ok(ratio >= 4.5, `${label} 必须 ≥4.5:1（实际 ${ratio.toFixed(2)}:1）`);
+    }
+    // --faint 在 --bg3/--panel 上确实不达标——这是"改用法而不是改令牌"的依据
+    assert.ok(contrast(dark.get('--faint'), dark.get('--bg3')) < 4.5, '--faint 在 --bg3 上必须仍 <4.5:1（改的是用法，不是令牌）');
+    assert.ok(contrast(dark.get('--faint'), dark.get('--panel')) < 4.5, '--faint 在 --panel 上必须仍 <4.5:1（改的是用法，不是令牌）');
+    // 承载信息的次要文本必须解析出 --dim（纯装饰的分隔符/三角保留 --faint）
+    for (const sel of ['.ss-src', '.ss-head .ss-sub', '.ss-field .ss-scope', '#statusBar', '#hint', '.rsec-title', '.kv dt', '.metric-box .l',
+      '.sess .m', '.tr-sub-meta', '.tr-sub-stats', '.td-meta', '.sess-empty', '.palette-foot', '.shortcut-note', '.cfg-hint', '.diag-note']) {
+      const rule = O.get(sel);
+      assert.ok(rule, `（前置）缺少选择器 ${sel}`);
+      assert.equal(rule.get('color'), 'var(--dim)', `${sel} 承载信息，颜色必须是 var(--dim)（--faint 只留装饰）`);
+    }
+    assert.ok(/§3\.78 无障碍覆盖/.test(oursCss153), '§3.78 必须有「无障碍覆盖」样式块（说明 --faint 仅作装饰）');
+    assert.ok(/--faint:#81858C/.test(htmlSrc153) && /--dim:#ADB2B8/.test(htmlSrc153), '不得为对比度改主题令牌原值');
+  }
+
+  ok('v0.6.22 §3.78 界面骨架：顶栏只留会话名/⌘K/设置（模型/预设/权限只在会话设置）+ 右栏四标签页装回轨迹/子Agent/任务/仪表盘（id 与 handler 不丢、railPanelDisplay 控制显隐）+ 侧栏会话列表/工作空间/新建/搜索（复用 sessionsCache 与 #sessions change）+ 底部 composer 胶囊与状态条六项同块 + 1280/1000/880 三档断点（run-drawer/side-drawer）+ 设计稿 CSS 逐值对照（颜色变量映射/新变量照抄/布局组件声明逐字一致）+ --faint→--dim 对比度（WCAG 相对亮度公式，关键次要文本 ≥4.5:1）');
+}
+
+
 process.exit(0);

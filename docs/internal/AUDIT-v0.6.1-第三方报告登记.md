@@ -3936,3 +3936,198 @@ test/** 里出现固定四位监听端口 1 处：test/smoke.js:123 → listen(4
   spawn 的 TOCTOU 小窗口，由 `startWeb` 的 EADDRINUSE 重试兜底。
 - 未改 `src/**`、`presets/**`、`desktop/**`、`ide/**`、`test/mutate/README.md` 计数行；未 tag、
   未改版本号、未 publish、未动官网。
+
+## 3.78 已补（v0.6.22 开发线：界面骨架照设计稿重排——三栏 / 右栏四标签 / 顶栏瘦身 / 底部合并）
+
+**来源**：负责人打开设计稿 [`docs/design/ui-preview.html`](../../docs/design/ui-preview.html) 后问"UI 怎么不是这个样子"。
+根因是此前只做**增量功能**（§3.68 P0、§3.70 P1、§3.73 收纳、§3.77 P2），没有做**布局重排**：
+页面仍是"52px 顶栏塞 11 个控件 + 左侧图标轨 + 4 个固定面板 + 单列正文"，与设计稿的三栏骨架是两套结构。
+
+**做法（严格照设计稿）**：把设计稿的 `<style>` 里**布局/组件规则体原样搬运**进 `src/web/index.html`
+（新增 §3.78 样式块，约 760 行），只做一处改动——设计稿的令牌变量映射到既有变量；设计稿有、既有变量没有的
+**新增变量并照抄数值**。class 名与设计稿一致，既有 id 全部保留（`#chat`/`#composer`/`#statusBar`/`#runPanel`/
+`#trajPanel`/`#sbList`/`#tpList`/`#dashPanel`…），新 class 加到这些节点上。`test/smoke.js` §153 的期望值
+**从设计稿文件解析**后逐值比对，不在断言里手写。
+
+### 一、新骨架装了什么
+
+1. **三栏**：`.app` = `264px minmax(0,1fr) 300px`、行 `48px minmax(0,1fr) auto`、
+   areas `"top top top" / "side main run" / "side foot run"`（与设计稿逐字一致）。
+2. **顶栏只留"我在哪 / 怎么跳 / 去哪改"**：`.topbar` 里是 `.brand` + `.crumb`（`#crumbWs › #crumbSession`）
+   + `.draft-badge`（`#draftBadge`，输入框有未发送文字时才显示）+ `#paletteBtn`（⌘K，`.kbtn`+`.kbd`）
+   + `#runChip`（仅右栏收起/窄屏出现）+ `#cfgBtn`（设置）。`#modelSel/#presetSel/#permSel` 只在
+   **会话设置弹层** `#sessSheet.popover` 里；`#wsSel/#sessionSearch/#sessions/#newChat/#sessMgrBtn/#costBadge/
+   #envBadge/#themeBtn` 移入侧栏底部/工作空间行。
+3. **侧栏**（`.sidebar`）：`.ws-row`（`#wsSel`）+ `.side-search`（`#sessionSearch`）+ `.new-chat`（`#newChat`）
+   + `.session-scroll#sessionNav`（`renderSessionNav()` 消费既有 `sessionsCache`，点击仍走既有 `#sessions`
+   change handler）+ `.side-foot`（`.avatar`、`#envBadge`、`#costBadge`、`#sessMgrBtn`、`#themeBtn`）。
+4. **底部一条区**：`.foot > .foot-inner` 里依次是 `#runStrip.runstrip`（六项 `data-k` + `.bar#rsCtxBar` +
+   `.stopbtn#stripStop`）、`#composer.composer`（`.attach` + `.input-wrap`（`#input` + `.input-meta`）+
+   `.settings-btn#sessSettingsBtn`（当前模型/权限胶囊）+ `.send#sendBtn`）、`#hint`、`#statusBar`。
+5. **右栏**（`#runPanel.runpanel`）：`.runpanel-head`（live + 本轮 + 收起）→ 会话配置 `.kv`（含 `.edit`「改」）
+   → 本轮数据 `.metrics`（六项 `data-rk` + `.ctxbar#rpCtxBar`）→ 四个标签页 `#rpTabs.seg`
+   （轨迹 / 子Agent / 任务 / 仪表盘，复用设计稿 `.seg` 组件）。
+6. **原 5 个并列面板的节点去向（id 与 handler 全保留）**：
+   - `#trajPanel` → 右栏「轨迹」标签页（内含 `#rpTraceList` §3.73 视图 + `#tjList` 原逐条列表，后者收进
+     `<details class="run-legacy">` 默认折叠）；`#trajRailBtn` 变成"轨迹"标签按钮（id 保留）。
+   - `#subPanel` → 「子Agent」标签页（`#rpSubList` + `#sbList`）；`#subRailBtn`/`#subBadge` 变成标签按钮/徽章。
+   - `#tasksPanel` → 「任务」标签页（`#tpList`/`#tpCount`）；`#tasksBtn` 变成"任务"标签按钮。
+   - `#dashPanel` → 「仪表盘」标签页（`#kpiToday/#trendChart/#dashModels…` 原样）；`#costBadge` 点开即切到该页。
+   - 旧的 `#trajRail` 图标轨移除（两个按钮的 id 保留在右栏标签栏里）。
+   - handler 未重写：`openTraj()/renderSubPanel()/updateTasksPanel()/renderDashboard()` 仍按原 id 查节点；
+     显隐改由纯函数 `railPanelDisplay(railTab, tab, open)` + `syncPanelLayout()` 统一控制（同一时刻只显示一页）。
+7. **断点**：≥1180 三栏；900–1180 右栏变 `position:fixed` 覆盖式抽屉（`body.run-drawer`）；
+   <900 侧栏变抽屉（`body.side-drawer`，顶栏 `#sideToggle` 开关；Esc 分层关闭先关侧栏再关右栏）。
+   宽屏收起右栏时 `body.rail-collapsed` 把第 3 列归零，不留 300px 空列。
+
+### 二、class / 变量映射表（设计稿 → 实现）
+
+**颜色变量（暗色；亮色同表逐项一致）**
+
+| 设计稿变量 | 设计稿值 | 我们的变量 | 我们的值 | 是否一致 |
+|---|---|---|---|---|
+| `--surface-0` | `#151517` | `--bg` | `#151517` | ✅ |
+| `--surface-1` | `#1B1B1C` | `--bg2` | `#1B1B1C` | ✅ |
+| `--surface-2` | `#2C2C2E` | `--panel` | `#2C2C2E` | ✅ |
+| `--surface-3` | `#353638` | `--bg3` | `#353638` | ✅ |
+| `--line` | `rgba(255,255,255,.12)` | `--border` | 同值 | ✅ |
+| `--t1` | `#F9FAFB` | `--text` | `#F9FAFB` | ✅ |
+| `--t2` | `#ADB2B8` | `--dim` | `#ADB2B8` | ✅ |
+| `--t3` | `#81858C` | `--faint` | `#81858C` | ✅ |
+| `--accent` | `#3ddc97` | `--accent` | `#3ddc97` | ✅ |
+| `--accent-2` | `#22b8cf` | `--accent2` | `#22b8cf` | ✅ |
+| `--warn` | `#F59E0B` | `--warn` | `#F59E0B` | ✅ |
+| `--err` | `#F25A5A` | `--err` | `#F25A5A` | ✅ |
+| `--user-bubble` | `#2C2C2E` | `--user` | `#2C2C2E` | ✅ |
+| `--code-bg` | `#1B1B1C` | `--code` | `#1B1B1C` | ✅ |
+
+**设计稿有、既有变量没有的：新增变量并照抄数值（不改一个字符）**
+
+| 变量 | 暗色 | 亮色 | 来源 |
+|---|---|---|---|
+| `--line-strong` | `rgba(255,255,255,.18)` | `#D4D4D8` | ui-preview §0 |
+| `--ok` | `#3ddc97` | `#0E9F6E` | 同上 |
+| `--tint-warn/--tint-err/--tint-ok` | `rgba(245,158,11,.08)/rgba(242,90,90,.08)/rgba(61,220,151,.08)` | `rgba(180,83,9,.07)/rgba(220,38,38,.06)/rgba(14,159,110,.08)` | 同上 |
+| `--sh-panel/--sh-overlay` | `0 8px 24px rgba(0,0,0,.35)` / `0 16px 48px rgba(0,0,0,.55)` | `0 8px 24px rgba(24,24,27,.10)` / `0 16px 48px rgba(24,24,27,.18)` | 同上 |
+| `--scroll/--scroll-hover` | `#3C3C3D` / `#545557` | `#D4D4D8` / `#A1A1AA` | 同上 |
+| `--on-accent` | `#06121a` | `#06121a` | 设计稿规则体（强调渐变上的文字） |
+| `--btn-primary-bg/--btn-primary-fg` | `#F9FAFB` / `#0F1115` | `#18181B` / `#FFFFFF` | 设计稿规则体（主按钮） |
+| 字号/间距/圆角/动效 | `--fs-caption:12px … --sp-6:32px、--r-*、--dur-*、--ease` | 同值 | ui-preview §0 |
+
+**结构 / 组件 class**
+
+| 设计稿 class | 落在哪 | id 是否保留 |
+|---|---|---|
+| `.app` | 新骨架根节点 `<div class="app">` | — |
+| `.topbar` | `<header class="topbar" id="topBar">` | — |
+| `.sidebar` | `<aside class="sidebar" id="sidebar">` | — |
+| `.main` / `.stream` | `<main class="main">` / `<div class="stream">` | `#chat`、`#traceDock` 保留 |
+| `.foot` / `.foot-inner` | `<footer class="foot">` | `#composer/#runStrip/#statusBar` 保留 |
+| `.runpanel` | `<aside id="runPanel" class="runpanel">` | ✅ |
+| `.composer` | `#composer` | ✅ |
+| `.runstrip` | `#runStrip` | ✅ |
+| `.bar` / `.ctxbar` | `#rsCtxBar` / `#rpCtxBar` | ✅ |
+| `.metric-box` / `.kv` / `.rsec` | 右栏本轮数据/会话配置 | `data-rk` 六项保留 |
+| `.chip` / `.chip.mono` | 消息头模型 chip、右栏 API id | — |
+| `.bubble` / `.ai-dot` / `.deliver` | 用户气泡 / 助手消息头 / 交付物（既有渲染器） | — |
+| `.session-scroll` / `.ws-row` / `.new-chat` / `.side-foot` / `.avatar` | 侧栏 | `#sessionNav/#wsSel/#newChat` 等保留 |
+| `.settings-btn` / `.input-wrap` / `.input-meta` / `.send` / `.attach` | 底部 composer | ✅ |
+| `.seg` | `#rpTabs`（四个标签）与 `#ssPermSeg`（权限三档） | ✅ |
+| `.popover` / `.field` / `.mask` / `.palette` / `.sheet` | 会话设置 / 设置字段 / 三个浮层 / 快捷键表 | `#sessSheet/#paletteMask/#shortcutMask` 保留 |
+| `.draft-badge` | `#draftBadge`（输入框有字时显示） | 新增 |
+| `.cmd` / `.edit` / `.kbd` / `.kbtn` / `.crumb` | 权限卡问题正文 / 右栏「改」/ 顶栏快捷键/按钮/面包屑 | — |
+
+### 三、逐项对照（设计稿元素 → 实现位置 → 是否一致）
+
+| # | 设计稿元素 | 实现位置 | 结论 |
+|---|---|---|---|
+| 1 | 三栏 grid（264/1fr/300、48px 顶栏、areas） | `index.html` §3.78 `.app` | ✅ 逐字一致（§153 从设计稿解析比对） |
+| 2 | 侧栏：工作空间行 / 搜索 / 新对话 / 会话列表 / 底部 | 同上 `.sidebar` 结构 | ✅ 结构一致；会话项点击映射到既有 handler |
+| 3 | 会话分组「今天/昨天/更早」+ 每项「N 步 · 时间」 | — | ❌ 未做：`/api/sessions` 只返回 `{file,label}`，没有步数与相对时间；不伪造 |
+| 4 | 顶栏 brand / crumb / draft-badge / ⌘K / run chip / 设置 | `.topbar` | ✅（品牌 mark 用文字 "M" 代替设计稿 SVG：无外链图标约束下取同一视觉） |
+| 5 | 顶栏「主题」图标按钮 | 侧栏底部 `#themeBtn`（保留 id 与能力） | ⚠️ 位置不同：任务要求顶栏只留会话名/⌘K/设置；主题仍在「外观」设置里可切 |
+| 6 | 用户气泡圆角 16/16/4/16、`--fs-body-lg` | `.msg-user .bubble`（选择器适配，声明照抄） | ✅ |
+| 7 | 助手消息头（`.turn-head` + `.ai-dot` + 模型 chip） | `newAiMsg()` | ⚠️ 部分：有 ai-dot + 模型 `.chip.mono`；**时间戳/权限 chip 未做**（历史消息无该数据） |
+| 8 | 「今天 14:05 · 仓库」分隔行 | — | ❌ 未做（无轮次时间轴数据，不伪造） |
+| 9 | 思考过程 `details.fold` | 既有 `.reasoning` 组件（P1） | ⚠️ 组件 class 未改：`.fold` 样式已搬但未替换既有折叠卡（避免破坏 §149/§151 断言），视觉沿用同一折叠语言 |
+| 10 | 对话流内联工具时间线卡 | §3.73 已收纳到右栏「轨迹」标签页 | ⚠️ 有意不同：负责人上一轮（§3.73）明确要求"对话流每轮只留一行摘要"；`.toolcard` 样式已搬，节点在右栏 |
+| 11 | 错误折叠卡 `.err-card` | P0 组件（选择器保持 `.err-card`） | ✅ 设计稿声明逐字覆盖（含 `.err-hint` 的 `white-space:pre-line`） |
+| 12 | 内联权限确认 `.permcard`（`.cmd` / 三档 `.btn`） | `askCardHtml()`（`perm-card permcard`） | ✅ 结构/class 对齐；倒计时在 `.perm-count`（同一数据） |
+| 13 | 正文排版 `.content` | 既有渲染器 + 设计稿 `.content` 规则 | ✅ |
+| 14 | 交付物 `.deliver` | 既有渲染器 | ✅ |
+| 15 | 底部 `.runstrip` 六项 + 分隔符 + 上下文 `.bar` + 停止 | `#runStrip` | ✅（六项 `data-k` 原样；新增 `.bar#rsCtxBar` 与 `.stopbtn#stripStop`） |
+| 16 | `.composer` 输入区 + 附件 + 当前值胶囊 + 发送 | `#composer` | ✅（`.settings-btn` 印模型/权限；预设仍在弹层，与设计稿一致） |
+| 17 | 右栏 `.runpanel` 头 / 会话配置 `.kv` / 本轮数据 `.metrics` | `#runPanel` | ✅ 数值逐字；⚠️ 多一个「阶段」盒子（P1 §149 要求 `data-rk` 六项含 phase，设计稿把阶段放在底栏） |
+| 18 | 右栏「产出」区块（交付物/工具明细/子 Agent 记录链接） | — | ❌ 未做：任务要求把 5 个面板收编成 4 个标签页（轨迹/子Agent/任务/仪表盘），产出改由「轨迹」「子Agent」两页承担；未再加一块 |
+| 19 | 右栏标签页 | 设计稿没有标签页（是三个 `.rsec` 区块） | ⚠️ 有意新增：任务要求；外观复用设计稿 `.seg` 组件 |
+| 20 | 命令面板 `.palette` / `.mask` | `#paletteMask` | ✅ |
+| 21 | 会话设置 `.popover` / `.field` / `.seg` | `#sessSheet` | ✅ 定位 `right:320px;bottom:96px;width:400px` 照抄；<1180 改 `right:24px` |
+| 22 | 快捷键表 `.sheet` | `#shortcutMask .sheet` | ✅ |
+| 23 | toast（`#toastWrap` / `.toast`） | 只搬了样式 | ❌ 未接：产品当前没有 toast 产出（不伪造调用点） |
+| 24 | 明暗两套令牌 | `:root` / `:root[data-theme="light"]` | ✅ 14 个映射 + 9 个新增变量逐值一致 |
+| 25 | 1180 断点：侧栏 232px、右栏收起为抽屉 | CSS 媒体查询 + `body.run-drawer` | ✅ |
+| 26 | 980 断点：侧栏图标化（64px 图标轨） | — | ⚠️ 有意不同：任务要求 **<900 侧栏变抽屉**，未做设计稿的"图标化"（两者都保留左侧可达性） |
+| 27 | 720 断点：隐藏 crumb | — | ❌ 未做（<900 已由抽屉承接；crumb 靠 `text-overflow` 收缩） |
+| 28 | 折叠动画（grid 列宽过渡 / 右栏 opacity） | `.app` transition 已搬 | ⚠️ 部分：右栏收起用 `hidden`（display:none），没有设计稿的 opacity 过渡；`body.run-collapsed` 类未使用（改用 `rail-collapsed`） |
+| 29 | 滚动条 / reduced-motion | 设计稿规则原样 | ✅ |
+
+### 四、`--faint` → `--dim`（可访问性；不改令牌，只改用法）
+
+**公式**：sRGB 通道 `c`（0–255）先除以 255；`c ≤ 0.03928` 时线性化 `c/12.92`，否则
+`((c+0.055)/1.055)^2.4`；相对亮度 `L = 0.2126R + 0.7152G + 0.0722B`；
+对比度 `(Lmax+0.05)/(Lmin+0.05)`（WCAG 2.x）。§153 里用同一公式现算，不写死期望值。
+
+| 位置 | 底色 | 改前（`--faint`） | 改后（`--dim`） |
+|---|---|---|---|
+| `.ss-src` / `.ss-head .ss-sub` / `.ss-field .ss-scope`（来源/作用域） | `--panel` | 3.76:1 ❌ | 6.53:1 ✅ |
+| `.metric-box .l` / `.tr-sub-meta` / `.tr-sub-stats`（指标标签/子代理元信息） | `--bg3` | 3.26:1 ❌ | 5.67:1 ✅ |
+| `#statusBar` / `#hint` / `.rsec-title` / `.kv dt` / `.sess .m` / `.sess-empty` / `.cfg-hint` | `--bg2` | 4.64:1（勉强） | 8.06:1 ✅ |
+| `.palette-foot` / `.palette-empty` / `.pitem .hint/.scope` | `--panel` | 3.76:1 ❌ | 6.53:1 ✅ |
+| 亮色 `.ss-src` 等 | `--bg3` | 4.21:1 ❌ | 6.73:1 ✅ |
+
+改动范围：**61 条 CSS 规则 + 2 处行内 style** 的 `color:var(--faint)` → `var(--dim)`（时间戳/来源/计数/
+说明/空态/标签等承载信息的位置）；分隔符、三角、禁用占位等纯装饰仍保留 `--faint`。`--faint`/`--dim`
+令牌原值未动（§153 有断言）。这是对设计稿 `--t3` 用法的**有意偏离**，已在 CSS 里就地注明。
+
+### 五、断言与变异
+
+- `test/smoke.js` **只追加 §153**（编号沿用任务约定；当前文件里 §152 未使用）：
+  ①顶栏不含模型/预设/权限等 10 个控件，且三者只在 `#sessSheet`；②右栏四标签页 `data-tab` +
+  四个原面板 id + `#rpTraceList/#tjList/#sbList/#rpSubList/#tpList/#tpCount/#kpiToday` 仍在 +
+  `railPanelDisplay` 行为断言 + handler 仍查询原 id；③侧栏五件套 + `renderSessionNav` 复用 `sessionsCache`
+  与 `#sessions` change；④底部 composer 胶囊 + 状态条六项 + `.bar`；⑤1280/1000/880 断点与
+  `run-drawer`/`side-drawer` 类名；⑥**从设计稿解析**颜色映射/新增变量/字号间距圆角/59 个选择器的
+  逐声明比对 + 关键 class 真实存在 + 规则里无裸色值；⑦对比度现算（关键次要文本 ≥4.5:1，`--faint`
+  在 `--bg3/--panel` 上仍 <4.5:1）。
+- 新建 `test/mutate/batch43-ui-shell.mjs`：**12/12 全中**（顶栏放回模型选择器 / 删任务面板 / 标签页恒显 /
+  断点漂移 / 侧栏缺会话列表 / 底部丢 composer / 右栏状态条少一项 / 顶栏丢会话名 / 三栏列宽漂移 /
+  颜色别名指错层 / 来源行回退 `--faint` / 侧栏缺新建会话）。
+- `test/mutate/README.md` 计数行按本提交树 `doc-lint` 实测值：**369**（357 + 12）。
+
+### 六、验证
+
+- `npm run typecheck` ✅
+- `node test/smoke.js`（单独跑）✅ —— 含新增 §153。
+- `node test/e2e-web.js`（24 项）✅、`node test/e2e-local.js`（17 项）✅、
+  `node test/ui-p2.js`（6 项）✅、`node test/api-contracts.js`（8 项）✅。
+- `node test/mutate/batch43-ui-shell.mjs`：12/12；`node test/mutate/run.mjs --allow-dirty`：32 批次 /
+  369 条变异全中、0 逃逸（全局锁正常获取/释放，跑前 `pgrep -f "test/mutate"` 为空）。
+- `node scripts/doc-lint.mjs` ✅（⑥ 实际 369 = README 369）。
+
+### 七、边界与未做（如实）
+
+- **会话分组/副标题、轮次时间戳、权限 chip**：`/api/sessions` 与历史消息没有这些字段，未伪造；
+  要做得先扩后端（本轮不允许改 `src/web/server.js` 之外的接口面，且任务要求"不新造后端"）。
+- **对话流内联工具卡**：设计稿有，但 §3.73 的决定是"每轮一行摘要、详情进右栏"；两者不能同时满足，
+  本轮沿用 §3.73（样式已搬，节点在右栏）。
+- **折叠动画/右栏 opacity 过渡**：右栏收起仍是 `hidden`（display:none），没有设计稿的 opacity 过渡；
+  未为了动画改显隐机制（会与 `traceDockVisible` / 断点判据耦合）。
+- **toast 组件**：只搬了 CSS，产品当前没有 toast 产出点，不伪造。
+- **980 图标化侧栏 / 720 隐藏 crumb**：按任务要求改成 <900 抽屉，980/720 两条设计稿规则未落地。
+- **`--faint` 有意偏离设计稿 `--t3`**：承载信息的次要文本统一 `--dim`（对比度 3.26/3.76 → 5.67/6.53），
+  设计稿原样会在 `--bg3/--panel` 上低于 4.5:1；这是唯一一处"数值不跟设计稿"的地方，理由与对照见第四节。
+- **`<main>` 字面量**：§151 用 `htmlSrc.indexOf('<main>')` 切主区；新骨架是 `<main class="main">`，
+  为保持该断言仍能取到主区片段，在 `<main>` 后保留一行含 `<main>` 的说明注释（`#traceDock` 确实在
+  `<main>` 内，位置未变）。
+- 未改 `src/providers/**`、`src/agent.js`、`src/models.js`、`test/ui-p2.js`、`presets/**`、`desktop/**`、
+  `ide/**`；未新增轮询、未引入外部库；未 tag、未改版本号、未 publish、未动官网。

@@ -240,7 +240,13 @@ let currentSession = null, thinking = null;
 
 
 
-function newAiMsg(){ const el=document.createElement('div'); el.className='msg-ai'; chatEl.appendChild(el); scrollBottom(); return el; }
+function newAiMsg(){
+  const el=document.createElement('div'); el.className='msg-ai turn';
+  const head=document.createElement('div'); head.className='turn-head';
+  head.innerHTML='<span class="ai-dot" aria-hidden="true">M</span><b>助手</b><span class="chip mono">'+esc(runState.turnModel||runState.modelName||'')+'</span>';
+  el.appendChild(head);
+  chatEl.appendChild(el); scrollBottom(); return el;
+}
 function aiContent(msg){ const c=msg.querySelector('.content'); return c || (()=>{const d=document.createElement('div');d.className='content';msg.appendChild(d);return d;})(); }
 function addReasoning(msg){ const d=document.createElement('details'); d.className='reasoning'; d.innerHTML='<summary>思考过程</summary><div class="body"></div>'; msg.appendChild(d); return d.querySelector('.body'); }
 
@@ -333,11 +339,11 @@ function askCardHtml(ev){
   const q=String((ev&&ev.question)||'');
   const opts=Array.isArray(ev&&ev.options)&&ev.options.length?ev.options:null;
   const acts=opts
-    ? opts.map((/** @type {any} */ o)=>'<button data-a="'+esc(o.value)+'">'+esc(o.label||o.value)+'</button>').join('')+'<button class="danger" data-a="deny">拒绝</button>'
-    : '<button class="primary" data-a="allow">本次放行</button><button class="danger" data-a="deny">拒绝</button><button class="perm-always" data-a="always">始终允许本会话</button>';
-  return '<div class="perm-head">🔐 需要你确认<span class="perm-scope">本会话</span></div>'
-    +'<div class="perm-q">'+esc(q)+'</div>'
-    +'<div class="perm-acts">'+acts+'<button class="perm-stop" data-stop="1" title="停止本轮（与输入区的「■ 停止」同一条出口）">■ 停止本轮</button></div>'
+    ? opts.map((/** @type {any} */ o)=>'<button class="btn" data-a="'+esc(o.value)+'">'+esc(o.label||o.value)+'</button>').join('')+'<button class="btn danger" data-a="deny">拒绝</button>'
+    : '<button class="btn primary" data-a="allow">本次放行</button><button class="btn danger" data-a="deny">拒绝</button><button class="btn ghost perm-always" data-a="always">始终允许本会话</button>';
+  return '<div class="perm-head permcard-head">🔐 需要你确认<span class="perm-scope">本会话</span></div>'
+    +'<div class="perm-q cmd">'+esc(q)+'</div>'
+    +'<div class="perm-acts">'+acts+'<button class="btn ghost perm-stop" data-stop="1" title="停止本轮（与输入区的「■ 停止」同一条出口）">■ 停止本轮</button></div>'
     +'<div class="perm-note">「始终允许本会话」只对<b>本会话</b>内相同确认（同一工具与参数）自动放行，不写入 config.json；刷新页面或新会话后失效。键盘：y = 本次放行，n = 拒绝，Esc = 拒绝。</div>'
     +'<div class="perm-count" data-count>等待 02:00 后按「拒绝」处理</div>';
 }
@@ -367,6 +373,7 @@ function mountNextAsk(){
   while(askQueue.length){ const e=askQueue.shift(); if(!e.settled){ activeAsk=e; break; } }
   const entry=activeAsk; if(!entry) return;
   const card=document.createElement('div'); card.className='perm-card';
+  card.classList.add('permcard');
   card.setAttribute('role','group'); card.setAttribute('aria-label','权限确认（不遮挡输入区）');
   card.innerHTML=askCardHtml(entry.ev);
   entry.card=card;
@@ -477,7 +484,7 @@ async function send(){
     stopTurn(curTaskId).catch(()=>{});
   },120000); };
   arm();
-  input.value=''; input.style.height='44px';
+  input.value=''; input.style.height='44px'; updateDraftBadge();
   const payload={message:text,file:currentSession};
   // v0.4.0 Agent Preset：选择器选中的预设随本轮发送（服务端按会话应用一次）
   const presetVal=$('#presetSel')?.value;
@@ -757,6 +764,14 @@ function renderWorkStatus(){
   set('#rsCtx', view.ctx);
   set('#rsTools', view.tools);
   set('#rsCost', view.cost);
+  const ctxBar=$('#rsCtxBar');
+  if(ctxBar){
+    const usedCtx=Math.max(0, Number(runState.contextUsed)||0);
+    const totalCtx=Number(runState.contextTotal)||0;
+    ctxBar.style.width=(totalCtx?Math.min(100, Math.round((usedCtx/totalCtx)*100)):0)+'%';
+  }
+  const rsDot=$('#rsDot');
+  if(rsDot) rsDot.className='pdot rs-dot '+(view.phase==='已中止'?'stop':(generating?'acting':'idle'));
   el.classList.toggle('rs-busy', generating && view.phase!=='已中止');
   el.classList.toggle('rs-acting', view.phase==='执行工具');
   el.classList.toggle('rs-aborted', view.phase==='已中止');
@@ -1541,6 +1556,12 @@ let workingDirCache = '';
 let compactAvailable = false; // Web 端当前没有 /api/compact；为 true 时才显示压缩入口
 let runPanelOpen = false;
 let responsiveInitialized = false;
+// §3.78：右栏标签页（轨迹 / 子Agent / 任务 / 仪表盘）——原 5 个并列面板收编到同一栏。
+// RAIL_PANEL_IDS 映射到**原面板 id**（不重命名、不删节点），handler 仍按既有 id 查询。
+const RAIL_TABS = ['traj', 'sub', 'tasks', 'dash'];
+const RAIL_PANEL_IDS = { traj: 'trajPanel', sub: 'subPanel', tasks: 'tasksPanel', dash: 'dashPanel' };
+let railTab = 'traj';
+let lastNarrowRun = null;
 // —— 轨迹收纳状态（§3.73）：两个折叠区 + 展开过的轮次/工具/子代理（重渲染后保持展开） ——
 const traceFoldState = { trace: true, subs: true };
 const openTraceRounds = new Set();
@@ -1592,7 +1613,7 @@ function syncRunPanel() {
   // （syncPanelLayout 统一算，避免"两个面板各写一份互斥逻辑"）。
   syncPanelLayout();
   const chip = $('#runChip'); if (chip) chip.setAttribute('aria-expanded', runPanelOpen ? 'true' : 'false');
-  const col = $('#rpCollapse'); if (col) col.textContent = '收起';
+  const col = $('#rpCollapse'); if (col) { col.textContent = '›'; col.title = '收起右栏'; }
 }
 function setRunPanel(open) { runPanelOpen = Boolean(open); syncRunPanel(); }
 function toggleRunPanel() { setRunPanel(!runPanelOpen); }
@@ -1601,6 +1622,11 @@ function applyResponsiveLayout(width) {
   const cls = layoutClassesFor(w);
   document.body.classList.toggle('narrow-side', cls.narrow);
   document.body.classList.toggle('narrow-run', cls.narrowRun);
+  // §3.78：<900 侧栏抽屉只在窄屏存在；宽屏恢复时自动关掉，避免盖住正文。
+  if (!cls.narrow) document.body.classList.remove('side-drawer');
+  // §3.78：宽 → 窄（跨过 1180）时右栏回到"收起 + 运行 chip"，不默认盖在正文上。
+  if (cls.narrowRun && lastNarrowRun === false) runPanelOpen = false;
+  lastNarrowRun = cls.narrowRun;
   syncRunPanel();
 }
 function initResponsive() {
@@ -1612,6 +1638,12 @@ function initResponsive() {
   window.addEventListener('resize', () => applyResponsiveLayout());
   const chip = $('#runChip'); if (chip) chip.onclick = toggleRunPanel;
   const col = $('#rpCollapse'); if (col) col.onclick = () => setRunPanel(false);
+  // §3.78：<900 侧栏抽屉开关（设计稿在 980 图标化；任务要求"侧栏变抽屉"，见 §3.78 登记）
+  const sideToggle = $('#sideToggle');
+  if (sideToggle) sideToggle.onclick = () => {
+    const on = document.body.classList.toggle('side-drawer');
+    sideToggle.setAttribute('aria-expanded', on ? 'true' : 'false');
+  };
 }
 initResponsive();
 // §3.73：绑定两个折叠区 + 末尾区块总开关（渲染入口在下面的轨迹收纳块）。
@@ -1761,6 +1793,9 @@ function renderRunPanel() {
   set('#rpTtft', v.ttft);
   set('#rpTps', v.tps);
   set('#rpCtx', v.ctx);
+  const ctxTotalN=Number(runState.contextTotal)||0;
+  const ctxUsedN=Math.max(0, Number(runState.contextUsed)||0);
+  set('#rpCtxTotal', ctxTotalN?(fmtTok(ctxUsedN)+' / '+fmtTok(ctxTotalN)):'');
   set('#rpTools', v.tools);
   set('#rpCost', v.cost);
   set('#rpModel', v.modelLabel || v.model);
@@ -2172,6 +2207,7 @@ $('#sessSettingsBtn').onclick = () => {
 };
 $('#ssClose').onclick = closeSessionSheet;
 $('#ssDone').onclick = closeSessionSheet;
+document.querySelectorAll('[data-open-settings]').forEach((b) => { b.onclick = () => openSessionSheet(); });
 document.querySelectorAll('#ssPermSeg [data-perm]').forEach((b) => { b.onclick = () => setPermissionEverywhere(b.dataset.perm); });
 
 async function setModelEverywhere(name) {
@@ -2478,6 +2514,7 @@ document.addEventListener('keydown', (e) => {
     if ($('#diagModal').style.display === 'flex') { e.preventDefault(); $('#diagModal').style.display = 'none'; return; }
     if ($('#cfgModal').style.display === 'flex') { e.preventDefault(); $('#cfgModal').style.display = 'none'; return; }
     if ($('#dirModal').style.display === 'flex') { e.preventDefault(); $('#dirModal').style.display = 'none'; return; }
+    if (document.body.classList.contains('side-drawer')) { e.preventDefault(); closeSideDrawer(); return; }
     if (document.body.classList.contains('run-drawer')) { e.preventDefault(); setRunPanel(false); return; }
     if (activeAsk) return; // 内联确认自己的 Esc 处理器负责（拒绝，不是停止）
     if (generating) { e.preventDefault(); stopTurnFromButton(); return; }
@@ -2522,39 +2559,62 @@ function openTraj(msg){
     // 点击标题定位到聊天中的对应工具卡
     list.appendChild(div);
   }
-  $('#trajPanel').style.display='flex';
-  $('#tasksPanel').style.display='none'; // 仅任务面板（右侧）与轨迹互斥；子代理面板可与轨迹同显
-  $('#trajRailBtn').classList.add('on');
+  railTab='traj';
   syncPanelLayout();
 }
-// 面板布局同步（2026-09-02）：轨迹/子代理/任务面板打开时以 body class 推开内容区，
-// 聊天文本与附件行不再被固定面板遮挡；面板宽度随屏宽自动收窄（CSS 媒体查询）。
+// §3.78 面板布局同步：右栏四个标签页 + 断点抽屉。原来的 traj-open/sub-open/tasks-open/dash-open
+// 各自推开正文的写法全部收口到这里——同一时刻只显示一个标签页，不再叠两个右侧面板。
+/** 标签页显隐（纯函数；smoke §153 直接断言，不碰 DOM）。 */
+function railPanelDisplay(tab, panelTab, runOpen) {
+  return runOpen && tab === panelTab ? 'flex' : 'none';
+}
+function showRailTab(name) {
+  if (!RAIL_TABS.includes(name)) return;
+  railTab = name;
+  if (!runPanelOpen) setRunPanel(true); else syncPanelLayout();
+  if (name === 'tasks') { try { updateTasksPanel(); } catch { /* 未初始化时忽略 */ } }
+  if (name === 'dash') { try { refreshCostBadge(); } catch { /* 未初始化时忽略 */ } }
+  if (name === 'sub') { try { renderSubPanel(); } catch { /* 未初始化时忽略 */ } }
+  if (name === 'traj' || name === 'sub') { try { renderTracePanels(); } catch { /* 未初始化时忽略 */ } }
+}
+function initRailTabs() {
+  document.querySelectorAll('#rpTabs [data-tab]').forEach((btn) => {
+    btn.onclick = () => showRailTab(btn.dataset.tab);
+    btn.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      const i = RAIL_TABS.indexOf(railTab);
+      const n = (i + (e.key === 'ArrowRight' ? 1 : RAIL_TABS.length - 1)) % RAIL_TABS.length;
+      showRailTab(RAIL_TABS[n]);
+      const next = document.querySelector('#rpTabs [data-tab="' + RAIL_TABS[n] + '"]');
+      if (next) next.focus();
+    });
+  });
+}
+function closeSideDrawer() { document.body.classList.remove('side-drawer'); }
 function syncPanelLayout(){
-  const open=(id)=>document.getElementById(id)?.style.display==='flex';
-  document.body.classList.toggle('traj-open', open('trajPanel'));
-  document.body.classList.toggle('sub-open', open('subPanel'));
-  document.body.classList.toggle('tasks-open', open('tasksPanel'));
-  document.body.classList.toggle('dash-open', open('dashPanel'));
-  // P1-4：右边缘只留一个抽屉——既有右侧面板（子代理/任务/省钱仪表盘）打开时运行面板让位；
-  // 它们关闭后 syncPanelLayout 再被调用，运行面板按 runPanelOpen 恢复。
-  const otherRight=open('subPanel')||open('tasksPanel')||open('dashPanel');
-  const narrow=layoutClassesFor(window.innerWidth||0).narrowRun;
-  const showRun=Boolean(runPanelOpen)&&!otherRight;
-  const rp=$('#runPanel'); if(rp) rp.hidden=!showRun;
-  document.body.classList.toggle('run-open', showRun&&!narrow);
-  document.body.classList.toggle('run-drawer', showRun&&narrow);
+  const wide = !layoutClassesFor(window.innerWidth || 0).narrowRun;
+  const open = Boolean(runPanelOpen);
+  const rp = $('#runPanel'); if (rp) rp.hidden = !open;
+  document.body.classList.toggle('run-open', open && wide);
+  document.body.classList.toggle('run-drawer', open && !wide);
+  document.body.classList.toggle('rail-collapsed', !open);
+  for (const tab of RAIL_TABS) {
+    const el = document.getElementById(RAIL_PANEL_IDS[tab]);
+    if (el) el.style.display = railPanelDisplay(railTab, tab, open);
+    const btn = document.querySelector('#rpTabs [data-tab="' + tab + '"]');
+    if (btn) {
+      const on = railTab === tab;
+      btn.classList.toggle('on', on);
+      btn.setAttribute('aria-selected', on ? 'true' : 'false');
+      btn.tabIndex = on ? 0 : -1;
+    }
+  }
   // §3.73：窄屏右栏收起时，轨迹/子Agent 在对话流末尾显示；右栏（抽屉）一开就让位。
   syncTraceDock();
 }
-$('#tjClose').onclick=()=>{ $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); syncPanelLayout(); };
-$('#trajRailBtn').onclick=()=>{
-  const p=$('#trajPanel');
-  const willShow=p.style.display==='none';
-  if(willShow){ const m=lastMsgWithTraj(); if(!m){ uiAlert('本轮还没有可展示的轨迹（先发起一个任务）'); return; } openTraj(m); }
-  else p.style.display='none';
-  $('#trajRailBtn').classList.toggle('on', willShow);
-  syncPanelLayout();
-};
+$('#tjClose').onclick=()=>{ setRunPanel(false); };
+$('#trajRailBtn').onclick=()=>showRailTab('traj');
 function lastMsgWithTraj(){
   const msgs=[...document.querySelectorAll('#chat .msg-ai')].reverse();
   for(const m of msgs){ if(m._traj && m._traj.length) return m; }
@@ -2579,23 +2639,23 @@ function renderSubPanel(){
   }
   if(!count) list.innerHTML='<div class="empty" style="color:var(--faint);font-size:12px;padding:10px">本会话还没有子 Agent（task 工具会派生子 Agent）</div>';
 }
-const toggleSubPanel=()=>{
-  const p=$('#subPanel');
-  const willShow=p.style.display==='none';
-  p.style.display=willShow?'flex':'none';
-  $('#subRailBtn').classList.toggle('on', willShow);
-  if(willShow){ $('#tasksPanel').style.display='none'; renderSubPanel(); } // 轨迹（左侧）可与子代理（右侧）同显
-  syncPanelLayout();
-};
-$('#subRailBtn').onclick=toggleSubPanel;
-$('#sbClose').onclick=()=>{ $('#subPanel').style.display='none'; $('#subRailBtn').classList.remove('on'); syncPanelLayout(); };
+$('#subRailBtn').onclick=()=>showRailTab('sub');
+$('#sbClose').onclick=()=>{ setRunPanel(false); };
 // —— 任务面板（多会话并行） ——
 function setBtn(){
   // §138：停止点击后立刻有可见反馈（「停止中…」+ 禁用防连点），回合真正收尾后由 finally 复位。
+  syncStripStop();
   if(stopping){ sendBtn.textContent='⏹ 停止中…'; sendBtn.className='danger'; sendBtn.disabled=true; return; }
   sendBtn.disabled=false;
   sendBtn.textContent = generating ? '■ 停止' : '发送';
-  sendBtn.className = generating ? 'danger' : 'primary';
+  sendBtn.className = generating ? 'send danger' : 'send primary';
+}
+/** §3.78：底部状态条里的 .stopbtn 与主按钮同一状态（同一条停止出口）。 */
+function syncStripStop(){
+  const s=$('#stripStop'); if(!s) return;
+  s.disabled=!generating||stopping;
+  s.textContent=stopping?'■ 停止中…':'■ 停止';
+  s.style.display=(generating||stopping)?'':'none';
 }
 const lastBgStatus = new Map(); // 后台任务状态跟踪（完成/失败转换 → 聊天横幅反馈）
 async function updateTasksPanel(){
@@ -2655,8 +2715,8 @@ async function refreshCostBadge(){
   if($('#dashPanel').style.display==='flex') renderDashboard(j);
 }
 refreshCostBadge(); setInterval(refreshCostBadge, 15000);
-$('#costBadge').onclick=()=>{ const p=$('#dashPanel'); const show=p.style.display==='none'; p.style.display=show?'flex':'none'; if(show){ $('#subPanel').style.display='none'; $('#trajPanel').style.display='none'; $('#tasksPanel').style.display='none'; $('#subRailBtn').classList.remove('on'); $('#trajRailBtn').classList.remove('on'); refreshCostBadge(); } syncPanelLayout(); };
-$('#dashClose').onclick=()=>{ $('#dashPanel').style.display='none'; syncPanelLayout(); };
+$('#costBadge').onclick=()=>showRailTab('dash');
+$('#dashClose').onclick=()=>{ setRunPanel(false); };
 // 底部状态栏：轮次/步数/LLM 与工具时长/首 token 平均/吞吐/缓存命中/输入输出 tokens
 async function refreshStatusBar(){
   const r=await fetch('/api/cache-stats',{cache:'no-store'}).catch(()=>null); if(!r) return;
@@ -2668,8 +2728,8 @@ async function refreshStatusBar(){
   $('#statusBar').textContent = s.turns+' 轮 · '+s.steps+' 步 | LLM '+fmtDur(s.llmMs)+' · 工具调用 '+fmtDur(s.toolMs)+' | 首 token 平均 '+ft+' · '+tps+' | 缓存命中 '+rate+' | 输入 '+fmtTok(s.prompt)+' tok · 输出 '+fmtTok(s.completion)+' tok';
 }
 refreshStatusBar(); setInterval(refreshStatusBar, 15000);
-$('#tasksBtn').onclick=()=>{ const p=$('#tasksPanel'); p.style.display = p.style.display==='none'?'flex':'none'; if(p.style.display==='flex'){ $('#subPanel').style.display='none'; $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); $('#subRailBtn').classList.remove('on'); updateTasksPanel(); } syncPanelLayout(); };
-$('#tpClose').onclick=()=>{ $('#tasksPanel').style.display='none'; syncPanelLayout(); };
+$('#tasksBtn').onclick=()=>showRailTab('tasks');
+$('#tpClose').onclick=()=>{ setRunPanel(false); };
 
 async function refreshSessions(q){
   const u=q?'/api/sessions?q='+encodeURIComponent(q):'/api/sessions';
@@ -2679,6 +2739,35 @@ async function refreshSessions(q){
   const sel=$('#sessions'); sel.innerHTML='<option value="">历史会话</option>';
   for(const s of sessionsCache){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; sel.appendChild(o); }
   if(currentSession&&!q) sel.value=currentSession;
+  renderSessionNav();
+  updateCrumb();
+}
+/** §3.78 侧栏会话列表：消费既有 sessionsCache / #sessions change handler（不新增接口）。 */
+function renderSessionNav(){
+  const nav=$('#sessionNav'); if(!nav) return;
+  const list=Array.isArray(sessionsCache)?sessionsCache:[];
+  nav.innerHTML='';
+  if(!list.length){ nav.innerHTML='<div class="sess-empty">暂无会话（发一条消息后自动出现）</div>'; return; }
+  for(const s of list){
+    const btn=document.createElement('button');
+    btn.type='button';
+    btn.className='sess'+(currentSession===s.file?' active':'');
+    btn.dataset.file=s.file;
+    btn.title=s.label||s.file;
+    if(currentSession===s.file) btn.setAttribute('aria-current','true');
+    const t=document.createElement('span'); t.className='t'; t.textContent=s.label||s.file;
+    btn.appendChild(t);
+    btn.onclick=()=>{ const sel=$('#sessions'); if(sel){ sel.value=s.file; sel.dispatchEvent(new Event('change')); } closeSideDrawer(); };
+    nav.appendChild(btn);
+  }
+}
+/** §3.78 顶栏「工作空间 › 当前会话」：只读既有状态，不新增请求。 */
+function updateCrumb(){
+  const ws=$('#wsSel');
+  const opt=ws&&ws.selectedIndex>=0?ws.options[ws.selectedIndex]:null;
+  const w=$('#crumbWs'); if(w) w.textContent=(opt?(opt.textContent||'').replace(/^●\s*/,''):'')||'工作空间';
+  const cur=(sessionsCache||[]).find((x)=>x.file===currentSession);
+  const c=$('#crumbSession'); if(c) c.textContent=cur?(cur.label||cur.file):'新对话';
 }
 let searchTimer=null;
 $('#sessionSearch').addEventListener('input',e=>{ clearTimeout(searchTimer); searchTimer=setTimeout(()=>refreshSessions(e.target.value.trim()),300); });
@@ -2782,7 +2871,7 @@ async function init(){
   }catch(e){}
   try{
     const dr=await fetch('/api/draft?file='+encodeURIComponent(currentSession||''),{cache:'no-store'}); const dj=await dr.json();
-    if(dj.text){ input.value=dj.text; input.style.height=Math.min(input.scrollHeight,200)+'px'; input.focus(); }
+    if(dj.text){ input.value=dj.text; input.style.height=Math.min(input.scrollHeight,200)+'px'; input.focus(); updateDraftBadge(); }
   }catch(e){}
   renderSessionSettings();
   renderEmptyState();
@@ -2837,6 +2926,7 @@ async function refreshWsSel(){
   sel.appendChild(add);
   const mgr=document.createElement('option'); mgr.value='__manage__'; mgr.textContent='管理（重命名/删除/改目录）…';
   sel.appendChild(mgr);
+  updateCrumb();
 }
 /** 命令面板与顶栏下拉共用的工作空间切换（携带当前会话，语义与旧路径一致）。 */
 async function applyWorkspaceSwitch(name){
@@ -3260,7 +3350,7 @@ function finalizeCurrentSession(){
   if(!currentSession) return;
   fetch('/api/session-finalize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:currentSession})}).catch(()=>{});
 }
-async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; resetTraceState(); const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); renderEmptyState(); }
+async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; resetTraceState(); const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); renderEmptyState(); updateCrumb(); renderSessionNav(); closeSideDrawer(); }
 
 // ============================================================================
 // P2 DOM 接线（v0.6.19 §3.76）
@@ -3444,9 +3534,12 @@ if (sbxEl) {
 
 
 sendBtn.onclick=()=>{ if(generating){ stopTurnFromButton(); } else { send(); } };
+const stripStopEl=$('#stripStop'); if(stripStopEl) stripStopEl.onclick=()=>stopTurnFromButton();
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
-input.addEventListener('input',()=>{ input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; });
-$('#newChat').onclick=()=>{ finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); refreshSessions(); };
+input.addEventListener('input',()=>{ input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; updateDraftBadge(); });
+/** §3.78 设计稿 .draft-badge：输入框有未发送文字时显示（真实草稿状态，不伪造）。 */
+function updateDraftBadge(){ const d=$('#draftBadge'); if(d) d.hidden=!String(input.value||'').trim(); }
+$('#newChat').onclick=()=>{ finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); updateCrumb(); renderSessionNav(); closeSideDrawer(); refreshSessions(); };
 $('#sessMgrBtn').onclick=openSessModal;
 $('#sessClose').onclick=()=>{ $('#sessModal').style.display='none'; };
 async function openSessModal(){
@@ -3462,6 +3555,6 @@ async function openSessModal(){
     div.appendChild(rn); div.appendChild(dl); list.appendChild(div);
   }
 }
-$('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); } };
+$('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); updateCrumb(); renderSessionNav(); } };
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
 init();
