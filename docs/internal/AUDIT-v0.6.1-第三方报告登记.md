@@ -3871,3 +3871,68 @@ request failed.` 当时上下文只有 ≈2,773 tokens、预算 32,768——压�
   命令面板列表的动态命令文案仍为中文。
 - 未改 `test/smoke.js`、`src/providers/**`、`src/agent.js`、`presets/**`、`desktop/**`、`ide/**`；
   未 tag、未改版本号、未 publish、未动官网。
+
+## 3.76 已修复（v0.6.19 开发线：测试固定端口 → `listen(0)` 临时端口，消除 CI `EADDRINUSE`）
+
+**来源**：发版执行者报告——上一提交 `6927bd8` 的 **node18 腿**因 smoke §145 的固定端口 **45998
+`EADDRINUSE`** 红了一次；同一条 smoke 重跑全绿。这不是代码缺陷，而是**测试自己写死端口**：CI 上
+别的进程（或本测试自己的出站连接落在临时端口段）抢先占用了那个数字。
+
+### 一、扫描与改动（只动 `test/**` 与 `scripts/doc-lint.mjs`）
+
+全仓 `test/**` 扫描结果：**8 个写死的监听端口值、20 处代码引用**（另 1 处随机端口落在内核临时
+端口段，同属一类根因）：
+
+| 文件 | 位置 | 原值 | 改法 |
+| --- | --- | --- | --- |
+| `test/smoke.js` | §34 无密钥启动 | 45972（server + URL） | `port: 0` → `srv.address().port` |
+| `test/smoke.js` | §116 / §123 | 45974（两段都复用） | 各自 `port: 0` 取运行时端口 |
+| `test/smoke.js` | §144 | 45996（server + 2 处 URL） | `base144` 由 `srv144.address().port` 拼 |
+| `test/smoke.js` | §145 | 45997 / 45998（两个实例） | 两次 `port: 0`，见下 |
+| `test/smoke.js` | §146 | 45999（server 重启 + 2 处 URL） | 两次 `port: 0`，每次重取 `base146` |
+| `test/smoke.js` | §148 | 45991（server + URL） | `base148` 由 `srv148.address().port` 拼 |
+| `test/api-contracts.js` | 启动 | 45980 | `port: 0`（base 本就用 `address().port`） |
+| `test/e2e-web.js` | 访问令牌用例 | `40000 + random*20000` | 复用 `freePort()`，并从子进程就绪日志解析实际端口做 Host 头断言 |
+
+**§145 两个实例的语义**：`srv145a = runWebServer({ port: 0 })` 先取 `port145a`；a 关闭后用同样
+`port: 0` 起 b，并在最多 5 次重试内保证 b 的端口 **≠ a**（`assert.notEqual(base145b, base145a)`）。
+原用例要的是「两个不同端口的实例」，不是两个特定数字；执行顺序（a 先关、b 再起）与全部断言不变。
+
+**未改**：`test/e2e-local.js`、`test/e2e-schedule.js`、`test/ledger-source.js`、`test/model-names.js`
+本来就用 `listen(0)`；`test/memory-recovery.js` 的 `http://127.0.0.1:18081/v1` 只是桩 provider 的
+**假目的地**（从不监听、fetch 也是注入的），不构成端口冲突；`8081/11434/60091` 等是 URL 判据/真机
+证据里的示例值。
+
+### 二、守卫（`scripts/doc-lint.mjs` ⑨，CI 必跑）
+
+扫描 `test/**/*.js|*.mjs`（排除 `test/mutate/.generated/`），先抹块注释、再按行剔行注释
+（`://` 不误伤），命中 `/\blisten\(\s*([45]\d{4})\b/` 即失败。`listen(0)`、`listen(port)`、
+注释里的示例、`e2e-web` 的 `freePort()` 均不误报。失败信息形如：
+
+```text
+test/** 里出现固定四位监听端口 1 处：test/smoke.js:123 → listen(45997)。测试必须用 listen(0) 取临时端口，避免 CI 端口冲突（固定端口会 EADDRINUSE，见 §3.76）
+```
+
+已用临时探针文件实测：行注释里的 `listen(45998)` 不报、真违规 `listen(45997)` 只报 1 处；删除探针后
+扫描 53 个测试文件、0 处。
+
+### 三、验证
+
+- `node test/smoke.js`：改造后连跑 **3 次**全绿；rebase 到 `a99a24b` 后再连跑 **2 次**全绿（每轮
+  §145 均执行、`EADDRINUSE` 0 次，单轮约 144–146s）。
+- `node test/e2e-local.js`（17 项）、`node test/e2e-web.js`（24 项）、`node test/e2e-schedule.js`
+  （11 项）、`node test/api-contracts.js`（8 项）全部通过。
+- `node test/mutate/run.mjs --allow-dirty`：**31/31 批次全中、357/357 条变异全中、0 逃逸**
+  （含 UI P2 线新增的 `batch42`；跑前 `pgrep -f "test/mutate"` 为空，全局锁
+  `os.tmpdir()/mingdao-mutate.lock/` 正常获取/释放）。
+- `npm run typecheck`、`node scripts/doc-lint.mjs` 通过（⑥ 实际 357 条 = README 357）。
+
+### 四、边界与未做（如实）
+
+- 守卫只抓 **`listen(` 字面量四位端口**；`const P = 45997; listen(P)` 这类间接写法抓不到——本轮
+  扫描后已无此类写法，且属于刻意绕过。`runWebServer({ port: 0 })` 之外的常量端口仍需人工 review。
+- `e2e-web` 的 `freePort()` 优先在 20000–32000 随机 bind 探测（刻意避开 Linux/macOS 内核临时端口
+  段，降低"自己的出站连接抢端口"），全失败才 `listen(0)`；它不再是固定端口，但仍存在 bind→close→
+  spawn 的 TOCTOU 小窗口，由 `startWeb` 的 EADDRINUSE 重试兜底。
+- 未改 `src/**`、`presets/**`、`desktop/**`、`ide/**`、`test/mutate/README.md` 计数行；未 tag、
+  未改版本号、未 publish、未动官网。

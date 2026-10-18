@@ -22,7 +22,8 @@ const ok = (name) => {
 const { runWebServer } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
 const { saveConfig } = await import(pathToFileURL(path.join(srcDir, 'config.js')).href);
 saveConfig({ provider: 'deepseek', model: 'deepseek-v4-flash', permission: 'ask', sandbox: 'off', contextBudget: 128000 });
-const srv = await runWebServer({ host: '127.0.0.1', port: 45980, authToken: null });
+// v0.6.19（§3.76）：端口交给内核分配（listen(0)），禁止写死——固定端口在 CI 并发时 EADDRINUSE。
+const srv = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
 // runWebServer 已 await listen 成功才 resolve；仅防御性等待（早期版本语义）
 if (!srv.listening) await new Promise((r) => srv.once('listening', r));
 const base = `http://127.0.0.1:${srv.address().port}`;

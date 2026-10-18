@@ -151,6 +151,38 @@ const tracked = (() => {
   console.log(`⑧ 只读工具：READONLY_TOOLS=${[...ro].join('/')}`);
 }
 
+// ⑨ 测试监听端口：test/** 不得写死四位端口（固定端口在 CI 并发时被占用 → EADDRINUSE 假红）
+//
+// 背景（v0.6.19 §3.76）：`6927bd8` 的 node18 腿因 §145 的固定端口 45998 `EADDRINUSE` 红过一次，
+// 同一条 smoke 重跑即绿——不是代码缺陷，是测试自己抢端口。临时端口只有一个正确写法：
+// `server.listen(0)` 后读 `server.address().port`（先写配置再 spawn 的场景也先 listen(0) 拿端口）。
+// 这里做结构检查而不是运行时探测：让"下一次又写死端口"在 doc-lint（CI 必跑）就红。
+{
+  const testDir = path.join(root, 'test');
+  const files = tracked.filter(
+    (p) => p.startsWith(testDir + path.sep) && /\.(?:m?js)$/.test(p) && !p.includes(`${path.sep}.generated${path.sep}`)
+  );
+  /** @type {string[]} */
+  const hits = [];
+  for (const f of files) {
+    // 块注释整段抹成空白（保留行号）；行注释按行剔除。注释里可以写历史端口，不算违规。
+    const text = fs.readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '));
+    text.split('\n').forEach((line, i) => {
+      const code = line.replace(/^\s*\/\/.*$/, '').replace(/(^|[^:'"`\\])\/\/.*$/, '$1');
+      const m = code.match(/\blisten\(\s*([45]\d{4})\b/);
+      if (m) hits.push(`${rel(f)}:${i + 1} → listen(${m[1]})`);
+    });
+  }
+  if (hits.length) {
+    problems.push(
+      `test/** 里出现固定四位监听端口 ${hits.length} 处：${hits.slice(0, 8).join('；')}${hits.length > 8 ? ' …' : ''}。` +
+        '测试必须用 listen(0) 取临时端口，避免 CI 端口冲突（固定端口会 EADDRINUSE，见 §3.76）'
+    );
+  }
+  console.log(`⑨ 测试端口：扫描 ${files.length} 个测试文件，固定四位 listen 端口 ${hits.length} 处`);
+}
+
+
 if (problems.length) {
   console.error(`\n✗ 文档守卫发现 ${problems.length} 个问题：`);
   for (const p of problems) console.error('  · ' + p);

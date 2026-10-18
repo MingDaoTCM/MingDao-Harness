@@ -652,7 +652,9 @@ let base = await startWeb(work1);
 
 // ---------- 14. WebUI 访问令牌与 Host 校验（P1-3/P1-4） ----------
 {
-  const authPort = 40000 + Math.floor(Math.random() * 20000);
+  // v0.6.19（§3.76）：不再用 `40000 + random*20000`（正落在内核临时端口段，会被自己的出站连接抢走），
+  // 改用与 startWeb 相同的 freePort()：先 bind 探测、必要时 listen(0) 由内核分配。
+  const authPort = await freePort();
   const child = spawn(
     process.execPath,
     [path.join(root, 'src', 'cli.js'), 'web', String(authPort), '--auth-token', 'tok-test-123'],
@@ -668,6 +670,9 @@ let base = await startWeb(work1);
     else await new Promise((r) => setTimeout(r, 200));
   }
   assert.ok(tbase, '带令牌的 web 服务器应在 12s 内就绪：' + log.slice(-300));
+  // 端口以子进程实际打印的地址为准（不再假设自己挑的那个数字一定就是它）。
+  const authPortActual = Number(new URL(tbase).port);
+  assert.ok(Number.isInteger(authPortActual) && authPortActual > 0, '必须能从就绪日志解析出实际监听端口：' + tbase);
   // 壳页面公开（不含数据，SPA 需先加载才能读取 ?token=）
   const shell = await fetch(tbase + '/');
   assert.equal(shell.status, 200, '壳页面应无需令牌即可加载');
@@ -690,7 +695,7 @@ let base = await startWeb(work1);
   // Host 白名单（DNS rebinding）：伪造 Host 即使带对令牌也应 403（用原生 http 精确控制 Host 头）
   const badHostStatus = await new Promise((resolve) => {
     const req = http.request(
-      { host: '127.0.0.1', port: authPort, path: '/api/state', headers: { Host: `evil.example:${authPort}`, 'X-MingDao-Token': 'tok-test-123' } },
+      { host: '127.0.0.1', port: authPortActual, path: '/api/state', headers: { Host: `evil.example:${authPortActual}`, 'X-MingDao-Token': 'tok-test-123' } },
       (res) => {
         res.resume();
         resolve(res.statusCode);

@@ -2908,9 +2908,9 @@ const ctx = { cwd: tmp };
   process.env.MINGDAO_HOME = jhome;
   saveConfig({ provider: 'deepseek', model: 'deepseek-v4-flash', permission: 'ask', sandbox: 'off', contextBudget: 128000 });
   const { runWebServer } = await import(pathToFileURL(path.join(srcDir, 'web', 'server.js')).href);
-  const srv = await runWebServer({ host: '127.0.0.1', port: 45972, authToken: null });
+  const srv = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
   assert.ok(srv, '无密钥时服务器必须正常启动（此前直接退出 → 桌面版黑屏）');
-  const st = await (await fetch('http://127.0.0.1:45972/api/state')).json();
+  const st = await (await fetch(`http://127.0.0.1:${srv.address().port}/api/state`)).json();
   assert.equal(st.ok, true, '/api/state 应正常返回');
   assert.equal(st.keyReady, false, '无密钥时 keyReady 应为 false（前端显示 ⚙ 设置引导横幅）');
   assert.ok(Array.isArray(st.models), '无密钥时模型列表应为数组（含当前模型占位）');
@@ -8816,9 +8816,10 @@ process.stdout.write('done');`
   const home116 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-batch5-'));
   process.env.MINGDAO_HOME = home116;
   saveConfig({ provider: 'deepseek', model: 'deepseek-v4-flash', permission: 'ask', sandbox: 'off', contextBudget: 128000 });
-  const PORT116 = 45974;
+  // v0.6.19（§3.76）：临时端口——写死端口会在 CI 并发时 EADDRINUSE（45974 曾被占用过一次）。
+  const srv116 = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
+  const PORT116 = srv116.address().port;
   const base116 = `http://127.0.0.1:${PORT116}`;
-  const srv116 = await runWebServer({ host: '127.0.0.1', port: PORT116, authToken: null });
   const req116 = (p, opts = {}) => fetch(base116 + p, opts);
   const jreq116 = async (p, opts) => {
     const r = await req116(p, opts);
@@ -10579,8 +10580,9 @@ if (typeof tmp !== 'undefined') safeRmSync(tmp, { recursive: true, force: true }
     });
     await new Promise((r) => benignSrv.listen(0, '127.0.0.1', r));
     const benignPort = benignSrv.address().port;
-    const PORT123 = 45974; // 与 116 同端口（两段串行执行、各自 close）
-    const srv123 = await runWebServer({ host: '127.0.0.1', port: PORT123, authToken: null });
+    // v0.6.19（§3.76）：与 116 一样用内核分配的临时端口；"复用同一端口"不是本用例的语义。
+    const srv123 = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
+    const PORT123 = srv123.address().port;
     const base123 = `http://127.0.0.1:${PORT123}`;
     const post123 = async (p, body) => {
       const r = await fetch(base123 + p, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
@@ -15410,7 +15412,8 @@ process.exit(0);
     fsAllowDirs: [markerDir144],
     customModels: { mock144: { label: 'Mock144', baseUrl: `http://127.0.0.1:${mock144.address().port}/v1`, contextWindow: 8192, key: 'sk-mock' } },
   });
-  const srv144 = await runWebServer({ host: '127.0.0.1', port: 45996, authToken: null });
+  const srv144 = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
+  const base144 = `http://127.0.0.1:${srv144.address().port}`;
   /**
    * 发一轮 chat 并**边读边答**：只读档下非只读工具会弹权限确认（ask），
    * 若无人应答就要等 120s 超时——变异版会因此挂在 fetch 上（"挂住"必须表现为失败，
@@ -15418,7 +15421,7 @@ process.exit(0);
    * @param {any} body
    */
   const chat144 = async (body) => {
-    const r = await fetch('http://127.0.0.1:45996/api/chat', {
+    const r = await fetch(base144 + '/api/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -15446,7 +15449,7 @@ process.exit(0);
           events.push(ev);
           if (ev.type === 'ask') {
             try {
-              await fetch('http://127.0.0.1:45996/api/permission', {
+              await fetch(base144 + '/api/permission', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ id: ev.id, answer: '', taskId: ev.taskId }),
@@ -15650,12 +15653,18 @@ process.exit(0);
       });
     return { status: r.status, events };
   };
-  const srv145a = await runWebServer({ host: '127.0.0.1', port: 45997, authToken: null });
+  // v0.6.19（§3.76）：两个实例都不写死端口——各自由内核在 listen(0) 时分配。
+  // 原来的 45997/45998 在并发 CI 上被别的进程占过（EADDRINUSE），而这里要的是「两个不同端口的实例」，
+  // 不是「某两个特定数字」；两个端口仍然必须不同（a 先关、b 再起，语义保持不变）。
+  const srv145a = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
+  const port145a = srv145a.address().port;
+  const base145a = `http://127.0.0.1:${port145a}`;
   let srv145b = null;
+  let base145b = null;
   try {
     // ① 空正文回合：baseNote（"没有输出正文"）与 zeroNote（"0 次工具调用"）必须**合并**下发
     mode145 = 'empty';
-    const cEmpty = await chatOn145('http://127.0.0.1:45997', { message: '请把 hello.txt 改好', permission: 'auto' });
+    const cEmpty = await chatOn145(base145a, { message: '请把 hello.txt 改好', permission: 'auto' });
     const doneEmpty = cEmpty.events.find((e) => e.type === 'done');
     assert.ok(doneEmpty, '（前置）空正文回合也必须以 done 收尾');
     const noteEmpty = String(doneEmpty.note || '');
@@ -15671,7 +15680,7 @@ process.exit(0);
     // ② 11 秒 bash 回合：进度/预告/首帧/限频/pendingTool/toolCalls 全从真实日志与 SSE 取证
     mode145 = 'bash-slow';
     const tSlow0 = Date.now();
-    const cSlow = await chatOn145('http://127.0.0.1:45997', { message: '请跑一个长命令', permission: 'auto' });
+    const cSlow = await chatOn145(base145a, { message: '请跑一个长命令', permission: 'auto' });
     const slowMs = Date.now() - tSlow0;
     assert.ok(cSlow.events.some((e) => e.type === 'done'), `（前置）慢回合必须完成，实际耗时 ${slowMs}ms`);
     // 负载自适应（v0.6.19 §3.70 收尾）：慢命令固定 sleep 11s，本应 ≥10s；并发/CI 慢机上只会更长，
@@ -15724,7 +15733,7 @@ process.exit(0);
 
     // ③ 跑满步数：结局必须是 capped（不是 done）
     mode145 = 'capped';
-    const cCapped = await chatOn145('http://127.0.0.1:45997', { message: '请一直读文件', permission: 'auto' });
+    const cCapped = await chatOn145(base145a, { message: '请一直读文件', permission: 'auto' });
     assert.ok(cCapped.events.some((e) => e.type === 'done'), '（前置）跑满步数的回合同样要收尾');
     const doneCappedLine = logLines145().filter((l) => l.includes('chat 发送 done')).pop() || '';
     assert.ok(
@@ -15735,9 +15744,20 @@ process.exit(0);
     // ④ 无进展中止：stalled 必须是独立结局，且 reason 可见（换一个 noProgress 阈值的服务）
     await new Promise((r) => srv145a.close(r));
     saveConfig({ ...cfgBase145, noProgressTimeoutMs: 1500 });
-    srv145b = await runWebServer({ host: '127.0.0.1', port: 45998, authToken: null });
+    // 再 listen(0) 取一个新端口：a 已关闭，避免内核复用同一端口——本用例要的正是"两个不同端口的实例"。
+    for (let i = 0; i < 5 && !srv145b; i++) {
+      const cand = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
+      if (cand.address().port === port145a) {
+        await new Promise((r) => cand.close(r));
+        continue;
+      }
+      srv145b = cand;
+    }
+    assert.ok(srv145b, '§145 第二个实例必须拿到与第一个不同的临时端口（5 次重试仍相同说明语义被破坏）');
+    base145b = `http://127.0.0.1:${srv145b.address().port}`;
+    assert.notEqual(base145b, base145a, '§145 两个实例必须使用不同临时端口（原 45997/45998 的语义不变）');
     mode145 = 'stall';
-    const cStall = await chatOn145('http://127.0.0.1:45998', { message: '请继续', permission: 'auto' });
+    const cStall = await chatOn145(base145b, { message: '请继续', permission: 'auto' });
     const doneStall = cStall.events.find((e) => e.type === 'done');
     assert.ok(doneStall, '（前置）无进展回合必须由看门狗收尾（否则这里会挂住）');
     const stallBanners145 = cStall.events.filter((e) => e.type === 'banner').map((e) => String(e.text || ''));
@@ -15821,7 +15841,9 @@ process.exit(0);
     customModels: { mock146: { label: 'Mock146', baseUrl: `http://127.0.0.1:${mock146.address().port}/v1`, contextWindow: 8192, key: 'sk-mock', ...(vision ? { vision: true } : {}) } },
   });
   saveConfig(cfg146(true));
-  let srv146 = await runWebServer({ host: '127.0.0.1', port: 45999, authToken: null });
+  // v0.6.19（§3.76）：临时端口；重启后的第二个实例同样重新取端口（不再写死 45999）。
+  let srv146 = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
+  let base146 = `http://127.0.0.1:${srv146.address().port}`;
   /** @param {string} base @param {any} body */
   const chatOn146 = async (base, body) => {
     const r = await fetch(base + '/api/chat', {
@@ -15845,7 +15867,7 @@ process.exit(0);
   const image146 = { type: 'image', name: 'a.png', dataUrl: 'data:image/png;base64,iVBORw0KGgo=' };
   try {
     lastUserContent146 = null;
-    const c1 = await chatOn146('http://127.0.0.1:45999', { message: '看这张图', permission: 'auto', attachments: [image146] });
+    const c1 = await chatOn146(base146, { message: '看这张图', permission: 'auto', attachments: [image146] });
     const done146 = c1.events.find((e) => e.type === 'done');
     const err146 = c1.events.find((e) => e.type === 'error');
     assert.ok(
@@ -15859,8 +15881,9 @@ process.exit(0);
     // 反向：去掉声明后同一请求必须被拒绝（门控不得 fail-open）
     await new Promise((r) => srv146.close(r));
     saveConfig(cfg146(false));
-    srv146 = await runWebServer({ host: '127.0.0.1', port: 45999, authToken: null });
-    const c2 = await chatOn146('http://127.0.0.1:45999', { message: '看这张图', permission: 'auto', attachments: [image146] });
+    srv146 = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
+    base146 = `http://127.0.0.1:${srv146.address().port}`;
+    const c2 = await chatOn146(base146, { message: '看这张图', permission: 'auto', attachments: [image146] });
     const err2 = c2.events.find((e) => e.type === 'error');
     assert.ok(
       err2 && /不支持图片输入/.test(String(err2.message || '')),
@@ -16041,9 +16064,9 @@ process.exit(0);
     });
     fs.mkdirSync(path.join(home148, 'presets'), { recursive: true });
     fs.writeFileSync(path.join(home148, 'presets', 'ro148.json'), JSON.stringify({ name: 'ro148', label: '只读夹具', permission: 'readonly' }));
-    const base148 = 'http://127.0.0.1:45991';
+    const srv148 = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
+    const base148 = `http://127.0.0.1:${srv148.address().port}`;
     const map148 = { webui: 'explicit', preset: 'preset', config: 'config' };
-    const srv148 = await runWebServer({ host: '127.0.0.1', port: 45991, authToken: null });
     /** @param {any} body */
     const chat148 = async (body) => {
       const r = await fetch(base148 + '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
