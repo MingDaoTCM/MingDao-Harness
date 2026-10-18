@@ -1,36 +1,176 @@
 // 模型与服务商预设目录（MingDao 内置）。
 // 所有字段都可以通过 ~/.mingdao/config.json 或环境变量覆盖，
 // 也可以在 <mingdao-home>/providers/<name>.mjs 中注册完全自定义的 Provider 模块。
+//
+// v0.6.19（§3.67）：**模型名称以 API 实时返回的官方名为唯一事实来源**。
+//
+// 背景：此前 MODELS 表把 `deepseek-v4-pro` / `deepseek-flash` / `deepseek-v4-flash` /
+// `deepseek-v4-flash-vision-exp` 写死成键，默认值也写成这些字面量。厂家每次改名/升版本
+// （`deepseek-v4-flash` → `deepseek-flash` → `DeepSeek-V4.1-Flash 1017` …）都要回来改代码，
+// 否则新装用户会被给一个 API 已经不提供的名字，或者界面能拉到、一点就报「未知模型」。
+//
+// 现在的分工：
+//   1. **家族模式表**（MODEL_FAMILIES）：能力/定价/是否视觉挂在正则模式上（pro / flash / vision），
+//      官方升版本、改大小写、把版本号写进名字（`DeepSeek-V4.1-Flash 1017`）都自动命中；
+//   2. **精确 id 只作为已知别名**（MODELS_KNOWN 里的兼容条目）：老配置/旧会话里的名字仍然可用；
+//   3. **默认值运行时解析**（由 model-discovery.resolveDefaultModel 完成）：优先 config.routing.*，
+//      否则从当前 API 列表按家族挑官方名；解析不到才退回家族代表名并提示「兜底」。
+//      这里导出的 DEFAULT_* 只是**家族代表名/兼容兜底**，不是「当前官方版本」。
 
-// ---------- v0.6.2：默认模型名的**单一来源** ----------
-// 为什么单独立常量：DeepSeek 把 `deepseek-v4-flash` 改名为 `deepseek-flash` 后，
-// 「默认值」仍以字面量散落在 12 处（routing / config 向导 / WebUI 兜底 / 任务 worker /
-// 费用护栏降级目标 / update / CLI / REPL 别名…）。厂家只要再改一次名，这些地方就会
-// **各自漂移**——而它们全是"新装用户与兜底路径"会走到的，等于给新用户一个 API 不提供的模型名。
-// 这正是 v0.6.1 那次故障的翻版，也是本项目「同一逻辑多份副本」的老教训。
-// 旧名 `deepseek-v4-flash` 仍保留在 MODELS 里（兼容老配置与历史会话），但**不再作为任何默认值**。
-export const DEFAULT_MODEL = 'deepseek-flash';
-export const DEFAULT_PLANNER_MODEL = 'deepseek-v4-pro';
-export const DEFAULT_EXECUTOR_MODEL = DEFAULT_MODEL;
+// ---------- 家族模式表（能力与定价的唯一来源） ----------
+// match 必须兼容官方可能出现的写法：大小写、空格/下划线/连字符、版本号（v4 / v4.1 / V5）。
+// vision 必须排在 flash 前面：`...-flash-vision-...` 同时命中 flash 的词根。
+/**
+ * @typedef {{ id: string, match: RegExp, representative: string, label: string,
+ *   verifiedThrough: string, caps: any }} ModelFamily
+ */
 
-// 旧名 → 现名的别名表（厂家改名后保留兼容）
-/** @type {Record<string, string>} */
-const MODEL_ALIASES = { 'deepseek-v4-flash': 'deepseek-flash' };
+/** @type {ModelFamily[]} */
+export const MODEL_FAMILIES = [
+  {
+    id: 'vision',
+    // `deepseek-v4-flash-vision-exp` / `DeepSeek-V4.1-Flash-Vision 1017` / 未来的 V5 视觉版
+    match: /^deepseek(?:[\s_-]*v?\d+(?:[.\s_-]*\d+)?)?[\s_-]*flash[\s_-]*vision/i,
+    representative: 'deepseek-v4-flash-vision-exp',
+    label: '多模态视觉 · 图片描述/截图识别/图表分析',
+    // 已核对过规格的版本上限；更新的版本仍可选用，但会标「能力未知（新版本）」
+    verifiedThrough: '4.1',
+    caps: {
+      contextWindow: 1000000,
+      maxOutputCeiling: 384000,
+      budgetTokens: 128000,
+      maxOutputTokens: 8192,
+      temperature: 0.6,
+      supportsReasoning: false,
+      supportsVision: true,
+      pricing: {
+        offpeak: { input: 1.5, output: 4.5, cacheHit: 0.05 },
+        peak: { input: 3, output: 9, cacheHit: 0.1 },
+      },
+    },
+  },
+  {
+    id: 'pro',
+    // `deepseek-v4-pro` / `DeepSeek-V4.1-Pro 1017` / 未来的 V5-Pro
+    match: /^deepseek(?:[\s_-]*v?\d+(?:[.\s_-]*\d+)?)?[\s_-]*pro(?:[\s_-]|$)/i,
+    representative: 'deepseek-v4-pro',
+    label: '旗舰推理 · 复杂架构、排障、规划',
+    verifiedThrough: '4.1',
+    caps: {
+      contextWindow: 1000000, // 官方上下文 1M（384K 实为单次最大输出，字段语义见 maxOutputCeiling）
+      maxOutputCeiling: 384000,
+      budgetTokens: 200000,
+      maxOutputTokens: 65536,
+      temperature: 0.4,
+      supportsReasoning: true,
+      // 思考强度三档（官方 thinking_mode：low/high/max）——输出按 completion 计费。
+      reasoningEffort: { default: 'high', options: ['low', 'high', 'max'] },
+      pricing: {
+        offpeak: { input: 4.5, output: 13.5, cacheHit: 0.15 },
+        peak: { input: 9, output: 27, cacheHit: 0.3 },
+      },
+    },
+  },
+  {
+    id: 'flash',
+    // `deepseek-flash` / `deepseek-v4-flash` / `DeepSeek-V4.1-Flash 1017` / 未来的 V5-Flash
+    match: /^deepseek(?:[\s_-]*v?\d+(?:[.\s_-]*\d+)?)?[\s_-]*flash(?:[\s_-]|$)/i,
+    representative: 'deepseek-flash',
+    label: '极速响应 · 日常问答与轻量任务',
+    verifiedThrough: '4.1',
+    caps: {
+      contextWindow: 1000000,
+      maxOutputCeiling: 384000,
+      budgetTokens: 128000,
+      maxOutputTokens: 8192,
+      temperature: 0.6,
+      supportsReasoning: false,
+      pricing: {
+        offpeak: { input: 1.5, output: 4.5, cacheHit: 0.05 },
+        peak: { input: 3, output: 9, cacheHit: 0.1 },
+      },
+    },
+  },
+];
+
+/** @type {Record<string, ModelFamily>} */
+const FAMILY_BY_ID = {};
+for (const fam of MODEL_FAMILIES) FAMILY_BY_ID[fam.id] = fam;
+
+/** 解析名字里的 DeepSeek 版本号：`DeepSeek-V4.1-Flash 1017` → [4,1]；`deepseek-flash` → null。 */
+function parseModelVersion(/** @type {any} */ name) {
+  const m = /^deepseek[\s_-]*v?(\d+)(?:\.(\d+))?/i.exec(String(name || '').trim());
+  if (!m) return null;
+  return [Number(m[1]), Number(m[2] || 0)];
+}
+
+function versionAtMost(/** @type {number[]} */ v, /** @type {string} */ cap) {
+  const [cmaj, cmin] = String(cap).split('.').map(Number);
+  return v[0] < cmaj || (v[0] === cmaj && v[1] <= (cmin || 0));
+}
 
 /**
- * 归一化模型名：把已改名的旧名映射到当前名。
- *
- * 为什么必须有：厂家改名后老配置里仍是旧名，而路由/子代理判断「当前模型是否在池内」
- * 用的是**精确字符串比较**。不归一的话，旧名会被判成「池外模型（用户手动指定）」，
- * 于是**自动路由对老用户静默失效**——他们从此永远停在同一个模型上，且没有任何提示。
- * （这个后果是我把默认值改成新名后由既有测试抓出来的：分类器路径断言突然失败。）
- *
- * 只用于「是不是同一个模型」的比较；真正发给 API 的模型名仍用配置里的原值，保留用户意图。
+ * 按家族模式匹配模型名（大小写/空格/连字符/版本号无关）。
  * @param {any} name
+ * @returns {ModelFamily|null}
  */
-export function canonicalModel(/** @type {any} */ name) {
+export function matchModelFamily(/** @type {any} */ name) {
+  const n = String(name || '').trim();
+  if (!n) return null;
+  for (const fam of MODEL_FAMILIES) {
+    if (fam.match.test(n)) return fam;
+  }
+  return null;
+}
+
+/**
+ * 家族代表名（**兜底**用，不声称是最新官方版本）。官方名的唯一来源是 API 列表。
+ * @param {any} familyId
+ */
+export function familyRepresentative(/** @type {any} */ familyId) {
+  const fam = FAMILY_BY_ID[String(familyId || '')];
+  return fam ? fam.representative : '';
+}
+
+/**
+ * 从 API 返回的名单里按家族挑一个默认模型：优先版本号最高的官方名。
+ * 视觉变体不会被当成 flash 执行模型（vision 家族单独匹配）。
+ * @param {any} names
+ * @param {any} familyId
+ * @returns {string|null}
+ */
+export function pickFamilyModel(/** @type {any} */ names, /** @type {any} */ familyId) {
+  const id = String(familyId || '');
+  let best = null;
+  let bestScore = -1;
+  for (const raw of Array.isArray(names) ? names : []) {
+    const n = String(raw || '').trim();
+    if (!n) continue;
+    const fam = matchModelFamily(n);
+    if (!fam || fam.id !== id) continue;
+    const v = parseModelVersion(n);
+    const score = v ? v[0] * 1000 + v[1] : 0; // 无版本号的名字排在有版本的后面
+    if (score > bestScore) {
+      best = n;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
+/** 由家族模式 + 具体名字生成能力预设（同一家族共享上下文/定价/视觉能力）。 */
+function familyPreset(/** @type {any} */ name, /** @type {ModelFamily} */ fam) {
   const n = String(name || '');
-  return MODEL_ALIASES[n] || n;
+  const v = parseModelVersion(n);
+  const unknown = Boolean(v && !versionAtMost(v, fam.verifiedThrough));
+  return {
+    ...fam.caps,
+    label: unknown ? `${fam.label}（能力未知（新版本），仍可选用；按 ${fam.id} 家族规格保守估算）` : fam.label,
+    provider: 'deepseek',
+    family: fam.id,
+    pattern: true, // 来自家族模式，而不是精确内置条目
+    capabilityUnknown: unknown,
+  };
 }
 
 export const PROVIDERS = {
@@ -39,9 +179,9 @@ export const PROVIDERS = {
     kind: 'openai-compatible',
     baseUrl: 'https://api.deepseek.com/v1',
     envKey: 'DEEPSEEK_API_KEY',
-    // 与官方 `GET /v1/models` 的实际返回保持一致（拉取失败时的回退名单也应是真实可用的）
-    models: ['deepseek-flash', 'deepseek-v4-pro'],
-    note: 'DeepSeek-V4 正式版（2026-08-17 起商用）：1M 上下文（单次最大输出 384K），峰谷定价（高峰＝北京工作日 9:00–12:00、14:00–18:00，闲时价＝高峰一半），支持工具调用 / Responses API / Anthropic 兼容接口。',
+    // 离线兜底名单：家族代表名（**不是**当前官方版本）。在线时以 GET /v1/models 为准。
+    models: [familyRepresentative('flash'), familyRepresentative('pro')],
+    note: '模型名称与版本以 GET /v1/models 实时返回的官方名为准；仓库只维护 pro / flash / vision 家族的能力与定价模式，官方改名或升版本无需改代码。',
   },
   openai: {
     label: 'OpenAI',
@@ -109,79 +249,24 @@ export const PROVIDERS = {
   },
 };
 
-export const MODELS = {
-  // —— DeepSeek-V4 系列（MingDao 首发优化目标）——
+// ---------- 已知精确 id（兼容别名表） ----------
+// 这些条目只为「老配置 / 历史会话 / 离线兜底」保留；能力仍来自上面的家族模式。
+// 注意：doc-lint 用 `  '<id>': {` 扫描本文件来校验 README 里提到的模型 id，故保留字面键。
+const MODELS_KNOWN = {
   'deepseek-v4-pro': {
-    label: '旗舰推理 · 复杂架构、排障、规划',
-    provider: 'deepseek',
-    contextWindow: 1000000, // 官方上下文 1M（审计 Kimi P1-C：384K 实为单次最大输出，字段语义修正）
-    maxOutputCeiling: 384000, // 单次最大输出上限（官方规格）
-    budgetTokens: 200000, // 默认注入预算（省钱省时，可调高）
-    maxOutputTokens: 65536, // 生成类任务少续写、少重复计费（Kimi P1-C）
-    temperature: 0.4,
-    supportsReasoning: true,
-    // 思考强度三档（官方 thinking_mode：low/high/max）——输出按 completion 计费（输入 3 倍价），
-    // 简单任务用 low 可砍掉大部分推理 token；辅助调用（标题/记忆/分类器）固定 low
-    reasoningEffort: { default: 'high', options: ['low', 'high', 'max'] },
-    // 峰谷定价（元/百万 tokens；input=缓存未命中，cacheHit=缓存命中约为未命中的 1/30）
-    pricing: {
-      offpeak: { input: 4.5, output: 13.5, cacheHit: 0.15 },
-      peak: { input: 9, output: 27, cacheHit: 0.3 },
-    },
+    ...familyPreset('deepseek-v4-pro', FAMILY_BY_ID.pro),
   },
-  // v0.6.1：DeepSeek 官方把 `deepseek-v4-flash` **改名**为 `deepseek-flash`
-  // （依据：`GET /v1/models` 现只返回 `deepseek-flash` 与 `deepseek-v4-pro` 两个，
-  //  而本项目静态表里还是旧名 → 设置界面能拉到、聊天界面选中却被判「未知模型」）。
-  // 版本标注订正：本条修复落在 v0.6.1（提交 `9f19de7`，在 v0.6.0 标签 `a9167d1` 之后），
-  // 原先误标为 v0.6.0。
-  // 上限/价格沿用 v4-flash 的数值（同一个模型换了名字）；若官方后续公布不同规格，
-  // 只需改这一处——**价格必须在这里显式给出**，否则费用会变成「无法估算」而不是真实计费。
   'deepseek-flash': {
-    label: '极速响应 · 日常问答与轻量任务',
-    provider: 'deepseek',
-    contextWindow: 1000000,
-    maxOutputCeiling: 384000,
-    budgetTokens: 128000,
-    maxOutputTokens: 8192,
-    temperature: 0.6,
-    supportsReasoning: false,
-    pricing: {
-      offpeak: { input: 1.5, output: 4.5, cacheHit: 0.05 },
-      peak: { input: 3, output: 9, cacheHit: 0.1 },
-    },
+    ...familyPreset('deepseek-flash', FAMILY_BY_ID.flash),
   },
-  // 旧名保留：**老配置与历史会话里写的是这个字符串**，删掉会让它们直接 404。
-  // 但官方已不再在 /v1/models 里返回它，故标签里标明原因，避免用户以为是内核丢了三方模型。
+  // 旧名保留：厂家改名后老配置里仍是这个字符串，删掉会让它们直接 404。
+  // 标签里的「旧名」是给用户看的兼容说明（不写死具体版本号——官方名称以 API 为准）。
   'deepseek-v4-flash': {
-    label: '极速响应 · 日常问答与轻量任务（旧名；官方已改名为 deepseek-flash，建议切换）',
-    provider: 'deepseek',
-    contextWindow: 1000000, // 官方上下文 1M
-    maxOutputCeiling: 384000,
-    budgetTokens: 128000,
-    maxOutputTokens: 8192,
-    temperature: 0.6,
-    supportsReasoning: false,
-    pricing: {
-      offpeak: { input: 1.5, output: 4.5, cacheHit: 0.05 },
-      peak: { input: 3, output: 9, cacheHit: 0.1 },
-    },
+    ...familyPreset('deepseek-v4-flash', FAMILY_BY_ID.flash),
+    label: '极速响应 · 日常问答与轻量任务（旧名别名；官方名称以 API 为准）',
   },
-  // 多模态视觉模型（2026-08-21 上线，实验版）：文本 + 图片输入（JPEG/PNG/GIF/WebP），
-  // 图片转 token 计费（≤384 tokens/张），价格与 V4-Flash 完全一致。
   'deepseek-v4-flash-vision-exp': {
-    label: '多模态视觉 · 图片描述/截图识别/图表分析（实验版）',
-    provider: 'deepseek',
-    contextWindow: 1000000,
-    maxOutputCeiling: 384000,
-    budgetTokens: 128000,
-    maxOutputTokens: 8192,
-    temperature: 0.6,
-    supportsReasoning: false,
-    supportsVision: true,
-    pricing: {
-      offpeak: { input: 1.5, output: 4.5, cacheHit: 0.05 },
-      peak: { input: 3, output: 9, cacheHit: 0.1 },
-    },
+    ...familyPreset('deepseek-v4-flash-vision-exp', FAMILY_BY_ID.vision),
   },
   // —— 其他主流模型（OpenAI 兼容接入，按 2026-08 官方当前型号）——
   'gpt-5': {
@@ -267,8 +352,80 @@ export const MODELS = {
   },
 };
 
+/**
+ * 模型表：精确条目之外，**任何家族模式命中的名字**（如 API 刚返回的
+ * `DeepSeek-V4.1-Flash 1017`）也按家族能力解析——不必等内核发版。
+ * 用 Proxy 而不是在启动时枚举，是因为官方名只存在于 API 返回值里，无法预先写进源码。
+ * @type {Record<string, any>}
+ */
+export const MODELS = /** @type {Record<string, any>} */ (
+  new Proxy(MODELS_KNOWN, {
+    get(target, prop) {
+      if (typeof prop !== 'string') return Reflect.get(target, prop);
+      if (Object.prototype.hasOwnProperty.call(target, prop)) return /** @type {any} */ (target)[prop];
+      const fam = matchModelFamily(prop);
+      return fam ? familyPreset(prop, fam) : undefined;
+    },
+    has(target, prop) {
+      if (typeof prop === 'string' && matchModelFamily(prop)) return true;
+      return Reflect.has(target, prop);
+    },
+    getOwnPropertyDescriptor(target, prop) {
+      const own = Reflect.getOwnPropertyDescriptor(target, prop);
+      if (own) return own;
+      if (typeof prop === 'string') {
+        const fam = matchModelFamily(prop);
+        if (fam) return { configurable: true, enumerable: false, writable: false, value: familyPreset(prop, fam) };
+      }
+      return undefined;
+    },
+  })
+);
+
+// ---------- 默认值：家族代表名（兼容兜底），运行时再解析官方名 ----------
+// 导出这些常量的原因：routing / agent / CLI / worker 等既有调用点仍需要一个同步兜底值；
+// **新建配置 / WebUI 默认值 / 向导** 走 model-discovery.resolveDefaultModel（API 优先）。
+// 它们的值由家族模式派生（见下），不在这里维护「当前版本号」。
+export const DEFAULT_MODEL = familyRepresentative('flash');
+export const DEFAULT_PLANNER_MODEL = familyRepresentative('pro');
+export const DEFAULT_EXECUTOR_MODEL = DEFAULT_MODEL;
+
+// 旧名 → 兼容名的别名表（doc-lint 用它识别 README 里的旧名；厂家再改名时只需追加一行）。
+/** @type {Record<string, string>} */
+const MODEL_ALIASES = { 'deepseek-v4-flash': 'deepseek-flash' };
+
+/**
+ * 归一化模型名：把同一家族的不同版本/旧名归一到**家族代表名**。
+ *
+ * 为什么必须有：路由判断「当前模型是否在池内」用字符串比较。API 现在返回的是
+ * `DeepSeek-V4.1-Flash 1017`，而老配置/路由默认可能写 `deepseek-flash` 或
+ * `deepseek-v4-flash`——不归一就会把老用户判成「池外模型（用户手动指定）」，
+ * 自动路由从此静默失效。
+ *
+ * 只用于「是不是同一个模型」的比较；真正发给 API 的模型名仍用配置原值。
+ * @param {any} name
+ */
+export function canonicalModel(/** @type {any} */ name) {
+  const n = String(name || '');
+  if (!n) return n;
+  if (MODEL_ALIASES[n]) return MODEL_ALIASES[n];
+  const fam = matchModelFamily(n);
+  if (!fam) return n;
+  if (fam.id === 'flash') return DEFAULT_MODEL;
+  if (fam.id === 'pro') return DEFAULT_PLANNER_MODEL;
+  return familyRepresentative(fam.id);
+}
+
 export function modelPreset(/** @type {any} */ name) {
-  return /** @type {any} */ (MODELS)[name] || null;
+  const n = String(name || '').trim();
+  if (!n) return null;
+  return /** @type {any} */ (MODELS)[n] || null;
+}
+
+/** 该名字的能力是否**未经验证**（家族能匹配但版本比已核对规格新，或完全不属于任何家族）。 */
+export function modelCapabilityUnknown(/** @type {any} */ name) {
+  const preset = modelPreset(name);
+  return !preset || preset.capabilityUnknown === true;
 }
 
 export function providerPreset(/** @type {any} */ name) {

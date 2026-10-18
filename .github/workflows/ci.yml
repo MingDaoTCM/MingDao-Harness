@@ -97,6 +97,21 @@ jobs:
           exit $code
       - name: API 域契约测试（7 域路由契约 + body 上限）
         run: node test/api-contracts.js
+      - name: 模型名称以 API 为准（家族模式 / 默认值解析 / 未知新版本 / 离线兜底，v0.6.19 §3.67）
+        # 只加在 Linux 腿：套件会起 WebUI（真 HTTP）并对本地 stub /v1/models 发请求；按任务书要求
+        # 只挂 Linux，Windows/macOS 腿不增抖动（bash 包装与其它端到端步骤同一口径）。
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          node test/model-names.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=model-names 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
       - name: 账本来源回归（run.start.permissionSource + 旧账本兼容，v0.6.17 §3.64）
         # 只加在 Linux 腿：套件会起 WebUI（真 HTTP）并 spawn CLI 子进程；按任务书要求只挂 Linux，
         # Windows/macOS 腿不增抖动（bash 包装与其它端到端步骤同一口径）。

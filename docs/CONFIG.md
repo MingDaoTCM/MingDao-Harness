@@ -373,6 +373,56 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
 
 长期偏好仍走用户记忆（`AGENTS.md`，见上），不受此开关影响。
 
+## 模型名称以 API 为准（v0.6.19，§3.67）
+
+**仓库不维护具体版本号，只维护「家族能力 / 定价模式」。** 官方改名、升版本（例如
+`deepseek-v4-flash` → `deepseek-flash` → `DeepSeek-V4.1-Flash 1017` → 未来的 V4.2/V5）
+**不需要改代码**：模型名一律以 `GET /v1/models` 实时返回的官方名为准。
+
+### 家族模式表
+
+`src/models.js` 的 `MODEL_FAMILIES` 用正则匹配名字，能力（上下文窗口、单次输出上限、工具调用、
+视觉）与定价挂在**模式**上：
+
+| 家族 | 匹配（大小写 / 空格 / 连字符 / 版本号无关） | 典型官方名 |
+| --- | --- | --- |
+| `pro` | `deepseek` + 可选版本 + `pro` | `DeepSeek-V4.1-Pro 1017` |
+| `flash` | `deepseek` + 可选版本 + `flash` | `DeepSeek-V4.1-Flash 1017` |
+| `vision` | `deepseek` + 可选版本 + `flash` + `vision` | `DeepSeek-V4.1-Flash-Vision 1017` |
+
+- 精确 id 只作为**已知别名**存在（如旧名 `deepseek-v4-flash`），老配置与历史会话照常可用；
+  路由比较前会归一化到家族代表名，不会因为厂家改名而静默失效。
+- 比已核对规格更新的版本（例如 `DeepSeek-V4.2-Flash 1101`）**仍可选中**，列表会标
+  「能力未知（新版本）」并按家族规格保守估算上下文与价格；需要精确规格时用
+  `customModels.<模型名>.contextWindow` / `config.pricing.overrides` 覆盖。
+
+### 默认值如何解析
+
+默认模型（新建配置、WebUI 模型下拉、自动路由的 planner / executor）在**运行时**按下列顺序解析：
+
+1. 用户显式配置优先：`config.model`、`config.routing.planner`、`config.routing.executor`；
+2. 否则从**当前 API 名单**里按家族挑官方名：planner → `pro` 家族，executor → `flash` 家族，
+   多个版本并存时取最高版本；
+3. 名单里没有对应家族、或 API 不可达时，才退回**内置家族代表名**，并输出提示：
+   - 服务端日志：`[MingDao] ⚠ … 默认模型走兜底 …`
+   - WebUI / HTTP：`GET /api/models` 与 `GET /api/state` 的 `note` 字段，离线时
+     `offlineFallback: true`，文案为「离线兜底：模型名可能不是最新的」。
+
+离线时模型列表使用内置家族代表名（不是最新官方版本），并在每个条目上标
+「离线兜底」；连上 API 后刷新即恢复官方名。
+
+**自定义端点不主动探测。** `provider: "custom"`（以及未内置的服务商）不会收到
+`GET /models` 请求——很多自定义网关只实现 chat，空 body 的 `/models` 请求会让它们直接崩。
+这类端点的默认 planner / executor 用家族代表名兜底，需要指定时在 `config.routing.*`
+里写端点自己的模型名。
+
+### 旧名与自定义模型
+
+- 旧名（`deepseek-v4-flash`、`deepseek-flash`、`deepseek-v4-pro`、`deepseek-v4-flash-vision-exp`）
+  仍可作为 `--model` / `config.model` 的取值；能力与定价照旧按家族解析。
+- 完全不属于任何家族的线上新模型（例如非 DeepSeek 命名）仍会出现在列表里，可直接选中；
+  能力未知时按远程模型保守默认（上下文 128k）估算，可用 `customModels` 显式覆盖。
+
 ## 自定义模型（WebUI 添加后落盘的结构）
 
 ```json

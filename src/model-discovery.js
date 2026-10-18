@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import { safeFetchText } from './safe-fetch.js';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
-import { PROVIDERS, MODELS } from './models.js';
+import { PROVIDERS, modelPreset, familyRepresentative, pickFamilyModel, modelCapabilityUnknown } from './models.js';
 import { getStoredKey } from './credentials.js';
 import { isLocalBaseUrl, resolveModelCaps } from './model-caps.js';
 import { resolveProviderConfig, acquireLocalSlot, localQueueTimeoutMs } from './providers/index.js';
@@ -1005,6 +1005,128 @@ export function isDiscoveredModel(/** @type {any} */ name, /** @type {string} */
   return false;
 }
 
+// ---------------------------------------------------------------------------
+// v0.6.19（§3.67）：**默认模型 = API 实时返回的官方名**
+//
+// 以前 DEFAULT_MODEL / DEFAULT_PLANNER_MODEL 是写死的具体版本，厂家升版本就要改代码；
+// 现在默认值在运行时解析：
+//   ① 用户显式配置（config.routing.planner/executor、config.model）优先——不覆盖用户意图；
+//   ② 否则从该服务商当前 `/models` 名单里按**家族模式**挑（planner→pro、executor→flash）；
+//   ③ 名单里没有该家族 / API 不可达时，才退回家族代表名，并明确提示「兜底」。
+// 提示会出现在 console.warn（服务端日志）与 /api/models 的 note 字段（界面 banner 可读）。
+// ---------------------------------------------------------------------------
+
+/** 离线兜底提示（测试与界面共用同一句，避免两处漂移）。 */
+export const OFFLINE_MODEL_NOTE = '离线兜底：模型名可能不是最新的（API 不可达，已使用内置家族代表名）';
+
+/** 角色 → 家族（planner 用 pro，executor/model 用 flash）。 */
+export const MODEL_ROLE_FAMILY = /** @type {Record<string, string>} */ ({ planner: 'pro', executor: 'flash', model: 'flash' });
+
+/** 兜底告警只打一次/角色，避免每轮刷屏（但**不能不打**，否则用户不知道用的是旧名）。 */
+const warnedFallback = new Set();
+
+function warnFallback(/** @type {string} */ role, /** @type {string} */ reason, /** @type {string} */ model) {
+  const key = `${role}:${reason}`;
+  if (warnedFallback.has(key)) return;
+  warnedFallback.add(key);
+  console.warn(`[MingDao] ⚠ ${role} 默认模型走兜底（${reason}）：使用内置家族代表名 ${model}——模型名可能不是最新的，请检查 API 连通性/密钥。`);
+}
+
+/**
+ * 把模型列表里「离线兜底 / 能力未知」的条目标成一句提示，供 /api/models 与界面 banner 使用。
+ * @param {any} models
+ * @returns {string|null}
+ */
+export function modelsCatalogNote(/** @type {any} */ models) {
+  const list = Array.isArray(models) ? models : [];
+  if (list.some((m) => m && m.offlineFallback === true)) return OFFLINE_MODEL_NOTE;
+  const unknown = list.filter((m) => m && m.capabilityUnknown === true).length;
+  if (unknown) return `${unknown} 个模型是 API 返回的新版本：能力未知（按家族规格保守估算，仍可选用）`;
+  return null;
+}
+
+/**
+ * 解析某个角色的默认模型（**以 API 实时返回的官方名为准**）。
+ * @param {any} cfg
+ * @param {'planner'|'executor'|'model'} [role]
+ * @param {{force?: boolean}} [opts]
+ * @returns {Promise<{model: string, role: string, family: string, source: 'config'|'api'|'fallback', official: boolean, fallback: boolean, offline: boolean, note: string|null}>}
+ */
+export async function resolveDefaultModel(/** @type {any} */ cfg, /** @type {any} */ role = 'executor', { force = false } = {}) {
+  const r = String(role || 'executor');
+  const family = MODEL_ROLE_FAMILY[r] || 'flash';
+  const explicit = r === 'planner' ? cfg?.routing?.planner : r === 'executor' ? cfg?.routing?.executor : cfg?.model;
+  if (explicit) {
+    return {
+      model: String(explicit),
+      role: r,
+      family,
+      source: 'config',
+      official: false,
+      fallback: false,
+      offline: false,
+      note: null,
+    };
+  }
+  const provider = String(cfg?.provider || 'deepseek');
+  // 既有策略（v0.6.13）：**自定义端点不主动探测 `GET /models`**——真实世界里很多自定义网关
+  // 只实现 chat，`/models` 可能返回空 body/非 JSON（e2e-web 的 mock 就会因此 JSON.parse 崩）。
+  // 自定义端点/未内置的服务商还没有可枚举的名单元数据，直接走家族代表名兜底（不发任何请求）。
+  if (provider === 'custom' || !/** @type {any} */ (PROVIDERS)[provider]) {
+    const rep = familyRepresentative(family);
+    return {
+      model: rep,
+      role: r,
+      family,
+      source: 'fallback',
+      official: false,
+      fallback: true,
+      offline: false,
+      note: `自定义端点/未内置服务商不主动探测 /models，使用内置家族代表名 ${rep}（可用 config.routing.* 显式指定端点自己的模型名）`,
+    };
+  }
+  let fetched = /** @type {any} */ ({ error: '该服务商未设置 API Key' });
+  try {
+    fetched = await fetchProviderModels(cfg, provider, { force });
+  } catch (/** @type {any} */ e) {
+    fetched = { error: String(e?.message || e) };
+  }
+  if (Array.isArray(fetched?.models) && fetched.models.length) {
+    const picked = pickFamilyModel(fetched.models, family);
+    if (picked) {
+      return {
+        model: picked,
+        role: r,
+        family,
+        source: 'api',
+        official: true,
+        fallback: false,
+        offline: false,
+        note: null,
+      };
+    }
+    const rep = familyRepresentative(family);
+    const note = `兜底：API 列表里没有 ${family} 家族模型，改用内置家族代表名 ${rep}`;
+    warnFallback(r, 'API 列表无匹配家族', rep);
+    return { model: rep, role: r, family, source: 'fallback', official: false, fallback: true, offline: false, note };
+  }
+  const rep = familyRepresentative(family);
+  warnFallback(r, String(fetched?.error || '未知原因'), rep);
+  return { model: rep, role: r, family, source: 'fallback', official: false, fallback: true, offline: true, note: OFFLINE_MODEL_NOTE };
+}
+
+/**
+ * 一次解析 planner + executor 的默认值（WebUI 开启自动路由时调用）。
+ * @param {any} cfg
+ * @param {{force?: boolean}} [opts]
+ */
+export async function resolveRoutingDefaults(/** @type {any} */ cfg, { force = false } = {}) {
+  const [planner, executor] = await Promise.all([resolveDefaultModel(cfg, 'planner', { force }), resolveDefaultModel(cfg, 'executor', { force })]);
+  const fellBack = [planner, executor].filter((x) => x.fallback);
+  const note = planner.offline || executor.offline ? OFFLINE_MODEL_NOTE : fellBack.length ? fellBack.map((x) => x.note).filter(Boolean).join('；') : null;
+  return { planner, executor, offline: planner.offline || executor.offline, note };
+}
+
 // 合并可用模型列表：只含已设置 Key 的服务商；动态名单优先、预设回退；自定义模型恒在。
 //
 // v0.6.13（B）：**每个条目都要能看出"来自哪个服务商/端点"**。此前自定义条目只有
@@ -1019,21 +1141,42 @@ export async function availableModels(/** @type {any} */ cfg, /** @type {any} */
     if (pname === 'custom') continue;
     if (!providerHasKey(pname)) continue;
     const dynamic = await fetchProviderModels(cfg, pname);
+    // §3.67：拉取失败时用内置名单，但必须**明确标成离线兜底**——
+    // 否则界面会把这些可能过期的名字当成「官方实时名单」展示。
+    const offline = Boolean(dynamic?.error) && !dynamic?.models?.length;
     const names = dynamic.models?.length ? dynamic.models : pp.models || [];
     for (const n of names) {
       if (seen.has(n)) continue;
       seen.add(n);
-      const preset = /** @type {any} */ (MODELS)[n];
+      // 家族模式优先：`DeepSeek-V4.1-Flash 1017` 这类 API 官方名不在精确表里，但能力照样可解析。
+      const preset = modelPreset(n);
+      const capabilityUnknown = modelCapabilityUnknown(n);
+      const label = offline
+        ? `${n} — ${preset ? preset.label : '能力未知（新版本/非家族）'}（离线兜底，模型名可能不是最新的）`
+        : preset
+          ? `${n} — ${preset.label}`
+          : `${n}（线上最新；能力未知（新版本），仍可选用）`;
       out.push({
         name: n,
-        label: preset ? `${n} — ${preset.label}` : `${n}（线上最新）`,
+        label,
         provider: pname,
         providerLabel: pp.label,
-        dynamic: !(/** @type {any} */ (MODELS))[n],
+        // dynamic 的既有语义（前端/旧测试读它）：不在任何内置模式表里。家族命中不等于 dynamic。
+        dynamic: !preset,
         // 来源标注（B）：内置预设 vs 服务商线上名单——两者都是"该服务商自己的模型"
         official: Boolean(preset),
+        family: preset?.family || null,
+        capabilityUnknown,
+        offlineFallback: offline,
+        // 这一行保持原样：既有变异批 batch28 以它作锚点；离线来源在下一行覆盖。
         source: preset ? 'preset' : 'discovered',
-        sourceLabel: preset ? `内置预设 · ${pp.label}` : `线上名单 · ${pp.label}`,
+        ...(offline ? { source: 'offline' } : {}),
+        sourceLabel: offline
+          ? `离线兜底 · ${pp.label}`
+          : preset
+            ? `线上名单 · ${pp.label}（家族模式匹配）`
+            : `线上名单 · ${pp.label}`,
+        note: offline ? OFFLINE_MODEL_NOTE : capabilityUnknown ? '能力未知（新版本）：按家族规格保守估算，仍可选用' : undefined,
       });
     }
   }
@@ -1066,6 +1209,8 @@ export async function availableModels(/** @type {any} */ cfg, /** @type {any} */
       official: false,
       source: 'current',
       sourceLabel: '当前配置（不在任何已知名单里）',
+      family: modelPreset(currentModel)?.family || null,
+      capabilityUnknown: modelCapabilityUnknown(currentModel),
       note: '该名称不在任何服务商名单/自定义条目里——只是 config.json 里当前写着的模型名。',
     });
   }

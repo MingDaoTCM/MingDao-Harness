@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { PROVIDERS, modelPreset, providerPreset, DEFAULT_MODEL, DEFAULT_PLANNER_MODEL, DEFAULT_EXECUTOR_MODEL } from './models.js';
+import { PROVIDERS, modelPreset, providerPreset, pickFamilyModel, DEFAULT_MODEL, DEFAULT_PLANNER_MODEL, DEFAULT_EXECUTOR_MODEL } from './models.js';
 import { setStoredKey, resolveApiKey, maskKey } from './credentials.js';
 import { atomicWriteFileSync } from './atomic-write.js';
 
@@ -87,6 +87,58 @@ export function quarantineCorruptConfig(reason) {
   return dest;
 }
 
+/**
+ * 同步读取 model-cache.json 里某服务商的线上名单（最近一次 `GET /models` 的结果）。
+ * `ensureMinimalConfig` / `loadConfig` 都是同步接口，无法 await 网络请求，用这份缓存
+ * 把「默认模型」对齐到 API 返回的官方名；缓存为空时才用家族代表名兜底并告警。
+ * @param {string} provider
+ * @returns {string[]}
+ */
+function cachedModelNames(provider) {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(mingdaoHome(), 'model-cache.json'), 'utf8'));
+    const list = j?.[provider]?.models;
+    return Array.isArray(list) ? list.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+let warnedCachedFallback = false;
+function warnCachedFallback(/** @type {string} */ what, /** @type {string} */ rep) {
+  if (warnedCachedFallback) return;
+  warnedCachedFallback = true;
+  console.warn(`[MingDao] ⚠ ${what} 没有可用的 API 官方名缓存：暂用内置家族代表名 ${rep}（兜底，模型名可能不是最新的；连上 API 后会自动刷新）。`);
+}
+
+/**
+ * v0.6.19（§3.67）：把配置里的**缺省**模型补成 API 名单里的官方名。
+ * 只补缺省值，绝不覆盖用户显式写下的模型名/路由（用户意图优先）。
+ * @param {any} cfg
+ */
+function applyCachedModelDefaults(/** @type {any} */ cfg) {
+  if (!cfg || typeof cfg !== 'object') return cfg;
+  const provider = String(cfg.provider || 'deepseek');
+  const cached = cachedModelNames(provider);
+  if (!cfg.model) {
+    const m = pickFamilyModel(cached, 'flash');
+    if (m) cfg.model = m;
+  }
+  if (cfg.routing && cfg.routing.enabled) {
+    if (!cfg.routing.planner) {
+      const p = pickFamilyModel(cached, 'pro');
+      cfg.routing.planner = p || DEFAULT_PLANNER_MODEL;
+      if (!p) warnCachedFallback('routing.planner', DEFAULT_PLANNER_MODEL);
+    }
+    if (!cfg.routing.executor) {
+      const e = pickFamilyModel(cached, 'flash');
+      cfg.routing.executor = e || DEFAULT_EXECUTOR_MODEL;
+      if (!e) warnCachedFallback('routing.executor', DEFAULT_EXECUTOR_MODEL);
+    }
+  }
+  return cfg;
+}
+
 /** 读取配置对象（不存在/损坏返回 null）；返回值为用户可编辑的任意 JSON 配置，类型不定
  *
  * 注意（v0.6.3 / H-7）：null **同时**表示「不存在」与「读不出来」。凡是要**写**配置的调用点，
@@ -94,7 +146,7 @@ export function quarantineCorruptConfig(reason) {
  * @returns {any} */
 export function loadConfig() {
   const r = readConfigStrict();
-  return r.ok ? r.data : null;
+  return r.ok ? applyCachedModelDefaults(r.data) : null;
 }
 
 /**
@@ -126,7 +178,11 @@ export function ensureMinimalConfig() {
   if (strict.exists && !strict.ok) quarantineCorruptConfig(strict.error || '未知原因');
   ensureHome();
   const pp = PROVIDERS['deepseek'] || Object.values(PROVIDERS)[0];
-  const model = modelPreset(DEFAULT_MODEL) ? DEFAULT_MODEL : pp.models[0];
+  // v0.6.19（§3.67）：首选最近一次 API 名单里的 flash 官方名；没有缓存才用家族代表名。
+  // （首次运行还没填 Key，API 拉不到，此时代表名就是合理的兜底，后续拉到官方名会自动替换。）
+  const officialFlash = pickFamilyModel(cachedModelNames('deepseek'), 'flash');
+  const model = officialFlash || (modelPreset(DEFAULT_MODEL) ? DEFAULT_MODEL : pp.models[0]);
+  if (!officialFlash) warnCachedFallback('默认模型', model);
   const cfg = {
     provider: 'deepseek',
     model,
@@ -212,25 +268,28 @@ export async function runWizard(io) {
   if (models) io.print(`✓ API Key 验证通过：该服务商线上可用模型 ${models.length} 个。`);
   else if (verifyError) io.print('（已跳过验证，稍后可在 WebUI 设置面板「刷新模型」处再次校验）');
 
-  // ③ 选择模型（允许暂时跳过——不写 config.model，进入后默认用该服务商首个模型，/model 可随时换）
+  // ③ 选择模型（允许暂时跳过——跳过时默认用 **API 名单里的 flash 官方名**，/model 可随时换）
   let model = null;
   if (provider === 'custom') {
     const m = await io.ask('③ 模型名（可留空跳过，稍后 /model 再选）：');
     model = m.trim() || null;
   } else {
-    const options = [{ value: '__skip__', label: '暂时跳过（稍后 /model 再选）' }];
+    const options = [{ value: '__skip__', label: '暂时跳过（用 API 返回的官方默认名，/model 可换）' }];
     for (const m of models || pp.models) {
       const preset = modelPreset(m);
-      options.push({ value: m, label: preset ? `${m} — ${preset.label}` : m });
+      options.push({ value: m, label: preset ? `${m} — ${preset.label}` : `${m}（能力未知（新版本），仍可选用）` });
     }
     options.push({ value: '__custom__', label: '自定义模型名（手动输入）' });
     const choice = await io.choose('③ 选择模型：', options);
-    if (choice === '__skip__') model = null;
+    if (choice === '__skip__') model = pickFamilyModel(models || [], 'flash');
     else if (choice === '__custom__') model = (await io.ask('模型名：')).trim() || null;
     else model = choice;
   }
+  const chosenPreset = model ? modelPreset(model) : null;
   if (model) io.print(`✓ 已选择模型：${model}`);
   else io.print('✓ 已跳过模型选择：进入后自动使用该服务商默认模型，输入 /model 可随时切换。');
+  if (chosenPreset?.capabilityUnknown) io.print('⚠ 该模型是 API 返回的新版本：能力未知（按家族规格保守估算，仍可选用）。');
+  if (!models && provider !== 'custom') io.print('（未取得 API 模型名单：模型名用内置家族代表名——离线兜底，模型名可能不是最新的）');
 
   const perm = await io.choose('权限模式（写文件 / 执行命令时）：', [
     { value: 'ask', label: 'ask — 每次询问（推荐，最安全）' },
@@ -245,12 +304,19 @@ export async function runWizard(io) {
   ]);
 
   let routing = null;
-  if (modelPreset(DEFAULT_PLANNER_MODEL) && modelPreset(DEFAULT_EXECUTOR_MODEL)) {
+  // v0.6.19（§3.67）：路由默认名同样以 API 名单里的官方名为准（planner→pro 家族、executor→flash 家族）；
+  // 名单不可用才退回家族代表名，并在下面明确提示「兜底」。
+  const plannerDefault = pickFamilyModel(models || [], 'pro') || DEFAULT_PLANNER_MODEL;
+  const executorDefault = pickFamilyModel(models || [], 'flash') || DEFAULT_EXECUTOR_MODEL;
+  if (modelPreset(plannerDefault) && modelPreset(executorDefault)) {
     const routeChoice = await io.choose('自动模型路由（规划类任务→pro，执行类→flash）：', [
       { value: 'on', label: 'on — 开启（省钱又高效，推荐）' },
       { value: 'off', label: 'off — 关闭（始终用当前模型）' },
     ]);
-    if (routeChoice === 'on') routing = { enabled: true, planner: DEFAULT_PLANNER_MODEL, executor: DEFAULT_EXECUTOR_MODEL };
+    if (routeChoice === 'on') {
+      routing = { enabled: true, planner: plannerDefault, executor: executorDefault };
+      if (!models) io.print(`⚠ 路由默认名走兜底（未取得 API 名单）：planner=${plannerDefault} / executor=${executorDefault}——模型名可能不是最新的。`);
+    }
   }
 
   const preset = model ? modelPreset(model) : null;
@@ -274,7 +340,7 @@ export async function runWizard(io) {
     `服务商  ${provider}（${pp.label}）`,
     model ? `模型    ${model}` : '模型    （暂未选择，进入后 /model 随时切换）',
     `权限    ${perm} · 沙箱  ${sandbox}`,
-    `路由    ${routing ? '自动（pro⇄flash）' : '关闭'}`,
+    `路由    ${routing ? `自动（${routing.planner} ⇄ ${routing.executor}）` : '关闭'}`,
     `密钥    ${apiKey ? '凭证库 ' + maskKey(apiKey) : '环境变量 ' + (pp.envKey || 'MINGDAO_API_KEY')}`,
     `保存于  ${configPath()}`,
   ]);

@@ -125,7 +125,7 @@ export function checkCostGuard(modelName) {
     // P0-4（v0.4.5）：无价格数据时护栏无法累计——显式告警而非静默放行（绝不当「没花钱」）
     return {
       blocked: false,
-      message: '⚠ 费用护栏：当前模型无价格数据，今日费用无法累计、dailyLimitYuan 不生效——请在 config.pricing.overrides 为模型补充定价，或改用有价的 DeepSeek 模型（deepseek-v4-pro/flash）。',
+      message: '⚠ 费用护栏：当前模型无价格数据，今日费用无法累计、dailyLimitYuan 不生效——请在 config.pricing.overrides 为模型补充定价，或改用有价的 DeepSeek pro / flash 家族模型（具体名称以 API 返回的官方名为准）。',
     };
   }
   if (st.overLimit && st.action === 'block') {

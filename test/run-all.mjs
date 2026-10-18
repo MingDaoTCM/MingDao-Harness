@@ -13,6 +13,8 @@ const SUITES = [
   ['e2e-web', 'node', ['test/e2e-web.js']],
   ['e2e-schedule', 'node', ['test/e2e-schedule.js']],
   ['api-contracts', 'node', ['test/api-contracts.js']],
+  // v0.6.19 §3.67：模型名称以 API 实时返回的官方名为准（家族模式 / 默认值解析 / 未知新版本 / 离线兜底）
+  ['model-names', 'node', ['test/model-names.js']],
   // v0.6.17 §3.64：账本来源（run.start.permissionSource）+ 旧账本向后兼容
   ['ledger-source', 'node', ['test/ledger-source.js']],
   // 审计 M-1 §2.1 第 4 条（Pack 反向提权）：工具拿到的 ctx 必须被裁剪 + 冻结

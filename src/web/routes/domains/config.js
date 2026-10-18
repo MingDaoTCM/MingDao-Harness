@@ -2,11 +2,11 @@
 // 服务商 Key 管理、自定义模型增删改、API 地址覆盖、系统状态快照。
 import fs from 'node:fs';
 import crypto from 'node:crypto';
-import { DEFAULT_MODEL, DEFAULT_EXECUTOR_MODEL } from '../../../models.js';
+import { DEFAULT_MODEL } from '../../../models.js';
 import path from 'node:path';
 import { loadConfig, saveConfig } from '../../../config.js';
 import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../../../credentials.js';
-import { availableModels, fetchProviderModels, providerHasKey, isDiscoveredModel } from '../../../model-discovery.js';
+import { availableModels, fetchProviderModels, providerHasKey, isDiscoveredModel, resolveDefaultModel, resolveRoutingDefaults, modelsCatalogNote } from '../../../model-discovery.js';
 import { createProvider, resolveProviderConfig } from '../../../providers/index.js';
 import { MODELS, PROVIDERS, modelPreset } from '../../../models.js';
 import { detectSandbox } from '../../../tools/bash.js';
@@ -79,6 +79,9 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       ok: true,
       model: state.modelName,
       models,
+      // §3.67：模型名以 API 官方名为准；离线兜底 / 新版本能力未知时把提示一并给界面
+      modelsNote: modelsCatalogNote(models),
+      modelsOfflineFallback: models.some((m) => /** @type {any} */ (m).offlineFallback === true),
       // 首次使用引导：当前模型无可用 API Key 时前端显示「去 ⚙ 设置填 Key」横幅
       keyReady: Boolean((resolveProviderConfig(cfg, state.modelName) || {}).apiKey),
       permissions: ['ask', 'auto', 'readonly'],
@@ -97,6 +100,26 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       workingDir: state.workingDir,
       mcp: mcpFacade.status(),
       sessions,
+    });
+    return true;
+  }
+
+  // v0.6.19（§3.67）：模型清单 + **运行时解析出的默认 planner/executor 官方名**。
+  // `/api/state` 也带 models，但这里把「默认值怎么来的」说清楚（source=config/api/fallback，
+  // offline/note 供界面 banner 使用），便于用户核对是不是拿到了 API 的官方名。
+  if (method === 'GET' && p === '/api/models') {
+    const models = await availableModels(cfg, state.modelName);
+    const defaults = await resolveRoutingDefaults(cfg);
+    const note = modelsCatalogNote(models) || defaults.note;
+    json(res, 200, {
+      ok: true,
+      model: state.modelName,
+      models,
+      note,
+      offlineFallback: models.some((m) => /** @type {any} */ (m).offlineFallback === true) || defaults.offline,
+      defaultPlanner: defaults.planner.model,
+      defaultExecutor: defaults.executor.model,
+      defaults: { planner: defaults.planner, executor: defaults.executor },
     });
     return true;
   }
@@ -156,11 +179,25 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     }
     if (body.routing !== undefined) {
       const on = body.routing === true || body.routing === 'on';
-      cfg.routing = {
-        enabled: on,
-        planner: cfg.routing?.planner || 'deepseek-v4-pro',
-        executor: cfg.routing?.executor || DEFAULT_EXECUTOR_MODEL,
-      };
+      // v0.6.19（§3.67）：planner/executor 缺省时**运行时从 API 名单解析官方名**
+      // （pro/flash 家族），不再写死某个版本；解析不到才退回家族代表名并在 note 里说明。
+      if (on) {
+        const defaults = await resolveRoutingDefaults(cfg);
+        cfg.routing = {
+          enabled: true,
+          planner: cfg.routing?.planner || defaults.planner.model,
+          executor: cfg.routing?.executor || defaults.executor.model,
+        };
+        if (defaults.planner.fallback || defaults.executor.fallback) {
+          console.warn(`[MingDao] ⚠ 自动路由默认名走兜底：${defaults.note || '模型名可能不是最新的'}`);
+        }
+      } else {
+        cfg.routing = {
+          enabled: false,
+          planner: cfg.routing?.planner || (await resolveDefaultModel(cfg, 'planner')).model,
+          executor: cfg.routing?.executor || (await resolveDefaultModel(cfg, 'executor')).model,
+        };
+      }
       next.routing = on;
     }
     if (body.contextBudget !== undefined) {
@@ -348,7 +385,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       delete cfg.customModels[name];
       removeStoredKey(`custom:${name}`);
       if (state.modelName === name) {
-        state.modelName = DEFAULT_MODEL;
+        // §3.67：回退到 API 名单里的 flash 官方名；拿不到才用家族代表名（兜底会告警）。
+        state.modelName = (await resolveDefaultModel(cfg, 'executor')).model;
         cfg.model = state.modelName;
       }
       saveConfig(cfg);

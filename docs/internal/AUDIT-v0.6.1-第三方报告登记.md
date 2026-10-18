@@ -3229,6 +3229,85 @@ Reduce --context-window, close other apps, or try q8 KV quantization.
   方式（结构 / DOM slice 行为），供后续实现时补。
 - 未改 `src/**`、`test/**`、`presets/**`、`desktop/**`、`ide/**`；未新增依赖、未改构建。
 
+## 3.67 已修复（v0.6.19 开发线：模型名称与能力判定改为"以 API 实时返回的官方名为准"）
+
+**来源**：负责人反馈——"DeepSeek 官方已推出 DeepSeek-V4.1-Flash 1017，API 拉取到的也是该版本，
+所以模型名称应该相应改为官方名称，或者一步到位，以后版本一律以 API 实时拉取到的官方名称为准，
+不必在版本升级时再修改。"
+
+### 一、复现（旧实现）
+
+- `src/models.js` 的 `MODELS` 把 `deepseek-v4-pro` / `deepseek-flash` / `deepseek-v4-flash` /
+  `deepseek-v4-flash-vision-exp` 写死成键；`DEFAULT_PLANNER_MODEL = 'deepseek-v4-pro'`。
+- 默认值/文案里散落具体版本：`cost-guard.js` 的护栏提示、`help.js` 的 `--model` 示例、
+  `web/attachments.js` 的视觉模型提示、`web/routes/domains/config.js` 的路由默认值。
+- 后果：官方升到 `DeepSeek-V4.1-Flash 1017` 后，API 能拉到、但默认值与提示仍指着旧名；
+  模式表不认识的新版本没有统一的"能力未知"表达。
+
+### 二、修复
+
+1. **家族模式表**（`src/models.js`）：`MODEL_FAMILIES` 用正则匹配 pro / flash / vision
+   （大小写、空格/下划线/连字符、版本号 v4/v4.1/V5 均兼容），上下文窗口、输出上限、
+   工具/推理/视觉能力与峰谷定价挂在**模式**上；精确 id 只作为已知别名表 `MODELS_KNOWN`，
+   旧名 `deepseek-v4-flash` 保留且标签注明"旧名别名"。
+2. **默认值运行时解析**（`src/model-discovery.js`）：新增 `resolveDefaultModel(role)` /
+   `resolveRoutingDefaults(cfg)`。优先级：`config.routing.planner/executor`、`config.model`
+   → 当前 API 名单按家族挑官方名（多版本取最高版本）→ 内置家族代表名并把 `fallback/offline`
+   与提示一起返回。`console.warn` 与 `/api/models`、`/api/state` 的 `note` 都说明"用的是兜底"。
+   自定义端点（`provider: custom`）与未内置服务商**不主动探测** `GET /models`（很多网关只实现
+   chat，空 body 会 JSON.parse 崩）；默认值用家族代表名兜底，显式 `config.routing.*` 仍优先。
+3. **展示与选择**：`availableModels` 的 `name/label` 用 API 官方名；家族能匹配但比已核对规格新的
+   版本标"能力未知（新版本），仍可选用"，按家族规格保守估算；非家族线上新模型仍列在列表里。
+   `src/web/routes/domains/config.js` 新增 `GET /api/models`（含默认 planner/executor 与
+   `source=config/api/fallback`、`offlineFallback`、`note`），并让 `/api/config` 的模型校验
+   接受 API 官方名/新版本、路由开关运行时解析默认名。
+4. **离线兜底**：`fetchProviderModels` 失败时列表回退内置家族代表名，每条标
+   `offlineFallback: true`，`modelsCatalogNote()` 统一给出
+   "离线兜底：模型名可能不是最新的（API 不可达，已使用内置家族代表名）"。
+5. **文案清版本号**：`cost-guard.js`（pro/flash 家族）、`help.js`（家族 + 以 API 为准）、
+   `web/attachments.js`（vision 家族，以 API 列表为准）、`web/routes/domains/config.js`
+   （不再写死路由默认版本）；`web/index.html` 的附件按钮 title 由并行执行者改为
+   "图片需支持视觉的模型"（同样不含版本号）。
+6. **文档**：`docs/CONFIG.md` 新增「模型名称以 API 为准（v0.6.19，§3.67）」，说明仓库只维护
+   家族能力/定价模式、官方改名/升版本不用改代码、旧名别名仍可用、默认值解析顺序与离线提示。
+
+### 三、断言与变异
+
+- 新套件 `test/model-names.js`（`node test/model-names.js`，失败非 0）：本地 stub `GET /v1/models`，
+  覆盖 ① API 返回 `DeepSeek-V4.1-Flash 1017` → 列表/选中/显示均用官方名；② `DeepSeek-V4.2-Flash 1101`
+  → 可选中、标"能力未知（新版本）"、不报错；③ API 只有 V4.1 时默认 planner/executor 解析到官方名
+  （显式配置优先；新配置默认值同样生效）；④ 旧名 `deepseek-v4-flash` 仍可用且路由归一；
+  ⑤ 自定义端点（provider=custom）收到 **0 次** `GET /models` 探测（真实网关可能只实现 chat）；
+  ⑥ API 不可达 → 家族代表名兜底 + "离线兜底/不是最新"提示（函数层 + `/api/models` 路由层）。
+  已接入 `test/run-all.mjs` 与 `.github/workflows/ci.yml`（仅 Linux 腿，带失败注解）。
+- 新变异批 `test/mutate/batch35-modelnames.mjs`：**9 条全中**（家族正则退化成精确匹配 /
+  新版本当已知 / 默认值不再读 API / 精确表拒绝官方名 / 清空离线提示 / 标签丢掉官方名 /
+  新配置默认值写死 / 显式配置不再优先 / 路由默认值写死）。
+- 变异总数：本批新增 **9** 条；并行批次 batch36 新增 12 条，两批合计 292 条（271+9+12）。
+  计数行在 rebase 到 7059606（B 的 283）之后由本提交校正为 292，`doc-lint` ⑥ 已复跑通过。
+
+### 四、门禁
+
+- `npm run typecheck`（tsc 全量 strict，0 错误）。
+- `node test/model-names.js`（7 组断言）、`node test/api-contracts.js`、`node test/e2e-local.js`、
+  `node test/e2e-web.js`（24 项）、
+  `node test/smoke.js`（单独跑，确认未破坏既有 78/86 等模型相关断言）、`node scripts/doc-lint.mjs`。
+- `node test/mutate/batch35-modelnames.mjs`（9/9）；全量 `node test/mutate/run.mjs` 在独立 worktree
+  从本批提交跑（结果见提交说明/回复）。
+
+### 五、边界与未做
+
+- 按并行约束**未改** `src/web/app.js`、`src/web/server.js`、`test/smoke.js`、`.gitignore`。
+  `test/mutate/README.md` 仅在 rebase 后把计数行 283→292（B 推完后授权由后提交者统一校正）。`src/web/index.html` 仅任务点名的那行 title（实际由并行
+  执行者改成等价的"支持视觉的模型"表述，同样无版本号）。
+- `DEFAULT_MODEL` / `DEFAULT_PLANNER_MODEL` / `DEFAULT_EXECUTOR_MODEL` 三个导出仍保留：
+  `routing.js` / `agent.js` / `cli.js` / `tasks/worker.js` 等既有调用点不在本次允许改动范围，
+  它们现在是**家族代表名兜底**（由 `familyRepresentative()` 派生，不再是"当前官方版本"）；
+  新建配置、向导、WebUI 默认值与路由开关都已改走运行时解析。
+- `src/models.js` 里 `verifiedThrough: '4.1'` 是"已核对能力规格的版本上限"（不是默认模型版本）；
+  更新的版本仍可用，只标"能力未知（新版本）"并按家族规格保守估算。
+- 未 tag、未改版本号、未 publish、未动官网。
+
 ## 3.68 已修复（v0.6.18 开发线：DESIGN-UI-v1 的 P0 三项界面改造 + 两处配套）
 
 **来源**：`docs/DESIGN-UI-v1.md` §4.2/4.3/4.4 的 P0（状态条 / 内联确认 / 错误卡）与 §3.3 的诚实边界

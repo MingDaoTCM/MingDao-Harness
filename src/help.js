@@ -56,7 +56,7 @@ export function helpLines({ variant = 'cli', home = '' } = {}) {
     ['  mingdao --continue         继续最近一次会话', null],
     ['  mingdao --journal          新会话带上最近会话日志（默认不注入，新会话全新开始）', null],
     ['  mingdao --resume           从会话列表选择恢复', null],
-    ['  mingdao --model <模型名>   指定模型，例如 deepseek-v4-pro', null],
+    ['  mingdao --model <模型名>   指定模型（pro / flash 家族；具体名称以 API 返回的官方名为准）', null],
     ...cliOnly,
     ['  mingdao init               初始化配置向导', null],
     ['  mingdao update [--check]   一键自更新（git 安装形态；--check 只对比版本）', null],
