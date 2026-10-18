@@ -16473,7 +16473,30 @@ return { normalizeRunPhase, fmtRunTtft, fmtRunTps, fmtRunTools, fmtRunCost, fmtR
       '设置页说明必须是 cfg-hint 文案，不新增表单控件');
   }
 
-  ok('v0.6.20 §3.71 模型显示别名接线：两处下拉 value=API id / 可见文本=label（含 detail 进 title「API id: <id>」）+ 无映射回退 id + 会话设置 #ssModelAliasHint 仅 label!==id 显示（HTML 默认 hidden）+ 选择后 /api/config 的 model 仍是 id（label 只进 modelLabel）+ 设置页「模型与 API Key」下 cfg-hint 说明（无新增控件）');
+
+  // —— ⑥ ⌘K 命令面板的模型项：显示 label、执行用 id、搜索 label 与 id 都能命中 ——
+  {
+    const alias = { id: 'deepseek-flash', label: 'DeepSeek-V4.1-Flash 1017', detail: '线上最新' };
+    const paletteSrc = slice150('function paletteFilter(', '\nfunction paletteNext(') + '\n'
+      + slice150('function buildPaletteCommands(', '\nfunction paletteItemHtml(');
+    const P150 = new Function(paletteSrc + '\nreturn { paletteFilter, buildPaletteCommands };')();
+    const calls = [];
+    const cmds = P150.buildPaletteCommands({ models: [alias], compactAvailable: false }, { setModel: (v) => calls.push(v) });
+    const cmd = cmds.find((c) => c.group === '模型');
+    assert.ok(cmd, '（前置）⌘K 必须列出模型项');
+    assert.equal(cmd.label, alias.label, '⌘K 里模型项文本必须显示 label（与下拉一致，不能显示 API id）');
+    assert.ok(cmd.hint.includes('API id: deepseek-flash'), `⌘K 模型项提示必须带「API id: <id>」，实际：${cmd.hint}`);
+    cmd.run();
+    assert.deepEqual(calls, ['deepseek-flash'], '⌘K 执行切换模型必须用 API id（不能把显示名交给 setModel）');
+    assert.ok(P150.paletteFilter(cmds, 'DeepSeek-V4.1-Flash').some((c) => c.group === '模型'),
+      '⌘K 搜索必须能按显示名匹配');
+    assert.ok(P150.paletteFilter(cmds, 'deepseek-flash').some((c) => c.group === '模型'),
+      '⌘K 搜索必须能按旧 API id 匹配（改名后仍搜得到）');
+    assert.ok(/add\('模型', mtext/.test(appSrc150) && /a\.setModel\(mid\)/.test(appSrc150),
+      '⌘K 模型项必须显示 mtext（label），执行用 mid（API id）');
+  }
+
+  ok('v0.6.20 §3.71 模型显示别名接线：两处下拉 value=API id / 可见文本=label（含 detail 进 title「API id: <id>」）+ 无映射回退 id + 会话设置 #ssModelAliasHint 仅 label!==id 显示（HTML 默认 hidden）+ 选择后 /api/config 的 model 仍是 id（label 只进 modelLabel）+ 设置页「模型与 API Key」下 cfg-hint 说明（无新增控件）+ ⌘K 模型项同显 label/执行 id/搜索两键');
 }
 
 process.exit(0);

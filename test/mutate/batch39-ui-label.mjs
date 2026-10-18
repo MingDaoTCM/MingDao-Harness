@@ -6,10 +6,10 @@
 // 更危险的是把 label 塞进 value / 请求体（官方 API 只认 deepseek-flash 这类 id，传宣传名会 400）。
 // 本批把每一处修复逐个改回缺陷，test/smoke.js §150 的断言必须当场红。
 //
-// 覆盖（任务书要求 ≥5 条，本批 6 条）：
+// 覆盖（任务书要求 ≥5 条，本批 7 条）：
 //   下拉 value 退回 m.name / 可见文本改用 id / title 丢掉「API id:」/
 //   会话设置 hint 逻辑写反（该显示的藏起来、该藏的显示）/
-//   请求体 model 改成 label / 设置页说明被删。
+//   请求体 model 改成 label / 设置页说明被删 / ⌘K 模型项退回 m.name（与下拉显示不一致）。
 import { makeMutator } from './lib.mjs';
 const M = makeMutator();
 const SEC = () => M.section('150');
@@ -72,6 +72,16 @@ M.mutate({
   from: '    <div class="cfg-hint">模型 id 以 API 返回为准；官方宣传名可在 <code>config.modelLabels</code> 里映射为显示名（请求仍用 API id）。</div>\n',
   to: '',
   expect: ['设置页必须说明「模型 id 以 API 返回为准'],
+  run: SEC,
+});
+
+// ⑦ ⌘K 模型项退回 m.name（下拉显示宣传名、⌘K 显示 API id——用户以为是两个模型）
+M.mutate({
+  name: '⑦ ⌘K 模型项退回 m.name（与下拉显示不一致）',
+  file: 'src/web/app.js',
+  from: "    const mtext = m && m.id ? String(m.label || m.id) : String((m && (m.name || m.label)) || m || '');",
+  to: "    const mtext = String((m && m.name) || m || '');",
+  expect: ['⌘K 里模型项文本必须显示 label'],
   run: SEC,
 });
 

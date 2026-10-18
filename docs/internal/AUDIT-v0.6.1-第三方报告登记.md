@@ -3555,6 +3555,10 @@ label 写回 `config.model`** 的变异（batch37 ①）证明：一旦这么做
 3. **设置页说明**（`src/web/index.html:759`）：在「模型与 API Key」标题下加一条 `cfg-hint`：
    「模型 id 以 API 返回为准；官方宣传名可在 config.modelLabels 里映射为显示名（请求仍用 API id）。」
    **没有新增表单控件**。
+4. **补 ⌘K 命令面板**（`app.js:935`）：模型项文本改为 `m.label || m.id`（旧快照无 `id` 时才退回
+   `m.name`，兼容 §149 的旧桩），提示显示「API id: <id>」，执行仍 `setModel(mid)`（id）；
+   `keywords` 同时含 `label`/`id`/`name`，按新显示名或旧 API id 都搜得到——否则下拉显示宣传名、
+   ⌘K 显示 id，用户会以为是两个模型。
 
 ### 二、请求 `model` 仍是 id 的证据
 
@@ -3570,16 +3574,17 @@ label 写回 `config.model`** 的变异（batch37 ①）证明：一旦这么做
   title 含 `API id: <id>` 与 detail、按 id 选中、拿 label 当选择键不命中（两处循环都跑）；
   ②无映射（label===id）与缺 label 字段 → 文本回退 id、title 仍含 API id；③`modelDisplay` 暴露 id，
   `#ssModelAliasHint` 在 label≠id 时显示、相等时 hidden，HTML 默认 hidden 且文案存在；
-  ④`/api/config` 的 model 是 id、label 只进 `modelLabel`；⑤设置页 cfg-hint 位于标题下。
-- 新建 `test/mutate/batch39-ui-label.mjs`：**6/6 全中**（value 退回 m.name / 可见文本用 id /
-  title 去掉 API id / hint 条件写反 / 请求 model 改成 label / 设置页说明被删）。
-- `test/mutate/README.md` 计数行按本提交树 `doc-lint` 实测值：316+6=**322**
+  ④`/api/config` 的 model 是 id、label 只进 `modelLabel`；⑤设置页 cfg-hint 位于标题下；
+  ⑥⌘K 模型项文本=label、提示带 API id、执行切 id、搜索 label 与 id 都命中。
+- 新建 `test/mutate/batch39-ui-label.mjs`：**7/7 全中**（value 退回 m.name / 可见文本用 id /
+  title 去掉 API id / hint 条件写反 / 请求 model 改成 label / 设置页说明被删 / ⌘K 模型项退回 m.name）。
+- `test/mutate/README.md` 计数行按本提交树 `doc-lint` 实测值：316+7=**323**
   （`node scripts/doc-lint.mjs` 绿）。
 
 ### 四、边界与未做（如实）
 
-- **只接了两处下拉 + 两处提示**：⌘K 命令面板的「模型」条目仍以 `m.name` 为标题（keywords 已含
-  label），不在本次允许改动的语义内；如需显示别名可另开一节。
+- **显示面已统一**：模型下拉、⌘K 模型项、会话设置/右栏/空态/状态条 chip 都显示 `label`（回退 id）；
+  `m.name` 只保留在选择键/请求参数与兼容旧快照的显示回退里。
 - `test/mutate/.generated/` 下的抽节脚本是运行产物，不入库。
 - 未改 `src/models.js`、`src/model-discovery.js`、`src/config.js`、`test/model-names.js`、
   `presets/**`、`desktop/**`、`ide/**`；未新增轮询、未引入外部库；P0/P1 既有守卫（状态条/时间线/

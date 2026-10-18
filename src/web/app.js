@@ -932,7 +932,10 @@ function buildPaletteCommands(src, act) {
   }
   add('工作空间', '选择目录 / 新建工作空间…', { hint: '目录选择器', keywords: '新建 workspace add', run: a.newWorkspace });
   for (const m of s.models || []) {
-    add('模型', String(m.name || m), { hint: '切换模型', scope: '全局', keywords: [m.label, m.providerLabel].filter(Boolean).join(' '), run: () => a.setModel && a.setModel(m.name || m) });
+    // §3.71：⌘K 与模型下拉显示同一个显示名；执行/选择仍用 API id。旧快照没有 id 时才退回 name 展示。
+    const mid = String((m && (m.id || m.name)) || m || '');
+    const mtext = m && m.id ? String(m.label || m.id) : String((m && (m.name || m.label)) || m || '');
+    add('模型', mtext, { hint: 'API id: ' + mid, scope: '全局', keywords: [m.label, m.id, m.name, m.providerLabel].filter(Boolean).join(' '), run: () => a.setModel && a.setModel(mid) });
   }
   add('预设', '无预设', { hint: '恢复默认', scope: '本轮', keywords: 'none preset', run: () => a.setPreset && a.setPreset('') });
   for (const p of s.presets || []) {
