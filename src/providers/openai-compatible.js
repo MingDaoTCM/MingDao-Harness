@@ -31,7 +31,7 @@ function extractStreamError(/** @type {any} */ json) {
 // 注意：这是**协议层**判据（有没有可能是内存问题）；「能不能压缩重试」还要叠加
 // `isLocalBaseUrl` —— 云 API 的 507 不压缩重试（见 agent.js 的 describeUpstreamError）。
 const MEMORY_PRESSURE_RE =
-  /insufficient memory|memory_refusal|allocator wall|engine shed its caches and stays up|out of memory|oom|cuda.*memory|gpu memory|显存(?:不足|不够)|内存(?:不足|拒绝|不够)/i;
+  /insufficient memory|memory_refusal|allocator wall|engine shed its caches and stays up|out of memory|\boom\b|cuda.*memory|gpu memory|显存(?:不足|不够)|内存(?:不足|拒绝|不够)/i;
 
 /**
  * 这次错误是否属于「本地引擎内存/显存不足」（纯函数）。

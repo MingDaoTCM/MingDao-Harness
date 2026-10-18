@@ -3745,8 +3745,13 @@ request failed.` 当时上下文只有 ≈2,773 tokens、预算 32,768——压�
 - 新建 `test/mutate/batch40-memory-recovery.mjs`：**11/11 全中**（不重试 / 不压预算 / 不降输出 /
   不强制串行 / 允许两次 / 第二次伪装 done / 云端也重试 / 不 clamp / 比例 0.95 / 4xx 全当内存 /
   删掉 `--ctx-size` 建议）。
-- 本提交树变异脚本实测 **342** 条（原 331 + 本节 11）；`test/mutate/README.md` 计数行由另一条
-  执行线拥有，本节**未改**该计数行。
+- 本提交树变异脚本实测 **342** 条（323 + batch41 的 8 + 本节 11）；最终树
+  `test/mutate/README.md` 计数行为 **342**（由后提交者校正；本节未直接编辑该文件）。
+- **兼容既有锚点**：`batch31 ①` 的 `acquireLocalSlot` 锚点跟随新增的
+  `cfg: opts.localConcurrency != null ? … : cfg` 参数更新；`src/web/server.js` 的
+  `note: [baseNote, zeroNote]…` 行**保持原形**（降级说明另走 `mergedNote` 变量与 `srvlog`），
+  因此 `batch33 ⑧` 无需改动、仍能被抓到。
+- **全量** `node test/mutate/run.mjs`（独立 worktree，30 个批次）：**30/30 全中、0 逃逸**。
 
 ### 四、边界与未做（如实）
 
@@ -3755,5 +3760,7 @@ request failed.` 当时上下文只有 ≈2,773 tokens、预算 32,768——压�
 - 压缩只做**本回合预算下调 + 既有 compact/trim 投影**，不改写会话历史文件；预算下调后本回合
   后续请求沿用（不在成功一次后自动恢复原值）。
 - 自适应 clamp 只认预检 `/props` 的 `engineCtx`；没读到 `n_ctx` 时不猜、不 clamp（保留既有行为）。
-- 未改 `src/web/app.js`、`src/web/index.html`、`test/smoke.js`、`test/mutate/README.md`、
-  `desktop/**`、`ide/**`、`presets/**`；未 tag、未改版本号、未 publish。
+- 未改 `src/web/app.js`、`src/web/index.html`、`test/smoke.js`、`test/mutate/README.md`
+  （内容一字未动，计数行由后提交者校正）、`desktop/**`、`ide/**`、`presets/**`；
+  经负责人授权仅额外改了 `test/mutate/batch31-localconcurrency.mjs` 的 ① 锚点（代码形状变了，
+  锚点必须跟着走）。未 tag、未改版本号、未 publish。
