@@ -3647,3 +3647,59 @@ label 写回 `config.model`** 的变异（batch37 ①）证明：一旦这么做
   `buildUpdateNotice`，无须改接线）；未改 `src/**`、`test/mutate/README.md`、`presets/**`、`ide/**`。
 - 未 tag、未改版本号、未 publish、未动官网；`desktop/README.md` / `docs/DESKTOP-AUTO-UPDATE.md`
   里"UI 明写…"的描述仍成立（未逐字引用旧五句），本轮不改。
+## 3.74 已补（v0.6.18 开发线：本地引擎「显存/内存不足」自动降级重试一次）
+
+**来源**：v0.6.17 真机（本机 8081 qwen）：子代理并发 / 长解码时引擎在 prefill 阶段拒绝——
+`insufficient memory: the request exceeded available GPU memory (sustained critical memory pressure
+during prefill; aborted before the allocator wall). The engine shed its caches and stays up; this
+request failed.` 当时上下文只有 ≈2,773 tokens、预算 32,768——压小预算/输出上限后极可能成功，
+但整回合**直接失败**。本节把"识别 → 一次有界降级 → 如实报错"接到 Agent 循环。
+
+### 一、改了什么（五个落点）
+
+1. **识别可重试**（`src/providers/openai-compatible.js` + `src/agent.js`）：
+   `isMemoryPressureError()` 单一判据（HTTP 507 / `insufficient memory` / `memory_refusal` /
+   `allocator wall` / `engine shed its caches and stays up` / OOM 措辞；**不含** 400/401/429 与普通 5xx）。
+   `describeUpstreamError(err, { isLocal })` 新增 `recoverableByShrinking`——**只对本地端点**为真
+   （`isLocalBaseUrl` 或 `customModels.<名>.local`）。provider 的内部瞬态重试对内存错误**直接放行**
+   （`isTransient` 先判内存，避免 500+insufficient memory 被白重发 2 次）。
+2. **一次降级重试**（`src/agent.js`）：命中后本回合 `contextBudget × 0.6`（**下限 4096**）、
+   `maxOutputTokens × 0.5`，重试请求传 `localConcurrency: 1`（provider 复用既有
+   `acquireLocalSlot` 把并发上限压回 1）；`MAX_MEMORY_RETRIES = 1`，第二次仍失败即抛错。
+3. **不掩盖**：日志/界面打 `♻ 因本地引擎内存不足，已压缩上下文（32,768 → ~19,660）…并重试一次`；
+   `done.note` 追加压缩前后数值、重试次数与最终结果（`↩ 内存降级重试（1 次）…重试后成功`）；
+   `src/web/server.js` 把含降级/ clamp 的 note 同步写进 `web-server.log`。
+4. **自适应 clamp**（`src/model-discovery.js` + `src/agent.js`）：新增纯函数
+   `clampContextBudgetToEngine()`；预检读到引擎 `n_ctx` 且预算 > `n_ctx×0.8` 时，**创建 agent 即
+   （发请求前）** clamp 并打印 `⚠ 引擎自述上下文 … 发请求前已自动 clamp 上下文预算 …`。
+5. **不为云端做压缩重试**：云 API 的 507 仍走既有路径（不重试），400/401/429 行为不变。
+
+### 二、断言（新建独立套件 `test/memory-recovery.js`，接 `test/run-all.mjs` + CI 仅 Linux 腿）
+
+- ① 桩引擎第一次 507/`insufficient memory` → 第二次成功：回合 done；请求数=2；第二次
+  `maxTokens` = 4096（首次 8192 的一半）；第二次 `localConcurrency=1`；note/日志含
+  `已压缩上下文`、`重试一次`、`32,768`、`19,660`。
+- ② 两次都失败：回合失败（不是 done），错误文案含 `32,768`/`19,660`/`config.contextBudget`/
+  `--ctx-size`/`重试 1 次`。
+- ③ 云端端点 507：请求数=1，不出现压缩重试说明。
+- ④ `contextBudget=131072`、引擎 `n_ctx=32768`：`agent.budget=26214`，clamp 提示**先于**首次请求，
+  note 含 `26,214`；未超线/无 `n_ctx` 时纯函数不 clamp。
+- ⑤ 400/401/429：各只发 1 次、不出现压缩重试；`recoverableByShrinking` 仅对本地内存类错误为真。
+
+### 三、变异
+
+- 新建 `test/mutate/batch40-memory-recovery.mjs`：**11/11 全中**（不重试 / 不压预算 / 不降输出 /
+  不强制串行 / 允许两次 / 第二次伪装 done / 云端也重试 / 不 clamp / 比例 0.95 / 4xx 全当内存 /
+  删掉 `--ctx-size` 建议）。
+- 本提交树变异脚本实测 **342** 条（原 331 + 本节 11）；`test/mutate/README.md` 计数行由另一条
+  执行线拥有，本节**未改**该计数行。
+
+### 四、边界与未做（如实）
+
+- 真机 8081 未在开发机复跑（引擎/显存不可控）：验证全部使用桩 provider + 纯函数；真机现场证据只
+  作为判据来源。恢复是否真的成功取决于引擎侧内存，故失败路径给的是可操作建议而非承诺。
+- 压缩只做**本回合预算下调 + 既有 compact/trim 投影**，不改写会话历史文件；预算下调后本回合
+  后续请求沿用（不在成功一次后自动恢复原值）。
+- 自适应 clamp 只认预检 `/props` 的 `engineCtx`；没读到 `n_ctx` 时不猜、不 clamp（保留既有行为）。
+- 未改 `src/web/app.js`、`src/web/index.html`、`test/smoke.js`、`test/mutate/README.md`、
+  `desktop/**`、`ide/**`、`presets/**`；未 tag、未改版本号、未 publish。

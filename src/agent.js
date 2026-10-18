@@ -8,7 +8,9 @@ import { compactConversation } from './compact.js';
 // 两个对象从此分开：内核 ctx（makeCtx() 的产物）只在循环内用；工具只拿到 makeToolCtx() 的白名单对象。
 import { buildToolSchemas, dispatch, makeToolCtx } from './tools/index.js';
 import { DEFAULT_MODEL, modelPreset } from './models.js';
-import { resolveModelCaps, safeBudget, EDGE_RATIO } from './model-caps.js';
+import { resolveModelCaps, safeBudget, EDGE_RATIO, isLocalBaseUrl } from './model-caps.js';
+// v0.6.18 §3.74：预检已读到引擎自述 n_ctx 时，**发请求前**按 n_ctx×0.8 clamp 预算（纯函数）。
+import { clampContextBudgetToEngine } from './model-discovery.js';
 import { makeTokenCounter } from './tokenizer.js';
 import { createHooks } from './hooks.js';
 import { createIO, style, C } from './ui.js';
@@ -18,7 +20,7 @@ import { redactSecrets } from './redact.js';
 import { checkCostGuard, costGuardConfig, todayCost, preflightBlockMessage, roundGuardAction } from './cost-guard.js';
 import { recordCacheStats, packDailyCost } from './cachestats.js';
 import { estimateCost, cacheSplit, isPeakHour } from './pricing.js';
-import { resolveProviderConfig, createProvider, localGateSnapshot, localConcurrencyLimit } from './providers/index.js';
+import { resolveProviderConfig, createProvider, localGateSnapshot, localConcurrencyLimit, isMemoryPressureError } from './providers/index.js';
 import { compileConstraints, checkPreTool, checkPostTool, checkOutput, blockedOutputText } from './constraints.js';
 import { createLedger, newRunId } from './ledger.js';
 import { registerEgressSink } from './net-guard.js';
@@ -76,6 +78,13 @@ export const DEFAULT_NO_PROGRESS_TIMEOUT_MS = 3600000;
  *  这不是"把阈值调大掩盖问题"：判据没动、默认值没动，只是在"父回合正等子代理"这一种
  *  形态下多等 15s（相对默认 60 分钟是 0.4%），换"子代理自己的结论能回传父回合"。 */
 export const SUBAGENT_WAIT_GRACE_MS = 15000;
+
+/** 本地引擎内存不足时允许的**降级重试次数**（v0.6.18 §3.74）。
+ *
+ *  只允许一次：内存墙不是网络抖动——同一份大 prompt 重发只会再撞一次。第一次失败后
+ *  agent 会压缩上下文 + 输出减半 + 强制串行；第二次仍失败就如实报错，绝不无限重试。
+ *  抽成常量是为了让"最多一次"可被断言/变异钉住（不是散在 if 里的魔法值）。 */
+export const MAX_MEMORY_RETRIES = 1;
 
 /** 解析无进展阈值：非正/非有限一律回落默认（fail-safe，防"配置写 0 就静默失去看门狗"）。 */
 export function resolveNoProgressTimeoutMs(/** @type {any} */ cfg) {
@@ -281,13 +290,20 @@ export function zeroToolCallNotice({ modelRounds, steps = 0, taskLike = false })
 /**
  * 上游/引擎错误的可操作解读（纯函数）：把「HTTP 400 + 一段 Jinja/模板报错」这类原文
  * 变成「原文 + 这是什么 + 该怎么办」。识别不出时 hint 为 null（**绝不改原文**）。
+ *
+ * v0.6.18 §3.74：额外返回 `recoverableByShrinking`——**只有本地端点**的内存/显存不足
+ * 才是"压缩上下文 + 降输出 + 串行重试一次"能救的；云端 API 的 507/内存报错不在此列
+ * （云端的容量/配额不是本地上下文能改的，对云 API 做压缩重试只会多烧一次请求）。
  * @param {any} err
- * @returns {{ message: string, hint: string|null, status: number|null }}
+ * @param {{ isLocal?: boolean }} [opts]
+ * @returns {{ message: string, hint: string|null, status: number|null, recoverableByShrinking: boolean }}
  */
-export function describeUpstreamError(/** @type {any} */ err) {
+export function describeUpstreamError(/** @type {any} */ err, opts = {}) {
   const raw = String(err?.message ?? err ?? '').trim();
   const status = Number(err?.status) > 0 ? Number(err.status) : null;
   const t = raw.toLowerCase();
+  const memoryPressure = isMemoryPressureError(err);
+  const recoverableByShrinking = Boolean(memoryPressure && opts?.isLocal === true);
   /** @type {string|null} */
   let hint = null;
   if (/jinja|template|no user query|parser for this template/.test(t)) {
@@ -321,7 +337,7 @@ export function describeUpstreamError(/** @type {any} */ err) {
   }
   // 上游原文可能很长（内核只保留前 400 字）：如实标注它被截断过，避免用户以为这就是全部
   const truncated = /…|\.\.\.$/.test(raw) || raw.length >= 380;
-  return { message: raw, hint: hint ? `💡 ${hint}${truncated ? '（上面的上游原文可能被截断）' : ''}` : null, status };
+  return { message: raw, hint: hint ? `💡 ${hint}${truncated ? '（上面的上游原文可能被截断）' : ''}` : null, status, recoverableByShrinking };
 }
 
 /**
@@ -436,7 +452,17 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   const caps = resolveModelCaps(cfg, modelName);
   // safeBudget 恒用：即使用户显式 contextBudget 也套「窗口−输出−余量」上限与 75% 舒适区，
   // 防显式值撑爆窗口（本地模型窗口可能只有 32k/131k，用户却留了默认 128000）。
-  const budget = safeBudget(cfg, caps);
+  const safeB = safeBudget(cfg, caps);
+  // v0.6.18 §3.74（自适应上下文）：预检若已读到**引擎自述 n_ctx**，配置预算再大也没用——
+  // 发出去就会在 prefill 阶段被引擎以 insufficient memory 拒绝。这里在**创建 agent 时**
+  // （即第一次请求之前）就 clamp 到 n_ctx×0.8，并在第一回合开始前打印一条明确提示。
+  const budgetClamp = clampContextBudgetToEngine({
+    contextBudget: safeB,
+    configuredBudget: Number(cfg?.contextBudget) > 0 ? Number(cfg.contextBudget) : null,
+    engineCtx: cfg?.endpointProbe?.engineCtx ?? null,
+  });
+  const budget = budgetClamp.budget ?? safeB;
+  const budgetClampNotice = budgetClamp.clamped ? budgetClamp.notice : '';
   // maxOutput 也按窗口封顶：显式配超大 maxOutputTokens 时，prompt(预算)+output 仍不得越过窗口
   // （预算已按 caps.maxOutputTokens 留余量，但显式值可能更大——此处兜底，防服务端截断/拒绝）
   const maxOutput = Math.min(
@@ -480,6 +506,13 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // （CLI/REPL 每次派子代理都漏计；README 主推的「多方向并行调研」场景漏计最重）。
   // runTurn 开始时指向本轮 usage，finally 清空；runTurn 之外调用 spawnTask 时为 null（安全跳过）。
   let currentUsage = /** @type {any} */ (null);
+  // v0.6.18 §3.74：本回合的「内存降级重试」记录（runTurn 内写、runTurn 包装层读）与本回合
+  // 必须进 done.note 的提示（clamp 提示 / 压缩重试提示）。声明在 runTurn 之外，包装层才能把
+  // 这些提示统一追加到**每一条** return 路径上（runTurn 内部有十几个 return，逐条补会漏）。
+  let lastMemoryRecovery = /** @type {any} */ (null);
+  let turnNotes = /** @type {string[]} */ ([]);
+  /** clamp 提示每个 agent 只打一次（子代理各自持有一份，但只在各自第一回合出现）。 */
+  let clampNoticeShown = false;
   // v0.6.0 C1：当前回合的账本写入器（与 currentUsage 同款：runTurn 内赋值、finally 清空）。
   // 账本不可用/被关闭时它是 no-op，**绝不影响主流程**——与 writeAudit 同款容错。
   let turnLedger = /** @type {any} */ (null);
@@ -746,9 +779,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     };
   }
 
-  async function runTurn(/** @type {any} */ messages) {
+  async function runTurnInner(/** @type {any} */ messages) {
     let steps = 0;
     let finish = null;
+    // v0.6.18 §3.74：本回合实际生效的 prompt 预算 / 输出上限——内存不足时**只在本回合内**
+    // 压小（contextBudget ×0.6、maxOutputTokens ×0.5），不写回用户配置。
+    let turnBudget = budget;
+    let turnMaxOutput = maxOutput;
+    /** 本回合已用掉的内存降级重试次数（上限 MAX_MEMORY_RETRIES，默认 1）。 */
+    let memoryRetries = 0;
+    lastMemoryRecovery = null;
     /** v0.6.3（M-16）：本回合是否出现过"上游提前关流"（回答可能不完整）。
      * 刻意不叫 truncated——既有 `truncated` 的含义是"步数兜底总结也失败了"，两者必须分开。 */
     let upstreamTruncated = false;
@@ -1163,7 +1203,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (turnProgress.phase !== '已中止（无进展）') turnProgress.phase = '压缩上下文';
           const compacted = await compactConversation({
             messages,
-            budget,
+            budget: turnBudget,
             count,
             provider,
             executorModel: subagentModel(cfg, modelName),
@@ -1203,7 +1243,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           }
         } catch {}
       }
-      const trimmed = trimMessages(messages, budget, count);
+      const trimmed = trimMessages(messages, turnBudget, count);
 
       // reasoning 回填防护（Kimi P0 修正）：带 tool_calls 的 assistant 消息必须「完整」回传
       // reasoning_content（DeepSeek thinking_mode 官方要求：后续请求含 tools 时缺/截断即 400，
@@ -1239,7 +1279,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         if (g && Number(g.dailyLimitYuan) > 0 && g.action !== 'downgrade') {
           let promptTokens = 0;
           for (const m of sanitized) promptTokens += messageTokens(m, count);
-          const worst = estimateCost(activeModel, promptTokens, maxOutput, null, new Date());
+          const worst = estimateCost(activeModel, promptTokens, turnMaxOutput, null, new Date());
           // 判据本身抽到 cost-guard.js 的 preflightBlockMessage（v0.6.11 / P1-1 第一刀）：
           // 它能被单测逐条钉边界，而 runTurn 只负责"拿到数字 → 问判据 → 该拦就拦"。
           // 统计不可读 / 无价格数据时判据返回 null（不误拦、也不静默放行——主检查会告警）。
@@ -1332,7 +1372,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             contextWindow: caps.contextWindow,
             isLocal: caps.isLocal,
             firstTokenMs: Number(cfg?.timeout?.firstTokenMs) > 0 ? Number(cfg.timeout.firstTokenMs) : effFirstTokenMs,
-            budget,
+            budget: turnBudget,
             probe: cfg?.endpointProbe || null,
             localBusy: Boolean(caps.isLocal && (gate.active > 0 || gate.queued > 0)),
             localActive: gate.active,
@@ -1358,9 +1398,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           messages: sanitized,
           tools: toolsFor(readOnlyPhase, turnStrippedSet),
           temperature,
-          maxTokens: maxOutput,
+          maxTokens: turnMaxOutput,
           // MiniMax P0：仅当 activeModel 声明支持 reasoning 才发送（否则 400 终止回合）；'off' 显式禁用例外
           reasoningEffort: modelPreset(activeModel)?.supportsReasoning || reasoningEffort === 'off' ? reasoningEffort : undefined,
+          // v0.6.18 §3.74：发生过内存降级后，本回合后续请求**一律压回单并发**（即便用户把
+          // config.localConcurrency 配成 0/2）——provider 会把它传给 acquireLocalSlot。
+          ...(memoryRetries > 0 ? { localConcurrency: 1 } : {}),
           signal: ac.signal,
           // v0.6.15（§3.59 第 1 条）：本地端点串行化必须**在界面上可见**——
           // 排队时状态条/进度行写"排队等待本地端点（已串行化防内存压力）"，
@@ -1440,6 +1483,68 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // MacBook 本地 507 memory_refusal 根因（v0.4.5）：服务端内存拒绝不是「空输出」——
         // 直接终结合合并透出降级提示，不计入空轮、不注入续写重试（内存未释放必再 507，空烧请求）。
         const e = /** @type {any} */ (err);
+        // ---------------------------------------------------------------------------
+        // v0.6.18 §3.74：**本地引擎内存/显存不足 → 压缩上下文 + 降输出 + 强制串行，重试一次**
+        //
+        // 真机（v0.6.17，8081 qwen）：子代理并发/长解码导致显存峰值超限，引擎在 prefill 前拒绝，
+        // 整回合直接失败；而当时上下文只有 ≈2,773 tokens、预算 32,768——压小预算/输出上限后
+        // 极可能成功。这里不再立刻判失败，而是**只对本地端点**做一次有界降级重试：
+        //   · contextBudget ×0.6（下限 4k，避免压到连系统提示都放不下）；
+        //   · maxOutputTokens ×0.5（只用于本回合后续请求）；
+        //   · 该次重试传 localConcurrency=1（provider 的 acquireLocalSlot 会把并发上限压回 1）；
+        //   · 只重试一次：memoryRetryUsed 一旦置真，第二次失败就如实抛错（不无限重试）。
+        // 云端端点不在此列：云 API 的 507/容量问题不是本地上下文能改的，压缩重试只会多烧一次请求。
+        // ---------------------------------------------------------------------------
+        let localEndpoint = false;
+        try {
+          // 用**本回合实际使用**的模型判本地：费用护栏可能把 activeModel 降级到云端模型，
+          // 此时不能拿原始 modelName 的 caps.isLocal 误判成"本地内存不足"。
+          const activeCaps = resolveModelCaps(cfg, activeModel);
+          const pcNow = resolveProviderConfig(cfg, activeModel);
+          localEndpoint = Boolean(activeCaps.isLocal || isLocalBaseUrl(pcNow?.baseUrl || provider?.config?.baseUrl || ''));
+        } catch {}
+        const localMemory = describeUpstreamError(e, { isLocal: localEndpoint });
+        if (localMemory.recoverableByShrinking) {
+          if (memoryRetries >= MAX_MEMORY_RETRIES) {
+            // 第二次仍失败：不掩盖，把压缩前后数值、重试次数、具体建议一起抛给用户/日志。
+            const rec = /** @type {any} */ (lastMemoryRecovery) || {};
+            const suggest = Math.max(4096, Math.floor(Number(rec.toBudget) > 0 ? Number(rec.toBudget) * 0.7 : 8192));
+            const detail =
+              `本地引擎内存不足：已压缩上下文（${fmtTok(rec.fromBudget)} → ~${fmtTok(rec.toBudget)}）、` +
+              `输出上限 ${fmtTok(rec.fromMaxOutput)} → ${fmtTok(rec.toMaxOutput)}，并重试 1 次（最多一次），仍失败——不再重试。` +
+              `建议：把 config.contextBudget 调到 ${fmtTok(suggest)} 左右（或更低），关闭其他占用显存的模型进程/并行会话，` +
+              `并在引擎侧调大 --ctx-size 或使用 q8 KV 量化。`;
+            try { io.print(style(`⚠ ${localMemory.message}\n   ${detail}`, C.yellow)); } catch {}
+            const enriched = new Error(`${localMemory.message}\n   ${localMemory.hint || ''}\n   ↩ ${detail}`);
+            /** @type {any} */ (enriched).status = e?.status ?? 507;
+            if (e?.headers !== undefined) /** @type {any} */ (enriched).headers = e.headers;
+            throw enriched;
+          }
+          memoryRetries += 1;
+          const fromBudget = turnBudget;
+          const fromMaxOutput = turnMaxOutput;
+          // 压缩比例 0.6、下限 4096：0.6 在真机 32,768 → ~19,660 的区间内足够把 KV cache 峰值压下来；
+          // 再低会伤任务质量，且 4k 以下连系统提示 + 一轮工具结果都放不下（重启永远失败）。
+          turnBudget = Math.max(4096, Math.floor(fromBudget * 0.6));
+          turnMaxOutput = Math.max(256, Math.floor(fromMaxOutput * 0.5));
+          lastMemoryRecovery = {
+            attempts: memoryRetries,
+            fromBudget,
+            toBudget: turnBudget,
+            fromMaxOutput,
+            toMaxOutput: turnMaxOutput,
+            at: Date.now(),
+          };
+          const msg =
+            `♻ 因本地引擎内存不足，已压缩上下文（${fmtTok(fromBudget)} → ~${fmtTok(turnBudget)}）、` +
+            `输出上限 ${fmtTok(fromMaxOutput)} → ${fmtTok(turnMaxOutput)}，并重试一次（串行化：并发上限 1）`;
+          try { io.print(style(msg, C.yellow)); } catch {}
+          turnNotes.push(msg);
+          turnProgress.phase = '内存降级重试（已压缩上下文）';
+          turnProgress.memoryRecovery = lastMemoryRecovery;
+          steps = Math.max(0, steps - 1); // 重试不额外消耗一步，避免 maxSteps=1 时根本没机会重试
+          continue;
+        }
         // v0.6.15（§3.59 第 2 条）：`engine shed its caches and stays up` / `allocator wall`
         // 说明引擎**活着**（自己丢缓存后继续服务）——不走这条"507 旧文案"（那里建议重启引擎，
         // 对活着但内存吃紧的引擎是错误处置）；交给下面 describeUpstreamError 的独立分型。
@@ -1552,7 +1657,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         if (steps === stepLimit) {
           io.endTurn();
           if (res.text) {
-            const ap = await applyOutputConstraints(res.text, { messages, provider, activeModel, temperature, maxOutput, usage, signal: currentAc?.signal });
+            const ap = await applyOutputConstraints(res.text, { messages, provider, activeModel, temperature, maxOutput: turnMaxOutput, usage, signal: currentAc?.signal });
             messages.push({ role: 'assistant', content: ap.text });
             // 步数已耗尽：这一条与下方 `break`（→ 兜底总结/截断收尾）必须是同一口径
             markOutcome('capped', { capHit: true });
@@ -1907,7 +2012,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         if (res.text) {
           // v0.5.0 A3 ③：输出前领域约束必须在**回填历史之前**应用——
           // 否则被拦下的违规措辞会留在会话里，下一轮又被当作既成事实喂回模型。
-          const ap = await applyOutputConstraints(res.text, { messages, provider, activeModel, temperature, maxOutput, usage, signal: currentAc?.signal });
+          const ap = await applyOutputConstraints(res.text, { messages, provider, activeModel, temperature, maxOutput: turnMaxOutput, usage, signal: currentAc?.signal });
           finalText = ap.text;
           outputNote = ap.note;
           messages.push({ role: 'assistant', content: finalText });
@@ -2080,7 +2185,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           messages: wrapReq,
           tools: [],
           temperature,
-          maxTokens: Math.min(maxOutput, 2048),
+          maxTokens: Math.min(turnMaxOutput, 2048),
           reasoningEffort: modelPreset(activeModel)?.supportsReasoning ? 'low' : undefined,
           signal: currentAc.signal,
           onDelta(/** @type {any} */ d) {
@@ -2094,7 +2199,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         }
         // v0.5.0 A3 ③：兜底总结同样过一遍输出约束
         const wrapApplied = wrapRes.text
-          ? await applyOutputConstraints(wrapRes.text, { messages, provider, activeModel, temperature, maxOutput, usage, signal: currentAc?.signal })
+          ? await applyOutputConstraints(wrapRes.text, { messages, provider, activeModel, temperature, maxOutput: turnMaxOutput, usage, signal: currentAc?.signal })
           : { text: null, note: null };
         if (wrapApplied.text) messages.push({ role: 'assistant', content: wrapApplied.text });
         // capHit：本轮因步数上限被迫收尾（任务可能未真正完成）→ 供上层落检查点续跑
@@ -2211,6 +2316,38 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       offEgressSink();
       offSigint();
     }
+  }
+
+  /**
+   * 回合包装层（v0.6.18 §3.74）：把「本回合必须让用户看见」的提示统一追加到 done.note。
+   *
+   * 为什么需要包装：`runTurnInner` 有十几个 return 路径（工具收尾、cap、stalled、aborted…），
+   * 逐条补 note 必漏。这里只做两件事：
+   *   ① 第一回合发请求前打印「按引擎 n_ctx clamp 预算」的提示（只打一次，避免每回合刷屏）；
+   *   ② 回合结束后把 clamp 提示与内存降级重试的**压缩前后数值 / 重试次数 / 最终结果**
+   *      追加到 `note`——WebUI 的 done.note、CLI 的收尾说明因此共用同一份口径。
+   */
+  async function runTurn(/** @type {any} */ messages) {
+    turnNotes = [];
+    if (budgetClampNotice && !clampNoticeShown) {
+      clampNoticeShown = true;
+      try { io.print(style(budgetClampNotice, C.yellow)); } catch {}
+      turnNotes.push(budgetClampNotice);
+    }
+    const r = await runTurnInner(messages);
+    const notes = turnNotes.filter(Boolean);
+    if (lastMemoryRecovery && r) {
+      const rec = lastMemoryRecovery;
+      const final = r.aborted ? '重试后被中断' : r.stalled ? '重试后无进展中止' : r.text ? '重试后成功' : '重试后仍无正文';
+      notes.push(
+        `↩ 内存降级重试（${Number(rec.attempts) || 1} 次）：上下文预算 ${fmtTok(rec.fromBudget)} → ${fmtTok(rec.toBudget)}、` +
+          `输出上限 ${fmtTok(rec.fromMaxOutput)} → ${fmtTok(rec.toMaxOutput)}；${final}。`
+      );
+    }
+    if (notes.length && r && typeof r === 'object') {
+      r.note = [r.note, ...notes].filter(Boolean).join('\n');
+    }
+    return r;
   }
 
   return {

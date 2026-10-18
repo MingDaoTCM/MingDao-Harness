@@ -552,6 +552,11 @@ API id，不参与 `modelLabels`（其条目仍带 `id`，等于自定义模型�
   模型兜底 **32k**、远程兜底 **128k**。
 - **安全预算**：`contextBudget` 会被自动收紧到 `min(contextBudget, 窗口×75%, 窗口−maxOutput−余量)`，
   prompt 永不逼近窗口边缘（75% 舒适区以上 prefill 时间陡增）。
+- **按引擎自述 `n_ctx` clamp（v0.6.18 §3.74）**：预检（`GET /props`）读到引擎真实 `n_ctx` 后，
+  若预算超过 `n_ctx × 0.8`，**发请求前**就 clamp 到该上限并打印
+  `⚠ 引擎自述上下文 32768：config.contextBudget 131072 超过其 80%（26214），发请求前已自动 clamp …`。
+  这是为了避免"明知引擎装不下还照发"——那种请求只会在 prefill 阶段被 `insufficient memory` 拒绝。
+  想真正用更大上下文，必须调引擎侧 `--ctx-size`，改 `config.contextBudget` 只会被 clamp。
 - **边缘检测**：模型每轮上报真实 `prompt_tokens`，≥ 窗口 85% 时下一轮强制压缩历史（即使启发式
   计数低估也强制触发）。
 - **工具输出截断**：单条工具结果按 `窗口/16` 封顶（最少 2000 字），小窗口不再整条回灌大段代码。
@@ -728,6 +733,37 @@ request failed.` 同一错误此前在 60091 的 35B 上也出现过 → **不�
   2. 确认没有多个会话/多个本地模型同时跑长任务（每个模型各占一份显存与 KV cache）；
   3. 临时把 `localConcurrency` 保持 `1`，并减少子代理数量（读只读子代理在本地模型下已不并行）；
   4. **不要**因为 `engine shed its caches and stays up` 去重启引擎——它没有崩；重启只会重新加载模型。
+
+#### 内存/显存不足时的自动降级重试（v0.6.18 §3.74）
+
+即使有串行化，本地引擎仍可能因**子代理并发 / 长解码 / 其他进程占显存**在 prefill 时拒绝请求：
+
+```
+insufficient memory: the request exceeded available GPU memory
+(sustained critical memory pressure during prefill; aborted before the allocator wall).
+The engine shed its caches and stays up; this request failed.
+```
+
+真机（v0.6.17，8081 qwen）当时上下文只有 ≈2,773 tokens、预算 32,768——**整回合却直接失败**。
+现在对**本地端点**（`isLocalBaseUrl` 为真，或 `customModels.<名>.local: true`）改为**一次**有界降级重试：
+
+| 动作 | 数值 |
+| --- | --- |
+| 压缩上下文预算 | 本回合 `contextBudget × 0.6`，**下限 4096**（例：32,768 → ~19,660） |
+| 降低输出上限 | 本回合 `maxOutputTokens × 0.5`（例：8,192 → 4,096） |
+| 串行化加强 | 该重试传 `localConcurrency: 1`（复用既有的 `acquireLocalSlot`），即便你配了 0/2 |
+| 重试次数 | **最多一次**；第二次仍失败即如实报错，绝不无限重试 |
+
+- **可见性**：界面与日志出现
+  `♻ 因本地引擎内存不足，已压缩上下文（32,768 → ~19,660）…并重试一次`；
+  回合成功时 `done.note` 追加压缩前后数值、重试次数与最终结果（`↩ 内存降级重试（1 次）…重试后成功`）。
+- **第二次仍失败**：回合失败，错误文案带压缩前后数值与具体建议——把 `config.contextBudget` 调到多少、
+  关闭其他占用显存的模型进程/并行会话、引擎侧调大 `--ctx-size` 或使用 q8 KV 量化。
+- **云端端点不重试**：云 API 的 507/容量问题不是本地上下文能改的，压缩重试只会多烧一次请求；
+  400/401/429 等非内存错误同样不触发该恢复。
+- **判据单一来源**：`isMemoryPressureError`（协议层：507 / `insufficient memory` / `memory_refusal` /
+  `allocator wall` / `engine shed its caches and stays up` / OOM 措辞）＋
+  `describeUpstreamError(err, { isLocal })` 的 `recoverableByShrinking` 才决定是否重试。
 
 ### 用本地模型测 harness（测试者步骤清单）
 

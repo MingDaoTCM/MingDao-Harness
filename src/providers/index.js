@@ -11,7 +11,9 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { chat as openaiChat } from './openai-compatible.js';
+import { chat as openaiChat, isMemoryPressureError } from './openai-compatible.js';
+// 供 agent/model-discovery 与回归套件复用同一条「内存压力」判据（单一来源，避免各层各写一份正则）。
+export { isMemoryPressureError };
 import { modelPreset, providerPreset } from '../models.js';
 import { mingdaoHome } from '../config.js';
 import { resolveApiKey, getStoredKey } from '../credentials.js';
@@ -421,6 +423,11 @@ const sleep = (/** @type {any} */ ms, /** @type {any} */ signal) =>
   });
 
 function isTransient(/** @type {any} */ err) {
+  // v0.6.18 §3.74：内存/显存不足**不是瞬态网络抖动**——原样重发同一份大 prompt 只会再撞一次
+  // 内存墙（真机 8081：父回合 + 子代理并发 prefill）。这类错误交给 agent 做「压缩上下文 +
+  // 输出减半 + 强制串行」的一次性恢复；这里必须**不重试**，否则同回合会白烧 2 次请求
+  // （且 500+insufficient memory 会被 `status >= 500` 误判成瞬态）。
+  if (isMemoryPressureError(err)) return false;
   const status = err?.status;
   if (status === 429 || (status >= 500 && status <= 504)) return true;
   // 注意：不含 abort —— 用户 Ctrl+C 主动中断不应触发重试
@@ -511,7 +518,9 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
           // 必须在**首 token 计时之前**排队：排队是内核自己的调度，不是"引擎迟迟不出首帧"。
           // 云端端点由 acquireLocalSlot 内部直接放行（不排队、不记日志、不加延迟）。
           releaseLocal = await acquireLocalSlot(pc.baseUrl, {
-            cfg,
+            // v0.6.18 §3.74：内存降级重试时 agent 传 localConcurrency=1，**临时把该端点压回单并发**
+            // （即便用户把 config.localConcurrency 配成 0/2）——重试期间不允许父回合/子代理再同时 prefill。
+            cfg: opts.localConcurrency != null ? { ...cfg, localConcurrency: opts.localConcurrency } : cfg,
             signal: ac.signal,
             onWait: opts.onQueueWait,
             endpoint: pc.name || pc.baseUrl,

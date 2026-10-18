@@ -866,6 +866,45 @@ export function engineContextNotice({ engineCtx = null, configuredWindow = null,
   return `引擎自述上下文 ${eng} vs 配置 ${conf ?? '（未声明）'} —— 配置未超出引擎能力${where}`;
 }
 
+// ---------------------------------------------------------------------------
+// v0.6.18 §3.74：**发请求前按引擎自述 n_ctx clamp 预算**
+//
+// 只"提示配置超出引擎能力"还不够：真机（v0.6.17，8081 qwen）配置 contextBudget=32768、
+// 引擎自述 n_ctx 也很小，请求照样发出去，然后整回合被 `insufficient memory` 拒绝。
+// 既然预检已经读到了 n_ctx，就在**发请求之前**把 prompt 预算压到 n_ctx×0.8 以下——
+// 明知会炸还发，等于把一次必然失败的 prefill 再烧一遍。
+//
+// 为什么留 20%：引擎的 n_ctx 是 prompt+输出/KV cache 的总窗口，输出上限、模板开销与
+// 并发请求都要占同一份窗口；贴着 n_ctx 发等于没有余量。0.8 与 PREFILL_WARN_RATIO 同口径。
+// ---------------------------------------------------------------------------
+
+/** 引擎自述 n_ctx 的预算占比（超过即 clamp）。 */
+export const ENGINE_BUDGET_RATIO = 0.8;
+
+/**
+ * 按引擎自述上下文 clamp prompt 预算（纯函数，便于断言/变异）。
+ *
+ * @param {{ contextBudget?: number|null, configuredBudget?: number|null, engineCtx?: number|null, ratio?: number }} [input]
+ * @returns {{ clamped: boolean, budget: number|null, from: number|null, to: number|null,
+ *             engineCtx: number|null, ceiling: number|null, ratio: number, notice: string }}
+ */
+export function clampContextBudgetToEngine({ contextBudget = null, configuredBudget = null, engineCtx = null, ratio = ENGINE_BUDGET_RATIO } = {}) {
+  const raw = Number(contextBudget) > 0 ? Math.floor(Number(contextBudget)) : null;
+  const confRaw = Number(configuredBudget) > 0 ? Math.floor(Number(configuredBudget)) : raw;
+  const eng = Number(engineCtx) > 0 ? Math.floor(Number(engineCtx)) : null;
+  const r = Number(ratio) > 0 && Number(ratio) < 1 ? Number(ratio) : ENGINE_BUDGET_RATIO;
+  const base = { clamped: false, budget: raw, from: raw, to: raw, engineCtx: eng, ceiling: null, ratio: r, notice: '' };
+  if (raw == null || eng == null) return base; // 没配置/没读到 n_ctx → 不猜、不 clamp
+  const ceiling = Math.max(1024, Math.floor(eng * r));
+  if (raw <= ceiling) return { ...base, ceiling };
+  const to = ceiling;
+  const notice =
+    `⚠ 引擎自述上下文 ${eng}：config.contextBudget ${confRaw} 超过其 ${Math.round(r * 100)}%（${ceiling}），` +
+    `发请求前已自动 clamp 上下文预算 ${raw} → ${ceiling}——否则长上下文会在 prefill 阶段被引擎直接拒绝` +
+    `（insufficient memory）。如需更大上下文，请在引擎侧调大 --ctx-size，而不是只改 config.contextBudget。`;
+  return { clamped: true, budget: to, from: raw, to, engineCtx: eng, ceiling, ratio: r, notice };
+}
+
 export function modelCacheFile() {
   return path.join(mingdaoHome(), 'model-cache.json');
 }

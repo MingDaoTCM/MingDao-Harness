@@ -17,7 +17,34 @@ function extractStreamError(/** @type {any} */ json) {
   /** @type {ApiError} */
   const e = new Error(`[流式响应错误${code ? ' ' + code : ''}] ${msg}`);
   if (code) e.status = code;
+  if (isMemoryPressureError(e)) /** @type {any} */ (e).memoryPressure = true;
   return e;
+}
+
+// 本地引擎「内存/显存不足」的判据（纯函数，v0.6.18 §3.74）：
+//   · HTTP 507（Insufficient Storage，llama.cpp / vLLM 的内存拒绝常用）；
+//   · 真机原文 `insufficient memory … aborted before the allocator wall` /
+//     `The engine shed its caches and stays up` / `memory_refusal`；
+//   · 中文本地引擎常见措辞（内存不足 / 内存拒绝 / 显存不足）；
+//   · 通用 OOM 措辞（CUDA out of memory / OOM）。
+// **只认"内存类"**：400/401/429 与普通 5xx 一律不命中——否则会把重试/压缩用在无意义的场景上。
+// 注意：这是**协议层**判据（有没有可能是内存问题）；「能不能压缩重试」还要叠加
+// `isLocalBaseUrl` —— 云 API 的 507 不压缩重试（见 agent.js 的 describeUpstreamError）。
+const MEMORY_PRESSURE_RE =
+  /insufficient memory|memory_refusal|allocator wall|engine shed its caches and stays up|out of memory|oom|cuda.*memory|gpu memory|显存(?:不足|不够)|内存(?:不足|拒绝|不够)/i;
+
+/**
+ * 这次错误是否属于「本地引擎内存/显存不足」（纯函数）。
+ * @param {any} err
+ * @returns {boolean}
+ */
+export function isMemoryPressureError(/** @type {any} */ err) {
+  const status = Number(err?.status);
+  if (status === 507) return true;
+  const text = String(err?.message ?? err ?? '');
+  if (!text) return false;
+  if (MEMORY_PRESSURE_RE.test(text)) return true;
+  return Boolean(err?.memoryPressure);
 }
 
 export async function chat(/** @type {any} */ { baseUrl, apiKey, model, messages, tools, temperature, maxTokens, signal, onDelta, onActivity, includeUsage = true, responseFormat, reasoningEffort }) {
@@ -76,6 +103,7 @@ export async function chat(/** @type {any} */ { baseUrl, apiKey, model, messages
     const e = new Error(`[${model}] API 错误 ${res.status}: ${detail}${hint}`);
     e.status = res.status;
     e.headers = res.headers; // 重试退避读取 Retry-After 用
+    if (isMemoryPressureError(e)) /** @type {any} */ (e).memoryPressure = true;
     throw e;
   }
 

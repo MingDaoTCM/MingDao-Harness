@@ -1131,6 +1131,12 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       // 界面看起来一切正常（ok:true + 正文），实际一次工具都没调（"看起来在工作、其实什么都没做"）。
       const zeroNote = String(r.perf?.zeroToolCalls || '');
       const baseNote = r.note || (r.text ? '' : `（任务已执行 ${io.stats().toolCount} 步工具操作${io.stats().deliverables.length ? `、交付 ${io.stats().deliverables.length} 个文件` : ''}，自动收尾总结未能生成——可追问「总结一下刚才的工作」）`);
+      // v0.6.18 §3.74：内存降级/clamp 的事实必须同时进 **web-server.log**（不只 done.note 与 banner）——
+      // 真机事后取证只拿得到日志文件；「重试了几次、压缩前后多少、最后成没成」不能只存在于界面里。
+      const mergedNote = [baseNote, zeroNote].filter(Boolean).join('\n');
+      if (/已压缩上下文|内存降级重试|已自动 clamp|引擎自述上下文/.test(mergedNote)) {
+        srvlog('chat 内存降级 ' + taskId + ' ' + mergedNote.replace(/\n/g, ' | '));
+      }
       send({
         type: 'done',
         budget: budgetInfo,
@@ -1145,7 +1151,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         //（子代理被一起收口），'own' = 本回合自己零进展。前端据此给出不同的处置建议。
         stallCause: r.perf?.stallCause ?? null,
         perf: r.perf ? { llmCalls: r.perf.llmCalls ?? null, toolCalls: r.perf.toolCalls ?? null, ttftMs: r.perf.ttftMs ?? null, noToolCalls: Boolean(r.perf.noToolCalls) } : null,
-        note: [baseNote, zeroNote].filter(Boolean).join('\n'),
+        note: mergedNote,
         stats: io.stats(),
         session: path.basename(session.file),
       });
