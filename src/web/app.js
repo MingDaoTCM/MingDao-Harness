@@ -203,7 +203,9 @@ let ctxLimit = 128000; // /api/state.contextBudget（上下文上限）
 let lastBudgetUsed = 0; // 上一回合 done.budget.used：生成中用"上一轮 used + 本轮字符估算"（诚实标 ≈）
 // 状态条的悬浮详情：最近一次工具 / 子 Agent / 本地队列 / 权限来源（不占常驻行）
 if ($('#runStrip')) attachTip($('#runStrip'), () => runState.detail || '运行状态：阶段 · 首帧 · 吞吐 · 上下文 · 工具步数 · 本轮费用');
-const sessionSubs=[]; // 本会话全部子代理（task 工具）条目：{seq, question, result, msg}
+const sessionSubs=[]; // 本会话全部子代理（task 工具）条目：{seq, question, result, msg, round, toolCalls, modelRounds, lastProgressAgoMs, status}
+let turnSeq=0; // 本会话的轮次序号（对话流一行摘要 / 右栏轨迹分组的同一键）
+let pendingSubagent=null; // 正在运行的 task 子代理快照（progress.subagent 刷新；任务完成后固化进 sessionSubs）
 // 回到底部悬浮按钮：滚动容器为 main；上滚超过 300px 时出现，点击平滑回底
 (function(){
   const scroller = document.querySelector('main');
@@ -234,16 +236,16 @@ function addReasoning(msg){ const d=document.createElement('details'); d.classNa
 function addUser(text){ const el=document.createElement('div'); el.className='msg-user'; el.innerHTML='<div class="bubble">'+esc(text)+'</div>'; chatEl.appendChild(el); renderEmptyState(); scrollBottom(); }
 
 const runningTools = new Map();
-// P1-1 工具时间线（v0.6.19 §3.70）：同一轮所有工具调用聚合成**一张**卡，节点复用不跳位。
-// 开始/完成只更新同一行（不再"删掉旧卡、在消息末尾重建一张"），结论顺序稳定；失败行红边高亮。
+// P1-1 工具时间线（v0.6.19 §3.70）保留为轨迹详情的渲染原语（toolStepNode/paintToolStep/
+// toolTimelineSummary）；§3.73 起对话流不再挂载内联卡——每轮只留一行摘要，详情进右栏/末尾区块。
 function renderToolStartEvent(ev){
-  timelineToolStart(activeAiMsg, ev);
+  traceToolStarted(activeAiMsg, ev);
 }
 function renderToolEvent(ev){
-  timelineToolDone(activeAiMsg, ev);
+  traceToolFinished(activeAiMsg, ev);
 }
 function renderToolDeniedEvent(ev){
-  timelineToolDenied(activeAiMsg, ev);
+  traceToolDenied(activeAiMsg, ev);
 }
 function renderTodos(todos,msg){
   const ul=document.createElement('ul'); ul.className='todo';
@@ -484,7 +486,7 @@ async function send(){
   attachments=[]; renderAttachments();
   addUser(text||(sentAttachments.map(a=>(a.type==='image'?'🖼 ':'📄 ')+a.name).join(' ')));
   const msg=newAiMsg(); const content=aiContent(msg); let raw='';
-  activeAiMsg=msg; msg._traj=[]; msg._steps=0; curSteps=0; curWorkT0=Date.now();
+  activeAiMsg=msg; msg._traj=[]; msg._steps=0; msg._round=++turnSeq; msg._startedAt=Date.now(); msg._endedAt=null; pendingSubagent=null; curSteps=0; curWorkT0=Date.now();
   // P0-1：本轮开始 → 运行状态条归零（上一轮的费用/首帧/工具数不许泄漏到本轮；上下文基数保留）
   runState.rawPhase='发请求（等首帧）'; runState.phase='等首帧'; runState.aborted=false;
   runState.ttftMs=null; runState.tokensPerSec=null; runState.toolCalls=0; runState.contentChars=0;
@@ -562,14 +564,18 @@ async function send(){
         if(ev.stalled) bits.push('已判定无进展，正在中止');
         runState.detail=bits.join(' · ');
         think.textContent='💭 正在工作 '+Math.floor(p/60)+' 分 '+Math.round(p%60)+' 秒 · 第 '+msg._steps+' 回合 · '+curPhase+' · '+bits.join(' · ')+'…';
-        renderWorkStatus(); }
+        renderWorkStatus();
+        // §3.73：子代理运行中随既有 progress.subagent 实时更新右侧/末尾那一行（不新增轮询）。
+        if (ev.subagent && pendingSubagent) pendingSubagent = mergeSubagentProgress(pendingSubagent, ev.subagent);
+        updateTraceSummary(activeAiMsg);
+        if (ev.subagent) renderSubagentSections(); }
       if(ev.type==='text'){ curPhase='模型输出中'; runState.rawPhase='解码中（收到增量）'; runState.phase='解码中'; runState.contentChars=raw.length; onActivity(); raw+=ev.delta; update(); }
       else if(ev.type==='reasoning'){ if(!reason){ reason=addReasoning(msg); reason.dataset.full=''; } if(!reason.parentElement.open) reason.parentElement.open=true; reason.parentElement.querySelector('summary').classList.add('live'); reason.dataset.full+=ev.delta; const full=reason.dataset.full; reason.textContent=(full.length>9000?full.slice(-9000)+'\n…（思考内容较长，仅显示末尾；已 '+full.length+' 字符）':full); reason.scrollTop=reason.scrollHeight; scroll(); }
       else if(ev.type==='turnStart'){ stepsCount+=1; curSteps+=1; msg._steps=curSteps; curPhase='模型推理中'; runState.rawPhase='发请求（等首帧）'; runState.phase='等首帧'; msg._traj.push({kind:'turn', t:Date.now()}); showThink(); think.textContent='💭 第 '+msg._steps+' 回合：模型推理中…'; renderWorkStatus(); scroll(); }
       else if(ev.type==='turnEnd'){ curPhase='回合完成，进入下一回合'; showThink(); think.textContent='⏸ 第 '+msg._steps+' 回合完成（累计 '+(ev.toolSteps||0)+' 工具步）· 进入下一回合…'; renderWorkStatus(); }
       else if(ev.type==='toolStart'){ stepsCount+=1; curSteps+=1; curPhase=ev.name==='task'?'子 Agent 执行中':'执行工具中'; runState.rawPhase=curPhase; runState.phase='执行工具'; msg._steps=curSteps; msg._traj.push({kind:'tool', seq:ev.seq, name:ev.name, args:ev.args, t:Date.now(), done:false}); onActivity(); update(); renderToolStartEvent(ev); renderWorkStatus(); }
       else if(ev.type==='code'){ onActivity(); const pre=document.createElement('pre'); pre.innerHTML='<code>'+highlight(ev.code,ev.lang)+'</code>'; insertBeforeActiveMsg(pre); scroll(); }
-      else if(ev.type==='tool'){ onActivity(); update(); runningTools.delete(ev.seq); const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.result=ev.result; tj.durationMs=ev.durationMs; } if(ev.name==='task'){ sessionSubs.push({seq:ev.seq, question:String(ev.args?.question||ev.args?.prompt||''), result:ev.result, durationMs:ev.durationMs, msg}); renderSubPanel(); } renderToolEvent(ev); }
+      else if(ev.type==='tool'){ onActivity(); update(); runningTools.delete(ev.seq); const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.result=ev.result; tj.durationMs=ev.durationMs; } renderToolEvent(ev); }
       else if(ev.type==='toolDenied'){ onActivity(); const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.denied=ev.reason||'未授权'; } renderToolDeniedEvent(ev); const d=document.createElement('div'); d.className='errline'; d.textContent='✖ '+(ev.reason==='未授权'||!ev.reason?'未授权':ev.reason)+'：'+ev.name; msg.appendChild(d); scroll(); }
       else if(ev.type==='banner'){ renderBanner(ev); }
       else if(ev.type==='ask'){ runState.rawPhase='等待权限确认'; runState.phase='执行工具'; update(); renderWorkStatus(); handleAskEvent(ev); }
@@ -618,7 +624,7 @@ async function send(){
     // 具体错误形态已进日志（fetch failed 等不再绕开续跑提示）。
     d.textContent=(e&&e.name==='AbortError')?(killedByWatchdog?'响应超时已中断（120 秒无任何响应），请重试':'已中断'):('连接中断，本轮未完成。已执行的工作已保存检查点——直接发送「继续」即可从断点续跑（' + Math.round((Date.now() - workT0) / 1000) + 's · ' + stepsCount + ' 步）。');
     msg.appendChild(d); scroll(); }
-  finally{ clearInterval(hintTimer); disarm(); clearTimeout(stopFallbackTimer); stopFallbackTimer=null; stopping=false; turnAbortCtrl=null; generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); activeAiMsg=null; curWorkT0=0; if(!runState.aborted){ runState.rawPhase='空闲'; runState.phase='空闲'; } else { runState.rawPhase='已中止'; runState.phase='已中止'; } renderWorkStatus(); scroll(); updateTasksPanel(); }
+  finally{ clearInterval(hintTimer); disarm(); clearTimeout(stopFallbackTimer); stopFallbackTimer=null; stopping=false; turnAbortCtrl=null; generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; msg._endedAt=Date.now(); finalizePendingSubagent(msg); content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); renderTracePanels(); activeAiMsg=null; curWorkT0=0; if(!runState.aborted){ runState.rawPhase='空闲'; runState.phase='空闲'; } else { runState.rawPhase='已中止'; runState.phase='已中止'; } renderWorkStatus(); scroll(); updateTasksPanel(); }
 }
 
 let curTaskId=null; // 本轮 SSE 任务 id（质检 L1：主停止按钮只断本任务，不再误伤其他 tab）
@@ -1041,6 +1047,107 @@ function applyThemePreference(pref, deps) {
   return { pref: p, theme };
 }
 
+// —— 轨迹 / 子 Agent 视图（v0.6.21 §3.73；smoke §151 直接 eval 这段做行为断言） ——
+// 唯一统计口径：对话流每轮那一行摘要与右栏「轨迹」都走 traceRoundView / traceSummaryText，
+// 由 traceRoundForMsg 统一装配。**不允许**两处各算一套（§151 断言两处都调用同一函数）。
+function fmtTraceDur(ms) {
+  const total = Math.max(0, Math.round((Number(ms) || 0) / 1000));
+  if (total < 60) return total + 's';
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  if (m < 60) return m + 'm' + (s ? s + 's' : '');
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return h + 'h' + (rm ? rm + 'm' : '');
+}
+/** 子代理一行的视图：名称 · 轮次 · 工具次数 · 最后进展 · 状态（缺失字段如实显示 —，不编造）。 */
+function subagentRowView(sub) {
+  const s = sub || {};
+  const toolCalls = s.toolCalls == null || !Number.isFinite(Number(s.toolCalls)) ? null : Math.max(0, Math.round(Number(s.toolCalls)));
+  const modelRounds = s.modelRounds == null || !Number.isFinite(Number(s.modelRounds)) ? null : Math.max(0, Math.round(Number(s.modelRounds)));
+  const ago = s.lastProgressAgoMs == null || !Number.isFinite(Number(s.lastProgressAgoMs)) ? null : Math.max(0, Math.round(Number(s.lastProgressAgoMs)));
+  const running = Boolean(s.running);
+  const failed = !running && (s.status === 'failed' || Boolean(s.result && s.result.ok === false));
+  const status = running ? 'running' : failed ? 'failed' : 'done';
+  const round = Math.max(0, Math.round(Number(s.round) || 0));
+  return {
+    key: 'sub:' + String(s.seq == null ? '?' : s.seq),
+    seq: s.seq,
+    round,
+    roundText: round ? '第 ' + round + ' 轮' : '—',
+    name: String(s.label || s.description || s.question || '子代理').slice(0, 80),
+    question: String(s.question || ''),
+    toolCalls,
+    toolText: toolCalls == null ? '工具次数 —' : toolCalls + ' 次工具',
+    modelRounds,
+    roundsText: modelRounds == null ? '自身轮次 —' : modelRounds + ' 轮',
+    progress: ago == null ? '最后进展 —' : '最后进展 ' + (ago < 1000 ? '<1s' : Math.round(ago / 1000) + 's') + ' 前',
+    status,
+    statusText: running ? '运行中' : failed ? '失败' : '完成',
+    statusCls: running ? 'run' : failed ? 'bad' : 'ok',
+    running,
+    durationMs: s.durationMs == null ? null : Number(s.durationMs),
+    result: s.result,
+  };
+}
+/** 一轮的完整视图（工具步 + 子代理 + 摘要文案）；对话流与右栏消费同一个对象。 */
+function traceRoundView(round) {
+  const r = round || {};
+  const now = Number(r.now) || Date.now();
+  const tools = (r.tools || []).map((t) => toolStepView(t, t.done));
+  const subs = (r.subs || []).map(subagentRowView);
+  const started = Number(r.startedAt) || 0;
+  const ended = r.endedAt != null ? Number(r.endedAt) : now;
+  const durationMs = started ? Math.max(0, ended - started) : 0;
+  const durationText = started ? fmtTraceDur(durationMs) : '';
+  const parts = ['本轮 ' + tools.length + ' 次工具调用'];
+  if (subs.length) parts.push(subs.length + ' 个子代理');
+  if (durationText) parts.push(durationText);
+  return {
+    round: Math.max(0, Math.round(Number(r.round) || 0)),
+    tools,
+    subs,
+    toolCount: tools.length,
+    subCount: subs.length,
+    failed: tools.filter((t) => t.failed).length,
+    durationMs,
+    durationText,
+    summary: parts.join(' · '),
+  };
+}
+function traceSummaryText(view) { return String((view && view.summary) || ''); }
+/** 每轮的数据装配：只读 msg._traj 与传入的 sessionSubs/pending，不读 runState、不另算。 */
+function traceRoundData(msg, subs, pending, now) {
+  const m = msg || {};
+  const round = Math.max(0, Math.round(Number(m._round) || 0));
+  const tools = (m._traj || []).filter((t) => t.kind === 'tool');
+  const list = (subs || []).filter((s) => s && (s.msg === msg || (round && Number(s.round) === round)));
+  if (pending && pending.msg === msg && pending.running && !list.some((s) => s.seq != null && s.seq === pending.seq)) list.push(pending);
+  return { round, startedAt: m._startedAt, endedAt: m._endedAt, now, tools, subs: list };
+}
+/** 子代理运行中的实时快照（progress 事件已有字段；不新增轮询）。 */
+function mergeSubagentProgress(pending, sub) {
+  if (!pending || !sub) return pending;
+  const toolCalls = sub.toolCalls != null ? Number(sub.toolCalls) : pending.toolCalls;
+  const modelRounds = sub.modelRounds != null ? Number(sub.modelRounds) : pending.modelRounds;
+  return Object.assign({}, pending, {
+    toolCalls: Number.isFinite(toolCalls) ? toolCalls : pending.toolCalls,
+    modelRounds: Number.isFinite(modelRounds) ? modelRounds : pending.modelRounds,
+    lastProgressAgoMs: sub.ms != null ? Number(sub.ms) : pending.lastProgressAgoMs,
+    label: String(sub.label || pending.label || '子代理'),
+    running: true,
+    status: 'running',
+  });
+}
+/** 窄窗口（<1180 右栏收起）且右栏不可见时，轨迹落到对话流末尾的可折叠区块。 */
+function traceDockVisible(width, panelVisible) {
+  return layoutClassesFor(width).narrowRun && !panelVisible;
+}
+/** 点摘要时的定位目标：窄屏 → 末尾区块；宽屏/抽屉已开 → 右侧面板。 */
+function traceFocusTarget(width, panelVisible) {
+  return traceDockVisible(width, panelVisible) ? 'dock' : 'panel';
+}
+
 // —— 窄屏断点：<900 侧栏收起；<1180 右栏收起（同一判据供 initResponsive 与断言使用） ——
 function layoutClassesFor(width) {
   const w = Number(width) || 0;
@@ -1060,6 +1167,12 @@ let workingDirCache = '';
 let compactAvailable = false; // Web 端当前没有 /api/compact；为 true 时才显示压缩入口
 let runPanelOpen = false;
 let responsiveInitialized = false;
+// —— 轨迹收纳状态（§3.73）：两个折叠区 + 展开过的轮次/工具/子代理（重渲染后保持展开） ——
+const traceFoldState = { trace: true, subs: true };
+const openTraceRounds = new Set();
+const openTraceTools = new Set();
+const openTraceSubs = new Set();
+let traceAutoOpened = false;
 
 // —— 主题：偏好写 localStorage；显式 light/dark 优先，'system' 跟随系统并实时响应 ——
 function themeSystemPrefersDark() {
@@ -1127,6 +1240,8 @@ function initResponsive() {
   const col = $('#rpCollapse'); if (col) col.onclick = () => setRunPanel(false);
 }
 initResponsive();
+// §3.73：绑定两个折叠区 + 末尾区块总开关（渲染入口在下面的轨迹收纳块）。
+initTraceUI();
 
 // —— 工具时间线 DOM：一张卡 + 可复用行（开始/完成不换节点） ——
 function toolStepNode(step) {
@@ -1153,7 +1268,7 @@ function toolStepNode(step) {
     li.classList.toggle('open', open);
     row.setAttribute('aria-expanded', String(open));
   };
-  const entry = { li, row, no, st, tool, args, dur, res, argsFull, meta, pre, more, step, fullOpen: false };
+  const entry = { li, row, out, no, st, tool, args, dur, res, argsFull, meta, pre, more, step, fullOpen: false };
   more.onclick = () => { pre.textContent = step.output.full; more.hidden = true; entry.fullOpen = true; };
   return entry;
 }
@@ -1294,6 +1409,312 @@ function renderRunPanel() {
 }
 $('#rpStop').onclick = () => stopTurnFromButton();
 $('#rpCompact').onclick = () => renderBanner({ text: '⚠ Web 端没有 /compact 端点（只有 CLI 有），本入口未启用。', warn: true });
+
+// ============================================================================
+// §3.73 轨迹 / 子 Agent 收纳：
+//   · 对话流：每轮只留**一行**摘要（.trace-row > .trace-summary），不再内联工具卡；
+//   · 宽屏：详情在右栏「轨迹 / 子Agent」两个可折叠区；
+//   · 窄屏（<1180 右栏收起）：同样的两块在对话流末尾的 #traceDock 里（JS 切换 hidden）。
+//   · 统计口径：对话流摘要与右栏轮头都调用 traceRoundForMsg → traceRoundView，只有一套。
+// ============================================================================
+function traceRoundForMsg(msg, now) {
+  return traceRoundView(traceRoundData(msg, sessionSubs, pendingSubagent, now));
+}
+function collectTraceViews() {
+  return [...document.querySelectorAll('#chat .msg-ai')]
+    .map((m) => traceRoundForMsg(m))
+    .filter((v) => v.toolCount || v.subCount);
+}
+function ensureTraceSummary(msg) {
+  if (!msg) return null;
+  if (msg._traceRow) return msg._traceRow;
+  const row = document.createElement('div');
+  row.className = 'trace-row'; row.dataset.traceRow = '1';
+  const btn = document.createElement('button');
+  btn.type = 'button'; btn.className = 'trace-summary';
+  btn.dataset.round = String(msg._round || 0);
+  btn.dataset.src = 'traceRoundForMsg';
+  btn.onclick = () => focusTraceRound(msg._round);
+  row.appendChild(btn);
+  msg._traceRow = row;
+  msg.appendChild(row);
+  return row;
+}
+/** 对话流每轮的那**一行**摘要：文案与右栏轮头同源（traceSummaryText(traceRoundView(...))）。 */
+function updateTraceSummary(msg) {
+  if (!msg) return;
+  const v = traceRoundForMsg(msg);
+  if (!v.toolCount && !v.subCount) { if (msg._traceRow) msg._traceRow.hidden = true; return; }
+  const row = ensureTraceSummary(msg);
+  row.hidden = false;
+  const btn = row.querySelector('.trace-summary') || row.firstChild;
+  const summary = traceSummaryText(v);
+  btn.textContent = '🧭 ' + summary + '  ›';
+  btn.dataset.summary = summary;
+  btn.dataset.round = String(v.round);
+  btn.setAttribute('aria-label', '定位本轮轨迹：' + summary);
+  row.classList.toggle('has-fail', v.failed > 0);
+  msg.appendChild(row); // 收在本轮正文末尾（不在正文之间堆卡）
+}
+function traceToolStarted(msg, ev) {
+  if (msg && ev && ev.name === 'task') {
+    const question = String((ev.args && (ev.args.question || ev.args.prompt)) || '');
+    pendingSubagent = {
+      seq: ev.seq, msg, round: Number(msg._round) || 0,
+      label: String((ev.args && ev.args.description) || question.slice(0, 60) || '子代理'),
+      question, toolCalls: 0, modelRounds: 0, lastProgressAgoMs: null, running: true, status: 'running',
+    };
+  }
+  updateTraceSummary(msg);
+  renderTracePanels();
+}
+function traceToolFinished(msg, ev) {
+  if (msg && ev && ev.name === 'task') {
+    const question = String((ev.args && (ev.args.question || ev.args.prompt)) || '');
+    const snap = pendingSubagent && pendingSubagent.seq === ev.seq ? pendingSubagent : null;
+    sessionSubs.push({
+      seq: ev.seq,
+      label: String((snap && snap.label) || (ev.args && ev.args.description) || question.slice(0, 60) || '子代理'),
+      question,
+      result: ev.result,
+      durationMs: ev.durationMs,
+      msg,
+      round: Number(msg._round) || 0,
+      toolCalls: snap ? snap.toolCalls : null,
+      modelRounds: snap ? snap.modelRounds : null,
+      lastProgressAgoMs: snap ? snap.lastProgressAgoMs : null,
+      status: ev.result && ev.result.ok === false ? 'failed' : 'done',
+    });
+    if (snap) pendingSubagent = null;
+    renderSubPanel();
+  }
+  updateTraceSummary(msg);
+  renderTracePanels();
+}
+function traceToolDenied(msg, ev) {
+  if (msg && ev && ev.name === 'task') {
+    const question = String((ev.args && (ev.args.question || ev.args.prompt)) || '');
+    const snap = pendingSubagent && pendingSubagent.seq === ev.seq ? pendingSubagent : null;
+    sessionSubs.push({
+      seq: ev.seq, label: String((snap && snap.label) || question.slice(0, 60) || '子代理'), question,
+      result: { ok: false, error: ev.reason || '未授权' }, durationMs: ev.durationMs, msg,
+      round: Number(msg._round) || 0, toolCalls: snap ? snap.toolCalls : null,
+      modelRounds: snap ? snap.modelRounds : null, lastProgressAgoMs: snap ? snap.lastProgressAgoMs : null,
+      status: 'failed',
+    });
+    if (snap) pendingSubagent = null;
+    renderSubPanel();
+  }
+  updateTraceSummary(msg);
+  renderTracePanels();
+}
+/** 回合收尾时仍在跑的子代理：如实落成失败行（不让它从界面上凭空消失）。 */
+function finalizePendingSubagent(msg) {
+  const p = pendingSubagent;
+  if (!p || (msg && p.msg !== msg)) return;
+  sessionSubs.push({
+    seq: p.seq, label: p.label, question: p.question,
+    result: { ok: false, error: '本轮结束时子代理仍未回传结果' }, durationMs: null, msg: p.msg,
+    round: p.round, toolCalls: p.toolCalls, modelRounds: p.modelRounds,
+    lastProgressAgoMs: p.lastProgressAgoMs, status: 'failed',
+  });
+  pendingSubagent = null;
+  renderSubPanel();
+}
+function syncTraceFoldButtons() {  document.querySelectorAll('[data-fold]').forEach((btn) => {
+    const key = btn.dataset.fold;
+    const open = traceFoldState[key] !== false;
+    btn.setAttribute('aria-expanded', String(open));
+    const body = document.getElementById(btn.getAttribute('aria-controls'));
+    if (body) body.hidden = !open;
+  });
+}
+function toggleTraceFold(key) {
+  traceFoldState[key] = !(traceFoldState[key] !== false);
+  syncTraceFoldButtons();
+}
+function traceScrollParent(root) {
+  if (!root || !root.closest) return null;
+  return root.closest('.rp-body') || root.closest('#tdBody');
+}
+function renderTraceRoundList(root, views) {
+  if (!root) return;
+  const scroller = traceScrollParent(root);
+  const top = scroller ? scroller.scrollTop : 0;
+  root.innerHTML = '';
+  if (!views.length) {
+    const empty = document.createElement('div'); empty.className = 'tr-empty';
+    empty.textContent = '还没有可展示的轨迹——发起任务后这里按轮分组。';
+    root.appendChild(empty);
+    return;
+  }
+  for (const v of views) root.appendChild(buildTraceRoundNode(v));
+  if (scroller) scroller.scrollTop = top;
+}
+function buildTraceRoundNode(v) {
+  const box = document.createElement('div');
+  box.className = 'tr-round' + (v.failed ? ' has-fail' : '');
+  box.dataset.round = String(v.round);
+  const head = document.createElement('button');
+  head.type = 'button'; head.className = 'tr-round-head';
+  const no = document.createElement('span'); no.className = 'tr-round-no'; no.textContent = '第 ' + v.round + ' 轮';
+  const sum = document.createElement('span'); sum.className = 'tr-round-sum';
+  sum.textContent = traceSummaryText(v);
+  sum.dataset.summary = traceSummaryText(v); sum.dataset.src = 'traceRoundForMsg';
+  head.appendChild(no); head.appendChild(sum);
+  const body = document.createElement('div'); body.className = 'tr-round-body';
+  if (v.tools.length) {
+    const list = document.createElement('ol'); list.className = 'tl-steps tr-steps';
+    for (const step of v.tools) {
+      const entry = toolStepNode(step);
+      paintToolStep(entry, step);
+      const key = v.round + ':' + String(step.seq);
+      if (openTraceTools.has(key)) { entry.out.hidden = false; entry.li.classList.add('open'); entry.row.setAttribute('aria-expanded', 'true'); }
+      entry.row.addEventListener('click', () => {
+        if (!entry.out.hidden) openTraceTools.add(key); else openTraceTools.delete(key);
+      });
+      list.appendChild(entry.li);
+    }
+    body.appendChild(list);
+  } else {
+    const d = document.createElement('div'); d.className = 'tr-empty'; d.textContent = '本轮没有工具调用'; body.appendChild(d);
+  }
+  const open = openTraceRounds.has(v.round);
+  if (open) box.classList.add('open');
+  head.setAttribute('aria-expanded', String(open));
+  head.onclick = () => {
+    const next = !box.classList.contains('open');
+    box.classList.toggle('open', next);
+    head.setAttribute('aria-expanded', String(next));
+    if (next) openTraceRounds.add(v.round); else openTraceRounds.delete(v.round);
+  };
+  box.appendChild(head); box.appendChild(body);
+  return box;
+}
+function renderTraceSubList(root, views) {
+  if (!root) return;
+  const scroller = traceScrollParent(root);
+  const top = scroller ? scroller.scrollTop : 0;
+  root.innerHTML = '';
+  const rows = [];
+  for (const v of views) for (const s of v.subs) rows.push(s);
+  if (!rows.length) {
+    const empty = document.createElement('div'); empty.className = 'tr-empty';
+    empty.textContent = '本会话还没有子 Agent（task 工具会派生子 Agent）';
+    root.appendChild(empty);
+    return;
+  }
+  for (const s of rows) root.appendChild(buildTraceSubNode(s));
+  if (scroller) scroller.scrollTop = top;
+}
+function buildTraceSubNode(s) {
+  const box = document.createElement('div');
+  box.className = 'tr-sub ' + (s.statusCls || '');
+  box.dataset.seq = String(s.seq == null ? '' : s.seq);
+  box.dataset.round = String(s.round);
+  const head = document.createElement('button');
+  head.type = 'button'; head.className = 'tr-sub-head';
+  const name = document.createElement('span'); name.className = 'tr-sub-name'; name.textContent = '🤖 ' + s.name;
+  const round = document.createElement('span'); round.className = 'tr-sub-meta'; round.textContent = s.roundText;
+  const tools = document.createElement('span'); tools.className = 'tr-sub-meta'; tools.textContent = s.toolText;
+  const progress = document.createElement('span'); progress.className = 'tr-sub-meta'; progress.textContent = s.progress;
+  const state = document.createElement('span'); state.className = 'tr-sub-state ' + (s.statusCls || ''); state.textContent = s.statusText;
+  [name, round, tools, progress, state].forEach((n) => head.appendChild(n));
+  const body = document.createElement('div'); body.className = 'tr-sub-body';
+  const q = document.createElement('div'); q.className = 'tr-sub-q'; q.textContent = '任务：' + (s.question || '—');
+  const stats = document.createElement('div'); stats.className = 'tr-sub-stats';
+  stats.textContent = '子代理自身：' + s.roundsText + ' · ' + s.toolText + ' · ' + s.progress
+    + '（实时快照来自既有 progress.subagent，未新增轮询）';
+  const rl = document.createElement('div'); rl.className = 'tr-sub-rl'; rl.textContent = '结果：';
+  body.appendChild(q); body.appendChild(stats); body.appendChild(rl);
+  if (s.running) { const w = document.createElement('div'); w.className = 'tr-sub-wait'; w.textContent = '仍在运行——工具次数与最后进展随 progress 事件更新…'; body.appendChild(w); }
+  else body.appendChild(textBody(resultText(s.result)));
+  const open = openTraceSubs.has(s.key);
+  if (open) box.classList.add('open');
+  head.setAttribute('aria-expanded', String(open));
+  head.onclick = () => {
+    const next = !box.classList.contains('open');
+    box.classList.toggle('open', next);
+    head.setAttribute('aria-expanded', String(next));
+    if (next) openTraceSubs.add(s.key); else openTraceSubs.delete(s.key);
+  };
+  box.appendChild(head); box.appendChild(body);
+  return box;
+}
+function renderTracePanels() {
+  const views = collectTraceViews();
+  const totalTools = views.reduce((a, v) => a + v.toolCount, 0);
+  const totalSubs = views.reduce((a, v) => a + v.subCount, 0);
+  const meta = views.length ? views.length + ' 轮 · ' + totalTools + ' 次工具 · ' + totalSubs + ' 个子代理' : '—';
+  ['#rpTraceMeta', '#tdTraceMeta'].forEach((sel) => { const n = $(sel); if (n) n.textContent = meta; });
+  ['#rpSubMeta', '#tdSubMeta'].forEach((sel) => { const n = $(sel); if (n) n.textContent = totalSubs ? totalSubs + ' 个' : '—'; });
+  const dockMeta = $('#tdMeta'); if (dockMeta) dockMeta.textContent = meta;
+  if (!traceAutoOpened && views.length) { openTraceRounds.add(views[views.length - 1].round); traceAutoOpened = true; }
+  renderTraceRoundList($('#rpTraceList'), views);
+  renderTraceRoundList($('#tdTraceList'), views);
+  renderTraceSubList($('#rpSubList'), views);
+  renderTraceSubList($('#tdSubList'), views);
+  syncTraceFoldButtons();
+}
+/** 子代理运行中只刷新子代理两块（progress≈1s；不重建工具列表，少打扰）。 */
+function renderSubagentSections() {
+  const views = collectTraceViews();
+  const totalSubs = views.reduce((a, v) => a + v.subCount, 0);
+  ['#rpSubMeta', '#tdSubMeta'].forEach((sel) => { const n = $(sel); if (n) n.textContent = totalSubs ? totalSubs + ' 个' : '—'; });
+  renderTraceSubList($('#rpSubList'), views);
+  renderTraceSubList($('#tdSubList'), views);
+}
+function syncTraceDock() {
+  const dock = $('#traceDock'); if (!dock) return;
+  const show = traceDockVisible(window.innerWidth || 0, !$('#runPanel').hidden);
+  dock.hidden = !show;
+  if (show) renderTracePanels();
+}
+function focusTraceRound(round) {
+  const n = Math.max(0, Math.round(Number(round) || 0)); if (!n) return;
+  const target = traceFocusTarget(window.innerWidth || 0, !$('#runPanel').hidden);
+  if (target === 'dock') {
+    const dock = $('#traceDock'); if (dock) dock.hidden = false;
+    const body = $('#tdBody'); if (body) body.hidden = false;
+    const toggle = $('#tdToggle'); if (toggle) toggle.setAttribute('aria-expanded', 'true');
+  } else {
+    setRunPanel(true);
+  }
+  traceFoldState.trace = true;
+  openTraceRounds.add(n);
+  renderTracePanels();
+  const root = target === 'dock' ? $('#tdTraceList') : $('#rpTraceList');
+  const el = root ? root.querySelector('[data-round="' + n + '"]') : null;
+  if (el) {
+    el.classList.add('focus');
+    try { el.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); } catch { /* 老浏览器/无布局：跳过平滑滚动 */ }
+    setTimeout(() => el.classList.remove('focus'), 1600);
+  }
+}
+function initTraceUI() {
+  document.querySelectorAll('[data-fold]').forEach((btn) => { btn.onclick = () => toggleTraceFold(btn.dataset.fold); });
+  const toggle = $('#tdToggle');
+  if (toggle) toggle.onclick = () => {
+    const body = $('#tdBody'); if (!body) return;
+    const show = body.hidden;
+    body.hidden = !show;
+    toggle.setAttribute('aria-expanded', String(show));
+  };
+  syncTraceFoldButtons();
+  renderTracePanels();
+}
+/** 新对话/切换会话：轮次、子代理、展开状态一起归零（旧会话的轨迹不得串到新会话）。 */
+function resetTraceState() {
+  turnSeq = 0;
+  pendingSubagent = null;
+  sessionSubs.length = 0;
+  openTraceRounds.clear();
+  openTraceTools.clear();
+  openTraceSubs.clear();
+  traceAutoOpened = false;
+  renderTracePanels();
+  try { renderSubPanel(); } catch { /* 子代理面板未初始化时忽略 */ }
+}
 
 // —— 会话设置弹层：模型 / 预设 / 权限（生效值 + 来源） ——
 function permissionModeLabel(mode) {
@@ -1612,15 +2033,8 @@ document.addEventListener('keydown', (e) => {
 });
 
 function attachTrajMeta(msg){
-  if(!msg || !msg._traj || !msg._traj.length) return;
-  const tools=msg._traj.filter(x=>x.kind==='tool');
-  const subs=tools.filter(x=>x.name==='task');
-  const meta=document.createElement('div'); meta.className='msg-meta';
-  const b=document.createElement('button'); b.className='trajBtn';
-  b.textContent='🧭 轨迹：'+(msg._steps||tools.length)+' 步 · '+subs.length+' 个子 Agent';
-  b.onclick=()=>openTraj(msg);
-  meta.appendChild(b);
-  msg.insertBefore(meta, msg.firstChild);
+  // §3.73：不再插入 #chat 里的旧轨迹按钮卡；每轮只留一行摘要。
+  updateTraceSummary(msg);
 }
 function openTraj(msg){
   const list=$('#tjList'); list.innerHTML='';
@@ -1677,6 +2091,8 @@ function syncPanelLayout(){
   const rp=$('#runPanel'); if(rp) rp.hidden=!showRun;
   document.body.classList.toggle('run-open', showRun&&!narrow);
   document.body.classList.toggle('run-drawer', showRun&&narrow);
+  // §3.73：窄屏右栏收起时，轨迹/子Agent 在对话流末尾显示；右栏（抽屉）一开就让位。
+  syncTraceDock();
 }
 $('#tjClose').onclick=()=>{ $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); syncPanelLayout(); };
 $('#trajRailBtn').onclick=()=>{
@@ -1917,6 +2333,7 @@ async function init(){
   renderSessionSettings();
   renderEmptyState();
   renderRunPanel();
+  renderTracePanels();
 }
 
 // v0.4.7（T24）：IDE「发送选中代码」此前不生效——扩展 POST /api/draft 时只带 text（写进**全局槽**），
@@ -2382,13 +2799,13 @@ function finalizeCurrentSession(){
   if(!currentSession) return;
   fetch('/api/session-finalize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:currentSession})}).catch(()=>{});
 }
-async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); renderEmptyState(); }
+async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; resetTraceState(); const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); renderEmptyState(); }
 
 // §138：主按钮在生成态=停止，必须走**同一个**停止出口（stopTurnFromButton → stopTurn → POST /api/abort）
 sendBtn.onclick=()=>{ if(generating){ stopTurnFromButton(); } else { send(); } };
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
 input.addEventListener('input',()=>{ input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; });
-$('#newChat').onclick=()=>{ finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; renderEmptyState(); refreshSessions(); };
+$('#newChat').onclick=()=>{ finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); refreshSessions(); };
 $('#sessMgrBtn').onclick=openSessModal;
 $('#sessClose').onclick=()=>{ $('#sessModal').style.display='none'; };
 async function openSessModal(){
@@ -2404,6 +2821,6 @@ async function openSessModal(){
     div.appendChild(rn); div.appendChild(dl); list.appendChild(div);
   }
 }
-$('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; renderEmptyState(); } };
+$('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); } };
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
 init();

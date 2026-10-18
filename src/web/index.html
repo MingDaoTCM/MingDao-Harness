@@ -386,6 +386,64 @@ body.run-open #scrollBottomBtn{right:326px}
 #rpStop{color:var(--err);border-color:rgba(242,90,90,.45);background:transparent;padding:4px 10px;font-size:12px}
 #rpStop[disabled]{opacity:.45}
 #rpCompact{padding:4px 10px;font-size:12px}
+
+/* —— §3.73 轨迹收纳：对话流一行摘要 + 右栏/末尾两块（轨迹 · 子Agent） —— */
+.trace-row{display:flex;justify-content:flex-end;margin:6px 0 2px}
+.trace-summary{border:1px solid var(--border);background:var(--bg3);color:var(--dim);border-radius:999px;padding:2px 11px;font-size:11.5px;cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.trace-summary:hover{border-color:var(--accent2);color:var(--text)}
+.trace-row.has-fail .trace-summary{border-color:rgba(242,90,90,.45);color:var(--err)}
+.rp-fold-head{width:100%;border:0;background:transparent;padding:0 0 6px;margin:0;cursor:pointer;font:inherit;font-size:10.5px;letter-spacing:.5px;color:var(--faint);text-transform:uppercase;display:flex;align-items:center;gap:6px}
+.rp-fold-head:hover{color:var(--text)}
+.rp-fold-head .rp-fold-meta{margin-left:auto;font-size:10px;letter-spacing:0;text-transform:none;color:var(--faint)}
+.rp-fold-tri{width:0;height:0;border-top:4px solid currentColor;border-left:3px solid transparent;border-right:3px solid transparent;transition:transform .15s}
+.rp-fold-head[aria-expanded="false"] .rp-fold-tri{transform:rotate(-90deg)}
+.tr-round{border:1px solid var(--border);border-radius:8px;background:var(--bg3);margin-bottom:6px;overflow:hidden}
+.tr-round:last-child{margin-bottom:0}
+.tr-round.has-fail{border-color:rgba(242,90,90,.35)}
+.tr-round-head{display:flex;align-items:center;gap:6px;width:100%;padding:5px 8px;border:0;background:transparent;color:var(--dim);text-align:left;font-size:11.5px}
+.tr-round-head:hover{background:var(--bg2);color:var(--text)}
+.tr-round-no{flex:none;color:var(--faint);font-size:10.5px;font-variant-numeric:tabular-nums}
+.tr-round-sum{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tr-round.has-fail .tr-round-sum{color:var(--err)}
+.tr-round-body{display:none;border-top:1px dashed var(--border)}
+.tr-round.open .tr-round-body{display:block}
+.tr-round.focus{outline:1px solid var(--accent2);outline-offset:1px}
+.tr-round-body .tl-row{grid-template-columns:18px 14px 52px minmax(0,1fr) 40px 8px;gap:5px;padding:4px 8px;font-size:12px}
+.tr-round-body .tl-row .tl-args{font-size:11.5px}
+.tr-round-body .tl-res{padding:0 8px 4px 86px;font-size:11px}
+.tr-round-body .tl-out{padding:0 8px 8px 86px}
+.tr-empty{padding:7px 9px;color:var(--faint);font-size:11.5px}
+.tr-sub{border:1px solid var(--border);border-radius:8px;background:var(--bg3);margin-bottom:6px;overflow:hidden}
+.tr-sub:last-child{margin-bottom:0}
+.tr-sub.failed{border-color:rgba(242,90,90,.35)}
+.tr-sub-head{display:flex;flex-wrap:wrap;align-items:center;gap:2px 6px;width:100%;padding:5px 8px;border:0;background:transparent;color:var(--dim);text-align:left;font-size:11.5px}
+.tr-sub-head:hover{background:var(--bg2);color:var(--text)}
+.tr-sub-name{min-width:0;max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text);font-weight:600}
+.tr-sub-meta{font-size:10.5px;color:var(--faint);white-space:nowrap}
+.tr-sub-state{margin-left:auto;font-size:10.5px;border:1px solid var(--border);border-radius:999px;padding:0 5px;line-height:15px;color:var(--faint);white-space:nowrap}
+.tr-sub-state.run{color:var(--accent2);border-color:rgba(55,196,210,.4)}
+.tr-sub-state.ok{color:var(--accent)}
+.tr-sub-state.bad{color:var(--err);border-color:rgba(242,90,90,.4)}
+.tr-sub-body{display:none;border-top:1px dashed var(--border);padding:6px 8px;font-size:11.5px;color:var(--dim);line-height:1.6}
+.tr-sub.open .tr-sub-body{display:block}
+.tr-sub-q{color:var(--text);word-break:break-word}
+.tr-sub-stats{margin-top:3px;color:var(--faint);font-size:10.5px}
+.tr-sub-rl{margin-top:5px;color:var(--faint);font-size:10.5px}
+.tr-sub-wait{color:var(--faint);font-size:11px;padding:2px 0}
+#traceDock{margin:10px auto 4px;max-width:760px;border:1px solid var(--border);border-radius:12px;background:var(--bg2);overflow:hidden}
+#tdToggle{display:flex;align-items:center;gap:8px;width:100%;padding:8px 12px;border:0;background:transparent;color:var(--text);font:inherit;font-size:12.5px;font-weight:600;text-align:left;cursor:pointer}
+#tdToggle:hover{background:var(--bg3)}
+.td-meta{margin-left:auto;font-size:10.5px;font-weight:400;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#tdBody{border-top:1px solid var(--border);padding:8px 12px 10px}
+.td-fold{margin-bottom:10px}
+.td-fold:last-child{margin-bottom:0}
+.td-fold-head{width:100%;display:flex;align-items:center;gap:8px;border:0;background:transparent;padding:0 0 6px;color:var(--faint);font:inherit;font-size:10.5px;letter-spacing:.5px;text-transform:uppercase;cursor:pointer}
+.td-fold-head:hover{color:var(--text)}
+.td-fold-head .td-fold-meta{margin-left:auto;font-size:10px;letter-spacing:0;text-transform:none}
+.td-fold-body .tr-round-body .tl-row{grid-template-columns:20px 16px 64px minmax(0,1fr) 54px 10px;gap:7px;padding:5px 12px;font-size:12.5px}
+.td-fold-body .tr-round-body .tl-res{padding:0 12px 5px 138px;font-size:11.5px}
+.td-fold-body .tr-round-body .tl-out{padding:0 12px 9px 138px}
+
 @media (max-width:1180px){
   body.run-open{padding-right:0}
   #runPanel{display:none}
@@ -578,6 +636,21 @@ body.run-open #sessSheet{right:318px}
     </div>
   </div>
   <div id="chat"></div>
+  <!-- §3.73：窄屏（<1180）右栏收起时，轨迹/子Agent 落在对话流末尾的这一个可折叠区块里，
+       不塞回每条消息之间。宽屏隐藏（详情在 #runPanel）。 -->
+  <section id="traceDock" aria-label="轨迹与子 Agent" hidden>
+    <button id="tdToggle" type="button" aria-expanded="true">🧭 轨迹与子 Agent<span class="td-meta" id="tdMeta">—</span><span class="td-tri" aria-hidden="true">⌄</span></button>
+    <div id="tdBody">
+      <section class="td-fold">
+        <button class="td-fold-head" type="button" data-fold="trace" aria-controls="tdTraceFoldBody" aria-expanded="true">轨迹<span class="td-fold-meta" id="tdTraceMeta">—</span></button>
+        <div id="tdTraceFoldBody"><div id="tdTraceList"></div></div>
+      </section>
+      <section class="td-fold">
+        <button class="td-fold-head" type="button" data-fold="subs" aria-controls="tdSubFoldBody" aria-expanded="true">子Agent<span class="td-fold-meta" id="tdSubMeta">—</span></button>
+        <div id="tdSubFoldBody"><div id="tdSubList"></div></div>
+      </section>
+    </div>
+  </section>
 </main>
 <footer>
   <!-- P0-1 常驻运行状态条（v0.6.18 §3.68）：唯一刷新出口 renderWorkStatus()。
@@ -638,6 +711,16 @@ body.run-open #sessSheet{right:318px}
         <div class="rp-metric wide"><span class="l">上下文占用</span><span class="v" data-rk="ctx" id="rpCtx">—</span><div class="rp-ctxbar"><i id="rpCtxBar"></i></div></div>
         <div class="rp-metric wide"><span class="l">本轮费用（估算）</span><span class="v" data-rk="cost" id="rpCost">—</span></div>
       </div>
+    </section>
+    <!-- §3.73：轨迹 / 子Agent 两块可折叠区。对话流每轮只留一行摘要，细节都收在这里；
+         统计与摘要同源（renderTracePanels → 同一 traceRoundForMsg 视图）。 -->
+    <section class="rp-sec" id="rpTraceSec">
+      <button class="rp-sec-title rp-fold-head" type="button" data-fold="trace" aria-controls="rpTraceFoldBody" aria-expanded="true">轨迹<span class="rp-fold-meta" id="rpTraceMeta">—</span><span class="line"></span><span class="rp-fold-tri" aria-hidden="true"></span></button>
+      <div id="rpTraceFoldBody"><div id="rpTraceList" class="tr-list"></div></div>
+    </section>
+    <section class="rp-sec" id="rpSubSec">
+      <button class="rp-sec-title rp-fold-head" type="button" data-fold="subs" aria-controls="rpSubFoldBody" aria-expanded="true">子Agent<span class="rp-fold-meta" id="rpSubMeta">—</span><span class="line"></span><span class="rp-fold-tri" aria-hidden="true"></span></button>
+      <div id="rpSubFoldBody"><div id="rpSubList" class="tr-list"></div></div>
     </section>
   </div>
   <div class="rp-foot"><span class="grow" id="rpFootNote">停止与压缩：与状态条同一条停止出口</span><button id="rpCompact" type="button" hidden title="后端有 /compact 时才显示">压缩上下文</button><button id="rpStop" type="button" disabled>■ 停止</button></div>

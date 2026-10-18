@@ -3647,6 +3647,60 @@ label 写回 `config.model`** 的变异（batch37 ①）证明：一旦这么做
   `buildUpdateNotice`，无须改接线）；未改 `src/**`、`test/mutate/README.md`、`presets/**`、`ide/**`。
 - 未 tag、未改版本号、未 publish、未动官网；`desktop/README.md` / `docs/DESKTOP-AUTO-UPDATE.md`
   里"UI 明写…"的描述仍成立（未逐字引用旧五句），本轮不改。
+
+## 3.73 已补（v0.6.21 开发线：轨迹 / 子 Agent 收纳，对话流只留正文 + 每轮一行摘要）
+
+**来源**：负责人看 P1（§3.70）后反馈"界面清新多了，建议把**轨迹**、**子Agent**移到其他合适位置，
+让界面更整洁美观"。§3.70 的工具时间线卡与子代理虽然能用，但**内联在对话流里**：长任务时 N 次调用
+堆成卡片，把正文淹没；窄窗口右栏一收（<1180）又完全看不到细节。
+
+### 一、修了什么（收纳而不减能力）
+
+1. **对话流每轮只剩一行摘要**（`app.js` 的 `ensureTraceSummary/updateTraceSummary`）：
+   格式 `🧭 本轮 12 次工具调用 · 3 个子代理 · 1m42s ›`，`appendChild` 收在本轮正文末尾；
+   不再调用 `timelineToolStart/Done/Denied`，`#chat` 里不再出现 `.toolcard`/`.tl-step` 内联卡。
+   点击摘要 → `focusTraceRound()`：宽屏打开右栏并滚到该轮，窄屏展开对话流末尾区块并滚过去。
+   旧的 `attachTrajMeta` 只保留刷新这一行（不再插 `.msg-meta/.trajBtn` 前置卡）。
+2. **右栏「本轮运行」新增两块可折叠区**（`index.html` 的 `data-fold="trace"/"subs"`）：
+   - **轨迹**：按轮分组（`#rpTraceList` → `.tr-round`），轮头即同一行摘要；组内用既有
+     `toolStepNode/paintToolStep` 渲染「工具名 · 耗时 · 状态 · 结果摘要一行」，失败行沿用
+     `.tl-step.fail` 红边，点行展开完整参数/输出（原时间线的展开能力原样复用）；
+   - **子Agent**：每个子代理一行（名称 · 第 N 轮 · M 次工具 · 最后进展 · 运行中/完成/失败），
+     点行展开任务、自身轮次/工具数/最后进展与结果全文；运行中的行随既有 `progress.subagent`
+     事件更新（`mergeSubagentProgress`，**没有新增轮询/setInterval**）。
+3. **窄窗口**（<1180 右栏收起）：两块放进对话流末尾的 `#traceDock`（`<main>` 内、`#chat` 之后），
+   与右栏消费**同一个 `views` 数组**；右栏抽屉一开，末尾区块让位（`traceDockVisible`）。
+4. **统计同源**：新增 `traceRoundForMsg(msg)` → `traceRoundData` → `traceRoundView`，
+   对话流摘要与右栏轮头都调用它，文案由 `traceSummaryText(v)` 产出；摘要不读
+   `runState.toolCalls`、不另数 `_traj.length`。`renderTracePanels` 同一帧填右栏与末尾区块。
+5. **保留**：P0 状态条六项、错误折叠卡、内联权限确认、⌘K、快捷键表、会话设置、空态、设置搜索、
+   主题/断点、`Esc` 停止、左轨 🧭 / 子代理面板均未移除；P1 时间线的纯函数与失败高亮仍在（§149 绿）。
+
+### 二、断言与变异
+
+- `test/smoke.js` **只追加 §151**（接 §150）：①一行摘要结构与文案（12 次工具 / 3 子代理 / 1m42s）；
+  ②摘要与右栏同源（都调 `traceRoundForMsg`，逐字一致，禁止 `runState.toolCalls` 另算）；
+  ③右栏两块可折叠、子代理行含名称/轮次/工具数/最后进展/状态、运行中随 progress 更新；
+  ④<1180 右栏收起时 `#traceDock` 可见（在 `#chat` 之后）且与右栏同 `views`；
+  ⑤点摘要按 `traceFocusTarget` 定位/展开/滚动；⑥P0/P1 关键项不回归。
+- 新建 `test/mutate/batch41-ui-trace.mjs`：**8/8 全中**（恢复内联卡 / 右栏另算一套 / 子代理丢状态 /
+  丢工具次数 / 窄屏不显示 / 点摘要不定位 / 折叠头不响应 / progress 不更新）。
+- `test/mutate/README.md` 计数行按本提交树 `doc-lint` 实测值：323+8=**331**
+  （`node scripts/doc-lint.mjs` 绿；若 batch40 先/后落树，由后提交者按实际值校正）。
+
+### 三、边界与未做（如实）
+
+- **子代理内部工具调用不逐条回传**：父回合 SSE 的 `progress.subagent` 只给「轮次 / 工具次数 /
+  最后进展」聚合快照（后端既有字段，本轮不改 provider/agent），所以子代理展开区展示的是聚合数字
+  + 任务/结果，不伪造每次调用的参数。要逐条需另开事件通道（本轮不允许改 `src/providers/**`、`src/agent.js`）。
+- **窄屏未逐档截图**：<1180 断点、`#traceDock` 显隐与右栏抽屉互斥已做结构/行为断言，但没有浏览器
+  自动化，真实 Electron 窗口视觉仍建议发版前人工过一遍。
+- **右栏宽度仍是 300px**：新增两块只占原右栏高度（`rp-body` 滚动），未改桌面/IDE 布局。
+- 未改 `src/providers/**`、`src/agent.js`、`src/model-discovery.js`、`desktop/**`、`ide/**`、`presets/**`
+  （并行执行者范围）；未新增轮询、未引入外部库。
+- 未 tag、未改版本号、未 publish、未动官网。
+
+
 ## 3.74 已补（v0.6.18 开发线：本地引擎「显存/内存不足」自动降级重试一次）
 
 **来源**：v0.6.17 真机（本机 8081 qwen）：子代理并发 / 长解码时引擎在 prefill 阶段拒绝——

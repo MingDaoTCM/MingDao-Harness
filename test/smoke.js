@@ -16518,4 +16518,197 @@ return { normalizeRunPhase, fmtRunTtft, fmtRunTps, fmtRunTools, fmtRunCost, fmtR
   ok('v0.6.20 §3.71 模型显示别名接线：两处下拉 value=API id / 可见文本=label（含 detail 进 title「API id: <id>」）+ 无映射回退 id + 会话设置 #ssModelAliasHint 仅 label!==id 显示（HTML 默认 hidden）+ 选择后 /api/config 的 model 仍是 id（label 只进 modelLabel）+ 设置页「模型与 API Key」下 cfg-hint 说明（无新增控件）+ ⌘K 模型项同显 label/执行 id/搜索两键');
 }
 
+// ---------- 151. v0.6.21 §3.73：轨迹 / 子 Agent 收纳（对话流每轮一行摘要 + 右栏两块可折叠 + 窄屏末尾区块 + 摘要与右栏同源） ----------
+// 接 §150：§3.70 把工具调用做成内联时间线卡、子代理放在右侧面板，长任务时正文被卡片淹没。
+// 本节守住：①对话流每轮只留**一行**摘要（不再挂内联工具卡）；②摘要计数/耗时与右栏轨迹**同一函数**
+// （traceRoundForMsg → traceRoundView），不允许各算一套；③右栏「轨迹 / 子Agent」可折叠，子代理行含
+// 名称/轮次/工具数/最后进展/状态；④<1180 右栏收起时末尾 #traceDock 可见且与右栏同内容；
+// ⑤点摘要能定位（宽屏右栏滚动/窄屏末尾区块）；⑥P0/P1 既有能力不回归。
+{
+  const appSrc151 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+  const htmlSrc151 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  const { fmtTok } = await import(pathToFileURL(path.join(srcDir, 'web', 'util.js')).href);
+  /** @param {string} a @param {string} b */
+  const slice151 = (a, b) => {
+    const i = appSrc151.indexOf(a);
+    const j = appSrc151.indexOf(b, i + a.length);
+    assert.ok(i >= 0 && j > i, `（前置）应能定位 app.js 切片：${a}`);
+    return appSrc151.slice(i, j);
+  };
+  const pure151 = slice151('// —— 运行状态条：字段口径', '// P1 DOM 接线（v0.6.19');
+  const P = new Function('fmtTok', pure151 + `
+return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRoundData, mergeSubagentProgress,
+  traceDockVisible, traceFocusTarget, toolStepView, layoutClassesFor };`)(fmtTok);
+
+  // —— ① 对话流每轮只有一行摘要（结构：不再是 N 个内联工具卡） ——
+  {
+    const startedAt = 1000, endedAt = 103000; // 102s → 1m42s
+    const msg = {
+      _round: 2, _startedAt: startedAt, _endedAt: endedAt,
+      _traj: [
+        { kind: 'turn', t: startedAt },
+        ...Array.from({ length: 12 }, (_, i) => ({ kind: 'tool', seq: i + 1, name: 'read', args: { path: 'f' + i }, result: { ok: true, lines: i + 1 }, durationMs: 100, done: true })),
+      ],
+    };
+    const subs = [1, 2, 3].map((i) => ({ seq: 100 + i, label: '子任务' + i, round: 2, toolCalls: i, modelRounds: i, lastProgressAgoMs: 1200, status: 'done', result: { ok: true, output: '汇报' + i }, msg }));
+    const v = P.traceRoundView(P.traceRoundData(msg, subs, null, 200000));
+    assert.equal(v.toolCount, 12, `摘要必须统计本轮全部工具调用（12），实际：${v.toolCount}`);
+    assert.equal(v.subCount, 3, `摘要必须统计本轮子代理（3），实际：${v.subCount}`);
+    assert.equal(v.durationText, '1m42s', `摘要耗时必须来自本轮起止（102s→1m42s），实际：${v.durationText}`);
+    assert.equal(P.traceSummaryText(v), '本轮 12 次工具调用 · 3 个子代理 · 1m42s',
+      `对话流摘要文案必须是「本轮 N 次工具调用 · M 个子代理 · 耗时」，实际：${P.traceSummaryText(v)}`);
+    const failed = P.traceRoundView({
+      round: 3, startedAt: 0, now: 1, subs: [],
+      tools: [{ kind: 'tool', seq: 9, name: 'bash', args: { command: 'npm test' }, result: { ok: false, error: 'boom' }, durationMs: 30, done: true }],
+    });
+    assert.equal(failed.failed, 1, '失败工具必须计入轨迹失败数');
+    assert.equal(failed.tools[0].liClass, 'tl-step fail', '右栏轨迹里的失败行必须带 fail 高亮类');
+
+    // 结构：工具事件只更新摘要/轨迹，不再调用 timelineToolStart 往 #chat 挂卡
+    const startSrc = slice151('function renderToolStartEvent(ev)', 'function renderTodos');
+    assert.ok(!/timelineToolStart\(activeAiMsg, ev\)/.test(startSrc), '对话流不得再内联工具卡（不能恢复 timelineToolStart）');
+    assert.ok(/traceToolStarted\(activeAiMsg, ev\)/.test(startSrc), '工具开始必须只更新轨迹数据/摘要（traceToolStarted）');
+    const attachSrc = slice151('function attachTrajMeta(msg)', 'function openTraj(msg)');
+    assert.ok(/updateTraceSummary\(msg\)/.test(attachSrc), '回合收尾必须刷新那一行摘要');
+    assert.ok(!/trajBtn|msg-meta|insertBefore\(meta/.test(attachSrc), '回合收尾不得再插入旧的轨迹按钮/卡片（对话流只留一行摘要）');
+    const ensureSrc = slice151('function ensureTraceSummary(msg)', 'function updateTraceSummary(msg)');
+    assert.ok(/if \(msg\._traceRow\) return msg\._traceRow;/.test(ensureSrc), '每轮只能有**一行**摘要（ensureTraceSummary 必须复用同一行）');
+    assert.ok(/msg\.appendChild\(row\)/.test(ensureSrc), '摘要必须收在正文末尾（appendChild），不再塞进正文之间');
+    assert.ok(!/toolcard/.test(slice151('function updateTraceSummary(msg)', 'function traceToolStarted')),
+      '对话流摘要渲染函数不得创建 toolcard 内联卡');
+    assert.ok(/className = 'trace-row'/.test(appSrc151), '对话流必须有 .trace-row 一行摘要容器');
+    assert.ok(/\.trace-row\{/.test(htmlSrc151) && /\.trace-summary\{/.test(htmlSrc151), '一行摘要必须有对应样式（.trace-row/.trace-summary）');
+  }
+
+  // —— ② 摘要与右栏轨迹同源（同一函数 / 同一视图对象） ——
+  {
+    const fnsSrc = slice151('function traceRoundForMsg(msg, now) {', 'function collectTraceViews()');
+    assert.ok(/return traceRoundView\(traceRoundData\(msg, sessionSubs, pendingSubagent, now\)\);/.test(fnsSrc),
+      '每轮视图必须由 traceRoundForMsg 统一装配（traceRoundData → traceRoundView）');
+    const summarySrc = slice151('function updateTraceSummary(msg)', 'function traceToolStarted');
+    assert.ok(/const v = traceRoundForMsg\(msg\);/.test(summarySrc),
+      '对话流摘要必须调用 traceRoundForMsg（与右栏同一函数）');
+    assert.ok(/traceSummaryText\(v\)/.test(summarySrc), '对话流摘要文案必须走 traceSummaryText（同一口径）');
+    const collectSrc = slice151('function collectTraceViews()', 'function ensureTraceSummary(msg)');
+    assert.ok(/traceRoundForMsg\(m\)/.test(collectSrc),
+      '右栏/末尾区块必须调用 traceRoundForMsg（与对话流同一函数，不得各算一套）');
+    const panelSrc = slice151('function renderTracePanels()', 'function renderSubagentSections()');
+    assert.ok(/renderTraceRoundList\(\$\('#rpTraceList'\), views\)/.test(panelSrc) && /renderTraceRoundList\(\$\('#tdTraceList'\), views\)/.test(panelSrc),
+      '右栏与窄屏末尾必须消费同一个 views 数组（同一份统计）');
+    const roundSrc = slice151('function buildTraceRoundNode(v)', 'function renderTraceSubList(root, views)');
+    assert.ok(/sum\.textContent = traceSummaryText\(v\)/.test(roundSrc) && /sum\.dataset\.summary = traceSummaryText\(v\)/.test(roundSrc),
+      '右栏轮头文案必须来自 traceSummaryText(v)（与对话流摘要同源）');
+    assert.ok(!/runState\.toolCalls|_traj\.length/.test(collectSrc + summarySrc + roundSrc),
+      '摘要/右栏不得另用 runState.toolCalls 或 _traj.length 各算一套');
+    // 行为：同一个 traceRoundForMsg 产出，对话流摘要与右栏轮头文本逐字一致
+    const msg = { _round: 5, _startedAt: 1000, _endedAt: 62000, _traj: [{ kind: 'tool', seq: 1, name: 'read', args: { path: 'a' }, result: { ok: true, lines: 3 }, durationMs: 10, done: true }] };
+    const roundFor = new Function('sessionSubs', 'pendingSubagent', 'traceRoundView', 'traceRoundData',
+      fnsSrc + '\nreturn traceRoundForMsg;')([], null, P.traceRoundView, P.traceRoundData);
+    const chatText = P.traceSummaryText(roundFor(msg));
+    const panelText = P.traceSummaryText(roundFor(msg));
+    assert.equal(chatText, panelText, '对话流摘要与右栏轮头必须逐字一致（同一函数产出）');
+    assert.equal(chatText, '本轮 1 次工具调用 · 1m1s', `摘要文案口径必须稳定，实际：${chatText}`);
+    assert.ok(/dataset\.src = 'traceRoundForMsg'/.test(appSrc151), '摘要/轮头必须标注同一数据源（traceRoundForMsg）');
+  }
+
+  // —— ③ 右栏「轨迹 / 子Agent」两块可折叠；子代理行含名称/轮次/工具数/最后进展/状态 ——
+  {
+    const foldTrace = /data-fold="trace"[^>]*aria-controls="rpTraceFoldBody"[^>]*aria-expanded="true"/.test(htmlSrc151);
+    const foldSubs = /data-fold="subs"[^>]*aria-controls="rpSubFoldBody"[^>]*aria-expanded="true"/.test(htmlSrc151);
+    assert.ok(foldTrace && foldSubs, '右栏必须有「轨迹 / 子Agent」两块可折叠区（data-fold + aria-expanded + aria-controls）');
+    assert.ok(/id="rpTraceList"/.test(htmlSrc151) && /id="rpSubList"/.test(htmlSrc151), '右栏轨迹/子Agent 必须各有列表容器');
+    const foldSrc = slice151('function syncTraceFoldButtons()', 'function toggleTraceFold(key)') + slice151('function toggleTraceFold(key)', 'function traceScrollParent(root)');
+    assert.ok(/body\.hidden = !open/.test(foldSrc), '折叠必须真的隐藏/显示内容（hidden 随 aria-expanded 同步）');
+    const bindSrc = slice151('function initTraceUI()', 'function resetTraceState()');
+    assert.ok(/btn\.onclick = \(\) => toggleTraceFold\(btn\.dataset\.fold\)/.test(bindSrc), '折叠头必须绑定 toggleTraceFold（可点开/收起）');
+
+    const running = P.subagentRowView({ seq: 7, label: '调研 A', round: 3, toolCalls: 4, modelRounds: 2, lastProgressAgoMs: 1200, running: true });
+    assert.equal(running.name, '调研 A', '子代理行必须含名称');
+    assert.equal(running.round, 3, '子代理行必须含轮次');
+    assert.equal(running.roundText, '第 3 轮', '子代理行轮次必须可读（第 N 轮）');
+    assert.equal(running.toolText, '4 次工具', `子代理行必须含工具次数，实际：${running.toolText}`);
+    assert.equal(running.progress, '最后进展 1s 前', `子代理行必须含最后进展，实际：${running.progress}`);
+    assert.equal(running.statusText, '运行中', `运行中的子代理状态必须是「运行中」，实际：${running.statusText}`);
+    const failed = P.subagentRowView({ seq: 8, label: '调研 B', round: 3, toolCalls: 1, lastProgressAgoMs: 900, status: 'failed', result: { ok: false, error: 'x' } });
+    assert.equal(failed.statusText, '失败', '失败子代理必须显示「失败」');
+    assert.equal(failed.progress, '最后进展 <1s 前', '不足 1s 的最后进展必须诚实显示 <1s');
+    const subSrc = slice151('function buildTraceSubNode(s)', 'function renderTracePanels()');
+    for (const cls of ['tr-sub-name', 'tr-sub-meta', 'tr-sub-state', 'tr-sub-stats']) {
+      assert.ok(new RegExp(`className = '${cls}`).test(subSrc), `子代理行 DOM 必须含 .${cls}`);
+    }
+    assert.ok(/s\.roundText/.test(subSrc) && /s\.toolText/.test(subSrc) && /s\.progress/.test(subSrc) && /s\.statusText/.test(subSrc),
+      '子代理行 DOM 必须消费轮次/工具数/最后进展/状态四个字段');
+    // 运行中随既有 progress.subagent 更新，不新增轮询
+    const merged = P.mergeSubagentProgress(
+      { seq: 9, label: '旧', toolCalls: 1, modelRounds: 1, lastProgressAgoMs: 5000, running: true, status: 'running' },
+      { label: '调研 C', modelRounds: 3, toolCalls: 7, ms: 1200 },
+    );
+    assert.equal(merged.toolCalls, 7, `progress.subagent.toolCalls 必须实时并入子代理行（实际 ${merged.toolCalls}）`);
+    assert.equal(merged.modelRounds, 3, 'progress.subagent.modelRounds 必须实时并入子代理行');
+    assert.equal(merged.lastProgressAgoMs, 1200, 'progress.subagent.ms 必须实时并入最后进展');
+    assert.equal(merged.status, 'running', '运行中的子代理状态必须保持 running');
+    const progressSrc = slice151("if(ev.type==='progress')", "if(ev.type==='text')");
+    assert.ok(/if \(ev\.subagent && pendingSubagent\) pendingSubagent = mergeSubagentProgress\(pendingSubagent, ev\.subagent\);/.test(progressSrc),
+      '子代理运行中必须随 progress 事件实时更新（mergeSubagentProgress），不新增轮询');
+    assert.ok(!/setInterval\([^)]*subagent|setInterval\([^)]*trace/i.test(appSrc151), '轨迹/子代理不得新增轮询定时器');
+  }
+
+  // —— ④ 窄窗口（<1180 右栏收起）：对话流末尾的 #traceDock 可见，内容与右栏一致 ——
+  {
+    assert.equal(P.traceDockVisible(1000, false), true, '窄窗口右栏收起时必须显示末尾轨迹区块');
+    assert.equal(P.traceDockVisible(1440, false), false, '宽屏右栏可展开时末尾区块必须隐藏（不重复展示）');
+    assert.equal(P.traceDockVisible(1000, true), false, '窄屏右栏抽屉打开时末尾区块让位（同一内容不重复）');
+    assert.equal(P.traceDockVisible(1440, true), false, '宽屏右栏可见时末尾区块必须隐藏');
+    const mainSrc = htmlSrc151.slice(htmlSrc151.indexOf('<main>'), htmlSrc151.indexOf('</main>'));
+    assert.ok(/id="chat"/.test(mainSrc) && /id="traceDock"/.test(mainSrc), '末尾轨迹区块必须在 <main> 里、对话流之后');
+    assert.ok(mainSrc.indexOf('id="chat"') < mainSrc.indexOf('id="traceDock"'), '#traceDock 必须在 #chat 之后（对话流末尾，不塞回消息之间）');
+    assert.ok(/<section id="traceDock"[^>]*hidden/.test(htmlSrc151), '末尾轨迹区块默认隐藏（宽屏/右栏打开时由 JS 收起）');
+    assert.ok(/id="tdTraceList"/.test(htmlSrc151) && /id="tdSubList"/.test(htmlSrc151), '末尾区块必须同样有轨迹/子Agent 两个列表');
+    const dockSrc = slice151('function syncTraceDock()', 'function focusTraceRound(round)');
+    assert.ok(/dock\.hidden = !show/.test(dockSrc) && /traceDockVisible\(window\.innerWidth/.test(dockSrc),
+      '末尾区块显隐必须由 traceDockVisible（<1180 判据）决定');
+    assert.ok(/if \(show\) renderTracePanels\(\);/.test(dockSrc), '末尾区块显示时必须用同一 renderTracePanels 渲染（内容一致）');
+    assert.ok(/#traceDock\{/.test(htmlSrc151) && /#tdToggle\{/.test(htmlSrc151), '末尾区块与总开关必须有样式');
+    const dockHtml = htmlSrc151.slice(htmlSrc151.indexOf('id="traceDock"'), htmlSrc151.indexOf('</main>'));
+    assert.ok(/data-fold="trace"/.test(dockHtml) && /data-fold="subs"/.test(dockHtml), '末尾区块的轨迹/子Agent 也可折叠');
+  }
+
+  // —— ⑤ 点摘要能定位到该轮（宽屏滚右栏 / 窄屏展开末尾区块） ——
+  {
+    assert.equal(P.traceFocusTarget(1440, false), 'panel', '宽屏点摘要必须定位右栏本轮轨迹');
+    assert.equal(P.traceFocusTarget(1000, false), 'dock', '窄屏右栏收起时点摘要必须展开对话流末尾区块');
+    assert.equal(P.traceFocusTarget(1000, true), 'panel', '窄屏抽屉已开时点摘要必须定位抽屉（不再另开末尾区块）');
+    const summarySrc = slice151('function ensureTraceSummary(msg)', 'function updateTraceSummary(msg)');
+    assert.ok(/btn\.onclick = \(\) => focusTraceRound\(msg\._round\);/.test(summarySrc),
+      '点摘要必须调用 focusTraceRound（不能是空处理器）');
+    const focusSrc = slice151('function focusTraceRound(round)', 'function initTraceUI()');
+    assert.ok(/const target = traceFocusTarget\(window\.innerWidth \|\| 0, !\$\('#runPanel'\)\.hidden\);/.test(focusSrc),
+      '定位目标必须按屏宽/右栏可见性选择（traceFocusTarget）');
+    assert.ok(/openTraceRounds\.add\(n\)/.test(focusSrc), '点摘要必须展开该轮详情');
+    assert.ok(/scrollIntoView/.test(focusSrc), '点摘要必须滚动到该轮（scrollIntoView）');
+    assert.ok(/setRunPanel\(true\)/.test(focusSrc), '宽屏定位前必须确保右栏打开');
+    assert.ok(/dock\.hidden = false/.test(focusSrc) && /body\.hidden = false/.test(focusSrc), '窄屏定位前必须展开末尾区块');
+    const renderSrc = slice151('function renderTracePanels()', 'function renderSubagentSections()');
+    assert.ok(/openTraceRounds\.add\(views\[views\.length - 1\]\.round\)/.test(renderSrc), '首次渲染应默认展开最新一轮（避免整栏全折叠）');
+  }
+
+  // —— ⑥ 不回归：P0 状态条六项 / 错误折叠卡 / 内联权限确认 / ⌘K / 快捷键 / 会话设置 / 空态 / 主题 / 断点 ——
+  {
+    const keys = [...htmlSrc151.matchAll(/data-k="([a-z]+)"/g)].map((m) => m[1]).sort();
+    assert.deepEqual(keys, ['cost', 'ctx', 'phase', 'tools', 'tps', 'ttft'], 'P0 运行状态条六字段不得被轨迹收纳挤掉');
+    const rks = [...htmlSrc151.matchAll(/data-rk="([a-z]+)"/g)].map((m) => m[1]).sort();
+    assert.deepEqual(rks, ['cost', 'ctx', 'phase', 'tools', 'tps', 'ttft'], '右栏本轮数据六项不得被新增两块挤掉');
+    assert.ok(/\.err-card\{/.test(htmlSrc151) && /\.err-hint\{[^}]*white-space:pre-line/.test(htmlSrc151), 'P0 错误折叠卡不得回退');
+    assert.ok(/\.perm-card\{[^}]*border-left:3px solid var\(--warn\)/.test(htmlSrc151), 'P0 内联权限确认不得回退成遮罩');
+    assert.ok(/id="paletteMask"/.test(htmlSrc151) && /id="shortcutMask"/.test(htmlSrc151), '⌘K 命令面板与快捷键表必须在');
+    assert.ok(/id="sessSheet"/.test(htmlSrc151) && /id="emptyState"/.test(htmlSrc151) && /id="themeSel"/.test(htmlSrc151), '会话设置/空态/主题不得回退');
+    assert.ok(/data-shortcut="Esc"/.test(htmlSrc151) && /data-shortcut="⌘K"/.test(htmlSrc151), '快捷键表关键项不得回退');
+    assert.ok(/const base = runStripView\(st, isGenerating\);/.test(appSrc151), '右栏六项仍必须与状态条同源（runPanelView→runStripView）');
+    assert.ok(/e\.key === 'Escape'/.test(appSrc151) && /stopTurnFromButton\(\)/.test(appSrc151), 'Esc 停止必须仍在');
+    assert.deepEqual(P.layoutClassesFor(1000), { narrow: false, narrowRun: true }, '1180 断点判据不得漂移（<1180 右栏收起）');
+  }
+
+  ok('v0.6.21 §3.73 轨迹/子代理收纳：对话流每轮仅一行摘要（复用 .trace-row / 无内联 toolcard）+ 摘要与右栏轨迹同源（traceRoundForMsg→traceRoundView）+ 右栏轨迹/子Agent 两块可折叠（子代理行含名称/轮次/工具数/最后进展/状态，运行中随 progress.subagent 实时更新）+ <1180 右栏收起时对话流末尾 #traceDock 可见且与右栏同 views + 点摘要定位/展开该轮 + P0/P1 六项字段/错误卡/内联确认/⌘K/快捷键/会话设置/空态/主题/断点不回归');
+}
+
 process.exit(0);
