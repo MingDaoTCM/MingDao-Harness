@@ -3,6 +3,91 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.19（2026-10-18）— 界面骨架照设计稿重排 + UI P2 收口 + 测试端口全部动态化
+
+> 补丁版，三件事：① **界面骨架照设计稿重排**（§3.78）——三栏 `.app`（264 / 1fr / 300、48px 顶栏），
+> 顶栏只留 brand / 面包屑 / 草稿徽标 / `⌘K` / 设置；侧栏会话 / 工作空间 / 新对话 / 搜索；底部
+> `#runStrip` 六项 + `#composer` + `#statusBar`；右栏 `#runPanel` 四标签页（轨迹 / 子Agent / 任务 /
+> 仪表盘），**原 5 个并列面板全部搬进右栏且 id 与 handler 保留**；设计稿布局/组件 CSS 原样搬运
+> （约 760 行，只做颜色变量映射 + 9 个新增变量照抄）；`--faint → --dim` 61 条规则（对比度
+> 3.26/3.76 → 5.67/6.53）；`§153` **从设计稿解析 59 个选择器**逐条比对。② **UI P2**（§3.77）——
+> 设置项三列（默认 / 当前 / 影响，默认值由 `/api/state.defaults` 透出）、六类危险操作二次确认
+> （初始焦点在取消、回车不确认、Esc 取消）、无障碍（`role=dialog` / `aria-modal` / 焦点陷阱 /
+> Esc 回焦 / `aria-live` 节流 / 图标 `aria-label`）、i18n（`src/web/i18n.js`，zh/en **109 键同键**，
+> 缺失回退 zh）。③ **固定端口治理**（§3.76）——测试中 **8 个写死监听端口全部改 `listen(0)`**
+> 运行时端口（含 §145 两次 `listen(0)` 且断言端口不同）、`e2e-web` 的 `40000+random` 改
+> `freePort()`；`doc-lint ⑨` 守卫拦 `listen(4xxxx/5xxxx)` 字面量。变异验证 **32 批 369 条全中**
+> （原 357 + batch42 的 15 + batch43 的 12；计数由 `scripts/doc-lint.mjs` ⑥ 守卫）。
+
+### 一、界面骨架照设计稿重排（§3.78）
+
+**骨架**：`.app` = `264px minmax(0,1fr) 300px`、行 `48px minmax(0,1fr) auto`、areas
+`"top top top" / "side main run" / "side foot run"`，与设计稿逐字一致。顶栏只留
+**brand / 面包屑（`#crumbWs › #crumbSession`）/ 草稿徽标 / `⌘K` / 设置**；`#modelSel`、`#presetSel`、
+`#permSel` 只在**会话设置弹层** `#sessSheet` 里；工作空间、搜索、会话列表、新对话、环境徽标、
+成本徽标、会话管理、主题切换移入侧栏。**底部合并成一条区**：`#runStrip`（六项 `data-k` + 上下文
+`.bar#rsCtxBar` + 停止）+ `#composer`（附件 / 输入 / 当前值胶囊 / 发送）+ `#hint` + `#statusBar`。
+
+**右栏四标签页**：`.runpanel` 头部（运行状态 + 本轮 + 收起）→ 会话配置 `.kv` → 本轮数据
+`.metrics`（六项 `data-rk`）→ `#rpTabs .seg` 四页；原 `#trajPanel` / `#subPanel` / `#tasksPanel` /
+`#dashPanel` 全部搬入且 **id 保留**，`#trajRailBtn` / `#subRailBtn` / `#subBadge` / `#tasksBtn` 变成
+标签按钮/徽章；handler（`openTraj()` / `renderSubPanel()` / `updateTasksPanel()` /
+`renderDashboard()`）**未重写**，显隐统一由 `railPanelDisplay()` + `syncPanelLayout()` 控制
+（同一时刻只显示一页）。
+
+**CSS 原样搬运**：设计稿 `<style>` 的布局/组件规则体约 **760 行**直接进 `src/web/index.html`
+（新增 §3.78 样式块），只做颜色令牌映射（14 个）；设计稿有、既有变量没有的 **9 个新增变量照抄数值**
+（`--line-strong`、`--ok`、`--tint-warn/err/ok`、`--sh-panel/overlay`、`--scroll/hover`、`--on-accent`、
+`--btn-primary-*`）。class 名与设计稿一致。
+
+**可访问性对比度**：承载信息的次要文本 `--faint → --dim` 共 **61 条规则 + 2 处行内 style**，
+`--panel` 上 3.76:1 → 6.53:1、`--bg3` 上 3.26:1 → 5.67:1；纯装饰（分隔符/三角/禁用占位）仍用
+`--faint`，令牌原值未动。设计稿的 `--t3` 用法是**唯一有意偏离**，已在 CSS 就地注明。
+
+**断点**：≥1180 三栏；900–1180 右栏为覆盖式抽屉（`body.run-drawer`）；<900 侧栏为抽屉
+（`body.side-drawer`，顶栏 `#sideToggle`），Esc 分层关闭（先侧栏再右栏）；宽屏收起右栏时
+`body.rail-collapsed` 把第 3 列归零。
+
+**断言**：`test/smoke.js` 新增 **§153**（①顶栏不含模型/预设/权限等 10 个控件；②右栏四标签 +
+原面板 id + `railPanelDisplay` 行为 + handler 仍查原 id；③侧栏五件套 + `renderSessionNav` 复用
+`sessionsCache`；④底部 composer 胶囊 + 状态条六项；⑤1280/1000/880 断点类名；⑥**从设计稿解析**
+颜色映射/新增变量/字号间距圆角/**59 个选择器**逐声明比对；⑦对比度现算 ≥4.5:1）。新建
+`batch43-ui-shell.mjs`：**12/12 全中**。
+
+### 二、UI P2：设置三列 / 危险操作二次确认 / 无障碍 / i18n（§3.77）
+
+- **设置三列**：每个可改项在控件下渲染 `默认 / 当前 / 影响`（`.cfg-cols[data-cols]`）。默认值来自
+  `src/config.js` 内置默认表，经 `GET /api/state` 新增的**只读** `defaults` 透出（不参与判定、
+  不写盘），前端有同值兜底 `SETTING_DEFAULTS_FALLBACK`；影响文案在 `SETTING_IMPACT`，英文在
+  `i18n.js` 的 `impact.*`。
+- **六类危险操作**：删除工作空间 / 删除会话 / 清空记忆 / 恢复默认配置 / 切 `permission=auto` /
+  关闭沙箱，统一走 `runDanger()`（**先 await confirm，取消直接返回、绝不 execute**）；`#dangerDialog`
+  说明后果，初始焦点在「取消」，**回车不确认**，Esc 取消，确认按钮 `type=button`。
+- **无障碍**：`installDialog()` 统一 `role=dialog` + `aria-modal` + `aria-label`、Tab/Shift+Tab
+  焦点陷阱、Esc 关闭、关闭后焦点归还触发元素（⌘K / 会话设置 / 危险确认三个弹层已接入）；
+  状态条/轨迹/子Agent 行 `aria-live="polite"`，另有节流的 `#a11yLive`；图标按钮补 `aria-label`。
+- **i18n**：`src/web/i18n.js` 零依赖，zh/en **109 键同键**；默认跟随 `navigator.language`，
+  `localStorage['mingdao-lang']` 可覆盖，设置 › 外观可选语言；缺失回退 zh，zh 也没有返回空串。
+  只抽静态 UI 文案，不翻译日志/错误原文。
+- **断言**：`test/ui-p2.js` 6 项（三列数据源/影响非空、六类危险操作取消不执行/确认才执行、
+  dialog 语义与焦点陷阱/回焦/aria-live/对比度、i18n 同键与回退、语言持久化、`defaults` 同口径）；
+  `batch42-ui-p2.mjs` **15/15 全中**。
+
+### 三、测试固定端口 → `listen(0)` 运行时端口（§3.76）
+
+全仓 `test/**` 扫描出 **8 个写死的监听端口值、20 处代码引用**：`smoke.js` §34 / §116 / §123 /
+§144 / §145（两个实例）/ §146 / §148，`api-contracts.js` 启动端口，`e2e-web.js` 的
+`40000 + random * 20000`。全部改为 `port: 0` 后取 `srv.address().port`；`e2e-web` 复用既有
+`freePort()` 并从子进程就绪日志解析实际端口；§145 两次 `listen(0)` 并断言
+`base145b !== base145a`（语义是"两个不同端口"，不是两个特定数字）。未改任何断言语义。
+
+**结构守卫**：`scripts/doc-lint.mjs` 新增 ⑨——扫描 `test/**/*.js|*.mjs`（排除
+`test/mutate/.generated/`），先抹块注释再按行剔行注释（`://` 不误伤），命中
+`/\blisten\(\s*([45]\d{4})\b/` 即失败；`listen(0)`、`listen(port)`、`freePort()` 均不误报。
+
+**验证**：smoke 连跑多次 **0 `EADDRINUSE`**；`e2e-local` 17 / `e2e-web` 24 / `e2e-schedule` 11 /
+`api-contracts` 8 全部通过；全量变异 **32 批 / 369 条全中、0 逃逸**。
+
 ## v0.6.18（2026-10-18）— 本地内存不足自动降级一次 + 轨迹收纳 + 变异跨 worktree 互斥
 
 > 补丁版，四件事：① **本地引擎内存/显存不足自动恢复**——`isMemoryPressureError()` 单一判据
