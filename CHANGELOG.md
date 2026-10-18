@@ -3,6 +3,107 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.17（2026-10-18）— UI P1 八项 + 模型显示别名（界面看官方宣传名，请求仍用 API id）
+
+> 功能版，两件事：① `docs/DESIGN-UI-v1.md` 的 **P1 八项**落地：工具调用时间线卡片、`⌘K` 命令面板、
+> 快捷键表（`⌘/`）、右栏「本轮运行」、会话设置弹层、空态三步引导、设置分组 + 搜索、
+> 明暗主题 + 窄屏断点（§3.70）；② 模型名称新增**显示别名** `config.modelLabels`：
+> 官方宣传名（如 `DeepSeek-V4.1-Flash 1017`）只影响界面显示，**请求体 `model` 始终是 API id**
+> （§3.69 后端 + §3.71 UI 接线）。顺带把 §145 的时序断言改为**负载自适应**（限频语义不变，
+> 去掉限频的变异仍会失败）。逐条根因与取舍见
+> `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` §3.69–§3.71。
+> 变异验证 **28 批 323 条全中**（数字由 `scripts/doc-lint.mjs` ⑥ 守卫）。
+
+### 一、UI P1：工具时间线 / ⌘K / 快捷键表 / 右栏本轮运行 / 会话设置 / 空态 / 设置分组搜索 / 主题与断点（§3.70）
+
+**工具调用时间线卡片**：同一轮工具调用聚合成**一张** `.toolcard`（头部「工具时间线 · N 步 ·
+总耗时 · K 个失败」+ 整卡折叠）；每步一行「序号 · 状态 · 工具名 · 参数摘要 · 耗时」，
+失败步 `li.tl-step.fail`（红色边条 + 8% 红底 + `✖`）；点击展开完整参数（JSON）与输出，
+长输出默认折叠并显示**真实行数/字节数**（`TextEncoder` 计字节）；默认只显示前 3 步 +
+**所有失败步**，其余收成「展开其余 K 步」；开始/完成复用同一 DOM 节点（`msg._toolTimeline`
++ `tl.steps.get(seq)`），不再删卡重建。
+
+**`⌘K` / `Ctrl+K` 命令面板**（纯前端）：分组列出 会话 / 工作空间 / 模型 / 预设 / 权限 / 命令 / 设置；
+打开时只刷新一次 `/api/sessions` 与 `/api/workspaces`（不是轮询）；↑↓/Home/End 选择、
+Enter 执行、Esc 关闭、焦点回到打开前元素，`e.isComposing` 期间不响应。动作覆盖新对话、切换会话/
+工作空间/模型/预设/权限、停止本轮、快捷键表、收起展开右栏、切换明暗、打开设置（可深链到四个主分组）、
+诊断路径。**Web 端没有 `/compact` 就不列该项**，不造新后端。
+
+**快捷键表**（`⌘/` / `Ctrl+/`）：只列**实际实现**的 7 项（`⌘K`、`⌘/`、`Esc`、`Enter`、
+`Shift+Enter`、`⌘Enter`、权限确认 `y/n`）；不列 `⌘N`、`F5` 等未实现项。
+
+**右栏「本轮运行」**：宽屏（≥1180）默认展开并推开正文 300px；<1180 默认收起，顶栏「运行」
+chip 点开为覆盖式抽屉。字段为模型 label + `API id` + 来源、预设、权限 + 来源，以及
+**六项本轮数据**（阶段/首帧/吞吐/上下文/工具步数/费用）+ 停止按钮与压缩入口（无后端时 hidden）。
+六项与 P0 状态条**同源**：`renderRunPanel()` 只调用 `runPanelView()`，后者只调用
+`runStripView()`、只读同一个 `runState`，不另算、不加轮询。
+
+**会话设置弹层**：模型 / 预设 / 权限三件套收进 `#sessSheet`，输入区只留一个「⚙ 会话设置」按钮
+（按钮上直接印当前模型 label 与权限标签）；模型显示服务端 `/api/state.models` 的 `label` 与
+`API id: <name>` 副标题（缺失回退 id，不编造）；预设标「仅下一轮」；权限显示
+`permission=auto（来源：explicit/preset/config/default）`；底部「本轮实际生效」由同一 `runState` 组装。
+原 `#modelSel`/`#presetSel`/`#permSel`/`#reasoningSel` 保留在弹层内，既有契约不变。
+
+**空态引导**：无消息且非生成中显示三步（选模型 → 选工作空间 → 输入任务），每步有完成状态；
+缺模型时第①步直接给「选择模型…」；3 个示例任务点击**只填进输入框并聚焦，不发送**。
+
+**设置分组 + 搜索**：导航改为 10 组（模型与端点 / 运行与超时 / 权限与沙箱 / 外观 / 工作空间 /
+调度队列 / 云同步与协作 / 长期记忆 / MCP 生态 / 技能库）；顶部 `#cfgSearch` 按标题/说明/
+placeholder/`data-kw` 过滤，不匹配项带 `hidden`，命中项描边高亮，自动切到首个命中分组并显示匹配数。
+
+**明暗主题 + 窄屏断点**：`<html data-theme>` 两套 token；偏好写
+`localStorage['mingdao-theme']`（`light|dark|system`），选 system 时用
+`matchMedia('(prefers-color-scheme: dark)')` 跟随并监听 `change`；顶栏一键切换。
+`<1180` 切 `body.narrow-run`（右栏收起）、`<900` 切 `body.narrow-side`（隐藏次要顶栏项、
+图标轨收窄、空态留白收紧），判据与类名由 `layoutClassesFor(width)` 单一函数给出；
+补 `prefers-reduced-motion`。
+
+### 二、模型显示别名后端 `config.modelLabels`（§3.69）
+
+**起因**：负责人真机实测 `GET /v1/models` 只返回 `deepseek-flash` / `deepseek-v4-pro`；
+拿宣传名 `DeepSeek-V4.1-Flash 1017` 请求会被 400 拒绝。因此宣传名只能做**显示别名**。
+
+- `src/models.js`：新增 `MODEL_LABEL_MAX_LENGTH`（80）、`normalizeModelLabels()`、
+  `modelDisplayLabel()`；key 非空、value 为字符串且去空白非空、≤80 字符，拦
+  `__proto__`/`constructor`/`prototype`；**非法项忽略并 `console.warn`，不阻断启动**
+  （同一项每进程只提醒一次）；不写回 `config.model` / `routing.*`。
+- `src/config.js`：`loadConfig()` / `ensureMinimalConfig()` 读配置时就地归一化，非法值在内存丢弃，
+  磁盘原文不静默改写。
+- `src/model-discovery.js`：服务商线上条目新增 `id`（API 实际 id）与 `detail`（能力/来源说明），
+  `label = modelLabels[id] || id`，`label !== id` 时附 `labelSource: "config"`；`name` 仍是 id。
+  `/api/models` 与 `/api/state` 都走 `availableModels()`，两个接口同时获得上述字段。
+- **请求 `model` 仍是 API id**：显示别名只出现在 `label`/`detail`；`/api/config` 切换模型仍按
+  `body.model`（id）校验落盘；有 `/api/chat` 桩断言**所有出网请求**（含预检）的 `model` 都等于 API id。
+- 文档：`docs/CONFIG.md` 新增「显示别名 `config.modelLabels`」一节（400 实测证据、校验表、接口字段表）。
+
+### 三、UI 接上别名：下拉 / 会话设置 / 设置页 / ⌘K（§3.71）
+
+- **两处模型下拉**（`init()` / `reloadModels()`）：`value` 取 `m.id`、可见文本取 `m.label`（回退 id）、
+  `title` 含 `API id: <id>` 与 detail；选择比较与 `modelsCache` 查找统一按 id。
+- **会话设置**：新增默认 `hidden` 的 `#ssModelAliasHint`（「显示名来自 config.modelLabels，
+  请求使用 API id。」），仅在 `label !== id` 时显示。
+- **设置页**：模型与 API Key 标题下补说明「模型 id 以 API 返回为准；官方宣传名可在
+  `config.modelLabels` 里映射为显示名（请求仍用 API id）。」，**不新增控件**。
+- **`⌘K` 模型项**：文本 `m.label || m.id`（旧快照无 id 时回退 `m.name`），提示带「API id: <id>」，
+  执行仍 `setModel(id)`；搜索同时匹配 label / id / name，新旧名字都搜得到。
+
+### 四、§145 时序断言改为负载自适应（负责人要求）
+
+原断言「11 秒回合日志里恰好 1 行进度」和 `slowMs>=5000` 在并发/慢机下会把基线打红
+（表现为变异「逃逸」）。现改为：`slowMs >= 10000`（命令固定 `sleep 11s`，覆盖 5s/10s 两次心跳）；
+进度行上限 = `ceil(slowMs / 30000)`（30s 限频的语义上限，随实测耗时增长）。
+去掉了限频的变异（每 5s 一行）仍会超过该上限——**这是收紧语义，不是松断言**。
+
+### 五、测试
+
+- `test/smoke.js` 追加 §149（P1 八项的结构与行为断言）与 §150（模型显示别名的下拉/会话设置/
+  设置页/请求仍 id/⌘K）；既有 P0/P1 守卫保持绿。
+- `test/model-names.js` 追加第 ⑧ 组（label/id 分离、非法值 ignore+warn、无映射回退、
+  `/api/chat` 桩断言请求 model 仍是 API id）。
+- 新变异批：`batch37-model-labels` **10 条**、`batch38-ui-p1` **14 条**、
+  `batch39-ui-label` **7 条**；总数 292 → **323**（28 批）。
+- `scripts/doc-lint.mjs` ⑥ 守卫核对 README 计数 323。
+
 ## v0.6.16（2026-10-18）— 模型名称与能力判定以 API 实时官方名为准 + UI P0（常驻状态条 / 错误折叠卡 / 内联权限确认）
 
 > 功能版，两件事：① 官方升级模型（如 `DeepSeek-V4.1-Flash 1017`）后，默认值与界面提示仍指着旧名 →
