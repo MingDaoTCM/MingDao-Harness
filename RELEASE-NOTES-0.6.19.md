@@ -119,7 +119,11 @@
   `node test/mutate/run.mjs` **32/32 批、369/369 条全中、0 逃逸（单独跑，全局锁正常获取/释放）** /
   `node scripts/doc-lint.mjs` 全通过（⑥ 369 = README 369，⑨ 固定端口 0 处）/
   `node src/cli.js diagnose` 正常。
+- **Windows 腿回归修正（仅改测试）**：`test/e2e-schedule.js` 的「连续失败熔断」用例改为**进程内
+  确定性驱动**（CLI 建任务 → 停掉刚拉起的 daemon → 复用守护进程同一个 `runSleeper` 跑满 3 次失败），
+  不再把熔断判定绑在「daemon 在长链路后仍存活」上（Windows CI 现场：`daemon pid 文件：(不存在)`、
+  任务停在 `running` → 30s 预算内假红）；断言与语义未变（3 次真实 worker + mock 500 + 第 3 次熔断）。
 - 发布提交只含发布文件（CHANGELOG / RELEASE-NOTES / `package.json` / `package-lock.json` /
-  `desktop/package.json`）；`git diff --name-only <门禁SHA>..<tagSHA> -- src test` 为 **0 行**。
+  `desktop/package.json`）+ 上述测试文件；`git diff --name-only <门禁SHA>..<tagSHA> -- src test` 为 **0 行**。
 - 三平台 main 与 tag 对齐；npm 已发布 `mingdao-harness@0.6.19`；官网 hero、三份 `/updates/*.yml`、
   7 个下载 URL 与两个域名线上核对通过；镜像 Release 日志出现 `MIRROR_RELEASE_DONE v0.6.19`。

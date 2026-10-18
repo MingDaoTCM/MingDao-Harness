@@ -321,15 +321,35 @@ const budget = (/** @type {number} */ factor = 10) => Math.min(Math.max(baseMs *
 }
 
 // ---------- 6. 周期任务连续失败熔断（「失败：避峰任务」通知刷屏根因回归） ----------
+// v0.6.19（Windows 腿回归护栏）：原用例把「熔断判定」绑在守护进程存活上。这段是整套件里最长的一条
+// 链（前面已多次 add/remove 拉起/退出 daemon），Windows CI 上 daemon 恰在此时退出——
+// 现场是 `daemon pid 文件：(不存在)`、任务停在 running，30s 预算内再没人推进 → 假红；
+// 熔断本身并没有回归。改为与 §0 同样的**进程内确定性驱动**：CLI 建任务（保留 CLI 路径），
+// 停掉刚拉起的 daemon（防并发双跑），再用守护进程用的同一个 `runSleeper` 跑完整条 every 循环
+// （3 次真实 worker + mock 500 + 第 3 次失败熔断）。断言与"这台机器上 daemon 是否还活着"解耦。
 {
+  const { runSleeper, stopDaemon, daemonPidFile } = await import(pathToFileURL(path.join(root, 'src', 'schedule.js')).href);
+  const { procAlive } = await import(pathToFileURL(path.join(root, 'src', 'proc.js')).href);
+  /** 停掉当前 daemon 并等进程真正消失（pidfile 可能刚写、SIGTERM 还在路上）。 */
+  const stopDaemonAndWait = async () => {
+    let pid = 0;
+    try {
+      pid = Number(String(fs.readFileSync(daemonPidFile(home), 'utf8')).trim().split(/\s+/)[0]) || 0;
+    } catch {}
+    stopDaemon(home);
+    for (let i = 0; i < 100 && pid && procAlive(pid); i++) await sleep(100);
+  };
+  await stopDaemonAndWait(); // 先停掉此前用例留下的 daemon
   const r = await runCli(['schedule', 'add', '熔断任务 SCHEDFAIL', '--every', '2s']);
   assert.equal(r.code, 0, r.err);
   const id = (r.out.match(/已创建\s+(\S+)/) || [])[1];
-  const j = await waitFor(() => {
-    const jj = readJson(jobFile(id));
-    return jj && jj.status === 'failed' ? jj : null;
-  }, budget(), '周期任务状态');
-  assert.ok(j, '连续失败后应熔断停止（status=failed）');
+  assert.ok(id, '应返回调度 id');
+  await stopDaemonAndWait(); // addSchedule 会顺手拉起 daemon；首次执行在 2s 后，来得及停
+  // every 循环会自己跑到熔断（第 3 次失败）才返回；不依赖 daemon 是否存活
+  await runSleeper(home, id, { shouldStop: () => false });
+  const j = readJson(jobFile(id));
+  assert.ok(j, '任务文件应存在');
+  assert.equal(j.status, 'failed', '连续失败后应熔断停止（status=failed）');
   assert.equal(j.runs, 3, '熔断前应恰好运行 3 次（第 3 次失败即停止）');
   assert.ok((j.consecutiveFailures || 0) >= 3, '应记录连续失败次数');
   assert.ok(String(j.note || '').includes('已停止'), '备注应说明已停止重试');
