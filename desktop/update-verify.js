@@ -273,16 +273,18 @@ export function buildUpdateNotice({ decision, version, keyId, reason }) {
       noLink: true,
     };
   }
+  // v0.6.21（§3.72）：负责人实测这版提示"太长、像一篇说明书"——弹窗正文只留**两行**：
+  // 第一行结论（未验证事实 + 默认仍安装，不是失败），第二行可操作入口（环境变量收紧 + 详情看哪）。
+  // 完整解释（发布链路未接入签名 → 无法用密码学证明来源；feed 被投毒时与官方包无法区分；
+  // 不改配置与会话）**原样留在 evaluateUpdate 的 logLine 里**，弹窗不再长篇罗列。
   return {
     allowInstall: true,
     type: 'warning',
     title: '更新已就绪（未验证来源签名）',
     message: `MingDao Harness v${v} 下载完成，重启应用即可完成更新`,
     detail:
-      `⚠ 本次更新未验证来源签名：${reason || 'feed 未提供签名'}。\n` +
-      '当前发布链路还没有签名步骤，因此无法用密码学证明这个安装包确实来自官网；更新源被投毒时，它与官方包无法区分。\n' +
-      '高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1：没有签名就拒绝安装。\n' +
-      '更新不会改动你的配置与会话。更新内容见官网：https://harness.mingdao.ai',
+      '本次更新未验证来源签名（发布链路尚未接入签名）——已按默认策略安装。\n' +
+      '高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝无签名更新；详情见日志与官网。',
     buttons: ['立即重启安装', '稍后'],
     defaultId: 0,
     cancelId: 1,
@@ -330,7 +332,13 @@ export function evaluateUpdate({
     decision === 'install'
       ? `更新来源校验：签名有效（${UPDATE_SIG_ALG}，keyId=${keyId ?? '?'}${where}）→ 允许安装`
       : decision === 'warn-and-install'
-        ? `更新来源校验：**本次更新未验证来源签名**（${reason}${where}）→ 按默认档放行（可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 改为拒绝）`
+        ? // v0.6.21（§3.72）：弹窗精简成两行后，**完整解释必须落在这里**——否则"短了"就变成"少说了"。
+          // 这一行就是弹窗里"详情见日志"指向的地方：未验证的事实、为什么无法证明来源、默认档为何放行、
+          // 怎么变严、以及"不改配置与会话"的保证，一条不丢。
+          `更新来源校验：**本次更新未验证来源签名**（${reason}${where}）→ 按默认档放行（可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 改为拒绝）。` +
+          '完整说明：当前发布链路尚未接入签名（desktop/gen-update-yml.mjs 与发布脚本都不产出 .sig），因此无法用密码学证明这个安装包确实来自官网；' +
+          '更新源被投毒时，它与官方包无法区分。默认档放行是为了不掐死存量用户的自动更新（"feed 被投毒"低概率高影响，"更新永远装不上"必然发生）；' +
+          '本更新不会改动你的配置与会话。更新内容见官网 https://harness.mingdao.ai/，判据与处置见 docs/CODE-SIGNING.md §五。'
         : `更新来源校验：拒绝安装（${reason}${where}）`;
   return {
     decision,

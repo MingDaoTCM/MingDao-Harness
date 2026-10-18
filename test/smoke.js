@@ -12726,6 +12726,25 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
       assert.ok(g4.notice.detail.includes('本次更新未验证来源签名'), 'UI 必须明确写出"本次更新未验证来源签名"，实际：' + g4.notice.detail);
       assert.ok(g4.notice.title.includes('未验证来源签名'), '标题也要让用户看见（不能只藏在详情里）');
       assert.ok(g4.logLine.includes('未验证来源签名'), '日志必须同样如实记录');
+      // v0.6.21（§3.72）：负责人实测弹窗文案"太长、像一篇说明书" → **用户可见文案长度上限**：
+      // 标题+主句+正文合计 ≤ 220 字符，正文 ≤ 2 行（结论 + 可操作入口）。
+      // 精简不等于少说：四条关键信息必须在两行里仍找得到——① 未验证事实；② 默认仍安装（不是失败）；
+      // ③ 怎么变严（环境变量）；④ 详情去哪看（日志/官网）；完整解释则**必须**留在 logLine 里。
+      const warnCopy135 = `${g4.notice.title}\n${g4.notice.message}\n${g4.notice.detail}`;
+      assert.ok(
+        warnCopy135.length <= 220,
+        '用户可见文案（标题+主句+正文）不得超过 220 字符，实际 ' + warnCopy135.length + ' 字符：' + warnCopy135,
+      );
+      assert.ok(g4.notice.detail.split('\n').length <= 2, '弹窗正文最多两行（结论 + 可操作入口），实际：' + JSON.stringify(g4.notice.detail));
+      assert.ok(g4.notice.detail.includes('未验证来源签名'), '第①条：正文必须点明"未验证来源签名"');
+      assert.ok(g4.notice.detail.includes('已按默认策略安装'), '第②条：正文必须说明默认仍然安装（不是失败）');
+      assert.ok(g4.notice.detail.includes('MINGDAO_REQUIRE_UPDATE_SIGNATURE=1'), '第③条：正文必须给出变严的开关（环境变量）');
+      assert.ok(g4.notice.detail.includes('详情见日志与官网'), '第④条：正文必须给出详情入口（日志/官网）');
+      assert.ok(
+        g4.logLine.includes('密码学') && g4.logLine.includes('投毒') && g4.logLine.includes('https://harness.mingdao.ai'),
+        '弹窗精简后，完整解释必须留在日志行（无法用密码学证明来源 / feed 被投毒无法区分 / 官网入口），实际：' + g4.logLine,
+      );
+      assert.ok(g4.logLine.includes('不会改动你的配置与会话'), '从弹窗挪进日志的那句"不改配置与会话"不能丢');
       // 三种签名载体：清单内嵌优先、本机旁车次之、都没有就如实报"无签名"（不伪造）
       const c4 = await uv135.collectUpdateSignature({ filePath: pkg135, fetchImpl: null });
       assert.equal(c4.hasSignature, false, '没有签名载体时必须如实报"无签名"');
