@@ -98,7 +98,10 @@ export function main(argv = process.argv.slice(2)) {
   const allowDirty = argv.includes('--allow-dirty');
   let lock;
   try {
-    lock = acquireLock({ root: repoRoot });
+    // check 是**显式自愈入口**：owner 记录的 pid 已死时允许立即接管（否则 SIGKILL 后要等
+    // 15 分钟才能清残留）。它仍不碰 pid 存活、或 owner 读不到（mkdir→node 空窗）的锁；
+    // run.mjs 走严格两条件（见 lib.mjs 的 acquireLock）。
+    lock = acquireLock({ root: repoRoot, reclaimDeadOwner: true });
   } catch (e) {
     console.log(`✗ ${e.message}`);
     return 1;

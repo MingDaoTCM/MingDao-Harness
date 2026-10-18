@@ -3764,3 +3764,58 @@ request failed.` 当时上下文只有 ≈2,773 tokens、预算 32,768——压�
   （内容一字未动，计数行由后提交者校正）、`desktop/**`、`ide/**`、`presets/**`；
   经负责人授权仅额外改了 `test/mutate/batch31-localconcurrency.mjs` 的 ① 锚点（代码形状变了，
   锚点必须跟着走）。未 tag、未改版本号、未 publish。
+
+## 3.75 已修复（v0.6.18 开发线：跨 worktree 变异互斥——全局锁 + 两条件陈旧判据）
+
+**来源**：2026-10-18 当天真实发生两次——两道并行执行者各在自己的 worktree 跑
+`node test/mutate/run.mjs`，锁却分别是各自的 `<worktree>/test/mutate/.generated/mutate.lock`，
+等于没有互斥：固定端口 45997/45998 冲突，§145 的时序断言在负载下"逃逸"、假红。临时改用
+`/tmp/mdh-mutate.lockdir` + `mkdir` 人工协调，陈旧判据又写成"`pgrep` 为空就删锁"——而
+`mkdir` 到 node 启动之间有几秒空窗，结果把活锁删掉，两道都以为自己持锁。结论：互斥必须做进
+`run.mjs`，不能靠人肉协议。
+
+### 一、改了什么（只动 `test/mutate/` 的锁与自验）
+
+1. **全局锁**：从 `<worktree>/.generated/mutate.lock` 改为 `os.tmpdir()/mingdao-mutate.lock/`。
+   `mkdirSync` 原子创建；锁内 `owner.json` 记 `pid` / `startedAt` / `cwd`（被变异的 **worktree 根**）/
+   `argv` / `host`。同 pid 重复获取**幂等**（引用计数归零才真正释放）。
+2. **严格两条件陈旧判据**：① 锁里的 pid 已不在；② 锁目录 mtime 已超过 **15 分钟**。
+   **两条同时满足**才判陈旧并接管；只有 ① 时明确拒绝（"锁很新但 pid 已死"→ 不接管）。
+   owner 还读不到（刚 `mkdir`、尚未落盘的几毫秒）同样拒绝。接管不裸删：先拿 `.takeover` 令牌
+   串行化，再把锁目录整体 `rename` 成唯一 tombstone 后重建，避免两道同时判陈旧、同时删。
+3. **释放**：正常/异常/`SIGINT`/`SIGTERM` 都走 `process.once` 清理；`SIGKILL` 捕获不到，
+   留给上面的陈旧判据（或 `check.mjs` 的显式自愈）兜底。批次子进程通过 `MINGDAO_MUTATE_LOCK`
+   继承父进程的锁，不再各抢一把。
+4. **错误信息**：统一含「pid / cwd / 已运行 Ys / 锁目录」，并给出手工解锁入口；
+   死 pid 但锁很新、owner 未落盘两种情形分别给出"按不接管处理"的原因。
+5. **与既有 fail-safe 协同**：`check.mjs` 的残留自愈逻辑（标记内容判据、在飞不碰）一行未改；
+   锁只负责"不并发"。`check` 作为**显式自愈入口**，在 owner pid 已死时允许立即接管
+   （否则 SIGKILL 后 15 分钟内无法自愈残留），但绝不接管 pid 存活或 owner 读不到的锁。
+6. **selfcheck 新增 6 场景（真跑，非只写断言）**：⑨ 同进程重复获取幂等；⑩ 另一进程持锁
+   （sleep 子进程 + 锁）时第二个 `run.mjs` 被拒且提示含 pid/cwd；⑪ 死 pid + mtime 20 分钟前
+   → 接管并清理；⑫ **活锁但 mtime 很新、进程已退 → 不接管**（今天踩的坑的回归）；⑬ SIGTERM
+   打在 `run.mjs` 上 → 锁释放；⑭ 两个 worktree（两个临时目录）同时跑 → 只有一个进入。
+
+### 二、验证
+
+- `node test/mutate/selfcheck.mjs`：**14/14** 场景通过（原有 8 + 新增 6），并连续复跑 8 次无失败；
+  ⑭ 在同时起跑的极短空窗里会走"owner 尚未落盘"的拒绝分支，测试同时接受该安全分支。
+- `node test/mutate/run.mjs`：rebase 到主干后 **30/30 批次全中、342/342 条变异全中**
+  （其中原有的 **28 批 / 323 条全部保持命中**，batch40/41 由主干并行执行线带入）；独立 worktree；
+  跑前 `pgrep -f "test/mutate"` 为空，全程持本节的全局锁。另用一个真实第二 worktree 在跑动中
+  执行 `run.mjs batch12` 作现场验证：被拒并打印 pid/cwd/已运行秒数（exit 1）。
+- `npm run typecheck`、`node scripts/doc-lint.mjs` 均通过。
+- 既有 28 批锚点未失效：`mutate()` 只增加锁相关行，控制流形状（`run()` 调用 → 还原 → 判定）
+  未改；不碰 `test/smoke.js`、`test/mutate/README.md` 计数行、`src/**`、`presets/**`、`desktop/**`、`ide/**`。
+
+### 三、边界与未做（如实）
+
+- **不是分布式锁**：只在本机 `os.tmpdir()` 上互斥；多机/多容器共享同一个工作树仍会并发，
+  需要文件系统级锁或 CI 并发组（未做）。
+- **强杀后的 15 分钟**：`run.mjs` 不会接管"pid 已死但锁很新"的锁（防 mkdir→node 空窗）。
+  需立刻继续时先跑 `node test/mutate/check.mjs`（显式自愈入口），或按 `FAILSAFE.md`
+  "如何手工解锁"确认后删锁。
+- **pid 复用**：锁/标记里的 pid 被系统回收给无关进程时仍按安全侧处理（拒绝运行），
+  输出里带 cwd/startedAt/锁目录，供人工判断。
+- 未 tag、未改版本号、未 publish；`test/mutate/README.md` 的计数行归另一条执行线，
+  本节未改它。

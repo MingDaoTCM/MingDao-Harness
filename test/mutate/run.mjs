@@ -7,7 +7,10 @@
 //   - 启动先跑开跑前自检（check.mjs 的 preflight）：pid 已死的残留**自动还原**；
 //     文件被第三方改过 / pid 还活着的"在飞"标记 → **拒绝运行**并列出清单；
 //   - 脏工作树（src/**、test/** 未提交改动）默认拒绝，`--allow-dirty` 显式放行；
-//   - 全程持锁（`.generated/mutate.lock`）：第二个 mutator 会被告知"已有 mutator 在跑（pid N）"；
+//   - 全程持**全局**锁（`os.tmpdir()/mingdao-mutate.lock/`，v0.6.18 起不再放 `.generated/`）：
+//     第二个 mutator（**包括另一个 worktree 里的**）会被告知"已有 mutator 在跑（pid N，cwd X，已运行 Ys）"；
+//     只有"pid 已不在"且"锁 mtime 超过 15 分钟"同时成立才判陈旧——只看 pid 会在
+//     mkdir→node 的空窗里误删活锁（今天两次事故的根因）；
 //   - 每批之间再扫一次：若某个批次子进程被强杀，残留会在下一批开跑前被自愈，而不是带病跑下去。
 import fs from 'node:fs';
 import path from 'node:path';

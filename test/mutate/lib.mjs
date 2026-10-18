@@ -19,8 +19,11 @@
 //   1. **持久标记**：写补丁前先落 `test/mutate/.generated/pending/<hash>.json`（含 file/from/to/
 //      pid/时间戳 + 原始字节与补丁全文），还原后删除。进程被 kill -9 时标记会留下——这就是
 //      "残留"的**唯一可信判据**（而不是靠扫描源码文本猜）。
-//   2. **锁**：`test/mutate/.generated/mutate.lock`（pid + 启动时间）。第二个 mutator 直接拒绝；
-//      锁持有者死了的陈旧锁会被自动清理。**pid 还活着的标记一律不算残留**（事故①就是把它当残留）。
+//   2. **锁**：**全局**锁目录 `os.tmpdir()/mingdao-mutate.lock/`（`mkdirSync` 原子创建，锁内记
+//      pid/startedAt/cwd/argv）。第二个 mutator 直接拒绝；**跨 worktree** 也只有一个能进
+//      （v0.6.18：此前锁在 `.generated/` 里，每个 worktree 各持一把，等于没互斥）。陈旧锁必须
+//      **同时**满足"pid 已不在"与"锁 mtime 超过 15 分钟"才接管——只看 pid 会踩 mkdir→node 空窗。
+//      **pid 还活着的标记一律不算残留**（事故①就是把它当残留）。
 //   3. **可感知**：每次变异在 stdout 与 `.generated/mutate.journal`（JSONL）落「变异进行中」/
 //      「已还原」；SIGINT/SIGTERM/正常退出时 `process.once` 清理锁并尝试还原在途补丁。
 //      SIGKILL 无法被任何处理器捕获——那种情况靠 2 的陈旧锁 + 1 的标记，由
@@ -42,9 +45,6 @@ export function genDir(root = repoRoot) {
 }
 export function pendingDir(root = repoRoot) {
   return path.join(genDir(root), 'pending');
-}
-export function lockFilePath(root = repoRoot) {
-  return path.join(genDir(root), 'mutate.lock');
 }
 export function journalPath(root = repoRoot) {
   return path.join(genDir(root), 'mutate.journal');
@@ -288,97 +288,345 @@ export function scanResidue({ root = repoRoot, mode = 'check' } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// 并发互斥：锁文件。第二个 mutator 直接拒绝；持有者已死的陈旧锁自动清理。
+// 并发互斥：**全局**锁目录（v0.6.18，跨 worktree）。
+//
+// 为什么不能放 `.generated/`：那是每个工作树各自的目录——两个 worktree 各自持一把"锁"，
+// 等于没有互斥（固定端口 45997/45998 冲突、§145 时序断言在负载下"逃逸"就是这么来的）。
+//
+// 路径：`os.tmpdir()/mingdao-mutate.lock/`（`MINGDAO_MUTATE_LOCK_DIR` 只给 selfcheck 隔离用）。
+// 原子性：`mkdirSync` 本身是原子的（EEXIST = 已有人持有）；锁内 `owner.json` 记
+// `pid/startedAt/cwd/argv`。cwd 是**被变异的 worktree 根**，不是进程的当前目录。
+//
+// 陈旧判据（**两个条件同时满足**才接管）：
+//   ① owner.pid 已不在（`process.kill(pid, 0)` 失败且不是 EPERM）；
+//   ② 锁目录 mtime 已超过 15 分钟。
+// 只看 ① 是错的：`mkdir` 到 node 真正开始跑之间有一小段空窗（pid 还没写进锁），
+// "看到 pgrep 为空就删锁"正是这么把活锁删掉的——今天两次事故的共同根因。
+// 两个条件都满足时仍用 **rename 抢占**（锁目录整体改名为唯一 tombstone 再删）并加一个
+// `.takeover` 令牌串行化，避免两个进程同时判陈旧、同时删、双双以为自己持锁。
 // ---------------------------------------------------------------------------
 
-export class LockHeldError extends Error {
-  constructor(holder, lockPath) {
-    const pid = holder && Number.isInteger(holder.pid) ? holder.pid : '?';
-    const at = (holder && holder.startedAt) || '未知时间';
-    super(`已有 mutator 在跑（pid ${pid}，启动于 ${at}）；锁文件：${lockPath}。若是上次被强杀留下的陈旧锁，确认该 pid 不在后删掉锁再跑。`);
-    this.name = 'LockHeldError';
-    this.holder = holder;
-    this.lockPath = lockPath;
-  }
+export const GLOBAL_LOCK_NAME = 'mingdao-mutate.lock';
+export const LOCK_STALE_MS = 15 * 60 * 1000;
+
+/** 全局锁目录。selfcheck 用 MINGDAO_MUTATE_LOCK_DIR 指向独立临时目录，避免碰到真锁。 */
+export function globalLockDir() {
+  const override = process.env.MINGDAO_MUTATE_LOCK_DIR;
+  return override ? path.resolve(override) : path.join(os.tmpdir(), GLOBAL_LOCK_NAME);
 }
 
-export function readLock(root = repoRoot) {
+export function lockOwnerPath(dir = globalLockDir()) {
+  return path.join(dir, 'owner.json');
+}
+
+/** 读锁里的持有者信息；目录/文件不存在或内容不完整时返回 null。 */
+export function readLockOwner(dir = globalLockDir()) {
   try {
-    const data = JSON.parse(fs.readFileSync(lockFilePath(root), 'utf8'));
+    const data = JSON.parse(fs.readFileSync(lockOwnerPath(dir), 'utf8'));
     return data && Number.isInteger(data.pid) ? data : null;
   } catch {
     return null;
   }
 }
 
-function makeLockHandle({ root, own, file, holderPid }) {
+function lockAgeMs(dir) {
+  try {
+    return Math.max(0, Date.now() - fs.statSync(dir).mtimeMs);
+  } catch {
+    return 0;
+  }
+}
+
+function formatAge(ms) {
+  const sec = Math.max(0, Math.round(ms / 1000));
+  if (sec < 60) return `${sec}s`;
+  const min = Math.floor(sec / 60);
+  return `${min}m${String(sec % 60).padStart(2, '0')}s`;
+}
+
+function samePath(a, b) {
+  try {
+    return fs.realpathSync(a) === fs.realpathSync(b);
+  } catch {
+    return path.resolve(a) === path.resolve(b);
+  }
+}
+
+export class LockHeldError extends Error {
+  /**
+   * @param {any} holder
+   * @param {string} lockPath
+   * @param {{ageMs?: number, pidAlive?: boolean|null, reason?: string}} [opts]
+   */
+  constructor(holder, lockPath, { ageMs = null, pidAlive = null, reason = '' } = {}) {
+    const pid = holder && Number.isInteger(holder.pid) ? holder.pid : '未知';
+    const cwd = (holder && (holder.cwd || holder.processCwd)) || (holder ? '未知工作树' : '未知（owner 尚未落盘）');
+    let age = Number.isFinite(ageMs) ? ageMs : null;
+    if (age === null && holder && holder.startedAt) {
+      const ts = Date.parse(holder.startedAt);
+      if (Number.isFinite(ts)) age = Date.now() - ts;
+    }
+    const ageText = age === null ? '未知' : formatAge(age);
+    let msg = `已有 mutator 在跑（pid ${pid}，cwd ${cwd}，已运行 ${ageText}）；锁目录：${lockPath}`;
+    if (!holder) {
+      // mkdir 成功、owner.json 还没落盘的几毫秒里，第二个进程会看到这个形状。
+      // 这正是"不能只看进程在不在"的那个空窗——一律拒绝，绝不替它清锁。
+      msg +=
+        '。锁内容还读不到（可能刚 mkdir、owner 尚未落盘）——按"不接管"处理，稍后重试；' +
+        '确认无人在跑后再手工解锁（见 test/mutate/FAILSAFE.md）。';
+    } else if (pidAlive === false) {
+      msg +=
+        `。该 pid 当前不在，但锁的 mtime 只有 ${ageText}（未超过 15 分钟）——可能正处在 mkdir→node 启动的空窗，` +
+        '按"不接管"处理；确认无人在跑后再手工解锁（见 test/mutate/FAILSAFE.md）。';
+    } else if (pidAlive === true) {
+      msg += '。它正在跑：等它结束，或确认该 pid 不是 mutator 后再手工解锁。';
+    } else {
+      msg += '。锁内容不可读（可能正在初始化）；未超过 15 分钟不接管，确认无人在跑后手工解锁。';
+    }
+    if (reason) msg += `（${reason}）`;
+    super(msg);
+    this.name = 'LockHeldError';
+    this.holder = holder;
+    this.lockPath = lockPath;
+    this.ageMs = age;
+    this.pidAlive = pidAlive;
+  }
+}
+
+/** 本进程持有的锁（目录 → 引用计数）。同 pid 重复 acquire 是幂等的。 */
+const heldLocks = new Map();
+function bumpHeld(dir, root, delta) {
+  const prev = heldLocks.get(dir) || { count: 0, root };
+  const count = prev.count + delta;
+  if (count <= 0) heldLocks.delete(dir);
+  else heldLocks.set(dir, { count, root });
+  return count;
+}
+
+function makeLockHandle({ root, dir, own, holderPid }) {
   let released = false;
   return {
     root,
     own,
-    path: file,
+    path: dir,
     holderPid,
     release() {
       if (released) return false;
       released = true;
       if (!own) return false;
-      const current = readLock(root);
+      if (bumpHeld(dir, root, -1) > 0) return false; // 同进程还有别的句柄仍持锁
+      const current = readLockOwner(dir);
       if (!current || current.pid !== process.pid) return false; // 锁已被别人（陈旧清理后）接管，不能删别人的
       try {
-        fs.unlinkSync(file);
+        fs.rmSync(dir, { recursive: true, force: true });
       } catch {
         return false;
       }
-      journal('lock-released', { root });
+      journal('lock-released', { root, lock: dir });
       return true;
     },
   };
 }
 
-export function acquireLock({ root = repoRoot, quiet = false } = {}) {
-  ensureDir(genDir(root));
-  const file = lockFilePath(root);
-  const payload = {
-    v: 1,
-    pid: process.pid,
-    startedAt: new Date().toISOString(),
-    argv: process.argv.slice(2),
-    cwd: process.cwd(),
-    host: os.hostname(),
-  };
-  for (let attempt = 0; attempt < 2; attempt += 1) {
-    try {
-      fs.writeFileSync(file, JSON.stringify(payload, null, 2), { flag: 'wx' });
-      journal('lock-acquired', { root });
-      return makeLockHandle({ root, own: true, file, holderPid: process.pid });
-    } catch (e) {
-      if (!e || e.code !== 'EEXIST') throw e;
-      const holder = readLock(root);
-      if (holder && holder.pid === process.pid) {
-        return makeLockHandle({ root, own: true, file, holderPid: process.pid });
-      }
-      if (holder && isPidAlive(holder.pid)) {
-        journal('lock-refused', { root, holderPid: holder.pid });
-        throw new LockHeldError(holder, path.relative(root, file));
-      }
-      // 陈旧锁：持有者已不在（上次被强杀留下的）→ 清掉再抢一次。
-      if (!quiet) console.log(`[mutate] 清理陈旧锁：${path.relative(root, file)}（pid ${(holder && holder.pid) || '?'} 已不在）`);
-      journal('lock-stale', { root, holderPid: (holder && holder.pid) || null });
+/** 退出路径上的兜底：只删 owner 仍是自己的锁，绝不碰别人的。 */
+export function releaseAllLocks() {
+  for (const [dir, entry] of [...heldLocks]) {
+    const current = readLockOwner(dir);
+    if (current && current.pid === process.pid) {
       try {
-        fs.unlinkSync(file);
+        fs.rmSync(dir, { recursive: true, force: true });
+        journal('lock-released', { root: entry.root, lock: dir, all: true });
       } catch {
-        /* 别人先清了就算了，下一轮 'wx' 会告诉我们真实状态 */
+        /* 退出路径上不能再抛 */
       }
     }
+    heldLocks.delete(dir);
   }
-  throw new LockHeldError(readLock(root), path.relative(root, file));
+}
+
+function tokenDir(dir) {
+  return `${dir}.takeover`;
+}
+
+/**
+ * 拿"接管令牌"：只有拿到令牌的进程可以动陈旧锁，避免两个进程同时判陈旧后互相抢。
+ * 令牌本身崩溃残留时，按同一套两条件（pid 死 + mtime > 15 分钟）用 rename 原子回收；
+ * 活着的令牌直接返回 null（调用方拒绝，让人稍后重试）。
+ */
+function acquireTakeoverToken({ dir, root }) {
+  const token = tokenDir(dir);
+  const payload = JSON.stringify(
+    { v: 1, pid: process.pid, startedAt: new Date().toISOString(), cwd: path.resolve(root), argv: process.argv.slice(2), host: os.hostname() },
+    null,
+    2
+  );
+  try {
+    fs.mkdirSync(token);
+  } catch (e) {
+    if (!e || e.code !== 'EEXIST') throw e;
+    const holder = readLockOwner(token);
+    const age = lockAgeMs(token);
+    if (holder && isPidAlive(holder.pid)) return null;
+    if (age <= LOCK_STALE_MS) return null;
+    const tomb = `${token}.stale-${process.pid}-${Date.now()}`;
+    try {
+      fs.renameSync(token, tomb);
+    } catch {
+      return null;
+    }
+    try {
+      fs.rmSync(tomb, { recursive: true, force: true });
+    } catch {
+      return null;
+    }
+    try {
+      fs.mkdirSync(token);
+    } catch {
+      return null;
+    }
+  }
+  try {
+    const tmp = path.join(token, `owner.${process.pid}.tmp`);
+    fs.writeFileSync(tmp, payload);
+    fs.renameSync(tmp, lockOwnerPath(token));
+  } catch (e) {
+    try {
+      fs.rmSync(token, { recursive: true, force: true });
+    } catch {
+      /* 尽力而为 */
+    }
+    throw e;
+  }
+  return token;
+}
+
+function releaseTakeoverToken(token) {
+  if (!token) return;
+  try {
+    fs.rmSync(token, { recursive: true, force: true });
+  } catch {
+    /* 令牌清不掉只会拖慢下一次接管，不能反过来阻断本次 */
+  }
+}
+
+/**
+ * 接管陈旧锁：rename 整个锁目录到唯一 tombstone（原子），再重建。调用方必须已持令牌。
+ * @returns {boolean} 是否成功抢到（false = 令牌/锁被别人先动了，调用方重试）
+ */
+function takeOverStaleLock({ dir, root, holder, ageMs, quiet, reclaimDeadOwner = false }) {
+  const token = acquireTakeoverToken({ dir, root });
+  if (!token) return false;
+  try {
+    // 拿到令牌后重新核对：这段时间里可能已经有人清掉并重建了锁。
+    const fresh = readLockOwner(dir);
+    const freshAge = lockAgeMs(dir);
+    /** @type {boolean} */
+    let stillStale;
+    if (!fresh) stillStale = freshAge > LOCK_STALE_MS;
+    else if (fresh.pid === process.pid) stillStale = false;
+    else if (isPidAlive(fresh.pid)) stillStale = false;
+    else stillStale = freshAge > LOCK_STALE_MS || reclaimDeadOwner;
+    if (!stillStale) return false;
+    const tomb = `${dir}.stale-${process.pid}-${Date.now()}`;
+    try {
+      fs.renameSync(dir, tomb);
+    } catch (e) {
+      if (e && (e.code === 'ENOENT' || e.code === 'ENOTDIR')) return false;
+      throw e;
+    }
+    try {
+      fs.rmSync(tomb, { recursive: true, force: true });
+    } catch {
+      /* 旧锁内容清不掉不影响抢占（下一次 mtime 判据仍按新目录算） */
+    }
+    if (!quiet) {
+      console.log(
+        `[mutate] 清理陈旧锁并接管：${dir}（pid ${(holder && holder.pid) || (fresh && fresh.pid) || '?'} 已不在，锁已 ${formatAge(ageMs)} 未更新）`
+      );
+    }
+    journal('lock-stale', { root, lock: dir, holderPid: (holder && holder.pid) || (fresh && fresh.pid) || null, ageMs });
+    return true;
+  } finally {
+    releaseTakeoverToken(token);
+  }
+}
+
+/**
+ * 抢全局变异锁。
+ *
+ * @param {{root?: string, quiet?: boolean, reclaimDeadOwner?: boolean}} [opts]
+ *   `reclaimDeadOwner` 只给 `check.mjs` 这个**显式自愈入口**用：owner 里记录的 pid 已死时，
+ *   即使锁 mtime 很新也允许接管（否则强杀后 15 分钟内无法自愈残留补丁）。它仍然**绝不**接管
+ *   pid 存活、或 owner 还读不到（mkdir→node 空窗）的锁；`run.mjs` 永远走严格两条件。
+ */
+export function acquireLock({ root = repoRoot, quiet = false, reclaimDeadOwner = false } = {}) {
+  const dir = globalLockDir();
+  const payload = {
+    v: 2,
+    pid: process.pid,
+    startedAt: new Date().toISOString(),
+    cwd: path.resolve(root),
+    argv: process.argv.slice(2),
+    host: os.hostname(),
+  };
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    try {
+      fs.mkdirSync(dir);
+    } catch (e) {
+      if (!e || e.code !== 'EEXIST') throw e;
+      const holder = readLockOwner(dir);
+      const ageMs = lockAgeMs(dir);
+      if (holder && holder.pid === process.pid) {
+        bumpHeld(dir, root, 1);
+        return makeLockHandle({ root, dir, own: true, holderPid: process.pid });
+      }
+      if (holder && isPidAlive(holder.pid)) {
+        journal('lock-refused', { root, lock: dir, holderPid: holder.pid, ageMs, why: 'pid-alive' });
+        throw new LockHeldError(holder, dir, { ageMs, pidAlive: true });
+      }
+      const deadOwner = Boolean(holder);
+      const staleByAge = ageMs > LOCK_STALE_MS;
+      // 严格两条件：① pid 已不在 ② mtime 超过 15 分钟。check 的自愈入口额外允许 ① 单条，
+      // 但空窗（owner 读不到）永远要求 ②——那才是今天误删活锁的形状。
+      const canTakeOver = deadOwner ? staleByAge || reclaimDeadOwner : staleByAge;
+      if (!canTakeOver) {
+        // 条件 ① 满足、② 不满足：绝不接管（mkdir→node 空窗的回归）。
+        journal('lock-refused', { root, lock: dir, holderPid: holder ? holder.pid : null, ageMs, why: deadOwner ? 'fresh-lock-dead-pid' : 'unreadable-fresh' });
+        throw new LockHeldError(holder, dir, { ageMs, pidAlive: deadOwner ? false : null });
+      }
+      if (!takeOverStaleLock({ dir, root, holder, ageMs, quiet, reclaimDeadOwner })) {
+        continue; // 令牌/锁被别人动了，重试（下一轮会看到新的真实状态）
+      }
+      continue; // 已清掉旧锁，回到循环去 mkdir
+    }
+    // mkdir 成功 = 抢到。锁内容原子落盘（先写临时文件再 rename），避免半截 JSON。
+    try {
+      const tmp = path.join(dir, `owner.${process.pid}.tmp`);
+      fs.writeFileSync(tmp, JSON.stringify(payload, null, 2));
+      fs.renameSync(tmp, lockOwnerPath(dir));
+    } catch (err) {
+      try {
+        fs.rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* 尽力而为 */
+      }
+      throw err;
+    }
+    bumpHeld(dir, root, 1);
+    journal('lock-acquired', { root, lock: dir });
+    return makeLockHandle({ root, dir, own: true, holderPid: process.pid });
+  }
+  throw new LockHeldError(readLockOwner(dir), dir, { ageMs: lockAgeMs(dir), pidAlive: null, reason: '接管竞争失败，稍后重试' });
 }
 
 /** 子进程继承父进程的锁（run.mjs 持锁跑批次，批次进程不再抢锁）。 */
 export function inheritLock({ root = repoRoot, pid }) {
-  const holder = readLock(root);
+  const dir = globalLockDir();
+  const holder = readLockOwner(dir);
   if (!holder || holder.pid !== pid || !isPidAlive(pid)) return null;
-  return makeLockHandle({ root, own: false, file: lockFilePath(root), holderPid: pid });
+  // cwd 必须对得上：防止环境变量被别的工作树的进程误继承。
+  if (holder.cwd && !samePath(holder.cwd, root)) return null;
+  return makeLockHandle({ root, dir, own: false, holderPid: pid });
 }
 
 let cleanupInstalled = false;
@@ -402,6 +650,7 @@ export function installCleanup({ root = repoRoot, lock } = {}) {
     }
     try {
       lock?.release();
+      releaseAllLocks();
     } catch {
       /* 退出路径上不能再抛 */
     }
