@@ -3,6 +3,99 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.18（2026-10-18）— 本地内存不足自动降级一次 + 轨迹收纳 + 变异跨 worktree 互斥
+
+> 补丁版，四件事：① **本地引擎内存/显存不足自动恢复**——`isMemoryPressureError()` 单一判据
+> （507 / `insufficient memory` / `memory_refusal` / `allocator wall` / `shed-caches` / OOM 词边界），
+> **仅本地端点**压缩上下文（×0.6，下限 4k）+ 输出 ×0.5 + 强制并发 1，**只重试一次**；二次失败把
+> 具体数值与建议一并抛出（§3.74）；② **轨迹/子 Agent 收纳**——宽屏进右栏「轨迹」「子Agent」
+> 可折叠区，<1180px 落到对话流末尾 `#traceDock`，对话流每轮只留一行摘要（§3.73）；③ **变异跨
+> worktree 互斥**——全局锁 `os.tmpdir()/mingdao-mutate.lock/`，陈旧判据「pid 不在 **且**
+> mtime>15min」双条件，接管用 `.takeover` 令牌 + rename（§3.75）；④ **更新未验证来源签名提示
+> 精简为两行**（§3.72）。变异验证 **30 批 342 条全中**（原 323 + batch40 的 11 + batch41 的 8；
+> 计数由 `scripts/doc-lint.mjs` ⑥ 守卫）。
+
+### 一、本地引擎内存不足自动恢复（§3.74）
+
+**判据单一**：`src/providers/openai-compatible.js` 的 `isMemoryPressureError()` 认 HTTP **507**、
+`insufficient memory`、`memory_refusal`、`allocator wall`、
+`engine shed its caches and stays up`、OOM（**词边界**，`room` / `zoom` 不误判）；
+**不含** 400/401/429 与普通 5xx。`describeUpstreamError()` 新增 `recoverableByShrinking`，
+**只对本地端点**为真（`isLocalBaseUrl` 或 `customModels.<名>.local`）；provider 的瞬态重试对内存
+错误直接放行，避免 500+`insufficient memory` 被白重发两次。
+
+**一次有界降级**（`src/agent.js`，`MAX_MEMORY_RETRIES = 1`）：命中后本回合 `contextBudget × 0.6`
+（**下限 4096**——压到连系统提示都放不下就永远失败）、`maxOutputTokens × 0.5`，重试请求带
+`localConcurrency: 1`（provider 复用既有 `acquireLocalSlot` 把并发压回 1）；第二次仍失败即如实
+抛错，**不无限重试**。降级不额外消耗 `maxSteps` 的一步（否则 `maxSteps=1` 时根本没机会重试）。
+
+**不掩盖**：界面/日志打 `♻ 因本地引擎内存不足，已压缩上下文（32,768 → ~19,660）…并重试一次
+（串行化：并发上限 1）`；失败路径的文案带压缩前后数值、输出上限、`config.contextBudget` 建议值与
+`--ctx-size` / q8 KV 建议；`done.note` 追加压缩前后数值与重试结果，`src/web/server.js` 把同一份
+说明写进 `web-server.log`。
+
+**自适应 clamp**：新增纯函数 `clampContextBudgetToEngine()`；预检读到引擎 `n_ctx` 且预算 >
+`n_ctx × 0.8` 时，**发请求前**（创建 agent 时）clamp 并提示；没读到 `n_ctx` 时不猜、不 clamp。
+
+**云端不变**：云 API 的 507 仍走既有路径（不重试），400/401/429 行为不变——上下文压缩改不了
+远端容量，重试只会多烧一次请求。
+
+**断言**：新套件 `test/memory-recovery.js`（5 项）接 `test/run-all.mjs` 与 CI（仅 Linux 腿），
+桩引擎逐条覆盖：降级后成功 / 两次失败 / 云端 507 / clamp 与 0.8 比例 / 4xx 不变；
+新建 `batch40-memory-recovery.mjs`（11 条变异）逐条抓回退。
+
+### 二、轨迹与子 Agent 收纳（§3.73）
+
+**对话流只留一行**：每轮正文末尾一行 `🧭 本轮 12 次工具调用 · 3 个子代理 · 1m42s ›`（复用既有
+`.trace-row`，失败轮加 `has-fail`），不再把工具卡与子代理内联堆在正文之间；无工具且无子代理时
+整行隐藏。
+
+**宽屏进右栏**：`≥1180` 时「轨迹」「子Agent」两块在右栏，均可折叠；子代理行显示名称 · 轮次 ·
+工具次数 · 最后进展 · 状态（运行中/完成/失败），运行中由既有 `progress.subagent` 快照实时更新，
+**不新增轮询**。
+
+**窄屏落末尾**：`<1180` 且右栏收起时，两块移到对话流末尾 `#traceDock`（`traceDockVisible()` 判定，
+与 `layoutClassesFor()` 同一断点）；点摘要按钮定位该轮：窄屏滚到 dock、宽屏/抽屉已开则定位右栏。
+
+**同一函数 / 同一数据源**：摘要与右栏都走 `traceRoundForMsg()` → `traceRoundView()`，只读
+`msg._traj` 与会话子代理列表，不读 `runState`、不另算一套（§151 断言两处都调用同一函数）。
+
+### 三、变异跨 worktree 互斥（§3.75）
+
+**全局锁**：从「各 worktree 一把 `<worktree>/.generated/mutate.lock`」改为
+`os.tmpdir()/mingdao-mutate.lock/`；`mkdirSync` 原子创建，锁内 `owner.json` 记
+`pid` / `startedAt` / `cwd`（被变异的 worktree 根）/ `argv` / `host`。同 pid 重复获取幂等
+（引用计数归零才真正释放）；批次子进程经 `MINGDAO_MUTATE_LOCK` 继承父进程的锁。
+
+**严格两条件陈旧判据**：① 锁里的 pid 已不在；② 锁目录 mtime 已超过 **15 分钟**。两条**同时**
+满足才判陈旧；只有 ① 时明确拒绝（"锁很新但 pid 已死"→ 不接管）；owner 还读不到（刚 `mkdir`、
+尚未落盘）同样拒绝。接管不裸删：先拿 `.takeover` 令牌串行化，再把锁目录整体 `rename` 成唯一
+tombstone 后重建。释放覆盖正常/异常/`SIGINT`/`SIGTERM`；`SIGKILL` 留给陈旧判据或
+`check.mjs` 显式自愈兜底。
+
+**错误信息**统一含 pid / cwd / 已运行秒数 / 锁目录，并给出手工解锁入口。
+`selfcheck` **14/14**（原 8 + 新增 6，含今天踩的坑的回归：活锁但 mtime 很新、pid 已死 → 不接管；
+两个 worktree 同时跑只有一个进入）；全量 **30/30 批次、342/342 条**。
+
+### 四、更新提示精简为两行（§3.72）
+
+桌面版 `warn-and-install`（无签名 + 默认档）的更新就绪弹窗正文由五句缩成两行：
+`本次更新未验证来源签名（发布链路尚未接入签名）——已按默认策略安装。` /
+`高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝无签名更新；详情见日志与官网。`
+标题与主句不变，`allowInstall` 仍为 `true`，**判据一行未动**；弹窗短了，日志反而更详细
+（`logLine` 追加「完整说明」：为何放行、投毒不可区分、官网与 `docs/CODE-SIGNING.md §五`）。
+`smoke` §135 补断言：用户可见文案 `title+message+detail` **≤220 字符**、正文 ≤2 行、四类关键串
+必须在、日志行仍含完整说明。仍**每次更新提示一次**（没有"不再提示"配置）。
+
+### 五、测试与文档
+
+- 新增 `test/memory-recovery.js`（5 项）并接入 `test/run-all.mjs` 与 CI（仅 Linux 腿）。
+- 新增 `batch40-memory-recovery.mjs`（11 条）、`batch41-ui-trace.mjs`（8 条）；`batch31 ①` 的
+  `acquireLocalSlot` 锚点跟随新增的 `localConcurrency` 传参更新；`src/web/server.js` 的
+  `note: [baseNote, zeroNote]…` 行保持原形，`batch33 ⑧` 无需改动。
+- `test/mutate/README.md` / `FAILSAFE.md` 同步锁语义与计数；`node scripts/doc-lint.mjs` ⑥
+  核对 **342** 条；`smoke` 补 §151 收纳断言与 §135 文案上限断言。
+
 ## v0.6.17（2026-10-18）— UI P1 八项 + 模型显示别名（界面看官方宣传名，请求仍用 API id）
 
 > 功能版，两件事：① `docs/DESIGN-UI-v1.md` 的 **P1 八项**落地：工具调用时间线卡片、`⌘K` 命令面板、
