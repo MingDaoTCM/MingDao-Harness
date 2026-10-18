@@ -13,6 +13,8 @@ const SUITES = [
   ['e2e-web', 'node', ['test/e2e-web.js']],
   ['e2e-schedule', 'node', ['test/e2e-schedule.js']],
   ['api-contracts', 'node', ['test/api-contracts.js']],
+  // v0.6.19 §3.76：UI P2（设置三列 / 六类危险操作二次确认 / 无障碍 / i18n / 语言持久化）
+  ['ui-p2', 'node', ['test/ui-p2.js']],
   // v0.6.18 §3.74：本地引擎内存/显存不足 → 压缩上下文 + 输出减半 + 串行，只重试一次
   ['memory-recovery', 'node', ['test/memory-recovery.js']],
   // v0.6.19 §3.67：模型名称以 API 实时返回的官方名为准（家族模式 / 默认值解析 / 未知新版本 / 离线兜底）

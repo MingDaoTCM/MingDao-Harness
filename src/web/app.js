@@ -1,5 +1,16 @@
 import { $, esc, highlight, renderMarkdown, scrollBottom, expandableBody, resultText, truncText, textBody, fmtDur, fmtTok, fmtT } from './util.js';
 import { MAX_ATTACHMENTS, MAX_IMAGE_BYTES, MAX_TEXT_BYTES } from './constants.js';
+import { LANG_STORAGE_KEY, applyI18n, detectLang, getLang, initI18n, setLang, storedLang, t, translate } from './i18n.js';
+
+// P2-4（v0.6.19 §3.76）：界面文案默认跟随 navigator.language，localStorage（mingdao-lang）可覆盖。
+// initI18n 只改 <html lang> 与 data-i18n* 节点；动态区域在各自渲染函数里用 t()。
+function safeStorage(){
+  try { return window.localStorage; } catch { return null; }
+}
+function navLang(){
+  try { return navigator.language || navigator.userLanguage || ''; } catch { return ''; }
+}
+const INITIAL_LANG = initI18n({ storage: safeStorage(), root: document.documentElement, navLang: navLang() });
 
 // 访问令牌（P1-3）：地址带 ?token= 时记入 sessionStorage 并从地址栏移除（防截图/历史外泄），
 // 之后所有同源请求统一附加 X-MingDao-Token 头；无令牌时行为与旧版一致。
@@ -1155,6 +1166,369 @@ function layoutClassesFor(width) {
 }
 
 // ============================================================================
+// P2 纯函数（v0.6.19 §3.76）
+//   设置三列（默认 / 当前 / 影响）、六类危险操作的二次确认闸门、对话框无障碍
+//   （role/aria-modal/焦点陷阱/Esc/焦点归还）、aria-live 状态节流、对比度自检。
+// test/ui-p2.js 直接 eval 这一整段做行为断言；DOM 接线在下面的 P2 DOM 段。
+// 注意：本段**不得**在顶层调用 t()/translate()/document（slice 后要能独立编译）。
+// ============================================================================
+
+// —— 设置项三列：key → 一句「影响」（前端映射表；英文文案在 i18n.js 的 impact.*） ——
+const SETTING_KEYS = ['permission', 'sandbox', 'routing', 'contextBudget', 'timeout', 'autostart', 'notify', 'theme', 'language'];
+const SETTING_IMPACT = {
+  permission: '切到 auto 会跳过逐次确认，工具直接执行；切到 readonly 会拒绝所有写操作。',
+  sandbox: '关掉沙箱后 bash 直接在本机执行；readonly/safe 会限制只读与断网，但需要 Linux + bubblewrap。',
+  routing: '开启后规划类任务走 pro、执行类走 flash；关闭则始终用当前模型，成本与延迟更可预测。',
+  contextBudget: '改小 contextBudget 会减少可容纳历史，长任务更易触发压缩；改大受模型窗口与实际引擎上限约束。',
+  timeout: '首 token / 流式空闲 / 总量调小会更早判定超时；留空表示按本地/云端模型自适应。',
+  autostart: '开启后登录系统即自动启动本地服务；关闭后需要手动运行 mingdao web。',
+  notify: '关闭后后台任务完成或失败不再发桌面通知，只能回到界面查看。',
+  theme: '只改变界面明暗，不影响模型与成本；选「跟随系统」时随系统偏好切换。',
+  language: '只改变界面文案语言，不改变日志、错误原文与会话内容。',
+  memory: '长期记忆会在每次会话中注入；清空后偏好与约定全部丢失，且不可恢复。',
+};
+// 与 /api/state.defaults 同值的兜底：服务端字段读不到时仍能诚实显示「默认」列（来源写在设置页）。
+const SETTING_DEFAULTS_FALLBACK = {
+  permission: 'ask',
+  sandbox: 'off',
+  routing: false,
+  contextBudget: 128000,
+  timeout: { firstTokenMs: null, streamIdleMs: null, totalMs: null },
+  autostart: false,
+  notify: true,
+  reasoningEffort: 'high',
+  theme: 'system',
+  language: 'auto',
+};
+/** 默认值表：优先用 /api/state.defaults（只读透出），缺字段按同一份兜底补。 */
+function settingDefaultsFromState(state) {
+  const src = state && state.defaults && typeof state.defaults === 'object' ? state.defaults : {};
+  const out = Object.assign({}, SETTING_DEFAULTS_FALLBACK);
+  for (const k of SETTING_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(src, k) && src[k] !== undefined) out[k] = src[k];
+  }
+  out.timeout = Object.assign({}, SETTING_DEFAULTS_FALLBACK.timeout, src.timeout || {});
+  if (src.reasoningEffort !== undefined) out.reasoningEffort = src.reasoningEffort;
+  return out;
+}
+/**
+ * 设置项的展示值（不编造：未知值原样显示）。
+ * @param {string} key
+ * @param {any} value
+ * @param {{lang?: string, translate?: Function}} [opts]
+ * @returns {string}
+ */
+function settingDisplayValue(key, value, opts) {
+  const o = opts || {};
+  const zh = o.lang !== 'en';
+  const tx = (/** @type {string} */ k, /** @type {string} */ fallback) => {
+    try {
+      const s = typeof o.translate === 'function' ? o.translate(zh ? 'zh' : 'en', k) : '';
+      return s || fallback;
+    } catch { return fallback; }
+  };
+  if (key === 'timeout') {
+    const t0 = value && typeof value === 'object' ? value : {};
+    const n = (/** @type {any} */ v) => (v == null || !Number.isFinite(Number(v)) || Number(v) <= 0 ? null : Number(v));
+    const a = n(t0.firstTokenMs), b = n(t0.streamIdleMs), c = n(t0.totalMs);
+    if (a == null && b == null && c == null) return tx('settings.auto', zh ? '自适应（留空）' : 'Auto (blank)');
+    return [a == null ? null : '首帧 ' + Math.round(a / 1000) + 's', b == null ? null : '空闲 ' + Math.round(b / 1000) + 's', c == null ? null : '总量 ' + Math.round(c / 1000) + 's']
+      .filter(Boolean).join(' · ');
+  }
+  if (typeof value === 'boolean') return value ? tx('settings.on', zh ? '开' : 'On') : tx('settings.off', zh ? '关' : 'Off');
+  if (value == null || value === '') return '—';
+  return String(value);
+}
+/**
+ * 单个设置项的三列视图（默认 / 当前 / 影响）。
+ * @param {string} key
+ * @param {{defaults?: any, values?: any, lang?: string, translate?: Function}} [opts]
+ * @returns {{key: string, defaultText: string, currentText: string, impact: string, changed: boolean}}
+ */
+function settingValueView(key, opts) {
+  const o = opts || {};
+  const defaults = o.defaults && typeof o.defaults === 'object' ? o.defaults : SETTING_DEFAULTS_FALLBACK;
+  const values = o.values && typeof o.values === 'object' ? o.values : defaults;
+  const hasCurrent = Object.prototype.hasOwnProperty.call(values, key);
+  const defaultValue = Object.prototype.hasOwnProperty.call(defaults, key) ? defaults[key] : undefined;
+  const currentValue = hasCurrent ? values[key] : defaultValue;
+  const lang = o.lang === 'en' ? 'en' : 'zh';
+  let impact = '';
+  try {
+    impact = (typeof o.translate === 'function' ? o.translate(lang, 'impact.' + key) : '') || SETTING_IMPACT[key] || '';
+  } catch {
+    impact = SETTING_IMPACT[key] || '';
+  }
+  return {
+    key,
+    defaultText: settingDisplayValue(key, defaultValue, o),
+    currentText: settingDisplayValue(key, currentValue, o),
+    impact,
+    changed: settingDisplayValue(key, defaultValue, o) !== settingDisplayValue(key, currentValue, o),
+  };
+}
+/**
+ * 全部设置项的三列视图（HTML 里有几个 data-setting，这里就应覆盖几个）。
+ * @param {{keys?: string[], defaults?: any, values?: any, lang?: string, translate?: Function}} [opts]
+ * @returns {ReturnType<typeof settingValueView>[]}
+ */
+function settingColumnsView(opts) {
+  const o = opts || {};
+  const keys = Array.isArray(o.keys) && o.keys.length ? o.keys : SETTING_KEYS;
+  return keys.map((k) => settingValueView(k, o));
+}
+
+// —— 六类危险操作：先确认、后执行（取消 → 绝不执行） ——
+const DANGER_ACTIONS = {
+  removeWorkspace: {
+    titleKey: 'danger.removeWorkspace.title',
+    consequenceKey: 'danger.removeWorkspace.consequence',
+    titleFallback: '删除工作空间',
+    consequenceFallback: '将从工作空间列表中移除该登记项；目录本身与其中的文件不会被删除，但依赖该空间的历史会话会失去一键切换入口。',
+  },
+  deleteSession: {
+    titleKey: 'danger.deleteSession.title',
+    consequenceKey: 'danger.deleteSession.consequence',
+    titleFallback: '删除会话',
+    consequenceFallback: '会话记录文件将被永久删除，无法恢复；若删的是当前会话，界面会回到空态。',
+  },
+  clearMemory: {
+    titleKey: 'danger.clearMemory.title',
+    consequenceKey: 'danger.clearMemory.consequence',
+    titleFallback: '清空记忆',
+    consequenceFallback: '长期记忆文件将被清空，注入每次会话的偏好与约定全部丢失，且不可恢复。',
+  },
+  resetConfig: {
+    titleKey: 'danger.resetConfig.title',
+    consequenceKey: 'danger.resetConfig.consequence',
+    titleFallback: '恢复默认配置',
+    consequenceFallback: '权限、沙箱、路由、上下文预算、超时、开机自启、通知将回到内置默认值；模型与 API Key 不受影响。',
+  },
+  permissionAuto: {
+    titleKey: 'danger.permissionAuto.title',
+    consequenceKey: 'danger.permissionAuto.consequence',
+    titleFallback: '切换到「自动」权限',
+    consequenceFallback: '之后写文件与执行命令不再逐次确认；模型可能在你未看清内容时修改文件或运行命令。',
+  },
+  sandboxOff: {
+    titleKey: 'danger.sandboxOff.title',
+    consequenceKey: 'danger.sandboxOff.consequence',
+    titleFallback: '关闭沙箱',
+    consequenceFallback: 'bash 将不再受只读/断网限制，直接在本机执行；沙箱提供的最外层隔离同时失效。',
+  },
+};
+const DANGER_KEYS = ['removeWorkspace', 'deleteSession', 'clearMemory', 'resetConfig', 'permissionAuto', 'sandboxOff'];
+/**
+ * 危险操作的标题 / 后果 / 按钮文案（未知 key 返回 null；绝不返回 undefined 文案）。
+ * @param {string} key
+ * @param {Function} [translateFn] 形如 translate(lang, key)
+ * @param {string} [lang]
+ * @returns {{key: string, title: string, consequence: string, confirmLabel: string, cancelLabel: string, note: string}|null}
+ */
+function dangerMeta(key, translateFn, lang) {
+  const a = DANGER_ACTIONS[key];
+  if (!a) return null;
+  const l = lang === 'en' ? 'en' : 'zh';
+  const tr = (/** @type {string} */ k, /** @type {string} */ fallback) => {
+    try {
+      const s = typeof translateFn === 'function' ? translateFn(l, k) : '';
+      return s || fallback;
+    } catch { return fallback; }
+  };
+  return {
+    key,
+    title: tr(a.titleKey, a.titleFallback),
+    consequence: tr(a.consequenceKey, a.consequenceFallback),
+    confirmLabel: tr('danger.confirm', '确认'),
+    cancelLabel: tr('danger.cancel', '取消'),
+    note: tr('danger.note', '需要点击「确认」才会执行；按回车不会确认，Esc 取消。'),
+  };
+}
+/** 这两个档位切换是否属于危险操作（同值切换不算）。 */
+function dangerGateNeeded(key, from, to) {
+  if (key === 'permissionAuto') return String(to) === 'auto' && String(from) !== 'auto';
+  if (key === 'sandboxOff') return String(to) === 'off' && String(from) !== 'off';
+  return false;
+}
+/**
+ * 危险操作统一入口：**先** await confirm(meta)，取消则直接返回且不执行；确认后才 execute。
+ * @param {string} key
+ * @param {{confirm: Function, execute: Function, translate?: Function, lang?: string}} deps
+ * @returns {Promise<{ok: boolean, cancelled: boolean, result?: any}>}
+ */
+async function runDanger(key, deps) {
+  const d = deps || {};
+  const meta = dangerMeta(key, d.translate, d.lang);
+  if (!meta) return { ok: false, cancelled: true };
+  const answer = await d.confirm(meta);
+  const confirmed = answer === true || Boolean(answer && answer.confirmed === true);
+  if (!confirmed) return { ok: false, cancelled: true };
+  const result = await d.execute(key, meta);
+  return { ok: true, cancelled: false, result };
+}
+
+// —— 对话框无障碍：role / aria-modal / 焦点陷阱 / Esc / 焦点归还 ——
+/** 对话框内可聚焦元素（按 DOM 顺序）。 */
+function dialogFocusables(el) {
+  if (!el || typeof el.querySelectorAll !== 'function') return [];
+  try {
+    return Array.from(el.querySelectorAll('a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'))
+      .filter((n) => n && !n.hidden);
+  } catch { return []; }
+}
+/** Tab / Shift+Tab 的目标下标（纯函数；index<0 表示焦点在对话框外）。 */
+function trapTabTarget(shift, index, count) {
+  const n = Number(count) || 0;
+  if (n <= 0) return -1;
+  const i = Number(index);
+  if (!Number.isFinite(i) || i < 0) return shift ? n - 1 : 0;
+  return shift ? (i - 1 + n) % n : (i + 1) % n;
+}
+/** 给元素补 dialog 语义（role=dialog + aria-modal=true + aria-label）。 */
+function applyDialogSemantics(el, label) {
+  if (!el || typeof el.setAttribute !== 'function') return el;
+  el.setAttribute('role', 'dialog');
+  el.setAttribute('aria-modal', 'true');
+  if (label) el.setAttribute('aria-label', String(label));
+  return el;
+}
+/**
+ * 安装对话框行为：焦点陷阱（Tab/Shift+Tab 循环）、Esc 关闭、关闭后焦点回到触发元素。
+ * @param {any} el
+ * @param {{document?: any, opener?: any, label?: string, initialFocus?: any, onClose?: Function}} [opts]
+ * @returns {{close: Function, focusables: Function, element: any}}
+ */
+function installDialog(el, opts) {
+  const o = opts || {};
+  const doc = o.document || (typeof document !== 'undefined' ? document : null);
+  const opener = o.opener || (doc && doc.activeElement) || null;
+  applyDialogSemantics(el, o.label);
+  let closed = false;
+  const focusables = () => dialogFocusables(el);
+  const onKey = (/** @type {any} */ e) => {
+    if (closed || !e) return;
+    if (e.key === 'Escape') {
+      if (e.preventDefault) e.preventDefault();
+      if (e.stopPropagation) e.stopPropagation();
+      close(false);
+      return;
+    }
+    if (e.key === 'Tab') {
+      const list = focusables();
+      if (!list.length) return;
+      if (e.preventDefault) e.preventDefault();
+      const active = doc && doc.activeElement;
+      const idx = list.indexOf(active);
+      const next = trapTabTarget(Boolean(e.shiftKey), idx, list.length);
+      const target = list[next];
+      if (target && typeof target.focus === 'function') {
+        try { target.focus(); } catch { /* 桩 DOM */ }
+      }
+    }
+  };
+  if (doc && typeof doc.addEventListener === 'function') doc.addEventListener('keydown', onKey, true);
+  const initial = o.initialFocus || focusables()[0] || null;
+  if (initial && typeof initial.focus === 'function') {
+    try { initial.focus(); } catch { /* 桩 DOM */ }
+  }
+  /** 关闭并归还焦点（onClose 只调用一次）。 */
+  function close(result) {
+    if (closed) return;
+    closed = true;
+    if (doc && typeof doc.removeEventListener === 'function') doc.removeEventListener('keydown', onKey, true);
+    if (typeof o.onClose === 'function') {
+      try { o.onClose(result); } catch { /* 关闭路径不再抛 */ }
+    }
+    if (opener && typeof opener.focus === 'function') {
+      try { opener.focus(); } catch { /* 桩 DOM */ }
+    }
+  }
+  return { close, focusables, element: el };
+}
+
+// —— aria-live：只在状态变化时播报（同一状态重复渲染不打扰读屏） ——
+function liveSnapshot(view) {
+  const v = view || {};
+  return JSON.stringify({
+    phase: String(v.phase || ''),
+    tools: Number(v.toolCount) || 0,
+    failed: Number(v.failed) || 0,
+    subs: (v.subs || []).map((/** @type {any} */ s) => String((s && s.status) || '')).join(','),
+  });
+}
+/**
+ * @param {string} prevSnapshot
+ * @param {any} view
+ * @returns {{changed: boolean, snapshot: string, text: string}}
+ */
+function liveAnnouncement(prevSnapshot, view) {
+  const snap = liveSnapshot(view);
+  if (snap === prevSnapshot) return { changed: false, snapshot: snap, text: '' };
+  const v = view || {};
+  const parts = [String(v.phase || '空闲')];
+  if (Number(v.toolCount)) parts.push(Number(v.toolCount) + ' 次工具调用');
+  if (Number(v.failed)) parts.push(Number(v.failed) + ' 个失败');
+  const subs = v.subs || [];
+  const running = subs.filter((/** @type {any} */ s) => s && s.status === 'running').length;
+  if (subs.length) parts.push(subs.length + ' 个子代理' + (running ? '（' + running + ' 运行中）' : ''));
+  let prefix = '本轮状态：';
+  try { prefix = (typeof translate === 'function' && translate(getLang(), 'a11y.livePrefix')) || prefix; } catch { /* 保持中文 */ }
+  return { changed: true, snapshot: snap, text: prefix + parts.join(' · ') };
+}
+
+// —— 对比度自检（WCAG 相对亮度；只给建议，**不改**主题令牌） ——
+const CONTRAST_TOKENS = {
+  bg: '#151517', bg2: '#1B1B1C', bg3: '#353638', panel: '#2C2C2E',
+  text: '#F9FAFB', dim: '#ADB2B8', faint: '#81858C',
+  bgLight: '#FFFFFF', bg3Light: '#EFEFF1', panelLight: '#FFFFFF', textLight: '#18181B', dimLight: '#52525B', faintLight: '#71717A',
+};
+function hexToRgb(hex) {
+  const s = String(hex || '').replace('#', '');
+  const full = s.length === 3 ? s.split('').map((c) => c + c).join('') : s;
+  return {
+    r: parseInt(full.slice(0, 2), 16) || 0,
+    g: parseInt(full.slice(2, 4), 16) || 0,
+    b: parseInt(full.slice(4, 6), 16) || 0,
+  };
+}
+function relativeLuminance(hex) {
+  const { r, g, b } = hexToRgb(hex);
+  const lin = [r, g, b].map((x) => {
+    const c = x / 255;
+    return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+  });
+  return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+}
+function contrastRatio(fg, bg) {
+  const a = relativeLuminance(fg);
+  const b = relativeLuminance(bg);
+  const hi = Math.max(a, b);
+  const lo = Math.min(a, b);
+  return Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100;
+}
+/**
+ * 暗/亮两套 token 的正文 / 次要文本对比度。
+ * @returns {{fg: string, bg: string, ratio: number, pass: boolean, advice: string}[]}
+ */
+function contrastAudit() {
+  const t0 = CONTRAST_TOKENS;
+  const pairs = [
+    ['text', 'bg'], ['text', 'panel'], ['text', 'bg3'],
+    ['dim', 'bg'], ['dim', 'bg2'], ['dim', 'bg3'], ['dim', 'panel'],
+    ['faint', 'bg'], ['faint', 'bg2'], ['faint', 'bg3'], ['faint', 'panel'],
+    ['textLight', 'bgLight'], ['dimLight', 'bgLight'], ['dimLight', 'bg3Light'], ['faintLight', 'bg3Light'],
+  ];
+  return pairs.map(([fg, bg]) => {
+    const ratio = contrastRatio(t0[fg], t0[bg]);
+    const pass = ratio >= 4.5;
+    return {
+      fg, bg, ratio, pass,
+      advice: pass ? '' : '比值为 ' + ratio + ':1，低于 4.5:1；建议该组合改用 var(--dim)（同色阶，正文/次要文本达标），或把 --faint 只用在 --bg/--bg2 上。',
+    };
+  });
+}
+
+// ============================================================================
 // P1 DOM 接线（v0.6.19 §3.70）：主题 / 断点 / 工具时间线 / 右栏 / 命令面板 /
 // 快捷键表 / 会话设置 / 空态 / 设置搜索 / 诊断。全部消费上面纯函数的结果。
 // ============================================================================
@@ -1249,6 +1623,7 @@ function toolStepNode(step) {
   const row = document.createElement('button'); row.type = 'button'; row.className = 'tl-row'; row.setAttribute('aria-expanded', 'false');
   const no = document.createElement('span'); no.className = 'tl-no'; no.textContent = '0';
   const st = document.createElement('span'); st.className = 'tl-st ' + (step.stCls || ''); st.textContent = step.stIcon;
+  st.setAttribute('aria-live', 'polite'); // P2-3：步骤状态变化时读屏播报（容器另有节流播报）
   const tool = document.createElement('span'); tool.className = 'tl-tool'; tool.textContent = step.name;
   const args = document.createElement('span'); args.className = 'tl-args'; args.textContent = step.args;
   const dur = document.createElement('span'); dur.className = 'tl-dur'; dur.textContent = step.dur;
@@ -1619,6 +1994,7 @@ function buildTraceSubNode(s) {
   const tools = document.createElement('span'); tools.className = 'tr-sub-meta'; tools.textContent = s.toolText;
   const progress = document.createElement('span'); progress.className = 'tr-sub-meta'; progress.textContent = s.progress;
   const state = document.createElement('span'); state.className = 'tr-sub-state ' + (s.statusCls || ''); state.textContent = s.statusText;
+  state.setAttribute('aria-live', 'polite'); // P2-3：子代理状态变化时读屏播报（暂停/失败/完成）
   [name, round, tools, progress, state].forEach((n) => head.appendChild(n));
   const body = document.createElement('div'); body.className = 'tr-sub-body';
   const q = document.createElement('div'); q.className = 'tr-sub-q'; q.textContent = '任务：' + (s.question || '—');
@@ -1645,6 +2021,7 @@ function renderTracePanels() {
   const views = collectTraceViews();
   const totalTools = views.reduce((a, v) => a + v.toolCount, 0);
   const totalSubs = views.reduce((a, v) => a + v.subCount, 0);
+  const totalFailed = views.reduce((a, v) => a + v.failed, 0);
   const meta = views.length ? views.length + ' 轮 · ' + totalTools + ' 次工具 · ' + totalSubs + ' 个子代理' : '—';
   ['#rpTraceMeta', '#tdTraceMeta'].forEach((sel) => { const n = $(sel); if (n) n.textContent = meta; });
   ['#rpSubMeta', '#tdSubMeta'].forEach((sel) => { const n = $(sel); if (n) n.textContent = totalSubs ? totalSubs + ' 个' : '—'; });
@@ -1655,6 +2032,15 @@ function renderTracePanels() {
   renderTraceSubList($('#rpSubList'), views);
   renderTraceSubList($('#tdSubList'), views);
   syncTraceFoldButtons();
+  // P2-3：aria-live 只在**状态变化**时播报（同一状态重复渲染不打扰读屏）。
+  try {
+    updateLiveRegion({
+      phase: runStripView(runState, generating).phase,
+      toolCount: totalTools,
+      failed: totalFailed,
+      subs: views.reduce((a, v) => a.concat(v.subs), []),
+    });
+  } catch { /* 桩 DOM / 启动早期：无障碍播报不得影响主流程 */ }
 }
 /** 子代理运行中只刷新子代理两块（progress≈1s；不重建工具列表，少打扰）。 */
 function renderSubagentSections() {
@@ -1730,7 +2116,7 @@ function renderSessionSettings() {
   const set = (id, text) => { const n = $(id); if (n) n.textContent = text; };
   set('#ssModelLabel', md.label);
   set('#ssModelId', md.subtitle);
-  set('#ssModelSrc', '来源：设置 › 模型与密钥 · 写入 config.json，下一轮生效');
+  set('#ssModelSrc', t('sess.modelSource'));
   const hint = $('#ssModelAliasHint');
   if (hint) hint.hidden = !(md && md.label && md.label !== (md.id || md.name));
   const permSel = $('#permSel');
@@ -1750,13 +2136,31 @@ function renderSessionSettings() {
   const reas = $('#reasoningSel');
   if (field && reas) field.hidden = reas.style.display === 'none';
 }
+let sessSheetDialog = null;
 function openSessionSheet() {
   renderSessionSettings();
   const s = $('#sessSheet'); if (!s) return;
   s.hidden = false;
   const btn = $('#sessSettingsBtn'); if (btn) btn.setAttribute('aria-expanded', 'true');
+  // P2-3：role=dialog + aria-modal + 焦点陷阱 + Esc 关闭 + 关闭后焦点回触发元素。
+  sessSheetDialog = installDialog(s, {
+    opener: (typeof document !== 'undefined' ? document.activeElement : null),
+    label: t('sess.title'),
+    initialFocus: $('#ssClose'),
+    onClose: () => {
+      sessSheetDialog = null;
+      s.hidden = true;
+      if (btn) btn.setAttribute('aria-expanded', 'false');
+    },
+  });
 }
 function closeSessionSheet() {
+  if (sessSheetDialog) {
+    const d = sessSheetDialog;
+    sessSheetDialog = null;
+    d.close();
+    return;
+  }
   const s = $('#sessSheet'); if (!s) return;
   s.hidden = true;
   const btn = $('#sessSettingsBtn'); if (btn) btn.setAttribute('aria-expanded', 'false');
@@ -1782,6 +2186,16 @@ async function setModelEverywhere(name) {
   renderSessionSettings();
 }
 async function setPermissionEverywhere(mode) {
+  const prev = runState.permissionMode || (($('#permSel') && $('#permSel').value) || 'ask');
+  // P2-2：切到 auto 属于危险操作——先说明后果，取消则保持原档（并复位分段控件）。
+  if (dangerGateNeeded('permissionAuto', prev, mode)) {
+    const gate = await confirmDanger('permissionAuto', async () => {});
+    if (gate.cancelled) {
+      if ($('#permSel')) $('#permSel').value = prev;
+      renderSessionSettings();
+      return false;
+    }
+  }
   const sel = $('#permSel');
   if (sel) sel.value = mode;
   runState.permissionMode = mode;
@@ -1790,6 +2204,7 @@ async function setPermissionEverywhere(mode) {
   renderWorkStatus();
   await applyConfig({ permission: mode }, sel || undefined);
   renderSessionSettings();
+  return true;
 }
 function setPresetEverywhere(name) {
   const sel = $('#presetSel');
@@ -1800,7 +2215,7 @@ function setPresetEverywhere(name) {
 }
 
 // —— 命令面板：数据全部来自既有 API 快照（打开时刷新一次，不是轮询） ——
-let paletteOpen = false, paletteSelected = 0, paletteItems = [], paletteButtons = [], paletteOpener = null;
+let paletteOpen = false, paletteSelected = 0, paletteItems = [], paletteButtons = [], paletteOpener = null, paletteDialog = null;
 function paletteSources() {
   return {
     sessions: sessionsCache,
@@ -1878,9 +2293,33 @@ async function openPalette() {
   renderPalette();
   try { await refreshSessions(); } catch { /* 网络失败：仍显示缓存命令 */ }
   try { await refreshWsSel(); } catch { /* 同上 */ }
-  if (paletteOpen) { renderPalette(); try { $('#paletteInput').focus(); } catch { /* ignore */ } }
+  if (paletteOpen) {
+    renderPalette();
+    // P2-3：命令面板的 dialog 语义/焦点陷阱/Esc/焦点归还（HTML 已有 role/aria-modal，这里补齐行为）。
+    const box = document.querySelector('#paletteMask .palette');
+    if (box) {
+      paletteDialog = installDialog(box, {
+        opener: paletteOpener,
+        label: t('palette.title'),
+        initialFocus: $('#paletteInput'),
+        onClose: () => {
+          paletteDialog = null;
+          const m = $('#paletteMask'); if (m) m.hidden = true;
+          paletteOpen = false;
+        },
+      });
+    }
+    try { $('#paletteInput').focus(); } catch { /* ignore */ }
+  }
 }
 function closePalette() {
+  if (paletteDialog) {
+    const d = paletteDialog;
+    paletteDialog = null;
+    paletteOpen = false;
+    d.close();
+    return;
+  }
   const mask = $('#paletteMask'); if (mask) mask.hidden = true;
   paletteOpen = false;
   if (paletteOpener && paletteOpener.focus) { try { paletteOpener.focus(); } catch { /* ignore */ } }
@@ -2005,6 +2444,19 @@ function openDiagnostics() {
     const cp = document.createElement('button'); cp.type = 'button'; cp.textContent = '复制';
     cp.onclick = () => copyToClipboard(v).then(() => { cp.textContent = '已复制'; setTimeout(() => { cp.textContent = '复制'; }, 1200); });
     row.appendChild(kk); row.appendChild(vv); row.appendChild(cp);
+    box.appendChild(row);
+  }
+  // P2-3：对比度自检（WCAG 相对亮度）。**只给建议，不改主题令牌**——主题是设计决策，不在运行时偷偷换色。
+  const audit = contrastAudit();
+  const failed = audit.filter((c) => !c.pass);
+  const head = document.createElement('div'); head.className = 'diag-k'; head.style.cssText = 'margin-top:10px';
+  head.textContent = failed.length ? '对比度未达标 ' + failed.length + ' 项（建议）' : '对比度：正文/次要文本全部 ≥4.5:1';
+  box.appendChild(head);
+  for (const c of failed) {
+    const row = document.createElement('div'); row.className = 'diag-row';
+    const kk = document.createElement('span'); kk.className = 'diag-k'; kk.textContent = c.fg + ' / ' + c.bg;
+    const vv = document.createElement('span'); vv.className = 'diag-v'; vv.textContent = c.ratio + ':1 · ' + c.advice;
+    row.appendChild(kk); row.appendChild(vv);
     box.appendChild(row);
   }
   $('#diagModal').style.display = 'flex';
@@ -2299,6 +2751,8 @@ async function init(){
     renderWorkStatus();
     renderSessionSettings();
     $('#sbxSel').value=j.sandbox||'off';
+    settingDefaultsCache=settingDefaultsFromState(j);
+    lastSandboxMode=j.sandbox||'off';
     $('#sbxHint').textContent=j.sandboxSupported?'':'当前环境未检测到 bubblewrap，readonly/safe 将自动降级为 off';
     $('#routeChk').checked=Boolean(j.routing);
     $('#budgetInput').value=j.contextBudget||128000;
@@ -2333,6 +2787,7 @@ async function init(){
   renderSessionSettings();
   renderEmptyState();
   renderRunPanel();
+  refreshSettingColumns();
   renderTracePanels();
 }
 
@@ -2359,6 +2814,7 @@ document.querySelectorAll('.cfg-nav-btn').forEach(b=>{ b.onclick=()=>showCfgPane
 function openSettingsPanel(panel){
   $('#cfgModal').style.display='flex';
   showCfgPanel(panel||cfgPanel);
+  refreshSettingColumns(); // P2-1：每次打开都按当前 config 刷新「默认 / 当前 / 影响」三列
 }
 $('#cfgBtn').onclick=()=>openSettingsPanel(cfgPanel);
 $('#cfgCancel').onclick=()=>{ $('#cfgModal').style.display='none'; };
@@ -2452,7 +2908,7 @@ async function refreshWorkspaces(){  const r=await fetch('/api/workspaces',{cach
     div.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(w.name)+(w.name===j.current?' <span style="color:var(--accent)">●当前</span>':'')+'</span><span style="flex:1.4;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;direction:rtl;text-align:left">'+esc(w.dir||'')+'</span>';
     const ed=document.createElement('button'); ed.textContent='改目录'; ed.style.cssText='padding:1px 8px;font-size:11px'; ed.onclick=()=>{ openDirPicker(w.dir||null, async (d)=>{ if(d==null) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'set',name:w.name,dir:d})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshWorkspaces(); refreshWsSel(); reloadModels(); } else uiAlert(jj.error||'修改失败'); }); };
     const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=await uiPrompt('新名称：', w.name); if(!t) return; const rr=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',name:w.name,newName:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshWorkspaces(); refreshWsSel(); } else uiAlert(jj.error||'重命名失败'); };
-    const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ if(!await uiConfirm('删除工作空间 '+w.name+'？')) return; await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',name:w.name})}); refreshWorkspaces(); refreshWsSel(); reloadModels(); };
+    const rm=document.createElement('button'); rm.textContent='删除'; rm.className='danger'; rm.style.cssText='padding:1px 8px;font-size:11px'; rm.onclick=async()=>{ const gate=await confirmDanger('removeWorkspace', async()=>{ await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',name:w.name})}); }); if(gate.cancelled) return; refreshWorkspaces(); refreshWsSel(); reloadModels(); };
     div.appendChild(ed); div.appendChild(rn); div.appendChild(rm); list.appendChild(div);
   }
 }
@@ -2627,9 +3083,12 @@ async function reloadModels(){
     $('#envBadge').textContent=env; $('#envBadge').style.display='';
     if(j.contextBudget){ ctxLimit=Number(j.contextBudget)||ctxLimit; runState.contextTotal=ctxLimit; }
     runState.permissionMode=String(j.permission||'ask'); runState.permissionSource=String(j.permissionSource||'');
+    settingDefaultsCache=settingDefaultsFromState(j);
+    lastSandboxMode=String(j.sandbox||lastSandboxMode||'off');
     applyReasoningUI(j.reasoning);
     renderWorkStatus();
     renderSessionSettings();
+    refreshSettingColumns();
   }catch(e){}
 }
 async function refreshModelsCfg(){
@@ -2771,7 +3230,9 @@ async function refreshSyncConflicts(){
     list.appendChild(div);
   }
 }
-$('#cfgSave').onclick=()=>{ const to={}; const ft=Number($('#toFirstToken').value), si=Number($('#toStreamIdle').value), tt=Number($('#toTotal').value); if(ft>0) to.firstTokenMs=Math.round(ft*1000); if(si>0) to.streamIdleMs=Math.round(si*1000); if(tt>0) to.totalMs=Math.round(tt*1000); const payload={sandbox:$('#sbxSel').value, routing:$('#routeChk').checked, contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}; if(Object.keys(to).length) payload.timeout=to; applyConfig(payload); $('#cfgModal').style.display='none'; };
+$('#cfgSave').onclick=async()=>{ const to={}; const ft=Number($('#toFirstToken').value), si=Number($('#toStreamIdle').value), tt=Number($('#toTotal').value); if(ft>0) to.firstTokenMs=Math.round(ft*1000); if(si>0) to.streamIdleMs=Math.round(si*1000); if(tt>0) to.totalMs=Math.round(tt*1000); const sbx=$('#sbxSel').value; // P2-2：若选择时被 Esc/取消绕过了沙箱确认，保存路径再拦一次（取消则不落盘）
+  if(dangerGateNeeded('sandboxOff', lastSandboxMode, sbx)){ const gate=await confirmDanger('sandboxOff', async()=>{}); if(gate.cancelled){ $('#sbxSel').value=lastSandboxMode; return; } }
+  lastSandboxMode=sbx; const payload={sandbox:sbx, routing:$('#routeChk').checked, contextBudget:Number($('#budgetInput').value), autostart:$('#autoStartChk').checked, notify:$('#notifyChk').checked}; if(Object.keys(to).length) payload.timeout=to; applyConfig(payload); refreshSettingColumns(); $('#cfgModal').style.display='none'; };
 async function applyConfig(payload, revertTarget){
   const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
   const j=await r.json().catch(()=>({error:'请求失败'}));
@@ -2793,7 +3254,7 @@ async function applyConfig(payload, revertTarget){
   m.style.display=''; setTimeout(()=>{m.style.display='none';},4000);
 }
 $('#modelSel').addEventListener('change', e=>{ runState.modelName=e.target.value; runState.modelLabel=(modelsCache.find((m)=>m&&(m.id||m.name)===e.target.value)||{}).label||e.target.value; applyConfig({model:e.target.value}, e.target); renderSessionSettings(); renderRunPanel(); });
-$('#permSel').addEventListener('change', e=>{ runState.permissionMode=e.target.value; runState.permissionSource='explicit'; applyConfig({permission:e.target.value}, e.target); renderSessionSettings(); renderWorkStatus(); });
+$('#permSel').addEventListener('change', e=>{ setPermissionEverywhere(e.target.value); });
 // v0.3.0 P0-3：会话边界收尾（切换/新对话时提取项目记忆+日志，fire-and-forget 不阻塞 UI）
 function finalizeCurrentSession(){
   if(!currentSession) return;
@@ -2801,7 +3262,187 @@ function finalizeCurrentSession(){
 }
 async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; resetTraceState(); const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); renderEmptyState(); }
 
-// §138：主按钮在生成态=停止，必须走**同一个**停止出口（stopTurnFromButton → stopTurn → POST /api/abort）
+// ============================================================================
+// P2 DOM 接线（v0.6.19 §3.76）
+//   设置三列 / 六类危险操作确认框 / 语言切换 / 对比度自检 / aria-live 播报。
+// ============================================================================
+let settingDefaultsCache = settingDefaultsFromState(null);
+let lastSandboxMode = 'off';
+
+function secToMs(/** @type {any} */ v) {
+  const n = Number(v);
+  return Number.isFinite(n) && n > 0 ? Math.round(n * 1000) : null;
+}
+/** 当前设置值：全部从既有控件/状态读取（不另存一份配置）。 */
+function currentSettingValues() {
+  return {
+    permission: ($('#permSel') && $('#permSel').value) || runState.permissionMode || 'ask',
+    sandbox: ($('#sbxSel') && $('#sbxSel').value) || lastSandboxMode || 'off',
+    routing: Boolean($('#routeChk') && $('#routeChk').checked),
+    contextBudget: Number($('#budgetInput') && $('#budgetInput').value) || settingDefaultsCache.contextBudget,
+    timeout: {
+      firstTokenMs: secToMs($('#toFirstToken') && $('#toFirstToken').value),
+      streamIdleMs: secToMs($('#toStreamIdle') && $('#toStreamIdle').value),
+      totalMs: secToMs($('#toTotal') && $('#toTotal').value),
+    },
+    autostart: Boolean($('#autoStartChk') && $('#autoStartChk').checked),
+    notify: Boolean($('#notifyChk') && $('#notifyChk').checked),
+    theme: storedThemePref(safeStorage()),
+    language: storedLang(safeStorage()) || 'auto',
+  };
+}
+/** 把三列写进设置面板（结构由 index.html 的 .cfg-cols 提供）。 */
+function refreshSettingColumns() {
+  const values = currentSettingValues();
+  const views = settingColumnsView({ defaults: settingDefaultsCache, values, lang: getLang(), translate });
+  for (const v of views) {
+    const box = document.querySelector('[data-cols="' + v.key + '"]');
+    if (!box) continue;
+    const put = (sel, text) => { const n = box.querySelector(sel); if (n) n.textContent = text; };
+    put('.cfg-default', v.defaultText);
+    put('.cfg-current', v.currentText);
+    put('.cfg-impact', v.impact);
+    if (box.classList) box.classList.toggle('changed', v.changed);
+    if (box.setAttribute) box.setAttribute('data-changed', String(v.changed));
+  }
+}
+// —— 危险操作确认框：说明后果 + 必须点「确认」（回车不确认） ——
+let dangerDialogHandle = null;
+function openDangerDialog(meta) {
+  return new Promise((resolve) => {
+    const mask = $('#dangerMask');
+    const dialog = $('#dangerDialog');
+    if (!mask || !dialog || !meta) { resolve(false); return; }
+    const title = $('#dangerTitle'); if (title) title.textContent = meta.title;
+    const body = $('#dangerBody'); if (body) body.textContent = meta.consequence;
+    const note = $('#dangerNote'); if (note) note.textContent = meta.note;
+    const ok = $('#dangerOk'); if (ok) ok.textContent = meta.confirmLabel;
+    const cancel = $('#dangerCancel'); if (cancel) cancel.textContent = meta.cancelLabel;
+    const opener = typeof document !== 'undefined' ? document.activeElement : null;
+    mask.hidden = false;
+    let settled = false;
+    const finish = (/** @type {boolean} */ value) => {
+      if (settled) return;
+      settled = true;
+      mask.hidden = true;
+      if (dangerDialogHandle) { const h = dangerDialogHandle; dangerDialogHandle = null; h.close(true); }
+      resolve(value);
+    };
+    if (ok) ok.onclick = () => finish(true);
+    if (cancel) cancel.onclick = () => finish(false);
+    dangerDialogHandle = installDialog(dialog, {
+      opener,
+      label: meta.title,
+      initialFocus: cancel,
+      onClose: () => {
+        if (settled) return;
+        settled = true;
+        mask.hidden = true;
+        resolve(false);
+      },
+    });
+  });
+}
+/**
+ * 确认 + 执行（取消 → execute 绝不调用）。所有危险操作共用这一条出口。
+ * @param {string} key
+ * @param {Function} execute
+ * @returns {Promise<{ok: boolean, cancelled: boolean, result?: any}>}
+ */
+function confirmDanger(key, execute) {
+  return runDanger(key, { confirm: openDangerDialog, execute, translate, lang: getLang() });
+}
+/** 设置项「恢复默认」的 payload（模型与密钥不在其中）。 */
+function resetConfigPayload() {
+  const d = settingDefaultsCache;
+  return {
+    permission: d.permission || 'ask',
+    sandbox: d.sandbox || 'off',
+    routing: Boolean(d.routing),
+    contextBudget: Number(d.contextBudget) || 128000,
+    timeout: { firstTokenMs: null, streamIdleMs: null, totalMs: null },
+    autostart: Boolean(d.autostart),
+    notify: d.notify !== false,
+  };
+}
+function applyResetConfigControls() {
+  const d = settingDefaultsCache;
+  if ($('#sbxSel')) $('#sbxSel').value = d.sandbox || 'off';
+  if ($('#routeChk')) $('#routeChk').checked = Boolean(d.routing);
+  if ($('#budgetInput')) $('#budgetInput').value = Number(d.contextBudget) || 128000;
+  if ($('#toFirstToken')) $('#toFirstToken').value = '';
+  if ($('#toStreamIdle')) $('#toStreamIdle').value = '';
+  if ($('#toTotal')) $('#toTotal').value = '';
+  if ($('#autoStartChk')) $('#autoStartChk').checked = Boolean(d.autostart);
+  if ($('#notifyChk')) $('#notifyChk').checked = d.notify !== false;
+  lastSandboxMode = d.sandbox || 'off';
+  refreshSettingColumns();
+}
+
+// —— aria-live：只在状态变化时写 #a11yLive（同一状态重复渲染直接返回 false） ——
+let lastLiveSnapshot = '';
+function updateLiveRegion(view) {
+  const r = liveAnnouncement(lastLiveSnapshot, view);
+  if (!r.changed) return false;
+  lastLiveSnapshot = r.snapshot;
+  const n = $('#a11yLive'); if (n) n.textContent = r.text;
+  return true;
+}
+
+// —— 语言切换：写 localStorage 并立即生效（默认跟随 navigator.language） ——
+function applyLanguageChoice(/** @type {string} */ pref) {
+  const storage = safeStorage();
+  let lang;
+  if (pref === 'auto') {
+    try { if (storage) storage.removeItem(LANG_STORAGE_KEY); } catch { /* 隐私模式 */ }
+    lang = detectLang(navLang());
+    setLang(lang, { root: document.documentElement });
+  } else {
+    lang = setLang(pref, { storage, root: document.documentElement, navLang: navLang() });
+  }
+  const sel = $('#langSel'); if (sel) sel.value = pref === 'auto' ? 'auto' : lang;
+  refreshSettingColumns();
+  renderSessionSettings();
+  renderWorkStatus();
+  renderRunPanel();
+  return lang;
+}
+const langSel = $('#langSel');
+if (langSel) {
+  langSel.value = storedLang(safeStorage()) || 'auto';
+  langSel.onchange = () => applyLanguageChoice(langSel.value);
+}
+$('#memClear') && ($('#memClear').onclick = async () => {
+  const gate = await confirmDanger('clearMemory', async () => {
+    const r = await fetch('/api/memory', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ content: '' }) });
+    return r.json().catch(() => ({}));
+  });
+  if (gate.cancelled) return;
+  const j = gate.result || {};
+  if (j.ok) { if ($('#memArea')) $('#memArea').value = ''; memFlash(t('settings.memCleared'), true); }
+  else memFlash(t('settings.memClearFail') + (j.error || '失败'), false);
+});
+$('#cfgReset') && ($('#cfgReset').onclick = async () => {
+  const gate = await confirmDanger('resetConfig', async () => applyConfig(resetConfigPayload()));
+  if (gate.cancelled) return;
+  applyResetConfigControls();
+  const m = $('#cfgMsg');
+  if (m) { m.textContent = t('settings.resetDone'); m.style.color = 'var(--accent)'; m.style.display = ''; setTimeout(() => { m.style.display = 'none'; }, 4000); }
+});
+// 沙箱：从非 off 切到 off 先确认；取消则回到上一个值（选择时拦截，保存时不再重复问）。
+const sbxEl = $('#sbxSel');
+if (sbxEl) {
+  sbxEl.addEventListener('change', async () => {
+    const next = sbxEl.value;
+    if (dangerGateNeeded('sandboxOff', lastSandboxMode, next)) {
+      const gate = await confirmDanger('sandboxOff', async () => {});
+      if (gate.cancelled) { sbxEl.value = lastSandboxMode; return; }
+    }
+    lastSandboxMode = next;
+  });
+}
+
+
 sendBtn.onclick=()=>{ if(generating){ stopTurnFromButton(); } else { send(); } };
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
 input.addEventListener('input',()=>{ input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; });
@@ -2817,7 +3458,7 @@ async function openSessModal(){
     const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12.5px';
     div.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.label)+'</span>';
     const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=await uiPrompt('新标题：', s.file.replace(/\.jsonl$/,'')); if(!t) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',file:s.file,title:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshSessions(); openSessModal(); } else uiAlert(jj.error||'重命名失败'); };
-    const dl=document.createElement('button'); dl.textContent='删除'; dl.className='danger'; dl.style.cssText='padding:1px 8px;font-size:11px'; dl.onclick=async()=>{ if(!await uiConfirm('删除会话 '+s.file+'？此操作不可恢复。')) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',file:s.file})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ if(currentSession===s.file){ currentSession=null; chatEl.innerHTML=''; renderEmptyState(); } refreshSessions(); openSessModal(); } else uiAlert(jj.error||'删除失败'); };
+    const dl=document.createElement('button'); dl.textContent='删除'; dl.className='danger'; dl.style.cssText='padding:1px 8px;font-size:11px'; dl.onclick=async()=>{ const gate=await confirmDanger('deleteSession', async()=>{ const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',file:s.file})}); return rr.json().catch(()=>({error:'失败'})); }); if(gate.cancelled) return; const jj=gate.result||{}; if(jj.ok){ if(currentSession===s.file){ currentSession=null; chatEl.innerHTML=''; renderEmptyState(); } refreshSessions(); openSessModal(); } else uiAlert(jj.error||'删除失败'); };
     div.appendChild(rn); div.appendChild(dl); list.appendChild(div);
   }
 }

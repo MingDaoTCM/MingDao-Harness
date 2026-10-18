@@ -29,6 +29,27 @@
 `stream_options` 时设 `false`）、`autoTitle`（自动生成会话标题，默认开）、`notify`（任务桌面通知，默认开）、
 `autoCompact`（上下文自动压缩，默认开，见下）、`audit`（工具调用审计，默认开，见下）。
 
+### WebUI 设置项的「默认值」列（只读，不落盘）
+
+设置面板每个可改项显示 **默认 / 当前 / 影响** 三列。默认值来自 `src/config.js` 的内置默认表，
+`GET /api/state` 以**只读字段 `defaults`** 透出（不接受写入，也不参与任何判定）：
+
+```json
+"defaults": {
+  "permission": "ask", "sandbox": "off", "routing": false,
+  "contextBudget": 128000, "timeout": { "firstTokenMs": null, "streamIdleMs": null, "totalMs": null },
+  "autostart": false, "notify": true, "reasoningEffort": "high",
+  "theme": "system", "language": "auto"
+}
+```
+
+- `timeout.*` 为 `null` 表示**按模型自适应**（与「留空」同义）。
+- `theme` / `language` 是浏览器侧偏好：`theme` 落 `mingdao-theme`、`language` 落 `mingdao-lang`；
+  `language: "auto"` 表示跟随 `navigator.language`。
+- 「影响」一句话写在前端映射表（`src/web/app.js` 的 `SETTING_IMPACT`，英文文案在
+  `src/web/i18n.js` 的 `impact.*`），说明「改了会怎样」，例如改小 `contextBudget` 会减少可容纳历史、
+  长任务更易触发压缩。
+
 ## 工具调用审计（P3-5）
 
 每个工具调用（含被拒/被钩子阻止/参数解析失败）自动落 `~/.mingdao/audit.jsonl`（600 权限）：

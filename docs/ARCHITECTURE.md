@@ -131,7 +131,7 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `web/constants.js` —— 前端与服务端共享常量：并发上限 8（`MAX_CONCURRENT`）、附件数与体积上限、单文件读取上限 —— 数值只在此定义，防客户端预检/服务端校验/工具读取三处漂移。
 - `web/attachments.js` —— 聊天附件构造（纯函数）：图片转 `data:` URL（仅视觉模型，单张 ≤5MB、最多 4 个），文本文件拼接进消息（≤200KB）—— 服务端按同一组常量校验。
 - `web/web-io.js` —— WebUI 的 io 适配器：把 Agent 的 io 事件翻译为 SSE 事件，权限确认/选择类交互经 `askHandler` 转发到浏览器模态框并等待 `POST /api/permission` 应答。
-- `web/util.js` / `web/app.js` —— 前端：`util.js` 是零状态工具（选择器/转义/Markdown/格式化），`app.js` 是页面主脚本（消息渲染与轨迹、设置面板、自绘气泡与模态框）—— 地址带 `?token=` 时记入 `sessionStorage` 并从地址栏移除，此后请求统一附加 `X-MingDao-Token`。
+- `web/util.js` / `web/app.js` / `web/i18n.js` —— 前端：`util.js` 是零状态工具（选择器/转义/Markdown/格式化），`app.js` 是页面主脚本（消息渲染与轨迹、设置面板、自绘气泡与模态框），`i18n.js` 是零依赖 UI 文案表（zh/en 同键、默认跟随 `navigator.language`、`localStorage` 覆盖）—— 地址带 `?token=` 时记入 `sessionStorage` 并从地址栏移除，此后请求统一附加 `X-MingDao-Token`。
 
 ### 2.8 CLI 层（13）
 

@@ -3819,3 +3819,55 @@ request failed.` 当时上下文只有 ≈2,773 tokens、预算 32,768——压�
   输出里带 cwd/startedAt/锁目录，供人工判断。
 - 未 tag、未改版本号、未 publish；`test/mutate/README.md` 的计数行归另一条执行线，
   本节未改它。
+
+## 3.77 已修复（v0.6.19 开发线：UI P2——设置三列 / 危险操作二次确认 / 无障碍 / i18n）
+
+**来源**：`docs/DESIGN-UI-v1.md` §4.8（设置三列与危险项）、§8.2（无障碍）、§8.3（i18n 收口）
+的 P2 清单。P0/P1 已上线（状态条 / 错误卡 / 内联确认 / 时间线 / ⌘K / 右栏 / 会话设置 / 空态 /
+搜索 / 主题 / 断点），本节只补 P2 的四块，并守住既有能力不回归。
+
+### 一、改了什么
+
+1. **设置项三列**（`src/web/index.html` + `src/web/app.js`）：每个可改项在控件下方渲染
+   `默认 / 当前 / 影响` 三列（`.cfg-cols[data-cols]`）。
+   - **默认值**来自 `src/config.js` 的内置默认表，经 `GET /api/state` 新增的**只读字段 `defaults`**
+     透出（`src/web/server.js` 在本层按路径补字段，不改路由域文件；不参与任何判定、不写盘）。
+     读不到时前端有同值兜底（`SETTING_DEFAULTS_FALLBACK`），不会显示另一套默认。
+   - **当前值**从既有控件/`runState` 读取（不另存一份配置）。
+   - **影响**是一句话说明，写在**前端映射表** `SETTING_IMPACT`（key → 一句话），英文文案在
+     `src/web/i18n.js` 的 `impact.*`。例如 `contextBudget`：改小会减少可容纳历史、长任务更易触发压缩。
+2. **六类危险操作二次确认**：删除工作空间 / 删除会话 / 清空记忆 / 恢复默认配置 /
+   切换 `permission=auto` / 关闭沙箱。统一走 `runDanger()`（**先 await confirm，取消直接返回、
+   绝不 execute**），确认框 `#dangerDialog` 说明后果，按钮必须点「确认」（`type=button`，
+   初始焦点在「取消」，回车不确认，Esc 取消）。
+3. **无障碍**：`installDialog()` 统一补齐 `role=dialog` + `aria-modal=true` + `aria-label`、
+   Tab/Shift+Tab 焦点陷阱、Esc 关闭、关闭后焦点归还触发元素；已接入 ⌘K 命令面板、会话设置弹层、
+   危险操作确认框。状态条/轨迹/子Agent 行加 `aria-live="polite"`，另有受节流的 `#a11yLive`
+   （`liveAnnouncement` 只在状态变化时产出文本）。图标按钮补 `aria-label`。
+   **对比度自检**（`contrastAudit()`）如实列出不达标组合并给建议（`--faint` 在 `--bg3` 上 3.26:1、
+   在 `--panel` 上 3.76:1 → 改用 `--dim`，5.67:1 / 6.53:1），**未改主题令牌**。
+4. **i18n**：新增 `src/web/i18n.js`（零依赖、不引第三方库），`zh` / `en` 两套同键表；
+   默认跟随 `navigator.language`，`localStorage`（`mingdao-lang`）可覆盖；设置 › 外观新增语言选择。
+   缺失键回退 zh，zh 也没有时返回空串（不渲染 `undefined`）。只抽 UI 文案，不翻译日志/错误原文。
+
+### 二、验证
+
+- 新建 `test/ui-p2.js`（桩 DOM + 纯函数切片，照 `test/api-contracts.js` 风格）：
+  ① 三列（数据来源 / 影响非空）；② 六类危险操作逐一"取消不执行 / 确认才执行"；③ dialog 语义、
+  焦点陷阱、Esc、焦点归还、aria-live 仅状态变化、图标 aria-label、对比度结论；④ i18n 键一致 /
+  切换生效 / 缺失安全回退；⑤ 语言写 localStorage 并生效；⑥ `/api/state.defaults` 与前端兜底同口径。
+- 接入 `test/run-all.mjs` 与 `.github/workflows/ci.yml`（仅 Linux 腿）。
+- 新建 `test/mutate/batch42-ui-p2.mjs`：**15/15 全中**。变异总数 342 → **357**（`test/mutate/README.md`
+  计数行已按 `doc-lint` 实际值更新；本提交树 31 个批次）。
+- `npm run typecheck`、`node test/smoke.js`、`node test/e2e-web.js`、`node test/e2e-local.js`、
+  `node test/api-contracts.js`、`node scripts/doc-lint.mjs` 均通过。
+
+### 三、边界与未做（如实）
+
+- 状态条/轨迹等**动态运行文案**仍为中文（它们与 SSE 字段、既有 smoke 断言强耦合，翻译会破坏
+  排障证据与断言）；i18n 先覆盖静态 UI 文案、设置项、确认框与新增 P2 组件。
+- 对比度只**给出建议**，未改 `--faint`/`--dim` 等主题令牌（主题是设计决策，不在运行时偷偷换色）。
+- 设置弹层（`#cfgModal`）与快捷键表仍是旧的焦点行为（本轮只要求 ⌘K / 会话设置 / 确认框三类）；
+  命令面板列表的动态命令文案仍为中文。
+- 未改 `test/smoke.js`、`src/providers/**`、`src/agent.js`、`presets/**`、`desktop/**`、`ide/**`；
+  未 tag、未改版本号、未 publish、未动官网。

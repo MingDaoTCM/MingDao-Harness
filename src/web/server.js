@@ -86,6 +86,29 @@ const PERM_HINT = /** @type {Record<string, string>} */ ({
   readonly: '仅只读工具直接放行，其余逐次询问是否本次放行',
 });
 /**
+ * v0.6.19 §3.76（P2）：设置项「默认值」列的只读数据源。
+ *
+ * 为什么放在这一层：`/api/state` 的响应体由 `routes/domains/config.js` 组装，本轮允许的后端改动面
+ * 只有本文件；这里按路径补一个**纯只读**字段（不参与任何判定、不写入 config.json）。
+ * 字段与 `src/config.js` 的内置默认表保持同一口径：
+ *   permission=ask / sandbox=off / routing=false / contextBudget=128000 /
+ *   timeout 未设置（= 按模型自适应）/ autostart=false / notify=true。
+ * 前端把它显示在设置项的「默认」列；读不到时前端有同值兜底（诚实标注来源）。
+ * @type {Readonly<Record<string, any>>}
+ */
+const SETTING_DEFAULTS = Object.freeze({
+  permission: 'ask',
+  sandbox: 'off',
+  routing: false,
+  contextBudget: 128000,
+  timeout: Object.freeze({ firstTokenMs: null, streamIdleMs: null, totalMs: null }),
+  autostart: false,
+  notify: true,
+  reasoningEffort: 'high',
+  theme: 'system',
+  language: 'auto',
+});
+/**
  * v0.6.17 §3.64：`resolveTurnPermission().source` → 账本 `run.start.permissionSource`。
  * 两套名字必须分开：`webui` 是「本模块内部从哪来」的措辞（既有测试与 banner 都依赖它），
  * 账本枚举是跨入口的公共契约，显式选择统一叫 `explicit`（CLI/调度同样适用）。
@@ -1185,6 +1208,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   const server = http.createServer((req, res) => {
     // v0.6.18 §3.68：/api/state 的响应体在配置域（routes/domains/config.js）里组装，而本轮允许的
     // 后端改动面只有本文件——在这一层按路径补 permissionSource，避免与并行执行者争同一个文件。
+    // v0.6.19 §3.76（P2）：同时补只读的 defaults（设置项「默认值」列的数据源；不参与判定）。
     // 只补 GET /api/state 的成功响应；其余 API/静态资源原样通过。
     if (req.method === 'GET' && new URL(String(req.url || '/'), 'http://localhost').pathname === '/api/state') {
       const rawEnd = res.end.bind(res);
@@ -1198,6 +1222,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
             const body = JSON.parse(String(chunk));
             if (body && body.ok === true && Array.isArray(body.permissions)) {
               body.permissionSource = statePermissionSource();
+              body.defaults = SETTING_DEFAULTS;
               chunk = JSON.stringify(body);
             }
           }

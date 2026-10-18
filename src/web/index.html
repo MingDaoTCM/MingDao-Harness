@@ -562,23 +562,41 @@ body.run-open #sessSheet{right:318px}
 .dr .p{color:var(--accent2);font-variant-numeric:tabular-nums}
 .dr .c{color:var(--faint);font-variant-numeric:tabular-nums}
 .badge-btn:hover{border-color:var(--accent2);color:var(--accent2)}
+/* ============================================================================
+   P2（v0.6.19 §3.76）：设置三列 / 危险操作确认框 / 语言切换 / 无障碍辅助。
+   只复用既有 token；--faint 不用于 --bg3/--panel 上的小字（见诊断里的对比度自检）。
+   ============================================================================ */
+.cfg-cols{display:grid;grid-template-columns:minmax(0,.8fr) minmax(0,1fr) minmax(0,1.6fr);gap:6px 10px;margin-top:6px;padding:6px 8px;border:1px dashed var(--border);border-radius:8px;background:var(--bg2);font-size:11.5px;line-height:1.55}
+.cfg-col{display:flex;flex-direction:column;gap:1px;min-width:0}
+.cfg-col-k{font-size:10.5px;letter-spacing:.4px;color:var(--dim)}
+.cfg-default{color:var(--dim);word-break:break-word}
+.cfg-current{color:var(--text);font-weight:600;word-break:break-word}
+.cfg-impact{color:var(--dim);word-break:break-word}
+.cfg-cols.changed{border-color:rgba(34,184,207,.55)}
+.cfg-cols.changed .cfg-current{color:var(--accent2)}
+@media (max-width:860px){.cfg-cols{grid-template-columns:1fr;gap:4px}}
+.danger-modal{width:min(540px,92vw)}
+.danger-body{color:var(--text);font-size:13.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word;margin:6px 0 10px}
+.danger-note{font-size:11.5px;color:var(--dim);line-height:1.6;margin:0 0 12px;border-left:3px solid var(--warn);padding-left:8px}
+#dangerOk{background:var(--err);color:#fff;border:none}
+.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
 </style>
 </head>
 <body>
 <header>
   <div class="logo">MingDao <span>Harness</span></div>
   <span id="cfgMsg" class="badge" style="display:none"></span>
-  <button id="paletteBtn" title="搜索或运行命令（⌘K / Ctrl+K）" aria-haspopup="dialog">⌘K <span class="palette-label">搜索或运行</span></button>
-  <button id="cfgBtn" title="设置">⚙</button>
-  <button id="runChip" title="本轮运行面板（窄屏以抽屉展开）" aria-expanded="false">运行</button>
-  <button id="themeBtn" title="切换明暗主题（跟随系统时由系统偏好决定）" aria-label="切换明暗主题">🌙</button>
-  <select id="wsSel" title="工作空间（切换 / 新建，目录自动创建）"></select>
-  <span class="badge" id="envBadge"></span><span class="badge badge-btn" id="costBadge" title="省钱仪表盘（点击展开）" style="cursor:pointer">📊 —</span>
+  <button id="paletteBtn" title="搜索或运行命令（⌘K / Ctrl+K）" aria-haspopup="dialog" aria-label="搜索或运行命令">⌘K <span class="palette-label" data-i18n="header.paletteLabel">搜索或运行</span></button>
+  <button id="cfgBtn" title="设置" aria-label="设置" data-i18n-title="header.settingsTitle" data-i18n-aria-label="header.settingsTitle">⚙</button>
+  <button id="runChip" title="本轮运行面板（窄屏以抽屉展开）" aria-expanded="false" data-i18n="header.run">运行</button>
+  <button id="themeBtn" title="切换明暗主题（跟随系统时由系统偏好决定）" aria-label="切换明暗主题" data-i18n-title="header.theme" data-i18n-aria-label="header.theme">🌙</button>
+  <select id="wsSel" title="工作空间（切换 / 新建，目录自动创建）" data-i18n-title="header.wsTitle"></select>
+  <span class="badge" id="envBadge"></span><span class="badge badge-btn" id="costBadge" title="省钱仪表盘（点击展开）" data-i18n-title="header.costTitle" style="cursor:pointer">📊 —</span>
   <div class="spacer"></div>
-  <input id="sessionSearch" placeholder="搜索会话…" title="关键词检索历史会话">
-  <select id="sessions" title="历史会话"><option value="">历史会话</option></select>
-  <button id="tasksBtn" title="任务面板">任务</button><button id="sessMgrBtn" title="管理会话（重命名/删除）">✎</button>
-  <button id="newChat">新对话</button>
+  <input id="sessionSearch" placeholder="搜索会话…" title="关键词检索历史会话" data-i18n-placeholder="header.searchPlaceholder" data-i18n-title="header.searchTitle">
+  <select id="sessions" title="历史会话" data-i18n-title="header.sessions"><option value="">历史会话</option></select>
+  <button id="tasksBtn" title="任务面板" aria-label="任务面板" data-i18n-title="header.tasks" data-i18n-aria-label="header.tasks" data-i18n="header.tasks">任务</button><button id="sessMgrBtn" title="管理会话（重命名/删除）" aria-label="管理会话" data-i18n-title="header.sessMgrTitle" data-i18n-aria-label="header.sessMgrTitle">✎</button>
+  <button id="newChat" data-i18n="header.newChat">新对话</button>
 </header>
 <div id="trajRail">
   <button class="rail-btn" id="trajRailBtn" title="轨迹（点击查看详情）">🧭</button>
@@ -643,11 +661,11 @@ body.run-open #sessSheet{right:318px}
     <div id="tdBody">
       <section class="td-fold">
         <button class="td-fold-head" type="button" data-fold="trace" aria-controls="tdTraceFoldBody" aria-expanded="true">轨迹<span class="td-fold-meta" id="tdTraceMeta">—</span></button>
-        <div id="tdTraceFoldBody"><div id="tdTraceList"></div></div>
+        <div id="tdTraceFoldBody"><div id="tdTraceList" aria-live="polite"></div></div>
       </section>
       <section class="td-fold">
         <button class="td-fold-head" type="button" data-fold="subs" aria-controls="tdSubFoldBody" aria-expanded="true">子Agent<span class="td-fold-meta" id="tdSubMeta">—</span></button>
-        <div id="tdSubFoldBody"><div id="tdSubList"></div></div>
+        <div id="tdSubFoldBody"><div id="tdSubList" aria-live="polite"></div></div>
       </section>
     </div>
   </section>
@@ -674,15 +692,15 @@ body.run-open #sessSheet{right:318px}
   <input type="file" id="fileInput" accept="image/png,image/jpeg,image/gif,image/webp,.txt,.md,.json,.js,.py,.log,.csv,.html,.css" multiple style="display:none">
   <div id="attachList" style="display:none"></div>
   <div id="composer">
-    <button id="attachBtn" title="上传图片或文本文件（图片需支持视觉的模型）">📎</button>
-    <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送，Shift+Enter 换行）"></textarea>
+    <button id="attachBtn" title="上传图片或文本文件（图片需支持视觉的模型）" data-i18n-title="footer.attachTitle">📎</button>
+    <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送，Shift+Enter 换行）" data-i18n-placeholder="footer.inputPlaceholder"></textarea>
     <!-- P1-5 会话设置弹层（v0.6.19 §3.70）：模型 / 预设 / 权限三件套收进同一个 popover，
          按钮上直接印当前生效的模型与权限（用户一眼知道"东西没丢"）。原三个 select 保留在弹层内
          （send()/init() 仍按既有 id 读取），不再占输入区。 -->
-    <button id="sessSettingsBtn" title="会话设置：模型 / 预设 / 权限（含生效值与来源）" aria-haspopup="dialog" aria-expanded="false"><b id="chipModel">模型</b><span class="sep">·</span><span id="chipPerm">权限</span></button>
-    <button id="sendBtn" class="primary">发送</button>
+    <button id="sessSettingsBtn" title="会话设置：模型 / 预设 / 权限（含生效值与来源）" data-i18n-title="footer.sessSettingsTitle" aria-haspopup="dialog" aria-expanded="false"><b id="chipModel">模型</b><span class="sep">·</span><span id="chipPerm">权限</span></button>
+    <button id="sendBtn" class="primary" data-i18n="footer.send">发送</button>
   </div>
-  <div id="hint"><span id="hintText">工具执行与权限确认会实时展示；生成中（含等待权限确认时）可点「■ 停止」立即中断。</span><label style="margin-left:12px;cursor:pointer;user-select:none"><input type="checkbox" id="journalChk" style="vertical-align:-2px;margin:0 4px 0 0">📌 带上文（最近会话日志，默认关＝新会话全新开始）</label></div>
+  <div id="hint"><span id="hintText">工具执行与权限确认会实时展示；生成中（含等待权限确认时）可点「■ 停止」立即中断。</span><label style="margin-left:12px;cursor:pointer;user-select:none"><input type="checkbox" id="journalChk" style="vertical-align:-2px;margin:0 4px 0 0"><span data-i18n="footer.journal">📌 带上文（最近会话日志，默认关＝新会话全新开始）</span></label></div>
   <div id="statusBar" title="累计使用统计（轮次/步数/LLM 与工具时长/首 token/吞吐/缓存命中/输入输出 tokens）"></div>
 </footer>
 
@@ -716,33 +734,33 @@ body.run-open #sessSheet{right:318px}
          统计与摘要同源（renderTracePanels → 同一 traceRoundForMsg 视图）。 -->
     <section class="rp-sec" id="rpTraceSec">
       <button class="rp-sec-title rp-fold-head" type="button" data-fold="trace" aria-controls="rpTraceFoldBody" aria-expanded="true">轨迹<span class="rp-fold-meta" id="rpTraceMeta">—</span><span class="line"></span><span class="rp-fold-tri" aria-hidden="true"></span></button>
-      <div id="rpTraceFoldBody"><div id="rpTraceList" class="tr-list"></div></div>
+      <div id="rpTraceFoldBody"><div id="rpTraceList" aria-live="polite" class="tr-list"></div></div>
     </section>
     <section class="rp-sec" id="rpSubSec">
       <button class="rp-sec-title rp-fold-head" type="button" data-fold="subs" aria-controls="rpSubFoldBody" aria-expanded="true">子Agent<span class="rp-fold-meta" id="rpSubMeta">—</span><span class="line"></span><span class="rp-fold-tri" aria-hidden="true"></span></button>
-      <div id="rpSubFoldBody"><div id="rpSubList" class="tr-list"></div></div>
+      <div id="rpSubFoldBody"><div id="rpSubList" aria-live="polite" class="tr-list"></div></div>
     </section>
   </div>
   <div class="rp-foot"><span class="grow" id="rpFootNote">停止与压缩：与状态条同一条停止出口</span><button id="rpCompact" type="button" hidden title="后端有 /compact 时才显示">压缩上下文</button><button id="rpStop" type="button" disabled>■ 停止</button></div>
 </aside>
 
 <!-- P1-5 会话设置弹层 -->
-<div id="sessSheet" role="dialog" aria-modal="false" aria-label="会话设置" hidden>
-  <div class="ss-head">⚙ 会话设置<span class="ss-sub">模型 / 预设 / 权限</span><button id="ssClose" type="button">关闭</button></div>
+<div id="sessSheet" role="dialog" aria-modal="true" aria-label="会话设置" hidden>
+  <div class="ss-head"><span data-i18n="sess.title">⚙ 会话设置</span><span class="ss-sub" data-i18n="sess.sub">模型 / 预设 / 权限</span><button id="ssClose" type="button" data-i18n="sess.close">关闭</button></div>
   <div class="ss-body">
     <div class="ss-field">
-      <label for="modelSel">模型<span class="ss-scope">全局 · 下一轮生效</span></label>
+      <label for="modelSel"><span data-i18n="sess.model">模型</span><span class="ss-scope" data-i18n="sess.scopeModel">全局 · 下一轮生效</span></label>
       <select id="modelSel" title="切换模型"></select>
       <div class="ss-src"><b id="ssModelLabel">—</b><br><span id="ssModelId">API id: —</span><br><span id="ssModelSrc">来源：设置 › 模型与密钥 · 写入 config.json，下一轮生效</span></div>
-      <div class="ss-src" id="ssModelAliasHint" hidden>显示名来自 config.modelLabels，请求使用 API id。</div>
+      <div class="ss-src" id="ssModelAliasHint" hidden data-i18n="sess.aliasHint">显示名来自 config.modelLabels，请求使用 API id。</div>
     </div>
     <div class="ss-field">
-      <label for="presetSel">预设<span class="ss-scope">仅下一轮</span></label>
+      <label for="presetSel"><span data-i18n="sess.preset">预设</span><span class="ss-scope" data-i18n="sess.scopePreset">仅下一轮</span></label>
       <select id="presetSel" title="智能体预设：一键切换工具白名单/权限/参数组合（选「无预设」恢复默认）"><option value="">无预设</option></select>
-      <div class="ss-src">来源：你的选择 · 只影响下一轮（工具白名单 / 参数）；不改变权限来源。</div>
+      <div class="ss-src" data-i18n="sess.presetSource">来源：你的选择 · 只影响下一轮（工具白名单 / 参数）；不改变权限来源。</div>
     </div>
     <div class="ss-field">
-      <label>权限<span class="ss-scope">全局 + 本轮</span></label>
+      <label><span data-i18n="sess.permission">权限</span><span class="ss-scope" data-i18n="sess.scopePerm">全局 + 本轮</span></label>
       <select id="permSel" title="权限模式：询问＝写文件/执行命令前先确认（推荐） · 自动＝全部直接放行 · 只读＝禁止修改与执行。此处选择随每条消息一起发送，优先于预设声明的权限（预设只能收紧、不能提权）">
         <option value="ask">询问</option>
         <option value="auto">自动</option>
@@ -756,7 +774,7 @@ body.run-open #sessSheet{right:318px}
       <div class="ss-src" id="ssPermSrc">permission=ask（来源：default）</div>
     </div>
     <div class="ss-field" id="ssReasoningField" hidden>
-      <label for="reasoningSel">推理等级<span class="ss-scope">全局</span></label>
+      <label for="reasoningSel"><span data-i18n="sess.reasoning">推理等级</span><span class="ss-scope" data-i18n="sess.scopeGlobal">全局</span></label>
       <select id="reasoningSel" title="思考模式（推理等级）：关＝不推理省 token · 低 · 高（默认）· 最高＝最强推理">
         <option value="off">关</option>
         <option value="low">低</option>
@@ -766,19 +784,19 @@ body.run-open #sessSheet{right:318px}
     </div>
   </div>
   <div class="ss-effective" id="ssEffective">本轮实际生效：—</div>
-  <div class="ss-foot"><span class="grow">每项右侧标了作用域；模型/预设/权限都只在这里改</span><button id="ssDone" type="button" class="primary">完成</button></div>
+  <div class="ss-foot"><span class="grow" data-i18n="sess.footNote">每项右侧标了作用域；模型/预设/权限都只在这里改</span><button id="ssDone" type="button" class="primary" data-i18n="sess.done">完成</button></div>
 </div>
 
 <!-- P1-2 命令面板（⌘K / Ctrl+K） -->
 <div class="overlay" id="paletteMask" hidden>
-  <div class="palette" role="dialog" aria-modal="true" aria-label="命令面板">
+  <div class="palette" role="dialog" aria-modal="true" aria-label="命令面板" data-i18n-aria-label="palette.title">
     <div class="palette-input">
       <span aria-hidden="true">🔎</span>
-      <input id="paletteInput" type="text" placeholder="搜索会话、工作空间、模型、预设、权限、设置项…" role="combobox" aria-expanded="true" aria-controls="paletteList" aria-activedescendant="" autocomplete="off">
+      <input id="paletteInput" type="text" placeholder="搜索会话、工作空间、模型、预设、权限、设置项…" data-i18n-placeholder="palette.placeholder" role="combobox" aria-expanded="true" aria-controls="paletteList" aria-activedescendant="" autocomplete="off">
       <span class="kbd">Esc</span>
     </div>
     <div class="palette-list" id="paletteList" role="listbox" aria-label="命令"></div>
-    <div class="palette-foot"><span><span class="kbd">↑</span><span class="kbd">↓</span> 选择</span><span><span class="kbd">↵</span> 执行</span><span><span class="kbd">esc</span> 关闭</span><span class="grow"></span><span>作用域标签 = 改动影响范围</span></div>
+    <div class="palette-foot"><span><span class="kbd">↑</span><span class="kbd">↓</span> <span data-i18n="palette.select">选择</span></span><span><span class="kbd">↵</span> <span data-i18n="palette.run">执行</span></span><span><span class="kbd">esc</span> <span data-i18n="palette.close">关闭</span></span><span class="grow"></span><span data-i18n="palette.scopeNote">作用域标签 = 改动影响范围</span></div>
   </div>
 </div>
 
@@ -809,6 +827,17 @@ body.run-open #sessSheet{right:318px}
   </div>
 </div>
 
+<!-- P2-2 危险操作二次确认（v0.6.19 §3.76）：说明后果 + 必须点「确认」；回车不确认，Esc 取消。
+     role/aria-modal 由 installDialog 补齐；初始焦点落在「取消」（避免误按回车执行）。 -->
+<div class="overlay center" id="dangerMask" hidden>
+  <div class="modal danger-modal" id="dangerDialog" role="dialog" aria-modal="true" aria-labelledby="dangerTitle" aria-describedby="dangerBody">
+    <h3 id="dangerTitle" data-i18n="danger.title">确认危险操作</h3>
+    <div class="danger-body" id="dangerBody"></div>
+    <p class="danger-note" id="dangerNote" data-i18n="danger.note">需要点击「确认」才会执行；按回车不会确认，Esc 取消。</p>
+    <div class="row"><button id="dangerCancel" type="button" data-i18n="danger.cancel">取消</button><button id="dangerOk" type="button" class="danger" data-i18n="danger.confirm">确认</button></div>
+  </div>
+</div>
+
 <div id="modalRoot"></div>
 <div id="sessModal" class="modal-mask" style="display:none">
   <div class="modal">
@@ -819,22 +848,23 @@ body.run-open #sessSheet{right:318px}
 </div>
 <div id="cfgModal" class="modal-mask" style="display:none">
   <div class="modal cfg-modal">
-    <h3>⚙ 设置</h3>
+    <h3 data-i18n="settings.title">⚙ 设置</h3>
     <!-- P1-7 设置分组 + 搜索（v0.6.19 §3.70）：按用户任务分组；输入关键字按标题/说明/placeholder 过滤，
          不匹配的 .cfg-row 带 hidden 属性；命中项高亮。 -->
-    <div class="cfg-search"><input id="cfgSearch" placeholder="搜索设置项（标题 / 关键字，如 沙箱、超时、Key）…" aria-label="搜索设置项" autocomplete="off"><span class="cfg-search-count" id="cfgSearchCount"></span></div>
+    <div class="cfg-search"><input id="cfgSearch" placeholder="搜索设置项（标题 / 关键字，如 沙箱、超时、Key）…" data-i18n-placeholder="settings.searchPlaceholder" aria-label="搜索设置项" autocomplete="off"><span class="cfg-search-count" id="cfgSearchCount"></span></div>
+    <div class="cfg-hint" data-i18n="settings.defaultSource">默认值来自 config.js 内置默认表（/api/state.defaults 只读透出）</div>
     <div class="cfg-body">
     <nav class="cfg-nav">
-      <button class="cfg-nav-btn active" data-panel="models" data-group="model">🔌 模型与端点</button>
-      <button class="cfg-nav-btn" data-panel="runtime" data-group="runtime">⏱️ 运行与超时</button>
-      <button class="cfg-nav-btn" data-panel="permissions" data-group="permission">🛡️ 权限与沙箱</button>
-      <button class="cfg-nav-btn" data-panel="appearance" data-group="appearance">🎨 外观</button>
-      <button class="cfg-nav-btn" data-panel="workspace" data-group="workspace">📁 工作空间</button>
-      <button class="cfg-nav-btn" data-panel="schedule" data-group="automation">⏰ 调度队列</button>
-      <button class="cfg-nav-btn" data-panel="sync" data-group="sync">☁️ 云同步与协作</button>
-      <button class="cfg-nav-btn" data-panel="memory" data-group="memory">🧠 长期记忆</button>
-      <button class="cfg-nav-btn" data-panel="mcp" data-group="ecosystem">🔌 MCP 生态</button>
-      <button class="cfg-nav-btn" data-panel="skills" data-group="ecosystem">🧩 技能库</button>
+      <button class="cfg-nav-btn active" data-panel="models" data-group="model" data-i18n="nav.models">🔌 模型与端点</button>
+      <button class="cfg-nav-btn" data-panel="runtime" data-group="runtime" data-i18n="nav.runtime">⏱️ 运行与超时</button>
+      <button class="cfg-nav-btn" data-panel="permissions" data-group="permission" data-i18n="nav.permissions">🛡️ 权限与沙箱</button>
+      <button class="cfg-nav-btn" data-panel="appearance" data-group="appearance" data-i18n="nav.appearance">🎨 外观</button>
+      <button class="cfg-nav-btn" data-panel="workspace" data-group="workspace" data-i18n="nav.workspace">📁 工作空间</button>
+      <button class="cfg-nav-btn" data-panel="schedule" data-group="automation" data-i18n="nav.schedule">⏰ 调度队列</button>
+      <button class="cfg-nav-btn" data-panel="sync" data-group="sync" data-i18n="nav.sync">☁️ 云同步与协作</button>
+      <button class="cfg-nav-btn" data-panel="memory" data-group="memory" data-i18n="nav.memory">🧠 长期记忆</button>
+      <button class="cfg-nav-btn" data-panel="mcp" data-group="ecosystem" data-i18n="nav.mcp">🔌 MCP 生态</button>
+      <button class="cfg-nav-btn" data-panel="skills" data-group="ecosystem" data-i18n="nav.skills">🧩 技能库</button>
     </nav>
     <div class="cfg-panels">
     <section class="cfg-panel active" data-panel="models">
@@ -886,40 +916,98 @@ body.run-open #sessSheet{right:318px}
       </section>
     <section class="cfg-panel" data-panel="permissions">
     <h4 style="margin:4px 0;color:var(--accent2)">权限与沙箱</h4>
-    <div class="cfg-row" data-kw="权限 permission ask auto readonly 沙箱 sandbox 隔离"><label>权限模式（写文件 / 执行命令前是否确认）</label>
+    <div class="cfg-row" data-setting="permission" data-kw="权限 permission ask auto readonly 沙箱 sandbox 隔离"><label>权限模式（写文件 / 执行命令前是否确认）</label>
       <div class="cfg-hint">权限模式在 <b>⚙ 会话设置</b>（输入区右侧）里切换，含生效值与来源；此处只控制沙箱。</div>
+      <div class="cfg-cols" data-cols="permission">
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colDefault">默认</span><span class="cfg-default">ask</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colCurrent">当前</span><span class="cfg-current">—</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colImpact">影响</span><span class="cfg-impact">—</span></div>
+      </div>
     </div>
-    <div class="cfg-row" data-kw="沙箱 sandbox 隔离 bash 只读 断网"><label>沙箱模式（bash 执行隔离）</label>
+    <div class="cfg-row" data-setting="sandbox" data-kw="沙箱 sandbox 隔离 bash 只读 断网"><label>沙箱模式（bash 执行隔离）</label>
       <select id="sbxSel">
         <option value="off">off — 直接执行</option>
         <option value="readonly">readonly — 全盘只读（/tmp 可写）</option>
         <option value="safe">safe — 只读 + 断网（最安全）</option>
       </select>
       <div class="cfg-hint" id="sbxHint"></div>
+      <div class="cfg-cols" data-cols="sandbox">
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colDefault">默认</span><span class="cfg-default">off</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colCurrent">当前</span><span class="cfg-current">—</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colImpact">影响</span><span class="cfg-impact">—</span></div>
+      </div>
     </div>
       </section>
     <section class="cfg-panel" data-panel="runtime">
     <h4 style="margin:4px 0;color:var(--accent2)">运行与超时</h4>
-    <div class="cfg-row" data-kw="路由 routing 模型 router planner executor"><label><input type="checkbox" id="routeChk"> 自动模型路由（规划→pro / 执行→flash）</label></div>
-    <div class="cfg-row" data-kw="上下文预算 context budget tokens 窗口"><label>上下文预算 tokens <input type="number" id="budgetInput" min="1000" step="1000"></label></div>
-    <div class="cfg-row" data-kw="超时 timeout 首帧 first token 流式空闲 stream idle 总量 total 秒" style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end">
+    <div class="cfg-row" data-setting="routing" data-kw="路由 routing 模型 router planner executor"><label><input type="checkbox" id="routeChk"> 自动模型路由（规划→pro / 执行→flash）</label>
+      <div class="cfg-cols" data-cols="routing">
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colDefault">默认</span><span class="cfg-default">关</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colCurrent">当前</span><span class="cfg-current">—</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colImpact">影响</span><span class="cfg-impact">—</span></div>
+      </div>
+    </div>
+    <div class="cfg-row" data-setting="contextBudget" data-kw="上下文预算 context budget tokens 窗口"><label>上下文预算 tokens <input type="number" id="budgetInput" min="1000" step="1000"></label>
+      <div class="cfg-cols" data-cols="contextBudget">
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colDefault">默认</span><span class="cfg-default">128000</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colCurrent">当前</span><span class="cfg-current">—</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colImpact">影响</span><span class="cfg-impact">—</span></div>
+      </div>
+    </div>
+    <div class="cfg-row" data-setting="timeout" data-kw="超时 timeout 首帧 first token 流式空闲 stream idle 总量 total 秒" style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end">
       <label style="font-size:12px">首 token 等待（秒）<input type="number" id="toFirstToken" min="0" step="10" placeholder="自动"></label>
       <label style="font-size:12px">流式空闲（秒）<input type="number" id="toStreamIdle" min="0" step="10" placeholder="自动"></label>
       <label style="font-size:12px">总量（秒）<input type="number" id="toTotal" min="0" step="10" placeholder="自动"></label>
+      <div class="cfg-cols" data-cols="timeout" style="flex-basis:100%">
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colDefault">默认</span><span class="cfg-default">自适应（留空）</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colCurrent">当前</span><span class="cfg-current">—</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colImpact">影响</span><span class="cfg-impact">—</span></div>
+      </div>
     </div>
     <div class="cfg-hint" data-kw="超时 timeout 自适应 本地模型 首 token">留空 = 自适应：本地模型自动给更长首 token 等待（慢 prefill 不被误杀）。仅在默认值仍不够/过松时手填。</div>
-    <div class="cfg-row" data-kw="开机自启 autostart 启动"><label><input type="checkbox" id="autoStartChk"> 开机自启（登录后自动启动服务器）</label></div>
-    <div class="cfg-row" data-kw="通知 notify 桌面 完成 失败"><label><input type="checkbox" id="notifyChk"> 后台任务完成/失败时桌面通知</label></div>
+    <div class="cfg-row" data-setting="autostart" data-kw="开机自启 autostart 启动"><label><input type="checkbox" id="autoStartChk"> 开机自启（登录后自动启动服务器）</label>
+      <div class="cfg-cols" data-cols="autostart">
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colDefault">默认</span><span class="cfg-default">关</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colCurrent">当前</span><span class="cfg-current">—</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colImpact">影响</span><span class="cfg-impact">—</span></div>
+      </div>
+    </div>
+    <div class="cfg-row" data-setting="notify" data-kw="通知 notify 桌面 完成 失败"><label><input type="checkbox" id="notifyChk"> 后台任务完成/失败时桌面通知</label>
+      <div class="cfg-cols" data-cols="notify">
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colDefault">默认</span><span class="cfg-default">开</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colCurrent">当前</span><span class="cfg-current">—</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colImpact">影响</span><span class="cfg-impact">—</span></div>
+      </div>
+    </div>
       </section>
     <section class="cfg-panel" data-panel="appearance">
     <h4 style="margin:4px 0;color:var(--accent2)">外观</h4>
-    <div class="cfg-row" data-kw="主题 theme 明暗 dark light 系统 prefers-color-scheme 外观"><label>明暗主题</label>
+    <div class="cfg-row" data-setting="theme" data-kw="主题 theme 明暗 dark light 系统 prefers-color-scheme 外观"><label>明暗主题</label>
       <select id="themeSel">
         <option value="system">跟随系统（prefers-color-scheme）</option>
         <option value="dark">暗色</option>
         <option value="light">亮色</option>
       </select>
       <div class="cfg-hint">偏好写入浏览器 localStorage（mingdao-theme）；选「跟随系统」时随系统明暗实时切换。</div>
+      <div class="cfg-cols" data-cols="theme">
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colDefault">默认</span><span class="cfg-default">system</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colCurrent">当前</span><span class="cfg-current">—</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colImpact">影响</span><span class="cfg-impact">—</span></div>
+      </div>
+    </div>
+    <!-- P2-4（v0.6.19 §3.76）：界面语言。默认跟随 navigator.language，localStorage 覆盖。 -->
+    <div class="cfg-row" data-setting="language" data-kw="语言 language i18n 中文 english 界面"><label data-i18n="settings.language">界面语言</label>
+      <select id="langSel">
+        <option value="auto" data-i18n="settings.langAuto">跟随系统</option>
+        <option value="zh" data-i18n="settings.langZh">中文</option>
+        <option value="en" data-i18n="settings.langEn">English</option>
+      </select>
+      <div class="cfg-hint" data-i18n="settings.languageHint">默认跟随系统语言（navigator.language）；选择后写入 localStorage（mingdao-lang）。只影响界面文案，不改日志与错误原文。</div>
+      <div class="cfg-cols" data-cols="language">
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colDefault">默认</span><span class="cfg-default">auto</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colCurrent">当前</span><span class="cfg-current">—</span></div>
+        <div class="cfg-col"><span class="cfg-col-k" data-i18n="settings.colImpact">影响</span><span class="cfg-impact">—</span></div>
+      </div>
     </div>
     <div class="cfg-row" data-kw="快捷键 keyboard shortcut ⌘K 命令面板"><label>快捷键</label>
       <div class="cfg-hint">⌘K / Ctrl+K 命令面板 · ⌘/ / Ctrl+/ 快捷键表 · Esc 分层关闭 / 停止本轮。答"实际实现了哪些"以快捷键表为准。</div>
@@ -961,7 +1049,7 @@ body.run-open #sessSheet{right:318px}
     <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
     <h4 style="margin:4px 0;color:var(--accent2)">长期记忆（注入每次会话的偏好/约定）</h4>
     <textarea id="memArea" rows="5" placeholder="例如：所有文档用中文；提交信息用约定式提交…" style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:12.5px;resize:vertical"></textarea>
-    <div class="row" style="justify-content:flex-start"><button id="memSave">保存记忆</button><button id="memDedupe">去重合并</button><span id="memMsg" style="font-size:12px;color:var(--faint)"></span></div>
+    <div class="row" style="justify-content:flex-start"><button id="memSave">保存记忆</button><button id="memDedupe">去重合并</button><button id="memClear" class="danger" data-i18n="settings.memClear">清空记忆</button><span id="memMsg" style="font-size:12px;color:var(--faint)"></span></div>
       </section>
 
     <section class="cfg-panel" data-panel="mcp">
@@ -982,7 +1070,7 @@ body.run-open #sessSheet{right:318px}
       </section>
     </div>
   </div>
-    <div class="row" style="margin-top:12px"><button id="cfgCancel">取消</button><button class="primary" id="cfgSave">保存</button></div>
+    <div class="row" style="margin-top:12px"><button id="cfgReset" class="danger" style="margin-right:auto" data-i18n="settings.reset">恢复默认配置</button><button id="cfgCancel" data-i18n="settings.cancel">取消</button><button class="primary" id="cfgSave" data-i18n="settings.save">保存</button></div>
   </div>
 </div>
 <!-- 回到底部悬浮按钮（参照 DeepSeek-Harness：上滚时出现，点击回到最新消息） -->
@@ -1001,6 +1089,8 @@ body.run-open #sessSheet{right:318px}
     </div>
   </div>
 </div>
+<!-- P2-3 读屏播报：内容只在状态变化时由 updateLiveRegion() 写入（同一状态重复渲染不更新）。 -->
+<div id="a11yLive" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></div>
 <script type="module" src="/app.js"></script>
 </body>
 </html>

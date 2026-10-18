@@ -97,6 +97,21 @@ jobs:
           exit $code
       - name: API 域契约测试（7 域路由契约 + body 上限）
         run: node test/api-contracts.js
+      - name: UI P2（设置三列 / 危险操作确认 / 无障碍 / i18n，v0.6.19 §3.76）
+        # 只加在 Linux 腿：套件是离线的（桩 DOM + 本机临时 home 起一次 WebUI），但按任务书要求
+        # 只挂 Linux，Windows/macOS 腿不增抖动（bash 包装与其它端到端步骤同一口径）。
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          node test/ui-p2.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=ui-p2 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
       - name: 本地内存不足降级重试（压缩上下文 + 输出减半 + 只重试一次，v0.6.18 §3.74）
         # 只加在 Linux 腿：套件全程离线（桩 provider，不连真引擎、不起 WebUI），但按任务书要求
         # 只挂 Linux，Windows/macOS 腿不增抖动（bash 包装与其它端到端步骤同一口径）。
