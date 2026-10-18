@@ -15655,7 +15655,9 @@ process.exit(0);
     const cSlow = await chatOn145('http://127.0.0.1:45997', { message: '请跑一个长命令', permission: 'auto' });
     const slowMs = Date.now() - tSlow0;
     assert.ok(cSlow.events.some((e) => e.type === 'done'), `（前置）慢回合必须完成，实际耗时 ${slowMs}ms`);
-    assert.ok(slowMs >= 5000, `（前置）本用例需要跨过 5s 心跳（实际 ${slowMs}ms）——否则进度断言没有取样点`);
+    // 负载自适应（v0.6.19 §3.70 收尾）：慢命令固定 sleep 11s，本应 ≥10s；并发/CI 慢机上只会更长，
+    // 不会更短。把前提钉在 10s（覆盖 5s/10s 两次心跳），避免"机器慢到 5–10s 之间"时基线偶发红。
+    assert.ok(slowMs >= 10000, `（前置）本用例需要跨过 10s（sleep 11s，实际 ${slowMs}ms）——否则进度断言没有取样点`);
     const progress145 = cSlow.events.filter((e) => e.type === 'progress');
     assert.ok(progress145.length >= 2, `5s/10s 两次心跳都必须到（实际 ${progress145.length} 条 progress）`);
     assert.ok(
@@ -15685,10 +15687,13 @@ process.exit(0);
       `发送前的规模预告必须带上端点预检结论（= endpointProbe 真的交给了本回合，而不是算了不用）——原守卫：chatCfg = { ...chatCfg, endpointProbe: probe }。实际预告行：${JSON.stringify(forecastLine145)}`
     );
     const progLines145 = logAll145.filter((l) => /chat 进度 t[0-9a-f]+ /.test(l));
-    assert.equal(
-      progLines145.length,
-      1,
-      `进度日志必须限频：11 秒的回合只允许一行（原守卫：lastProgressLogAt < 30000；每 5s 都写就是刷屏）。实际 ${progLines145.length} 行：${JSON.stringify(progLines145)}`
+    // 负载自适应（v0.6.19 §3.70 收尾）：断言的是**限频语义**（每 30s 最多一行），不是"11 秒恰好一行"。
+    // 慢机/并发下这一回合可能跑 40s+，按 30s 限频允许 2 行；去掉限频的变异（每 5s 写一行）仍会超上限，
+    // 不会变成永远不失败的松断言。上限只随实测耗时增长，不随变异放宽。
+    const maxProgressLines145 = Math.max(1, Math.ceil(slowMs / 30000));
+    assert.ok(
+      progLines145.length >= 1 && progLines145.length <= maxProgressLines145,
+      `进度日志必须限频：回合实测 ${slowMs}ms，按 30s 限频最多 ${maxProgressLines145} 行（原守卫：lastProgressLogAt < 30000；每 5s 都写就是刷屏）。实际 ${progLines145.length} 行：${JSON.stringify(progLines145)}`
     );
     assert.ok(
       /模型轮次=\d+/.test(progLines145[0] || '') &&
@@ -16071,6 +16076,265 @@ process.exit(0);
   }
 
   ok('v0.6.18 §3.68 P0 界面：常驻状态条六字段（阶段/首帧/吞吐/上下文/工具数含 0 次文案/费用，桩 progress 行为化）+ renderLiveBar 死代码已删 + 错误折叠卡（默认折叠/原文 <pre>/建议独立/复制）+ 内联确认三键与 120s 超时·停止优先 + 会话级 allow 接线 + /api/state.permissionSource 与 resolveTurnPermission 同源（config→explicit→preset 端到端）+ §144 临时文件 os.tmpdir/清理/.gitignore 兜底');
+}
+
+
+
+
+// ---------- 149. v0.6.19 §3.70：P1 界面（工具时间线 / ⌘K 命令面板 / 快捷键表 / 右栏本轮运行 / 会话设置 / 空态 / 设置搜索 / 主题与窄屏断点） ----------
+// 与 §148 同款：①纯函数喂桩数据做行为断言（时间线聚合与折叠、右栏与状态条同源、命令构建/过滤/执行、
+// 设置搜索、主题/断点、会话设置文案）②index.html/app.js 的结构守卫（只列已实现的快捷键、失败高亮类名、
+// hidden 属性、没后端就不列 /compact）③桩 DOM 行为（示例任务只填输入框、主题写 localStorage、面板复用节点）。
+{
+  const appSrc149 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+  const htmlSrc149 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  const { fmtTok } = await import(pathToFileURL(path.join(srcDir, 'web', 'util.js')).href);
+  /** @param {string} a @param {string} b */
+  const slice149 = (a, b) => {
+    const i = appSrc149.indexOf(a);
+    const j = appSrc149.indexOf(b, i + a.length);
+    assert.ok(i >= 0 && j > i, `（前置）应能定位 app.js 切片：${a}`);
+    return appSrc149.slice(i, j);
+  };
+  const pure149 = slice149('// —— 运行状态条：字段口径', '// P1 DOM 接线（v0.6.19');
+  const P = new Function('fmtTok', pure149 + `
+return { normalizeRunPhase, fmtRunTtft, fmtRunTps, fmtRunTools, fmtRunCost, fmtRunCtx, runStripView, applyRunProgress, permissionSourceLabel,
+  toolArgsSummary, toolResultSummary, toolOutputText, toolOutputStats, toolStepView, fmtToolDur, toolTimelineSummary, toolTimelineVisibility,
+  runPanelView, paletteFilter, paletteNext, buildPaletteCommands, paletteItemHtml,
+  modelDisplay, permissionDisplay, sessionEffectiveLine,
+  matchSettingsQuery, settingsRowSearchText, applySettingsFilter, shouldShowEmpty,
+  resolveTheme, storedThemePref, applyThemePreference, layoutClassesFor };`)(fmtTok);
+
+  // —— ① 工具时间线：聚合（步数/失败数/总耗时）、默认折叠（前 3 步 + 失败步）、失败高亮类名 ——
+  {
+    const mk = (seq, name, args, result, durationMs) => P.toolStepView({ seq, name, args, result, durationMs }, true);
+    const steps = [
+      mk(1, 'read', { path: 'package.json' }, { ok: true, lines: 12 }, 12),
+      mk(2, 'grep', { pattern: 'timeout' }, { ok: true, output: 'a\nb' }, 340),
+      mk(3, 'bash', { command: 'npm test' }, { ok: false, error: 'exit code 1 · 1 failed' }, 1200),
+      mk(4, 'read', { path: 'src/auth.ts' }, { ok: true, lines: 31 }, 9),
+      mk(5, 'bash', { command: 'npm run lint' }, { ok: false, error: 'lint failed' }, 800),
+    ];
+    const sum = P.toolTimelineSummary(steps);
+    assert.equal(sum.count, 5, `工具时间线必须聚合同一轮全部调用（5 步），实际：${sum.count}`);
+    assert.equal(sum.failed, 2, `时间线必须统计失败步数，实际：${sum.failed}`);
+    assert.equal(sum.sumText, '2.4s', `时间线总耗时必须是各步之和（12ms+340ms+1200ms+9ms+800ms→2.4s），实际：${sum.sumText}`);
+    assert.equal(steps[2].liClass, 'tl-step fail', `失败步必须带 fail 高亮类，实际：${steps[2].liClass}`);
+    assert.equal(steps[2].stCls, 'bad', '失败步状态图标必须用 bad 类（红）');
+    assert.equal(steps[2].stIcon, '✖', '失败步必须显示 ✖');
+    assert.equal(steps[2].dur, '1.2s', `耗时必须按 ms/s 展示，实际：${steps[2].dur}`);
+    assert.equal(steps[2].result, 'exit code 1 · 1 failed', '失败原因必须有一行摘要（免展开可见）');
+    assert.equal(steps[0].liClass, 'tl-step', '成功步不得带 fail 类');
+    assert.equal(steps[0].stIcon, '✓', '成功步必须显示 ✓');
+    assert.equal(P.toolArgsSummary('bash', { command: 'npm test -- --runInBand' }), 'npm test -- --runInBand', '参数摘要必须取命令/路径等关键字段');
+    const visible = P.toolTimelineVisibility(steps, false);
+    assert.deepEqual(visible, [0, 1, 2, 4], `默认只展开前 3 步 + 失败步（失败步免展开即可见），实际：${JSON.stringify(visible)}`);
+    assert.deepEqual(P.toolTimelineVisibility(steps, true), [0, 1, 2, 3, 4], '整卡展开后必须显示全部步');
+    const out = P.toolOutputStats(Array.from({ length: 100 }, (_, i) => 'line ' + i).join('\n'));
+    assert.equal(out.truncated, true, '长输出必须默认折叠');
+    assert.equal(out.lines, 100, `折叠时必须给出真实行数，实际：${out.lines}`);
+    assert.ok(out.bytes > 0, '折叠时必须给出真实字节数');
+    assert.ok(out.preview.length < out.full.length, '折叠时必须给预览而不是全文');
+    // DOM 结构：开始/完成复用同一张卡、同一行（不再删卡重建）；长输出入口
+    assert.ok(/if \(msg\._toolTimeline\) return msg\._toolTimeline;/.test(appSrc149),
+      '同一轮工具调用必须聚合到同一张时间线（msg._toolTimeline 必须复用）');
+    assert.ok(/tl\.steps\.get\(ev\.seq\)/.test(appSrc149) && /Object\.assign\(step, toolStepView\(ev, true\)\)/.test(appSrc149),
+      '工具完成必须更新同一行节点（不得删掉开始卡再重建）');
+    assert.ok(!/pending\.remove\(\)/.test(appSrc149), '工具完成不得再 remove 开始卡（位置跳动/结论顺序错乱的根因）');
+    assert.ok(/className = 'tl-more'/.test(appSrc149) && /展开其余 /.test(appSrc149), '时间线必须提供「展开其余 N 步」入口');
+    assert.ok(/\.tl-step\.fail\{[^}]*var\(--err\)/.test(htmlSrc149), '.tl-step.fail 必须有红色左边框/底色（失败免展开可见）');
+    assert.ok(/tl-more/.test(htmlSrc149) && /toolcard\.collapsed \.tl-steps/.test(htmlSrc149), '整卡必须可折叠（.collapsed 隐藏步骤）');
+  }
+
+  // —— ② ⌘K 命令面板：打开 / 过滤 / 执行（至少切换模型走通）；没有 /compact 端点就不列 ——
+  {
+    const calls = [];
+    const act = {
+      newChat: () => calls.push('newChat'),
+      switchSession: (f) => calls.push('session:' + f),
+      switchWorkspace: (n) => calls.push('ws:' + n),
+      newWorkspace: () => calls.push('ws:new'),
+      setModel: (m) => calls.push('model:' + m),
+      setPreset: (p) => calls.push('preset:' + p),
+      setPermission: (p) => calls.push('perm:' + p),
+      stop: () => calls.push('stop'),
+      openShortcuts: () => calls.push('shortcuts'),
+      toggleRunPanel: () => calls.push('runpanel'),
+      toggleTheme: () => calls.push('theme'),
+      openDiagnostics: () => calls.push('diag'),
+      openSettings: (p) => calls.push('settings:' + p),
+      compact: () => calls.push('compact'),
+    };
+    const cmds = P.buildPaletteCommands({
+      sessions: [{ file: 's1.jsonl', label: '修复登录超时' }],
+      workspaces: [{ name: 'MingDao-Harness', dir: '/repo' }],
+      currentWorkspace: 'MingDao-Harness',
+      models: [{ name: 'deepseek-v4-flash', label: 'flash — 快速' }, { name: 'deepseek-v4-pro', label: 'pro — 规划' }],
+      presets: [{ name: 'local-audit', label: '本地审计', permission: 'readonly' }],
+      compactAvailable: false,
+    }, act);
+    assert.deepEqual([...new Set(cmds.map((c) => c.group))], ['会话', '工作空间', '模型', '预设', '权限', '命令', '设置'],
+      '命令面板必须覆盖 会话/工作空间/模型/预设/权限/命令/设置 分组');
+    const modelCmd = cmds.find((c) => c.group === '模型' && c.label === 'deepseek-v4-flash');
+    assert.ok(modelCmd, '命令面板必须有「切换模型」项（列出模型名）');
+    modelCmd.run();
+    assert.deepEqual(calls, ['model:deepseek-v4-flash'], `切换模型命令必须真的执行（实际：${JSON.stringify(calls)}）`);
+    assert.ok(!cmds.some((c) => /compact|压缩上下文/i.test(c.label)),
+      '没有 /compact 端点时不得列出压缩项（不造新后端）');
+    const withCompact = P.buildPaletteCommands({ compactAvailable: true }, act);
+    assert.ok(withCompact.some((c) => /compact|压缩上下文/i.test(c.label)), '后端确有 compact 能力时才显示该项（哨兵）');
+    const filtered = P.paletteFilter(cmds, '模型');
+    assert.ok(filtered.some((c) => c.group === '模型'), '输入「模型」必须筛出模型组');
+    assert.ok(!filtered.some((c) => c.label === '快捷键表'), '过滤必须真的排除不匹配项');
+    assert.equal(P.paletteNext('ArrowDown', 0, 3), 1, '↓ 必须选中下一项');
+    assert.equal(P.paletteNext('ArrowUp', 0, 3), 0, '↑ 在首项不得越界');
+    assert.equal(P.paletteNext('ArrowDown', 2, 3), 2, '↓ 在末项不得越界');
+    assert.ok(/if \(mod && \(e\.key === 'k' \|\| e\.key === 'K'\)\) \{ e\.preventDefault\(\); togglePalette\(\); return; \}/.test(appSrc149),
+      '⌘K / Ctrl+K 必须打开命令面板（全局 keydown，任意焦点可用）');
+    assert.ok(/paletteMask.*hidden = false/s.test(appSrc149) && /aria-activedescendant/.test(appSrc149),
+      '命令面板必须真的显示并维护 aria-activedescendant（键盘可达）');
+    assert.ok(/e\.key === 'ArrowDown'/.test(appSrc149) && /e\.key === 'Enter'/.test(appSrc149), '面板必须支持 ↑↓ 选择与 Enter 执行');
+    assert.ok(/paletteOpener/.test(appSrc149) && /\.focus\(\)/.test(appSrc149), '关闭面板后必须把焦点还给打开前的元素');
+  }
+
+  // —— ③ 快捷键表：只列真实实现项（⌘K / Esc 在列，不得出现未实现的 ⌘N 等） ——
+  {
+    const rows = [...htmlSrc149.matchAll(/data-shortcut="([^"]+)"/g)].map((m) => m[1]);
+    const must = ['⌘K', '⌘/', 'Esc', 'Enter', 'Shift+Enter', '⌘Enter'];
+    for (const k of must) assert.ok(rows.includes(k), `快捷键表必须列出已实现的 ${k}，实际：${rows.join(',')}`);
+    assert.ok(rows.includes('y/n'), '权限确认的 y/n 已实现，应列出');
+    for (const fake of ['⌘N', '⌘⇧P', '⌘J', 'F5']) {
+      assert.ok(!rows.includes(fake) && !new RegExp(`data-shortcut="${fake}"`).test(htmlSrc149),
+        `快捷键表不得列未实现项（${fake}）——只列真实存在的快捷键`);
+    }
+    assert.ok(/keydown/.test(appSrc149) && /e\.key === 'Escape'/.test(appSrc149), 'Esc 分层关闭/停止必须已实现');
+    assert.ok(/e\.metaKey \|\| e\.ctrlKey/.test(appSrc149), '⌘/Ctrl 必须跨平台（metaKey || ctrlKey）');
+    assert.ok(/e\.isComposing/.test(appSrc149), '输入法组合期必须忽略快捷键');
+    assert.ok(/e\.key === '\/'/.test(appSrc149), '⌘/ 必须打开快捷键表');
+  }
+
+  // —— ④ 右栏「本轮运行」六项与 P0 状态条同源（同一函数/同一数据源） ——
+  {
+    const rks = [...htmlSrc149.matchAll(/data-rk="([a-z]+)"/g)].map((m) => m[1]).sort();
+    assert.deepEqual(rks, ['cost', 'ctx', 'phase', 'tools', 'tps', 'ttft'].sort(),
+      `右栏必须有且只有六项本轮字段（phase/ttft/tps/ctx/tools/cost），实际：${rks.join(',') || '(无)'}`);
+    assert.ok(/id="runPanel"/.test(htmlSrc149) && /本轮运行/.test(htmlSrc149), '右栏「本轮运行」面板必须存在');
+    const st = { rawPhase: '执行工具 bash', aborted: false, ttftMs: 2400, tokensPerSec: 18.6, toolCalls: 7, contentChars: 120, contextUsed: 79000, contextTotal: 128000, contextApprox: false, cost: ' ≈¥0.0132', permissionMode: 'auto', permissionSource: 'explicit', modelName: 'deepseek-v4-flash', modelLabel: 'flash — 快速', turnModel: 'deepseek-v4-flash', presetName: '本地审计' };
+    const strip = P.runStripView(st, true);
+    const panel = P.runPanelView(st, true);
+    for (const k of ['phase', 'ttft', 'tps', 'ctx', 'tools', 'cost']) {
+      assert.equal(panel[k], strip[k], `右侧运行面板六项必须与状态条同源（${k}）（同一 runState / runStripView），实际 ${JSON.stringify(panel[k])} ≠ ${JSON.stringify(strip[k])}`);
+    }
+    assert.equal(panel.permission, 'auto', '右栏必须显示本轮生效权限');
+    assert.equal(panel.permissionSource, 'explicit', '右栏必须显示权限来源（explicit/preset/config/default）');
+    assert.equal(panel.model, 'deepseek-v4-flash', '右栏必须显示本轮用到的模型');
+    assert.equal(panel.preset, '本地审计', '右栏必须显示本轮预设');
+    assert.ok(/const base = runStripView\(st, isGenerating\);/.test(pure149),
+      '右侧运行面板六项必须与状态条同源（runPanelView 只调用 runStripView，不得另算一套）');
+    assert.ok(/renderRunPanel\(\);/.test(pure149), '状态条每次刷新必须同帧刷新右栏（同一数据源）');
+    assert.ok(/runState\.turnModel=String\(ev\.modelName\)/.test(appSrc149), '右栏模型必须取本轮 usage.modelName（不是当前选择的猜测）');
+    assert.ok(/id="rpStop"/.test(htmlSrc149) && /\$\('#rpStop'\)\.onclick = \(\) => stopTurnFromButton\(\);/.test(appSrc149),
+      '右栏「停止」必须走与状态条同一个停止出口 stopTurnFromButton');
+    assert.ok(/id="rpCompact"[^>]*hidden/.test(htmlSrc149), '没有 /compact 后端时「压缩上下文」入口必须默认隐藏');
+  }
+
+  // —— ⑤ 会话设置弹层：权限来源 + 模型 API id 副标题 ——
+  {
+    assert.ok(/id="sessSheet"/.test(htmlSrc149), '会话设置必须是独立弹层（#sessSheet）');
+    const sheet = htmlSrc149.slice(htmlSrc149.indexOf('id="sessSheet"'), htmlSrc149.indexOf('id="paletteMask"'));
+    for (const id of ['modelSel', 'presetSel', 'permSel']) {
+      assert.ok(new RegExp(`id="${id}"`).test(sheet), `模型/预设/权限必须在同一个会话设置弹层里（缺 #${id}）`);
+    }
+    assert.ok(/id="ssModelId"/.test(sheet) && /id="ssPermSrc"/.test(sheet), '弹层必须显示模型 API id 副标题与权限来源');
+    const md = P.modelDisplay({ name: 'deepseek-v4-flash', label: 'flash — 快速' });
+    assert.equal(md.label, 'flash — 快速', '模型必须显示服务端透出的 label');
+    assert.equal(md.subtitle, 'API id: deepseek-v4-flash', `模型必须显示 API id 副标题，实际：${md.subtitle}`);
+    const md2 = P.modelDisplay({ name: 'local-llama' });
+    assert.equal(md2.label, 'local-llama', '没有 label 时必须回退到模型 id（不编造）');
+    assert.equal(P.permissionDisplay('auto', 'explicit'), 'permission=auto（来源：explicit）', '权限必须显示 permission=值（来源：explicit/preset/config/default）');
+    assert.equal(P.permissionDisplay('readonly', 'preset'), 'permission=readonly（来源：preset）');
+    const eff = P.sessionEffectiveLine({ model: 'deepseek-v4-flash', modelLabel: 'flash — 快速', permission: 'auto', sourceLabel: '显式选择', preset: '无预设' });
+    assert.ok(eff.includes('本轮实际生效') && eff.includes('auto') && eff.includes('显式选择'), `弹层底部必须给「本轮实际生效」，实际：${eff}`);
+    assert.ok(/set\('#ssModelId', md\.subtitle\)/.test(appSrc149), '渲染必须使用 modelDisplay().subtitle（API id 副标题）');
+    assert.ok(/set\('#ssPermSrc', permissionDisplay\(mode, source\)\)/.test(appSrc149), '渲染必须使用 permissionDisplay(权限, 来源)');
+  }
+
+  // —— ⑥ 空态三步引导 + 示例任务只填不发送 ——
+  {
+    assert.ok(P.shouldShowEmpty(0, false) === true, '无消息且非生成中必须显示空态');
+    assert.equal(P.shouldShowEmpty(1, false), false, '有消息后空态必须消失');
+    assert.equal(P.shouldShowEmpty(0, true), false, '生成中不得显示空态（避免盖住流式输出）');
+    const steps = [...htmlSrc149.matchAll(/data-step="([a-z]+)"/g)].map((m) => m[1]);
+    assert.deepEqual(steps, ['model', 'workspace', 'input'], `空态必须三步：选模型 → 选工作空间 → 输入任务，实际：${steps.join(',')}`);
+    const examples = [...htmlSrc149.matchAll(/data-example="([^"]+)"/g)].map((m) => m[1]);
+    assert.ok(examples.length >= 2, `空态必须给 2–3 个示例任务，实际：${examples.length}`);
+    const fillSrc = appSrc149.slice(appSrc149.indexOf('function fillExampleTask('), appSrc149.indexOf('function renderEmptyState('));
+    assert.ok(fillSrc && !/\bsend\s*\(/.test(fillSrc), '示例任务只填入输入框，不得自动发送（避免误触发付费调用）');
+    const stubInput = { value: '', focused: false, dispersed: 0, dispatchEvent() { this.dispersed += 1; }, focus() { this.focused = true; }, setSelectionRange() {} };
+    const fill = new Function('input', 'Event', 'renderEmptyState', fillSrc + '\nreturn fillExampleTask;')(stubInput, class {}, () => {});
+    fill('跑一遍测试，修掉失败的那条');
+    assert.equal(stubInput.value, '跑一遍测试，修掉失败的那条', '点击示例必须把任务填进输入框');
+    assert.equal(stubInput.focused, true, '填入后光标必须在输入框');
+    assert.ok(stubInput.dispersed >= 1, '填入必须触发 input 事件（高度/空态状态同步）');
+  }
+
+  // —— ⑦ 设置搜索过滤（不匹配项带 hidden）+ 分组数 ——
+  {
+    const groups = [...htmlSrc149.matchAll(/data-group="([a-z]+)"/g)].map((m) => m[1]);
+    assert.equal(groups.length, 10, `设置分组数应为 10（模型与端点/运行与超时/权限与沙箱/外观/工作空间/调度/同步/记忆/MCP/技能），实际：${groups.length}`);
+    for (const g of ['model', 'runtime', 'permission', 'appearance']) {
+      assert.ok(groups.includes(g), `设置必须有「${g}」分组（按用户任务分组）`);
+    }
+    assert.ok(/id="cfgSearch"/.test(htmlSrc149), '设置顶部必须有搜索框');
+    assert.ok(P.matchSettingsQuery('沙箱模式 sandbox', '沙箱') === true, '搜索必须命中标题/关键字');
+    assert.equal(P.matchSettingsQuery('模型与 API Key', '沙箱'), false, '搜索不得命中无关字段');
+    assert.equal(P.matchSettingsQuery('任意字段', ''), true, '空搜索必须显示全部');
+    const mkRow = (text) => ({ hidden: false, classList: { toggled: null, toggle(cls, v) { this.toggled = [cls, v]; } } });
+    const rows = [{ el: mkRow('沙箱模式 sandbox'), text: '沙箱模式 sandbox' }, { el: mkRow('模型与 API Key'), text: '模型与 API Key' }];
+    const hits = P.applySettingsFilter(rows, '沙箱');
+    assert.equal(hits, 1, `「沙箱」应命中 1 项，实际：${hits}`);
+    assert.equal(rows[0].el.hidden, false, '命中项不得隐藏');
+    assert.equal(rows[1].el.hidden, true, '设置搜索后不匹配项必须带 hidden 属性');
+    P.applySettingsFilter(rows, '');
+    assert.equal(rows[1].el.hidden, false, '清空搜索后必须恢复全部字段');
+    assert.ok(/runSettingsSearch/.test(appSrc149) && /cfgSearch/.test(appSrc149), '搜索框必须接到 runSettingsSearch 过滤器');
+  }
+
+  // —— ⑧ 主题写 localStorage + 跟随系统 + 窄屏断点类名 ——
+  {
+    assert.equal(P.resolveTheme('system', true), 'dark', 'system 主题必须跟随 prefers-color-scheme（系统暗色→dark）');
+    assert.equal(P.resolveTheme('system', false), 'light', 'system 主题必须跟随 prefers-color-scheme（系统亮色→light）');
+    assert.equal(P.resolveTheme('light', true), 'light', '显式 light 必须优先于系统偏好');
+    assert.equal(P.resolveTheme('dark', false), 'dark', '显式 dark 必须优先于系统偏好');
+    const root = { value: null, setAttribute(k, v) { this.value = v; this.key = k; } };
+    const storage = { saved: null, setItem(k, v) { this.saved = k + '=' + v; } };
+    const r = P.applyThemePreference('light', { root, storage, systemPrefersDark: true });
+    assert.equal(r.theme, 'light', 'applyThemePreference 必须返回生效主题');
+    assert.equal(root.value, 'light', '主题必须写到 <html data-theme>');
+    assert.equal(storage.saved, 'mingdao-theme=light', '主题偏好必须写入 localStorage（mingdao-theme）');
+    assert.equal(P.storedThemePref({ getItem: () => 'dark' }), 'dark', '必须能读回已存偏好');
+    assert.equal(P.storedThemePref({ getItem: () => 'nonsense' }), 'system', '非法偏好回退 system（不锁死主题）');
+    assert.ok(/matchMedia\('\(prefers-color-scheme: dark\)'\)/.test(appSrc149), '主题必须咨询 prefers-color-scheme');
+    assert.ok(/mq\.addEventListener\('change'/.test(appSrc149), 'system 主题必须随系统明暗实时切换（监听 change）');
+    const c880 = P.layoutClassesFor(880), c1000 = P.layoutClassesFor(1000), c1280 = P.layoutClassesFor(1280);
+    assert.deepEqual(c880, { narrow: true, narrowRun: true }, '900px 以下必须收起侧栏（narrow=true）');
+    assert.deepEqual(c1000, { narrow: false, narrowRun: true }, '1180px 以下必须收起右栏（narrowRun=true）');
+    assert.deepEqual(c1280, { narrow: false, narrowRun: false }, '1180px 以上右栏默认展开');
+    assert.ok(/classList\.toggle\('narrow-side'/.test(appSrc149) && /classList\.toggle\('narrow-run'/.test(appSrc149),
+      '窄屏断点必须切换 body 类名（narrow-side / narrow-run）');
+    assert.ok(/@media \(max-width:1180px\)/.test(htmlSrc149) && /@media \(max-width:900px\)/.test(htmlSrc149), 'CSS 必须有 1180/900 两个断点');
+    assert.ok(/data-theme="light"/.test(htmlSrc149) && /prefers-reduced-motion/.test(htmlSrc149), '亮色 token 与 reduced-motion 必须存在');
+  }
+
+  // —— ⑨ 不回归：P0 三项仍在（状态条六字段 / 错误卡 / 内联确认） ——
+  {
+    assert.ok(/data-k="phase"/.test(htmlSrc149) && /data-k="cost"/.test(htmlSrc149), 'P0 运行状态条六字段不得被 P1 移走');
+    assert.ok(/\.err-card\{/.test(htmlSrc149) && /\.err-hint\{[^}]*white-space:pre-line/.test(htmlSrc149), 'P0 错误折叠卡不得回退');
+    assert.ok(/\.perm-card\{[^}]*border-left:3px solid var\(--warn\)/.test(htmlSrc149), 'P0 内联权限确认不得回退成遮罩');
+    assert.ok(!/\$\('#workStatus'\)/.test(appSrc149), '旧 #workStatus 仍不得复活');
+  }
+
+  ok('v0.6.19 §3.70 P1 界面：工具时间线聚合（前 3 步 + 失败步/失败高亮/长输出行数字节数/节点复用不跳位）+ ⌘K 命令面板（分组构建/过滤/↑↓/Enter/焦点恢复/无 /compact 不列）+ 快捷键表只列 7 项已实现键 + 右栏本轮运行六项与状态条同源（runPanelView→runStripView）+ 会话设置（模型 label/API id 副标题、permission=值（来源））+ 空态三步与示例只填不发 + 设置 10 分组与搜索 hidden + 明暗主题落 localStorage/跟随系统 + 900/1180 断点类名 + P0 三项不回归');
 }
 
 

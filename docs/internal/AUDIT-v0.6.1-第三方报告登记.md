@@ -3369,3 +3369,107 @@ Reduce --context-window, close other apps, or try q8 KV quantization.
 - **不改** `desktop/main.js` 的 `minWidth`（720/900 断点矛盾属 desktop 范围）。
 - 未改内核事件协议；`permissionSource` 只读 `resolveTurnPermission()` 的既有返回。
 - 未 tag、未改版本号、未 publish、未动官网。
+
+## 3.70 已补（v0.6.19 开发线：DESIGN-UI-v1 的 P1 八项——工具时间线 / ⌘K / 快捷键表 / 右栏本轮运行 / 会话设置 / 空态 / 设置分组搜索 / 明暗主题与窄屏断点）
+
+**来源**：`docs/DESIGN-UI-v1.md` §4.1/4.5/4.6/4.7/4.8/4.9/4.10 与 §3.3；版式参照
+`docs/design/ui-preview.html`（静态假数据，未改）。P0 三项（状态条 / 错误折叠卡 / 内联权限确认）
+与 `permissionSource` 已在 §3.68 落地，本节只做 P1，且**没有**改 `docs/design/ui-preview.html`。
+
+### 一、修了什么（八项逐条）
+
+1. **工具调用时间线卡片**（`app.js` / `index.html`）：同一轮工具调用聚合成**一张** `.toolcard`，
+   头部 `工具时间线 · N 步 · 总耗时 · K 个失败` + 整卡折叠；每步一行 `序号 · 状态图标 · 工具名 ·
+   参数摘要 · 耗时`，下方一行结果摘要；失败步 `li.tl-step.fail`（左侧 3px `--err` + 8% 红底 + `✖`）；
+   点击行展开完整参数（JSON）与输出，长输出默认折叠并显示**真实行数/字节数**（`TextEncoder` 计字节）。
+   默认只可见前 3 步 + **所有失败步**，其余收成「展开其余 K 步」。开始/完成复用同一个 DOM 节点
+   （`msg._toolTimeline` + `tl.steps.get(seq)`），不再"删掉开始卡、在消息末尾重建一张"。
+2. **`⌘K` / `Ctrl+K` 命令面板**（纯前端）：分组列出 会话 / 工作空间 / 模型 / 预设 / 权限 / 命令 / 设置；
+   打开时刷新一次 `/api/sessions` 与 `/api/workspaces`（不是轮询），模型来自 `/api/state.models`、
+   预设来自既有 `presetData`。↑↓/Home/End 选择、Enter 执行、Esc 关闭、焦点回到打开前元素；
+   `e.isComposing` 期间不响应。动作：新对话、切换会话、切换工作空间、新建工作空间（复用目录选择器）、
+   切换模型（`POST /api/config`）、切换预设（随下一轮发送）、切换权限（写 config + 随本轮发送）、
+   停止本轮、打开快捷键表、收起/展开右栏、切换明暗、打开设置（可深链到四个主要分组）、诊断路径。
+   **没有 `/compact` 就不列该项**（Web 端只有 CLI 的 `/compact`），不造新后端。
+3. **快捷键表**（`⌘/` / `Ctrl+/`）：只列**实际实现**的 7 项：`⌘K`、`⌘/`、`Esc`、`Enter`、
+   `Shift+Enter`、`⌘Enter`、权限确认 `y/n`。明确不列 `⌘N`（桌面 accelerator 未接）、`F5` 等。
+4. **右栏「本轮运行」**：宽屏（≥1180）默认展开并推开正文 300px；<1180 默认收起，顶栏「运行」chip
+   点开为覆盖式抽屉。字段：模型 label + `API id` + 来源、预设、权限 + 来源，以及**六项本轮数据**
+   （阶段/首帧/吞吐/上下文/工具步数/费用）；另有停止按钮与压缩入口（无后端时 hidden）。
+   六项与 P0 状态条**同源**：`renderRunPanel()` 只调用 `runPanelView()`，后者只调用
+   `runStripView(st, isGenerating)`、只读同一个 `runState`；状态条每次刷新（progress/usage/done）
+   同帧刷新右栏，禁止第二套计算。右缘只留一个抽屉：子 Agent / 任务 / 省钱仪表盘打开时运行面板
+   自动让位，它们关闭后恢复。
+5. **会话设置弹层**：模型 / 预设 / 权限三件套收进 `#sessSheet`（输入区只留一个 `⚙ 会话设置` 按钮，
+   按钮上直接印当前模型 label 与权限标签）。模型显示服务端 `/api/state.models` 透出的 `label`
+   与 `API id: <name>` 副标题（`label` 缺失时回退 id，不编造）；预设标"仅下一轮"；权限显示
+   `permission=auto（来源：explicit/preset/config/default）`；底部「本轮实际生效」一行由同一
+   `runState` 组装。原 `#modelSel`/`#presetSel`/`#permSel`/`#reasoningSel` 保留在弹层内，
+   `send()`/`init()` 仍按既有 id 读取——没有破坏 P0 与既有契约。
+6. **空态引导**：无消息且非生成中显示三步（选模型 → 选工作空间 → 输入任务），每步有完成状态；
+   缺模型时第①步直接给「选择模型…」；3 个示例任务点击**只填进输入框并聚焦，不发送**（不发请求）。
+7. **设置分组 + 搜索**：导航改为「模型与端点 / 运行与超时 / 权限与沙箱 / 外观 / 工作空间 /
+   调度队列 / 云同步与协作 / 长期记忆 / MCP 生态 / 技能库」10 组（四个主分组即任务要求项）；
+   顶部 `#cfgSearch` 按字段标题/说明/placeholder/`data-kw` 过滤，不匹配的 `.cfg-row`/
+   `.cfg-searchable`/`.cfg-hint` 带 `hidden`，命中项描边高亮，自动切到首个命中分组并显示 N 项匹配。
+8. **明暗主题 + 窄屏断点**：`<html data-theme>` 两套 token；偏好写 `localStorage['mingdao-theme']`
+   （`light|dark|system`），选 system 时 `matchMedia('(prefers-color-scheme: dark)')` 跟随并监听
+   `change`；顶栏 🌙/☀️ 一键切换。断点 `<1180` 切 `body.narrow-run`（右栏收起）、`<900` 切
+   `body.narrow-side`（隐藏次要顶栏项、图标轨收窄、空态留白收紧），断点判据与类名切换由
+   `layoutClassesFor(width)` 单一函数给出；补 `prefers-reduced-motion`。
+
+### 二、数据源怎么统一的（时间线 / 右栏）
+
+- **工具时间线**：`toolStepView(ev)` 是唯一的"一步"视图（参数摘要、状态图标/类名、耗时、结果摘要、
+  输出行数字节数、`liClass`）；DOM 只消费它。开始与完成都走 `timelineToolStart` / `timelineToolDone`，
+  同一 `seq` 命中 `tl.steps` 后 `Object.assign(step, toolStepView(ev, true))` 并只更新节点文本，
+  **不 remove/重建**。轨迹面板 `msg._traj` 仍按原逻辑更新（未另造第二套事实）。
+- **右栏本轮运行**：`runState`（P0 已有）是唯一快照；`runPanelView` 的第一行就是
+  `const base = runStripView(st, isGenerating)`，六项直接取 `base.phase/ttft/tps/ctx/tools/cost`；
+  模型取本轮 `usage.modelName`（`runState.turnModel`）+ `/api/state.models.label`，权限取
+  `runState.permissionMode/permissionSource`。右栏不自己算 TTFT/吞吐/上下文/费用，也不新增轮询。
+
+### 三、断言与变异
+
+- `test/smoke.js` **追加 §149**（接 §148；把 §148 尾部的 `process.exit(0)` 移回文件末尾一次，
+  否则新增节永不执行）：①时间线聚合/汇总/默认 3 步+失败步/`tl-step fail`/`bad`/`✖`/行数字节数/
+  节点复用结构；②命令面板分组构建、过滤、↑↓ 边界、切换模型命令真的执行、无 `/compact` 不列、
+  `⌘K` 全局键与 `aria-activedescendant`/焦点恢复；③快捷键表 7 项且不含 `⌘N` 等未实现项；
+  ④右栏六项与 `runStripView` 逐字段相等 + `runPanelView` 只调用它 + 停止同出口 + 压缩默认隐藏；
+  ⑤会话设置弹层三控件同层、模型 label/`API id:` 副标题、`permission=auto（来源：explicit）`、
+  底部生效行；⑥空态三步、示例数 ≥2、桩 input 点击只填入不发送；⑦设置 10 分组、
+  `沙箱` 命中 1 项、不匹配项 `hidden`、清空恢复；⑧主题落 `mingdao-theme`、system 跟随
+  `prefers-color-scheme`、880/1000/1280 三档断点类名、CSS 两条媒体查询；⑨P0 三项不回归。
+- **顺带修 §145 的负载敏感断言**（负责人要求）：原断言"11 秒回合日志里恰好 1 行进度"和
+  "slowMs>=5000"在并发/慢机下会把基线打红（表现为变异"逃逸"）。现改为：slowMs>=10000
+  （命令固定 sleep 11s，覆盖 5s/10s 两次心跳），进度行上限 = `ceil(slowMs/30000)`（30s 限频
+  的语义上限，随实测耗时增长）；去掉限频的变异（每 5s 一行）仍会超上限，不会松成永远不失败。
+- 新建 `test/mutate/batch38-ui-p1.mjs`：**14/14 全中**（不聚合时间线 / 右栏另算六项 /
+  `⌘K` 不响应 / 快捷键表塞 `⌘N` / 搜索不写 hidden / 主题不落盘 / 900 断点失效 / 失败高亮丢失 /
+  无后端也列 compact / 权限来源写死 default / 示例自动发送 / system 恒暗色 / 失败步被折叠 /
+  右栏停止不走同出口）。全量 `node test/mutate/run.mjs --allow-dirty` 在独立 worktree 从本批提交跑
+  （结果见提交说明/回复）。
+- `test/mutate/README.md` 计数行按**本提交树**的 `doc-lint` 实测值写：本批 +14；若并行 `batch37`
+  尚未在提交树里，则 292+14=**306**（本批按此提交）；batch37 后提交者再加 10 校正到 316。
+  `node scripts/doc-lint.mjs` 在含 batch37 的工作树里绿；提交树的计数另在临时 worktree 复核。
+
+### 四、边界与未做（如实）
+
+- **`/compact` 未做**：Web 端没有 `/api/compact`（只有 `src/cli.js` 的 `/compact`）。命令面板与右栏
+  都按"没有就隐藏"处理（`compactAvailable` 目前恒 false；HTML 的 `#rpCompact` 带 `hidden`），
+  **没有造新后端**。要真用需 P2 增端点或复用 chat 指令通道。
+- **诊断/日志只"给路径 + 复制"**：Web 端没有打开系统文件管理器的能力，`desktop/preload.cjs` 只暴露
+  目录选择器（且本轮不允许改 preload/主进程）。命令面板的「诊断与日志路径」弹窗显示
+  `<home>/logs/`、`web-server.log`、`config.json`、工作目录，并可复制；**没有** Finder 打开动作。
+- **窄屏只做了断点与类名**：900/1180 的 CSS/JS 断点、右栏抽屉、左轨收窄、次要顶栏项隐藏均已接，
+  但**没有**在真实 Electron 窗口逐档截图验证（本轮无浏览器自动化；`desktop/main.js` 的
+  `minWidth:900` 不在允许改动面）。"900px 无横向滚动/无裁切"仍建议发版前人工过一遍。
+- **亮色是 token 映射，不是全量视觉收口**：既有大量行内 `style` 与硬编码 rgba 仍在（P2 才统一），
+  亮色下个别旧组件对比度可能仍需调；新组件（时间线/面板/弹层）使用既有 token。
+- **未改桌面菜单 accelerator**：`⌘N` 仍未实现，因此快捷键表不列；`⌘K`/`⌘/`/`Esc` 是页面级
+  keydown，Electron 菜单未加同名项（避免与页面重复触发）。
+- 未改 `src/models.js`、`src/model-discovery.js`、`src/config.js`、`src/web/routes/domains/config.js`、
+  `test/model-names.js`、`test/mutate/batch37-*.mjs`、`docs/CONFIG.md`（并行执行者范围）。
+- 未新增轮询：右栏/时间线只消费既有 SSE（progress≈1s、usage、done）与 `/api/state`；命令面板
+  仅在打开时刷新一次列表。
+- 未 tag、未改版本号、未 publish、未动官网。

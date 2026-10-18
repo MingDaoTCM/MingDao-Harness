@@ -192,6 +192,12 @@ const runState = {
   detail: '',
   permissionSource: '',
   permissionMode: '',
+  // P1-4：右栏「本轮运行」的模型来源。turnModel 取本**轮** usage.modelName，
+  // modelName 是当前配置选择；模型名称与 label 都来自 /api/state.models（label 由服务端透出）。
+  modelName: '',
+  modelLabel: '',
+  turnModel: '',
+  presetName: '无预设',
 };
 let ctxLimit = 128000; // /api/state.contextBudget（上下文上限）
 let lastBudgetUsed = 0; // 上一回合 done.budget.used：生成中用"上一轮 used + 本轮字符估算"（诚实标 ≈）
@@ -225,79 +231,19 @@ function newAiMsg(){ const el=document.createElement('div'); el.className='msg-a
 function aiContent(msg){ const c=msg.querySelector('.content'); return c || (()=>{const d=document.createElement('div');d.className='content';msg.appendChild(d);return d;})(); }
 function addReasoning(msg){ const d=document.createElement('details'); d.className='reasoning'; d.innerHTML='<summary>思考过程</summary><div class="body"></div>'; msg.appendChild(d); return d.querySelector('.body'); }
 
-function addUser(text){ const el=document.createElement('div'); el.className='msg-user'; el.innerHTML='<div class="bubble">'+esc(text)+'</div>'; chatEl.appendChild(el); scrollBottom(); }
+function addUser(text){ const el=document.createElement('div'); el.className='msg-user'; el.innerHTML='<div class="bubble">'+esc(text)+'</div>'; chatEl.appendChild(el); renderEmptyState(); scrollBottom(); }
 
 const runningTools = new Map();
+// P1-1 工具时间线（v0.6.19 §3.70）：同一轮所有工具调用聚合成**一张**卡，节点复用不跳位。
+// 开始/完成只更新同一行（不再"删掉旧卡、在消息末尾重建一张"），结论顺序稳定；失败行红边高亮。
 function renderToolStartEvent(ev){
-  const card=document.createElement('div'); card.className='tool';
-  const ico = {'read':'📄','write':'✏️','edit':'✎','bash':'⚙','grep':'🔎','glob':'🔎','ls':'📁','task':'👥','skill':'🧩','todo':'☑','undo':'↩'}[ev.name]||'🔌';
-  const args = ev.name==='bash'? (ev.args&&ev.args.command):(ev.args&&(ev.args.path||ev.args.pattern||ev.args.name||''))||'';
-  card.innerHTML='<div class="head"><span class="ico">'+ico+'</span><span class="name">'+esc(ev.name)+'</span><span class="args">'+esc(args)+'</span><span class="st" style="animation:blink 1.2s infinite">执行中…</span></div>';
-  insertBeforeActiveMsg(card);
-  runningTools.set(ev.seq, card);
-  scrollBottom();
+  timelineToolStart(activeAiMsg, ev);
 }
 function renderToolEvent(ev){
-  const card=document.createElement('div'); card.className='tool';
-  const ico = {'read':'📄','write':'✏️','edit':'✎','bash':'⚙','grep':'🔎','glob':'🔎','ls':'📁','task':'👥','skill':'🧩','todo':'☑','undo':'↩'}[ev.name]||'🔌';
-  const args = ev.name==='bash'? (ev.args&&ev.args.command):(ev.args&&(ev.args.path||ev.args.pattern||ev.args.name||''))||'';
-  const r = ev.result||{};
-  const ok = ev.result===undefined || r.ok!==false;
-  card.innerHTML='<div class="head"><span class="ico">'+ico+'</span><span class="name">'+esc(ev.name)+'</span><span class="args">'+esc(args)+'</span><span class="st '+(ok?'ok':'bad')+'">'+(ev.result===undefined?'…':(ok?'✓':'✖'))+(ev.durationMs!=null?' '+ev.durationMs+'ms':'')+'</span></div>';
-  insertBeforeActiveMsg(card);
-  const bodyWrap=(el)=>{ if(el) card.appendChild(el); };
-  if(ev.name==='skill'){
-    // 技能内容只供模型使用，不整篇倒给用户：一行摘要
-    const out=String(r.output||''); const desc=(out.match(/^description:\s*(.+)$/m)||[])[1]||'';
-    const b=document.createElement('div'); b.className='body';
-    b.innerHTML='<span style="color:var(--dim)">已加载技能 <b>'+esc(ev.args&&ev.args.name||'')+'</b>'+(desc?'：'+esc(desc.slice(0,80)):'')+'（全文 '+out.length+' 字，供模型参考）</span>';
-    bodyWrap(b);
-  }else if(ev.name==='edit'&&r.diff){
-    const b=document.createElement('div'); b.className='body diff';
-    const a=(r.diff.before||'').split('\n'), bb=(r.diff.after||'').split('\n');
-    const n=Math.max(a.length,bb.length); const cap=40;
-    const line=(x)=>'<span class="l ctx"> '+esc(x??'')+'</span>';
-    const line2=(x)=>'<span class="l del">- '+esc(x)+'</span>';
-    const line3=(x)=>'<span class="l add">+ '+esc(x)+'</span>';
-    let prev='', full='';
-    for(let i=0;i<n;i++){
-      const html=(a[i]===bb[i])?line(a[i]??''):((a[i]!==undefined?line2(a[i]):'')+(bb[i]!==undefined?line3(bb[i]):''));
-      if(i<cap) prev+=html; full+=html;
-    }
-    if(n>cap){ b.appendChild(expandableBody(prev+'<div style="color:var(--faint)">…（共 '+n+' 行差异）</div>', full)); }
-    else b.innerHTML=prev;
-    bodyWrap(b);
-  }else if(ev.name==='write'&&r.ok){
-    const lines=String(ev.args&&ev.args.content||'').split('\n');
-    const b=document.createElement('div'); b.className='body';
-    b.innerHTML='<pre>'+esc(lines.slice(0,8).join('\n'))+(lines.length>8?'\n…（共 '+lines.length+' 行）':'')+'</pre>';
-    bodyWrap(b);
-  }else if(ev.name==='bash'&&r.ok){
-    const badge='<b style="color:'+(r.exitCode===0?'var(--accent)':'var(--err)')+'">'+(r.timedOut?'⏱ 超时':'exit '+r.exitCode)+'</b>';
-    const out=(r.stdout?'<pre>'+esc(String(r.stdout).slice(-1200))+'</pre>':'')+(r.stderr?'<pre style="color:#ff9d97">'+esc(String(r.stderr).slice(-600))+'</pre>':'');
-    const full=badge+out;
-    if((String(r.stdout||'').length+String(r.stderr||'').length)>1800) bodyWrap(expandableBody(badge+'<div style="color:var(--faint)">…（输出较长）</div>', full));
-    else { const b=document.createElement('div'); b.className='body'; b.innerHTML=full; bodyWrap(b); }
-  }else if(ev.name==='ls'&&r.ok){
-    const out=String(r.output||''); const lines=out.split('\n').filter((x)=>x.trim());
-    const names=lines.slice(0,3).map((x)=>x.trim()).join('、');
-    const prev='<span style="color:var(--dim)">列出 <b>'+lines.length+'</b> 项'+(names?'：'+esc(names):'')+(lines.length>3?' 等':'')+'</span>';
-    if(lines.length>3) bodyWrap(expandableBody(prev, '<pre>'+esc(out)+'</pre>'));
-    else { const b=document.createElement('div'); b.className='body'; b.innerHTML=prev; bodyWrap(b); }
-  }else if(r.output){
-    const out=String(r.output);
-    const max=400;
-    if(out.length>max){
-      bodyWrap(expandableBody('<pre>'+esc(out.slice(0,max))+'…</pre>', '<pre>'+esc(out)+'</pre>'));
-    }else{
-      const b=document.createElement('div'); b.className='body'; b.innerHTML='<pre>'+esc(out)+'</pre>'; bodyWrap(b);
-    }
-  }else if(r.error){
-    const b=document.createElement('div'); b.className='body'; b.innerHTML='<span style="color:var(--err)">'+esc(r.error)+'</span>'; bodyWrap(b);
-  }
-  msg.appendChild(card);
-  if(ev.name==='todo'&&ev.result&&ev.result.todos) renderTodos(ev.result.todos, msg);
-  scrollBottom();
+  timelineToolDone(activeAiMsg, ev);
+}
+function renderToolDeniedEvent(ev){
+  timelineToolDenied(activeAiMsg, ev);
 }
 function renderTodos(todos,msg){
   const ul=document.createElement('ul'); ul.className='todo';
@@ -543,7 +489,7 @@ async function send(){
   runState.rawPhase='发请求（等首帧）'; runState.phase='等首帧'; runState.aborted=false;
   runState.ttftMs=null; runState.tokensPerSec=null; runState.toolCalls=0; runState.contentChars=0;
   runState.contextApprox=true; runState.contextUsed=lastBudgetUsed; runState.contextTotal=ctxLimit;
-  runState.cost=''; runState.detail='';
+  runState.cost=''; runState.detail=''; runState.turnModel='';
   renderWorkStatus();
   let reason=null; let taskId=null;
   // 等待输出时的可见状态：脉动「正在思考…」（每轮生成重新显示）
@@ -623,11 +569,14 @@ async function send(){
       else if(ev.type==='turnEnd'){ curPhase='回合完成，进入下一回合'; showThink(); think.textContent='⏸ 第 '+msg._steps+' 回合完成（累计 '+(ev.toolSteps||0)+' 工具步）· 进入下一回合…'; renderWorkStatus(); }
       else if(ev.type==='toolStart'){ stepsCount+=1; curSteps+=1; curPhase=ev.name==='task'?'子 Agent 执行中':'执行工具中'; runState.rawPhase=curPhase; runState.phase='执行工具'; msg._steps=curSteps; msg._traj.push({kind:'tool', seq:ev.seq, name:ev.name, args:ev.args, t:Date.now(), done:false}); onActivity(); update(); renderToolStartEvent(ev); renderWorkStatus(); }
       else if(ev.type==='code'){ onActivity(); const pre=document.createElement('pre'); pre.innerHTML='<code>'+highlight(ev.code,ev.lang)+'</code>'; insertBeforeActiveMsg(pre); scroll(); }
-      else if(ev.type==='tool'){ onActivity(); update(); const pending=runningTools.get(ev.seq); if(pending){ pending.remove(); runningTools.delete(ev.seq); } const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.result=ev.result; tj.durationMs=ev.durationMs; tj.card=pending||null; } if(ev.name==='task'){ sessionSubs.push({seq:ev.seq, question:String(ev.args?.question||ev.args?.prompt||''), result:ev.result, durationMs:ev.durationMs, msg}); renderSubPanel(); } renderToolEvent(ev); }
-      else if(ev.type==='toolDenied'){ onActivity(); const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.denied=ev.reason||'未授权'; } const d=document.createElement('div'); d.className='errline'; d.textContent='✖ '+(ev.reason==='未授权'||!ev.reason?'未授权':ev.reason)+'：'+ev.name; msg.appendChild(d); scroll(); }
+      else if(ev.type==='tool'){ onActivity(); update(); runningTools.delete(ev.seq); const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.result=ev.result; tj.durationMs=ev.durationMs; } if(ev.name==='task'){ sessionSubs.push({seq:ev.seq, question:String(ev.args?.question||ev.args?.prompt||''), result:ev.result, durationMs:ev.durationMs, msg}); renderSubPanel(); } renderToolEvent(ev); }
+      else if(ev.type==='toolDenied'){ onActivity(); const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.denied=ev.reason||'未授权'; } renderToolDeniedEvent(ev); const d=document.createElement('div'); d.className='errline'; d.textContent='✖ '+(ev.reason==='未授权'||!ev.reason?'未授权':ev.reason)+'：'+ev.name; msg.appendChild(d); scroll(); }
       else if(ev.type==='banner'){ renderBanner(ev); }
       else if(ev.type==='ask'){ runState.rawPhase='等待权限确认'; runState.phase='执行工具'; update(); renderWorkStatus(); handleAskEvent(ev); }
-      else if(ev.type==='usage'){ onActivity(); runState.cost=String(ev.cost||''); renderWorkStatus(); const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; msg.insertBefore(u, content); scroll(); }
+      else if(ev.type==='usage'){ onActivity(); runState.cost=String(ev.cost||'');
+        // P1-4：本**轮**实际用到的模型（服务端 usage.modelName）——不是"当前选择"的猜测。
+        if(ev.modelName){ runState.turnModel=String(ev.modelName); const ce=modelsCache.find((m)=>m&&m.name===runState.turnModel); runState.modelLabel=ce?String(ce.label||ce.modelName||ce.name||''):runState.modelLabel; }
+        renderWorkStatus(); const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; msg.insertBefore(u, content); scroll(); }
       else if(ev.type==='error'){ console.log('[MingDao] error 事件：' + ev.message); onActivity();
         // §138 Bug C：服务端已按超时把这条确认作废（pendingAsk 清空），前端若继续挂着那个弹窗，
         // 用户再点「允许」只会拿到 409 且毫无提示，弹窗还会一个个叠起来（界面"像卡住"）。
@@ -809,8 +758,852 @@ function renderWorkStatus(){
       bg.onclick=()=>{ const tp=$('#tasksPanel'); tp.style.display = tp.style.display==='none'?'flex':'none'; if(tp.style.display==='flex'){ $('#trajPanel').style.display='none'; $('#subPanel').style.display='none'; updateTasksPanel(); } syncPanelLayout(); };
     } else { bg.style.display='none'; bg.onclick=null; }
   }
+  // P1-4：右栏「本轮运行」与状态条**同源**——renderRunPanel() 内部只走 runPanelView()→runStripView()，
+  // 没有第二套计算/第二个数据源。状态条每次刷新（progress/usage/done）右栏随同一帧更新。
+  renderRunPanel();
 }
-// 轨迹元行：任务完成后附在本轮消息顶部（步数/子代理数，点击打开轨迹面板）
+
+// ============================================================================
+// P1 纯函数（v0.6.19 §3.70；smoke §149 直接 eval 这段做行为断言，不碰 DOM）：
+// 工具时间线视图 / 本轮运行面板视图 / 命令面板过滤与构建 / 设置搜索 / 主题 / 断点 /
+// 会话设置文案。DOM 渲染在下面各自的小节里，只消费这些结果。
+// ============================================================================
+
+// —— 工具时间线：同一轮多个调用聚合成一张卡（默认前 3 步 + 失败步，整卡可折叠） ——
+const TOOL_TL_DEFAULT_VISIBLE = 3;
+const TOOL_OUTPUT_PREVIEW = 900;
+/** 工具参数的**一行**摘要（完整参数在展开区里用 JSON 显示）。 */
+function toolArgsSummary(name, args) {
+  const a = args || {};
+  if (name === 'bash') return String(a.command || '');
+  if (name === 'task') return String(a.question || a.prompt || a.description || '');
+  return String(a.path || a.pattern || a.name || a.query || a.url || a.file || '');
+}
+/** 工具结果的一行摘要（不是正文；正文在展开区）。 */
+function toolResultSummary(ev) {
+  if (!ev || ev.result === undefined) return '执行中…';
+  const r = ev.result || {};
+  if (r.ok === false) return r.error ? String(r.error).split('\n')[0] : '失败';
+  if (ev.name === 'bash') return r.timedOut ? '超时' : 'exit ' + (r.exitCode != null ? r.exitCode : 0);
+  if (ev.name === 'skill') {
+    const m = String(r.output || '').match(/^description:\s*(.+)$/m);
+    return m ? m[1].slice(0, 100) : '已加载技能';
+  }
+  if (ev.name === 'write') return r.bytes != null ? r.bytes + ' 字节' : '已写入';
+  if (ev.name === 'edit') return '已修改';
+  if (ev.name === 'read') return r.lines != null ? r.lines + ' 行' : '读取完成';
+  if (ev.name === 'todo') return '更新任务清单';
+  const out = String(r.output || r.stdout || r.stderr || '');
+  return out.split('\n')[0].slice(0, 120);
+}
+/** 工具输出的完整文本（展开区用）。 */
+function toolOutputText(ev) {
+  const r = (ev && ev.result) || {};
+  if (ev && ev.name === 'skill') return String(r.output || '');
+  if (r.diff) {
+    const before = String(r.diff.before || '').split('\n');
+    const after = String(r.diff.after || '').split('\n');
+    const n = Math.max(before.length, after.length);
+    const out = [];
+    for (let i = 0; i < n; i++) {
+      if (before[i] === after[i]) out.push(' ' + (before[i] || ''));
+      else {
+        if (before[i] !== undefined) out.push('- ' + before[i]);
+        if (after[i] !== undefined) out.push('+ ' + after[i]);
+      }
+    }
+    return out.join('\n');
+  }
+  if (ev && ev.name === 'bash') return [r.stdout, r.stderr].filter(Boolean).join('\n') || ('exit ' + (r.exitCode != null ? r.exitCode : 0));
+  if (r.output != null) return String(r.output);
+  if (r.error != null) return String(r.error);
+  return ev && ev.result !== undefined ? JSON.stringify(r, null, 2) : '';
+}
+/** 长输出折叠判据：给出完整文本、预览、行数与字节数（用户要知道被折了多少）。 */
+function toolOutputStats(text, limit) {
+  const full = String(text == null ? '' : text);
+  const max = Number(limit) || TOOL_OUTPUT_PREVIEW;
+  const lines = full === '' ? 0 : full.split('\n').length;
+  let bytes = full.length;
+  try { bytes = new TextEncoder().encode(full).length; } catch { bytes = full.length; }
+  const truncated = full.length > max || lines > 40;
+  const preview = !truncated ? full : (full.length > max ? full.slice(0, max) : full.split('\n').slice(0, 40).join('\n'));
+  return { full, preview, lines, bytes, truncated };
+}
+/** 单步视图（失败高亮类名 / 状态图标 / 一行摘要 / 完整参数与输出）。 */
+function toolStepView(ev, done) {
+  const isDone = done !== undefined ? Boolean(done) : ev.result !== undefined || ev.denied;
+  const failed = Boolean(ev.denied) || (ev.result !== undefined && ev.result && ev.result.ok === false);
+  const out = toolOutputStats(toolOutputText(ev));
+  return {
+    seq: ev.seq,
+    name: String(ev.name || 'tool'),
+    args: toolArgsSummary(ev.name, ev.args),
+    argsJson: JSON.stringify(ev.args || {}, null, 2),
+    durationMs: ev.durationMs != null ? Number(ev.durationMs) : null,
+    dur: ev.durationMs != null ? fmtToolDur(ev.durationMs) : (isDone ? '—' : '执行中…'),
+    done: isDone,
+    failed,
+    stIcon: !isDone ? '…' : failed ? '✖' : '✓',
+    stCls: !isDone ? '' : failed ? 'bad' : 'ok',
+    result: ev.denied ? String(ev.denied || '未授权') : toolResultSummary(ev),
+    output: out,
+    liClass: 'tl-step' + (failed ? ' fail' : ''),
+  };
+}
+function fmtToolDur(ms) {
+  const n = Number(ms) || 0;
+  return n < 1000 ? n + 'ms' : (n / 1000).toFixed(1) + 's';
+}
+/** 时间线汇总：步数 / 失败数 / 总耗时 / 头行文案。 */
+function toolTimelineSummary(items) {
+  const list = items || [];
+  const failed = list.filter((s) => s.failed).length;
+  const totalMs = list.reduce((a, s) => a + (Number(s.durationMs) || 0), 0);
+  const detail = list.length + ' 步' + (failed ? ' · ' + failed + ' 个失败' : '');
+  return {
+    count: list.length,
+    failed,
+    totalMs,
+    countText: detail,
+    sumText: totalMs ? fmtToolDur(totalMs) : '',
+  };
+}
+/** 默认可见步：前 3 步 + 所有失败步（失败步免展开可见）。 */
+function toolTimelineVisibility(items, expanded) {
+  const list = items || [];
+  if (expanded) return list.map((_, i) => i);
+  const keep = new Set();
+  for (let i = 0; i < Math.min(TOOL_TL_DEFAULT_VISIBLE, list.length); i++) keep.add(i);
+  list.forEach((s, i) => { if (s.failed) keep.add(i); });
+  return [...keep].sort((a, b) => a - b);
+}
+
+// —— 右侧「本轮运行」：六项字段与状态条同源（都从 runStripView 派生） ——
+function runPanelView(st, isGenerating) {
+  const base = runStripView(st, isGenerating);
+  return {
+    phase: base.phase,
+    ttft: base.ttft,
+    tps: base.tps,
+    ctx: base.ctx,
+    tools: base.tools,
+    cost: base.cost,
+    model: st.turnModel || st.modelName || '—',
+    modelLabel: st.modelLabel || '',
+    modelSource: '设置 › 模型与密钥',
+    preset: st.presetName || '无预设',
+    permission: st.permissionMode || 'ask',
+    permissionSource: st.permissionSource || 'default',
+    permissionSourceLabel: permissionSourceLabel(st.permissionSource),
+  };
+}
+
+// —— 命令面板：构建 / 过滤 / 键盘选择（纯函数；执行动作由调用方注入） ——
+function paletteFilter(list, q) {
+  const terms = String(q == null ? '' : q).trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return (list || []).slice();
+  return (list || []).filter((c) => {
+    const hay = [c.group, c.label, c.hint, c.scope, c.keywords].join(' ').toLowerCase();
+    return terms.every((t) => hay.includes(t));
+  });
+}
+function paletteNext(key, index, length) {
+  const n = Number(length) || 0;
+  if (!n) return 0;
+  if (key === 'ArrowDown') return Math.min(Number(index) + 1, n - 1);
+  if (key === 'ArrowUp') return Math.max(Number(index) - 1, 0);
+  if (key === 'Home') return 0;
+  if (key === 'End') return n - 1;
+  return Number(index) || 0;
+}
+/** 构建命令列表。compactAvailable=false（Web 端当前没有 /api/compact）时**不列** /compact。 */
+function buildPaletteCommands(src, act) {
+  const s = src || {};
+  const a = act || {};
+  const out = [];
+  const add = (group, label, extra) => out.push(Object.assign({ group, label, hint: '', scope: '', keywords: '', run: null }, extra || {}));
+  add('会话', '新对话', { keywords: 'new chat 新会话', run: a.newChat });
+  for (const sess of s.sessions || []) {
+    add('会话', String(sess.label || sess.file), { hint: '切换会话', keywords: String(sess.file || ''), run: () => a.switchSession && a.switchSession(sess.file) });
+  }
+  for (const w of s.workspaces || []) {
+    add('工作空间', String(w.name || w), { hint: w.name === s.currentWorkspace ? '当前' : '切换', keywords: String(w.dir || ''), run: () => a.switchWorkspace && a.switchWorkspace(w.name || w) });
+  }
+  add('工作空间', '选择目录 / 新建工作空间…', { hint: '目录选择器', keywords: '新建 workspace add', run: a.newWorkspace });
+  for (const m of s.models || []) {
+    add('模型', String(m.name || m), { hint: '切换模型', scope: '全局', keywords: [m.label, m.providerLabel].filter(Boolean).join(' '), run: () => a.setModel && a.setModel(m.name || m) });
+  }
+  add('预设', '无预设', { hint: '恢复默认', scope: '本轮', keywords: 'none preset', run: () => a.setPreset && a.setPreset('') });
+  for (const p of s.presets || []) {
+    add('预设', String(p.label || p.name), { hint: p.permission ? '声明权限 ' + p.permission : '切换预设', scope: '本轮', keywords: String(p.description || ''), run: () => a.setPreset && a.setPreset(p.name) });
+  }
+  const perms = [['ask', '询问（逐次确认）'], ['auto', '自动（直接执行）'], ['readonly', '只读（禁止修改/执行）']];
+  for (const [value, label] of perms) {
+    add('权限', label, { hint: '切换权限档', scope: '全局+本轮', keywords: 'permission ' + value, run: () => a.setPermission && a.setPermission(value) });
+  }
+  add('命令', '停止本轮', { hint: 'Esc', keywords: 'stop abort 停止', run: a.stop });
+  add('命令', '快捷键表', { hint: '⌘/', keywords: 'keyboard shortcut', run: a.openShortcuts });
+  add('命令', '收起 / 展开本轮运行面板', { hint: '右栏', keywords: 'run panel 运行面板', run: a.toggleRunPanel });
+  add('命令', '切换明暗主题', { hint: '主题', keywords: 'theme dark light 明暗', run: a.toggleTheme });
+  add('命令', '诊断与日志路径', { hint: '排障', keywords: 'diagnostics logs 日志 诊断', run: a.openDiagnostics });
+  // 诚实边界：Web 端没有 /api/compact（只有 CLI 的 /compact）——没有就隐藏，不造新后端。
+  if (s.compactAvailable) add('命令', '压缩上下文（/compact）', { hint: '压缩', keywords: 'compact 压缩 上下文', run: a.compact });
+  const settings = [['模型与端点', 'model'], ['运行与超时', 'runtime'], ['权限与沙箱', 'permissions'], ['外观', 'appearance']];
+  for (const [label, panel] of settings) {
+    add('设置', label, { hint: '打开设置', scope: '设置', keywords: 'settings 设置 ' + panel, run: () => a.openSettings && a.openSettings(panel) });
+  }
+  return out;
+}
+function paletteItemHtml(cmd) {
+  const esc1 = (x) => String(x == null ? '' : x).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  return '<span class="label"><b>' + esc1(cmd.label) + '</b></span>'
+    + (cmd.scope ? '<span class="scope">' + esc1(cmd.scope) + '</span>' : '')
+    + (cmd.hint ? '<span class="hint">' + esc1(cmd.hint) + '</span>' : '');
+}
+
+// —— 会话设置：模型 label + API id 副标题 / 权限生效值与来源 ——
+function modelDisplay(m) {
+  const name = String((m && m.name) || m || '');
+  const label = String((m && m.label) || name);
+  return { name, label, subtitle: 'API id: ' + name };
+}
+function permissionDisplay(mode, source) {
+  return 'permission=' + String(mode || 'ask') + '（来源：' + String(source || 'default') + '）';
+}
+function sessionEffectiveLine(v) {
+  const x = v || {};
+  return '本轮实际生效：' + (x.modelLabel || x.model || '—') + ' · 权限 ' + (x.permission || 'ask')
+    + '（来源：' + (x.sourceLabel || 'default') + '） · 预设 ' + (x.preset || '无预设');
+}
+
+// —— 设置搜索：按标题 / 说明 / placeholder / data-kw 过滤；不匹配项必须带 hidden ——
+function matchSettingsQuery(text, q) {
+  const terms = String(q == null ? '' : q).trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return true;
+  const hay = String(text == null ? '' : text).toLowerCase();
+  return terms.every((t) => hay.includes(t));
+}
+function settingsRowSearchText(el) {
+  if (!el) return '';
+  const parts = [el.textContent || '', el.getAttribute ? el.getAttribute('data-kw') || '' : '', el.getAttribute ? el.getAttribute('title') || '' : ''];
+  if (el.querySelectorAll) {
+    el.querySelectorAll('input,select,textarea,button').forEach((n) => {
+      parts.push(n.placeholder || '', n.title || '', n.textContent || '');
+    });
+  }
+  return parts.join(' ').toLowerCase();
+}
+function applySettingsFilter(rows, q) {
+  const searching = String(q == null ? '' : q).trim().length > 0;
+  let hits = 0;
+  for (const row of rows || []) {
+    const el = row && row.el ? row.el : row;
+    if (!el) continue;
+    const text = row && row.text != null ? row.text : settingsRowSearchText(el);
+    const ok = !searching || matchSettingsQuery(text, q);
+    el.hidden = searching ? !ok : false;
+    if (el.classList) el.classList.toggle('search-hit', searching && ok);
+    if (searching && ok) hits += 1;
+  }
+  return hits;
+}
+
+// —— 空态：无消息且非生成中才显示；示例任务只填入输入框，不发送 ——
+function shouldShowEmpty(chatChildCount, isGenerating) {
+  return Number(chatChildCount) === 0 && !isGenerating;
+}
+
+// —— 主题：显式偏好优先；未显式选择时跟随系统 prefers-color-scheme ——
+const THEME_KEY = 'mingdao-theme';
+function resolveTheme(pref, systemPrefersDark) {
+  if (pref === 'light' || pref === 'dark') return pref;
+  return systemPrefersDark ? 'dark' : 'light';
+}
+function storedThemePref(storage) {
+  try {
+    const v = storage && storage.getItem ? storage.getItem(THEME_KEY) : null;
+    return v === 'light' || v === 'dark' || v === 'system' ? v : 'system';
+  } catch { return 'system'; }
+}
+function applyThemePreference(pref, deps) {
+  const p = pref === 'light' || pref === 'dark' ? pref : 'system';
+  const theme = resolveTheme(p, Boolean(deps && deps.systemPrefersDark));
+  if (deps && deps.root) deps.root.setAttribute('data-theme', theme);
+  if (deps && deps.storage) {
+    try { deps.storage.setItem(THEME_KEY, p); } catch { /* 隐私模式/配额满：不阻断界面 */ }
+  }
+  return { pref: p, theme };
+}
+
+// —— 窄屏断点：<900 侧栏收起；<1180 右栏收起（同一判据供 initResponsive 与断言使用） ——
+function layoutClassesFor(width) {
+  const w = Number(width) || 0;
+  return { narrow: w < 900, narrowRun: w < 1180 };
+}
+
+// ============================================================================
+// P1 DOM 接线（v0.6.19 §3.70）：主题 / 断点 / 工具时间线 / 右栏 / 命令面板 /
+// 快捷键表 / 会话设置 / 空态 / 设置搜索 / 诊断。全部消费上面纯函数的结果。
+// ============================================================================
+let sessionsCache = [];
+let workspacesCache = [];
+let currentWorkspaceName = '';
+let modelsCache = [];
+let homeDir = '';
+let workingDirCache = '';
+let compactAvailable = false; // Web 端当前没有 /api/compact；为 true 时才显示压缩入口
+let runPanelOpen = false;
+let responsiveInitialized = false;
+
+// —— 主题：偏好写 localStorage；显式 light/dark 优先，'system' 跟随系统并实时响应 ——
+function themeSystemPrefersDark() {
+  try { return window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)').matches : false; } catch { return false; }
+}
+function updateThemeButton(theme) {
+  const btn = $('#themeBtn');
+  if (btn) {
+    btn.textContent = theme === 'dark' ? '🌙' : '☀️';
+    btn.setAttribute('aria-label', theme === 'dark' ? '当前暗色，切换为亮色' : '当前亮色，切换为暗色');
+  }
+}
+function setThemePreference(pref) {
+  const r = applyThemePreference(pref, { root: document.documentElement, storage: window.localStorage, systemPrefersDark: themeSystemPrefersDark() });
+  updateThemeButton(r.theme);
+  const sel = $('#themeSel'); if (sel) sel.value = r.pref;
+  return r;
+}
+function initTheme() {
+  setThemePreference(storedThemePref(window.localStorage));
+  try {
+    const mq = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+    if (mq) {
+      const onSystem = () => { if (storedThemePref(window.localStorage) === 'system') setThemePreference('system'); };
+      if (mq.addEventListener) mq.addEventListener('change', onSystem);
+      else if (mq.addListener) mq.addListener(onSystem);
+    }
+  } catch { /* 老浏览器没有 matchMedia：保持当前主题 */ }
+  const btn = $('#themeBtn');
+  if (btn) btn.onclick = () => {
+    const cur = document.documentElement.getAttribute('data-theme');
+    setThemePreference(cur === 'dark' ? 'light' : 'dark');
+  };
+  const sel = $('#themeSel');
+  if (sel) sel.onchange = () => setThemePreference(sel.value);
+}
+initTheme();
+
+// —— 右栏「本轮运行」：<1180 收起为抽屉；宽屏默认展开；不做任何新轮询 ——
+function syncRunPanel() {
+  const el = $('#runPanel'); if (!el) return;
+  // 右边缘只留一个抽屉：子 Agent / 任务 / 省钱仪表盘打开时先让运行面板让位
+  // （syncPanelLayout 统一算，避免"两个面板各写一份互斥逻辑"）。
+  syncPanelLayout();
+  const chip = $('#runChip'); if (chip) chip.setAttribute('aria-expanded', runPanelOpen ? 'true' : 'false');
+  const col = $('#rpCollapse'); if (col) col.textContent = '收起';
+}
+function setRunPanel(open) { runPanelOpen = Boolean(open); syncRunPanel(); }
+function toggleRunPanel() { setRunPanel(!runPanelOpen); }
+function applyResponsiveLayout(width) {
+  const w = width == null ? (Number(window.innerWidth) || 0) : Number(width) || 0;
+  const cls = layoutClassesFor(w);
+  document.body.classList.toggle('narrow-side', cls.narrow);
+  document.body.classList.toggle('narrow-run', cls.narrowRun);
+  syncRunPanel();
+}
+function initResponsive() {
+  if (!responsiveInitialized) {
+    runPanelOpen = !layoutClassesFor(window.innerWidth || 0).narrowRun;
+    responsiveInitialized = true;
+  }
+  applyResponsiveLayout();
+  window.addEventListener('resize', () => applyResponsiveLayout());
+  const chip = $('#runChip'); if (chip) chip.onclick = toggleRunPanel;
+  const col = $('#rpCollapse'); if (col) col.onclick = () => setRunPanel(false);
+}
+initResponsive();
+
+// —— 工具时间线 DOM：一张卡 + 可复用行（开始/完成不换节点） ——
+function toolStepNode(step) {
+  const li = document.createElement('li'); li.className = step.liClass;
+  const row = document.createElement('button'); row.type = 'button'; row.className = 'tl-row'; row.setAttribute('aria-expanded', 'false');
+  const no = document.createElement('span'); no.className = 'tl-no'; no.textContent = '0';
+  const st = document.createElement('span'); st.className = 'tl-st ' + (step.stCls || ''); st.textContent = step.stIcon;
+  const tool = document.createElement('span'); tool.className = 'tl-tool'; tool.textContent = step.name;
+  const args = document.createElement('span'); args.className = 'tl-args'; args.textContent = step.args;
+  const dur = document.createElement('span'); dur.className = 'tl-dur'; dur.textContent = step.dur;
+  const tri = document.createElement('span'); tri.className = 'tl-tri'; tri.setAttribute('aria-hidden', 'true');
+  [no, st, tool, args, dur, tri].forEach((n) => row.appendChild(n));
+  const res = document.createElement('div'); res.className = 'tl-res'; res.textContent = step.result;
+  const out = document.createElement('div'); out.className = 'tl-out'; out.hidden = true;
+  const argsFull = document.createElement('div'); argsFull.className = 'tl-args-full';
+  const meta = document.createElement('div'); meta.className = 'tl-out-meta';
+  const pre = document.createElement('pre');
+  const more = document.createElement('button'); more.type = 'button'; more.className = 'tl-out-more'; more.textContent = '展开全文';
+  out.appendChild(argsFull); out.appendChild(meta); out.appendChild(pre); out.appendChild(more);
+  li.appendChild(row); li.appendChild(res); li.appendChild(out);
+  row.onclick = () => {
+    const open = out.hidden;
+    out.hidden = !open;
+    li.classList.toggle('open', open);
+    row.setAttribute('aria-expanded', String(open));
+  };
+  const entry = { li, row, no, st, tool, args, dur, res, argsFull, meta, pre, more, step, fullOpen: false };
+  more.onclick = () => { pre.textContent = step.output.full; more.hidden = true; entry.fullOpen = true; };
+  return entry;
+}
+function paintToolStep(entry, step) {
+  if (!entry) return;
+  entry.step = step;
+  entry.li.className = step.liClass;
+  entry.st.className = 'tl-st ' + (step.stCls || '');
+  entry.st.textContent = step.stIcon;
+  entry.tool.textContent = step.name;
+  entry.args.textContent = step.args || '';
+  entry.dur.textContent = step.dur || '';
+  entry.res.textContent = step.result || '';
+  entry.argsFull.textContent = '参数：' + step.argsJson;
+  entry.meta.textContent = step.output.truncated
+    ? '共 ' + step.output.lines + ' 行 · ' + step.output.bytes + ' 字节（已折叠，点下方展开全文）'
+    : step.output.lines + ' 行 · ' + step.output.bytes + ' 字节';
+  if (!entry.fullOpen) {
+    entry.pre.textContent = step.output.preview;
+    entry.more.hidden = !step.output.truncated;
+  }
+}
+function ensureToolTimeline(msg) {
+  if (!msg) return null;
+  if (msg._toolTimeline) return msg._toolTimeline;
+  const card = document.createElement('div'); card.className = 'toolcard';
+  const head = document.createElement('div'); head.className = 'toolcard-head';
+  const ico = document.createElement('span'); ico.textContent = '🧭'; ico.setAttribute('aria-hidden', 'true');
+  const title = document.createElement('b'); title.textContent = '工具时间线';
+  const count = document.createElement('span'); count.className = 'tl-count'; count.textContent = '0 步';
+  const sum = document.createElement('span'); sum.className = 'tl-sum';
+  const toggle = document.createElement('button'); toggle.type = 'button'; toggle.className = 'tl-toggle'; toggle.setAttribute('aria-expanded', 'true'); toggle.textContent = '收起';
+  [ico, title, count, sum, toggle].forEach((n) => head.appendChild(n));
+  const list = document.createElement('ol'); list.className = 'tl-steps';
+  const more = document.createElement('button'); more.type = 'button'; more.className = 'tl-more'; more.hidden = true;
+  card.appendChild(head); card.appendChild(list); card.appendChild(more);
+  const tl = { card, head, count, sum, toggle, list, more, items: [], steps: new Map(), entries: new Map(), expanded: false };
+  toggle.onclick = () => {
+    const collapsed = card.classList.toggle('collapsed');
+    toggle.setAttribute('aria-expanded', String(!collapsed));
+    toggle.textContent = collapsed ? '展开' : '收起';
+  };
+  more.onclick = () => { tl.expanded = true; refreshToolTimeline(tl); };
+  msg._toolTimeline = tl;
+  if (msg.parentNode) msg.parentNode.insertBefore(card, msg);
+  else chatEl.appendChild(card);
+  return tl;
+}
+function refreshToolTimeline(tl) {
+  if (!tl) return;
+  const sum = toolTimelineSummary(tl.items);
+  tl.count.textContent = sum.countText;
+  tl.sum.textContent = sum.sumText;
+  const visible = new Set(toolTimelineVisibility(tl.items, tl.expanded));
+  tl.items.forEach((s, i) => {
+    const entry = tl.entries.get(s.seq);
+    if (entry) {
+      paintToolStep(entry, s);
+      entry.no.textContent = String(i + 1);
+      entry.li.hidden = !visible.has(i);
+    }
+  });
+  const hidden = tl.items.length - visible.size;
+  tl.more.hidden = hidden <= 0;
+  tl.more.textContent = '展开其余 ' + hidden + ' 步';
+  tl.card.classList.toggle('has-fail', sum.failed > 0);
+}
+function timelineToolStart(msg, ev) {
+  const target = msg || activeAiMsg;
+  if (!target) return;
+  const tl = ensureToolTimeline(target); if (!tl) return;
+  const step = toolStepView(ev, false);
+  const entry = toolStepNode(step);
+  tl.items.push(step); tl.steps.set(ev.seq, step); tl.entries.set(ev.seq, entry);
+  tl.list.appendChild(entry.li);
+  refreshToolTimeline(tl);
+  scrollBottom();
+}
+function timelineToolDone(msg, ev) {
+  const target = msg || activeAiMsg;
+  if (!target) return;
+  const tl = ensureToolTimeline(target); if (!tl) return;
+  let step = tl.steps.get(ev.seq);
+  if (!step) {
+    step = toolStepView(ev, true);
+    const entry = toolStepNode(step);
+    tl.items.push(step); tl.steps.set(ev.seq, step); tl.entries.set(ev.seq, entry);
+    tl.list.appendChild(entry.li);
+  } else {
+    Object.assign(step, toolStepView(ev, true));
+  }
+  refreshToolTimeline(tl);
+  scrollBottom();
+}
+function timelineToolDenied(msg, ev) {
+  const target = msg || activeAiMsg;
+  if (!target) return;
+  const tl = ensureToolTimeline(target); if (!tl) return;
+  const fake = { seq: ev.seq, name: ev.name, args: ev.args, denied: ev.reason || '未授权', result: { ok: false, error: ev.reason || '未授权' } };
+  const step = tl.steps.get(ev.seq);
+  if (step) Object.assign(step, toolStepView(fake, true));
+  else {
+    const s = toolStepView(fake, true); const entry = toolStepNode(s);
+    tl.items.push(s); tl.steps.set(ev.seq, s); tl.entries.set(ev.seq, entry); tl.list.appendChild(entry.li);
+  }
+  refreshToolTimeline(tl);
+}
+
+// —— 右栏渲染（六项 + 模型/权限来源；每次随状态条同一帧刷新） ——
+function renderRunPanel() {
+  const el = $('#runPanel'); if (!el) return;
+  const v = runPanelView(runState, generating);
+  const set = (id, text) => { const n = $(id); if (n) n.textContent = text; };
+  set('#rpPhase', v.phase);
+  set('#rpTtft', v.ttft);
+  set('#rpTps', v.tps);
+  set('#rpCtx', v.ctx);
+  set('#rpTools', v.tools);
+  set('#rpCost', v.cost);
+  set('#rpModel', v.modelLabel || v.model);
+  set('#rpModelId', 'API id: ' + v.model);
+  set('#rpModelSrc', '来源：' + v.modelSource);
+  set('#rpPreset', v.preset);
+  set('#rpPerm', v.permission);
+  set('#rpPermSrc', '来源：' + v.permissionSource + '（' + v.permissionSourceLabel + '）');
+  const total = Number(runState.contextTotal) || 0;
+  const used = Math.max(0, Number(runState.contextUsed) || 0);
+  const pct = total ? Math.min(100, Math.round((used / total) * 100)) : 0;
+  const bar = $('#rpCtxBar'); if (bar) bar.style.width = pct + '%';
+  const time = $('#rpTime');
+  if (time) time.textContent = generating && curWorkT0 ? Math.max(0, Math.round((Date.now() - curWorkT0) / 1000)) + 's' : '—';
+  const stop = $('#rpStop');
+  if (stop) { stop.disabled = !generating || stopping; stop.textContent = stopping ? '■ 停止中…' : '■ 停止'; }
+  const compact = $('#rpCompact');
+  if (compact) compact.hidden = !compactAvailable; // 没有 /api/compact 就不显示，不造后端
+  const foot = $('#rpFootNote');
+  if (foot) foot.textContent = compactAvailable ? '停止与压缩：与状态条同一条停止出口' : '停止：与状态条同一条停止出口（Web 端无 /compact）';
+}
+$('#rpStop').onclick = () => stopTurnFromButton();
+$('#rpCompact').onclick = () => renderBanner({ text: '⚠ Web 端没有 /compact 端点（只有 CLI 有），本入口未启用。', warn: true });
+
+// —— 会话设置弹层：模型 / 预设 / 权限（生效值 + 来源） ——
+function permissionModeLabel(mode) {
+  return ({ ask: '询问', auto: '自动', readonly: '只读' })[String(mode || '')] || String(mode || '—');
+}
+function currentModelEntry() {
+  const name = (($('#modelSel') && $('#modelSel').value) || runState.modelName || '').trim();
+  const found = modelsCache.find((m) => m && m.name === name);
+  return found || { name, label: runState.modelLabel || name };
+}
+function renderSessionSettings() {
+  const md = modelDisplay(currentModelEntry());
+  const set = (id, text) => { const n = $(id); if (n) n.textContent = text; };
+  set('#ssModelLabel', md.label);
+  set('#ssModelId', md.subtitle);
+  set('#ssModelSrc', '来源：设置 › 模型与密钥 · 写入 config.json，下一轮生效');
+  const permSel = $('#permSel');
+  const mode = runState.permissionMode || (permSel && permSel.value) || 'ask';
+  const source = runState.permissionSource || 'default';
+  set('#ssPermSrc', permissionDisplay(mode, source));
+  document.querySelectorAll('#ssPermSeg [data-perm]').forEach((b) => b.classList.toggle('on', b.dataset.perm === mode));
+  const psel = $('#presetSel');
+  const presetLabel = psel && psel.value
+    ? ((presetData.find((p) => p.name === psel.value) || {}).label || psel.value)
+    : '无预设';
+  runState.presetName = presetLabel;
+  set('#ssEffective', sessionEffectiveLine({ model: md.name, modelLabel: md.label, permission: mode, sourceLabel: permissionSourceLabel(source), preset: presetLabel }));
+  set('#chipModel', md.label || md.name || '模型');
+  set('#chipPerm', permissionModeLabel(mode));
+  const field = $('#ssReasoningField');
+  const reas = $('#reasoningSel');
+  if (field && reas) field.hidden = reas.style.display === 'none';
+}
+function openSessionSheet() {
+  renderSessionSettings();
+  const s = $('#sessSheet'); if (!s) return;
+  s.hidden = false;
+  const btn = $('#sessSettingsBtn'); if (btn) btn.setAttribute('aria-expanded', 'true');
+}
+function closeSessionSheet() {
+  const s = $('#sessSheet'); if (!s) return;
+  s.hidden = true;
+  const btn = $('#sessSettingsBtn'); if (btn) btn.setAttribute('aria-expanded', 'false');
+}
+$('#sessSettingsBtn').onclick = () => {
+  const s = $('#sessSheet');
+  if (!s) return;
+  if (s.hidden) openSessionSheet(); else closeSessionSheet();
+};
+$('#ssClose').onclick = closeSessionSheet;
+$('#ssDone').onclick = closeSessionSheet;
+document.querySelectorAll('#ssPermSeg [data-perm]').forEach((b) => { b.onclick = () => setPermissionEverywhere(b.dataset.perm); });
+
+async function setModelEverywhere(name) {
+  const sel = $('#modelSel');
+  if (sel) sel.value = name;
+  runState.modelName = name;
+  const entry = modelsCache.find((m) => m && m.name === name);
+  runState.modelLabel = entry ? String(entry.label || name) : name;
+  renderSessionSettings();
+  await applyConfig({ model: name }, sel || undefined);
+  renderRunPanel();
+  renderSessionSettings();
+}
+async function setPermissionEverywhere(mode) {
+  const sel = $('#permSel');
+  if (sel) sel.value = mode;
+  runState.permissionMode = mode;
+  runState.permissionSource = 'explicit';
+  renderSessionSettings();
+  renderWorkStatus();
+  await applyConfig({ permission: mode }, sel || undefined);
+  renderSessionSettings();
+}
+function setPresetEverywhere(name) {
+  const sel = $('#presetSel');
+  if (sel) sel.value = name || '';
+  presetPicked();
+  renderSessionSettings();
+  renderRunPanel();
+}
+
+// —— 命令面板：数据全部来自既有 API 快照（打开时刷新一次，不是轮询） ——
+let paletteOpen = false, paletteSelected = 0, paletteItems = [], paletteButtons = [], paletteOpener = null;
+function paletteSources() {
+  return {
+    sessions: sessionsCache,
+    workspaces: workspacesCache,
+    currentWorkspace: currentWorkspaceName,
+    models: modelsCache,
+    presets: presetData,
+    compactAvailable,
+  };
+}
+function paletteActions() {
+  return {
+    newChat: () => $('#newChat').click(),
+    switchSession: (file) => { const sel = $('#sessions'); if (!sel) return; sel.value = file; sel.dispatchEvent(new Event('change')); },
+    switchWorkspace: (name) => applyWorkspaceSwitch(name),
+    newWorkspace: () => { const sel = $('#wsSel'); if (!sel) return; sel.value = '__add__'; sel.dispatchEvent(new Event('change')); },
+    setModel: (name) => setModelEverywhere(name),
+    setPreset: (name) => setPresetEverywhere(name),
+    setPermission: (mode) => setPermissionEverywhere(mode),
+    stop: () => stopTurnFromButton(),
+    openShortcuts: () => openShortcutSheet(),
+    toggleRunPanel: () => toggleRunPanel(),
+    toggleTheme: () => { const cur = document.documentElement.getAttribute('data-theme'); setThemePreference(cur === 'dark' ? 'light' : 'dark'); },
+    openSettings: (panel) => openSettingsPanel(panel),
+    openDiagnostics: () => openDiagnostics(),
+    compact: () => renderBanner({ text: '⚠ Web 端没有 /compact 端点（只有 CLI 有），本入口未启用。', warn: true }),
+  };
+}
+function paintPalette() {
+  paletteButtons.forEach((b, i) => b.setAttribute('aria-selected', String(i === paletteSelected)));
+  const active = paletteButtons[paletteSelected];
+  const inp = $('#paletteInput');
+  if (inp) inp.setAttribute('aria-activedescendant', active ? active.id : '');
+  if (active && active.scrollIntoView) { try { active.scrollIntoView({ block: 'nearest' }); } catch { /* 桩 DOM 无布局 */ } }
+}
+function renderPalette() {
+  const list = $('#paletteList'); if (!list) return;
+  const q = ($('#paletteInput') && $('#paletteInput').value) || '';
+  paletteItems = paletteFilter(buildPaletteCommands(paletteSources(), paletteActions()), q);
+  paletteButtons = [];
+  list.innerHTML = '';
+  if (!paletteItems.length) {
+    const empty = document.createElement('div'); empty.className = 'palette-empty';
+    empty.textContent = '没有匹配项 —— 试试「模型 / 会话 / 权限 / 设置」';
+    list.appendChild(empty);
+    paletteSelected = 0;
+    paintPalette();
+    return;
+  }
+  let group = '';
+  paletteItems.forEach((cmd, i) => {
+    if (cmd.group !== group) {
+      group = cmd.group;
+      const g = document.createElement('div'); g.className = 'pgroup-label'; g.textContent = group;
+      list.appendChild(g);
+    }
+    const b = document.createElement('button');
+    b.type = 'button'; b.className = 'pitem'; b.id = 'pitem-' + i;
+    b.setAttribute('role', 'option'); b.setAttribute('aria-selected', 'false');
+    b.innerHTML = paletteItemHtml(cmd);
+    b.onclick = () => runPaletteCommand(i);
+    b.onmousemove = () => { if (paletteSelected !== i) { paletteSelected = i; paintPalette(); } };
+    list.appendChild(b);
+    paletteButtons.push(b);
+  });
+  if (paletteSelected >= paletteItems.length) paletteSelected = Math.max(0, paletteItems.length - 1);
+  paintPalette();
+}
+async function openPalette() {
+  paletteOpener = document.activeElement;
+  paletteOpen = true;
+  const mask = $('#paletteMask'); if (mask) mask.hidden = false;
+  const inp = $('#paletteInput'); if (inp) inp.value = '';
+  paletteSelected = 0;
+  renderPalette();
+  try { await refreshSessions(); } catch { /* 网络失败：仍显示缓存命令 */ }
+  try { await refreshWsSel(); } catch { /* 同上 */ }
+  if (paletteOpen) { renderPalette(); try { $('#paletteInput').focus(); } catch { /* ignore */ } }
+}
+function closePalette() {
+  const mask = $('#paletteMask'); if (mask) mask.hidden = true;
+  paletteOpen = false;
+  if (paletteOpener && paletteOpener.focus) { try { paletteOpener.focus(); } catch { /* ignore */ } }
+}
+function togglePalette() { if (paletteOpen) closePalette(); else openPalette(); }
+function runPaletteCommand(i) {
+  const cmd = paletteItems[i]; if (!cmd) return;
+  closePalette();
+  try {
+    const p = cmd.run && cmd.run();
+    if (p && typeof p.catch === 'function') p.catch((err) => renderBanner({ text: '⚠ 命令执行失败：' + ((err && err.message) || '未知错误'), warn: true }));
+  } catch (err) {
+    renderBanner({ text: '⚠ 命令执行失败：' + ((err && err.message) || '未知错误'), warn: true });
+  }
+}
+$('#paletteBtn').onclick = () => openPalette();
+$('#paletteInput').addEventListener('input', () => { paletteSelected = 0; renderPalette(); });
+$('#paletteInput').addEventListener('keydown', (e) => {
+  if (e.isComposing) return;
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Home' || e.key === 'End') {
+    e.preventDefault();
+    paletteSelected = paletteNext(e.key, paletteSelected, paletteItems.length);
+    paintPalette();
+  } else if (e.key === 'Enter') {
+    e.preventDefault();
+    runPaletteCommand(paletteSelected);
+  }
+});
+$('#paletteMask').addEventListener('mousedown', (e) => { if (e.target === $('#paletteMask')) closePalette(); });
+
+// —— 快捷键表 ——
+function openShortcutSheet() { const m = $('#shortcutMask'); if (m) m.hidden = false; }
+function closeShortcutSheet() { const m = $('#shortcutMask'); if (m) m.hidden = true; }
+function toggleShortcutSheet() { const m = $('#shortcutMask'); if (!m) return; if (m.hidden) openShortcutSheet(); else closeShortcutSheet(); }
+$('#shortcutClose').onclick = closeShortcutSheet;
+$('#shortcutMask').addEventListener('mousedown', (e) => { if (e.target === $('#shortcutMask')) closeShortcutSheet(); });
+
+// —— 空态三步引导：示例只填入，不发送 ——
+function fillExampleTask(text) {
+  input.value = String(text == null ? '' : text);
+  try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch { /* 桩 DOM 无 Event */ }
+  try { input.focus(); } catch { /* ignore */ }
+  try { input.setSelectionRange(input.value.length, input.value.length); } catch { /* ignore */ }
+  renderEmptyState();
+}
+function renderEmptyState() {
+  const es = $('#emptyState'); if (!es) return;
+  const show = shouldShowEmpty(chatEl.children.length, generating);
+  es.hidden = !show;
+  if (!show) return;
+  const md = modelDisplay(currentModelEntry());
+  const set = (id, text) => { const n = $(id); if (n) n.textContent = text; };
+  set('#esModel', md.name ? md.label + ' · ' + md.subtitle : '还没有可用模型：在 ⚙ 设置 › 模型与端点填 Key');
+  set('#esWs', currentWorkspaceName ? currentWorkspaceName : '未登记工作空间：点「选择目录…」登记（也可先跳过）');
+  const hasModel = Boolean(md.name);
+  const hasWs = Boolean(currentWorkspaceName);
+  const hasInput = Boolean(String(input.value || '').trim());
+  const step = (name) => document.querySelector('#emptyState [data-step="' + name + '"]');
+  const mark = (name, done, stateText) => {
+    const li = step(name); if (li && li.classList) li.classList.toggle('done', Boolean(done));
+    set('#es' + name.charAt(0).toUpperCase() + name.slice(1) + 'State', stateText || (done ? '已就绪' : '待办'));
+  };
+  mark('model', hasModel, hasModel ? '已就绪' : '待办');
+  mark('workspace', hasWs, hasWs ? '已就绪' : '可跳过');
+  mark('input', hasInput, hasInput ? '已填写' : '待办');
+}
+$('#emptyState').addEventListener('click', (e) => {
+  const ex = e.target.closest ? e.target.closest('[data-example]') : null;
+  if (ex) { fillExampleTask(ex.getAttribute('data-example')); return; }
+  const act = e.target.closest ? e.target.closest('[data-es-act]') : null;
+  if (!act) return;
+  if (act.getAttribute('data-es-act') === 'model') openSessionSheet();
+  else {
+    const sel = $('#wsSel');
+    if (sel) { try { sel.focus(); } catch { /* ignore */ } }
+    renderBanner({ text: '工作空间在顶栏下拉里切换；点「＋ 新建工作空间…」可用系统目录选择器登记。' });
+  }
+});
+input.addEventListener('input', () => renderEmptyState());
+
+// —— 设置搜索：输入即过滤字段（不匹配项带 hidden），命中项高亮 ——
+function collectSettingRows() {
+  return [...document.querySelectorAll('#cfgModal .cfg-row, #cfgModal .cfg-hint, #cfgModal .cfg-searchable')].map((el) => ({ el, text: settingsRowSearchText(el) }));
+}
+function runSettingsSearch(q) {
+  const rows = collectSettingRows();
+  const hits = applySettingsFilter(rows, q);
+  const count = $('#cfgSearchCount');
+  if (count) count.textContent = String(q || '').trim() ? hits + ' 项匹配' : '';
+  const searching = String(q || '').trim().length > 0;
+  if (searching) {
+    const first = rows.find((r) => !r.el.hidden && r.el.closest && r.el.closest('.cfg-panel'));
+    if (first) showCfgPanel(first.el.closest('.cfg-panel').dataset.panel || cfgPanel);
+    document.querySelectorAll('#cfgModal .cfg-nav-btn').forEach((b) => {
+      const panel = b.dataset.panel;
+      const any = rows.some((r) => !r.el.hidden && r.el.closest && r.el.closest('.cfg-panel') && r.el.closest('.cfg-panel').dataset.panel === panel);
+      b.classList.toggle('no-hit', !any);
+    });
+  } else {
+    document.querySelectorAll('#cfgModal .cfg-nav-btn').forEach((b) => b.classList.remove('no-hit'));
+    showCfgPanel(cfgPanel);
+  }
+}
+$('#cfgSearch').addEventListener('input', (e) => runSettingsSearch(e.target.value));
+
+// —— 诊断 / 日志路径（不新增后端；路径来自 /api/state 的 home/workingDir） ——
+function openDiagnostics() {
+  const box = $('#diagRows'); if (!box) return;
+  box.innerHTML = '';
+  const home = homeDir || '~/.mingdao';
+  const items = [
+    ['日志目录', home.replace(/\/$/, '') + '/logs/'],
+    ['Web 日志', home.replace(/\/$/, '') + '/logs/web-server.log'],
+    ['配置文件', home.replace(/\/$/, '') + '/config.json'],
+    ['工作目录', workingDirCache || '—'],
+    ['当前工作空间', currentWorkspaceName || '—'],
+  ];
+  for (const [k, v] of items) {
+    const row = document.createElement('div'); row.className = 'diag-row';
+    const kk = document.createElement('span'); kk.className = 'diag-k'; kk.textContent = k;
+    const vv = document.createElement('span'); vv.className = 'diag-v'; vv.textContent = v;
+    const cp = document.createElement('button'); cp.type = 'button'; cp.textContent = '复制';
+    cp.onclick = () => copyToClipboard(v).then(() => { cp.textContent = '已复制'; setTimeout(() => { cp.textContent = '复制'; }, 1200); });
+    row.appendChild(kk); row.appendChild(vv); row.appendChild(cp);
+    box.appendChild(row);
+  }
+  $('#diagModal').style.display = 'flex';
+}
+$('#diagClose').onclick = () => { $('#diagModal').style.display = 'none'; };
+
+// —— 全局键盘：⌘K / ⌘/ / Esc 分层 / ⌘Enter（输入法组合期一律忽略） ——
+document.addEventListener('keydown', (e) => {
+  if (e.isComposing) return;
+  if (e.defaultPrevented) return;
+  const mod = e.metaKey || e.ctrlKey;
+  if (mod && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); togglePalette(); return; }
+  if (mod && (e.key === '/' || e.key === '?')) { e.preventDefault(); toggleShortcutSheet(); return; }
+  if (mod && e.key === 'Enter' && document.activeElement === input) { e.preventDefault(); send(); return; }
+  if (e.key === 'Escape') {
+    if (paletteOpen) { e.preventDefault(); closePalette(); return; }
+    const sm = $('#shortcutMask'); if (sm && !sm.hidden) { e.preventDefault(); closeShortcutSheet(); return; }
+    const ss = $('#sessSheet'); if (ss && !ss.hidden) { e.preventDefault(); closeSessionSheet(); return; }
+    if ($('#diagModal').style.display === 'flex') { e.preventDefault(); $('#diagModal').style.display = 'none'; return; }
+    if ($('#cfgModal').style.display === 'flex') { e.preventDefault(); $('#cfgModal').style.display = 'none'; return; }
+    if ($('#dirModal').style.display === 'flex') { e.preventDefault(); $('#dirModal').style.display = 'none'; return; }
+    if (document.body.classList.contains('run-drawer')) { e.preventDefault(); setRunPanel(false); return; }
+    if (activeAsk) return; // 内联确认自己的 Esc 处理器负责（拒绝，不是停止）
+    if (generating) { e.preventDefault(); stopTurnFromButton(); return; }
+  }
+});
+
 function attachTrajMeta(msg){
   if(!msg || !msg._traj || !msg._traj.length) return;
   const tools=msg._traj.filter(x=>x.kind==='tool');
@@ -869,6 +1662,14 @@ function syncPanelLayout(){
   document.body.classList.toggle('sub-open', open('subPanel'));
   document.body.classList.toggle('tasks-open', open('tasksPanel'));
   document.body.classList.toggle('dash-open', open('dashPanel'));
+  // P1-4：右边缘只留一个抽屉——既有右侧面板（子代理/任务/省钱仪表盘）打开时运行面板让位；
+  // 它们关闭后 syncPanelLayout 再被调用，运行面板按 runPanelOpen 恢复。
+  const otherRight=open('subPanel')||open('tasksPanel')||open('dashPanel');
+  const narrow=layoutClassesFor(window.innerWidth||0).narrowRun;
+  const showRun=Boolean(runPanelOpen)&&!otherRight;
+  const rp=$('#runPanel'); if(rp) rp.hidden=!showRun;
+  document.body.classList.toggle('run-open', showRun&&!narrow);
+  document.body.classList.toggle('run-drawer', showRun&&narrow);
 }
 $('#tjClose').onclick=()=>{ $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); syncPanelLayout(); };
 $('#trajRailBtn').onclick=()=>{
@@ -995,7 +1796,15 @@ refreshStatusBar(); setInterval(refreshStatusBar, 15000);
 $('#tasksBtn').onclick=()=>{ const p=$('#tasksPanel'); p.style.display = p.style.display==='none'?'flex':'none'; if(p.style.display==='flex'){ $('#subPanel').style.display='none'; $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); $('#subRailBtn').classList.remove('on'); updateTasksPanel(); } syncPanelLayout(); };
 $('#tpClose').onclick=()=>{ $('#tasksPanel').style.display='none'; syncPanelLayout(); };
 
-async function refreshSessions(q){ const u=q?'/api/sessions?q='+encodeURIComponent(q):'/api/sessions'; const r=await fetch(u).catch(()=>null); if(!r)return; const j=await r.json(); const sel=$('#sessions'); sel.innerHTML='<option value="">历史会话</option>'; for(const s of j.sessions){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; sel.appendChild(o); } if(currentSession&&!q) sel.value=currentSession; }
+async function refreshSessions(q){
+  const u=q?'/api/sessions?q='+encodeURIComponent(q):'/api/sessions';
+  const r=await fetch(u).catch(()=>null); if(!r)return;
+  const j=await r.json();
+  sessionsCache=Array.isArray(j.sessions)?j.sessions:[];
+  const sel=$('#sessions'); sel.innerHTML='<option value="">历史会话</option>';
+  for(const s of sessionsCache){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; sel.appendChild(o); }
+  if(currentSession&&!q) sel.value=currentSession;
+}
 let searchTimer=null;
 $('#sessionSearch').addEventListener('input',e=>{ clearTimeout(searchTimer); searchTimer=setTimeout(()=>refreshSessions(e.target.value.trim()),300); });
 // 思考模式 / 推理等级（v0.2.8）：与模型选择并列在输入区，按当前模型独立。
@@ -1015,7 +1824,10 @@ $('#presetSel').onchange=()=>{ presetPicked(); };
 function presetPicked(){
   const val=$('#presetSel')?.value||'';
   const p=presetData.find((x)=>x.name===val);
-  if(!p){ renderBanner({ text: '已取消预设，恢复默认配置（不注入预设定制段/白名单/权限覆盖）。' }); return; } // 选回「无预设」= 退出预设模式
+  if(!p){ // 选回「无预设」= 退出预设模式
+    runState.presetName='无预设'; renderSessionSettings(); renderRunPanel();
+    renderBanner({ text: '已取消预设，恢复默认配置（不注入预设定制段/白名单/权限覆盖）。' }); return;
+  }
   const over=[];
   if(Array.isArray(p.tools)) over.push('工具白名单 '+p.tools.length+' 个');
   if(p.permission) over.push('权限 '+p.permission);
@@ -1032,6 +1844,8 @@ function presetPicked(){
   const conflict=(p.permission&&permNow&&p.permission!==permNow)
     ? ' ⚠ 该预设声明权限 '+p.permission+'，与你当前选择的「'+permNow+'」不同——本轮按你的显式选择 '+permNow+' 执行（要按预设跑，请把权限模式切到 '+p.permission+'）。'
     : '';
+  runState.presetName=p.label||p.name||'无预设';
+  renderSessionSettings(); renderRunPanel();
   renderBanner({ text: '🧩 已选预设「'+(p.label||p.name)+'」：'+(p.description||'（无描述）')+summary+'。随本次发送生效，其余设置保持不变。'+conflict, warn: Boolean(conflict) });
 }
 async function init(){
@@ -1046,12 +1860,20 @@ async function init(){
       ms.appendChild(og);
     }
     if(!(j.models||[]).length){ const o=document.createElement('option'); o.value=j.model; o.textContent=j.model; ms.appendChild(o); }
+    modelsCache=Array.isArray(j.models)?j.models:[];
+    homeDir=String(j.home||'');
+    workingDirCache=String(j.workingDir||'');
+    compactAvailable=Boolean(j.compact||j.compactEndpoint||j.capabilities&&j.capabilities.compact);
+    runState.modelName=String(j.model||'');
+    const curEntry=modelsCache.find((m)=>m&&m.name===runState.modelName);
+    runState.modelLabel=curEntry?String(curEntry.label||curEntry.name||''):runState.modelName;
     $('#permSel').value=j.permission||'ask';
     // P0-4：/api/state 现在带 permissionSource（explicit/preset/config/cli/default）——
     // 状态条悬浮详情与会话设置里都能显示 "permission=auto（来源：显式选择/预设/config 默认）"。
     ctxLimit=Number(j.contextBudget)||ctxLimit;
     runState.contextTotal=ctxLimit; runState.permissionMode=String(j.permission||'ask'); runState.permissionSource=String(j.permissionSource||'');
     renderWorkStatus();
+    renderSessionSettings();
     $('#sbxSel').value=j.sandbox||'off';
     $('#sbxHint').textContent=j.sandboxSupported?'':'当前环境未检测到 bubblewrap，readonly/safe 将自动降级为 off';
     $('#routeChk').checked=Boolean(j.routing);
@@ -1084,6 +1906,9 @@ async function init(){
     const dr=await fetch('/api/draft?file='+encodeURIComponent(currentSession||''),{cache:'no-store'}); const dj=await dr.json();
     if(dj.text){ input.value=dj.text; input.style.height=Math.min(input.scrollHeight,200)+'px'; input.focus(); }
   }catch(e){}
+  renderSessionSettings();
+  renderEmptyState();
+  renderRunPanel();
 }
 
 // v0.4.7（T24）：IDE「发送选中代码」此前不生效——扩展 POST /api/draft 时只带 text（写进**全局槽**），
@@ -1105,12 +1930,20 @@ function showCfgPanel(name){
   document.querySelectorAll('.cfg-panel').forEach(p=>p.classList.toggle('active', p.dataset.panel===name));
 }
 document.querySelectorAll('.cfg-nav-btn').forEach(b=>{ b.onclick=()=>showCfgPanel(b.dataset.panel); });
-$('#cfgBtn').onclick=()=>{ $('#cfgModal').style.display='flex'; showCfgPanel(cfgPanel); };
+/** P1-2：命令面板「打开设置」与深链复用同一入口（可指定分组）。 */
+function openSettingsPanel(panel){
+  $('#cfgModal').style.display='flex';
+  showCfgPanel(panel||cfgPanel);
+}
+$('#cfgBtn').onclick=()=>openSettingsPanel(cfgPanel);
 $('#cfgCancel').onclick=()=>{ $('#cfgModal').style.display='none'; };
 // —— 工作空间头部下拉（⚙ 右侧：切换 / 新建 / 管理） ——
 async function refreshWsSel(){
   const r=await fetch('/api/workspaces',{cache:'no-store'}).catch(()=>null); if(!r) return;
   const j=await r.json();
+  workspacesCache=Array.isArray(j.workspaces)?j.workspaces:[];
+  currentWorkspaceName=j.current||'';
+  renderEmptyState();
   const sel=$('#wsSel'); sel.innerHTML='';
   const cur=document.createElement('option'); cur.value=''; cur.textContent='工作空间'+(j.current?'：'+j.current:'');
   sel.appendChild(cur);
@@ -1123,6 +1956,16 @@ async function refreshWsSel(){
   sel.appendChild(add);
   const mgr=document.createElement('option'); mgr.value='__manage__'; mgr.textContent='管理（重命名/删除/改目录）…';
   sel.appendChild(mgr);
+}
+/** 命令面板与顶栏下拉共用的工作空间切换（携带当前会话，语义与旧路径一致）。 */
+async function applyWorkspaceSwitch(name){
+  if(!name) return;
+  const payload={action:'set',name};
+  if(currentSession) payload.file=currentSession;
+  const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+  const j=await r.json().catch(()=>({error:'请求失败'}));
+  if(j.ok) renderBanner({text:'✓ 已切换到工作空间 '+j.name+'（'+j.dir+'），后续工具在此目录执行'}); else { uiAlert(j.error||'切换失败'); }
+  refreshWsSel(); reloadModels();
 }
 $('#wsSel').addEventListener('change', async e=>{
   const v=e.target.value;
@@ -1142,15 +1985,7 @@ $('#wsSel').addEventListener('change', async e=>{
     refreshWsSel();
     return;
   }
-  if(v){
-    // 携带当前会话：显式切换时该会话的工作空间一并切过去（P3-4 会话级工作空间）
-    const payload={action:'set',name:v};
-    if(currentSession) payload.file=currentSession;
-    const r=await fetch('/api/workspaces',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
-    const j=await r.json().catch(()=>({error:'请求失败'}));
-    if(j.ok) renderBanner({text:'✓ 已切换到工作空间 '+j.name+'（'+j.dir+'），后续工具在此目录执行'}); else { uiAlert(j.error||'切换失败'); }
-    refreshWsSel(); reloadModels();
-  }
+  if(v) await applyWorkspaceSwitch(v);
 });
 $('#cfgBtn').addEventListener('click', ()=>{ refreshModelsCfg(); refreshSyncUI(); refreshSyncShares(); refreshSyncConflicts(); refreshSchList(); refreshWorkspaces(); loadMemoryUI(); refreshMcpPresets(); refreshSkillLib(''); });
 $('#schWhen').onchange=e=>{ const v=e.target.value; $('#schAtRow').style.display=v==='at'?'':'none'; $('#schEveryRow').style.display=v==='every'?'':'none'; $('#schAfterRow').style.display=v==='after'?'':'none'; $('#schChainRow').style.display=v==='chain'?'':'none'; };
@@ -1355,12 +2190,20 @@ async function reloadModels(){
       ms.appendChild(og);
     }
     if(!(j.models||[]).length){ const o=document.createElement('option'); o.value=j.model; o.textContent=j.model; ms.appendChild(o); }
+    modelsCache=Array.isArray(j.models)?j.models:[];
+    homeDir=String(j.home||homeDir);
+    workingDirCache=String(j.workingDir||workingDirCache);
+    compactAvailable=Boolean(j.compact||j.compactEndpoint||j.capabilities&&j.capabilities.compact);
+    runState.modelName=String(j.model||runState.modelName||'');
+    const curEntry=modelsCache.find((m)=>m&&m.name===runState.modelName);
+    runState.modelLabel=curEntry?String(curEntry.label||curEntry.name||''):runState.modelName;
     const env=('路由'+(j.routing?'开':'关')+' · 沙箱'+((j.sandbox&&j.sandbox!=='off')?(j.sandboxSupported?j.sandbox:'降级'):'off'));
     $('#envBadge').textContent=env; $('#envBadge').style.display='';
     if(j.contextBudget){ ctxLimit=Number(j.contextBudget)||ctxLimit; runState.contextTotal=ctxLimit; }
     runState.permissionMode=String(j.permission||'ask'); runState.permissionSource=String(j.permissionSource||'');
-    renderWorkStatus();
     applyReasoningUI(j.reasoning);
+    renderWorkStatus();
+    renderSessionSettings();
   }catch(e){}
 }
 async function refreshModelsCfg(){
@@ -1523,20 +2366,20 @@ async function applyConfig(payload, revertTarget){
   }
   m.style.display=''; setTimeout(()=>{m.style.display='none';},4000);
 }
-$('#modelSel').addEventListener('change', e=>{ applyConfig({model:e.target.value}, e.target); });
-$('#permSel').addEventListener('change', e=>{ applyConfig({permission:e.target.value}, e.target); });
+$('#modelSel').addEventListener('change', e=>{ runState.modelName=e.target.value; runState.modelLabel=(modelsCache.find((m)=>m&&m.name===e.target.value)||{}).label||e.target.value; applyConfig({model:e.target.value}, e.target); renderSessionSettings(); renderRunPanel(); });
+$('#permSel').addEventListener('change', e=>{ runState.permissionMode=e.target.value; runState.permissionSource='explicit'; applyConfig({permission:e.target.value}, e.target); renderSessionSettings(); renderWorkStatus(); });
 // v0.3.0 P0-3：会话边界收尾（切换/新对话时提取项目记忆+日志，fire-and-forget 不阻塞 UI）
 function finalizeCurrentSession(){
   if(!currentSession) return;
   fetch('/api/session-finalize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:currentSession})}).catch(()=>{});
 }
-async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); }
+async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); renderEmptyState(); }
 
 // §138：主按钮在生成态=停止，必须走**同一个**停止出口（stopTurnFromButton → stopTurn → POST /api/abort）
 sendBtn.onclick=()=>{ if(generating){ stopTurnFromButton(); } else { send(); } };
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
 input.addEventListener('input',()=>{ input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; });
-$('#newChat').onclick=()=>{ finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; refreshSessions(); };
+$('#newChat').onclick=()=>{ finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; renderEmptyState(); refreshSessions(); };
 $('#sessMgrBtn').onclick=openSessModal;
 $('#sessClose').onclick=()=>{ $('#sessModal').style.display='none'; };
 async function openSessModal(){
@@ -1548,10 +2391,10 @@ async function openSessModal(){
     const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12.5px';
     div.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.label)+'</span>';
     const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=await uiPrompt('新标题：', s.file.replace(/\.jsonl$/,'')); if(!t) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',file:s.file,title:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshSessions(); openSessModal(); } else uiAlert(jj.error||'重命名失败'); };
-    const dl=document.createElement('button'); dl.textContent='删除'; dl.className='danger'; dl.style.cssText='padding:1px 8px;font-size:11px'; dl.onclick=async()=>{ if(!await uiConfirm('删除会话 '+s.file+'？此操作不可恢复。')) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',file:s.file})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ if(currentSession===s.file) currentSession=null; refreshSessions(); openSessModal(); } else uiAlert(jj.error||'删除失败'); };
+    const dl=document.createElement('button'); dl.textContent='删除'; dl.className='danger'; dl.style.cssText='padding:1px 8px;font-size:11px'; dl.onclick=async()=>{ if(!await uiConfirm('删除会话 '+s.file+'？此操作不可恢复。')) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',file:s.file})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ if(currentSession===s.file){ currentSession=null; chatEl.innerHTML=''; renderEmptyState(); } refreshSessions(); openSessModal(); } else uiAlert(jj.error||'删除失败'); };
     div.appendChild(rn); div.appendChild(dl); list.appendChild(div);
   }
 }
-$('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; } };
+$('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; renderEmptyState(); } };
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
 init();

@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -18,6 +18,18 @@
   --text:#F9FAFB; --dim:#ADB2B8; --faint:#81858C;
   --accent:#3ddc97; --accent2:#22b8cf; --warn:#F59E0B; --err:#F25A5A;
   --user:#2C2C2E; --code:#1B1B1C;
+  color-scheme:dark;
+}
+/* P1-8 明暗主题（v0.6.19 §3.70）：暗色沿用上面既有 token；亮色是同一套语义的另一组取值。
+   由 app.js 的 initTheme() 写 <html data-theme>，偏好落 localStorage（mingdao-theme），
+   未显式选择时跟随 prefers-color-scheme。 */
+:root[data-theme="light"]{
+  --bg:#FFFFFF; --bg2:#F7F7F8; --bg3:#EFEFF1; --panel:#FFFFFF;
+  --border:#E4E4E7;
+  --text:#18181B; --dim:#52525B; --faint:#71717A;
+  --accent:#0E9F6E; --accent2:#0E7490; --warn:#B45309; --err:#DC2626;
+  --user:#F4F4F5; --code:#F4F4F5;
+  color-scheme:light;
 }
 *{box-sizing:border-box}
 *::-webkit-scrollbar{width:10px;height:10px}
@@ -264,6 +276,202 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 .spinner{display:inline-block;width:14px;height:14px;border:2px solid var(--accent);border-top-color:transparent;border-radius:50%;animation:spin .8s linear infinite;vertical-align:-2px}
   #scrollBottomBtn{position:fixed;right:26px;bottom:118px;width:40px;height:40px;border-radius:50%;background:linear-gradient(135deg,var(--accent),var(--accent2));color:#06121a;font-size:20px;font-weight:800;border:none;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.45);z-index:30;display:none;align-items:center;justify-content:center}
 @keyframes spin{to{transform:rotate(360deg)}}
+/* ============================================================================
+   P1（v0.6.19 §3.70）界面改造：工具时间线 / 命令面板 / 快捷键表 /
+   右侧「本轮运行」/ 会话设置 / 空态 / 设置搜索 / 主题 + 窄屏断点。
+   全部复用既有 token，不新增设计语言，不引外部依赖。
+   ============================================================================ */
+[hidden]{display:none!important}
+/* —— 顶栏入口（⌘K / 运行 / 主题）—— */
+#paletteBtn{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+#paletteBtn .kbd{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10.5px;border:1px solid var(--border);background:var(--bg2);border-radius:5px;padding:0 5px;line-height:16px;color:var(--dim)}
+#runChip{white-space:nowrap}
+#themeBtn{min-width:34px;padding:6px 9px}
+#runChip[aria-expanded="true"]{border-color:var(--accent2);color:var(--accent2)}
+
+/* —— 工具时间线：同一轮多个调用聚合成一张卡（默认 3 步 + 失败步，整卡可折叠）—— */
+.toolcard{border:1px solid var(--border);border-radius:10px;background:var(--bg2);overflow:hidden;margin:4px 0;max-width:100%}
+.toolcard-head{display:flex;align-items:center;gap:8px;padding:7px 12px;background:var(--bg3);font-size:12.5px;color:var(--dim)}
+.toolcard-head b{color:var(--text);font-weight:600}
+.toolcard-head .tl-count{font-variant-numeric:tabular-nums;white-space:nowrap}
+.toolcard-head .tl-sum{margin-left:auto;color:var(--faint);font-size:11.5px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.toolcard-head .tl-toggle{border:1px solid var(--border);background:transparent;color:var(--dim);border-radius:6px;padding:1px 7px;font-size:11px;flex:none}
+.toolcard.collapsed .tl-steps,.toolcard.collapsed .tl-more{display:none}
+.toolcard.has-fail{border-color:rgba(242,90,90,.4)}
+.tl-steps{list-style:none;margin:0;padding:0}
+.tl-step{border-top:1px solid var(--border);position:relative}
+.tl-step:first-child{border-top:0}
+.tl-step.fail{box-shadow:inset 3px 0 0 var(--err);background:rgba(242,90,90,.06)}
+.tl-row{display:grid;grid-template-columns:20px 16px 64px minmax(0,1fr) 54px 10px;align-items:center;gap:7px;width:100%;padding:5px 12px;background:transparent;border:0;color:var(--dim);text-align:left;font-size:12.5px}
+.tl-row:hover{background:var(--bg3)}
+.tl-step.fail .tl-row .tl-tool{color:var(--err)}
+.tl-row .tl-no{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums}
+.tl-row .tl-st{font-size:12px;text-align:center;color:var(--faint)}
+.tl-row .tl-st.ok{color:var(--accent)}
+.tl-row .tl-st.bad{color:var(--err)}
+.tl-row .tl-tool{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--accent2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tl-row .tl-args{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--dim);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+.tl-row .tl-dur{text-align:right;color:var(--faint);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;font-variant-numeric:tabular-nums}
+.tl-row .tl-tri{width:0;height:0;border-left:4px solid currentColor;border-top:3px solid transparent;border-bottom:3px solid transparent;color:var(--faint);transition:transform .15s}
+.tl-step.open .tl-row .tl-tri{transform:rotate(90deg)}
+.tl-res{padding:0 12px 5px 138px;font-size:11.5px;line-height:1.5;color:var(--faint);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tl-step.fail .tl-res{color:var(--err)}
+.tl-out{padding:0 12px 9px 138px}
+.tl-out-meta{font-size:11px;color:var(--faint);margin:2px 0 4px;font-variant-numeric:tabular-nums}
+.tl-args-full{margin:2px 0 5px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px;line-height:1.55;color:var(--dim);white-space:pre-wrap;word-break:break-word;background:var(--code);border:1px solid var(--border);border-radius:8px;padding:6px 9px;max-height:150px;overflow:auto}
+.tl-out pre{margin:0;padding:7px 9px;background:var(--code);border:1px solid var(--border);border-radius:8px;max-height:190px;overflow:auto;font:11.5px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--dim);white-space:pre-wrap;word-break:break-word}
+.tl-out-more{margin-top:4px;padding:1px 8px;font-size:11px}
+.tl-more{display:block;width:100%;padding:5px 12px;border:0;border-top:1px solid var(--border);background:transparent;color:var(--faint);font-size:11.5px;text-align:center}
+.tl-more:hover{background:var(--bg3);color:var(--text)}
+
+/* —— 通用浮层（命令面板 / 快捷键表 / 诊断）—— */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,.48);z-index:80;display:flex;align-items:flex-start;justify-content:center;padding:10vh 12px 12px}
+.overlay.center{align-items:center;padding-top:12px}
+:root[data-theme="light"] .overlay{background:rgba(24,24,27,.28)}
+.palette{width:min(600px,94vw);background:var(--panel);border:1px solid var(--border);border-radius:14px;box-shadow:0 16px 48px rgba(0,0,0,.5);overflow:hidden;display:flex;flex-direction:column;max-height:70vh}
+.palette-input{display:flex;align-items:center;gap:8px;padding:11px 13px;border-bottom:1px solid var(--border);flex:none;color:var(--faint)}
+.palette-input input{flex:1;min-width:0;background:transparent;border:0;outline:none;color:var(--text);font-size:15px}
+.palette-input input::placeholder{color:var(--faint)}
+.palette-list{overflow-y:auto;padding:6px;min-height:0}
+.pgroup-label{font-size:10.5px;letter-spacing:.5px;color:var(--faint);padding:7px 9px 3px;text-transform:uppercase}
+.pitem{display:flex;align-items:center;gap:9px;width:100%;padding:7px 9px;border:1px solid transparent;border-radius:8px;background:transparent;color:var(--dim);text-align:left;font-size:13px}
+.pitem .label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pitem .label b{color:var(--text);font-weight:600}
+.pitem .hint{font-size:11px;color:var(--faint);white-space:nowrap;max-width:190px;overflow:hidden;text-overflow:ellipsis}
+.pitem .scope{font-size:10px;color:var(--faint);border:1px solid var(--border);border-radius:999px;padding:0 5px;line-height:15px;white-space:nowrap}
+.pitem[aria-selected="true"]{background:var(--bg3);border-color:var(--border);color:var(--text);box-shadow:inset 2px 0 0 var(--accent2)}
+.palette-foot{border-top:1px solid var(--border);padding:7px 12px;display:flex;align-items:center;gap:10px;font-size:11px;color:var(--faint);flex:none;flex-wrap:wrap}
+.palette-foot .kbd{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10.5px;border:1px solid var(--border);border-radius:5px;padding:0 5px;line-height:16px;background:var(--bg2)}
+.palette-foot .grow{flex:1}
+.palette-empty{padding:26px 16px;text-align:center;color:var(--faint);font-size:13px}
+
+/* —— 快捷键表 —— */
+.shortcut-sheet{width:min(560px,94vw);background:var(--panel);border:1px solid var(--border);border-radius:14px;box-shadow:0 16px 48px rgba(0,0,0,.5);overflow:hidden}
+.shortcut-head{display:flex;align-items:center;gap:8px;padding:12px 14px;border-bottom:1px solid var(--border);font-weight:600;color:var(--text)}
+.shortcut-head button{margin-left:auto}
+.shortcut-rows{display:grid;grid-template-columns:1fr 1fr;gap:8px 18px;padding:12px 14px}
+.shortcut-row{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim)}
+.shortcut-row .grow{flex:1}
+.shortcut-row .kbd{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:10.5px;border:1px solid var(--border);border-radius:5px;padding:0 5px;line-height:16px;background:var(--bg2);color:var(--dim);white-space:nowrap}
+.shortcut-note{grid-column:1/-1;font-size:11.5px;color:var(--faint);border-top:1px solid var(--border);padding-top:9px}
+
+/* —— 右侧「本轮运行」面板 —— */
+#runPanel{position:fixed;right:0;top:52px;bottom:0;width:300px;background:var(--bg2);border-left:1px solid var(--border);z-index:36;display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.18)}
+body.run-open{padding-right:300px}
+body.run-open #scrollBottomBtn{right:326px}
+.rp-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600;color:var(--text);flex:none}
+.rp-head .rp-live{width:7px;height:7px;border-radius:50%;background:var(--accent2)}
+.rp-head .rp-sub{font-size:11px;color:var(--faint);font-weight:400}
+.rp-head button{margin-left:auto;padding:1px 8px;font-size:11px}
+.rp-body{flex:1;overflow-y:auto;padding:10px 12px;min-height:0}
+.rp-sec{margin-bottom:12px}
+.rp-sec:last-child{margin-bottom:0}
+.rp-sec-title{font-size:10.5px;letter-spacing:.5px;color:var(--faint);text-transform:uppercase;margin-bottom:6px;display:flex;align-items:center;gap:6px}
+.rp-sec-title .line{flex:1;height:1px;background:var(--border)}
+.rp-kv{display:grid;grid-template-columns:58px minmax(0,1fr);gap:5px 8px;font-size:12.5px;align-items:baseline;margin:0}
+.rp-kv dt{color:var(--faint)}
+.rp-kv dd{margin:0;color:var(--text);min-width:0;display:flex;align-items:center;gap:5px;flex-wrap:wrap;word-break:break-word}
+.rp-kv .rp-src{font-size:10px;color:var(--faint);border:1px solid var(--border);border-radius:999px;padding:0 5px;line-height:16px;white-space:nowrap}
+.rp-kv .rp-id{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:var(--dim)}
+.rp-metrics{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.rp-metric{border:1px solid var(--border);border-radius:8px;background:var(--bg3);padding:6px 8px;display:flex;flex-direction:column;gap:1px;min-width:0}
+.rp-metric .l{font-size:10.5px;color:var(--faint)}
+.rp-metric .v{font-size:14px;font-weight:650;font-variant-numeric:tabular-nums;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rp-metric .v small{font-size:10px;font-weight:400;color:var(--faint);margin-left:2px}
+.rp-metric.wide{grid-column:1/-1}
+.rp-ctxbar{height:5px;border-radius:3px;background:var(--bg2);overflow:hidden;margin-top:5px}
+.rp-ctxbar i{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:3px}
+.rp-foot{border-top:1px solid var(--border);padding:8px 12px;display:flex;gap:6px;align-items:center;flex:none}
+.rp-foot .grow{flex:1;font-size:11px;color:var(--faint)}
+#rpStop{color:var(--err);border-color:rgba(242,90,90,.45);background:transparent;padding:4px 10px;font-size:12px}
+#rpStop[disabled]{opacity:.45}
+#rpCompact{padding:4px 10px;font-size:12px}
+@media (max-width:1180px){
+  body.run-open{padding-right:0}
+  #runPanel{display:none}
+  body.run-drawer #runPanel{display:flex;top:52px;width:300px;max-width:92vw;z-index:60;box-shadow:-12px 0 32px rgba(0,0,0,.4)}
+}
+
+/* —— 会话设置弹层（收编模型 / 预设 / 权限三件套）—— */
+#sessSheet{position:fixed;right:18px;bottom:110px;width:min(410px,calc(100vw - 24px));max-height:min(72vh,560px);background:var(--panel);border:1px solid var(--border);border-radius:14px;box-shadow:0 16px 48px rgba(0,0,0,.5);z-index:70;display:flex;flex-direction:column;overflow:hidden}
+body.run-open #sessSheet{right:318px}
+@media (max-width:1180px){body.run-open #sessSheet{right:18px}}
+.ss-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600;color:var(--text);flex:none}
+.ss-head .ss-sub{font-size:11px;color:var(--faint);font-weight:400}
+.ss-head button{margin-left:auto;padding:1px 8px;font-size:11px}
+.ss-body{padding:10px 12px;overflow-y:auto;min-height:0}
+.ss-field{margin-bottom:12px}
+.ss-field:last-child{margin-bottom:0}
+.ss-field>label{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--dim);margin-bottom:4px}
+.ss-field .ss-scope{margin-left:auto;font-size:10px;color:var(--faint);border:1px solid var(--border);border-radius:999px;padding:0 6px;line-height:16px}
+.ss-field select{width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px}
+.ss-src{font-size:11px;color:var(--faint);margin-top:4px;line-height:1.55;word-break:break-word}
+.ss-src b{color:var(--dim);font-weight:600}
+.ss-src code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px}
+.ss-seg{display:flex;gap:4px;background:var(--bg3);border:1px solid var(--border);border-radius:9px;padding:3px}
+.ss-seg button{flex:1;height:26px;border:0;border-radius:6px;background:transparent;color:var(--dim);font-size:12px}
+.ss-seg button.on{background:var(--panel);color:var(--text);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.18)}
+.ss-effective{margin:0 12px 8px;padding:7px 9px;border:1px dashed var(--border);border-radius:8px;font-size:11.5px;color:var(--dim);line-height:1.65}
+.ss-effective b{color:var(--text)}
+.ss-foot{display:flex;align-items:center;gap:8px;padding:8px 12px;border-top:1px solid var(--border)}
+.ss-foot .grow{flex:1;font-size:11px;color:var(--faint)}
+#sessSettingsBtn{max-width:230px;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#sessSettingsBtn b{overflow:hidden;text-overflow:ellipsis}
+#sessSettingsBtn .sep{color:var(--faint)}
+
+/* —— 空态三步引导 —— */
+#emptyState{max-width:720px;margin:18px auto 6px;padding:0 18px;display:flex;flex-direction:column;gap:12px;color:var(--text)}
+#emptyState h2{font-size:20px;margin:0;font-weight:700}
+#emptyState .es-lead{font-size:12.5px;color:var(--faint);margin:0}
+.empty-steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.empty-step{display:flex;align-items:center;gap:10px;border:1px solid var(--border);border-radius:10px;background:var(--bg2);padding:9px 12px}
+.empty-step .es-no{width:22px;height:22px;border-radius:50%;background:var(--bg3);color:var(--dim);display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;flex:none}
+.empty-step.done .es-no{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#06121a}
+.empty-step .es-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:1px}
+.empty-step .es-main b{font-size:13px;color:var(--text)}
+.empty-step .es-main span{font-size:11.5px;color:var(--faint);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.empty-step .es-act{padding:3px 9px;font-size:11.5px;flex:none}
+.empty-step .es-state{font-size:11px;color:var(--faint);flex:none;min-width:32px;text-align:right}
+.empty-step.done .es-state{color:var(--accent)}
+.empty-examples{display:flex;flex-wrap:wrap;gap:7px}
+.empty-examples .es-ex{border:1px solid var(--border);background:var(--bg2);color:var(--dim);border-radius:999px;padding:5px 11px;font-size:12px;text-align:left;max-width:100%}
+.empty-examples .es-ex:hover{border-color:var(--accent2);color:var(--text)}
+
+/* —— 设置分组 + 搜索 —— */
+.cfg-search{display:flex;gap:8px;align-items:center;margin:0 0 8px;flex:none}
+.cfg-search input{flex:1;min-width:0;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:7px 10px;font-size:13px}
+.cfg-search input:focus{outline:none;border-color:var(--accent2)}
+.cfg-search .cfg-search-count{font-size:11.5px;color:var(--faint);white-space:nowrap}
+.cfg-nav-btn[data-group].no-hit{opacity:.45}
+.cfg-row[hidden],.cfg-searchable[hidden],.cfg-hint[hidden]{display:none!important}
+.cfg-row.search-hit,.cfg-searchable.search-hit{outline:1px solid var(--accent2);outline-offset:2px;border-radius:8px}
+
+/* —— 诊断 / 日志路径 —— */
+.diag-modal{width:min(560px,94vw)}
+.diag-row{display:flex;align-items:flex-start;gap:8px;border-bottom:1px solid var(--border);padding:7px 0;font-size:12.5px}
+.diag-row .diag-k{width:92px;flex:none;color:var(--faint)}
+.diag-row .diag-v{flex:1;min-width:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11.5px;word-break:break-all;color:var(--text)}
+.diag-row button{flex:none;padding:1px 8px;font-size:11px}
+.diag-note{font-size:11.5px;color:var(--faint);margin-top:8px;line-height:1.6}
+
+/* —— 窄屏断点：<1180 右栏收起；<900 侧栏（图标轨/次要控件）收起 —— */
+@media (max-width:1180px){
+  body{padding-right:0}
+  .rp-head .rp-sub{display:none}
+}
+@media (max-width:900px){
+  body.narrow-side header{gap:6px;padding:8px}
+  body.narrow-side #sessionSearch,body.narrow-side #envBadge,body.narrow-side #costBadge{display:none!important}
+  body.narrow-side #paletteBtn span.palette-label{display:none}
+  body.narrow-side #sessions{max-width:110px}
+  body.narrow-side #trajRail{width:44px}
+  body.narrow-side #runChip{padding:6px 8px}
+  body.narrow-side #emptyState{padding:0 12px}
+  #emptyState h2{font-size:18px}
+}
+@media (prefers-reduced-motion:reduce){
+  *{animation:none!important;transition:none!important;scroll-behavior:auto!important}
+}
 /* 自绘悬浮气泡 tooltip（替换原生 title）：暗色悬浮层 + 阴影，跟随锚点居中，越界自动回弹 */
 .mdtip{position:fixed;z-index:1000;max-width:320px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.6;box-shadow:0 8px 24px rgba(0,0,0,.55);pointer-events:none;white-space:pre-line;word-break:break-word;display:none}
 /* —— 省钱仪表盘（v0.3.1 顶部入口，真·仪表盘） —— */
@@ -302,7 +510,10 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 <header>
   <div class="logo">MingDao <span>Harness</span></div>
   <span id="cfgMsg" class="badge" style="display:none"></span>
+  <button id="paletteBtn" title="搜索或运行命令（⌘K / Ctrl+K）" aria-haspopup="dialog">⌘K <span class="palette-label">搜索或运行</span></button>
   <button id="cfgBtn" title="设置">⚙</button>
+  <button id="runChip" title="本轮运行面板（窄屏以抽屉展开）" aria-expanded="false">运行</button>
+  <button id="themeBtn" title="切换明暗主题（跟随系统时由系统偏好决定）" aria-label="切换明暗主题">🌙</button>
   <select id="wsSel" title="工作空间（切换 / 新建，目录自动创建）"></select>
   <span class="badge" id="envBadge"></span><span class="badge badge-btn" id="costBadge" title="省钱仪表盘（点击展开）" style="cursor:pointer">📊 —</span>
   <div class="spacer"></div>
@@ -350,7 +561,24 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <div id="dashRecent" class="dash-recent"></div>
   </div>
 </aside>
-<main><div id="chat"></div></main>
+<main>
+  <!-- P1-6 空态三步引导（v0.6.19 §3.70）：无会话 / 无消息时显示；示例任务只填入输入框，不自动发送。 -->
+  <div id="emptyState" hidden>
+    <h2>开始第一轮</h2>
+    <p class="es-lead">三步开始：选模型 → 选工作空间 → 输入任务。示例任务只会填进输入框，不会自动发送（避免误触发付费调用）。</p>
+    <ol class="empty-steps">
+      <li class="empty-step" data-step="model"><span class="es-no">①</span><span class="es-main"><b>选模型</b><span id="esModel">正在读取模型…</span></span><button class="es-act" data-es-act="model" type="button">选择模型…</button><span class="es-state" id="esModelState">待办</span></li>
+      <li class="empty-step" data-step="workspace"><span class="es-no">②</span><span class="es-main"><b>选工作空间</b><span id="esWs">未登记工作空间时，点「选择目录…」登记</span></span><button class="es-act" data-es-act="workspace" type="button">选择目录…</button><span class="es-state" id="esWsState">待办</span></li>
+      <li class="empty-step" data-step="input"><span class="es-no">③</span><span class="es-main"><b>输入任务</b><span>Enter 发送 · Shift+Enter 换行 · ⌘K 命令面板</span></span><span class="es-state" id="esInputState">待办</span></li>
+    </ol>
+    <div class="empty-examples" aria-label="示例任务">
+      <button class="es-ex" data-example="给这个仓库写一份 README 快速开始" type="button">给这个仓库写一份 README 快速开始</button>
+      <button class="es-ex" data-example="跑一遍测试，修掉失败的那条" type="button">跑一遍测试，修掉失败的那条</button>
+      <button class="es-ex" data-example="解释 src/agent.js 的主循环" type="button">解释 src/agent.js 的主循环</button>
+    </div>
+  </div>
+  <div id="chat"></div>
+</main>
 <footer>
   <!-- P0-1 常驻运行状态条（v0.6.18 §3.68）：唯一刷新出口 renderWorkStatus()。
        六个 data-k 字段是 smoke §148 的结构锚点：phase / ttft / tps / ctx / tools / cost。
@@ -375,24 +603,128 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
   <div id="composer">
     <button id="attachBtn" title="上传图片或文本文件（图片需支持视觉的模型）">📎</button>
     <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送，Shift+Enter 换行）"></textarea>
-    <select id="permSel" title="权限模式：询问＝写文件/执行命令前先确认（推荐） · 自动＝全部直接放行 · 只读＝禁止修改与执行。此处选择随每条消息一起发送，优先于预设声明的权限（预设只能收紧、不能提权）；会话开始时会在对话里标明本轮生效的档位与来源">
-      <option value="ask">询问</option>
-      <option value="auto">自动</option>
-      <option value="readonly">只读</option>
-    </select>
-    <select id="modelSel" title="切换模型"></select>
-    <select id="presetSel" title="智能体预设：一键切换工具白名单/权限/参数组合（选「无预设」恢复默认）"><option value="">无预设</option></select>
-    <select id="reasoningSel" title="思考模式（推理等级）：关＝不推理省 token · 低 · 高（默认）· 最高＝最强推理" style="display:none">
-      <option value="off">关</option>
-      <option value="low">低</option>
-      <option value="high">高</option>
-      <option value="max">最高</option>
-    </select>
+    <!-- P1-5 会话设置弹层（v0.6.19 §3.70）：模型 / 预设 / 权限三件套收进同一个 popover，
+         按钮上直接印当前生效的模型与权限（用户一眼知道"东西没丢"）。原三个 select 保留在弹层内
+         （send()/init() 仍按既有 id 读取），不再占输入区。 -->
+    <button id="sessSettingsBtn" title="会话设置：模型 / 预设 / 权限（含生效值与来源）" aria-haspopup="dialog" aria-expanded="false"><b id="chipModel">模型</b><span class="sep">·</span><span id="chipPerm">权限</span></button>
     <button id="sendBtn" class="primary">发送</button>
   </div>
   <div id="hint"><span id="hintText">工具执行与权限确认会实时展示；生成中（含等待权限确认时）可点「■ 停止」立即中断。</span><label style="margin-left:12px;cursor:pointer;user-select:none"><input type="checkbox" id="journalChk" style="vertical-align:-2px;margin:0 4px 0 0">📌 带上文（最近会话日志，默认关＝新会话全新开始）</label></div>
   <div id="statusBar" title="累计使用统计（轮次/步数/LLM 与工具时长/首 token/吞吐/缓存命中/输入输出 tokens）"></div>
 </footer>
+
+<!-- P1-4 右栏「本轮运行」（v0.6.19 §3.70）：与底部状态条**同源**（runPanelView → runStripView → runState），
+     ≥1180 默认展开并推开正文；<1180 收起为顶栏「运行」chip，点开是覆盖式抽屉。无新增轮询。 -->
+<aside id="runPanel" aria-label="本轮运行" hidden>
+  <div class="rp-head"><span class="rp-live" aria-hidden="true"></span><span>本轮运行</span><span class="rp-sub">指标口径：本轮（非累计）</span><button id="rpCollapse" type="button" title="收起右栏">收起</button></div>
+  <div class="rp-body">
+    <section class="rp-sec">
+      <div class="rp-sec-title">会话配置<span class="line"></span></div>
+      <dl class="rp-kv">
+        <dt>模型</dt><dd><span id="rpModel">—</span><span class="rp-src" id="rpModelSrc">设置</span></dd>
+        <dt>API id</dt><dd><span class="rp-id" id="rpModelId">—</span></dd>
+        <dt>预设</dt><dd><span id="rpPreset">无预设</span><span class="rp-src">本轮</span></dd>
+        <dt>权限</dt><dd><span id="rpPerm">—</span><span class="rp-src" id="rpPermSrc">—</span></dd>
+      </dl>
+    </section>
+    <section class="rp-sec">
+      <div class="rp-sec-title">本轮数据<span class="line"></span></div>
+      <div class="rp-metrics">
+        <div class="rp-metric"><span class="l">阶段</span><span class="v" data-rk="phase" id="rpPhase">空闲</span></div>
+        <div class="rp-metric"><span class="l">首帧 TTFT</span><span class="v" data-rk="ttft" id="rpTtft">—</span></div>
+        <div class="rp-metric"><span class="l">吞吐</span><span class="v" data-rk="tps"><span id="rpTps">—</span><small>tok/s</small></span></div>
+        <div class="rp-metric"><span class="l">工具步数</span><span class="v" data-rk="tools" id="rpTools">0</span></div>
+        <div class="rp-metric"><span class="l">本轮用时</span><span class="v" id="rpTime">—</span></div>
+        <div class="rp-metric wide"><span class="l">上下文占用</span><span class="v" data-rk="ctx" id="rpCtx">—</span><div class="rp-ctxbar"><i id="rpCtxBar"></i></div></div>
+        <div class="rp-metric wide"><span class="l">本轮费用（估算）</span><span class="v" data-rk="cost" id="rpCost">—</span></div>
+      </div>
+    </section>
+  </div>
+  <div class="rp-foot"><span class="grow" id="rpFootNote">停止与压缩：与状态条同一条停止出口</span><button id="rpCompact" type="button" hidden title="后端有 /compact 时才显示">压缩上下文</button><button id="rpStop" type="button" disabled>■ 停止</button></div>
+</aside>
+
+<!-- P1-5 会话设置弹层 -->
+<div id="sessSheet" role="dialog" aria-modal="false" aria-label="会话设置" hidden>
+  <div class="ss-head">⚙ 会话设置<span class="ss-sub">模型 / 预设 / 权限</span><button id="ssClose" type="button">关闭</button></div>
+  <div class="ss-body">
+    <div class="ss-field">
+      <label for="modelSel">模型<span class="ss-scope">全局 · 下一轮生效</span></label>
+      <select id="modelSel" title="切换模型"></select>
+      <div class="ss-src"><b id="ssModelLabel">—</b><br><span id="ssModelId">API id: —</span><br><span id="ssModelSrc">来源：设置 › 模型与密钥 · 写入 config.json，下一轮生效</span></div>
+    </div>
+    <div class="ss-field">
+      <label for="presetSel">预设<span class="ss-scope">仅下一轮</span></label>
+      <select id="presetSel" title="智能体预设：一键切换工具白名单/权限/参数组合（选「无预设」恢复默认）"><option value="">无预设</option></select>
+      <div class="ss-src">来源：你的选择 · 只影响下一轮（工具白名单 / 参数）；不改变权限来源。</div>
+    </div>
+    <div class="ss-field">
+      <label>权限<span class="ss-scope">全局 + 本轮</span></label>
+      <select id="permSel" title="权限模式：询问＝写文件/执行命令前先确认（推荐） · 自动＝全部直接放行 · 只读＝禁止修改与执行。此处选择随每条消息一起发送，优先于预设声明的权限（预设只能收紧、不能提权）">
+        <option value="ask">询问</option>
+        <option value="auto">自动</option>
+        <option value="readonly">只读</option>
+      </select>
+      <div class="ss-seg" id="ssPermSeg" role="group" aria-label="权限模式">
+        <button type="button" data-perm="ask">询问</button>
+        <button type="button" data-perm="auto">自动</button>
+        <button type="button" data-perm="readonly">只读</button>
+      </div>
+      <div class="ss-src" id="ssPermSrc">permission=ask（来源：default）</div>
+    </div>
+    <div class="ss-field" id="ssReasoningField" hidden>
+      <label for="reasoningSel">推理等级<span class="ss-scope">全局</span></label>
+      <select id="reasoningSel" title="思考模式（推理等级）：关＝不推理省 token · 低 · 高（默认）· 最高＝最强推理">
+        <option value="off">关</option>
+        <option value="low">低</option>
+        <option value="high">高</option>
+        <option value="max">最高</option>
+      </select>
+    </div>
+  </div>
+  <div class="ss-effective" id="ssEffective">本轮实际生效：—</div>
+  <div class="ss-foot"><span class="grow">每项右侧标了作用域；模型/预设/权限都只在这里改</span><button id="ssDone" type="button" class="primary">完成</button></div>
+</div>
+
+<!-- P1-2 命令面板（⌘K / Ctrl+K） -->
+<div class="overlay" id="paletteMask" hidden>
+  <div class="palette" role="dialog" aria-modal="true" aria-label="命令面板">
+    <div class="palette-input">
+      <span aria-hidden="true">🔎</span>
+      <input id="paletteInput" type="text" placeholder="搜索会话、工作空间、模型、预设、权限、设置项…" role="combobox" aria-expanded="true" aria-controls="paletteList" aria-activedescendant="" autocomplete="off">
+      <span class="kbd">Esc</span>
+    </div>
+    <div class="palette-list" id="paletteList" role="listbox" aria-label="命令"></div>
+    <div class="palette-foot"><span><span class="kbd">↑</span><span class="kbd">↓</span> 选择</span><span><span class="kbd">↵</span> 执行</span><span><span class="kbd">esc</span> 关闭</span><span class="grow"></span><span>作用域标签 = 改动影响范围</span></div>
+  </div>
+</div>
+
+<!-- P1-3 快捷键表（⌘/ / Ctrl+/）：只列**真实实现**的快捷键 -->
+<div class="overlay center" id="shortcutMask" hidden>
+  <div class="shortcut-sheet" role="dialog" aria-modal="true" aria-label="键盘快捷键">
+    <div class="shortcut-head">⌨️ 键盘快捷键<span style="font-size:11px;color:var(--faint);font-weight:400">（只列已实现项）</span><button id="shortcutClose" type="button">关闭</button></div>
+    <div class="shortcut-rows">
+      <div class="shortcut-row" data-shortcut="⌘K"><span class="kbd">⌘K / Ctrl+K</span><span class="grow">命令面板（搜索 / 切换 / 执行）</span></div>
+      <div class="shortcut-row" data-shortcut="⌘/"><span class="kbd">⌘/ / Ctrl+/</span><span class="grow">打开本表</span></div>
+      <div class="shortcut-row" data-shortcut="Esc"><span class="kbd">Esc</span><span class="grow">分层关闭：浮层 › 确认卡 › 停止本轮</span></div>
+      <div class="shortcut-row" data-shortcut="Enter"><span class="kbd">Enter</span><span class="grow">发送</span></div>
+      <div class="shortcut-row" data-shortcut="Shift+Enter"><span class="kbd">Shift+Enter</span><span class="grow">换行</span></div>
+      <div class="shortcut-row" data-shortcut="⌘Enter"><span class="kbd">⌘Enter / Ctrl+Enter</span><span class="grow">发送（与 Enter 等价）</span></div>
+      <div class="shortcut-row" data-shortcut="y/n"><span class="kbd">y / n</span><span class="grow">权限确认：本次放行 / 拒绝（输入框内不触发）</span></div>
+      <div class="shortcut-note">输入法组合（isComposing）期间不触发上述快捷键；⌘ 在 Windows/Linux 上为 Ctrl。</div>
+    </div>
+  </div>
+</div>
+
+<!-- 诊断 / 日志路径（不新增后端：路径来自 /api/state 的 home / workingDir，可复制） -->
+<div id="diagModal" class="modal-mask" style="display:none">
+  <div class="modal diag-modal">
+    <h3>🩺 诊断与日志</h3>
+    <div id="diagRows"></div>
+    <div class="diag-note">Web 端没有打开系统文件管理器的权限（桌面 preload 只暴露目录选择器）；这里给出真实路径并可复制，便于排障。日志目录：&lt;home&gt;/logs/。 </div>
+    <div class="row" style="margin-top:12px"><button id="diagClose">关闭</button></div>
+  </div>
+</div>
+
 <div id="modalRoot"></div>
 <div id="sessModal" class="modal-mask" style="display:none">
   <div class="modal">
@@ -404,24 +736,28 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 <div id="cfgModal" class="modal-mask" style="display:none">
   <div class="modal cfg-modal">
     <h3>⚙ 设置</h3>
+    <!-- P1-7 设置分组 + 搜索（v0.6.19 §3.70）：按用户任务分组；输入关键字按标题/说明/placeholder 过滤，
+         不匹配的 .cfg-row 带 hidden 属性；命中项高亮。 -->
+    <div class="cfg-search"><input id="cfgSearch" placeholder="搜索设置项（标题 / 关键字，如 沙箱、超时、Key）…" aria-label="搜索设置项" autocomplete="off"><span class="cfg-search-count" id="cfgSearchCount"></span></div>
     <div class="cfg-body">
     <nav class="cfg-nav">
-      <button class="cfg-nav-btn active" data-panel="models">🔑 模型与密钥</button>
-      <button class="cfg-nav-btn" data-panel="sync">☁️ 云同步与协作</button>
-      <button class="cfg-nav-btn" data-panel="general">🛡️ 通用与权限</button>
-      <button class="cfg-nav-btn" data-panel="schedule">⏰ 调度队列</button>
-      <button class="cfg-nav-btn" data-panel="workspace">📁 工作空间</button>
-      <button class="cfg-nav-btn" data-panel="memory">🧠 长期记忆</button>
-
-      <button class="cfg-nav-btn" data-panel="mcp">🔌 MCP 生态</button>
-      <button class="cfg-nav-btn" data-panel="skills">🧩 技能库</button>
+      <button class="cfg-nav-btn active" data-panel="models" data-group="model">🔌 模型与端点</button>
+      <button class="cfg-nav-btn" data-panel="runtime" data-group="runtime">⏱️ 运行与超时</button>
+      <button class="cfg-nav-btn" data-panel="permissions" data-group="permission">🛡️ 权限与沙箱</button>
+      <button class="cfg-nav-btn" data-panel="appearance" data-group="appearance">🎨 外观</button>
+      <button class="cfg-nav-btn" data-panel="workspace" data-group="workspace">📁 工作空间</button>
+      <button class="cfg-nav-btn" data-panel="schedule" data-group="automation">⏰ 调度队列</button>
+      <button class="cfg-nav-btn" data-panel="sync" data-group="sync">☁️ 云同步与协作</button>
+      <button class="cfg-nav-btn" data-panel="memory" data-group="memory">🧠 长期记忆</button>
+      <button class="cfg-nav-btn" data-panel="mcp" data-group="ecosystem">🔌 MCP 生态</button>
+      <button class="cfg-nav-btn" data-panel="skills" data-group="ecosystem">🧩 技能库</button>
     </nav>
     <div class="cfg-panels">
     <section class="cfg-panel active" data-panel="models">
     <h4 style="margin:4px 0;color:var(--accent2)">模型与 API Key</h4>
-    <div id="pkList" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div id="pkList" class="cfg-searchable" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
     <div class="cfg-hint">自定义模型（OpenAI 兼容端点）：</div>
-    <div id="cmList" style="max-height:120px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div id="cmList" class="cfg-searchable" style="max-height:120px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
     <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap">
       <input id="cmName" placeholder="模型名（如 my-gpt4）" style="flex:1;min-width:110px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
       <input id="cmLabel" placeholder="标签（可选）" style="flex:1;min-width:90px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
@@ -457,15 +793,18 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <div class="cfg-row" style="display:flex;gap:6px"><input id="oldPass" type="password" placeholder="旧密码" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"><input id="newPass" type="password" placeholder="新密码（≥8 位）" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"><button id="passwdBtn">改密码</button></div>
     <div class="cfg-hint">分享与协作（分享码给对方，对方接受后进入自己的会话列表）：</div>
     <div class="cfg-row" style="display:flex;gap:6px"><input id="shareName" placeholder="要分享的会话文件名（如 2026-08-21T10-00-00-aaaa.jsonl）" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"><button id="shareCreate">创建分享</button></div>
-    <div id="shareList" style="max-height:110px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div id="shareList" class="cfg-searchable" style="max-height:110px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
     <div class="cfg-row" style="display:flex;gap:6px"><input id="acceptCode" placeholder="输入分享码，接受对方会话…" style="flex:1;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"><button id="shareAccept">接受</button></div>
-    <div id="shareAccepted" style="max-height:90px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div id="shareAccepted" class="cfg-searchable" style="max-height:90px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
     <div class="cfg-hint">会话冲突（多设备同时修改同一会话时出现）：</div>
-    <div id="conflictList" style="max-height:120px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div id="conflictList" class="cfg-searchable" style="max-height:120px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
       </section>
-    <section class="cfg-panel" data-panel="general">
-    <h4 style="margin:4px 0;color:var(--accent2)">通用与权限</h4>
-    <div class="cfg-row"><label>沙箱模式（bash 执行隔离）</label>
+    <section class="cfg-panel" data-panel="permissions">
+    <h4 style="margin:4px 0;color:var(--accent2)">权限与沙箱</h4>
+    <div class="cfg-row" data-kw="权限 permission ask auto readonly 沙箱 sandbox 隔离"><label>权限模式（写文件 / 执行命令前是否确认）</label>
+      <div class="cfg-hint">权限模式在 <b>⚙ 会话设置</b>（输入区右侧）里切换，含生效值与来源；此处只控制沙箱。</div>
+    </div>
+    <div class="cfg-row" data-kw="沙箱 sandbox 隔离 bash 只读 断网"><label>沙箱模式（bash 执行隔离）</label>
       <select id="sbxSel">
         <option value="off">off — 直接执行</option>
         <option value="readonly">readonly — 全盘只读（/tmp 可写）</option>
@@ -473,21 +812,38 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
       </select>
       <div class="cfg-hint" id="sbxHint"></div>
     </div>
-    <div class="cfg-row"><label><input type="checkbox" id="routeChk"> 自动模型路由（规划→pro / 执行→flash）</label></div>
-    <div class="cfg-row"><label>上下文预算 tokens <input type="number" id="budgetInput" min="1000" step="1000"></label></div>
-    <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end">
+      </section>
+    <section class="cfg-panel" data-panel="runtime">
+    <h4 style="margin:4px 0;color:var(--accent2)">运行与超时</h4>
+    <div class="cfg-row" data-kw="路由 routing 模型 router planner executor"><label><input type="checkbox" id="routeChk"> 自动模型路由（规划→pro / 执行→flash）</label></div>
+    <div class="cfg-row" data-kw="上下文预算 context budget tokens 窗口"><label>上下文预算 tokens <input type="number" id="budgetInput" min="1000" step="1000"></label></div>
+    <div class="cfg-row" data-kw="超时 timeout 首帧 first token 流式空闲 stream idle 总量 total 秒" style="display:flex;gap:6px;flex-wrap:wrap;align-items:flex-end">
       <label style="font-size:12px">首 token 等待（秒）<input type="number" id="toFirstToken" min="0" step="10" placeholder="自动"></label>
       <label style="font-size:12px">流式空闲（秒）<input type="number" id="toStreamIdle" min="0" step="10" placeholder="自动"></label>
       <label style="font-size:12px">总量（秒）<input type="number" id="toTotal" min="0" step="10" placeholder="自动"></label>
     </div>
-    <div class="cfg-hint">留空 = 自适应：本地模型自动给更长首 token 等待（慢 prefill 不被误杀）。仅在默认值仍不够/过松时手填。</div>
-    <div class="cfg-row"><label><input type="checkbox" id="autoStartChk"> 开机自启（登录后自动启动服务器）</label></div>
-    <div class="cfg-row"><label><input type="checkbox" id="notifyChk"> 后台任务完成/失败时桌面通知</label></div>
+    <div class="cfg-hint" data-kw="超时 timeout 自适应 本地模型 首 token">留空 = 自适应：本地模型自动给更长首 token 等待（慢 prefill 不被误杀）。仅在默认值仍不够/过松时手填。</div>
+    <div class="cfg-row" data-kw="开机自启 autostart 启动"><label><input type="checkbox" id="autoStartChk"> 开机自启（登录后自动启动服务器）</label></div>
+    <div class="cfg-row" data-kw="通知 notify 桌面 完成 失败"><label><input type="checkbox" id="notifyChk"> 后台任务完成/失败时桌面通知</label></div>
+      </section>
+    <section class="cfg-panel" data-panel="appearance">
+    <h4 style="margin:4px 0;color:var(--accent2)">外观</h4>
+    <div class="cfg-row" data-kw="主题 theme 明暗 dark light 系统 prefers-color-scheme 外观"><label>明暗主题</label>
+      <select id="themeSel">
+        <option value="system">跟随系统（prefers-color-scheme）</option>
+        <option value="dark">暗色</option>
+        <option value="light">亮色</option>
+      </select>
+      <div class="cfg-hint">偏好写入浏览器 localStorage（mingdao-theme）；选「跟随系统」时随系统明暗实时切换。</div>
+    </div>
+    <div class="cfg-row" data-kw="快捷键 keyboard shortcut ⌘K 命令面板"><label>快捷键</label>
+      <div class="cfg-hint">⌘K / Ctrl+K 命令面板 · ⌘/ / Ctrl+/ 快捷键表 · Esc 分层关闭 / 停止本轮。答"实际实现了哪些"以快捷键表为准。</div>
+    </div>
       </section>
     <section class="cfg-panel" data-panel="schedule">
     <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
     <h4 style="margin:4px 0;color:var(--accent2)">调度队列（定时 / 周期 / 依赖）</h4>
-    <div id="schList" style="max-height:170px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div id="schList" class="cfg-searchable" style="max-height:170px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
     <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap">
       <input id="schQuestion" placeholder="定时任务内容…" style="flex:1;min-width:130px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
       <select id="schWhen" style="background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 8px;font-size:13px">
@@ -508,7 +864,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <section class="cfg-panel" data-panel="workspace">
     <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
     <h4 style="margin:4px 0;color:var(--accent2)">工作空间（项目目录注册表，与 CLI 共享）</h4>
-    <div id="wsList" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div id="wsList" class="cfg-searchable" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
     <div class="cfg-row" style="display:flex;gap:6px;flex-wrap:wrap">
       <input id="wsName" placeholder="空间名称…" style="flex:1;min-width:90px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
       <input id="wsDir" placeholder="目录（可点右侧选择；留空登记时也会弹选择器，选「不指定」= 服务器工作目录）" title="可点右侧「选择目录…」用系统对话框选，或直接手输绝对路径" style="flex:1.4;min-width:140px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px">
@@ -537,7 +893,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
     <hr style="border:none;border-top:1px solid var(--border);margin:14px 0 8px">
     <h4 style="margin:4px 0;color:var(--accent2)">技能库（搜索 / 一键安装，装到用户级可改可删）<button id="skillRegRefresh" style="float:right;padding:1px 8px;font-size:11px">刷新线上</button></h4>
     <div class="cfg-row"><input id="skillSearch" placeholder="搜索技能…（留空显示全部）" style="width:100%;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:6px 10px;font-size:13px"></div>
-    <div id="skillLibList" style="max-height:170px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
+    <div id="skillLibList" class="cfg-searchable" style="max-height:170px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
       </section>
     </div>
   </div>
