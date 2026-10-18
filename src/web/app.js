@@ -575,7 +575,7 @@ async function send(){
       else if(ev.type==='ask'){ runState.rawPhase='等待权限确认'; runState.phase='执行工具'; update(); renderWorkStatus(); handleAskEvent(ev); }
       else if(ev.type==='usage'){ onActivity(); runState.cost=String(ev.cost||'');
         // P1-4：本**轮**实际用到的模型（服务端 usage.modelName）——不是"当前选择"的猜测。
-        if(ev.modelName){ runState.turnModel=String(ev.modelName); const ce=modelsCache.find((m)=>m&&m.name===runState.turnModel); runState.modelLabel=ce?String(ce.label||ce.modelName||ce.name||''):runState.modelLabel; }
+        if(ev.modelName){ runState.turnModel=String(ev.modelName); const ce=modelsCache.find((m)=>m&&(m.id||m.name)===runState.turnModel); runState.modelLabel=ce?String(ce.label||ce.id||ce.modelName||ce.name||''):runState.modelLabel; }
         renderWorkStatus(); const u=document.createElement('div'); u.className='usage'; u.textContent=''+ev.modelName+' · ↑'+ev.usage.prompt_tokens+' ↓'+ev.usage.completion_tokens+' tokens · '+((ev.durationMs||0)/1000).toFixed(1)+'s'+ev.cost; msg.insertBefore(u, content); scroll(); }
       else if(ev.type==='error'){ console.log('[MingDao] error 事件：' + ev.message); onActivity();
         // §138 Bug C：服务端已按超时把这条确认作废（pendingAsk 清空），前端若继续挂着那个弹窗，
@@ -964,9 +964,11 @@ function paletteItemHtml(cmd) {
 
 // —— 会话设置：模型 label + API id 副标题 / 权限生效值与来源 ——
 function modelDisplay(m) {
-  const name = String((m && m.name) || m || '');
+  // v0.6.20（§3.71）：id 是 API 实际模型名（请求/选择键），label 才是给人看的显示名。
+  const id = String((m && (m.id || m.name)) || m || '');
+  const name = id;
   const label = String((m && m.label) || name);
-  return { name, label, subtitle: 'API id: ' + name };
+  return { id, name, label, subtitle: 'API id: ' + name };
 }
 function permissionDisplay(mode, source) {
   return 'permission=' + String(mode || 'ask') + '（来源：' + String(source || 'default') + '）';
@@ -1296,7 +1298,7 @@ function permissionModeLabel(mode) {
 }
 function currentModelEntry() {
   const name = (($('#modelSel') && $('#modelSel').value) || runState.modelName || '').trim();
-  const found = modelsCache.find((m) => m && m.name === name);
+  const found = modelsCache.find((m) => m && (m.id || m.name) === name);
   return found || { name, label: runState.modelLabel || name };
 }
 function renderSessionSettings() {
@@ -1305,6 +1307,8 @@ function renderSessionSettings() {
   set('#ssModelLabel', md.label);
   set('#ssModelId', md.subtitle);
   set('#ssModelSrc', '来源：设置 › 模型与密钥 · 写入 config.json，下一轮生效');
+  const hint = $('#ssModelAliasHint');
+  if (hint) hint.hidden = !(md && md.label && md.label !== (md.id || md.name));
   const permSel = $('#permSel');
   const mode = runState.permissionMode || (permSel && permSel.value) || 'ask';
   const source = runState.permissionSource || 'default';
@@ -1346,7 +1350,7 @@ async function setModelEverywhere(name) {
   const sel = $('#modelSel');
   if (sel) sel.value = name;
   runState.modelName = name;
-  const entry = modelsCache.find((m) => m && m.name === name);
+  const entry = modelsCache.find((m) => m && (m.id || m.name) === name);
   runState.modelLabel = entry ? String(entry.label || name) : name;
   renderSessionSettings();
   await applyConfig({ model: name }, sel || undefined);
@@ -1856,7 +1860,8 @@ async function init(){
     for(const m of (j.models||[])){ const g=m.providerLabel||'其他'; if(!groups[g]){groups[g]=[];order.push(g);} groups[g].push(m); }
     for(const g of order){
       const og=document.createElement('optgroup'); og.label=g;
-      for(const m of groups[g]){ const o=document.createElement('option'); o.value=m.name; o.textContent=m.name; o.title=m.label; if(m.name===j.model) o.selected=true; og.appendChild(o); }
+      // §3.71：value=API id（选择键）、可见文本=显示名、title 保留来源说明（label/detail）+ API id；§139 仍要求 title 以 m.label 开头。
+      for(const m of groups[g]){ const o=document.createElement('option'); o.value=m.id||m.name; o.textContent=m.label||m.id||m.name; o.title=m.label+' · API id: '+(m.id||m.name)+(m.detail&&m.detail!==m.label?' · '+m.detail:''); if((m.id||m.name)===j.model) o.selected=true; og.appendChild(o); }
       ms.appendChild(og);
     }
     if(!(j.models||[]).length){ const o=document.createElement('option'); o.value=j.model; o.textContent=j.model; ms.appendChild(o); }
@@ -1865,8 +1870,8 @@ async function init(){
     workingDirCache=String(j.workingDir||'');
     compactAvailable=Boolean(j.compact||j.compactEndpoint||j.capabilities&&j.capabilities.compact);
     runState.modelName=String(j.model||'');
-    const curEntry=modelsCache.find((m)=>m&&m.name===runState.modelName);
-    runState.modelLabel=curEntry?String(curEntry.label||curEntry.name||''):runState.modelName;
+    const curEntry=modelsCache.find((m)=>m&&(m.id||m.name)===runState.modelName);
+    runState.modelLabel=curEntry?String(curEntry.label||curEntry.id||curEntry.name||''):runState.modelName;
     $('#permSel').value=j.permission||'ask';
     // P0-4：/api/state 现在带 permissionSource（explicit/preset/config/cli/default）——
     // 状态条悬浮详情与会话设置里都能显示 "permission=auto（来源：显式选择/预设/config 默认）"。
@@ -2186,7 +2191,8 @@ async function reloadModels(){
     for(const m of (j.models||[])){ const g=m.providerLabel||'其他'; if(!groups[g]){groups[g]=[];order.push(g);} groups[g].push(m); }
     for(const g of order){
       const og=document.createElement('optgroup'); og.label=g;
-      for(const m of groups[g]){ const o=document.createElement('option'); o.value=m.name; o.textContent=m.name; o.title=m.label; if(m.name===j.model) o.selected=true; og.appendChild(o); }
+      // §3.71：value=API id（选择键）、可见文本=显示名、title 保留来源说明（label/detail）+ API id；§139 仍要求 title 以 m.label 开头。
+      for(const m of groups[g]){ const o=document.createElement('option'); o.value=m.id||m.name; o.textContent=m.label||m.id||m.name; o.title=m.label+' · API id: '+(m.id||m.name)+(m.detail&&m.detail!==m.label?' · '+m.detail:''); if((m.id||m.name)===j.model) o.selected=true; og.appendChild(o); }
       ms.appendChild(og);
     }
     if(!(j.models||[]).length){ const o=document.createElement('option'); o.value=j.model; o.textContent=j.model; ms.appendChild(o); }
@@ -2195,8 +2201,8 @@ async function reloadModels(){
     workingDirCache=String(j.workingDir||workingDirCache);
     compactAvailable=Boolean(j.compact||j.compactEndpoint||j.capabilities&&j.capabilities.compact);
     runState.modelName=String(j.model||runState.modelName||'');
-    const curEntry=modelsCache.find((m)=>m&&m.name===runState.modelName);
-    runState.modelLabel=curEntry?String(curEntry.label||curEntry.name||''):runState.modelName;
+    const curEntry=modelsCache.find((m)=>m&&(m.id||m.name)===runState.modelName);
+    runState.modelLabel=curEntry?String(curEntry.label||curEntry.id||curEntry.name||''):runState.modelName;
     const env=('路由'+(j.routing?'开':'关')+' · 沙箱'+((j.sandbox&&j.sandbox!=='off')?(j.sandboxSupported?j.sandbox:'降级'):'off'));
     $('#envBadge').textContent=env; $('#envBadge').style.display='';
     if(j.contextBudget){ ctxLimit=Number(j.contextBudget)||ctxLimit; runState.contextTotal=ctxLimit; }
@@ -2366,7 +2372,7 @@ async function applyConfig(payload, revertTarget){
   }
   m.style.display=''; setTimeout(()=>{m.style.display='none';},4000);
 }
-$('#modelSel').addEventListener('change', e=>{ runState.modelName=e.target.value; runState.modelLabel=(modelsCache.find((m)=>m&&m.name===e.target.value)||{}).label||e.target.value; applyConfig({model:e.target.value}, e.target); renderSessionSettings(); renderRunPanel(); });
+$('#modelSel').addEventListener('change', e=>{ runState.modelName=e.target.value; runState.modelLabel=(modelsCache.find((m)=>m&&(m.id||m.name)===e.target.value)||{}).label||e.target.value; applyConfig({model:e.target.value}, e.target); renderSessionSettings(); renderRunPanel(); });
 $('#permSel').addEventListener('change', e=>{ runState.permissionMode=e.target.value; runState.permissionSource='explicit'; applyConfig({permission:e.target.value}, e.target); renderSessionSettings(); renderWorkStatus(); });
 // v0.3.0 P0-3：会话边界收尾（切换/新对话时提取项目记忆+日志，fire-and-forget 不阻塞 UI）
 function finalizeCurrentSession(){

@@ -16338,4 +16338,142 @@ return { normalizeRunPhase, fmtRunTtft, fmtRunTps, fmtRunTools, fmtRunCost, fmtR
 }
 
 
+
+// ---------- 150. v0.6.20 §3.71：模型显示别名接到界面（value=API id / 可见文本=label / title 带 API id / 会话设置 hint / 请求仍用 id） ----------
+// 接 §149：§3.69 已在后端把 id / label / detail 分开，但界面仍渲染 m.name —— 用户看不到 config.modelLabels
+// 的显示别名。本节守住：①两处下拉构建都 value=id、可见文本=label、title 含「API id: <id>」；②无映射
+// （label===id）时文本回退 id、title 仍带 API id；③会话设置 #ssModelAliasHint 只在 label!==id 时显示，
+// 相等时 hidden；④选择模型后写进 /api/config 的 model 仍是 API id（显示名只进 runState.modelLabel）；
+// ⑤设置页「模型与 API Key」下的说明存在（不新增表单控件）。
+{
+  const appSrc150 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+  const htmlSrc150 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  /** @param {string} a @param {string} b */
+  const slice150 = (a, b) => {
+    const i = appSrc150.indexOf(a);
+    const j = appSrc150.indexOf(b, i + a.length);
+    assert.ok(i >= 0 && j > i, `（前置）应能定位 app.js 切片：${a}`);
+    return appSrc150.slice(i, j);
+  };
+  // renderSessionSettings 里的两行（取 $ / 写 hidden），用桩节点跑真实代码
+  const hintSrc = slice150("  const hint = $('#ssModelAliasHint');", '\n  const permSel');
+  const renderHint = (md) => {
+    const node = { hidden: null };
+    const $ = (id) => (id === '#ssModelAliasHint' ? node : null);
+    new Function('$', 'md', hintSrc)($, md);
+    return node.hidden;
+  };
+  // 下拉构建：init() 与 reloadModels() 各一份，抽取真实循环在桩 document 上跑
+  const optLines = [];
+  {
+    const marker = "      for(const m of groups[g]){ const o=document.createElement('option');";
+    let from = 0;
+    for (;;) {
+      const i = appSrc150.indexOf(marker, from);
+      if (i < 0) break;
+      const j = appSrc150.indexOf('\n', i);
+      assert.ok(j > i, '（前置）模型下拉构建行必须能找到行尾');
+      optLines.push(appSrc150.slice(i, j));
+      from = j;
+    }
+  }
+  assert.equal(optLines.length, 2, '模型下拉必须在 init 与 reloadModels 两处都构建（缺一处说明渲染路径被删/改名）');
+  const buildWith = (line, models, current) => {
+    const og = { children: [], appendChild(o) { this.children.push(o); } };
+    const document = { createElement: () => ({ value: '', textContent: '', title: '', selected: false }) };
+    const fn = new Function('groups', 'g', 'j', 'document', 'og', line + '\nreturn og.children;');
+    return fn({ x: models }, 'x', { model: current }, document, og);
+  };
+  const buildOptions = (models, current) => buildWith(optLines[0], models, current);
+
+  // —— ① 有显示别名：value 是 id、可见文本是 label、title 含 API id（并带 detail） ——
+  {
+    const alias = { id: 'deepseek-flash', label: 'DeepSeek-V4.1-Flash 1017', detail: '线上最新（能力未知）' };
+    const [opt] = buildOptions([alias], 'deepseek-flash');
+    assert.equal(opt.value, 'deepseek-flash', '下拉项的 value 必须是 API id（不能是显示名）');
+    assert.equal(opt.textContent, 'DeepSeek-V4.1-Flash 1017', '下拉项可见文本必须是显示名 label');
+    assert.ok(opt.title.includes('API id: deepseek-flash'),
+      `下拉项 title 必须含「API id: <id>」，实际：${opt.title}`);
+    assert.ok(opt.title.includes('线上最新'),
+      `下拉项 title 必须带上 detail（能力/来源说明不丢），实际：${opt.title}`);
+    assert.equal(opt.selected, true, '选中比较必须按 API id 命中（值域仍是 id）');
+    assert.equal(buildOptions([alias], alias.label)[0].selected, false,
+      '拿显示名当选择键不得命中（选择逻辑只认 API id）');
+    for (const line of optLines) {
+      const [o] = buildWith(line, [alias], alias.id);
+      assert.equal(o.value, 'deepseek-flash', '两处模型下拉的 value 都必须是 API id');
+      assert.equal(o.textContent, alias.label, '两处模型下拉的可见文本都必须是显示名 label');
+      assert.ok(o.title.includes('API id: deepseek-flash'), '两处模型下拉的 title 都必须含 API id');
+    }
+  }
+
+  // —— ② 无 label 映射（label===id）：可见文本回退 id，title 仍含 API id ——
+  {
+    const plain = { id: 'local-llama', label: 'local-llama', detail: '离线兜底' };
+    const [opt] = buildOptions([plain], 'local-llama');
+    assert.equal(opt.value, 'local-llama', '无映射时 value 仍是 API id');
+    assert.equal(opt.textContent, 'local-llama', '无 label 映射时可见文本必须回退到 API id');
+    assert.ok(opt.title.includes('API id: local-llama'),
+      `无 label 映射时 title 仍必须含 API id，实际：${opt.title}`);
+    assert.equal(opt.selected, true, '无映射时选中仍按 id 命中');
+    const [bare] = buildOptions([{ id: 'no-label-field' }], 'no-label-field');
+    assert.equal(bare.textContent, 'no-label-field', '连 label 字段都没有时文本也必须回退 id（不出现空白项）');
+  }
+
+  // —— ③ 会话设置 hint：label!==id 显示、相等 hidden；HTML 默认 hidden ——
+  {
+    const alias = { id: 'deepseek-flash', label: 'DeepSeek-V4.1-Flash 1017', detail: '线上最新' };
+    const mdAlias = new Function(slice150('function modelDisplay(', '\nfunction permissionDisplay(') + '\nreturn modelDisplay;')()(alias);
+    assert.equal(mdAlias.id, 'deepseek-flash', 'modelDisplay 必须暴露 API id 供展示层比较');
+    assert.equal(mdAlias.label, alias.label, 'modelDisplay 仍必须显示 label');
+    assert.equal(renderHint(mdAlias), false, '显示名与 API id 不同时，#ssModelAliasHint 必须显示');
+    const mdSame = new Function(slice150('function modelDisplay(', '\nfunction permissionDisplay(') + '\nreturn modelDisplay;')()({ id: 'local-llama' });
+    assert.equal(mdSame.label, 'local-llama', '无映射时 modelDisplay.label 必须回退 id');
+    assert.equal(renderHint(mdSame), true, '显示名等于 API id 时，#ssModelAliasHint 必须 hidden');
+    assert.ok(/id="ssModelAliasHint"[^>]*hidden/.test(htmlSrc150), '会话设置必须有默认 hidden 的 #ssModelAliasHint');
+    const sheet150 = htmlSrc150.slice(htmlSrc150.indexOf('id="sessSheet"'), htmlSrc150.indexOf('id="paletteMask"'));
+    assert.ok(/显示名来自 config\.modelLabels，请求使用 API id。/.test(sheet150),
+      '会话设置必须解释「显示名来自 config.modelLabels，请求使用 API id」');
+  }
+
+  // —— ④ 选择模型后请求体的 model 仍是 API id（label 只写 runState.modelLabel） ——
+  {
+    const alias = { id: 'deepseek-flash', label: 'DeepSeek-V4.1-Flash 1017', detail: '线上最新' };
+    const cfgCalls = [];
+    const stubSel = { value: '' };
+    const stubRunState = {};
+    const stub$ = (id) => (id === '#modelSel' ? stubSel : null);
+    const fnSrc = slice150('async function setModelEverywhere(name) {', '\nasync function setPermissionEverywhere');
+    const runSetModel = new Function('$', 'modelsCache', 'runState', 'applyConfig', 'renderSessionSettings', 'renderRunPanel',
+      fnSrc + '\nreturn setModelEverywhere;')(
+      stub$, [alias], stubRunState, async (p) => { cfgCalls.push(p); }, () => {}, () => {});
+    await runSetModel(alias.id);
+    assert.equal(stubSel.value, 'deepseek-flash', '切模型必须把 API id 写回下拉（value 是 id）');
+    assert.equal(stubRunState.modelLabel, alias.label, '显示名只用于展示（runState.modelLabel）');
+    assert.equal(cfgCalls.length, 1, '切模型必须只写一次 /api/config');
+    assert.equal(cfgCalls[0].model, 'deepseek-flash', '选择模型后 /api/config 的 model 必须是 API id（不得用 label）');
+    assert.notEqual(cfgCalls[0].model, alias.label, '请求体的 model 绝不能是显示名（官方会 400）');
+    assert.ok(/applyConfig\(\{ model: name \}/.test(appSrc150), '切换模型必须把 id 变量（name=option.value）写进 /api/config');
+    const changeSrc = slice150("$('#modelSel').addEventListener('change'", "$('#permSel').addEventListener('change'");
+    assert.ok(/applyConfig\(\{model:e\.target\.value\}/.test(changeSrc),
+      '下拉 change 必须把 option.value（=API id）写进 /api/config');
+  }
+
+  // —— ⑤ 设置页说明存在（cfg-hint，不新增表单控件） ——
+  {
+    const modelsPanel = htmlSrc150.slice(htmlSrc150.indexOf('data-panel="models"'));
+    const h4 = modelsPanel.indexOf('模型与 API Key');
+    const hint = modelsPanel.indexOf('模型 id 以 API 返回为准');
+    const pk = modelsPanel.indexOf('id="pkList"');
+    assert.ok(hint >= 0 && h4 >= 0 && hint > h4 && pk > hint,
+      '设置页必须说明「模型 id 以 API 返回为准 / config.modelLabels 映射显示名」（在「模型与 API Key」标题下）');
+    assert.ok(/模型 id 以 API 返回为准；官方宣传名可在 <code>config\.modelLabels<\/code> 里映射为显示名（请求仍用 API id）。/.test(htmlSrc150),
+      '设置页说明必须写清「显示名可映射、请求仍用 API id」');
+    assert.ok(/class="cfg-hint"/.test(modelsPanel.slice(hint - 200, hint + 40)),
+      '设置页说明必须是 cfg-hint 文案，不新增表单控件');
+  }
+
+  ok('v0.6.20 §3.71 模型显示别名接线：两处下拉 value=API id / 可见文本=label（含 detail 进 title「API id: <id>」）+ 无映射回退 id + 会话设置 #ssModelAliasHint 仅 label!==id 显示（HTML 默认 hidden）+ 选择后 /api/config 的 model 仍是 id（label 只进 modelLabel）+ 设置页「模型与 API Key」下 cfg-hint 说明（无新增控件）');
+}
+
 process.exit(0);

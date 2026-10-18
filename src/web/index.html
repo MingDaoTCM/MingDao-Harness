@@ -651,6 +651,7 @@ body.run-open #sessSheet{right:318px}
       <label for="modelSel">模型<span class="ss-scope">全局 · 下一轮生效</span></label>
       <select id="modelSel" title="切换模型"></select>
       <div class="ss-src"><b id="ssModelLabel">—</b><br><span id="ssModelId">API id: —</span><br><span id="ssModelSrc">来源：设置 › 模型与密钥 · 写入 config.json，下一轮生效</span></div>
+      <div class="ss-src" id="ssModelAliasHint" hidden>显示名来自 config.modelLabels，请求使用 API id。</div>
     </div>
     <div class="ss-field">
       <label for="presetSel">预设<span class="ss-scope">仅下一轮</span></label>
@@ -755,6 +756,7 @@ body.run-open #sessSheet{right:318px}
     <div class="cfg-panels">
     <section class="cfg-panel active" data-panel="models">
     <h4 style="margin:4px 0;color:var(--accent2)">模型与 API Key</h4>
+    <div class="cfg-hint">模型 id 以 API 返回为准；官方宣传名可在 <code>config.modelLabels</code> 里映射为显示名（请求仍用 API id）。</div>
     <div id="pkList" class="cfg-searchable" style="max-height:150px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>
     <div class="cfg-hint">自定义模型（OpenAI 兼容端点）：</div>
     <div id="cmList" class="cfg-searchable" style="max-height:120px;overflow-y:auto;border:1px solid var(--border);border-radius:8px;padding:2px 8px"></div>

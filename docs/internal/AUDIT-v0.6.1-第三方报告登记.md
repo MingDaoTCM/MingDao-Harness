@@ -3533,3 +3533,55 @@ label 写回 `config.model`** 的变异（batch37 ①）证明：一旦这么做
 - 未新增轮询：右栏/时间线只消费既有 SSE（progress≈1s、usage、done）与 `/api/state`；命令面板
   仅在打开时刷新一次列表。
 - 未 tag、未改版本号、未 publish、未动官网。
+
+## 3.71 已补（v0.6.20 开发线：把模型显示别名接到界面——下拉显示 label、value 仍是 API id）
+
+**来源**：§3.69 的遗留边界（后端已在 `/api/models` 每条给出 `id`/`label`/`detail`，UI 仍渲染
+`m.name`，`config.modelLabels` 配好也看不见）。本节只做 UI 接线，不动后端。
+
+### 一、修了什么（三处）
+
+1. **两处模型下拉**（`src/web/app.js:1864` 的 `init()` 与 `:2195` 的 `reloadModels()`）：
+   `o.value=m.id||m.name`（选择键/请求键恒为 API id）、`o.textContent=m.label||m.id||m.name`
+   （可见文本优先显示名、无映射回退 id）、`o.title=m.label+' · API id: '+(m.id||m.name)+(detail…)`。
+   title 仍以 `m.label` 开头是**刻意保留 §139「title 必须带来源说明（含端点）」守卫**（自定义端点的
+   来源就在 label/detail 里），同时把「API id: <id>」与 detail 补进去；两处循环逐字一致，选择比较改按
+   `(m.id||m.name)===j.model`，`modelsCache.find` 与 change 处理器统一按 id 命中（后端保证
+   `name===id`，选择语义不变）。
+2. **会话设置提示**（`src/web/index.html:654` + `app.js:1310`）：新增默认 `hidden` 的
+   `#ssModelAliasHint`「显示名来自 config.modelLabels，请求使用 API id。」；`renderSessionSettings()`
+   里 `hint.hidden = !(md && md.label && md.label !== (md.id || md.name))`——只有映射生效
+   （label≠id）才显示。`modelDisplay()` 增加 `id` 字段供比较，`name` 仍为 API id。
+3. **设置页说明**（`src/web/index.html:759`）：在「模型与 API Key」标题下加一条 `cfg-hint`：
+   「模型 id 以 API 返回为准；官方宣传名可在 config.modelLabels 里映射为显示名（请求仍用 API id）。」
+   **没有新增表单控件**。
+
+### 二、请求 `model` 仍是 id 的证据
+
+选择链只有一条：`option.value = m.id||m.name` → `#modelSel.value` / `e.target.value` →
+`applyConfig({model: …})`（`POST /api/config`）。显示名只写入 `runState.modelLabel`（展示用）。
+§150 ④ 用桩 DOM 直接执行 `setModelEverywhere('deepseek-flash')`，断言写入 `/api/config` 的
+`model === 'deepseek-flash'` 且 `!== 'DeepSeek-V4.1-Flash 1017'`；并结构断言
+`applyConfig({ model: name })` / `applyConfig({model:e.target.value})` 两处入口都取 id。
+
+### 三、断言与变异
+
+- `test/smoke.js` **只追加 §150**（接 §149）：①含别名的条目 → value=id、可见文本=label、
+  title 含 `API id: <id>` 与 detail、按 id 选中、拿 label 当选择键不命中（两处循环都跑）；
+  ②无映射（label===id）与缺 label 字段 → 文本回退 id、title 仍含 API id；③`modelDisplay` 暴露 id，
+  `#ssModelAliasHint` 在 label≠id 时显示、相等时 hidden，HTML 默认 hidden 且文案存在；
+  ④`/api/config` 的 model 是 id、label 只进 `modelLabel`；⑤设置页 cfg-hint 位于标题下。
+- 新建 `test/mutate/batch39-ui-label.mjs`：**6/6 全中**（value 退回 m.name / 可见文本用 id /
+  title 去掉 API id / hint 条件写反 / 请求 model 改成 label / 设置页说明被删）。
+- `test/mutate/README.md` 计数行按本提交树 `doc-lint` 实测值：316+6=**322**
+  （`node scripts/doc-lint.mjs` 绿）。
+
+### 四、边界与未做（如实）
+
+- **只接了两处下拉 + 两处提示**：⌘K 命令面板的「模型」条目仍以 `m.name` 为标题（keywords 已含
+  label），不在本次允许改动的语义内；如需显示别名可另开一节。
+- `test/mutate/.generated/` 下的抽节脚本是运行产物，不入库。
+- 未改 `src/models.js`、`src/model-discovery.js`、`src/config.js`、`test/model-names.js`、
+  `presets/**`、`desktop/**`、`ide/**`；未新增轮询、未引入外部库；P0/P1 既有守卫（状态条/时间线/
+  ⌘K/右栏/会话设置/空态/搜索/主题/断点）全部保持绿。
+- 未 tag、未改版本号、未 publish、未动官网。
