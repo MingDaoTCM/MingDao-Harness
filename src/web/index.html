@@ -567,6 +567,8 @@ body.run-open #sessSheet{right:318px}
 <body>
 <header>
   <div class="logo">MingDao <span>Harness</span></div>
+  <!-- v0.6.21 小步重排（§3.81）：顶栏只保留「我在哪」的当前位置；模型/预设/权限只在 #sessSheet 里改。 -->
+  <span id="crumb" class="badge" title="当前工作空间 › 当前会话"><span id="crumbWs">工作空间</span><span aria-hidden="true"> › </span><b id="crumbSession">新对话</b></span>
   <span id="cfgMsg" class="badge" style="display:none"></span>
   <button id="paletteBtn" title="搜索或运行命令（⌘K / Ctrl+K）" aria-haspopup="dialog">⌘K <span class="palette-label">搜索或运行</span></button>
   <button id="cfgBtn" title="设置">⚙</button>
@@ -739,7 +741,7 @@ body.run-open #sessSheet{right:318px}
     <div class="ss-field">
       <label for="presetSel">预设<span class="ss-scope">仅下一轮</span></label>
       <select id="presetSel" title="智能体预设：一键切换工具白名单/权限/参数组合（选「无预设」恢复默认）"><option value="">无预设</option></select>
-      <div class="ss-src">来源：你的选择 · 只影响下一轮（工具白名单 / 参数）；不改变权限来源。</div>
+      <div class="ss-src" id="ssPresetSrc">当前：无预设 · 来源：你的选择 · 仅下一轮（工具白名单 / 参数）；不改变权限来源。</div>
     </div>
     <div class="ss-field">
       <label>权限<span class="ss-scope">全局 + 本轮</span></label>

@@ -1743,6 +1743,7 @@ function renderSessionSettings() {
     ? ((presetData.find((p) => p.name === psel.value) || {}).label || psel.value)
     : '无预设';
   runState.presetName = presetLabel;
+  set('#ssPresetSrc', '当前：' + presetLabel + ' · 来源：你的选择 · 仅下一轮（工具白名单 / 参数）');
   set('#ssEffective', sessionEffectiveLine({ model: md.name, modelLabel: md.label, permission: mode, sourceLabel: permissionSourceLabel(source), preset: presetLabel }));
   set('#chipModel', md.label || md.name || '模型');
   set('#chipPerm', permissionModeLabel(mode));
@@ -2219,6 +2220,13 @@ refreshStatusBar(); setInterval(refreshStatusBar, 15000);
 $('#tasksBtn').onclick=()=>{ const p=$('#tasksPanel'); p.style.display = p.style.display==='none'?'flex':'none'; if(p.style.display==='flex'){ $('#subPanel').style.display='none'; $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); $('#subRailBtn').classList.remove('on'); updateTasksPanel(); } syncPanelLayout(); };
 $('#tpClose').onclick=()=>{ $('#tasksPanel').style.display='none'; syncPanelLayout(); };
 
+// v0.6.21（§3.81）：顶栏「我在哪」——工作空间 › 当前会话。数据只取既有 currentWorkspaceName /
+// sessionsCache / currentSession，不新增后端字段。会话列表或工作空间刷新后同步更新。
+function renderCrumb(){
+  const w=$('#crumbWs'); if(w) w.textContent=currentWorkspaceName||'工作空间';
+  const cur=sessionsCache.find((s)=>s&&s.file===currentSession);
+  const c=$('#crumbSession'); if(c) c.textContent=cur?(cur.label||cur.file):(currentSession?String(currentSession).replace(/\.jsonl$/,''):'新对话');
+}
 async function refreshSessions(q){
   const u=q?'/api/sessions?q='+encodeURIComponent(q):'/api/sessions';
   const r=await fetch(u).catch(()=>null); if(!r)return;
@@ -2227,6 +2235,7 @@ async function refreshSessions(q){
   const sel=$('#sessions'); sel.innerHTML='<option value="">历史会话</option>';
   for(const s of sessionsCache){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; sel.appendChild(o); }
   if(currentSession&&!q) sel.value=currentSession;
+  renderCrumb();
 }
 let searchTimer=null;
 $('#sessionSearch').addEventListener('input',e=>{ clearTimeout(searchTimer); searchTimer=setTimeout(()=>refreshSessions(e.target.value.trim()),300); });
@@ -2381,6 +2390,7 @@ async function refreshWsSel(){
   sel.appendChild(add);
   const mgr=document.createElement('option'); mgr.value='__manage__'; mgr.textContent='管理（重命名/删除/改目录）…';
   sel.appendChild(mgr);
+  renderCrumb();
 }
 /** 命令面板与顶栏下拉共用的工作空间切换（携带当前会话，语义与旧路径一致）。 */
 async function applyWorkspaceSwitch(name){
@@ -2799,13 +2809,13 @@ function finalizeCurrentSession(){
   if(!currentSession) return;
   fetch('/api/session-finalize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:currentSession})}).catch(()=>{});
 }
-async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; resetTraceState(); const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); renderEmptyState(); }
+async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; resetTraceState(); const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); renderEmptyState(); renderCrumb(); }
 
 // §138：主按钮在生成态=停止，必须走**同一个**停止出口（stopTurnFromButton → stopTurn → POST /api/abort）
 sendBtn.onclick=()=>{ if(generating){ stopTurnFromButton(); } else { send(); } };
 input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
 input.addEventListener('input',()=>{ input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; });
-$('#newChat').onclick=()=>{ finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); refreshSessions(); };
+$('#newChat').onclick=()=>{ finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); renderCrumb(); refreshSessions(); };
 $('#sessMgrBtn').onclick=openSessModal;
 $('#sessClose').onclick=()=>{ $('#sessModal').style.display='none'; };
 async function openSessModal(){
@@ -2821,6 +2831,6 @@ async function openSessModal(){
     div.appendChild(rn); div.appendChild(dl); list.appendChild(div);
   }
 }
-$('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); } };
+$('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); renderCrumb(); } };
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
 init();

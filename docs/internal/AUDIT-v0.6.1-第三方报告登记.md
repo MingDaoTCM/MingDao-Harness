@@ -4256,3 +4256,81 @@ test/** 里出现固定四位监听端口 1 处：test/smoke.js:123 → listen(4
 **边界**：截图证明"渲染到像素"，不替代真实点击/键盘交互测试；默认会话是临时 home 的演示 fixture，
 不写真实用户目录；macOS Retina 下 `capturePage()` 原生为 2x，工具按请求尺寸重采样并记 warning；
 Electron 缓存重签只用于本机截图，不用于分发。
+
+## 3.81 已做（v0.6.21 小步重排第一步：顶栏补 crumb + 模型/预设/权限只留 `#sessSheet` + 截图工具 `--open`/`sheet.png`）
+
+**来源**：v0.6.20 回滚后按「小步、每步截图验证」重做界面（§3.79 四、后续必须）。本步只做一件事：
+确认顶栏不再承担模型/预设/权限，顶栏补上「我在哪」（工作空间 › 当前会话），并给会话设置弹层
+留下可见证据；不改 CSS 骨架、不搬右栏、不引设计稿样式表、不动三栏布局/主题/字号。
+
+### 一、先核对（避免伪需求）
+
+- 实际 v0.6.20（= v0.6.18 UI）里 `#modelSel` / `#presetSel` / `#permSel` **已经**在 `#sessSheet`
+  （§3.70 P1-5 起），`<header>` 里没有这三个 id——所以本次没有「搬 DOM」可做，也没有重写
+  `app.js` 里按 id 的 handler；三个 change 处理器与 `/api/config` 路径保持原样。
+- v0.6.19 重排新增的 `#crumbWs` / `#crumbSession` 随回滚消失；顶栏其余既有入口（工作空间 /
+  历史会话 / 会话管理 / 任务 / 新对话 / 主题 / 费用）仍在。按负责人指示，本步**不删**这些入口
+  （删除才是 v0.6.19 翻车的动作），只补 crumb；顶栏裁剪留到替代入口逐项验证之后再单独做。
+
+### 二、改动
+
+1. `src/web/index.html`：顶栏 logo 后新增 `#crumbWs › #crumbSession`（复用现有 `.badge` 样式，
+   不新增 CSS 骨架）；会话设置预设字段新增 `#ssPresetSrc`（显示「当前：… · 来源：你的选择 ·
+   仅下一轮」）。
+2. `src/web/app.js`：新增 `renderCrumb()`（数据只取 `currentWorkspaceName` / `sessionsCache` /
+   `currentSession`，不新增后端字段），在 `refreshSessions()`、`refreshWsSel()`、`loadSession()`、
+   新对话 / 清空会话选择后调用；`renderSessionSettings()` 同步 `#ssPresetSrc`。
+3. `scripts/ui-shot.mjs`：新增 `--open <css-selector>`；传 `#sessSheet` 时退回点击
+   `#sessSettingsBtn`；每次运行新增 `sheet.png`（打开 `#sessSheet` 后截图，并校验三个选择器
+   可见、记录 `sheetInfo` 生效值/来源）。原四张 `home/settings/palette/session` 不变。
+4. `test/smoke.js` 末尾新增 §153（回滚时删掉的节号重新启用）：钉「不回归」——顶栏既有入口
+   （工作空间 / 历史会话 / 会话管理 / 任务 / 新对话 / 主题 / 费用）id 与处理器都在；三个选择器
+   仍在 `#sessSheet` 且 change 处理器绑定（模型 / 权限 → `/api/config`，预设 → 本轮 payload）；
+   `#crumbWs › #crumbSession` 随会话 / 工作空间更新；⌘K / 设置入口仍开且 ⌘K 模型命令走 API id；
+   `#sessSheet` 可开关；`ui-shot` 带 `--open` 与 `sheet.png` 可见性校验。
+5. `test/mutate/batch43-header-sheet.mjs`：10 条回归型变异（删历史会话 / 任务入口、删弹层
+   选择器、模型 change 解绑、crumb 不刷新、⌘K 模型命令改用 label、`#sessSheet` 打不开、
+   `--open` 失效、`sheet.png` 不再截），全中。
+6. `test/mutate/README.md`：计数按 `node scripts/doc-lint.mjs` 实际值 **342 → 352**。
+
+### 三、截图（本次真跑）
+
+- wide（`node scripts/ui-shot.mjs --out /tmp/shots-step1` 与
+  `node scripts/ui-shot.mjs --out /tmp/shots-step1 --open "#sessSheet"` 各跑一次，第二次覆盖第一次；
+  均为 **1440×900**）：
+  - `/tmp/shots-step1/home.png` 1440×900 · 232,817 B
+  - `/tmp/shots-step1/settings.png` 1440×900 · 350,513 B
+  - `/tmp/shots-step1/palette.png` 1440×900 · 309,856 B
+  - `/tmp/shots-step1/session.png` 1440×900 · 273,252 B
+  - `/tmp/shots-step1/sheet.png` 1440×900 · 382,995 B
+- narrow（`node scripts/ui-shot.mjs --out /tmp/shots-step1-narrow --viewport narrow`，**880×900**）：
+  - `/tmp/shots-step1-narrow/home.png` 880×900 · 145,809 B
+  - `/tmp/shots-step1-narrow/settings.png` 880×900 · 260,851 B
+  - `/tmp/shots-step1-narrow/palette.png` 880×900 · 223,407 B
+  - `/tmp/shots-step1-narrow/session.png` 880×900 · 184,656 B
+  - `/tmp/shots-step1-narrow/sheet.png` 880×900 · 286,509 B
+- `sheet.png` 内容：弹层标题「会话设置 模型 / 预设 / 权限」；模型下拉
+  `deepseek-flash（当前配置）` 下方 `#ssModelLabel` / `API id: deepseek-flash` / 来源
+  「设置 › 模型与密钥 · 写入 config.json，下一轮生效」；预设下拉「无预设」下方
+  「当前：无预设 · 来源：你的选择 · 仅下一轮…」；权限下拉「询问」+ 三档分段控件 +
+  `permission=ask（来源：config）`；底部「本轮实际生效：deepseek-flash（当前配置） · 权限 ask
+  （来源：config 默认） · 预设 无预设」。弹层尺寸 **410×527**（wide/narrow 两档一致）。
+- 顶栏（wide 截图）：品牌「MingDao Harness」+ 新增 crumb「工作空间 › 刚刚 · 用一句…」+
+  ⌘K / ⚙ / 运行 / 主题 / 工作空间 / 路由 / 费用 / 搜索 / 历史会话 / 任务 / 新对话等既有入口。
+
+### 四、门禁
+
+- `npm run typecheck`：通过。
+- `node test/smoke.js`（单独）：通过（含新增 §153）。
+- `node test/e2e-web.js`：24/24 通过。
+- `node test/e2e-local.js`：通过。
+- `node test/api-contracts.js`：通过。
+- `node test/mutate/batch43-header-sheet.mjs`：**10/10 全中**。
+- `node test/mutate/run.mjs`（全批次）：**31/31 批次全中**，变异总数 352。
+- `node scripts/doc-lint.mjs`：通过。
+
+### 五、边界
+
+- 未改 `src/providers/**`、`src/agent.js`、`presets/**`、`desktop/**`、`ide/**`；未改 CSS 骨架 /
+  三栏 / 右栏 / 主题 / 字号；未引设计稿样式表；未新增轮询；未 tag / 改版本号 / publish / 动官网。
+- 本步**不删**顶栏既有入口：顶栏裁剪必须在替代入口逐项迁出并截图验证之后，作为后续独立小步做。

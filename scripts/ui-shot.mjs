@@ -8,6 +8,11 @@
 //   node scripts/ui-shot.mjs --viewport narrow --theme light
 //   node scripts/ui-shot.mjs --width 1280 --height 800 --out /tmp/mdh-shots
 //   node scripts/ui-shot.mjs --mobile --theme dark
+//   node scripts/ui-shot.mjs --out /tmp/shots --open "#sessSettingsBtn"   # 额外截会话设置弹层
+//
+// --open <css-selector>：截图前先在页面里点击该选择器（用于打开会话设置等弹层）。
+// 传 #sessSheet 本身时自动退回它的打开按钮 #sessSettingsBtn（隐藏节点点不开）。
+// 每次运行都会多产出一张 sheet.png：打开 #sessSheet 后截图，并校验模型/预设/权限三者可见。
 //
 // 退出码：0 成功 · 1 服务/通用失败 · 2 参数错误 · 3 Electron 不可用
 //         4 页面报错（did-fail-load / console error / 渲染进程崩溃） · 5 截图失败
@@ -38,6 +43,7 @@ const cfg = JSON.parse(fs.readFileSync(process.env.MDH_SHOT_CONFIG, 'utf8'));
 const shots = [];
 const pageErrors = [];
 const warnings = [];
+let sheetInfo = null;
 let finished = false;
 let winRef = null;
 
@@ -50,6 +56,7 @@ function finish(ok, error) {
     shots,
     pageErrors,
     warnings,
+    sheetInfo,
   };
   try { fs.writeFileSync(cfg.resultPath, JSON.stringify(payload, null, 2)); } catch {}
   try { if (winRef) winRef.destroy(); } catch {}
@@ -264,6 +271,43 @@ async function run() {
     await capture('session');
   }
 
+  // 5) 会话设置弹层（v0.6.21 §3.81）：--open 指定入口；传 #sessSheet 本身时退回打开按钮。
+  //    截图前校验模型/预设/权限三个选择器都在弹层内且可见——这是"看得见"的证据，不是字符串断言。
+  if (cfg.open && cfg.open !== '#sessSheet') {
+    try {
+      await click(cfg.open);
+    } catch (e) {
+      warnings.push('--open 点击失败（继续用 #sessSettingsBtn 打开会话设置）：' + ((e && e.message) || e));
+    }
+    await sleep(350);
+  }
+  let sheetOpen = await wc.executeJavaScript(
+    "(()=>{const s=document.querySelector('#sessSheet'); return !!s && !s.hidden && s.getBoundingClientRect().height > 0;})()"
+  );
+  if (!sheetOpen) {
+    await click('#sessSettingsBtn');
+    await sleep(450);
+    sheetOpen = await wc.executeJavaScript(
+      "(()=>{const s=document.querySelector('#sessSheet'); return !!s && !s.hidden && s.getBoundingClientRect().height > 0;})()"
+    );
+  }
+  if (!sheetOpen) throw new Error('会话设置弹层未打开（#sessSheet 不可见）');
+  sheetInfo = await wc.executeJavaScript(
+    "(()=>{const s=document.querySelector('#sessSheet'); const t=(id)=>{const n=document.querySelector(id); return n?String(n.textContent||'').trim():'';}; const sel=(id)=>{const n=document.querySelector(id); return n?{value:String(n.value||''),visible:!!(n.offsetWidth||n.offsetHeight||n.getClientRects().length)}:null;}; return {hidden:!!s.hidden,width:Math.round(s.getBoundingClientRect().width),height:Math.round(s.getBoundingClientRect().height),model:sel('#modelSel'),preset:sel('#presetSel'),perm:sel('#permSel'),modelLabel:t('#ssModelLabel'),modelId:t('#ssModelId'),modelSrc:t('#ssModelSrc'),presetSrc:t('#ssPresetSrc'),permSrc:t('#ssPermSrc'),effective:t('#ssEffective')};})()"
+  );
+  if (!sheetInfo || !sheetInfo.model || !sheetInfo.preset || !sheetInfo.perm) {
+    throw new Error('会话设置弹层里缺少模型/预设/权限选择器');
+  }
+  if (!sheetInfo.model.visible || !sheetInfo.preset.visible || !sheetInfo.perm.visible) {
+    throw new Error('会话设置弹层里的模型/预设/权限选择器不可见');
+  }
+  if (!sheetInfo.effective) warnings.push('会话设置底部「本轮实际生效」为空');
+  await capture('sheet');
+  await wc.executeJavaScript(
+    "(()=>{const s=document.querySelector('#sessSheet'); if(s) s.hidden=true; const b=document.querySelector('#sessSettingsBtn'); if(b) b.setAttribute('aria-expanded','false'); return true;})()"
+  );
+  await sleep(150);
+
   if (pageErrors.length && !cfg.allowConsoleErrors) {
     finish(false, '页面报错（' + pageErrors.length + ' 条）：' + pageErrors.join(' | '));
     return;
@@ -286,6 +330,7 @@ function usage() {
   --viewport <档>          wide|mid|narrow = 1440 / 1000 / 880（默认 wide）
   --theme <dark|light>     主题（默认 dark；写入 localStorage mingdao-theme 后 reload）
   --out <dir>              输出目录（默认 /tmp/mdh-shots）
+  --open <css-selector>    截图前先点击该选择器（用于打开会话设置；传 #sessSheet 时自动点打开按钮）
   --mobile                 移动视口（默认 390×844、DPR 2、移动 UA；显式宽高优先）
   --scale <n>              设备像素比（默认 1；--mobile 默认 2）
   --wait <ms>               did-finish-load 后的固定等待（默认 2000）
@@ -297,7 +342,7 @@ function usage() {
   -h, --help               显示本帮助
 
 产物（成功时）:
-  home.png · settings.png · palette.png · session.png（有会话时）
+  home.png · settings.png · palette.png · session.png（有会话时）· sheet.png（会话设置弹层）
 
 退出码:
   0 成功 · 1 服务/通用失败 · 2 参数错误 · 3 Electron 不可用
@@ -311,6 +356,7 @@ function parseArgs(argv) {
     viewport: 'wide',
     theme: 'dark',
     out: '/tmp/mdh-shots',
+    open: null,
     mobile: false,
     scale: null,
     wait: 2000,
@@ -330,6 +376,7 @@ function parseArgs(argv) {
     '--scale',
     '--wait',
     '--electron',
+    '--open',
   ]);
   for (let i = 0; i < argv.length; i += 1) {
     let arg = argv[i];
@@ -372,6 +419,8 @@ function parseArgs(argv) {
       opts.out = val;
     } else if (arg === '--electron') {
       opts.electron = val;
+    } else if (arg === '--open') {
+      opts.open = val;
     }
   }
   if (opts.width === null) opts.width = opts.mobile ? 390 : VIEWPORTS[opts.viewport];
@@ -844,7 +893,7 @@ async function main() {
 
   fs.mkdirSync(opts.out, { recursive: true });
   // 清掉上次的四张同名图，避免本次失败时把旧图误当成新证据。
-  for (const name of ['home', 'settings', 'palette', 'session']) {
+  for (const name of ['home', 'settings', 'palette', 'session', 'sheet']) {
     try { fs.rmSync(path.join(opts.out, name + '.png'), { force: true }); } catch {}
   }
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-ui-shot-home-'));
@@ -884,6 +933,7 @@ async function main() {
           waitMs: opts.wait,
           allowConsoleErrors: opts.allowConsoleErrors,
           viewport: opts.viewport,
+          open: opts.open,
         },
         null,
         2
@@ -930,7 +980,15 @@ async function main() {
     }
     console.log('[ui-shot] ✓ ' + result.shots.length + ' 张截图 → ' + opts.out);
     reportShots(result.shots);
-    const missing = ['home', 'settings', 'palette', 'session'].filter(
+    if (result.sheetInfo) {
+      const si = result.sheetInfo;
+      console.log(
+        '[ui-shot] sheet: ' + si.width + '×' + si.height +
+          ' · 模型=' + (si.model && si.model.value) + ' · 预设=' + (si.preset && si.preset.value || '无预设') +
+          ' · 权限=' + (si.perm && si.perm.value) + ' · 生效：' + (si.effective || '—')
+      );
+    }
+    const missing = ['home', 'settings', 'palette', 'session', 'sheet'].filter(
       (n) => !result.shots.some((s) => s.name === n)
     );
     if (missing.length) console.warn('[ui-shot] ⚠ 未生成：' + missing.join(', '));

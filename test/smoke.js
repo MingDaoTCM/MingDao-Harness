@@ -16734,4 +16734,169 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   ok('v0.6.21 §3.73 轨迹/子代理收纳：对话流每轮仅一行摘要（复用 .trace-row / 无内联 toolcard）+ 摘要与右栏轨迹同源（traceRoundForMsg→traceRoundView）+ 右栏轨迹/子Agent 两块可折叠（子代理行含名称/轮次/工具数/最后进展/状态，运行中随 progress.subagent 实时更新）+ <1180 右栏收起时对话流末尾 #traceDock 可见且与右栏同 views + 点摘要定位/展开该轮 + P0/P1 六项字段/错误卡/内联确认/⌘K/快捷键/会话设置/空态/主题/断点不回归');
 }
 
+// ---------- 153. v0.6.21 §3.81：顶栏「我在哪」crumb + 既有入口不回归 + 模型/预设/权限只留 #sessSheet ----------
+// 接 §151。v0.6.19 的教训（§3.79）不是"顶栏控件太多"，而是**在替代入口可用之前删掉了入口**：
+// 模型/预设/权限自 §3.70 起就在 #sessSheet，本次不搬骨架、不删既有入口；只补 #crumbWs › #crumbSession，
+// 并用 Electron 截图（scripts/ui-shot.mjs 的 sheet.png）给出"看得见"的证据。
+// 本节钉住五件事：① 顶栏关键入口仍在且仍有处理器；② 三个选择器仍在弹层且 change 处理器仍绑定；
+// ③ crumb 随当前会话/工作空间更新；④ ⌘K 与设置仍能打开、⌘K 切模型仍走 API id；
+// ⑤ #sessSheet 仍能显示，截图工具带 --open 与 sheet.png（渲染证据由截图命令侧产出，不在 smoke 里假渲染）。
+{
+  const appSrc153 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+  const htmlSrc153 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  const shotSrc153 = fs.readFileSync(path.join(srcDir, '..', 'scripts', 'ui-shot.mjs'), 'utf8');
+  const header153 = (() => {
+    const i = htmlSrc153.indexOf('<header>');
+    const j = htmlSrc153.indexOf('</header>', i);
+    assert.ok(i >= 0 && j > i, '（前置）index.html 必须有 <header>…</header>');
+    return htmlSrc153.slice(i, j + 9);
+  })();
+  const sheet153 = (() => {
+    const i = htmlSrc153.indexOf('id="sessSheet"');
+    const j = htmlSrc153.indexOf('id="paletteMask"', i);
+    assert.ok(i >= 0 && j > i, '（前置）index.html 必须有 #sessSheet（到 #paletteMask 之前）');
+    return htmlSrc153.slice(i, j);
+  })();
+  const line153 = (needle) => appSrc153.split('\n').find((l) => l.startsWith(needle));
+
+  // —— ① 顶栏：既有入口一个不许少（每个都要有真实处理器，不能只剩 id） ——
+  {
+    const entries = [
+      ['wsSel', '工作空间', /\$\('#wsSel'\)\.addEventListener\('change'/],
+      ['sessions', '历史会话', /\$\('#sessions'\)\.onchange=/],
+      ['sessMgrBtn', '会话管理', /\$\('#sessMgrBtn'\)\.onclick=openSessModal/],
+      ['tasksBtn', '任务面板', /\$\('#tasksBtn'\)\.onclick=/],
+      ['newChat', '新对话', /\$\('#newChat'\)\.onclick=/],
+      ['themeBtn', '明暗主题', /const btn = \$\('#themeBtn'\);[\s\S]{0,80}if \(btn\) btn\.onclick =/],
+      ['costBadge', '费用仪表盘', /\$\('#costBadge'\)\.onclick=/],
+    ];
+    for (const [id, label, re] of entries) {
+      assert.ok(new RegExp(`id="${id}"`).test(header153), `顶栏必须保留${label}入口 #${id}（不得重演 v0.6.19 的按钮失灵）`);
+      assert.ok(re.test(appSrc153), `顶栏${label}入口 #${id} 必须仍绑定处理器（不能只剩一个点不动的 id）`);
+    }
+    for (const id of ['modelSel', 'presetSel', 'permSel']) {
+      assert.ok(!new RegExp(`id="${id}"`).test(header153), `顶栏不得再出现 #${id}——模型/预设/权限只在 #sessSheet 里改`);
+    }
+  }
+
+  // —— ② 会话设置弹层：三个选择器 + 当前值/来源仍在；三个 change 处理器仍绑定 ——
+  {
+    for (const id of ['modelSel', 'presetSel', 'permSel']) {
+      assert.ok(new RegExp(`id="${id}"`).test(sheet153), `#sessSheet 必须仍含 #${id}（防止把选择器弄丢）`);
+      assert.ok(!new RegExp(`id="${id}"`).test(header153), `#${id} 不得回到顶栏`);
+    }
+    for (const id of ['ssModelLabel', 'ssModelId', 'ssModelSrc', 'ssPresetSrc', 'ssPermSrc', 'ssEffective']) {
+      assert.ok(new RegExp(`id="${id}"`).test(sheet153), `会话设置必须显示当前值与来源（缺 #${id}）`);
+    }
+    const modelLine = line153("$('#modelSel').addEventListener('change'");
+    const permLine = line153("$('#permSel').addEventListener('change'");
+    const presetLine = line153("$('#presetSel').onchange=()=>{");
+    assert.ok(modelLine, '模型 change 处理器必须仍绑定');
+    assert.ok(permLine, '权限 change 处理器必须仍绑定');
+    assert.ok(presetLine, '预设 change 处理器必须仍绑定');
+
+    const calls = [];
+    const modelNode = { fn: null, addEventListener(type, fn) { if (type === 'change') this.fn = fn; } };
+    new Function('$', 'runState', 'modelsCache', 'applyConfig', 'renderSessionSettings', 'renderRunPanel', modelLine)(
+      (sel) => (sel === '#modelSel' ? modelNode : null),
+      {}, [{ id: 'm2', label: '模型二' }], (p) => calls.push(p), () => {}, () => {}
+    );
+    assert.ok(modelNode.fn, '模型 change 必须挂到 #modelSel 上');
+    modelNode.fn({ target: { value: 'm2' } });
+    assert.deepEqual(calls[0], { model: 'm2' }, '模型 change 必须把 {model: API id} 写给 /api/config');
+
+    const permNode = { fn: null, addEventListener(type, fn) { if (type === 'change') this.fn = fn; } };
+    new Function('$', 'runState', 'applyConfig', 'renderSessionSettings', 'renderWorkStatus', permLine)(
+      (sel) => (sel === '#permSel' ? permNode : null),
+      {}, (p) => calls.push(p), () => {}, () => {}
+    );
+    assert.ok(permNode.fn, '权限 change 必须挂到 #permSel 上');
+    permNode.fn({ target: { value: 'auto' } });
+    assert.deepEqual(calls[1], { permission: 'auto' }, '权限 change 必须把 {permission} 写给 /api/config');
+
+    const presetSrc = appSrc153.slice(appSrc153.indexOf('function presetPicked(){'), appSrc153.indexOf('\nasync function init(){'));
+    assert.ok(presetSrc.length > 100, '（前置）应能定位 presetPicked 函数');
+    const picked = { presetName: '' };
+    const banners = [];
+    const presetPicked = new Function('$', 'presetData', 'runState', 'renderSessionSettings', 'renderRunPanel', 'renderBanner',
+      presetSrc + '\nreturn presetPicked;')(
+      (sel) => (sel === '#presetSel' ? { value: 'local-audit' } : sel === '#permSel' ? { value: 'ask' } : null),
+      [{ name: 'local-audit', label: '本地审计', permission: 'readonly', description: '只读审计' }],
+      picked, () => {}, () => {}, (m) => banners.push(m)
+    );
+    presetPicked();
+    assert.equal(picked.presetName, '本地审计', '预设 change 必须真的选中预设（runState.presetName）');
+    assert.ok(banners.some((b) => String(b.text || '').includes('已选预设')), '预设 change 必须给出可见反馈（banner）');
+    assert.ok(/if\(presetVal\) payload\.preset=presetVal;/.test(appSrc153), '预设仍随本轮 payload 发送（不是 /api/config）');
+    assert.ok(!calls.some((p) => p.preset !== undefined), '预设不得被写进 /api/config（它是逐轮 payload）');
+  }
+
+  // —— ③ crumb：当前工作空间 › 当前会话；随 currentSession / sessionsCache 更新 ——
+  {
+    const crumbSrc = appSrc153.slice(appSrc153.indexOf('function renderCrumb(){'), appSrc153.indexOf('\nasync function refreshSessions(q){'));
+    assert.ok(crumbSrc.length > 80, '（前置）应能定位 renderCrumb');
+    const mkNodes = () => ({ '#crumbWs': { textContent: '' }, '#crumbSession': { textContent: '' } });
+    const runCrumb = (currentSession, sessionsCache, currentWorkspaceName, nodes) => {
+      const $ = (id) => nodes[id] || null;
+      new Function('$', 'currentSession', 'sessionsCache', 'currentWorkspaceName', crumbSrc + '\nrenderCrumb();')(
+        $, currentSession, sessionsCache, currentWorkspaceName
+      );
+    };
+    const n1 = mkNodes();
+    runCrumb('s1.jsonl', [{ file: 's1.jsonl', label: '修复登录超时' }], 'MingDao-Harness', n1);
+    assert.equal(n1['#crumbWs'].textContent, 'MingDao-Harness', 'crumb 必须显示当前工作空间');
+    assert.equal(n1['#crumbSession'].textContent, '修复登录超时', 'crumb 必须显示当前会话名（来自 sessionsCache.label）');
+    const n2 = mkNodes();
+    runCrumb(null, [], 'MingDao-Harness', n2);
+    assert.equal(n2['#crumbSession'].textContent, '新对话', '没有当前会话时 crumb 必须回退「新对话」');
+    assert.ok(/id="crumbWs"/.test(header153) && /id="crumbSession"/.test(header153), 'crumb 必须真的在顶栏里');
+    const rsSrc = appSrc153.slice(appSrc153.indexOf('async function refreshSessions(q){'), appSrc153.indexOf('let searchTimer=null;'));
+    assert.ok(/renderCrumb\(\);/.test(rsSrc), 'refreshSessions 后必须刷新 crumb（切会话/新对话/删除后同步）');
+    const rwSrc = appSrc153.slice(appSrc153.indexOf('async function refreshWsSel(){'), appSrc153.indexOf('/** 命令面板与顶栏下拉共用的工作空间切换'));
+    assert.ok(/renderCrumb\(\);/.test(rwSrc), 'refreshWsSel 后必须刷新 crumb（切工作空间后同步）');
+  }
+
+  // —— ④ ⌘K 与设置入口仍绑定；⌘K 的模型命令仍用 API id 切换 ——
+  {
+    assert.ok(/\$\('#paletteBtn'\)\.onclick = \(\) => openPalette\(\);/.test(appSrc153), '⌘K 入口 #paletteBtn 必须仍能打开命令面板');
+    assert.ok(/\$\('#cfgBtn'\)\.onclick=\(\)=>openSettingsPanel\(/.test(appSrc153), '设置入口 #cfgBtn 必须仍能打开设置');
+    const bpSrc = appSrc153.slice(appSrc153.indexOf('function buildPaletteCommands('), appSrc153.indexOf('\nfunction paletteItemHtml('));
+    assert.ok(bpSrc.length > 500, '（前置）应能定位 buildPaletteCommands');
+    const buildPaletteCommands = new Function(bpSrc + '\nreturn buildPaletteCommands;')();
+    const switched = [];
+    const cmds = buildPaletteCommands({ models: [{ id: 'deepseek-flash', label: 'flash — 快速' }] }, { setModel: (id) => switched.push(id) });
+    const modelCmd = cmds.find((c) => c.group === '模型');
+    assert.ok(modelCmd, '⌘K 必须仍有模型命令');
+    assert.equal(modelCmd.label, 'flash — 快速', '⌘K 模型命令必须显示 label');
+    modelCmd.run();
+    assert.deepEqual(switched, ['deepseek-flash'], '⌘K 切模型必须仍用 API id（不能把 label 交给 setModel）');
+  }
+
+  // —— ⑤ #sessSheet 仍可显示；截图工具必须带 --open 与 sheet.png ——
+  {
+    const openSrc = appSrc153.slice(appSrc153.indexOf('function openSessionSheet() {'), appSrc153.indexOf("$('#sessSettingsBtn').onclick"));
+    assert.ok(openSrc.length > 100, '（前置）应能定位 openSessionSheet/closeSessionSheet');
+    const sheet = { hidden: true };
+    const btn = { attrs: {}, setAttribute(k, v) { this.attrs[k] = v; } };
+    const api = new Function('$', 'renderSessionSettings', openSrc + '\nreturn { openSessionSheet, closeSessionSheet };')(
+      (id) => (id === '#sessSheet' ? sheet : id === '#sessSettingsBtn' ? btn : null),
+      () => {}
+    );
+    api.openSessionSheet();
+    assert.equal(sheet.hidden, false, '#sessSheet 必须能被打开（openSessionSheet 置 hidden=false）');
+    assert.equal(btn.attrs['aria-expanded'], 'true', '打开弹层必须同步 aria-expanded=true');
+    api.closeSessionSheet();
+    assert.equal(sheet.hidden, true, '#sessSheet 必须能关闭');
+    assert.equal(btn.attrs['aria-expanded'], 'false', '关闭弹层必须同步 aria-expanded=false');
+
+    assert.ok(/^    '--open',$/m.test(shotSrc153), 'ui-shot 必须接受 --open <selector>');
+    assert.ok(/cfg\.open && cfg\.open !== '#sessSheet'/.test(shotSrc153), '--open 传 #sessSheet 时必须退回打开按钮（否则点不动隐藏节点）');
+    assert.ok(/capture\('sheet'\)/.test(shotSrc153), 'ui-shot 必须产出 sheet.png');
+    assert.ok(/'home', 'settings', 'palette', 'session', 'sheet'/.test(shotSrc153), 'sheet 必须进入截图产物清单（缺图要能发现）');
+    assert.ok(/sheetInfo/.test(shotSrc153), '截图工具必须记录弹层的模型/预设/权限可见性（渲染证据）');
+  }
+
+  ok('v0.6.21 §3.81 顶栏不回归：既有入口（工作空间/历史会话/会话管理/任务/新对话/主题/费用）id 与处理器均在 + 三个选择器仍在 #sessSheet 且 change 处理器绑定（模型/权限→/api/config，预设→本轮 payload）+ #crumbWs›#crumbSession 随当前会话/工作空间更新 + ⌘K/设置入口仍开且 ⌘K 模型命令走 API id + #sessSheet 可开关 + ui-shot --open/sheet.png 可见性校验');
+}
+
 process.exit(0);
