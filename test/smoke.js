@@ -17100,4 +17100,185 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   ok('v0.6.21 §3.82 右栏四标签：轨迹/子Agent/任务/仪表盘按钮齐全且只切 display（默认轨迹、未知回退轨迹）+ 四个面板关键子节点 id 不变并搬进对应标签页（tpList/kpiToday/tjList/sbList 等）+ 顶栏「任务」切 tasks 并开右栏、右栏收起时同样打开 + updateTasksPanel/renderDashboard/openTraj/renderSubPanel 未被重写且仍被调用 + tasks-open/dash-open 不再推开正文');
 }
 
+// ---------- 155. v0.6.21 §3.83：界面重排第三步（视觉细节：对比度 / 顶栏 1000px / seg 标签 / 会话设置间距） ----------
+// 接 §154。本步只做四处**可逐条核对**的 CSS/结构微调，不引入设计稿整段样式：
+//   ① 承载信息的次要文本 --faint→--dim（token 本身不动；用 WCAG 相对亮度算对比度）；
+//   ② 顶栏右半区收进 .hdr-right（overflow-x:auto + min-width:0），1000px 下露出费用/搜索/历史会话；
+//   ③ 右栏四个标签统一 .seg 分段控件观感（只改样式，不改切页行为）；
+//   ④ 会话设置弹层间距按设计稿 .popover 对齐（padding/gap/radius/标题字号）。
+{
+  const htmlSrc155 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  /** 取一条单行 CSS 规则的全文（selector{...}）。 */
+  function rule155(selector) {
+    const i = htmlSrc155.indexOf(selector + '{');
+    assert.ok(i >= 0, `（前置）应能定位 CSS 规则：${selector}`);
+    const j = htmlSrc155.indexOf('}', i);
+    assert.ok(j > i, `（前置）CSS 规则未闭合：${selector}`);
+    return htmlSrc155.slice(i, j + 1);
+  }
+
+  // —— ① 对比度：点名选择器解析为 --dim；token 取值不变；用 WCAG 相对亮度验证 AA ——
+  {
+    const iRoot = htmlSrc155.indexOf(':root{');
+    assert.ok(iRoot >= 0, '（前置）应有暗色 :root token');
+    const dark155 = htmlSrc155.slice(iRoot, htmlSrc155.indexOf('}', iRoot) + 1);
+    const iLight = htmlSrc155.indexOf(':root[data-theme="light"]{');
+    assert.ok(iLight >= 0, '（前置）应有亮色 :root token');
+    const light155 = htmlSrc155.slice(iLight, htmlSrc155.indexOf('}', iLight) + 1);
+    /** @param {string} block @param {string} name */
+    const token155 = (block, name) => {
+      const m = new RegExp(name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ':\\s*([^;]+)').exec(block);
+      assert.ok(m, `（前置）token ${name} 必须存在`);
+      return String(m[1]).trim();
+    };
+    const darkFaint = token155(dark155, '--faint');
+    const darkDim = token155(dark155, '--dim');
+    const lightFaint = token155(light155, '--faint');
+    const lightDim = token155(light155, '--dim');
+    assert.equal(darkFaint, '#81858C', '--faint 本身不得改动（暗色设计稿取值 #81858C）');
+    assert.equal(darkDim, '#ADB2B8', '--dim 本身不得改动（暗色设计稿取值 #ADB2B8）');
+    assert.equal(lightFaint, '#71717A', '--faint 本身不得改动（亮色设计稿取值 #71717A）');
+    assert.equal(lightDim, '#52525B', '--dim 本身不得改动（亮色设计稿取值 #52525B）');
+
+    /** @param {string} hex @returns {number} sRGB 相对亮度（WCAG 2.x） */
+    const srgbLum155 = (hex) => {
+      const h = String(hex).replace('#', '');
+      assert.equal(h.length, 6, `（前置）只支持 6 位十六进制颜色：${hex}`);
+      const lin = [0, 2, 4].map((i) => {
+        const v = parseInt(h.slice(i, i + 2), 16) / 255;
+        return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+      });
+      return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2];
+    };
+    /** @param {string} a @param {string} b */
+    const contrast155 = (a, b) => {
+      const la = srgbLum155(a), lb = srgbLum155(b);
+      const hi = Math.max(la, lb), lo = Math.min(la, lb);
+      return (hi + 0.05) / (lo + 0.05);
+    };
+    const darkBgs = ['--bg', '--bg2', '--panel', '--bg3'].map((k) => token155(dark155, k));
+    const lightBgs = ['--bg', '--bg2', '--panel', '--bg3'].map((k) => token155(light155, k));
+    for (const bg of darkBgs) {
+      assert.ok(contrast155(darkDim, bg) >= 4.5, `暗色 --dim 对 ${bg} 必须达到 WCAG AA（≥4.5:1），实际 ${contrast155(darkDim, bg).toFixed(2)}:1`);
+    }
+    for (const bg of lightBgs) {
+      assert.ok(contrast155(lightDim, bg) >= 4.5, `亮色 --dim 对 ${bg} 必须达到 WCAG AA（≥4.5:1），实际 ${contrast155(lightDim, bg).toFixed(2)}:1`);
+    }
+    // 改前证据：--faint 在 panel/bg3 上连 AA 都不到（3.76/3.26），这正是要修的问题。
+    assert.ok(contrast155(darkFaint, token155(dark155, '--panel')) < 4.5,
+      '（前置）改前 --faint 在 panel 上应低于 AA——否则这条对比度修复没有对象');
+    assert.ok(contrast155(darkDim, token155(dark155, '--panel')) >= 6.0,
+      '改后 --dim 在 panel 上必须达到 6:1 以上');
+
+    const iGroup = htmlSrc155.indexOf('.msg-meta,\n.usage,');
+    assert.ok(iGroup >= 0, '§3.83 对比度分组规则必须存在（.msg-meta/.usage 起头）');
+    const group155 = htmlSrc155.slice(iGroup, htmlSrc155.indexOf('}', iGroup) + 1);
+    for (const sel of [
+      '.rp-foot .grow', '.ss-src', '.ss-field .ss-scope', '.tp-item .tp-meta', '.sb-item .sb-meta',
+      '.tr-sub-meta', '.tr-sub-stats', '.tr-round-no', '.tl-row .tl-dur', '.tl-out-meta',
+      '.empty-step .es-main span', '#emptyState .es-lead', '.tr-empty', '#statusBar', '#hint',
+      '.rp-kv .rp-src', '.banner:not(.banner-warn)',
+    ]) {
+      assert.ok(group155.includes(sel), `承载信息的次要文本必须点名 ${sel}`);
+    }
+    assert.ok(/color:\s*var\(--dim\)\s*\}/.test(group155), '点名选择器的 color 必须解析为 --dim（不是 --faint）');
+    assert.ok(/\.banner-warn\{[^}]*color:var\(--warn\)/.test(htmlSrc155),
+      '.banner:not(.banner-warn) 必须只改普通提示条，警告条仍保留 --warn 颜色');
+    assert.ok(!/\.banner\{[^}]*color:var\(--dim\)/.test(htmlSrc155),
+      '不得用裸 .banner 选择器覆盖 .banner-warn 的警告色');
+  }
+
+  // —— ② 顶栏 1000px：右半区收进 .hdr-right（可横向滚动 + min-width:0），并含历史会话/搜索/费用 ——
+  {
+    const hStart = htmlSrc155.indexOf('<header>');
+    const hEnd = htmlSrc155.indexOf('</header>', hStart);
+    assert.ok(hStart >= 0 && hEnd > hStart, '（前置）应能切出 <header>');
+    const header155 = htmlSrc155.slice(hStart, hEnd);
+    const iRight = header155.indexOf('<div class="hdr-right">');
+    assert.ok(iRight >= 0, '顶栏右半区必须收进 <div class="hdr-right">');
+    const rightEnd = header155.lastIndexOf('</div>');
+    assert.ok(rightEnd > iRight, '（前置）.hdr-right 必须闭合');
+    const right155 = header155.slice(iRight, rightEnd);
+    for (const id of ['sessionSearch', 'sessions', 'costBadge', 'tasksBtn', 'sessMgrBtn', 'newChat']) {
+      assert.ok(new RegExp(`id="${id}"`).test(right155), `#${id} 必须在 .hdr-right 容器内（否则 1000px 仍会被整条顶栏裁掉）`);
+    }
+    assert.ok(/<select id="sessions"[^>]*>[\s\S]{0,120}历史会话/.test(right155), '「历史会话」文本必须在 .hdr-right 的 #sessions 里');
+    assert.ok(/header\{[^}]*overflow-x:auto/.test(htmlSrc155), 'header 自身仍保留 overflow-x:auto（兜底）');
+
+    const rightCss = rule155('header .hdr-right');
+    assert.ok(/overflow-x:\s*auto/.test(rightCss), '.hdr-right 必须 overflow-x:auto（可横向滚动触达其余控件）');
+    assert.ok(/min-width:\s*0/.test(rightCss), '.hdr-right 必须 min-width:0（flex 子项才能收缩到小于内容宽度）');
+    assert.ok(/flex:\s*1 1 auto/.test(rightCss), '.hdr-right 必须是可伸缩的 flex 子项');
+    const narrowStart = htmlSrc155.indexOf('@media (max-width:1100px){');
+    assert.ok(narrowStart >= 0, '必须有 ≤1100px 的顶栏收窄断点');
+    const narrowEnd = htmlSrc155.indexOf('\n}', narrowStart);
+    const narrow155 = htmlSrc155.slice(narrowStart, narrowEnd);
+    assert.ok(/#envBadge\{display:none!important\}/.test(narrow155), '≤1100px 必须隐藏低频诊断徽标 #envBadge，给历史会话让位');
+    assert.ok(/#sessionSearch\{[^}]*min-width:70px/.test(narrow155), '≤1100px 搜索框最小宽度必须仍是 70px');
+    assert.ok(/#sessions\{[^}]*max-width:110px/.test(narrow155), '≤1100px 历史会话必须收到 110px（含文本与箭头）');
+    const crumbCss = rule155('#crumb');
+    assert.ok(/max-width:120px/.test(crumbCss), '#crumb 必须限宽 120px（否则会话名一长，历史会话又会被挤出 1000px 视口）');
+    assert.ok(/header\{gap:6px;padding:8px\}/.test(narrow155), '≤1100px 顶栏间距必须收紧到 gap:6px/padding:8px');
+    assert.ok(!/id="sessions"/.test(header155.slice(0, iRight)), '历史会话不得再留在 .hdr-right 之外（否则不参与横向滚动）');
+  }
+
+  // —— ③ 右栏四标签：四个按钮同带 seg 类；CSS 是设计稿 .seg 的分段控件观感（只改样式） ——
+  {
+    const iTabs = htmlSrc155.indexOf('<div class="rp-tabs"');
+    assert.ok(iTabs >= 0, '（前置）应有 .rp-tabs 标签栏');
+    const tabs155 = htmlSrc155.slice(iTabs, htmlSrc155.indexOf('</div>', iTabs));
+    assert.equal((tabs155.match(/class="seg(?: on)?"/g) || []).length, 4,
+      '右栏四个标签必须都带同一 seg 类（四个标签按钮统一类）');
+    for (const id of ['rtTrace', 'rtSub', 'rtTasks', 'rtDash']) {
+      assert.ok(new RegExp(`<button id="${id}"[^>]*class="seg(?: on)?"`).test(tabs155), `标签 #${id} 必须带 seg 类`);
+    }
+    const tabsCss = rule155('.rp-tabs');
+    for (const decl of ['padding:3px', 'margin:0 12px 8px', 'background:var(--bg3)', 'border:1px solid var(--border)', 'border-radius:9px']) {
+      assert.ok(tabsCss.includes(decl), `.rp-tabs 必须包含 ${decl}（分段控件外框）`);
+    }
+    const segCss = rule155('.rp-tabs .seg');
+    for (const decl of ['height:26px', 'border:0', 'border-radius:6px', 'background:transparent', 'color:var(--dim)', 'font-size:12px']) {
+      assert.ok(segCss.includes(decl), `.rp-tabs .seg 必须包含 ${decl}（统一高度/内边距/圆角）`);
+    }
+    const onCss = rule155('.rp-tabs .seg.on');
+    for (const decl of ['background:var(--panel)', 'color:var(--text)', 'font-weight:600']) {
+      assert.ok(onCss.includes(decl), `.rp-tabs .seg.on 必须包含 ${decl}（选中态底色与文字对比）`);
+    }
+    assert.ok(!/\.rp-tabs button\{/.test(htmlSrc155), '旧 .rp-tabs button 规则必须退场（统一走 .rp-tabs .seg）');
+    assert.ok(/classList\.toggle\('on'/.test(fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8')),
+      '标签切换仍只切 on 类（本次不得改行为）');
+  }
+
+  // —— ④ 会话设置弹层：padding/gap/border-radius/标题字号与设计稿 .popover 对齐 ——
+  {
+    const sheetCss = rule155('#sessSheet');
+    assert.ok(/width:min\(400px/.test(sheetCss), '#sessSheet 宽度必须对齐设计稿 400px');
+    assert.ok(/border-radius:14px/.test(sheetCss), '#sessSheet 圆角必须保持设计稿 14px');
+    const headCss = rule155('.ss-head');
+    assert.ok(headCss.includes('gap:8px') && headCss.includes('padding:11px 13px'),
+      '.ss-head 间距必须对齐设计稿（gap:8px / padding:11px 13px）');
+    assert.ok(headCss.includes('font-size:13px'), '.ss-head 分组标题字号必须保持设计稿 13px');
+    const bodyCss = rule155('.ss-body');
+    assert.ok(bodyCss.includes('padding:11px 13px'), '.ss-body 内边距必须对齐设计稿 11px 13px');
+    const labelCss = rule155('.ss-field>label');
+    assert.ok(labelCss.includes('font-size:12px'), '.ss-field>label 分组标题字号必须保持设计稿 12px');
+    assert.ok(labelCss.includes('margin-bottom:5px'), '.ss-field>label 与控件间距必须对齐设计稿 5px');
+    const effCss = rule155('.ss-effective');
+    assert.ok(effCss.includes('margin:0 13px 11px') && effCss.includes('padding:8px 10px'),
+      '.ss-effective 间距必须对齐设计稿（margin:0 13px 11px / padding:8px 10px）');
+    assert.ok(effCss.includes('border-radius:8px'), '.ss-effective 圆角必须保持设计稿 8px');
+    const footCss = rule155('.ss-foot');
+    assert.ok(footCss.includes('gap:8px') && footCss.includes('padding:9px 13px'),
+      '.ss-foot 间距必须对齐设计稿（gap:8px / padding:9px 13px）');
+    const segCss = rule155('.ss-seg');
+    assert.ok(segCss.includes('border-radius:9px') && segCss.includes('padding:3px'),
+      '权限分段控件外框必须保持 9px 圆角 / 3px 内边距（与设计稿 .seg 同源）');
+    const segBtnCss = rule155('.ss-seg button');
+    assert.ok(segBtnCss.includes('height:26px') && segBtnCss.includes('border-radius:6px'),
+      '权限分段控件按钮必须保持 26px 高 / 6px 圆角');
+  }
+
+  ok('v0.6.21 §3.83 视觉细节：承载信息的次要文本 --faint→--dim（token 未动，WCAG 暗/亮均达 AA，panel 3.76→6.53）+ 顶栏 .hdr-right 可滚动容器（overflow-x:auto/min-width:0，1000px 含费用/搜索/历史会话，≤1100 让位 #envBadge）+ 右栏四标签统一 seg 类与 .seg 分段控件观感 + 会话设置弹层 padding/gap/圆角/标题字号对齐设计稿（400px 宽 / 11px 13px / 5px / 13px / 12px）');
+}
+
 process.exit(0);

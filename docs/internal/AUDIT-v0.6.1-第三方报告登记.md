@@ -4410,3 +4410,137 @@ Electron 缓存重签只用于本机截图，不用于分发。
 - 旧 `#trajPanel` / `#subPanel` 作为兼容容器随迁并保留 `#tjList` / `#sbList`，默认收起：
   轨迹标签页展示 §3.73 的富轨迹（`#rpTraceList`），子Agent 标签页展示富子Agent 列表
   （`#rpSubList`），避免同一标签里出现两份重复列表。任务/仪表盘两个面板则整体可见。
+
+## 3.83 已做（v0.6.21 小步重排第三步：只做视觉细节——对比度 / 顶栏 1000px / seg 标签 / 会话设置间距）
+
+**来源**：§3.82 之后继续按「小步、每步截图验证」重做界面；本步**只做视觉细节**，允许的改动只有
+少量、可逐条核对的 CSS/结构微调。**没有**整段引入 `docs/design/ui-preview.html` 的 `<style>`
+（v0.6.19 的翻车原因）；没有改 `.app` 网格、顶栏高度、`#runPanel` 宽度、主题变量或字号阶。
+
+### 一、四处改动（选择器与新旧值）
+
+| # | 选择器 / 结构 | 旧值 | 新值 | 理由 |
+| --- | --- | --- | --- | --- |
+| ① | `.msg-meta, .usage, .banner:not(.banner-warn), #hint, #statusBar, .sb-item .sb-meta, .tp-item .tp-meta, .tl-row .tl-dur, .tl-out-meta, .tl-more, .tr-round-no, .tr-sub-meta, .tr-sub-stats, .tr-sub-wait, .tr-sub-state, .rp-fold-meta, .td-fold-meta, .td-meta, .rp-kv .rp-src, .rp-foot .grow, .ss-src, .ss-field .ss-scope, .dash-head .dash-sub, .dr .c, .tr-empty, #emptyState .es-lead, .empty-step .es-main span, .empty-step .es-state` | `color:var(--faint)`（各选择器原规则） | `color:var(--dim)` | 时间戳/来源/计数/说明是重要信息；原 `--faint` 在 panel/bg3 上不到 WCAG AA |
+| ① | `:root` 的 `--faint` / `--dim` | `#81858C` / `#ADB2B8`（亮色 `#71717A` / `#52525B`） | **未改** | 只改选择器，不动 token 本身 |
+| ② | 顶栏结构 | `#costBadge / #sessionSearch / #sessions / #tasksBtn / #sessMgrBtn / #newChat` 平铺；`.spacer` 在 header 下 | 同一批控件收进 `<div class="hdr-right">`，`.spacer` 移入容器；`header .hdr-right{display:flex;gap:8px;flex:1 1 auto;min-width:0;overflow-x:auto;overflow-y:hidden;scrollbar-width:thin;scrollbar-color:var(--border) transparent}` + 4px 横向滚动条 | 1000px 时右侧「历史会话」被挤出视口；容器可滚动且不撑破顶栏 |
+| ② | `#wsSel` | `max-width:130px` | `max-width:110px`（≤1100 再 `120px`） | 给右半区让 ~20px |
+| ② | `#crumb` | `max-width:180px`（`.badge` 默认） | `max-width:120px` | crumb 是左半区唯一会随会话名变长的项；限宽防止长会话名把历史会话再次挤出 |
+| ② | `@media (max-width:1100px)` | 无 | `header{gap:6px;padding:8px}`；`#envBadge{display:none!important}`；`#sessionSearch{min-width:70px;max-width:120px}`；`#sessions{max-width:110px}` | 诊断徽标（≤900 本就隐藏）让位；1000px 下费用+搜索+历史会话完整可见 |
+| ③ | 四个标签按钮 | `<button id="rtTrace" ... class="on">` / `rtSub` / `rtTasks` / `rtDash` 无统一类 | 四个都加 `class="seg"`（`rtTrace` 为 `seg on`）；`app.js` 未改 | 只统一类，不碰切页行为 |
+| ③ | `.rp-tabs` | `padding:0 12px 8px;flex:none` | `padding:3px;margin:0 12px 8px;background:var(--bg3);border:1px solid var(--border);border-radius:9px` | 设计稿 `.seg` 外框 |
+| ③ | `.rp-tabs button` → `.rp-tabs .seg` | `height:28px;border:1px solid var(--border);border-radius:8px;background:var(--bg3)` | `height:26px;border:0;border-radius:6px;background:transparent` | 内按钮统一高度/内边距/圆角 |
+| ③ | `.rp-tabs .seg.on` | `background:var(--panel);color:var(--text);font-weight:600;border-color:var(--accent2)` | 去掉 `border-color`，保留 panel 底 + text 字 + 600 字重 + 阴影 | 选中态底色/文字对比与设计稿一致 |
+| ④ | `#sessSheet` | `width:min(410px,calc(100vw - 24px))`，圆角 14px | `width:min(400px,...)`，圆角仍 14px | 设计稿 `.popover` 宽 400 / 圆角 14 |
+| ④ | `.ss-head` | `padding:10px 12px`，字号 13px，gap 8px | `padding:11px 13px`，字号 13px，gap 8px | 设计稿 `.pop-head` |
+| ④ | `.ss-body` | `padding:10px 12px` | `padding:11px 13px` | 设计稿 `.pop-body` |
+| ④ | `.ss-field>label` | `margin-bottom:4px`，字号 12px | `margin-bottom:5px`，字号 12px | 设计稿 `.field label` |
+| ④ | `.ss-effective` | `margin:0 12px 8px;padding:7px 9px`，圆角 8px | `margin:0 13px 11px;padding:8px 10px`，圆角 8px | 设计稿 `.pop-effective` |
+| ④ | `.ss-foot` | `padding:8px 12px`，gap 8px | `padding:9px 13px`，gap 8px | 设计稿 `.pop-foot` |
+| ④ | `.ss-seg` / `.ss-seg button` / `.ss-field select` | 9px / 6px / 8px 圆角，26px 高 | **未改**（已与设计稿一致） | 保留；只对齐外框间距 |
+
+### 二、对比度（WCAG 相对亮度公式）
+
+`L = 0.2126R + 0.7152G + 0.0722B`，其中每个通道先做 sRGB 线性化
+（`c/12.92`（c≤0.03928）或 `((c+0.055)/1.055)^2.4`）；对比度 `(L1+0.05)/(L2+0.05)`。
+
+**暗色**（token 未改，只把点名选择器从 `--faint` 换成 `--dim`）：
+
+| 背景 | --faint 改前 | --dim 改后 | 变化 |
+| --- | --- | --- | --- |
+| `--bg #151517` | 4.92:1 | 8.54:1 | +3.62 |
+| `--bg2 #1B1B1C` | 4.64:1 | 8.06:1 | +3.42 |
+| `--panel #2C2C2E`（`.ss-src` 等） | 3.76:1（**低于 AA**） | 6.53:1 | +2.77 |
+| `--bg3 #353638`（`.tp-meta`/`.tr-sub-meta` 等） | 3.26:1（**低于 AA**） | 5.67:1 | +2.41 |
+
+**亮色**：
+
+| 背景 | --faint 改前 | --dim 改后 |
+| --- | --- | --- |
+| `--bg/#panel #FFFFFF` | 4.83:1 | 7.73:1 |
+| `--bg2 #F7F7F8` | 4.51:1 | 7.22:1 |
+| `--bg3 #EFEFF1` | 4.21:1 | 6.73:1 |
+
+修前 `--faint` 在 panel/bg3 上连 4.5:1 都不到，正是本步要修的问题；修后所有承载信息的次要
+文本在四个底色上均达到 AA（最小 5.67:1）。`--faint` 仍用于纯装饰性文字（分隔符、标签页轨道
+未选中项等），token 本身未动。
+
+### 三、1000px 顶栏裁切（实测）
+
+用 Electron 在 1000×900 视口读取 `getBoundingClientRect()`（不是只看截图）：
+
+- **改前**：`header.clientWidth=1000`、`header.scrollWidth=1348`；`#sessionSearch` 左 975 / 右 1045，
+  `#sessions`（历史会话）左 1055 / 右 1153——右边界超出视口 153px，用户看不到历史会话。
+- **改后**：`header.clientWidth=1000`、`header.scrollWidth=1000`（顶栏不再溢出）；
+  `.hdr-right` 左 670 / 右 992（宽 322）；`#costBadge` 678–800、`#sessionSearch` 808–878、
+  `#sessions` 886–984——**历史会话完整可见**。
+- 1440px（右栏展开，header 内容宽 1140）：`.hdr-right` 813–1128；费用 821–943、搜索 951–1021、
+  历史会话 1029–1127，仍完整可见。
+- 说明：1000px 下「任务 / ✎ / 新对话」仍在同一个 `.hdr-right` 容器内，需横向滚动触达；
+  本步只修任务书点名的「历史会话」裁切，未把低频控件搬成「更多 ▾」下拉（改动更小、无 JS 行为变化）。
+- 长会话名：`#crumb` 从默认 180px 限到 120px（完整标题仍在 `title` 里），否则会话名一长，右半区会再被挤掉；
+  截图 `sheet.png` / `session.png` 已加载演示会话，`#sessions` 的下拉箭头仍在视口内，只是当前会话名在 110px 控件内被截断。
+
+### 四、截图（改前 / 改后两套，真跑 Electron）
+
+**改前基线**（`node scripts/ui-shot.mjs --out /tmp/shots-step3-before`，1440×900）：
+
+- `/tmp/shots-step3-before/home.png` 1440×900 · 230,635 B
+- `/tmp/shots-step3-before/settings.png` 1440×900 · 348,589 B
+- `/tmp/shots-step3-before/palette.png` 1440×900 · 308,560 B
+- `/tmp/shots-step3-before/session.png` 1440×900 · 271,152 B
+- `/tmp/shots-step3-before/sheet.png` 1440×900 · 380,821 B
+
+**改前 1000px**（`--width 1000 --height 900`）：
+
+- `/tmp/shots-step3-before-1000/home.png` 1000×900 · 153,775 B（右侧「历史会话」被裁掉）
+- `/tmp/shots-step3-before-1000/settings.png` 1000×900 · 266,509 B
+- `/tmp/shots-step3-before-1000/palette.png` 1000×900 · 231,472 B
+- `/tmp/shots-step3-before-1000/session.png` 1000×900 · 195,945 B
+- `/tmp/shots-step3-before-1000/sheet.png` 1000×900 · 300,227 B
+
+**改后**（`--out /tmp/shots-step3-after`，最后一跑 `--open "#costBadge"`）：
+
+- `/tmp/shots-step3-after/home.png` 1440×900 · 236,167 B
+- `/tmp/shots-step3-after/settings.png` 1440×900 · 353,641 B
+- `/tmp/shots-step3-after/palette.png` 1440×900 · 312,382 B
+- `/tmp/shots-step3-after/session.png` 1440×900 · 275,505 B
+- `/tmp/shots-step3-after/sheet.png` 1440×900 · 404,768 B（`--open "#costBadge"`，费用徽标打开仪表盘）
+
+**改后 1000px**（`--width 1000 --height 900`）：
+
+- `/tmp/shots-step3-after-1000/home.png` 1000×900 · 160,916 B（费用 / 搜索 / 历史会话完整可见）
+- `/tmp/shots-step3-after-1000/settings.png` 1000×900 · 271,605 B
+- `/tmp/shots-step3-after-1000/palette.png` 1000×900 · 235,502 B
+- `/tmp/shots-step3-after-1000/session.png` 1000×900 · 199,620 B
+- `/tmp/shots-step3-after-1000/sheet.png` 1000×900 · 307,602 B（400×541 弹层，间距对齐）
+
+**看图结论**：① 1000px 下「历史会话」不再裁切（改前右边界 1153px，改后 984px）；
+② 次要文本更清楚：欢迎提示、`rp-foot` 说明、底部累计状态、会话设置里的来源行都从灰暗的
+`--faint` 提到 `--dim`（panel 上 3.76:1 → 6.53:1）；③ 右栏四标签由「四个独立描边按钮」变成
+设计稿的 `.seg` 分段控件（外框 bg3 + 3px padding + 9px 圆角，内按钮 26px/6px，选中 panel 底 +
+text 字）；会话设置弹层宽度 410→400、head/body 内边距 10/12→11/13、field 标题下间距 4→5、
+effective 外边距 12/8→13/11、foot 8/12→9/13，观感更接近设计稿 `.popover`。
+
+### 五、门禁
+
+- `npm run typecheck`：通过。
+- `node test/smoke.js`（单独）：通过（含新增 §155）。
+- `node test/e2e-web.js`：24/24 通过。
+- `node test/e2e-local.js`：通过（17 项）。
+- `node test/api-contracts.js`：通过（8 项）。
+- `node test/mutate/batch45-visual.mjs`：**14/14 全中**。
+- `node test/mutate/run.mjs`（全批次，`--allow-dirty` 因改动尚未提交）：**33/33 批次全中**
+  （含 `batch45-visual` 14/14），变异总数 376。
+- `node scripts/doc-lint.mjs`：通过（变异总数 376）。
+
+### 六、边界
+
+- 未改 `src/providers/**`、`src/agent.js`、`presets/**`、`desktop/**`、`ide/**`、`scripts/ui-shot.mjs`；
+  `src/web/app.js` 也**未改**（本次只在 HTML 里给四个标签加 `seg` 类，切页逻辑原样）。
+- 未改 `.app` 网格、顶栏高度（`min-height:52px`）、`#runPanel` 宽度（300px）、
+  `body.run-open` 推开量、主题变量、字号阶；未引设计稿样式表。
+- 1000px 下「任务 / ✎ / 新对话」仍收在 `.hdr-right` 内需要横向滚动（`#sessions` 的下拉箭头本身在视口内，只有当前会话名在 110px 宽内被截断）；未做「更多 ▾」下拉。
+- `#envBadge` 在 ≤1100px 隐藏（≤900 原本就隐藏），为「历史会话」让位；>1100px 仍显示。
+- `#wsSel` 最大宽度 130→110px（≤1100 为 120px），只影响顶栏工作空间下拉的视觉宽度。
+- 未 tag / 改版本号 / publish / 动官网。
