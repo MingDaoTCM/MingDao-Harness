@@ -761,7 +761,7 @@ function renderWorkStatus(){
       const running=bgTasks.filter((/** @type {any} */ t)=>t.status==='running');
       const latest=running.length?running[running.length-1]:null;
       bg.style.display=''; bg.textContent='🛠 '+bgRunning+' 个后台任务运行中'+(latest?' · '+String(latest.message||'').slice(0,22):'')+' — 点击查看详情';
-      bg.onclick=()=>{ const tp=$('#tasksPanel'); tp.style.display = tp.style.display==='none'?'flex':'none'; if(tp.style.display==='flex'){ $('#trajPanel').style.display='none'; $('#subPanel').style.display='none'; updateTasksPanel(); } syncPanelLayout(); };
+      bg.onclick=()=>{ activateRailTab('tasks'); }; // §3.82：后台任务 chip 打开右栏「任务」标签
     } else { bg.style.display='none'; bg.onclick=null; }
   }
   // P1-4：右栏「本轮运行」与状态条**同源**——renderRunPanel() 内部只走 runPanelView()→runStripView()，
@@ -1166,6 +1166,44 @@ let homeDir = '';
 let workingDirCache = '';
 let compactAvailable = false; // Web 端当前没有 /api/compact；为 true 时才显示压缩入口
 let runPanelOpen = false;
+// —— 右栏四标签（§3.82 第二步）：轨迹 / 子Agent / 任务 / 仪表盘 ——
+// 标签切换**只控制 display**（railTabDisplay 纯函数），四个面板节点常驻 DOM、id 不变；
+// 不重写 updateTasksPanel / renderDashboard / openTraj / renderSubPanel 的数据逻辑。
+const RAIL_TABS = ['trace', 'sub', 'tasks', 'dash'];
+const RAIL_TAB_PANELS = { trace: '#tabTrace', sub: '#tabSub', tasks: '#tabTasks', dash: '#tabDash' };
+const RAIL_TAB_BUTTONS = { trace: '#rtTrace', sub: '#rtSub', tasks: '#rtTasks', dash: '#rtDash' };
+let activeRailTab = 'trace';
+function railTabDisplay(tab) {
+  const active = RAIL_TABS.includes(tab) ? tab : 'trace';
+  /** @type {Record<string, 'flex'|'none'>} */
+  const out = {};
+  for (const key of RAIL_TABS) out[key] = key === active ? 'flex' : 'none';
+  return out;
+}
+function setRailTab(tab) {
+  activeRailTab = RAIL_TABS.includes(tab) ? tab : 'trace';
+  const disp = railTabDisplay(activeRailTab);
+  for (const key of RAIL_TABS) {
+    const panel = $(RAIL_TAB_PANELS[key]);
+    if (panel) panel.style.display = disp[key];
+    const btn = $(RAIL_TAB_BUTTONS[key]);
+    if (btn) {
+      btn.classList.toggle('on', key === activeRailTab);
+      btn.setAttribute('aria-selected', key === activeRailTab ? 'true' : 'false');
+    }
+  }
+  // 搬进标签页的两个旧面板：display 继续跟着标签走（updateTasksPanel / refreshCostBadge 靠它判可见）。
+  const tp = $('#tasksPanel'); if (tp) tp.style.display = disp.tasks;
+  const dp = $('#dashPanel'); if (dp) dp.style.display = disp.dash;
+  if (activeRailTab === 'tasks' && typeof updateTasksPanel === 'function') updateTasksPanel();
+  if (activeRailTab === 'dash' && typeof refreshCostBadge === 'function') refreshCostBadge();
+  return activeRailTab;
+}
+/** 点标签/既有入口的统一出口：先开右栏，再切标签。 */
+function activateRailTab(tab) {
+  setRunPanel(true);
+  return setRailTab(tab);
+}
 let responsiveInitialized = false;
 // —— 轨迹收纳状态（§3.73）：两个折叠区 + 展开过的轮次/工具/子代理（重渲染后保持展开） ——
 const traceFoldState = { trace: true, subs: true };
@@ -1214,8 +1252,7 @@ initTheme();
 // —— 右栏「本轮运行」：<1180 收起为抽屉；宽屏默认展开；不做任何新轮询 ——
 function syncRunPanel() {
   const el = $('#runPanel'); if (!el) return;
-  // 右边缘只留一个抽屉：子 Agent / 任务 / 省钱仪表盘打开时先让运行面板让位
-  // （syncPanelLayout 统一算，避免"两个面板各写一份互斥逻辑"）。
+  // §3.82：四个面板都在右栏标签页内，右边缘只剩右栏一个抽屉（显隐由 syncPanelLayout 统一算）。
   syncPanelLayout();
   const chip = $('#runChip'); if (chip) chip.setAttribute('aria-expanded', runPanelOpen ? 'true' : 'false');
   const col = $('#rpCollapse'); if (col) col.textContent = '收起';
@@ -1242,6 +1279,12 @@ function initResponsive() {
 initResponsive();
 // §3.73：绑定两个折叠区 + 末尾区块总开关（渲染入口在下面的轨迹收纳块）。
 initTraceUI();
+// §3.82：四个标签按钮（只切 display + 开右栏；默认轨迹）。
+for (const key of RAIL_TABS) {
+  const btn = $(RAIL_TAB_BUTTONS[key]);
+  if (btn) btn.onclick = () => activateRailTab(key);
+}
+setRailTab('trace');
 
 // —— 工具时间线 DOM：一张卡 + 可复用行（开始/完成不换节点） ——
 function toolStepNode(step) {
@@ -1678,6 +1721,7 @@ function focusTraceRound(round) {
     const body = $('#tdBody'); if (body) body.hidden = false;
     const toggle = $('#tdToggle'); if (toggle) toggle.setAttribute('aria-expanded', 'true');
   } else {
+    setRailTab('trace');
     setRunPanel(true);
   }
   traceFoldState.trace = true;
@@ -2071,38 +2115,29 @@ function openTraj(msg){
     // 点击标题定位到聊天中的对应工具卡
     list.appendChild(div);
   }
-  $('#trajPanel').style.display='flex';
-  $('#tasksPanel').style.display='none'; // 仅任务面板（右侧）与轨迹互斥；子代理面板可与轨迹同显
+  // §3.82：轨迹入口不再单独开旧浮层——切到右栏「轨迹」标签（旧面板与其 #tjList 仍在 DOM 里）。
   $('#trajRailBtn').classList.add('on');
-  syncPanelLayout();
+  activateRailTab('trace');
 }
-// 面板布局同步（2026-09-02）：轨迹/子代理/任务面板打开时以 body class 推开内容区，
-// 聊天文本与附件行不再被固定面板遮挡；面板宽度随屏宽自动收窄（CSS 媒体查询）。
+// 面板布局同步：§3.82 起轨迹/子代理/任务/仪表盘都在右栏标签页内，
+// 右栏是否显示只由 runPanelOpen 决定；旧的四条 body 推开 class 不再使用（CSS 规则保留不动）。
 function syncPanelLayout(){
-  const open=(id)=>document.getElementById(id)?.style.display==='flex';
-  document.body.classList.toggle('traj-open', open('trajPanel'));
-  document.body.classList.toggle('sub-open', open('subPanel'));
-  document.body.classList.toggle('tasks-open', open('tasksPanel'));
-  document.body.classList.toggle('dash-open', open('dashPanel'));
-  // P1-4：右边缘只留一个抽屉——既有右侧面板（子代理/任务/省钱仪表盘）打开时运行面板让位；
-  // 它们关闭后 syncPanelLayout 再被调用，运行面板按 runPanelOpen 恢复。
-  const otherRight=open('subPanel')||open('tasksPanel')||open('dashPanel');
+  document.body.classList.remove('traj-open','sub-open','tasks-open','dash-open');
   const narrow=layoutClassesFor(window.innerWidth||0).narrowRun;
-  const showRun=Boolean(runPanelOpen)&&!otherRight;
+  const showRun=Boolean(runPanelOpen);
   const rp=$('#runPanel'); if(rp) rp.hidden=!showRun;
   document.body.classList.toggle('run-open', showRun&&!narrow);
   document.body.classList.toggle('run-drawer', showRun&&narrow);
   // §3.73：窄屏右栏收起时，轨迹/子Agent 在对话流末尾显示；右栏（抽屉）一开就让位。
   syncTraceDock();
 }
-$('#tjClose').onclick=()=>{ $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); syncPanelLayout(); };
+$('#tjClose').onclick=()=>{ setRunPanel(false); $('#trajRailBtn').classList.remove('on'); };
 $('#trajRailBtn').onclick=()=>{
-  const p=$('#trajPanel');
-  const willShow=p.style.display==='none';
-  if(willShow){ const m=lastMsgWithTraj(); if(!m){ uiAlert('本轮还没有可展示的轨迹（先发起一个任务）'); return; } openTraj(m); }
-  else p.style.display='none';
-  $('#trajRailBtn').classList.toggle('on', willShow);
-  syncPanelLayout();
+  // §3.82：轨迹入口 = 打开右栏并切到「轨迹」标签（没有轨迹时也切过去，显示空态）。
+  const m=lastMsgWithTraj();
+  if(m && m._traj && m._traj.length){ openTraj(m); return; }
+  $('#trajRailBtn').classList.add('on');
+  activateRailTab('trace');
 };
 function lastMsgWithTraj(){
   const msgs=[...document.querySelectorAll('#chat .msg-ai')].reverse();
@@ -2129,15 +2164,13 @@ function renderSubPanel(){
   if(!count) list.innerHTML='<div class="empty" style="color:var(--faint);font-size:12px;padding:10px">本会话还没有子 Agent（task 工具会派生子 Agent）</div>';
 }
 const toggleSubPanel=()=>{
-  const p=$('#subPanel');
-  const willShow=p.style.display==='none';
-  p.style.display=willShow?'flex':'none';
-  $('#subRailBtn').classList.toggle('on', willShow);
-  if(willShow){ $('#tasksPanel').style.display='none'; renderSubPanel(); } // 轨迹（左侧）可与子代理（右侧）同显
-  syncPanelLayout();
+  // §3.82：子Agent 入口 = 打开右栏并切到「子Agent」标签（不再单独开旧浮层）。
+  renderSubPanel();
+  activateRailTab('sub');
+  $('#subRailBtn').classList.add('on');
 };
 $('#subRailBtn').onclick=toggleSubPanel;
-$('#sbClose').onclick=()=>{ $('#subPanel').style.display='none'; $('#subRailBtn').classList.remove('on'); syncPanelLayout(); };
+$('#sbClose').onclick=()=>{ setRunPanel(false); $('#subRailBtn').classList.remove('on'); };
 // —— 任务面板（多会话并行） ——
 function setBtn(){
   // §138：停止点击后立刻有可见反馈（「停止中…」+ 禁用防连点），回合真正收尾后由 finally 复位。
@@ -2204,8 +2237,12 @@ async function refreshCostBadge(){
   if($('#dashPanel').style.display==='flex') renderDashboard(j);
 }
 refreshCostBadge(); setInterval(refreshCostBadge, 15000);
-$('#costBadge').onclick=()=>{ const p=$('#dashPanel'); const show=p.style.display==='none'; p.style.display=show?'flex':'none'; if(show){ $('#subPanel').style.display='none'; $('#trajPanel').style.display='none'; $('#tasksPanel').style.display='none'; $('#subRailBtn').classList.remove('on'); $('#trajRailBtn').classList.remove('on'); refreshCostBadge(); } syncPanelLayout(); };
-$('#dashClose').onclick=()=>{ $('#dashPanel').style.display='none'; syncPanelLayout(); };
+// §3.82：顶栏费用徽标 = 打开右栏「仪表盘」标签（原有 📊 内容仍在 #dashPanel 里；关闭用 ✕/收起）。
+$('#costBadge').onclick=()=>{
+  $('#trajRailBtn').classList.remove('on'); $('#subRailBtn').classList.remove('on');
+  activateRailTab('dash');
+};
+$('#dashClose').onclick=()=>{ setRunPanel(false); };
 // 底部状态栏：轮次/步数/LLM 与工具时长/首 token 平均/吞吐/缓存命中/输入输出 tokens
 async function refreshStatusBar(){
   const r=await fetch('/api/cache-stats',{cache:'no-store'}).catch(()=>null); if(!r) return;
@@ -2217,8 +2254,12 @@ async function refreshStatusBar(){
   $('#statusBar').textContent = s.turns+' 轮 · '+s.steps+' 步 | LLM '+fmtDur(s.llmMs)+' · 工具调用 '+fmtDur(s.toolMs)+' | 首 token 平均 '+ft+' · '+tps+' | 缓存命中 '+rate+' | 输入 '+fmtTok(s.prompt)+' tok · 输出 '+fmtTok(s.completion)+' tok';
 }
 refreshStatusBar(); setInterval(refreshStatusBar, 15000);
-$('#tasksBtn').onclick=()=>{ const p=$('#tasksPanel'); p.style.display = p.style.display==='none'?'flex':'none'; if(p.style.display==='flex'){ $('#subPanel').style.display='none'; $('#trajPanel').style.display='none'; $('#trajRailBtn').classList.remove('on'); $('#subRailBtn').classList.remove('on'); updateTasksPanel(); } syncPanelLayout(); };
-$('#tpClose').onclick=()=>{ $('#tasksPanel').style.display='none'; syncPanelLayout(); };
+// §3.82：顶栏「任务」= 打开右栏「任务」标签（右栏收起时也会展开；关闭用 ✕/收起）。
+$('#tasksBtn').onclick=()=>{
+  $('#trajRailBtn').classList.remove('on'); $('#subRailBtn').classList.remove('on');
+  activateRailTab('tasks');
+};
+$('#tpClose').onclick=()=>{ setRunPanel(false); };
 
 // v0.6.21（§3.81）：顶栏「我在哪」——工作空间 › 当前会话。数据只取既有 currentWorkspaceName /
 // sessionsCache / currentSession，不新增后端字段。会话列表或工作空间刷新后同步更新。

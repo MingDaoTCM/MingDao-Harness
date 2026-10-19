@@ -19,7 +19,7 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：352（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：362（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
 
 > v0.6.20（§3.79）：界面重排回滚到 v0.6.18，`batch42-ui-p2`（15 条）与 `batch43-ui-shell`（12 条）
 > 断言的 P2/新骨架已不在代码里，随 `test/ui-p2.js` 一并移除（369 → 342）。
@@ -27,3 +27,7 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 > v0.6.21（§3.81）：新增 `batch43-header-sheet`（10 条）——顶栏既有入口被删、会话设置里的
 > 模型/预设选择器被删、模型 change 解绑、crumb 不刷新、⌘K 模型命令改用 label、`#sessSheet`
 > 打不开、`ui-shot --open` 失效、`sheet.png` 不再截（342 → 352）。
+>
+> v0.6.21（§3.82）：新增 `batch44-run-tabs`（10 条）——标签切不动、默认标签错、任务面板被搬出
+> 右栏、`#tpList` id 丢失、顶栏「任务」不切页、右栏不打开、任务标签不刷新 `updateTasksPanel`、
+> 仪表盘不接 `renderDashboard`、切标签销毁节点、标签按钮 id 丢失（352 → 362）。

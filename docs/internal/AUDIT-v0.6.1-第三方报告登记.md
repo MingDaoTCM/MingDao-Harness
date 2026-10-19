@@ -4334,3 +4334,79 @@ Electron 缓存重签只用于本机截图，不用于分发。
 - 未改 `src/providers/**`、`src/agent.js`、`presets/**`、`desktop/**`、`ide/**`；未改 CSS 骨架 /
   三栏 / 右栏 / 主题 / 字号；未引设计稿样式表；未新增轮询；未 tag / 改版本号 / publish / 动官网。
 - 本步**不删**顶栏既有入口：顶栏裁剪必须在替代入口逐项迁出并截图验证之后，作为后续独立小步做。
+
+## 3.82 已做（v0.6.21 小步重排第二步：右栏改成四个标签页 轨迹 / 子Agent / 任务 / 仪表盘）
+
+**来源**：§3.81 之后继续按「小步、每步截图验证」重做界面；本步只搬右栏，不删任何现有入口、
+不改顶栏、不动 `#runPanel` 宽度 / `body.run-open` 推开量 / `.app` 网格 / 主题 / 字号。
+
+### 一、右栏新结构
+
+`#runPanel` 内自上而下：`rp-head`（本轮运行 / 收起）→ `rp-top`（会话配置 + 本轮数据六项：阶段 /
+首帧 TTFT / 吞吐 / 工具步数 / 上下文 / 本轮费用）→ `rp-tabs`（轨迹 · 子Agent · 任务 · 仪表盘）→
+`rp-tabbody`（四个 `role="tabpanel"`：`#tabTrace` / `#tabSub` / `#tabTasks` / `#tabDash`）→
+`rp-foot`（停止/压缩）。默认标签 = 轨迹；窄屏仍是顶栏「运行」抽屉，内容同一套标签。
+
+### 二、四个 panel 的搬迁位置（id 原样保留）
+
+| 面板 | 新位置 | 关键子节点（保留） |
+| --- | --- | --- |
+| `#trajPanel`（旧轨迹浮层） | `#tabTrace` 内，与 §3.73 富轨迹 `#rpTraceSec` / `#rpTraceList` 同页 | `#tjList` / `#tjSummary` |
+| `#subPanel`（旧子Agent 浮层） | `#tabSub` 内，与 `#rpSubSec` / `#rpSubList` 同页 | `#sbList` / `#sbCount` |
+| `#tasksPanel`（任务） | `#tabTasks` 内（整体搬入，宽度改为跟随右栏） | `#tpList` / `#tpCount` |
+| `#dashPanel`（省钱仪表盘） | `#tabDash` 内（KPI / 趋势 / Top / 最近命中全保留） | `#kpiToday` / `#kpiRate` / `#kpiSaved` / `#kpiTurns` / `#rateGauge` / `#trendChart` / `#dashModels` / `#dashTools` / `#dashRecent` |
+
+- `app.js` 新增 `railTabDisplay(tab)` **纯函数**（只返回四个 `flex|none`）与 `setRailTab(tab)`：
+  只改 `display` / `.on` / `aria-selected`，不重建、不销毁任何节点；未知标签回退轨迹。
+- `activateRailTab(tab)` = `setRunPanel(true)` + `setRailTab(tab)`；顶栏「任务」、顶栏费用徽标、
+  左栏 🧭 / 🤖 都改走它（点入口 = 切对应标签并显示右栏；关闭用右栏「收起」或 ✕）。
+- `syncPanelLayout()` 不再用 `traj-open/sub-open/tasks-open/dash-open` 推正文（四个面板已进右栏，
+  右栏是否显示只由 `runPanelOpen` 决定）；旧 CSS 规则原样保留，未删。
+- `updateTasksPanel` / `renderDashboard` / `openTraj` / `renderSubPanel` 的数据逻辑未重写：
+  任务标签仍调用 `updateTasksPanel()`，仪表盘仍调用 `refreshCostBadge()` → `renderDashboard(j)`，
+  `openTraj` 仍逐条写 `#tjList`，`renderSubPanel` 仍写 `#sbList`。
+
+### 三、截图（本次真跑）
+
+- wide 基准（`node scripts/ui-shot.mjs --out /tmp/shots-step2`，**1440×900**）：
+  - `/tmp/shots-step2/home.png` 1440×900 · 230,635 B
+  - `/tmp/shots-step2/settings.png` 1440×900 · 348,589 B
+  - `/tmp/shots-step2/palette.png` 1440×900 · 308,560 B
+  - `/tmp/shots-step2/session.png` 1440×900 · 271,152 B
+  - `/tmp/shots-step2/sheet.png` 1440×900 · 378,677 B（最后一跑为 `--open "#tasksBtn"`，右栏停在任务标签）
+- 宽屏任务（`node scripts/ui-shot.mjs --out /tmp/shots-step2 --open "#tasksBtn"`，**1440×900**）：
+  同上 `sheet.png`；右栏标签栏「任务」高亮，下面可见 **「任务面板（0 运行中 / 上限 8）」** 与
+  既有 `#tpList` 容器 / ✕ 关闭（演示 home 没有运行中的任务，所以列表为空，不是没渲染）。
+- narrow（`node scripts/ui-shot.mjs --out /tmp/shots-step2-narrow --viewport narrow`，**880×900**）：
+  - `/tmp/shots-step2-narrow/home.png` 880×900 · 145,809 B
+  - `/tmp/shots-step2-narrow/settings.png` 880×900 · 260,851 B
+  - `/tmp/shots-step2-narrow/palette.png` 880×900 · 223,407 B
+  - `/tmp/shots-step2-narrow/session.png` 880×900 · 184,656 B
+  - `/tmp/shots-step2-narrow/sheet.png` 880×900 · 286,509 B
+- 额外自检（未列入必须三跑）：`/tmp/shots-step2-dash/sheet.png` 1440×900 · 397,076 B
+  （`--open "#costBadge"`：仪表盘标签高亮，KPI「今日费用 ¥0.0000 / 缓存命中 0.0% /
+  已节省 ¥0.0000 / 轮次·步数 0 / 0」与「省钱仪表盘」标题可见）；
+  `/tmp/shots-step2-trace/sheet.png` 1440×900 · 381,699 B（左栏 🧭 → 右栏轨迹标签，入口不再只开旧浮层）；
+  `/tmp/shots-step2-sub/sheet.png` 1440×900 · 382,011 B（左栏 🤖 → 子Agent 标签）。
+- 顶栏 / 左栏：4 个标签按钮在右栏顶部；顶栏既有入口（工作空间 / 历史会话 / 任务 / 新对话 /
+  主题 / 费用 / ⌘K / 设置 / 运行）一个未删。
+
+### 四、门禁
+
+- `npm run typecheck`：通过。
+- `node test/smoke.js`（单独）：通过（含新增 §154）。
+- `node test/e2e-web.js`：24/24 通过。
+- `node test/e2e-local.js`：通过（17 项）。
+- `node test/api-contracts.js`：通过（8 项）。
+- `node test/mutate/batch44-run-tabs.mjs`：**10/10 全中**。
+- `node test/mutate/run.mjs`（全批次）：**32/32 批次全中**，变异总数 362。
+- `node scripts/doc-lint.mjs`：通过。
+
+### 五、边界
+
+- 未改 `src/providers/**`、`src/agent.js`、`presets/**`、`desktop/**`、`ide/**`；未改顶栏、
+  CSS 网格 / `#runPanel` 宽度 / `body.run-open` 推开量 / 主题 / 字号；未引设计稿样式表；
+  未动 `#sessSheet`；未新增轮询；未 tag / 改版本号 / publish / 动官网。
+- 旧 `#trajPanel` / `#subPanel` 作为兼容容器随迁并保留 `#tjList` / `#sbList`，默认收起：
+  轨迹标签页展示 §3.73 的富轨迹（`#rpTraceList`），子Agent 标签页展示富子Agent 列表
+  （`#rpSubList`），避免同一标签里出现两份重复列表。任务/仪表盘两个面板则整体可见。

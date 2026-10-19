@@ -16899,4 +16899,205 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   ok('v0.6.21 §3.81 顶栏不回归：既有入口（工作空间/历史会话/会话管理/任务/新对话/主题/费用）id 与处理器均在 + 三个选择器仍在 #sessSheet 且 change 处理器绑定（模型/权限→/api/config，预设→本轮 payload）+ #crumbWs›#crumbSession 随当前会话/工作空间更新 + ⌘K/设置入口仍开且 ⌘K 模型命令走 API id + #sessSheet 可开关 + ui-shot --open/sheet.png 可见性校验');
 }
 
+// ---------- 154. v0.6.21 §3.82：右栏四标签（轨迹 / 子Agent / 任务 / 仪表盘） ----------
+// 接 §153。界面重排第二步只做一件事：把原来并列的 #trajPanel / #subPanel / #tasksPanel / #dashPanel
+// 整体搬进 #runPanel 的四个标签页，顶栏/左栏既有开关继续可用（点它们 = 切标签 + 开右栏）。
+// 本节钉住：①四个标签按钮存在，点击只切 display（桩 DOM 行为，节点不销毁）；
+// ②四个面板的关键子节点仍在 DOM、id 不变且确实在 #runPanel 的对应标签页内；
+// ③顶栏「任务」点击 → 右栏显示 + activeTab=任务；④右栏收起时点任务按钮 → 右栏打开；
+// ⑤既有 updateTasksPanel / renderDashboard / openTraj / renderSubPanel 的数据逻辑未被重写，且仍被调用。
+{
+  const appSrc154 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+  const htmlSrc154 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  /** @param {string} a @param {string} b */
+  const slice154 = (a, b) => {
+    const i = appSrc154.indexOf(a);
+    const j = appSrc154.indexOf(b, i + a.length);
+    assert.ok(i >= 0 && j > i, `（前置）应能定位 app.js 切片：${a}`);
+    return appSrc154.slice(i, j);
+  };
+
+  // —— ① 四个标签按钮存在；点击只切 display（桩 DOM）；默认轨迹 ——
+  {
+    const tabSrc154 = slice154("const RAIL_TABS = ['trace', 'sub', 'tasks', 'dash'];", 'let responsiveInitialized = false;');
+    const bindSrc154 = slice154('for (const key of RAIL_TABS) {\n  const btn = $(RAIL_TAB_BUTTONS[key]);', "setRailTab('trace');");
+    const tasksBtnSrc154 = slice154("$('#tasksBtn').onclick=", "$('#tpClose').onclick=");
+    const costBtnSrc154 = slice154("$('#costBadge').onclick=", "$('#dashClose').onclick=");
+    assert.ok(!/innerHTML|replaceChildren|removeChild|appendChild/.test(tabSrc154),
+      '标签切换不得销毁/重建节点（只能改 display 与 aria/class）');
+
+    /** @param {string} id */
+    function mkNode154(id) {
+      const node = { id, style: { display: 'none' }, hidden: false, attrs: {}, textContent: '', _classes: new Set() };
+      node.classList = {
+        add: (c) => node._classes.add(c),
+        remove: (c) => node._classes.delete(c),
+        contains: (c) => node._classes.has(c),
+        toggle: (c, on) => {
+          if (on === undefined) { if (node._classes.has(c)) node._classes.delete(c); else node._classes.add(c); }
+          else if (on) node._classes.add(c); else node._classes.delete(c);
+        },
+      };
+      node.setAttribute = (k, v) => { node.attrs[k] = String(v); };
+      return node;
+    }
+    const els154 = {};
+    for (const id of ['#tabTrace', '#tabSub', '#tabTasks', '#tabDash', '#rtTrace', '#rtSub', '#rtTasks', '#rtDash', '#tasksPanel', '#dashPanel', '#tasksBtn', '#costBadge', '#trajRailBtn', '#subRailBtn']) {
+      els154[id] = mkNode154(id);
+    }
+    const openCalls = [];
+    let tasksRefresh = 0, dashRefresh = 0;
+    const wrapper154 = 'let runPanelOpen = false;\n' + tabSrc154 + '\n' + bindSrc154 + '\n' + tasksBtnSrc154 + '\n' + costBtnSrc154 + '\n' +
+      'return { railTabDisplay, setRailTab, activateRailTab, getActive: () => activeRailTab, setOpen: (v) => { runPanelOpen = Boolean(v); } };';
+    const W154 = new Function('$', 'setRunPanel', 'updateTasksPanel', 'refreshCostBadge', wrapper154)(
+      (sel) => els154[sel] || null,
+      (open) => { openCalls.push(Boolean(open)); },
+      () => { tasksRefresh += 1; },
+      () => { dashRefresh += 1; },
+    );
+
+    assert.deepEqual(W154.railTabDisplay('trace'), { trace: 'flex', sub: 'none', tasks: 'none', dash: 'none' },
+      'railTabDisplay(轨迹) 必须只让轨迹标签 display:flex');
+    assert.deepEqual(W154.railTabDisplay('tasks'), { trace: 'none', sub: 'none', tasks: 'flex', dash: 'none' },
+      'railTabDisplay(任务) 必须只让任务标签 display:flex');
+    assert.deepEqual(W154.railTabDisplay('nope'), { trace: 'flex', sub: 'none', tasks: 'none', dash: 'none' },
+      '未知标签必须回退轨迹（不允许整栏全隐藏）');
+
+    W154.setRailTab('trace');
+    assert.equal(W154.getActive(), 'trace', '默认标签必须是轨迹');
+    assert.equal(els154['#tabTrace'].style.display, 'flex', '默认标签页必须可见');
+    for (const id of ['#tabSub', '#tabTasks', '#tabDash']) {
+      assert.equal(els154[id].style.display, 'none', `未选中的 ${id} 必须隐藏（只切 display，不销毁节点）`);
+    }
+
+    // 点「任务」标签：对应 panel 可见、其余隐藏；任务列表仍由既有 updateTasksPanel 刷新
+    els154['#rtTasks'].onclick();
+    assert.equal(W154.getActive(), 'tasks', '点「任务」标签必须把 activeTab 切成任务');
+    assert.equal(els154['#tabTasks'].style.display, 'flex', '点「任务」标签后任务标签页必须可见');
+    assert.equal(els154['#tasksPanel'].style.display, 'flex', '任务标签页里的 #tasksPanel 必须显示');
+    assert.equal(els154['#tabTrace'].style.display, 'none', '切到任务后轨迹标签页必须隐藏');
+    assert.equal(els154['#dashPanel'].style.display, 'none', '切到任务后仪表盘必须隐藏');
+    assert.equal(els154['#rtTasks'].attrs['aria-selected'], 'true', '选中的标签必须 aria-selected=true');
+    assert.equal(els154['#rtTrace'].attrs['aria-selected'], 'false', '未选中的标签必须 aria-selected=false');
+    assert.ok(tasksRefresh > 0, '任务标签必须仍调用既有 updateTasksPanel()');
+
+    // 点「仪表盘」标签：KPI 容器显示；仍由既有 refreshCostBadge → renderDashboard 刷新
+    els154['#rtDash'].onclick();
+    assert.equal(els154['#tabDash'].style.display, 'flex', '点「仪表盘」标签后仪表盘标签页必须可见');
+    assert.equal(els154['#dashPanel'].style.display, 'flex', '仪表盘标签页里的 #dashPanel 必须显示');
+    assert.equal(els154['#tabTasks'].style.display, 'none', '切到仪表盘后任务标签页必须隐藏');
+    assert.ok(dashRefresh > 0, '仪表盘标签必须仍调用既有 refreshCostBadge()');
+
+    // ③ 顶栏「任务」：宽屏右栏开着、当前在轨迹 → 切到任务并保持显示
+    W154.setRailTab('trace');
+    openCalls.length = 0;
+    W154.setOpen(true);
+    els154['#tasksBtn'].onclick();
+    assert.equal(W154.getActive(), 'tasks', '点顶栏「任务」必须切到任务标签（不能只是开一个空面板）');
+    assert.deepEqual(openCalls, [true], '点顶栏「任务」必须显示右栏');
+
+    // ④ 右栏收起时点任务按钮 → 右栏打开（且仍切到任务）
+    W154.setRailTab('trace');
+    W154.setOpen(false);
+    openCalls.length = 0;
+    els154['#tasksBtn'].onclick();
+    assert.deepEqual(openCalls, [true], '右栏收起时点任务按钮必须展开右栏');
+    assert.equal(W154.getActive(), 'tasks', '右栏收起时点任务按钮必须同时切到任务标签');
+  }
+
+  // —— ② 四个面板与关键子节点仍在 DOM、id 不变，且确实搬进了 #runPanel 对应标签页 ——
+  {
+    const iRun = htmlSrc154.indexOf('<aside id="runPanel"');
+    assert.ok(iRun >= 0, '（前置）index.html 必须有 #runPanel');
+    const runPanel154 = htmlSrc154.slice(iRun, htmlSrc154.indexOf('<!-- P1-5 会话设置弹层 -->', iRun));
+    assert.ok(runPanel154.length > 1000, '（前置）应能切出 #runPanel 整块');
+
+    const keyIds = [
+      'tabTrace', 'tabSub', 'tabTasks', 'tabDash', 'rtTrace', 'rtSub', 'rtTasks', 'rtDash',
+      'trajPanel', 'tjList', 'tjSummary', 'subPanel', 'sbList', 'sbCount',
+      'tasksPanel', 'tpList', 'tpCount', 'dashPanel', 'kpiToday', 'kpiRate', 'kpiSaved', 'kpiTurns',
+      'rateGauge', 'trendChart', 'dashModels', 'dashTools', 'dashRecent', 'rpTraceList', 'rpSubList',
+    ];
+    for (const id of keyIds) {
+      assert.ok(new RegExp(`id="${id}"`).test(runPanel154), `#${id} 必须仍在 #runPanel 内（搬迁而非重写/删节点）`);
+    }
+
+    const tabOf = (id, endNeedle) => {
+      const i = runPanel154.indexOf(`id="${id}"`);
+      const j = runPanel154.indexOf(endNeedle, i);
+      assert.ok(i >= 0 && j > i, `（前置）应能切出 ${id} 标签页`);
+      return runPanel154.slice(i, j);
+    };
+    const traceTab = tabOf('tabTrace', 'id="tabSub"');
+    assert.ok(/id="rpTraceSec"/.test(traceTab) && /id="rpTraceList"/.test(traceTab), '轨迹标签页必须保留 #rpTraceList（§3.73 富轨迹）');
+    assert.ok(/id="trajPanel"/.test(traceTab) && /id="tjList"/.test(traceTab), '旧轨迹面板 #trajPanel/#tjList 必须搬进轨迹标签页');
+    const subTab = tabOf('tabSub', 'id="tabTasks"');
+    assert.ok(/id="rpSubSec"/.test(subTab) && /id="rpSubList"/.test(subTab), '子Agent 标签页必须保留 #rpSubList');
+    assert.ok(/id="subPanel"/.test(subTab) && /id="sbList"/.test(subTab), '旧子Agent 面板 #subPanel/#sbList 必须搬进子Agent 标签页');
+    const tasksTab = tabOf('tabTasks', 'id="tabDash"');
+    assert.ok(/id="tasksPanel"/.test(tasksTab) && /id="tpList"/.test(tasksTab), '任务面板必须整体搬进 #tabTasks');
+    const dashTab = tabOf('tabDash', '<div class="rp-foot"');
+    assert.ok(/id="dashPanel"/.test(dashTab) && /id="kpiToday"/.test(dashTab) && /id="trendChart"/.test(dashTab),
+      '仪表盘必须整体搬进 #tabDash（KPI/趋势/Top 都在，不能只剩一个空标签）');
+
+    // 标签栏在状态条之下、标签内容区之上；顶栏不动
+    const iTop = runPanel154.indexOf('class="rp-top"');
+    const iTabs = runPanel154.indexOf('class="rp-tabs"');
+    const iBody = runPanel154.indexOf('class="rp-tabbody"');
+    const iFoot = runPanel154.indexOf('class="rp-foot"');
+    assert.ok(iTop >= 0 && iTop < iTabs && iTabs < iBody && iBody < iFoot,
+      '右栏结构必须是「状态条 → 标签栏 → 标签内容 → 底部停止」');
+    const rks154 = [...runPanel154.matchAll(/data-rk="([a-z]+)"/g)].map((m) => m[1]).sort();
+    assert.deepEqual(rks154, ['cost', 'ctx', 'phase', 'tools', 'tps', 'ttft'],
+      '右栏顶部状态条六项（阶段/首帧/吞吐/工具数/上下文/费用）必须仍在，不得被标签挤掉');
+    assert.ok(/id="tabTrace"[^>]*>/.test(runPanel154) && !/id="tabTrace"[^>]*style="display:none"/.test(runPanel154),
+      '默认标签页（轨迹）不得默认 display:none');
+    for (const id of ['tabSub', 'tabTasks', 'tabDash']) {
+      assert.ok(new RegExp(`id="${id}"[^>]*style="display:none"`).test(runPanel154), `${id} 默认必须隐藏（默认标签是轨迹）`);
+    }
+    assert.ok(/let activeRailTab = 'trace';/.test(appSrc154), 'activeRailTab 默认值必须是轨迹');
+    assert.ok(!/body\.classList\.toggle\('tasks-open'/.test(appSrc154) && !/body\.classList\.toggle\('dash-open'/.test(appSrc154),
+      '四个面板已进右栏，不得再用 tasks-open/dash-open 推开正文（否则右栏与正文各让一次）');
+  }
+
+  // —— ③/④ 已由上面的桩 DOM 覆盖；这里守住源码接线：两个入口都走 activateRailTab ——
+  {
+    assert.ok(/\$\('#tasksBtn'\)\.onclick=\(\)=>\{[\s\S]{0,240}activateRailTab\('tasks'\);/.test(appSrc154),
+      '顶栏「任务」必须走 activateRailTab(tasks)（切标签 + 开右栏）');
+    assert.ok(/\$\('#costBadge'\)\.onclick=\(\)=>\{[\s\S]{0,240}activateRailTab\('dash'\);/.test(appSrc154),
+      '顶栏费用徽标必须走 activateRailTab(dash)（切标签 + 开右栏）');
+    assert.ok(/function activateRailTab\(tab\) \{\n  setRunPanel\(true\);\n  return setRailTab\(tab\);\n\}/.test(appSrc154),
+      'activateRailTab 必须先 setRunPanel(true) 再 setRailTab（右栏收起时也能打开）');
+  }
+
+  // —— ⑤ 既有 handler 未被重写：updateTasksPanel / renderDashboard / openTraj / renderSubPanel 仍在原文件且仍被调用 ——
+  {
+    const utp154 = appSrc154.slice(appSrc154.indexOf('async function updateTasksPanel(){'), appSrc154.indexOf('setInterval(updateTasksPanel, 2000);'));
+    assert.ok(utp154.length > 1200, '（前置）updateTasksPanel 必须仍是一个完整实现');
+    assert.ok(/fetch\('\/api\/tasks'\)/.test(utp154) && /\$\('#tpList'\)/.test(utp154) && /\$\('#tpCount'\)/.test(utp154),
+      'updateTasksPanel 必须仍从 /api/tasks 取数并写 #tpList/#tpCount（不得改写成空壳）');
+    assert.ok(/if \(activeRailTab === 'tasks' && typeof updateTasksPanel === 'function'\) updateTasksPanel\(\);/.test(appSrc154),
+      '任务标签必须仍调用既有 updateTasksPanel()');
+
+    const rd154 = appSrc154.slice(appSrc154.indexOf('function renderDashboard(j){'), appSrc154.indexOf('async function refreshMcpPresets(){'));
+    assert.ok(rd154.length > 800, '（前置）renderDashboard 必须仍是一个完整实现');
+    for (const id of ['kpiToday', 'kpiRate', 'kpiSaved', 'kpiTurns', 'trendChart', 'dashModels', 'dashTools', 'dashRecent']) {
+      assert.ok(new RegExp(`\\$\\('#${id}'\\)`).test(rd154), `renderDashboard 必须仍写 #${id}`);
+    }
+    assert.ok(/if\(\$\('#dashPanel'\)\.style\.display==='flex'\) renderDashboard\(j\);/.test(appSrc154),
+      '省钱仪表盘仍必须调用既有 renderDashboard(j)（不得只搬 DOM 不接数据）');
+    assert.ok(/if \(activeRailTab === 'dash' && typeof refreshCostBadge === 'function'\) refreshCostBadge\(\);/.test(appSrc154),
+      '仪表盘标签必须仍调用既有 refreshCostBadge()');
+
+    const ot154 = appSrc154.slice(appSrc154.indexOf('function openTraj(msg){'), appSrc154.indexOf('// 面板布局同步：§3.82'));
+    assert.ok(ot154.length > 800 && /\$\('#tjList'\)/.test(ot154) && /for\(const e of msg\._traj\)/.test(ot154),
+      'openTraj 的逐条轨迹渲染不得被重写（#tjList 仍由它写入）');
+    const rsp154 = appSrc154.slice(appSrc154.indexOf('function renderSubPanel(){'), appSrc154.indexOf('const toggleSubPanel='));
+    assert.ok(rsp154.length > 500 && /sessionSubs/.test(rsp154) && /\$\('#sbList'\)/.test(rsp154),
+      'renderSubPanel 的数据逻辑不得被重写（#sbList 仍由它写入）');
+  }
+
+  ok('v0.6.21 §3.82 右栏四标签：轨迹/子Agent/任务/仪表盘按钮齐全且只切 display（默认轨迹、未知回退轨迹）+ 四个面板关键子节点 id 不变并搬进对应标签页（tpList/kpiToday/tjList/sbList 等）+ 顶栏「任务」切 tasks 并开右栏、右栏收起时同样打开 + updateTasksPanel/renderDashboard/openTraj/renderSubPanel 未被重写且仍被调用 + tasks-open/dash-open 不再推开正文');
+}
+
 process.exit(0);
