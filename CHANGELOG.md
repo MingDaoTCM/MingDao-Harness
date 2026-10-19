@@ -3,6 +3,89 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.21（2026-10-19）— 界面重排（三步走，每步截图验证）
+
+> v0.6.19 的界面重排在真机翻车、v0.6.20 已逐字节回滚到 v0.6.18。本版按「小步、每步先出
+> Electron 截图、经负责人过目」重新上线界面重排：① 顶栏补当前会话面包屑、会话设置补预设
+> 来源；② 右栏改成轨迹/子Agent/任务/仪表盘四标签页；③ 只做视觉细节（对比度、1000px 顶栏、
+> seg 标签、会话设置间距）。**所有既有入口保留**，右栏面板节点原样搬迁、id 保留、handler
+> 未重写。细节与截图见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` **§3.81 / §3.82 / §3.83**。
+
+### 一、三步改动（每步独立提交，先截图后进入下一步）
+
+**步骤 1（§3.81）顶栏 crumb + 会话设置预设来源 + 截图工具 `--open`**
+
+- 顶栏 logo 后新增 `#crumbWs › #crumbSession`（工作空间 › 当前会话），复用 `.badge`，
+  不新增 CSS 骨架；`renderCrumb()` 只读 `currentWorkspaceName` / `sessionsCache` /
+  `currentSession`，不新增后端字段，在 `refreshSessions()` / `refreshWsSel()` /
+  `loadSession()` / 新对话后刷新。
+- **既有入口全部保留**：工作空间 / 历史会话 / 会话管理 / 任务 / 新对话 / 主题 / 费用一个未删。
+  模型 / 预设 / 权限本来就在 `#sessSheet`（v0.6.18 起），本步未搬 DOM、未重写 change handler。
+- `#sessSheet` 新增 `#ssPresetSrc`：显示「当前：… · 来源：你的选择 · 仅下一轮」。
+- `scripts/ui-shot.mjs` 新增 `--open <css-selector>`（`#sessSheet` 退回点击
+  `#sessSettingsBtn`）与每次运行额外输出 `sheet.png`，并校验弹层三个选择器可见。
+- `smoke §153` + `batch43-header-sheet`（10 条）钉住「入口不回归 / 弹层可开 / `--open` 有效」。
+
+**步骤 2（§3.82）右栏四个标签页：轨迹 / 子Agent / 任务 / 仪表盘**
+
+- `#runPanel` 内：`rp-head` → `rp-top`（会话配置 + 本轮六项）→ `rp-tabs`（`#tabTrace` /
+  `#tabSub` / `#tabTasks` / `#tabDash`，均 `role="tabpanel"`）→ `rp-foot`；默认轨迹。
+- **`#trajPanel` / `#subPanel` / `#tasksPanel` / `#dashPanel` 节点原样搬迁、id 保留、
+  handler 未重写**：`#tjList` / `#sbList` / `#tpList` / `#kpiToday` / `#trendChart` 等子节点
+  全在，`updateTasksPanel()` / `renderDashboard()` / `openTraj()` / `renderSubPanel()` 的
+  数据逻辑与调用点未改。
+- 新增 `railTabDisplay(tab)` 纯函数与 `setRailTab(tab)`：只改 `display` / `.on` /
+  `aria-selected`，不重建节点；未知标签回退轨迹。`syncPanelLayout()` 不再用
+  `traj-open/sub-open/tasks-open/dash-open` 推正文。
+- 顶栏「任务」、费用徽标、左栏 🧭 / 🤖 改为 `activateRailTab()` = 切标签 + 开右栏；关闭仍用
+  「收起」/ ✕。窄屏仍是顶栏「运行」抽屉，内容同一套标签。
+- `smoke §154` + `batch44-run-tabs`（10 条）。
+
+**步骤 3（§3.83）视觉细节四条**
+
+- **对比度**：28 个承载信息的选择器 `color:var(--faint)` → `var(--dim)`（时间戳、来源、计数、
+  说明等）；`--faint` / `--dim` token 本身未改。暗色：bg 4.92→8.54、bg2 4.64→8.06、
+  panel 3.76→6.53、bg3 3.26→5.67；亮色最小 4.21→6.73，修后均达 WCAG AA。
+- **顶栏 1000px 裁切修复**：新增 `header .hdr-right`（`display:flex;flex:1 1 auto;
+  min-width:0;overflow-x:auto`、4px 滚动条），费用 / 搜索 / 历史会话 / 任务 / ✎ / 新对话
+  收进容器；`#wsSel` 130→110px、`#crumb` 180→120px；新增 `@media (max-width:1100px)`
+  收窄间距并隐藏 `#envBadge`。实测 `#sessions` 从视口外 **1055–1153px** 变为视口内
+  **886–984px**。
+- **右栏标签 `.seg` 化**：`.rp-tabs` 外框 bg3 + 3px padding + 9px 圆角；内按钮 26px / 透明底 /
+  6px 圆角；选中 panel 底 + text 字 + 600。只加类与 CSS，`app.js` 未改。
+- **会话设置弹层间距圆角**：宽 410→400，head/body padding 10/12→11/13，field 标题下间距
+  4→5，effective 外边距 12/8→13/11，foot 8/12→9/13。
+- `smoke §155` + `batch45-visual`（14 条）。
+
+### 二、v0.6.19 的翻车与处置
+
+- v0.6.19 一次性合入约 3,000 行前端改动（设计稿 CSS 整段追加、三栏骨架与旧样式叠加、面板
+  默认态统一接管），真机表现为界面凌乱、菜单/设置消失、按钮失灵、主按钮亮色硬编码，而
+  `smoke` 字符串断言与桩 DOM 测试**全绿**。
+- v0.6.20 处置：`src/web/index.html` / `src/web/app.js` 逐字节回滚到 v0.6.18，并移除断言被
+  回滚骨架的 `smoke §153`、`test/ui-p2.js`、`batch43-ui-shell`、`batch42-ui-p2`。
+- 同时新增 `scripts/ui-shot.mjs`（真实 Electron `capturePage()`），并在 `docs/DEVELOPER.md §六`
+  立下硬纪律：**UI 改动必须先截图、经负责人过目再提交**；字符串断言不能当界面可用的证据。
+  本版三步每一步都先出 wide / 1000px 截图再进入下一步。
+
+### 三、变异与测试
+
+- 新增 `batch43-header-sheet`（10）、`batch44-run-tabs`（10）、`batch45-visual`（14），
+  变异总数 **362 → 376**（共 **33 批 / 376 条**，全中，0 逃逸）。
+- `smoke` 重新启用 §153（回滚时删除的节号），并新增 §154 / §155。
+
+### 四、已知边界（如实登记）
+
+- 设计稿里**未做**：会话分组 / 副标题、轮次时间戳 / 权限 chip、折叠动画、toast、
+  **980px 图标化侧栏**（现为 **<880px 抽屉**）、「更多 ▾」下拉。
+- **1000px 下「任务 / ✎ / 新对话」仍需横向滚动**才能触达（历史会话已在视口内），本步只修
+  任务书点名的裁切，未搬下拉菜单。
+- `--faint → --dim` **只改承载信息的用法**（28 个选择器）；纯装饰文字仍保留 `--faint`。
+- **动态运行文案仍中文**：运行阶段 / 任务状态等文案未接 i18n；`src/web/i18n.js` 仍未被引用。
+- `#envBadge` 在 ≤1100px 隐藏；`#wsSel` / `#crumb` 限宽只影响视觉宽度（完整名称在 `title`）。
+- 未改 `.app` 网格、顶栏高度、`#runPanel` 宽度、`body.run-open` 推开量、主题变量、字号阶；
+  未引设计稿样式表。
+
 ## v0.6.20（2026-10-19）— 紧急回滚界面重排，恢复 v0.6.18 可用 UI
 
 > **紧急 hotfix**：v0.6.19 的界面骨架重排（§3.78）在真机翻车——界面凌乱、菜单/设置消失、
