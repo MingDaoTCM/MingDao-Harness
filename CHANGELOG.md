@@ -3,6 +3,73 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.20（2026-10-19）— 紧急回滚界面重排，恢复 v0.6.18 可用 UI
+
+> **紧急 hotfix**：v0.6.19 的界面骨架重排（§3.78）在真机翻车——界面凌乱、菜单/设置消失、
+> 按钮失灵。按既定决策把 `src/web/index.html` / `src/web/app.js` **逐字节回滚到 v0.6.18**
+> （`git diff v0.6.18 -- src/web/index.html src/web/app.js` 为空），这是唯一可靠的恢复手段；
+> 与 UI 无关的改进全部保留。移除断言被回滚骨架/交互的 `§153`、`test/ui-p2.js`、
+> `batch43-ui-shell`，以及只跑 ui-p2、锚点已不存在的 `batch42-ui-p2`；变异 **369 → 342 条
+> （32 → 30 批）**。真机现象、根因（约 3,000 行前端改动 + 无视觉验证 + 设计稿 CSS 整段覆盖）
+> 与重新上线前置条件见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` **§3.79**。
+
+### 一、回滚（§3.79）
+
+- `git checkout v0.6.18 -- src/web/index.html src/web/app.js`：顶栏 / 侧栏 / 右栏 / 底部
+  回到 v0.6.18 的已知可用结构；`diff` 为空（逐字节恢复）。
+- 随回滚下线：§3.78 三栏骨架与右栏四标签页、§3.77 设置三列 / 六类危险操作二次确认 /
+  dialog 无障碍 / 语言选择（`src/web/i18n.js` 文件保留但**不再被引用**）。
+- v0.6.19 的「id 与 handler 保留」没有救回现场：id 在、节点搬家后默认态与 CSS 级联变了，
+  字符串断言全绿而真机整页不可用——这条教训写进 §3.79。
+
+### 二、移除失效的 UI 断言与批次
+
+- `test/smoke.js`：删除 **§153**（界面骨架整节，含设计稿 CSS 逐值/对比度断言）。
+- 删除 `test/ui-p2.js`（P2 只测回滚后的 `app.js`，已不可测），并从 `test/run-all.mjs` 与
+  `.github/workflows/ci.yml` 移除注册。
+- 删除 `test/mutate/batch43-ui-shell.mjs`（12 条，锚定新骨架）。
+- 连带删除 `test/mutate/batch42-ui-p2.mjs`（15 条）：每条都锚定回滚后**已不存在**的 P2 代码、
+  且只跑 `test/ui-p2.js`，保留必然「变异点未找到」。
+- `test/mutate/README.md` 计数按 `node scripts/doc-lint.mjs` 实测：**342**。
+
+### 三、保留（与 UI 无关）
+
+- `src/web/i18n.js`：**暂不引用**，作为后续重建的资产保留（zh/en 同键，零依赖）。
+- `src/web/server.js` 的 `/api/state.defaults`：**纯新增只读字段**，不参与判定、不写盘，
+  向后兼容；前端当前不消费它。
+- 端口治理（`listen(0)` 运行时端口 + `doc-lint ⑨` 守卫）、本地引擎内存不足自动恢复（§3.74）、
+  变异跨 worktree 全局锁（§3.75）、调度熔断测试进程内确定性驱动等，一行未动。
+
+### 四、重新上线的前置条件（硬要求）
+
+- **必须用 Electron 截图验证再上线**：真实 Electron 窗口，覆盖 **≥1280 / 1000 / 880** 三档宽度、
+  暗/亮两主题，逐页打开顶栏/侧栏/右栏四标签/会话设置/危险确认/空态，截图随 PR 与发布说明存档；
+  截图不通过不得发布。
+- **字符串断言不能代替渲染验证**：`smoke` 是回归底线，不是 UI 可用的证据。
+- 重建时不要整段覆盖设计稿 CSS：`header` 只留一处基准定义、主按钮只用主题令牌、
+  面板默认态由单一函数决定，初始化失败要回退到可用布局而不是「全部隐藏」。
+
+### 五、新增 Electron 截图工具（§3.80）
+
+- 新增 `scripts/ui-shot.mjs`：起真实 `src/cli.js web`（临时 `MINGDAO_HOME` + token），用真实
+  Electron 加载页面并 `capturePage()` 输出 `home/settings/palette/session` 四张 PNG；支持
+  `--viewport wide|mid|narrow`（1440/1000/880）、`--theme dark|light`、`--mobile`、`--out`，
+  服务/参数/Electron/页面报错/截图失败分别以非 0 退出。
+- `docs/DEVELOPER.md` 新增 §六：**UI 改动必须先用 `node scripts/ui-shot.mjs` 截图自查**，
+  至少覆盖三档宽度与暗/亮两主题，截图不对不提交。
+- 本版起 UI 改动必须先跑 `node scripts/ui-shot.mjs` 截图自查（工具见 `docs/DEVELOPER.md §六`）。
+
+### 六、验证
+
+- `npm run typecheck` 0；`node test/smoke.js`（单独跑）**156 组断言全通过**；
+  `e2e-local` 17 项 / `e2e-web` 24 项 / `e2e-schedule` 11 项 / `api-contracts` 8 项全部通过。
+- `node test/mutate/run.mjs --allow-dirty`：**30/30 批、342/342 条全中、0 逃逸**
+  （跑前 `pgrep -f "test/mutate"` 为空，全局锁正常获取/释放）。
+- `node scripts/doc-lint.mjs` 全通过（⑥ 实际 342 = README 342；⑨ 固定端口 0 处）。
+- 回滚提交与发布提交分离：发布提交只含 CHANGELOG / RELEASE-NOTES / `package.json` /
+  `package-lock.json` / `desktop/package.json` 五个文件；`git diff --name-only <门禁SHA>..<tagSHA>
+  -- src test` 为空。
+
 ## v0.6.19（2026-10-18）— 界面骨架照设计稿重排 + UI P2 收口 + 测试端口全部动态化
 
 > 补丁版，三件事：① **界面骨架照设计稿重排**（§3.78）——三栏 `.app`（264 / 1fr / 300、48px 顶栏），
