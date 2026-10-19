@@ -215,3 +215,15 @@ console.log(res.text, res.usage, res.perf);
 - 预设/工具的扩展点沿用既有安全链路（权限引擎、审计、脱敏、沙箱），**不提供绕过入口**。
 - 公共 API 变更必须过测试门禁（smoke 含「公共 API 导出面」断言）+ 发布前自检。
 - 自定义 Provider 模块（非 OpenAI 兼容协议）见 [PROVIDERS.md](PROVIDERS.md)。
+
+## 六、UI 改动必须先用 `node scripts/ui-shot.mjs` 截图自查
+
+> 背景：v0.6.19 前端约 2,561 行改动只有字符串/桩 DOM 断言、没有渲染真实页面，真机出现界面凌乱/按钮失灵（§3.79/§3.80）。改 `src/web/**` 的人必须先留下真实 Electron 截图。
+
+1. 跑一次默认截图：起真实 `src/cli.js web`、用 Electron 打开带 token 的 URL，产出 `home.png` / `settings.png` / `palette.png` / `session.png`；临时 `MINGDAO_HOME` 在退出时自动删除。
+2. 至少覆盖三档宽度与暗/亮两主题：`--viewport wide|mid|narrow`（1440/1000/880）+ `--theme dark|light`；窄屏必须单独跑一次 `--viewport narrow`。
+3. 逐张打开 `/tmp/mdh-shots/*.png` 检查布局、遮挡、白底白字与按钮可见性；截图不对就不要提交 UI 改动（工具对服务/Electron/页面报错/截图失败分别以非 0 退出）。
+
+```bash
+node scripts/ui-shot.mjs --viewport narrow --theme light --out /tmp/mdh-shots-narrow-light
+```

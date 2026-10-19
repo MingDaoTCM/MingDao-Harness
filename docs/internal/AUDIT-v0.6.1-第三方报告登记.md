@@ -3822,6 +3822,10 @@ request failed.` 当时上下文只有 ≈2,773 tokens、预算 32,768——压�
 
 ## 3.77 已修复（v0.6.19 开发线：UI P2——设置三列 / 危险操作二次确认 / 无障碍 / i18n）
 
+> **v0.6.20 注（§3.79）**：本节的 UI 实现（`src/web/index.html` / `src/web/app.js` 中的 P2 部分）
+> 已随界面重排整体回滚到 v0.6.18，`test/ui-p2.js` 与 `batch42-ui-p2` 已移除。`src/web/i18n.js`
+> 与 `/api/state.defaults` 作为后续重建资产保留。下文是当时的记录，不代表当前代码状态。
+
 **来源**：`docs/DESIGN-UI-v1.md` §4.8（设置三列与危险项）、§8.2（无障碍）、§8.3（i18n 收口）
 的 P2 清单。P0/P1 已上线（状态条 / 错误卡 / 内联确认 / 时间线 / ⌘K / 右栏 / 会话设置 / 空态 /
 搜索 / 主题 / 断点），本节只补 P2 的四块，并守住既有能力不回归。
@@ -3938,6 +3942,10 @@ test/** 里出现固定四位监听端口 1 处：test/smoke.js:123 → listen(4
   未改版本号、未 publish、未动官网。
 
 ## 3.78 已补（v0.6.22 开发线：界面骨架照设计稿重排——三栏 / 右栏四标签 / 顶栏瘦身 / 底部合并）
+
+> **v0.6.20 注（§3.79）**：本节**已在真机翻车并整体回滚到 v0.6.18**，
+> `src/web/index.html` / `src/web/app.js` 已还原，`§153` / `batch43-ui-shell` 已移除。
+> 下文是当时的记录，不代表当前代码状态；重新上线前置条件见 §3.79。
 
 **来源**：负责人打开设计稿 [`docs/design/ui-preview.html`](../../docs/design/ui-preview.html) 后问"UI 怎么不是这个样子"。
 根因是此前只做**增量功能**（§3.68 P0、§3.70 P1、§3.73 收纳、§3.77 P2），没有做**布局重排**：
@@ -4131,3 +4139,120 @@ test/** 里出现固定四位监听端口 1 处：test/smoke.js:123 → listen(4
   `<main>` 内，位置未变）。
 - 未改 `src/providers/**`、`src/agent.js`、`src/models.js`、`test/ui-p2.js`、`presets/**`、`desktop/**`、
   `ide/**`；未新增轮询、未引入外部库；未 tag、未改版本号、未 publish、未动官网。
+
+## 3.79 已处置（v0.6.20 紧急 hotfix：回滚界面重排，恢复 v0.6.18 可用 UI）
+
+**来源**：v0.6.19（§3.78 界面骨架重排 + §3.77 UI P2）发布后**真机翻车**，负责人被阻塞。
+本节的结论是**不再试图在坏骨架上打补丁**：把 `src/web/index.html` / `src/web/app.js`
+整体回滚到 `v0.6.18`（唯一让界面恢复的可靠手段），与 UI 无关的改进全部保留，发 `v0.6.20`。
+
+### 一、真机现象（逐条）
+
+1. **界面凌乱**：三栏骨架与旧样式叠加，间距/列宽/层级错位，同一元素出现两套排版；
+   窗口缩放时抽屉/侧栏/右栏互相挤压。
+2. **菜单/设置消失**：顶栏原有的模型/预设/权限等控件被移入会话设置弹层后，弹层/右栏面板
+   在真机上不出现（面板默认 `hidden` / `display:none`，初始化异常时没有任何入口可打开）；
+   侧栏会话列表、设置按钮同样不可见。
+3. **按钮失灵**：点击「设置」「新对话」「发送」「右栏标签」等无响应——结构搬移后
+   JS 初始化/显隐同步在真实 DOM 上失败，handler 没有挂到用户看得到的节点上。
+4. **主题/主按钮异常**：`button.primary` 仍是硬编码亮色（`background:#F9FAFB;color:#0F1115`），
+   不随主题令牌走；暗/亮切换下出现低对比或"白底白字"。
+
+> 说明：以上是负责人真机反馈的归纳；当时**没有留存 Electron 截图**，这正是本轮最该补的流程缺口。
+
+### 二、根因
+
+1. **单次前端改动约 3,000 行**（实测 `v0.6.18..v0.6.19` 的 `src/web/` diff 为 **2,561 行**：
+   `index.html +1,116/−211`、`app.js +797/−63`、`i18n.js +349`、`server.js +25`）。
+   布局、组件、P2 交互、i18n 一次落地，任何一个初始化顺序问题都会放大成整页不可用。
+2. **没有视觉验证**：`smoke §153` 是字符串/选择器/设计稿解析断言，**不渲染页面**；
+   `test/ui-p2.js` 是桩 DOM + 纯函数切片。两者都完全可能在"真机一片凌乱"时全绿——
+   本轮就是。发布前没有 Electron 截图、没有真实窗口逐档断点检查。
+3. **设计稿 CSS 整段覆盖**：设计稿 `<style>` 的约 760 行规则体直接追加进 `index.html`，
+   与旧规则并存而不是替换/限定作用域。具体表现：
+   - `header` **三处定义**同时存在——旧 `header{min-height:52px;…}`（第 64 行）、
+     旧窄屏 `body.narrow-side header{…}`（第 521 行）、新 `header.topbar{…}`（第 1254 行），
+     级联结果依赖声明顺序，旧属性把新顶栏撑开/裁切；
+   - `button.primary{background:#F9FAFB;color:#0F1115}` **硬编码亮色**，未走主题令牌；
+   - 面板默认隐藏：`#runPanel` 带 `hidden`，`#subPanel/#tasksPanel/#dashPanel` 行内
+     `display:none`，显隐统一交给新的 `syncPanelLayout()` / `railPanelDisplay()`；
+     该链路在真机上未按预期执行时，**所有面板一起消失**，用户没有任何入口。
+4. **"id 与 handler 保留"不等于"可用"**：id 确实保留了，但节点被搬到新容器、默认态与
+   CSS 级联同时变化；字符串断言只证明 id 存在，证明不了"点得到、看得见"。
+
+### 三、处置（v0.6.20）
+
+- **回滚**：`git checkout v0.6.18 -- src/web/index.html src/web/app.js`；
+  `git diff v0.6.18 -- src/web/index.html src/web/app.js` 为空（逐字节回到已知可用状态）。
+- **保留**（与 UI 骨架无关、向后兼容）：
+  - `src/web/i18n.js`：**暂不引用**，作为后续重建的资产保留（349 行、zh/en 同键）；
+  - `src/web/server.js` 的 `/api/state.defaults`：**纯新增只读字段**，不参与判定、不写盘；
+  - 所有非 UI 改动：端口治理（`listen(0)` / `doc-lint ⑨`）、内存恢复（§3.74）、
+    变异全局锁（§3.75）、调度熔断测试修正等。
+- **移除失效断言与批次**（它们断言的是被回滚的骨架/P2）：
+  - `test/smoke.js`：删除 §153 整节（界面骨架）；
+  - 删除 `test/mutate/batch43-ui-shell.mjs`（12 条，锚定新骨架）；
+  - 删除 `test/ui-p2.js`，并从 `test/run-all.mjs`、`.github/workflows/ci.yml` 移除注册；
+  - 连带删除 `test/mutate/batch42-ui-p2.mjs`（15 条）：它每条都锚定回滚后的 `app.js` 里
+    **已不存在的 P2 代码**、并只跑 `test/ui-p2.js`；保留它必然"变异点未找到"而假红；
+  - 变异总数 **369 → 342**（32 批 → 30 批），`test/mutate/README.md` 计数按
+    `node scripts/doc-lint.mjs` 的"实际 N 条"写。
+- **文档**：本节 + §3.77/§3.78 顶部"已回滚"注记；`CHANGELOG` / `RELEASE-NOTES-0.6.20.md`
+  写清回滚了什么、保留了什么、为什么。
+
+### 四、后续必须（重新上线的前置条件）
+
+1. **必须用 Electron 截图验证再上线**：真实 Electron 窗口，覆盖 **≥1280 / 1000 / 880** 三档
+   宽度、暗/亮两主题，逐页打开顶栏/侧栏/右栏四标签/会话设置/危险确认弹层/空态，
+   截图随 PR 与发布说明存档；截图不通过不得发布。
+2. **不接受"字符串断言代替渲染验证"**：`smoke` 可作为回归底线，但不能作为 UI 可用的证据。
+3. **重建时不要整段覆盖设计稿 CSS**：新规则限定作用域并替换旧规则（同一选择器只留一处），
+   `header` 只保留一个基准定义；主按钮只用主题令牌（禁止硬编码亮色）。
+4. **默认态由单一函数决定**：面板默认可见性、抽屉开合、焦点与 Esc 顺序集中到一处，
+   初始化失败必须"回退到可用布局"而不是"全部隐藏"。
+5. **发布前回归**：至少 `npm run typecheck`、`smoke`、`e2e-web`、全量变异与 `doc-lint` 全绿，
+   外加上述 Electron 截图清单。
+
+## 3.80 已补（v0.6.20 开发线：新增 `scripts/ui-shot.mjs`，用真实 Electron 给 WebUI 截图）
+
+**为什么需要它**：v0.6.19 的 `src/web/**` 改动约 2,561 行，发布前只有 `smoke` 的字符串/选择器
+断言和 `test/ui-p2.js` 的桩 DOM 切片，**从未渲染过真实页面**；真机因此出现界面凌乱、设置/面板
+打不开、按钮失灵（§3.79）。缺的不是又一条断言，而是"看得见"的证据。本节把截图变成可机械执行的
+发布前步骤，避免同类翻车再次靠用户真机发现。
+
+**做了什么**（只新增 `scripts/ui-shot.mjs`，不改产品代码）：
+
+- 起真实服务：`node src/cli.js web <port>`（临时 `MINGDAO_HOME`，token 走 `MINGDAO_WEB_TOKEN`），
+  从启动日志取带 token 的真实 URL，并做 HTTP 200 自检。
+- 用 Electron 加载：等 `did-finish-load` + 固定 2s（字体/面板就绪）后 `capturePage()` 写 PNG；
+  监听 `console-message` / `did-fail-load` / `render-process-gone` 等页面错误。
+- 选项：`--width/--height`、`--viewport wide|mid|narrow`（1440/1000/880）、`--theme dark|light`
+  （localStorage `mingdao-theme`，页面不支持时注入 `data-theme`）、`--out`（默认 `/tmp/mdh-shots`）、
+  `--mobile`（390×844、DPR 2）、`--scale`、`--electron`、`--no-seed-session`。
+- 默认产出 `home.png` / `settings.png`（点 `#cfgBtn`）/ `palette.png`（⌘K，失败退回 `#paletteBtn`）/
+  `session.png`（临时 home 里的演示会话；没有会话则明确警告并跳过）。
+- 失败即非 0：服务/通用=1、参数=2、Electron 不可用=3、页面报错=4、截图=5；退出时关窗、
+  杀子进程、删 `os.tmpdir()` 下的临时 `MINGDAO_HOME`。
+- `docs/DEVELOPER.md` 新增「UI 改动必须先用 `node scripts/ui-shot.mjs` 截图自查」一节。
+
+**本次真跑（基于 v0.6.18 回滚后的工作树）**：
+
+- 截图时 `git diff v0.6.18 -- src/web/index.html src/web/app.js` 为 **0**（其余非 UI 文件仍在
+  回滚/发版流程中；截图只依赖这两个 UI 文件与当前 `src/web/server.js`）。
+- Electron 来源：`desktop/node_modules/electron` 安装不完整（缺 `dist/` 与 `path.txt`），
+  `npx electron` 因安装脚本无法联网也失败；工具自动回退到项目 Electron 缓存
+  `~/Library/Caches/electron/electron-v31.7.7-darwin-arm64.zip`，解包 + 本地 ad-hoc 重签后运行
+  （Electron 31.7.7）。
+- wide：`/tmp/mdh-shots/{home,settings,palette,session}.png`，均 **1440×900**；`file` 与 `sips`
+  确认是有效 PNG、非空（约 225–340 KB）。
+- narrow：`/tmp/mdh-shots-narrow/{home,settings,palette,session}.png`，均 **880×900**，断点生效。
+- 额外跑通 light + mid：`/tmp/mdh-shots-light/*.png`，均 1000×900；暗/亮主题均能落到截图。
+- 失败路径抽测：`--electron /nonexistent/electron` → 退出码 **3**，提示"指定的 Electron 不存在"；
+  `--viewport huge` → 退出码 **2** 并打印用法。
+- **观察（只记录、未修 UI）**：1000px 宽时顶栏右侧「历史会话」被裁切；`--mobile`（390×844、DPR 2）
+  下 v0.6.18 布局左侧被裁切，说明 <880 尚未适配。这是本工具第一次留下可复核的视觉证据，
+  按"回滚发版优先、不碰 `src/web/**`"处理。
+
+**边界**：截图证明"渲染到像素"，不替代真实点击/键盘交互测试；默认会话是临时 home 的演示 fixture，
+不写真实用户目录；macOS Retina 下 `capturePage()` 原生为 2x，工具按请求尺寸重采样并记 warning；
+Electron 缓存重签只用于本机截图，不用于分发。
