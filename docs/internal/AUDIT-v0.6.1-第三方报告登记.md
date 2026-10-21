@@ -4544,3 +4544,106 @@ effective 外边距 12/8→13/11、foot 8/12→9/13，观感更接近设计稿 `
 - `#envBadge` 在 ≤1100px 隐藏（≤900 原本就隐藏），为「历史会话」让位；>1100px 仍显示。
 - `#wsSel` 最大宽度 130→110px（≤1100 为 120px），只影响顶栏工作空间下拉的视觉宽度。
 - 未 tag / 改版本号 / publish / 动官网。
+
+## 3.85 已做（v0.6.22 CI 稳定性：BUG-068 并发合并写断言改成「判提交」而不是「判进程退出」）
+
+**现象（v0.6.21 发布时的真实证据）**：CI 第 1 次尝试只有 **windows 腿**红在 `test/smoke.js:10236`（BUG-068 并发 merge 写检查点），`rerun-failed-jobs` 后第 2 次五腿全绿，产品代码未改。复查历史还找到同一条断言的另一次 Windows 红：run `39032028100` 是 **7/8**，run `39267296609` 是 **6/8**（其余四腿同期全绿）。
+
+**原断言在比什么**：8 个子进程各自 `saveTaskStateMerge('s1', { artifacts: ['/tmp/a-<i>'] })`——锁内 read-modify-write，往 `artifacts` 里并一条互不相同的标记；父进程 `Promise.all` 等 8 个子进程 `exit` 后读回 `s1.json`，比 `artifacts.length === 8`。**6/8 就是终态只剩 6 条**，即那 2 次合并没有进文件。
+
+**抖动根因（时序）**：不是「父进程读早了」。子进程走的是**同步**合并写（`writeFileSync(tmp)` + `renameSync`，两者都在子进程 `exit` 之前返回），所以 8 个 `exit` 都到齐时文件必然已定型——旧写法其实已经等到了写完，再等 `'close'`、再等一次 Promise settle 都不会改变文件内容。真正不可判定的是**失败被抹平**：旧写法把子进程 `saveTaskStateMerge()` 的返回值丢进 `stdio: 'ignore'`，只用「进程退了没有」当完成信号。而这一步在 Windows 上会偶发返回 `{ ok: false }`（最可能是 `s1.json.lock` 处于 NTFS delete-pending 状态时 `openSync(…, 'wx')` 被拒 EACCES/EPERM，或杀软扫描刚写的 `.tmp` 时 `rename` 被拒），子进程**照常 exit 0**，父进程只看到条数少 1–2。归因信息在 spawn 的一刻就被扔掉了，所以同一份产品代码时而 8/8、时而 7/8、时而 6/8，`rerun` 只是再掷一次骰子。
+
+**改成什么（确定性判据，三条都不看时序）**：
+1. **发令栅栏**：8 个子进程先报到（`READY`），父进程收齐 8 个报到后才 `stdin.end('go\n')`——8 个写**必然重叠**，不再靠「谁先启动谁先写」碰运气；没报到就退出的立刻带 stderr 报错，而不是静默少一条。
+2. **判提交，不判退出**：子进程把 `{ ok, error, seen, hasOwn }` 从 stdout 交回，父进程等 `'close'`（管道读空）后逐条核对；任何一次合并 `ok !== true` 就用它自己的 OS 错误文案失败（不再折成一个查不出原因的差数）。
+3. **终态集合判等**：`artifacts` 排序后必须**恰好等于** 8 个预期标记（不再是 `length === 8`），且每个子进程自报「提交后自己的标记仍在」（`hasOwn`）——这正是 BUG-068 要守的不变量：锁内合并不得丢**已提交**项。判据与谁先谁后无关。
+
+**为什么不再抖**：旧判据里有一个「失败会被抹平成数字」的量（`artifacts.length`），它分不清「锁丢了更新」和「这次写被 OS 拒了」，只能靠 rerun 掷骰子。新判据只有两种结局：8 次提交全部 `ok` → 依锁的串行语义，终态**必然**恰好是那 8 个标记（集合判等）；否则以原始错误红在同一条断言上。也就是说抖动（有时红、有时绿、看不出原因）被消掉了：**要么全绿，要么可复现地带原因红**。没有放宽成 `≥6`，也没有加重试。
+
+**验证**：
+- `node test/smoke.js` 连跑 3 次全绿（单次约 2.5 分钟）。
+- `node test/e2e-local.js`、`node scripts/doc-lint.mjs` 通过。
+- 本机锁正确性压力（macOS）：8 进程 × 每轮预置 2 万条 artifacts（单次临界区 ≈20ms）× 5 轮 → 终态 20008/20008；64 进程 × 5 轮 → 64/64。**锁本身在 POSIX 上不丢更新**，所以问题不在「read-modify-write 竞争」，而在 Windows 的写结果被丢弃。
+- 故障注入（本地演示，不进仓）：给 8 个子进程中的第 4 个注入一次锁获取 EACCES——**改前**报「实际 7/8」（无归因），**改后**报 `#3 code=1 {"ok":false,"error":"EACCES: … s1.json.lock …"}`。这复现了 CI 的 7/8 形状，并证明归因信息确实存在、只是旧写法把它扔了。
+
+**未做 / 边界**：
+- 未改 `src/**`（含 `src/atomic-write.js`）。Windows 上「锁获取遇到 EACCES/EPERM 应算争用而不是失败」（把这两个 errno 并入 EEXIST 的等待路径）是**产品侧硬化项**，本次按约束未动；若那条腿再红，新断言会把 errno 原文打进注解，可直接据此立项，不再需要 rerun 猜。
+- 做不到「改前红、改后不红」的演示，结论恰恰相反：这种红来自**真实的写失败**，测试侧能做到的是「可判定 + 可归因」，不是把失败变成通过；本机（macOS）复现不出 Windows 的瞬时拒绝（8/64 进程压力全绿）。
+- 未改 `test/mutate/README.md` 计数行、未改其它节、未改 web 端；未 tag / 改版本号 / publish / 动官网。
+
+## 3.84 已做（v0.6.22 小步重排第四步：会话列表按 updatedAt 分组 + 消息时间戳）
+
+**来源**：设计稿「信息密度」最明显的缺项——左栏会话列表没有时间分组，对话流每条消息没有时间。
+本步仍按「只增不改结构、小步可回滚、先出截图」执行；**没有**动 `.app` 网格（v0.6.21 的产物里也没有它，
+§3.79 已回滚）、顶栏、右栏、`#sessSheet`、主题、字号阶，也没有新增面板。
+
+**后端（只增字段，不改既有字段语义）**
+- `GET /api/sessions` 每项在 `file` / `mtime` / `label` 之外新增 `updatedAt`（文件 mtime 的 ISO 字符串）、
+  `messageCount`（该会话 JSONL 里合法 role 的行数，坏行跳过）、`title`（复用既有文件名标题：
+  自动标题 / 手工重命名都落在文件名上）。
+- `GET /api/session?file=` 每条消息新增 `ts`。旧会话没有 `ts` → `null`；`role` / `content` 等既有字段
+  的语义与值不变。载入时**不用文件 mtime 冒充消息时间**，也不因缺字段报错。
+- 新消息在 **Web 服务端落盘时**写入 `ts`（`stampMessageTs()`：只为缺 ts 的新增消息补，已有 ts 原样保留；
+  压缩重写不会冲掉历史时间）。未改 `src/session.js`、`src/agent.js`。
+
+**前端（只加展示，不动布局）**
+- 必须诚实说明：当前发行版（v0.6.21）**没有左栏会话列**——`#sessions` 是顶栏「历史会话」下拉，
+  三栏骨架已在 §3.79 回滚。在「不新增面板、不改布局」的约束下，分组落在**既有会话列表**：
+  ① `#sessions` 用原生 `<optgroup label="今天|昨天|本周|更早">`（组标题不可点击、不可折叠）；
+  ② 既有「会话管理」弹层 `#sessList` 里用 `.sess-group` 小号次要文本（`--dim`）显示同样四组。
+  两处都只读 `sessionsGroupedCache`；分组只在 `refreshSessions()` 里算一次，渲染不重算。
+- `groupSessionsByUpdatedAt()` / `sessionGroupKey()` 是 `app.js` 里的纯函数：今天 = 本地 00:00 起，
+  昨天 = 本地昨天 00:00 起，本周 = 本地周一 00:00 起，其余更早；「现在」可注入（测试固定 now，
+  不跨午夜抖动）。旧接口的 `mtime`（毫秒）也能分组。
+- 对话流：`msgTimeText()` 同日 `14:32`、跨天 `10-19 14:32`；`ts` 缺失/非法返回空串，
+  `addUser` / `newAiMsg` 不渲染任何时间节点——不会出现 `Invalid Date` / `undefined`。
+  `loadSession` 把接口的 `m.ts` 传进两个渲染函数；新消息用本地 ISO 时间；没有新增轮询。
+
+**测试与变异**
+- 新增 `test/ui-sessions.js`（`node test/ui-sessions.js`，失败非 0）：① 固定 now 的分组/边界；
+  ② API 三字段 + 旧会话（无 ts / 半截 JSONL）不报错；③ 用真实 `addUser`/`newAiMsg` 源码渲染
+  （有 ts 显示、无 ts 不显示、无 Invalid Date/undefined）；④ 标题文案与顺序；⑤ 分组只算一次 +
+  新代码无 `setInterval`。已接入 `test/run-all.mjs` 与 `.github/workflows/ci.yml`（仅 Linux 腿）。
+- 新增 `test/mutate/batch46-sessions.mjs`：**12/12 全中**（边界错、旧会话报错、显示 undefined、
+  顺序错、渲染路径重算、标题文案错、跨天格式错、缺 updatedAt、title 未复用、ts 返回空串、
+  messageCount 口径错、引入 setInterval）。变异总数 376 → **388**（`test/mutate/README.md` 计数行已改，
+  `doc-lint` 通过）。
+- 未动 `test/smoke.js`（另一道在改）；本步改动后单独跑 smoke 通过。
+
+**截图（真实 Electron，`scripts/ui-shot.mjs`）**
+- 改前（默认种子）：`/tmp/shots-sess-before/home.png` 1440×900 · 236,167 B；
+  `settings.png` 1440×900 · 353,641 B；`palette.png` 1440×900 · 312,382 B；
+  `session.png` 1440×900 · 275,505 B；`sheet.png` 1440×900 · 389,282 B。
+- 改后（默认种子，含 `--open "#sessions"` 最后一跑）：
+  `/tmp/shots-sess-after/home.png` 1440×900 · 236,167 B；`settings.png` 1440×900 · 353,641 B；
+  `palette.png` 1440×900 · 312,382 B；`session.png` 1440×900 · 275,505 B；
+  `sheet.png` 1440×900 · 389,282 B。
+- **默认种子的边界**：ui-shot 只播种一条**旧会话**（消息无 ts），所以默认 `session.png` 按兼容规则
+  **不显示时间**（这正是"缺 ts 不显示"的正确行为）；`session.png` / `home.png` 与改前逐字节相同，
+  也说明布局零漂移。`--open "#sessions"` 点的是原生 `<select>`，Electron 的 `capturePage` 不截
+  原生下拉菜单，最后落到 `sheet.png`（会话设置弹层，与改前同尺寸/同字节）。
+- 为让「分组 + 小号时间」**看得见**，另用临时种子（脚本不落库、跑完即删）生成一组证据：
+  `/tmp/shots-sess-after-extra/session.png` 1440×900 · 277,509 B（对话流用户气泡内 `18:08`、
+  AI 消息上方 `18:08` 小号时间）；`/tmp/shots-sess-after-extra/sessions.png` 1440×900 · 293,941 B
+  （会话管理列表依次显示「今天 / 昨天 / 本周 / 更早」四组，组标题为 11px `--dim` 次要文本，
+  不可点击、不折叠）；同目录 `home.png` 236,167 B、`settings.png` 353,641 B、`palette.png` 322,131 B、
+  `sheet.png` 391,833 B。
+
+**门禁**
+- `npm run typecheck`：通过。
+- `node test/ui-sessions.js`：5/5 通过。
+- `node test/smoke.js`（单独）：通过。
+- `node test/e2e-web.js`：24/24 通过；`node test/e2e-local.js`：17 项通过；
+  `node test/api-contracts.js`：8 项通过。
+- `node test/mutate/batch46-sessions.mjs`：12/12；`node test/mutate/run.mjs`：全批次通过（388 条）。
+- `node scripts/doc-lint.mjs`：通过（变异总数 388）。
+
+**边界**
+- **没有左栏可分组**：当前版本没有三栏骨架（§3.79 已回滚），按任务书「不新增面板 / 不改布局」，
+  分组只落在既有顶栏「历史会话」下拉与既有「会话管理」列表；没有为了截图去重排 `.app`。
+- 未改 `src/session.js`、`src/agent.js`、`src/providers/**`、`presets/**`、`desktop/**`、`ide/**`、
+  `test/smoke.js`、`scripts/ui-shot.mjs`。
+- CLI / REPL / 调度写下的新消息不带 `ts`（本步允许的改动面只有 Web 服务端）；它们会被当作旧消息，
+  接口返回 `null`、前端不显示时间。要覆盖所有入口，需要下一步在 `src/session.js` 的
+  `appendMessages` 统一补 ts（不在本步允许范围）。
+- 未 tag / 改版本号 / publish / 动官网。

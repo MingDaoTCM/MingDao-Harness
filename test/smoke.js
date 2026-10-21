@@ -10213,28 +10213,117 @@ if (typeof tmp !== 'undefined') safeRmSync(tmp, { recursive: true, force: true }
   }
 
   // 122e. BUG-068：并发 merge 写检查点不得丢更新（旧实现读-改-写无锁）
+  //
+  // v0.6.22（修「Windows 首跑红、rerun 才绿」，CI run 39032028100 的 7/8、39267296609 的 6/8）：
+  // 判据从「进程都退出了」改成「每次提交都拿到了结果」。
+  // 旧版 spawn 8 个子进程后只等 'exit'，把子进程 saveTaskStateMerge() 的返回值丢进 `stdio:'ignore'`：
+  // 退出只说明「进程没了」，不说明「这次合并写成功了」。而**同步写一定在 exit 之前完成**，
+  // 所以"少两条 artifacts"不是父进程读早了，是那两次写真的没落盘：Windows 上锁文件/目标文件在
+  // 跨进程翻动时会瞬时拒绝（NTFS 上 delete-pending 的名字做 CREATE_NEW、杀软扫描刚建的 .tmp
+  // 时的 rename），子进程拿到 {ok:false} 照样退出，父进程只剩一个没有归因的 6/8，rerun 换个
+  // 运气就绿。现在三条判据都不看时序：
+  //   ① 8 个子进程先报到、等父进程发令再写 —— 8 个写**必然**重叠，不靠进程启动先后碰运气；
+  //   ② 每个子进程把 {ok,error,seen,hasOwn} 从管道交回，父进程等 'close'（管道读空，不是 'exit'）
+  //      后逐条核对 —— 有失败就把 OS 原文带出来，不再折成一个查不出原因的差数；
+  //   ③ 终态按 artifacts **集合**判等（不是长度），且要求每个子进程自报「提交后自己的标记仍在」
+  //      —— 锁内合并只要保住已提交项，这两条与谁先谁后无关。
   {
     const home122e = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-b11e-'));
     const N122e = 8;
-    const child122e = (/** @type {number} */ i) =>
-      new Promise((resolve) => {
-        const p = spawn(process.execPath, ['--input-type=module', '-e', `
-          process.env.MINGDAO_HOME = ${JSON.stringify(home122e)};
-          const TS = await import(${JSON.stringify(pathToFileURL(path.join(srcDir, 'task-state.js')).href)});
-          TS.saveTaskStateMerge('s1', { goal: 'g', artifacts: ['/tmp/a-${i}'], progress: 'p', status: 'interrupted', updatedAt: Date.now() });
-        `], { stdio: 'ignore' });
-        p.on('exit', () => resolve(null));
+    const expected122e = Array.from({ length: N122e }, (_, i) => `/tmp/a-${i}`);
+    // 子进程：导入 → 报到 → 等发令 → 合并 → 自检 → 交回结果；stdout 刷完再退，退出码 = 合并是否成功
+    const script122e = (/** @type {number} */ i) => `
+      process.env.MINGDAO_HOME = ${JSON.stringify(home122e)};
+      const readline = await import('node:readline');
+      const TS = await import(${JSON.stringify(pathToFileURL(path.join(srcDir, 'task-state.js')).href)});
+      const rl = readline.createInterface({ input: process.stdin });
+      process.stdout.write('READY\\n');
+      await new Promise((resolve) => rl.once('line', resolve));
+      rl.close();
+      const mine = ${JSON.stringify(`/tmp/a-${i}`)};
+      const r = TS.saveTaskStateMerge('s1', { goal: 'g', artifacts: [mine], progress: 'p', status: 'interrupted', updatedAt: Date.now() });
+      const seen = TS.loadTaskState('s1')?.artifacts || [];
+      const payload = JSON.stringify({ ok: !!(r && r.ok), error: (r && r.error) || null, seen: seen.length, hasOwn: seen.includes(mine) });
+      process.stdout.write(payload, () => process.exit(r && r.ok ? 0 : 1));
+    `;
+    // 卡住比失败贵（Windows 腿能挂满超时）：任何等待都加 30s 上限
+    /** @type {(pr: Promise<any>, what: string) => Promise<any>} */
+    const withDeadline122e = (pr, what) =>
+      Promise.race([pr, new Promise((_, reject) => setTimeout(() => reject(new Error(`122e 超时（30s）：${what}`)), 30000).unref())]);
+    const kids122e = Array.from({ length: N122e }, (_, i) => {
+      const p = spawn(process.execPath, ['--input-type=module', '-e', script122e(i)], { stdio: ['pipe', 'pipe', 'pipe'] });
+      // 子进程先走时 end() 会 EPIPE；那是「它没等到发令」，由 done/ready 报，不在这里炸
+      p.stdin.on('error', () => {});
+      p.stdout.setEncoding('utf8');
+      p.stderr.setEncoding('utf8');
+      let out = '';
+      let err = '';
+      p.stdout.on('data', (/** @type {string} */ c) => (out += c));
+      p.stderr.on('data', (/** @type {string} */ c) => (err += c));
+      // 'close' 而不是 'exit'：stdout 管道读空之后才算交卷，回传的 JSON 不会只到一半
+      const done = new Promise((resolve) => p.on('close', (code, signal) => resolve({ i, code, signal, out, err })));
+      const ready = new Promise((resolve, reject) => {
+        const check = () => {
+          if (out.includes('READY\n')) {
+            p.stdout.off('data', check);
+            resolve(null);
+          }
+        };
+        p.stdout.on('data', check);
+        // 没报到就退了 = 启动/导入失败：立刻带出 stderr，不要干等 30s
+        done.then((r) => {
+          if (!out.includes('READY\n')) reject(new Error(`子进程 #${i} 未报到即退出（code=${r.code}）：${String(r.err).slice(0, 300)}`));
+        });
       });
+      const readyD = withDeadline122e(ready, `子进程 #${i} 报到`);
+      const doneD = withDeadline122e(done, `子进程 #${i} 交卷`);
+      // 两条都可能因超时/早退而 reject；先各挂一个空 catch，避免"没被 await 的那条"变成未处理拒绝
+      readyD.catch(() => {});
+      doneD.catch(() => {});
+      return { i, p, ready: readyD, done: doneD };
+    });
     const prevHome122e = process.env.MINGDAO_HOME;
     try {
-      await Promise.all(Array.from({ length: N122e }, (_, i) => child122e(i)));
+      await Promise.all(kids122e.map((k) => k.ready));
+      // 发令：8 个写从这里开始重叠（不再靠"谁先启动谁先写"）
+      for (const k of kids122e) k.p.stdin.end('go\n');
+      const results122e = await Promise.all(kids122e.map((k) => k.done));
+      const parsed122e = results122e.map((r) => {
+        const line = r.out.split('\n').find((l) => l.startsWith('{'));
+        /** @type {any} */
+        let res = null;
+        try {
+          res = JSON.parse(line || '');
+        } catch {}
+        return { i: r.i, code: r.code, err: r.err, res };
+      });
+      const failed122e = parsed122e.filter((r) => !r.res || r.res.ok !== true || r.code !== 0);
+      assert.equal(
+        failed122e.length,
+        0,
+        `并发合并写的每一次提交都必须成功（Windows 腿实测 1–2 次写被 OS 瞬时拒绝后，旧断言只退化成 6/8）。失败 ${failed122e.length}/${N122e}：` +
+          failed122e.map((r) => `#${r.i} code=${r.code} ${JSON.stringify(r.res)} ${String(r.err).slice(0, 200)}`).join(' | ')
+      );
+      for (const r of parsed122e) {
+        assert.equal(r.res.hasOwn, true, `第 ${r.i} 个子进程提交后自己的 artifact 必须仍在（锁内合并不得丢已提交项），实际自读 ${r.res.seen} 条 / ${N122e}`);
+      }
       // 读回时必须切到**同一个 home**（子进程各自设了 MINGDAO_HOME，父进程默认还停在上一个用例的 home）
       process.env.MINGDAO_HOME = home122e;
       const { loadTaskState } = await import(pathToFileURL(path.join(srcDir, 'task-state.js')).href);
       const ts122e = loadTaskState('s1');
-      const arts = Array.isArray(ts122e?.artifacts) ? ts122e.artifacts : [];
-      assert.equal(arts.length, N122e, `并发合并写必须保住全部 artifacts（BUG-068：旧实现丢更新，实测 12 进程只剩 3），实际 ${arts.length}/${N122e}`);
+      const arts122e = (Array.isArray(ts122e?.artifacts) ? ts122e.artifacts : []).map(String);
+      // 集合判等而不是长度：8 次提交各加一个互不相同的标记，终态就必须恰好是这 8 个
+      assert.deepEqual(
+        arts122e.sort(),
+        [...expected122e].sort(),
+        `并发合并写必须保住全部 artifacts（BUG-068：旧实现丢更新，实测 12 进程只剩 3），实际 ${arts122e.length}/${N122e}：${JSON.stringify(arts122e)}`
+      );
     } finally {
+      for (const k of kids122e) {
+        try {
+          k.p.kill();
+        } catch {}
+      }
       process.env.MINGDAO_HOME = prevHome122e;
       safeRmSync(home122e, { recursive: true, force: true });
     }
