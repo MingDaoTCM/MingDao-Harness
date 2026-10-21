@@ -19,7 +19,7 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：376（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：388（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
 
 > v0.6.20（§3.79）：界面重排回滚到 v0.6.18，`batch42-ui-p2`（15 条）与 `batch43-ui-shell`（12 条）
 > 断言的 P2/新骨架已不在代码里，随 `test/ui-p2.js` 一并移除（369 → 342）。
@@ -36,3 +36,7 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 > 顶栏 `.hdr-right` 不再 overflow-x:auto、min-width:0 回退、`#envBadge` 不让位、历史会话被移出
 > 容器、`#crumb` 不限宽、标签少一个 `seg` 类、`.rp-tabs` 分段控件外框回退、选中态回退、弹层 `.ss-body` 间距回退、
 > `.ss-effective` 间距回退、弹层宽度回退（362 → 376）。
+>
+> v0.6.22（§3.84）：新增 `batch46-sessions`（12 条）——今天/昨天边界错、旧会话缺 ts 报错、
+> 页面显示 undefined、分组顺序错、打开管理面板重算分组、分组标题文案错、跨天时间丢日期、
+> `/api/sessions` 缺 updatedAt、title 未复用、缺失 ts 返回空串、messageCount 口径错、引入 setInterval（376 → 388）。

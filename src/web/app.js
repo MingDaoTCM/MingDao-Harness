@@ -224,16 +224,87 @@ chatEl.addEventListener('click', (e) => {
   const done = () => { b.textContent = '已复制'; setTimeout(() => { b.textContent = '复制'; }, 1200); };
   if (navigator.clipboard?.writeText) navigator.clipboard.writeText(t).then(done).catch(() => {});
 });
+// ==== v0.6.22 §3.84 会话分组 + 消息时间（纯函数，test/ui-sessions.js 可直接抽取执行）====
+// 只做展示：分组顺序固定「今天 → 昨天 → 本周 → 更早」，组标题不可点击/不可折叠。
+// 「现在」一律由调用方传入（默认 new Date()），测试用固定 now 避免跨午夜抖动。
+const SESSION_GROUP_ORDER = ['today', 'yesterday', 'week', 'earlier'];
+const SESSION_GROUP_TITLES = { today: '今天', yesterday: '昨天', week: '本周', earlier: '更早' };
+
+/** 取本地时区某一天的 00:00（用日期构造器而非减 86400000，跨夏令时也不会偏一小时）。 */
+function localDayStart(d) {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+/**
+ * 单个会话落在哪个分组。时间不可解析/缺失 → earlier（绝不抛错）。
+ * 边界：今天 00:00 起算今天；昨天 00:00 起算昨天；本周从周一 00:00 起算。
+ * @param {string|number|Date|undefined|null} updatedAt
+ * @param {Date} [now]
+ * @returns {string}
+ */
+function sessionGroupKey(updatedAt, now) {
+  const t = new Date(updatedAt == null ? NaN : updatedAt).getTime();
+  const n = now instanceof Date ? now : new Date(now == null ? Date.now() : now);
+  if (!Number.isFinite(t) || Number.isNaN(n.getTime())) return 'earlier';
+  const today = localDayStart(n);
+  if (t >= today) return 'today';
+  const yesterday = new Date(n.getFullYear(), n.getMonth(), n.getDate() - 1).getTime();
+  if (t >= yesterday) return 'yesterday';
+  const dow = (n.getDay() + 6) % 7; // 周一 = 0
+  const weekStart = new Date(n.getFullYear(), n.getMonth(), n.getDate() - dow).getTime();
+  if (t >= weekStart) return 'week';
+  return 'earlier';
+}
+
+/**
+ * 一次性把会话列表分到四个桶（空桶不返回；顺序固定）。调用方只在数据刷新时调用一次，
+ * 渲染函数只读 `sessionsGroupedCache`——不得在每次渲染时重算。
+ * @param {any[]} sessions
+ * @param {Date} [now]
+ * @returns {{key:string,title:string,items:any[]}[]}
+ */
+function groupSessionsByUpdatedAt(sessions, now) {
+  /** @type {Record<string, any[]>} */
+  const buckets = { today: [], yesterday: [], week: [], earlier: [] };
+  for (const s of sessions || []) {
+    // updatedAt 是 v0.6.22 新增字段；mtime 是旧接口既有字段（毫秒），两者都能分组。
+    buckets[sessionGroupKey(s && (s.updatedAt ?? s.mtime), now)].push(s);
+  }
+  return SESSION_GROUP_ORDER
+    .filter((key) => buckets[key].length > 0)
+    .map((key) => ({ key, title: SESSION_GROUP_TITLES[key], items: buckets[key] }));
+}
+
+/**
+ * 消息时间文案：同一天 `14:32`；跨天 `10-19 14:32`；缺失/非法 → ''（前端不渲染任何节点，
+ * 所以不会出现 "Invalid Date" / "undefined"）。
+ * @param {any} ts
+ * @param {Date} [now]
+ * @returns {string}
+ */
+function msgTimeText(ts, now) {
+  if (typeof ts !== 'string' || !ts.trim()) return '';
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return '';
+  const n = now instanceof Date ? now : new Date(now == null ? Date.now() : now);
+  if (Number.isNaN(n.getTime())) return '';
+  const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  const sameDay = d.getFullYear() === n.getFullYear() && d.getMonth() === n.getMonth() && d.getDate() === n.getDate();
+  if (sameDay) return hm;
+  return String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0') + ' ' + hm;
+}
+// ==== /v0.6.22 §3.84 ====
+
 let generating = false; // 生成中：发送按钮复用为停止按钮
 let currentSession = null, thinking = null;
 
 
 
-function newAiMsg(){ const el=document.createElement('div'); el.className='msg-ai'; chatEl.appendChild(el); scrollBottom(); return el; }
+function newAiMsg(ts){ const el=document.createElement('div'); el.className='msg-ai'; const t=msgTimeText(ts); if(t){ const m=document.createElement('div'); m.className='msg-time'; m.textContent=t; el.appendChild(m); } chatEl.appendChild(el); scrollBottom(); return el; }
 function aiContent(msg){ const c=msg.querySelector('.content'); return c || (()=>{const d=document.createElement('div');d.className='content';msg.appendChild(d);return d;})(); }
 function addReasoning(msg){ const d=document.createElement('details'); d.className='reasoning'; d.innerHTML='<summary>思考过程</summary><div class="body"></div>'; msg.appendChild(d); return d.querySelector('.body'); }
 
-function addUser(text){ const el=document.createElement('div'); el.className='msg-user'; el.innerHTML='<div class="bubble">'+esc(text)+'</div>'; chatEl.appendChild(el); renderEmptyState(); scrollBottom(); }
+function addUser(text, ts){ const el=document.createElement('div'); el.className='msg-user'; const t=msgTimeText(ts); el.innerHTML='<div class="bubble">'+esc(text)+(t?'<span class="msg-time">'+esc(t)+'</span>':'')+'</div>'; chatEl.appendChild(el); renderEmptyState(); scrollBottom(); }
 
 const runningTools = new Map();
 // P1-1 工具时间线（v0.6.19 §3.70）保留为轨迹详情的渲染原语（toolStepNode/paintToolStep/
@@ -484,8 +555,8 @@ async function send(){
   if(attachments.length) payload.attachments=attachments;
   const sentAttachments=attachments;
   attachments=[]; renderAttachments();
-  addUser(text||(sentAttachments.map(a=>(a.type==='image'?'🖼 ':'📄 ')+a.name).join(' ')));
-  const msg=newAiMsg(); const content=aiContent(msg); let raw='';
+  addUser(text||(sentAttachments.map(a=>(a.type==='image'?'🖼 ':'📄 ')+a.name).join(' ')), new Date().toISOString());
+  const msg=newAiMsg(new Date().toISOString()); const content=aiContent(msg); let raw='';
   activeAiMsg=msg; msg._traj=[]; msg._steps=0; msg._round=++turnSeq; msg._startedAt=Date.now(); msg._endedAt=null; pendingSubagent=null; curSteps=0; curWorkT0=Date.now();
   // P0-1：本轮开始 → 运行状态条归零（上一轮的费用/首帧/工具数不许泄漏到本轮；上下文基数保留）
   runState.rawPhase='发请求（等首帧）'; runState.phase='等首帧'; runState.aborted=false;
@@ -1159,6 +1230,8 @@ function layoutClassesFor(width) {
 // 快捷键表 / 会话设置 / 空态 / 设置搜索 / 诊断。全部消费上面纯函数的结果。
 // ============================================================================
 let sessionsCache = [];
+// §3.84：分组只在 refreshSessions 里算一次；下拉/会话管理列表都只读这份缓存（不随渲染重算）。
+let sessionsGroupedCache = [];
 let workspacesCache = [];
 let currentWorkspaceName = '';
 let modelsCache = [];
@@ -2273,8 +2346,14 @@ async function refreshSessions(q){
   const r=await fetch(u).catch(()=>null); if(!r)return;
   const j=await r.json();
   sessionsCache=Array.isArray(j.sessions)?j.sessions:[];
+  sessionsGroupedCache=groupSessionsByUpdatedAt(sessionsCache); // 一次性分组（性能：不在渲染时重算）
   const sel=$('#sessions'); sel.innerHTML='<option value="">历史会话</option>';
-  for(const s of sessionsCache){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; sel.appendChild(o); }
+  for(const g of sessionsGroupedCache){
+    // 原生 optgroup 的组标题由系统渲染：不可点击、不可折叠——正好符合"保持简单"。
+    const og=document.createElement('optgroup'); og.label=g.title;
+    for(const s of g.items){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; og.appendChild(o); }
+    sel.appendChild(og);
+  }
   if(currentSession&&!q) sel.value=currentSession;
   renderCrumb();
 }
@@ -2850,7 +2929,7 @@ function finalizeCurrentSession(){
   if(!currentSession) return;
   fetch('/api/session-finalize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:currentSession})}).catch(()=>{});
 }
-async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; resetTraceState(); const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content); else { const el=newAiMsg(); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); renderEmptyState(); renderCrumb(); }
+async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; resetTraceState(); const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content, m.ts); else { const el=newAiMsg(m.ts); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); renderEmptyState(); renderCrumb(); }
 
 // §138：主按钮在生成态=停止，必须走**同一个**停止出口（stopTurnFromButton → stopTurn → POST /api/abort）
 sendBtn.onclick=()=>{ if(generating){ stopTurnFromButton(); } else { send(); } };
@@ -2861,15 +2940,19 @@ $('#sessMgrBtn').onclick=openSessModal;
 $('#sessClose').onclick=()=>{ $('#sessModal').style.display='none'; };
 async function openSessModal(){
   $('#sessModal').style.display='flex';
-  const r=await fetch('/api/sessions',{cache:'no-store'}); const j=await r.json();
+  await refreshSessions(); // 复用同一次分组缓存：打开管理面板不再单独算一遍
   const list=$('#sessList'); list.innerHTML='';
-  if(!j.sessions.length){ list.innerHTML='<div style="color:var(--faint);font-size:12px;padding:6px">暂无会话</div>'; return; }
-  for(const s of j.sessions){
-    const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12.5px';
-    div.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.label)+'</span>';
-    const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=await uiPrompt('新标题：', s.file.replace(/\.jsonl$/,'')); if(!t) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',file:s.file,title:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ refreshSessions(); openSessModal(); } else uiAlert(jj.error||'重命名失败'); };
-    const dl=document.createElement('button'); dl.textContent='删除'; dl.className='danger'; dl.style.cssText='padding:1px 8px;font-size:11px'; dl.onclick=async()=>{ if(!await uiConfirm('删除会话 '+s.file+'？此操作不可恢复。')) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',file:s.file})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ if(currentSession===s.file){ currentSession=null; chatEl.innerHTML=''; renderEmptyState(); } refreshSessions(); openSessModal(); } else uiAlert(jj.error||'删除失败'); };
-    div.appendChild(rn); div.appendChild(dl); list.appendChild(div);
+  if(!sessionsCache.length){ list.innerHTML='<div style="color:var(--faint);font-size:12px;padding:6px">暂无会话</div>'; return; }
+  for(const g of sessionsGroupedCache){
+    // 小号次要文本、不可点击、不可折叠；只是分组标签。
+    const gh=document.createElement('div'); gh.className='sess-group'; gh.textContent=g.title; list.appendChild(gh);
+    for(const s of g.items){
+      const div=document.createElement('div'); div.style.cssText='display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:12.5px';
+      div.innerHTML='<span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">'+esc(s.label)+'</span>';
+      const rn=document.createElement('button'); rn.textContent='重命名'; rn.style.cssText='padding:1px 8px;font-size:11px'; rn.onclick=async()=>{ const t=await uiPrompt('新标题：', s.file.replace(/\.jsonl$/,'')); if(!t) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'rename',file:s.file,title:t})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ await refreshSessions(); openSessModal(); } else uiAlert(jj.error||'重命名失败'); };
+      const dl=document.createElement('button'); dl.textContent='删除'; dl.className='danger'; dl.style.cssText='padding:1px 8px;font-size:11px'; dl.onclick=async()=>{ if(!await uiConfirm('删除会话 '+s.file+'？此操作不可恢复。')) return; const rr=await fetch('/api/session',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'delete',file:s.file})}); const jj=await rr.json().catch(()=>({error:'失败'})); if(jj.ok){ if(currentSession===s.file){ currentSession=null; chatEl.innerHTML=''; renderEmptyState(); } await refreshSessions(); openSessModal(); } else uiAlert(jj.error||'删除失败'); };
+      div.appendChild(rn); div.appendChild(dl); list.appendChild(div);
+    }
   }
 }
 $('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); renderCrumb(); } };

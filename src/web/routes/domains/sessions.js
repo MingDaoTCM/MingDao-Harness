@@ -20,6 +20,35 @@ import {
 } from '../../../workspace.js';
 
 /**
+ * v0.6.22（§3.84）：会话列表的**只增**元数据。
+ *
+ * 只读文件、绝不改写；坏行/不可读文件按 0 条处理，不得让整个列表接口 500——
+ * 真机上确实存在历史遗留的半截 JSONL（进程被 kill 时最后一行可能不完整）。
+ * 标题沿用既有事实来源：会话文件名（自动标题 / 手工重命名都会落到文件名）。
+ * @param {string} file 会话文件绝对路径
+ * @param {string} name 会话文件名
+ * @returns {{messageCount:number,title:string}}
+ */
+function sessionMeta(file, name) {
+  let messageCount = 0;
+  try {
+    const raw = fs.readFileSync(file, 'utf8');
+    for (const line of raw.split('\n')) {
+      if (!line.trim()) continue;
+      try {
+        const m = JSON.parse(line);
+        if (m && typeof m === 'object' && ['system', 'user', 'assistant', 'tool'].includes(m.role)) messageCount += 1;
+      } catch {
+        // 单行损坏只跳过该行：旧会话/半截写入都不能把整个列表打挂。
+      }
+    }
+  } catch {
+    // 文件在 readdir 之后被删除/无权限：计数按 0，元数据仍可返回。
+  }
+  return { messageCount, title: name.replace(/\.jsonl$/, '') };
+}
+
+/**
  * 会话域路由。命中返回 true，未命中返回 false。
  * @param {{req:any,res:any,method:any,p:any,url:any}} ctx
  * @param {any} deps
@@ -33,9 +62,22 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
 
   if (method === 'GET' && p === '/api/sessions') {
     const q = url.searchParams.get('q');
+    // v0.6.22（§3.84）：每项**只增** updatedAt / messageCount / title 三个字段；
+    // file / mtime / label 的既有语义与顺序不变（前端 crumb、命令面板、同步等仍按旧字段消费）。
+    const decorate = (/** @type {any} */ s, /** @type {string} */ label) => {
+      const meta = sessionMeta(path.join(home, 'sessions', path.basename(s.name)), s.name);
+      return {
+        file: s.name,
+        mtime: s.mtime,
+        label,
+        updatedAt: new Date(s.mtime).toISOString(),
+        messageCount: meta.messageCount,
+        title: meta.title,
+      };
+    };
     const found = q
-      ? searchSessions(home, q, { limit: 30 }).map((/** @type {any} */ s) => ({ file: s.name, mtime: s.mtime, label: `${relativeTime(s.mtime)} · ${s.snippet}` }))
-      : listSessions(home).slice(0, 30).map((s) => ({ file: s.name, mtime: s.mtime, label: `${relativeTime(s.mtime)} · ${sessionPreview(s.file)}` }));
+      ? searchSessions(home, q, { limit: 30 }).map((/** @type {any} */ s) => decorate(s, `${relativeTime(s.mtime)} · ${s.snippet}`))
+      : listSessions(home).slice(0, 30).map((s) => decorate(s, `${relativeTime(s.mtime)} · ${sessionPreview(s.file)}`));
     json(res, 200, { ok: true, sessions: found });
     return true;
   }
@@ -54,7 +96,11 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       }
       json(res, 200, {
         ok: true,
-        messages: loaded.messages.filter((m) => m.role === 'user' || m.role === 'assistant').map((m) => ({ role: m.role, content: m.content ?? '' })),
+        // v0.6.22（§3.84）：只增 ts。旧会话消息没有 ts → **null**（前端据此不显示时间），
+        // 绝不在这里用文件 mtime 冒充消息时间，也绝不因缺字段报错。
+        messages: loaded.messages
+          .filter((m) => m.role === 'user' || m.role === 'assistant')
+          .map((m) => ({ role: m.role, content: m.content ?? '', ts: typeof m.ts === 'string' && m.ts ? m.ts : null })),
         workspace: ws?.name || null,
         // v0.3.0 P0-2：未完成检查点（供前端提示续跑）
         taskState: loadTaskState(path.basename(file)),
