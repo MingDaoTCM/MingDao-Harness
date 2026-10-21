@@ -17370,4 +17370,239 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   ok('v0.6.21 §3.83 视觉细节：承载信息的次要文本 --faint→--dim（token 未动，WCAG 暗/亮均达 AA，panel 3.76→6.53）+ 顶栏 .hdr-right 可滚动容器（overflow-x:auto/min-width:0，1000px 含费用/搜索/历史会话，≤1100 让位 #envBadge）+ 右栏四标签统一 seg 类与 .seg 分段控件观感 + 会话设置弹层 padding/gap/圆角/标题字号对齐设计稿（400px 宽 / 11px 13px / 5px / 13px / 12px）');
 }
 
+// ---------- 156. v0.6.23 §3.86：Windows 上锁/重命名遇 EACCES/EPERM 视为争用并重试 ----------
+//
+// 证据：CI Windows 腿的 BUG-068（8 个子进程并发 saveTaskStateMerge）出现过 7/8、6/8，
+// rerun 换运气；macOS/Linux 万条×5 轮、64 进程×5 轮 0 丢。归因不是"丢更新"，而是
+// Windows 的 NTFS delete-pending / Defender/索引器扫描让 open(lock,'wx') 或
+// rename(tmp,target) **瞬时**返回 EACCES/EPERM；产品侧此前把它当永久失败直接
+// {ok:false}，旧测试又把这个结果丢掉，于是只看到少一两条（没有归因）。
+//
+// 本节不依赖 Windows 真机：用 fs 门面注入复现这几种拒绝，钉死「等待 + 有界重试」的语义。
+{
+  const { spawn } = await import('node:child_process');
+  const AW156 = await import(pathToFileURL(path.join(srcDir, 'atomic-write.js')).href);
+  const TS156 = await import(pathToFileURL(path.join(srcDir, 'task-state.js')).href);
+  const home156 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-lock156-'));
+  const prevHome156 = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = home156;
+  const file156 = TS156.taskStateFile('s1');
+  const lock156 = file156 + '.lock';
+  const realOpenSync156 = fs.openSync;
+  const realRenameSync156 = fs.renameSync;
+  const realWriteFileSync156 = fs.writeFileSync;
+  const sleep156 = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
+  const mkErr156 = (/** @type {string} */ code, /** @type {string} */ syscall, /** @type {string} */ p) => {
+    const text = /** @type {any} */ ({ EACCES: 'permission denied', EPERM: 'operation not permitted', EBUSY: 'resource busy or locked' })[code] || 'unknown error';
+    const e = /** @type {any} */ (new Error(`${code}: ${text}, ${syscall} '${p}'`));
+    e.code = code;
+    e.syscall = syscall;
+    e.path = p;
+    return e;
+  };
+  const arts156 = () => {
+    const st = TS156.loadTaskState('s1');
+    return Array.isArray(st?.artifacts) ? st.artifacts.map(String) : [];
+  };
+  try {
+    // ⑤（先跑成功路径做对照）返回值形状与合并语义必须一字不变
+    {
+      const rOk0 = TS156.saveTaskStateMerge('s1', { goal: 'g156', artifacts: ['a0'], progress: 'p156', status: 'interrupted', updatedAt: 1 });
+      assert.deepEqual(rOk0, { ok: true, error: null }, '成功路径的返回值必须仍是 {ok:true,error:null}（字段不得增删）');
+      assert.ok(!fs.existsSync(lock156), '成功后锁文件必须被释放');
+      const rOk1 = TS156.saveTaskStateMerge('s1', { artifacts: ['a1'], status: 'interrupted', updatedAt: 2 });
+      assert.equal(rOk1.ok, true, '连续第二次合并必须成功（锁已释放，不得留下活锁）');
+      assert.deepEqual(arts156().sort(), ['a0', 'a1'], '合并语义不变：artifacts 必须是并集（不得覆盖已提交项）');
+      assert.equal(TS156.loadTaskState('s1').goal, 'g156', '合并语义不变：续跑时保留原 goal');
+    }
+
+    // ① 锁已存在（EEXIST）：真实子进程持锁 300ms 后释放 → 必须等待后成功，而不是直接失败
+    {
+      const holderCode156 = `const fs=require('node:fs');const p=${JSON.stringify(lock156)};const fd=fs.openSync(p,'wx');fs.writeSync(fd,JSON.stringify({pid:process.pid,at:Date.now()}));fs.closeSync(fd);setTimeout(()=>{try{fs.unlinkSync(p)}catch{};process.exit(0)},300);`;
+      const holder156 = spawn(process.execPath, ['-e', holderCode156], { stdio: 'ignore' });
+      const holderDone156 = new Promise((r) => holder156.once('exit', r));
+      const tSeen = Date.now();
+      while (!fs.existsSync(lock156) && Date.now() - tSeen < 3000) await sleep156(10);
+      assert.ok(fs.existsSync(lock156), '前置：持锁子进程必须真的建出 .lock（否则本用例没测到等待）');
+      const tEexist = Date.now();
+      const rEexist = TS156.saveTaskStateMerge('s1', { artifacts: ['a2'], status: 'interrupted', updatedAt: 3 });
+      const waited156 = Date.now() - tEexist;
+      assert.equal(rEexist.ok, true, `锁已存在（EEXIST）时必须等待重试后成功，不得直接失败：${JSON.stringify(rEexist)}`);
+      assert.ok(waited156 >= 120, `必须真的等过持锁者（否则没测到争用），实际 ${waited156}ms`);
+      assert.ok(!fs.existsSync(lock156), '等待写入结束后锁文件必须被释放');
+      await holderDone156;
+    }
+
+    // ② EACCES / EPERM（Windows 瞬时拒绝）：重试后成功，而不是第一时间返回 {ok:false}
+    {
+      let left156 = 3;
+      fs.openSync = function (/** @type {any} */ p, ...args) {
+        if (String(p) === lock156 && left156 > 0) {
+          left156 -= 1;
+          throw mkErr156('EACCES', 'open', lock156);
+        }
+        return realOpenSync156.call(fs, p, ...args);
+      };
+      try {
+        const tEacces = Date.now();
+        const rEacces = TS156.saveTaskStateMerge('s1', { artifacts: ['a3'], status: 'interrupted', updatedAt: 4 });
+        assert.equal(rEacces.ok, true, `锁获取遇 EACCES 必须视为争用重试（Windows delete-pending），不得直接失败：${JSON.stringify(rEacces)}`);
+        assert.equal(left156, 0, '注入的 3 次 EACCES 必须都被真实调用消耗（证明走了重试而不是绕过）');
+        assert.ok(Date.now() - tEacces >= 25, `重试之间必须有退避等待（5+10+20ms），实际 ${Date.now() - tEacces}ms——忙等只会加重杀软争用`);
+      } finally {
+        fs.openSync = realOpenSync156;
+      }
+      left156 = 2;
+      fs.openSync = function (/** @type {any} */ p, ...args) {
+        if (String(p) === lock156 && left156 > 0) {
+          left156 -= 1;
+          throw mkErr156('EPERM', 'open', lock156);
+        }
+        return realOpenSync156.call(fs, p, ...args);
+      };
+      try {
+        const rEperm = TS156.saveTaskStateMerge('s1', { artifacts: ['a4'], status: 'interrupted', updatedAt: 5 });
+        assert.equal(rEperm.ok, true, `锁获取遇 EPERM 也必须重试（Windows 杀软/索引器常见形态）：${JSON.stringify(rEperm)}`);
+        assert.equal(left156, 0, '注入的 EPERM 必须被重试消耗');
+      } finally {
+        fs.openSync = realOpenSync156;
+      }
+      // 异步版（WebUI 请求路径）共用同一个 tryAcquire 判据，也必须重试
+      left156 = 2;
+      fs.openSync = function (/** @type {any} */ p, ...args) {
+        if (String(p) === lock156 && left156 > 0) {
+          left156 -= 1;
+          throw mkErr156('EACCES', 'open', lock156);
+        }
+        return realOpenSync156.call(fs, p, ...args);
+      };
+      try {
+        const rAsync = await TS156.saveTaskStateMergeAsync('s1', { artifacts: ['a5'], status: 'interrupted', updatedAt: 6 });
+        assert.equal(rAsync.ok, true, `异步锁（WebUI 路径）遇 EACCES 同样必须重试：${JSON.stringify(rAsync)}`);
+        assert.equal(left156, 0, '异步注入的 EACCES 必须被重试消耗');
+      } finally {
+        fs.openSync = realOpenSync156;
+      }
+    }
+
+    // ③ 重试耗尽：2s 预算内仍被拒 → {ok:false,error:<原始 errno>}，不静默、不折成"锁超时"
+    {
+      let attempts156 = 0;
+      fs.openSync = function (/** @type {any} */ p, ...args) {
+        if (String(p) === lock156) {
+          attempts156 += 1;
+          throw mkErr156('EACCES', 'open', lock156);
+        }
+        return realOpenSync156.call(fs, p, ...args);
+      };
+      let rGive156;
+      const tGive = Date.now();
+      try {
+        rGive156 = TS156.saveTaskStateMerge('s1', { artifacts: ['a6'], status: 'interrupted', updatedAt: 7 });
+      } finally {
+        fs.openSync = realOpenSync156;
+      }
+      const spent156 = Date.now() - tGive;
+      assert.equal(rGive156.ok, false, '持续 EACCES 必须如实失败，不能假装成功');
+      assert.ok(/EACCES/.test(String(rGive156.error)), `失败必须带原始 errno 文本（EACCES），实际 ${JSON.stringify(rGive156)}`);
+      assert.ok(!/超时/.test(String(rGive156.error)), `重试耗尽不得折成「锁超时」——那会把权限/杀软问题伪装成死锁：${JSON.stringify(rGive156)}`);
+      assert.ok(attempts156 >= 3, `预算内必须多次重试（实际 ${attempts156} 次），不能试一次就放弃`);
+      assert.ok(spent156 >= 1500, `瞬时拒绝的重试预算应接近 2s（实测 ${spent156}ms）：Windows 杀软扫描窗口可达数百 ms，且 EEXIST 走的是另一条 5s 超时闸，两者不能混用`);
+      assert.ok(spent156 <= 6000, `重试必须有界（实测 ${spent156}ms），不得无限重试冻住进程/WebUI`);
+      assert.ok(!arts156().includes('a6'), '写失败不得污染检查点（失败即未提交）');
+    }
+
+    // ④ 原子写：rename 遇 EPERM 重试后成功；持续失败必须抛原始 errno，且目标保持旧值
+    {
+      const target156 = path.join(home156, 'atomic-156.txt');
+      let leftRename156 = 2;
+      fs.renameSync = function (/** @type {any} */ from, /** @type {any} */ to, ...args) {
+        if (String(to) === target156 && leftRename156 > 0) {
+          leftRename156 -= 1;
+          throw mkErr156('EPERM', 'rename', String(from));
+        }
+        return realRenameSync156.call(fs, from, to, ...args);
+      };
+      let errRetry156 = null;
+      try {
+        AW156.atomicWriteFileSync(target156, 'v1');
+      } catch (e) {
+        errRetry156 = e;
+      } finally {
+        fs.renameSync = realRenameSync156;
+      }
+      assert.equal(errRetry156, null, `rename 遇 EPERM 必须重试后成功，不得直接抛：${String(errRetry156 && /** @type {any} */ (errRetry156).message)}`);
+      assert.equal(leftRename156, 0, '注入的 rename EPERM 必须被重试消耗');
+      assert.equal(fs.readFileSync(target156, 'utf8'), 'v1', 'rename 重试后必须真的写成功');
+
+      // 持续 EPERM：必须抛出原始 errno（不许静默吞掉），且目标保持旧值、临时文件被清理
+      fs.writeFileSync(target156, 'old');
+      fs.renameSync = function (/** @type {any} */ from, /** @type {any} */ to, ...args) {
+        if (String(to) === target156) throw mkErr156('EPERM', 'rename', String(from));
+        return realRenameSync156.call(fs, from, to, ...args);
+      };
+      let errGive156 = null;
+      const tRename = Date.now();
+      try {
+        AW156.atomicWriteFileSync(target156, 'v2');
+      } catch (e) {
+        errGive156 = e;
+      } finally {
+        fs.renameSync = realRenameSync156;
+      }
+      const spentRename156 = Date.now() - tRename;
+      assert.ok(errGive156 && /EPERM/.test(String(/** @type {any} */ (errGive156).message)), `rename 持续 EPERM 必须抛出原始 errno（不许静默吞掉），实际 ${String(errGive156 && /** @type {any} */ (errGive156).message)}`);
+      assert.equal(fs.readFileSync(target156, 'utf8'), 'old', '写失败时目标文件必须保持旧值（不能半截覆盖）');
+      assert.deepEqual(fs.readdirSync(home156).filter((f) => f.includes('.tmp')), [], '失败后必须清理 .tmp 临时文件');
+      assert.ok(spentRename156 >= 1500, `原子写的重试预算也必须接近 2s，实际 ${spentRename156}ms`);
+    }
+
+    // ⑥ 原子写：writeFileSync(tmp) 遇 EACCES 也必须重试（杀软扫描刚创建的文件）
+    {
+      const targetW156 = path.join(home156, 'atomic-156-w.txt');
+      let leftWrite156 = 2;
+      fs.writeFileSync = function (/** @type {any} */ p, /** @type {any} */ data, /** @type {any} */ opts) {
+        if (String(p).includes('atomic-156-w.txt') && String(p).endsWith('.tmp') && leftWrite156 > 0) {
+          leftWrite156 -= 1;
+          throw mkErr156('EACCES', 'open', String(p));
+        }
+        return realWriteFileSync156.call(fs, p, data, opts);
+      };
+      let errWrite156 = null;
+      try {
+        AW156.atomicWriteFileSync(targetW156, 'w1');
+      } catch (e) {
+        errWrite156 = e;
+      } finally {
+        fs.writeFileSync = realWriteFileSync156;
+      }
+      assert.equal(errWrite156, null, `tmp 写入遇 EACCES 必须重试后成功，不得直接抛：${String(errWrite156 && /** @type {any} */ (errWrite156).message)}`);
+      assert.equal(leftWrite156, 0, '注入的 writeFileSync EACCES 必须被重试消耗');
+      assert.equal(fs.readFileSync(targetW156, 'utf8'), 'w1', 'tmp 写入重试后必须真的写成功');
+    }
+
+    // 参数本身也要有界且可解释（初始 5–10ms / 封顶 ≤200ms / 总预算 ~2s）
+    {
+      const rd156 = AW156.retryDefaults();
+      assert.ok(rd156.initialMs >= 5 && rd156.initialMs <= 10, `瞬时拒绝的初始退避必须是 5–10ms（实测 ${rd156.initialMs}ms）：太小会高频敲盘，太大则恢复慢`);
+      assert.ok(rd156.maxDelayMs >= rd156.initialMs && rd156.maxDelayMs <= 200, `退避必须封顶且 ≤200ms（实测 ${rd156.maxDelayMs}ms），否则晚期恢复延迟不可接受`);
+      assert.ok(rd156.budgetMs >= 1500 && rd156.budgetMs <= 2500, `瞬时拒绝的重试总预算必须 ~2s（实测 ${rd156.budgetMs}ms）：覆盖杀软扫描窗口，同时有界（EEXIST 另走 5s 超时闸）`);
+    }
+
+    // 终态：失败的那次（a6）不得进入；所有成功合并的 artifacts 必须恰好都在
+    {
+      const final156 = arts156().sort();
+      assert.deepEqual(final156, ['a0', 'a1', 'a2', 'a3', 'a4', 'a5'], `失败不得污染状态：最终 artifacts 必须恰好是成功提交的 6 条，实际 ${JSON.stringify(final156)}`);
+    }
+
+    ok('v0.6.23 §3.86：锁/原子写遇 EACCES/EPERM/EBUSY 视为争用（5ms 起、×2、封顶 100ms、总预算 2s），EEXIST 等待、瞬时拒绝重试、耗尽返回原始 errno（不静默/不折成锁超时）、成功路径与合并语义不变');
+  } finally {
+    fs.openSync = realOpenSync156;
+    fs.renameSync = realRenameSync156;
+    fs.writeFileSync = realWriteFileSync156;
+    process.env.MINGDAO_HOME = prevHome156;
+    safeRmSync(home156, { recursive: true, force: true });
+  }
+}
+
 process.exit(0);

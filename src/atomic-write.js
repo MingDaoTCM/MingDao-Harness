@@ -26,12 +26,79 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as sleepAsync } from 'node:timers/promises';
 import { procAlive } from './proc.js';
 
+// ---------------------------------------------------------------------------
+// 瞬时拒绝（Windows）与有界重试（v0.6.23，§3.86）
+//
+// 证据：CI Windows 腿的 BUG-068（8 个子进程并发 saveTaskStateMerge）曾出现 7/8、6/8，
+// rerun 换运气；macOS/Linux 万条×5 轮、64 进程×5 轮 0 丢。子进程把 saveTaskStateMerge 的
+// {ok:false} 丢进 stdio:'ignore' 后照常 exit 0，所以父进程只看到一个没有归因的差数。
+// 复查后确认：丢更新不是原因，**瞬时拒绝被当成永久失败**才是——NTFS 上刚 unlink 的
+// `.lock` 仍处于 delete-pending 时 `open(…,'wx')` 会被拒 EACCES/EPERM；Defender/索引器
+// 正在扫描刚写出的 `.tmp` 时 `rename` 会被拒 EACCES/EPERM/EBUSY。这两种都不是"权限配错"，
+// 也不是"别人长期持锁"，而是**争用的一种**：等几十~几百毫秒就会自己消失。
+//
+// 所以把 EACCES/EPERM/EBUSY 与 EEXIST 一样纳入"等待 + 重试"，但**单独给 2 秒预算**：
+//   · 初始 5ms：锁刚被 unlink 时 delete-pending 通常几个 tick 就清掉，早试能少等；
+//   · 每次 ×2、封顶 100ms：既不在前 100ms 里高频敲文件系统（杀软扫描时高频重试只会更糟），
+//     又保证晚期的恢复延迟不超过 100ms；
+//   · 总预算 2000ms：Windows 杀软/索引器的单文件扫描窗口在数十~数百 ms 量级，
+//     2s 有约 10~100 倍余量；同时**有界**——真正的 ACL/只读目录问题不会把进程永久冻住，
+//     也不会把一次保存拖成整个 WebUI 的几十秒卡顿（同步锁仍走 Atomics.wait）。
+//   · EEXIST（确实有人在持锁）不适用这个 2s 预算：它继续走原来的 timeoutMs(5s)/staleMs(4s)。
+// 预算耗尽时**原样抛出原始错误**（保留 errno/path），不折成"锁超时"——后者会把权限/杀软
+// 问题伪装成死锁，用户按提示删锁也没用。
+// ---------------------------------------------------------------------------
+const TRANSIENT_DENY_CODES = new Set(['EACCES', 'EPERM', 'EBUSY']);
+const TRANSIENT_RETRY_INITIAL_MS = 5;
+const TRANSIENT_RETRY_MAX_MS = 100;
+const TRANSIENT_RETRY_BUDGET_MS = 2000;
+
+/** 某个 errno 是否属于「等一会儿可能自己好」的瞬时拒绝。 @param {any} code */
+export function isTransientDenyCode(code) {
+  return TRANSIENT_DENY_CODES.has(String(code || ''));
+}
+
+/** 退避参数（导出供诊断与测试断言「5–10ms 起 / 封顶 / 总预算有界」）。 */
+export function retryDefaults() {
+  return {
+    initialMs: TRANSIENT_RETRY_INITIAL_MS,
+    maxDelayMs: TRANSIENT_RETRY_MAX_MS,
+    budgetMs: TRANSIENT_RETRY_BUDGET_MS,
+    codes: [...TRANSIENT_DENY_CODES],
+  };
+}
+
+const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
+const sleepMs = (/** @type {number} */ ms) => Atomics.wait(sleepBuf, 0, 0, ms);
+
+/**
+ * 在 deadline 之前对瞬时拒绝做指数退避重试；非瞬时错误与预算耗尽都**原样抛出**。
+ * deadline 由调用方传入：一次原子写的 write+rename 共享同一份预算，避免两段各等 2 秒。
+ * @template T @param {() => T} fn @param {number} deadline @returns {T}
+ */
+function retryTransientSync(fn, deadline) {
+  let delay = TRANSIENT_RETRY_INITIAL_MS;
+  for (;;) {
+    try {
+      return fn();
+    } catch (err) {
+      if (!isTransientDenyCode(/** @type {any} */ (err)?.code)) throw err;
+      const remain = deadline - Date.now();
+      if (remain <= 0) throw err;
+      sleepMs(Math.min(delay, remain));
+      delay = Math.min(delay * 2, TRANSIENT_RETRY_MAX_MS);
+    }
+  }
+}
+
 export function atomicWriteFileSync(/** @type {string} */ target, /** @type {string|Buffer} */ data, /** @type {any} */ options = {}) {
   const dir = path.dirname(target);
   const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`);
+  const deadline = Date.now() + TRANSIENT_RETRY_BUDGET_MS;
   try {
-    fs.writeFileSync(tmp, data, options);
-    fs.renameSync(tmp, target);
+    // Windows：杀软/索引器短暂持有新建的 .tmp（EACCES/EPERM/EBUSY）或拒绝覆盖目标，都等一等再试。
+    retryTransientSync(() => fs.writeFileSync(tmp, data, options), deadline);
+    retryTransientSync(() => fs.renameSync(tmp, target), deadline);
   } catch (err) {
     try {
       fs.unlinkSync(tmp);
@@ -81,8 +148,6 @@ export function atomicWriteJsonSync(/** @type {string} */ target, /** @type {any
 
 // 极简互斥锁：O_EXCL 创建 lockfile；持锁期间执行 fn（同步/异步）；异常/完成释放。
 // 进程崩溃遗留的陈旧锁自动回收，避免永久卡死。
-const sleepBuf = new Int32Array(new SharedArrayBuffer(4));
-const sleepMs = (/** @type {number} */ ms) => Atomics.wait(sleepBuf, 0, 0, ms);
 
 // 可重入集合按**调用链**隔离（见文件头注释：异步临界区会 yield，进程级 Set 会让并发任务互相穿透）
 const lockScope = new AsyncLocalStorage();
@@ -95,16 +160,23 @@ function runWithHeld(fn) {
 }
 
 /**
- * 尝试独占创建锁文件。EEXIST 表示别人持有（返回 false，由调用方决定等待或重试）；
- * 其它错误（权限/路径非法）**直接抛出**——那不是"有人在用"，装成争用只会掩盖真问题。
+ * 尝试独占创建锁文件。**返回结构化结果而不是用异常表达"忙"**：
+ *   · `{ok:true}` —— 拿到了锁；
+ *   · `{ok:false, code:'EEXIST', error}` —— 锁确实被别人持有（按 timeoutMs 等待，可回收陈旧锁）；
+ *   · `{ok:false, code:'EACCES'|'EPERM'|'EBUSY', error}` —— Windows 的**瞬时拒绝**：NTFS
+ *     delete-pending / 杀软/索引器扫描 / 共享冲突。它既不是"权限配错"也不是"长期持锁"，
+ *     由调用方走独立的 2s 退避预算；预算耗尽时抛 `error`（保留 errno 原文）。
+ * 其余错误（路径非法等）仍**直接抛出**——那不是争用，装成争用只会掩盖真问题。
  * @param {string} lockPath
+ * @returns {{ok: true} | {ok: false, code: string, error: any}}
  */
 function tryAcquire(lockPath) {
   let fd;
   try {
     fd = fs.openSync(lockPath, 'wx');
   } catch (err) {
-    if (/** @type {any} */ (err)?.code === 'EEXIST') return false;
+    const code = String(/** @type {any} */ (err)?.code || '');
+    if (code === 'EEXIST' || isTransientDenyCode(code)) return { ok: false, code, error: err };
     throw err;
   }
   try {
@@ -124,7 +196,7 @@ function tryAcquire(lockPath) {
   } finally {
     fs.closeSync(fd);
   }
-  return true;
+  return { ok: true };
 }
 
 /** @param {string} lockPath */
@@ -217,39 +289,34 @@ export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() =
     if (held.has(lockPath)) return fn();
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     const t0 = Date.now();
+    let delay = TRANSIENT_RETRY_INITIAL_MS;
+    // 第一次遇到瞬时拒绝的时刻（EEXIST 不参与这个预算，见文件头参数说明）
+    let transientSince = 0;
     for (;;) {
-      // v0.4.7：区分「抢锁阶段」与「执行 fn 阶段」。此前 fn 自身抛出的 EEXIST 也会落进下方的
-      // 锁重试分支，而 finally 已释放锁 → 重抢成功后再次执行 fn → 再次抛出 → **同步死循环**
-      // （100% CPU，连超时分支都不可达）。acquiring 在 fn 开始执行前置 false。
-      let acquiring = true;
-      try {
-        if (!tryAcquire(lockPath)) {
-          const e = /** @type {any} */ (new Error('EEXIST'));
-          e.code = 'EEXIST';
-          throw e;
-        }
+      const got = tryAcquire(lockPath);
+      if (got.ok) {
         held.add(lockPath);
-        acquiring = false; // 锁已持有：此后 fn 的任何异常都不得进入锁重试分支
+        // v0.4.7：fn 在 try/finally 里直接执行，**不进入抢锁的 catch**——
+        // 否则 fn 自身抛出的 EEXIST 会被当成抢锁失败，重抢后再次执行 fn → 同步死循环。
         try {
           return fn();
         } finally {
           held.delete(lockPath);
           releaseLock(lockPath);
         }
-      } catch (err) {
-        if (!acquiring) throw err; // fn 自身的异常绝不进入锁重试
-        if (/** @type {any} */ (err).code !== 'EEXIST') throw err;
-        // 审计 BUG-047（实测复现）：回收陈旧锁的分支原先直接 `continue`，**跳过了下面的超时判断**——
-        // 当陈旧锁删不掉（只读目录 / EPERM / EIO；实测 chmod 555 即可复现）时 reclaimIfStale
-        // 永远返回 true，于是无限空转：99% CPU、5 秒超时失效、进程不返回。
-        // 「回收过」不构成「可以不计时地重试」，两条路径都必须过超时闸。
-        const reclaimed = reclaimIfStale(lockPath, staleMs);
-        if (Date.now() - t0 > timeoutMs) {
-          throw lockTimeoutError(lockPath, timeoutMs);
-        }
-        sleepMs(25);
-        if (reclaimed) continue; // 回收后立刻重试；否则同样按 25ms 节流再试
       }
+      if (got.code === 'EEXIST') {
+        // 审计 BUG-047：回收陈旧锁的分支不得绕过超时闸，否则陈旧锁删不掉（只读目录/EPERM）
+        // 时 reclaimIfStale 恒返回 true → 无限空转、超时失效。
+        reclaimIfStale(lockPath, staleMs);
+        if (Date.now() - t0 > timeoutMs) throw lockTimeoutError(lockPath, timeoutMs);
+      } else {
+        // EACCES/EPERM/EBUSY：Windows 的瞬时拒绝，走独立的 2s 预算；耗尽时抛原始 errno。
+        if (!transientSince) transientSince = Date.now();
+        if (Date.now() - transientSince >= TRANSIENT_RETRY_BUDGET_MS) throw got.error;
+      }
+      sleepMs(delay);
+      delay = Math.min(delay * 2, TRANSIENT_RETRY_MAX_MS);
     }
   });
 }
@@ -262,15 +329,21 @@ export function withFileLockSync(/** @type {string} */ lockPath, /** @type {() =
  * 为什么值得单独一个函数而不是把同步版改成异步：调用链里不少地方本身就是同步的
  * （CLI 一次性命令、调度守护进程内部的读-改-写），强行异步化会把 async 传染到 24 个调用点，
  * 回归风险大于收益。做法是**逐个判断**：请求路径上的迁移，纯同步链保留同步版。
+ *
+ * 等待策略与同步版逐字一致：EEXIST 走 timeoutMs，EACCES/EPERM/EBUSY 走 2s 瞬时预算；
+ * `pollMs` 是**首次**等待时长，之后每次 ×2、封顶 100ms（旧版是固定 25ms 轮询）。
  * @param {string} lockPath @param {() => any} fn
  */
-export async function withFileLock(/** @type {string} */ lockPath, /** @type {() => any} */ fn, { timeoutMs = DEFAULT_TIMEOUT_MS, staleMs = DEFAULT_STALE_MS, pollMs = 25 } = {}) {
+export async function withFileLock(/** @type {string} */ lockPath, /** @type {() => any} */ fn, { timeoutMs = DEFAULT_TIMEOUT_MS, staleMs = DEFAULT_STALE_MS, pollMs = TRANSIENT_RETRY_INITIAL_MS } = {}) {
   return runWithHeld(async (held) => {
     if (held.has(lockPath)) return fn();
     fs.mkdirSync(path.dirname(lockPath), { recursive: true });
     const t0 = Date.now();
+    let delay = Number(pollMs) > 0 ? Number(pollMs) : TRANSIENT_RETRY_INITIAL_MS;
+    let transientSince = 0;
     for (;;) {
-      if (tryAcquire(lockPath)) {
+      const got = tryAcquire(lockPath);
+      if (got.ok) {
         held.add(lockPath);
         try {
           return await fn();
@@ -281,13 +354,16 @@ export async function withFileLock(/** @type {string} */ lockPath, /** @type {()
           releaseLock(lockPath);
         }
       }
-      // 与同步版同一条修正（审计 BUG-047）：回收分支不得绕过超时闸，否则陈旧锁删不掉时永远自旋
-      const reclaimed = reclaimIfStale(lockPath, staleMs);
-      if (Date.now() - t0 > timeoutMs) {
-        throw lockTimeoutError(lockPath, timeoutMs);
+      if (got.code === 'EEXIST') {
+        // 与同步版同一条修正（审计 BUG-047）：回收分支不得绕过超时闸，否则陈旧锁删不掉时永远自旋
+        reclaimIfStale(lockPath, staleMs);
+        if (Date.now() - t0 > timeoutMs) throw lockTimeoutError(lockPath, timeoutMs);
+      } else {
+        if (!transientSince) transientSince = Date.now();
+        if (Date.now() - transientSince >= TRANSIENT_RETRY_BUDGET_MS) throw got.error;
       }
-      await sleepAsync(pollMs);
-      if (reclaimed) continue;
+      await sleepAsync(delay);
+      delay = Math.min(delay * 2, TRANSIENT_RETRY_MAX_MS);
     }
   });
 }

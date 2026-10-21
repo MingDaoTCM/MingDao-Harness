@@ -4647,3 +4647,87 @@ effective 外边距 12/8→13/11、foot 8/12→9/13，观感更接近设计稿 `
   接口返回 `null`、前端不显示时间。要覆盖所有入口，需要下一步在 `src/session.js` 的
   `appendMessages` 统一补 ts（不在本步允许范围）。
 - 未 tag / 改版本号 / publish / 动官网。
+
+## 3.86 已做（v0.6.23 产品侧硬化：Windows 上锁/重命名遇 EACCES/EPERM 视为争用并重试）
+
+**来源 / 证据**：§3.85 的「未做边界」——测试侧已经改成「判提交」并能把子进程的 `{ok:false,error}`
+带出来，但**产品侧仍把 Windows 的瞬时拒绝当永久失败**。CI 证据同 §3.85：Windows 腿
+run `39032028100` 是 7/8、run `39267296609` 是 6/8，其余四腿同期全绿，rerun 换运气才绿；
+本机（macOS）万条×5 轮、64 进程×5 轮 0 丢。所以这一步不再改断言，而是修
+`saveTaskStateMerge` 底下的锁与原子写：落点是 `src/atomic-write.js` 的
+`tryAcquire` / `withFileLockSync` / `withFileLock` / `atomicWriteFileSync`（`src/task-state.js`
+只消费它们的返回值，未改语义）。
+
+**根因（两个 errno 都是「名字暂时不可用」，不是权限配置错）**
+
+1. **锁获取**：`tryAcquire` 只把 `EEXIST` 当「别人持有」，其它 errno 直接抛。Windows 上
+   `.lock` 刚被 `unlink` 但句柄尚未释放（NTFS delete-pending），`openSync(…,'wx')` 会返回
+   `EACCES`/`EPERM`；Defender/索引器扫描锁文件时同样。于是 `saveTaskStateMerge` 立刻
+   `{ok:false}`——调用方若忽略结果（旧测试正是），就是静默少一次合并。
+2. **原子写**：`writeFileSync(tmp)` + `renameSync(tmp,target)` 一次都不重试。杀软/索引器短暂
+   持有新建的 `.tmp` 或目标文件时，`rename` 返回 `EACCES`/`EPERM`/`EBUSY`，同样立刻失败。
+3. 两种错误都**没有**被吞（`saveTaskState` / `saveTaskStateMerge` 会转成 `{ok:false,error}`），
+   但「失败得太早」使并发窗口里偶发 6/8、7/8；rerun 只是再掷一次骰子。
+
+**修法（`src/atomic-write.js`，退避参数与理由）**
+
+- `tryAcquire` 改为返回结构化结果 `{ok:true}` / `{ok:false,code,error}`：
+  `EEXIST` **以及** `EACCES`/`EPERM`/`EBUSY` 都算争用；其余错误（路径非法等）仍直接抛。
+- 两条等待路径**分开**（语义不同，不能共用一条超时闸）：
+  - `EEXIST`（确实有人持锁）保持既有 `timeoutMs=5s` / `staleMs=4s` 与陈旧锁回收，不套瞬时预算；
+  - 瞬时拒绝单独 **2s 预算：首次 5ms、每次 ×2、封顶 100ms**。理由：delete-pending 通常几个
+    tick 就清掉（5ms 起能最快恢复）；指数退避避免在前 100ms 里高频敲盘（杀软扫描时高频重试
+    只会更糟）；封顶 100ms 让晚期恢复也不慢；2s 覆盖数十~数百 ms 的单文件扫描窗口（10~100 倍
+    余量），同时**有界**——真 ACL/只读目录不会永久冻住进程，也不会把一次保存拖成 WebUI 的
+    几十秒卡顿（同步锁仍走 `Atomics.wait`）。
+  - 同步版（`Atomics.wait`）与异步版（`sleepAsync`）同一判据；异步版 `pollMs` 从「固定 25ms 轮询」
+    改成「首次 5ms + 指数退避（封顶 100ms）」。
+- 原子写：`writeFileSync(tmp)` 与 `renameSync(tmp,target)` **共享同一份 2s deadline**（避免两段
+  各等 2s），只对 `EACCES`/`EPERM`/`EBUSY` 重试，其它错误立即抛；耗尽后**原样 rethrow**
+  （`error.message` 保留 errno 与路径）并清理 `.tmp`，不 `catch{}` 吞掉。
+- 预算耗尽后经 `saveTaskStateMerge` 返回的是
+  `{ok:false, error:"EACCES: permission denied, open '…s1.json.lock'"}`——**原始 errno 文本**，
+  而不是「获取文件锁超时」；后者会把权限/杀软问题伪装成死锁，用户按提示删锁也没用。
+- 成功路径零开销、返回值形状不变：`saveTaskState` / `saveTaskStateMerge` 仍是
+  `{ok:true,error:null}`，合并语义（保留 goal、artifacts 并集）未动。
+
+**断言与变异**
+
+- `test/smoke.js` 末尾新增 §156（不依赖 Windows 真机，用可注入的 fs 门面复现拒绝）：
+  ① 真实子进程持 `.lock` 300ms → `saveTaskStateMerge` 必须等待后 `ok:true`，随后锁被释放；
+  ② 注入 `openSync` EACCES×3 / EPERM×2 → 重试后成功（含异步版 WebUI 路径）；断言注入次数被
+  真实消耗、重试间有退避（≥25ms）；
+  ③ 持续 EACCES → 约 2s 耗尽后 `{ok:false}`，`error` 含 `EACCES` 且**不含**「超时」，
+  attempts≥3、1.5s≤耗时≤6s，失败不污染状态；
+  ④ 注入 `rename` EPERM×2 → 原子写成功；持续 EPERM → 抛原始 errno、目标保持旧值、不留 `.tmp`；
+  ⑤ `writeFileSync(tmp)` EACCES×2 → 重试后成功；
+  ⑥ 参数边界（初始 5–10ms / 封顶≤200ms / 总预算~2s）与成功返回值/合并语义不变。
+- 新增 `test/mutate/batch47-lock-retry.mjs`：**9/9 全中**（EACCES 当致命、EPERM 当致命、
+  耗尽折成锁超时、预算缩到 50ms、rename 不重试、tmp 写入不重试、写失败被吞、
+  成功返回值少 `error:null`、锁成功后不释放）。变异总数 388 → **397**
+  （`test/mutate/README.md` 计数行已改，`doc-lint` 通过）。
+
+**门禁**
+
+- `npm run typecheck`：通过。
+- `node test/smoke.js` 连跑 2 次：均通过（含新增 §156）。
+- `node test/e2e-local.js`：17 项通过；`node test/api-contracts.js`：8 项通过。
+- `node test/mutate/batch47-lock-retry.mjs`：**9/9 全中**。
+- `node test/mutate/run.mjs --allow-dirty`（改动未提交）：**35/35 批次全中**（含 `batch47-lock-retry` 9/9；
+  全仓变异 397 条逐条改回缺陷、逐条被断言抓到，跑完自动还原，无残留/无在飞标记）。
+- `node scripts/doc-lint.mjs`：通过（变异总数 397）。
+
+**未做 / 边界**
+
+- **未在真实 Windows 机器上验证**：本机只能按 Node fs 行为注入 errno 复现；Windows CI 会是
+  第一次真实证据，注入无法复现 NTFS delete-pending 的具体时序。
+- `releaseLock` 的 `unlinkSync` 仍是 best-effort（`catch {}`）：若 unlink 被拒且持有者 pid 还活着，
+  下一个写方会等到 5s 超时（持有者退出后可立刻回收）。本次任务只要求「锁获取 / 原子写」，
+  release 的重试与可观测留给下一项。
+- `mkdirSync(dir)` 的 EACCES/EPERM 不重试（父目录 ACL 是永久错误，不是瞬时争用）；
+  锁文件 `writeSync` 失败也不重试。
+- 未给预算加环境变量/配置项（保持零配置）；极端情况下一次同步保存最坏先等 2s 锁预算、
+  再等 2s 写预算后报错（正常路径零开销）。
+- Windows 上把目标路径占成目录时 `rename` 也可能报 EPERM，因此这类**永久**错误也会先等 2s
+  才报出（无法与杀软瞬时占用区分）；smoke §103 等用例在 Windows 腿会多等，但不改变结论。
+- 未改测试侧 §122e（判提交的断言）、未改 web/CLI 调用点、未 tag / 改版本号 / publish / 动官网。
