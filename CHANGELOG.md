@@ -3,6 +3,96 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.22（2026-10-21）— 会话分组/消息时间戳 + CI 断言确定性
+
+> 本版两件事：① **会话分组 + 消息时间戳**（§3.84）——按「只增字段、不新增面板、不改布局」
+> 的小步做法，把会话列表按本地时间分「今天/昨天/本周/更早」，并给 Web 新落盘的消息加 `ts`；
+> ② **CI 不可判定断言**（§3.85）——v0.6.21 发布时 Windows 首跑红、`rerun` 才绿的
+> BUG-068 并发 merge 写断言，改成「等全部写入提交后再断言终态」，判提交而不判中间态。
+> 细节见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` **§3.84 / §3.85**。
+
+### 一、§3.84 会话列表按 updatedAt 分组 + 消息时间戳
+
+**后端（只增字段，既有字段语义不变）**
+
+- `GET /api/sessions` 每项在既有 `file` / `mtime` / `label` 之外**只增**三个字段：
+  `updatedAt`（文件 mtime 的 ISO 字符串）、`messageCount`（JSONL 里合法 `role` 的行数，坏行跳过）、
+  `title`（复用既有文件名标题：自动标题 / 手工重命名都落在文件名上）。
+- `GET /api/session?file=` 每条消息**只增** `ts`：旧会话没有 `ts` → **`null`**；
+  `role` / `content` 等既有字段的值与语义不变；**不用文件 mtime 冒充消息时间**。
+- **半截 JSONL 跳坏行不 500**：末尾未写完的行、损坏的行只跳过，不影响其余消息。
+- 新消息在 **Web 服务端落盘时**写 ISO `ts`（`stampMessageTs()`：只为缺 ts 的新增消息补，
+  已有 ts 原样保留；压缩重写不冲掉历史时间）。未改 `src/session.js`、`src/agent.js`。
+
+**前端（只加展示，不动布局）**
+
+- `groupSessionsByUpdatedAt()` / `sessionGroupKey()` 纯函数：按**本地 00:00 边界**分
+  「今天 / 昨天 / 本周（本地周一 00:00 起）/ 更早」，「现在」可注入（测试固定 now，不跨午夜抖动）；
+  旧接口的 `mtime`（毫秒）也能分组。
+- 落点：既有顶栏「历史会话」下拉用原生 `<optgroup label="今天|昨天|本周|更早">`；既有
+  「会话管理」弹层 `#sessList` 用 `.sess-group` 小号次要文本（`--dim`）显示同样四组。
+- **分组只算一次**：只在 `refreshSessions()` 里算并缓存，渲染不重算，**没有新增 `setInterval`**。
+- 消息显示小号时间：同日 `14:32`、跨天 `10-19 14:32`；`ts` 缺失/非法返回空串，
+  `addUser` / `newAiMsg` **不建时间节点**——不出现 `Invalid Date` / `undefined`。
+
+**测试与变异**
+
+- 新增 `test/ui-sessions.js`（5 组）：分组边界（固定 now）/ API 三字段 + 旧会话（无 ts、
+  半截 JSONL）不报错 / 真实 `addUser`·`newAiMsg` 源码渲染（有 ts 显示、无 ts 不显示）/
+  标题文案与顺序 / 分组只算一次 + 无 `setInterval`。已接入 `test/run-all.mjs` 与 CI（**仅 Linux 腿**）。
+- 新增 `test/mutate/batch46-sessions.mjs`：**12/12 全中**。变异总数 **376 → 388**
+  （34 批 / 388 条，`test/mutate/README.md` 计数行已改，`doc-lint` 通过）。
+
+### 二、§3.85 CI 不可判定断言：BUG-068 并发 merge 写改成「判提交」
+
+**现象**：v0.6.21 发布时 CI 第 1 次尝试只有 **windows 腿**红在 `test/smoke.js` 的 BUG-068
+并发 merge 写检查点（终态 6/8），`rerun-failed-jobs` 后第 2 次五腿全绿，产品代码未改；
+历史同类红还有 7/8、6/8 各一次，其余四腿同期全绿。
+
+**根因（时序）**：不是「父进程读早了」——子进程走同步合并写（`writeFileSync(tmp)` +
+`renameSync`，都在 `exit` 之前返回）。不可判定的是**失败被抹平**：旧写法把子进程
+`saveTaskStateMerge()` 的返回值丢进 `stdio: 'ignore'`，只用「进程退了没有」当完成信号；
+而这一步在 Windows 上偶发返回 `{ ok: false }`（最可能是 `s1.json.lock` 处于 NTFS
+delete-pending 时 `openSync(…, 'wx')` 被拒 EACCES/EPERM，或杀软扫描刚写的 `.tmp` 时
+`rename` 被拒），子进程**照常 exit 0**，父进程只看到条数少 1–2。
+
+**改成什么（三条都不看时序）**：
+
+1. **发令栅栏**：8 个子进程先 `READY` 报到，父进程收齐 8 个才 `stdin.end('go\n')`——
+   8 个写**必然重叠**；没报到就退出的立刻带 stderr 报错，而不是静默少一条。
+2. **判提交，不判退出**：子进程把 `{ ok, error, seen, hasOwn }` 从 stdout 交回，父进程等
+   `'close'`（管道读空）后逐条核对；任何一次合并 `ok !== true` 就用它自己的 OS 错误文案失败。
+3. **终态集合判等**：`artifacts` 排序后必须**恰好等于** 8 个预期标记（不再是 `length === 8`），
+   且每个子进程自报「提交后自己的标记仍在」——锁内合并不得丢**已提交**项。
+
+**没有做的事**：没有放宽成 `≥6`、没有加重试、没有改 `src/**`（含 `src/atomic-write.js`）。
+Windows 上「锁获取遇到 EACCES/EPERM 应算争用而不是失败」是产品侧硬化项，按约束未动；
+若那条腿再红，新断言会把 errno 原文打进 CI 注解，可据此立项，不再靠 rerun 猜。
+
+### 三、验证
+
+- `npm run typecheck` → 0；`npm run typecheck:strict` → 0 / 基线 0
+- `node test/smoke.js` 单独连跑 **2 次** → 均全通过（§3.85：不再出现 6/8 / 7/8；开发期另跑过 3 次）
+- `e2e-local` 17 项 / `e2e-web` 24 项 / `e2e-schedule` 11 项 / `api-contracts` 8 项 → 全通过
+- `pack-ctx-privesc` / `ledger-source` / `model-names` / `memory-recovery` / `ui-sessions` → 全通过
+- `mutate/selfcheck` 通过；`npm run bench` 5 套基准 0 失败
+- `node test/mutate/run.mjs` → **34/34 批、388/388 条全中、0 逃逸**
+- `doc-lint` 通过（变异总数 388）；`diagnose` 报告正常、密钥脱敏
+
+### 四、已知边界
+
+- **当前没有左栏**：v0.6.19 的三栏骨架已在 v0.6.20 整体回滚（§3.79），本版未重排 `.app`，
+  分组只落在**既有**的「历史会话」下拉与**既有**的「会话管理」列表，没有新建面板/左栏。
+- **CLI / REPL / 调度写入的消息暂无 `ts`**：本版只有 **Web 服务端落盘**会写 `ts`，
+  `src/session.js` 未动。因此**旧会话**与**非 Web 会话**接口返回 `ts: null`、前端**不显示时间**
+  ——这是「缺失不建节点」的正确行为。要覆盖所有入口需在 `src/session.js` 的 `appendMessages`
+  统一补 ts（不在本版改动面）。
+- `updatedAt` 取会话文件 mtime（ISO），不是「最后一条消息的 ts」；手工 `touch` 会改变分组。
+  分组按本地时区计算，「本周」从本地周一 00:00 起算。
+- 组标题不可点击、不可折叠（原生 `<optgroup>` 行为）；`messageCount` 只计合法 `role` 的行。
+- 本版未改 `src/providers/**`、`src/agent.js`、`src/session.js`、`presets/**`、`desktop/**`
+  （除版本号）、`ide/**`；未改 `.app` 网格、顶栏、右栏、`#sessSheet`、主题变量或字号阶。
+
 ## v0.6.21（2026-10-19）— 界面重排（三步走，每步截图验证）
 
 > v0.6.19 的界面重排在真机翻车、v0.6.20 已逐字节回滚到 v0.6.18。本版按「小步、每步先出
