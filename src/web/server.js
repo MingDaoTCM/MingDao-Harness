@@ -77,24 +77,8 @@ import { syncStatus, syncLogin, syncLogout, syncPush, syncPull, syncRemoteList, 
 
 const INDEX_HTML = path.join(path.dirname(fileURLToPath(import.meta.url)), 'index.html');
 
-/**
- * v0.6.22（§3.84）：落盘前给**新增**消息补 ISO 时间戳。
- *
- * 只补缺 ts 的消息（`{...m, ts}` 不改动原对象），已有 ts 的原样保留：
- * 旧会话/旧消息不会被"补写"成另一个时间；压缩重写时也不会把历史时间冲掉。
- * 时间只在服务端落盘这一刻取，前端渲染用同一字段——不引入第二套时间来源。
- * @template T
- * @param {T[]} messages
- * @param {Date} [now]
- * @returns {T[]}
- */
-function stampMessageTs(messages, now = new Date()) {
-  const ts = now.toISOString();
-  return messages.map((/** @type {any} */ m) => {
-    if (!m || typeof m !== 'object' || m.ts) return m;
-    return { ...m, ts };
-  });
-}
+// v0.6.23（§3.87）：Web 落盘**不再自建 stamp**——ts 的唯一补齐点是 `src/session.js` 的
+// `appendMessages()`（CLI / REPL / 调度 / Web 共用）；下面两处 chat 落盘都只调它，不引入第二套时间来源。
 
 /** 合法权限模式（与 /api/config 的校验同一口径：非法值一律忽略，绝不 fail-open）。 */
 const PERMISSION_MODES = new Set(['ask', 'auto', 'readonly']);
@@ -902,13 +886,14 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     }
     messages.push({ role: 'user', content: built.content });
     // 落盘用文本版（图文数组只发给模型，会话文件保持字符串可渲染）。
-    // v0.6.22（§3.84）：同一次落盘的时间戳也写回内存里的这条消息——后续自动压缩整文件重写时
-    // 不会把这一轮刚写下的 ts 冲掉；历史消息（已有/缺失 ts）不在这里补。
-    const userTs = new Date().toISOString();
-    await withSessionLock(session.file, () => appendMessages(session.file, [{ role: 'user', content: built.persistText, ts: userTs }]));
+    // v0.6.23（§3.87）：ts 由 session.appendMessages 统一补齐（唯一来源）；把落盘对象上的 ts
+    // 同步回内存里的这条消息，后续自动压缩整文件重写时才不会把这一轮刚写下的时间冲掉。
+    /** @type {any} */
+    const persistUser = { role: 'user', content: built.persistText };
+    await withSessionLock(session.file, () => appendMessages(session.file, [persistUser]));
     {
       const lastUserMsg = messages[messages.length - 1];
-      if (lastUserMsg && typeof lastUserMsg === 'object' && !lastUserMsg.ts) lastUserMsg.ts = userTs;
+      if (lastUserMsg && typeof lastUserMsg === 'object' && !lastUserMsg.ts && persistUser.ts) lastUserMsg.ts = persistUser.ts;
     }
     let persistedBefore = messages.length;
 
@@ -1091,13 +1076,11 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       // 会话级路由统计（Hermes C2 升级检测）：累计工具步数与截断次数，粘滞 flash 会话复杂度上来后自动升 planner
       const st = session.routeStats || { steps: 0, truncated: 0 };
       session.routeStats = { steps: st.steps + (io.stats().toolCount || 0), truncated: st.truncated + (r.truncated ? 1 : 0) };
-      // v0.6.22（§3.84）：本回合新增的 assistant/tool 消息落盘时补 ts，并同步回内存数组，
-      // 让之后发生的自动压缩整文件重写保留这些时间戳（历史消息不动）。
+      // v0.6.23（§3.87）：本回合新增的 assistant/tool 消息由 appendMessages 就地补 ts，
+      // 内存数组随之带上时间戳——之后自动压缩整文件重写保留这些时间（历史消息不动）。
       {
         const tail = messages.slice(persistedBefore);
-        const stamped = stampMessageTs(tail);
-        for (let i = 0; i < stamped.length; i += 1) messages[persistedBefore + i] = stamped[i];
-        await withSessionLock(session.file, () => appendMessages(session.file, stamped));
+        await withSessionLock(session.file, () => appendMessages(session.file, tail));
       }
       io.printUsageLine({ modelName: runModel, usage: r.usage, durationMs: r.durationMs });
       // v0.4.4：补记最后一轮 + 兜底总结的剩余 usage（自动续跑轮已在 onUsage 逐轮入账，避免重复计）

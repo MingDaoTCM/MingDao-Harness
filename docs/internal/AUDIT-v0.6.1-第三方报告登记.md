@@ -4731,3 +4731,62 @@ run `39032028100` 是 7/8、run `39267296609` 是 6/8，其余四腿同期全绿
 - Windows 上把目标路径占成目录时 `rename` 也可能报 EPERM，因此这类**永久**错误也会先等 2s
   才报出（无法与杀软瞬时占用区分）；smoke §103 等用例在 Windows 腿会多等，但不改变结论。
 - 未改测试侧 §122e（判提交的断言）、未改 web/CLI 调用点、未 tag / 改版本号 / publish / 动官网。
+
+## 3.87 已做（v0.6.23 会话层统一消息 `ts`：单一来源 / 幂等 / 旧会话不回填）
+
+**来源 / 证据**：§3.84 的 `ts` 只在 `src/web/server.js` 的 Web 落盘路径上打（`stampMessageTs`），
+而 CLI / REPL / 调度 worker 走的是 `src/session.js` 的 `appendMessages()`——于是同一份会话文件里，
+Web 写的消息有时间、非 Web 写的没有；旧会话（该字段引入前写下的 JSONL）也全部没有。
+界面侧 `msgTimeText()` 对缺失/非法 `ts` 返回空串（§3.84 已实现），所以问题不是前端崩，而是
+**一半消息永远不显示时间**，且这条规则实际上有两份实现（Web 一份、session 层没有）。
+
+**修法（`src/session.js` + `src/web/server.js`）**
+
+- `src/session.js` 新增 `stampMessageTs(messages, now)`，并在唯一公共写入口
+  `appendMessages()` 内调用：**只补缺少 `ts` 的消息**（ISO 字符串），已有 `ts` 原样保留。
+  CLI / REPL / 调度 / Web 从此走同一个补齐点；`role` / `content` / 顺序不变，`ts` 为新增字段。
+- **幂等**：判据是 `m.ts` 真值——同一条消息重复写入（追加再读再写、自动压缩 `rewriteSession`
+  整文件重写）不会刷新时间；补齐是**就地写回同一批消息对象**，因此内存数组也带上 `ts`，
+  压缩重写会原样保留，而不是把刚写下的时间冲掉。
+- **兼容**：读取路径（`loadSession` / `/api/session`）完全不动。旧消息没有 `ts` 就返回 `null`，
+  不补、不推测、不用文件 mtime 冒充；旧文件不会被批量改写（只有显式压缩重写才会重写文件）。
+- **去重**：删除 `src/web/server.js` 里的 `stampMessageTs`；Web 用户消息与回合新增消息都只调
+  `appendMessages`，用户消息落盘后把该对象上的 `ts` 同步回内存用于压缩重写——不再有第二套时间来源。
+- 文档：`docs/CONFIG.md` 的「WebUI 会话列表字段与消息时间」改为「`ts` 由
+  `session.appendMessages` 统一补齐」。
+
+**断言与变异**
+
+- `test/smoke.js` 末尾新增 §157（CLI/REPL/调度/Web 共用 `appendMessages` 的行为化断言）：
+  ① 写入即补合法 ISO `ts`，`role`/`content`/顺序不变且同批同时间；
+  ② 已有 `ts` 不覆盖；同一对象重复写入 + `rewriteSession` 整文件重写后 `ts` 均不变；
+  ③ 旧会话（无 `ts`）经真实 `/api/session` 路由读取返回 `null`，文件内容与 mtime 均未被改写；
+  ④ 结构断言：`server.js` 不得再自建 `stampMessageTs`，Web 两处落盘都必须走 `appendMessages`，
+     `appendMessages` 必须调用唯一补齐点；
+  ⑤ 非法 `ts`（`"abc"`）读取 200、content 不丢、原样返回（前端 `msgTimeText` 负责不显示）。
+- 新增 `test/mutate/batch48-ts.mjs`：**10/10 全中**（不补 ts、ts 不是 ISO、已有 ts 被覆盖、
+  补在副本上导致重复写入刷新、压缩重写刷新、Web 自建第二份实现、Web 绕过 `appendMessages`、
+  读取路径回填 ts、读取路径改写旧文件、非法 ts 读取崩溃）。变异总数 397 → **407**
+  （`test/mutate/README.md` 计数行已改，`doc-lint` 通过）。
+
+**门禁**
+
+- `npm run typecheck`：通过。
+- `node test/smoke.js`：通过（含新增 §157）。
+- `node test/e2e-local.js`：17 项通过；`node test/e2e-web.js`：24 项通过；`node test/api-contracts.js`：8 项通过。
+- `node test/mutate/batch48-ts.mjs`：**10/10 全中**。
+- `node test/mutate/run.mjs --allow-dirty`（改动未提交）：**36/36 批次全中**（含 `batch48-ts` 10/10；
+  全仓变异 407 条逐条改回缺陷、逐条被断言抓到，跑完自动还原，无残留/无在飞标记）。
+- `node scripts/doc-lint.mjs`：通过（变异总数 407）。
+
+**未做 / 边界**
+
+- 未改前端（`src/web/app.js` / `index.html`）：`msgTimeText()` 的缺失/非法口径 §3.84 已实现，
+  本次只补后端写入。
+- 未在 `rewriteSession()` 里补 `ts`：压缩后新生成的摘要消息是合成消息，没有真实发生时间；
+  若在重写时统一补，会把**旧会话的历史消息**全部回填成「压缩那一刻」，违背「不改写历史」。
+  已有 `ts` 由内存对象原样带入，缺失的仍保持缺失。
+- 未批量回填/迁移任何历史会话文件；旧会话在界面上仍不显示时间，直到该会话产生新消息。
+- Web 用户消息落盘后仍有一行「把 `persistUser.ts` 同步回 `messages` 末尾」的赋值（供压缩重写），
+  它不是第二份补齐实现（时间值来自 `appendMessages`），但属于 Web 与内存数组的接线细节。
+- 未 tag / 改版本号 / publish / 动官网。

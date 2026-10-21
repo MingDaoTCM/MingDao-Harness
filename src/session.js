@@ -60,9 +60,30 @@ export function createSession(home) {
   return { file, name: path.basename(file) };
 }
 
+/**
+ * v0.6.23（§3.87）：会话消息 `ts` 的**唯一补齐点**。
+ *
+ * 为什么放在这一层：CLI / REPL / 调度 worker / Web 落盘最终都走 appendMessages；
+ * 此前只有 Web server 在落盘前自己 stamp，导致旧会话与非 Web 会话的消息在界面上没有时间。
+ * 规则：只给**缺少 ts** 的消息补一个 ISO 字符串，已有 ts 原样保留（重复写入不刷新时间）；
+ * 就地写回同一批消息对象，这样自动压缩的整文件重写（rewriteSession）能带上刚写下的 ts。
+ * 读取路径不调用它：旧会话缺 ts 仍返回 null，绝不回填/改写历史文件。
+ * @param {any[]} messages
+ * @param {Date} [now]
+ */
+export function stampMessageTs(messages, now = new Date()) {
+  const ts = now.toISOString();
+  for (const m of messages) {
+    if (!m || typeof m !== 'object' || m.ts) continue;
+    m.ts = ts;
+  }
+  return messages;
+}
+
 /** @param {any} file @param {any} messages */
 export function appendMessages(file, messages) {
   if (!messages?.length) return;
+  stampMessageTs(messages); // 单一来源：所有写入路径在这里补 ts（已有 ts 不覆盖）
   const lines = messages.map((/** @type {any} */ m) => JSON.stringify(m)).join('\n') + '\n';
   appendFilePrivateSync(file, lines);
 }

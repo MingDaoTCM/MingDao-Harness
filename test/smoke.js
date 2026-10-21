@@ -17605,4 +17605,115 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   }
 }
 
+// ---------- 157. v0.6.23 §3.87：消息 ts 统一到 session.appendMessages（单一来源 / 幂等 / 旧会话不改写） ----------
+{
+  const SESS157 = await import(pathToFileURL(path.join(srcDir, 'session.js')).href);
+  const ROUTE157 = await import(pathToFileURL(path.join(srcDir, 'web', 'routes', 'domains', 'sessions.js')).href);
+  const home157 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-ts157-'));
+  const sessionsDir157 = path.join(home157, 'sessions');
+  fs.mkdirSync(sessionsDir157, { recursive: true, mode: 0o700 });
+  const ISO_RE157 = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/;
+  const lines157 = (/** @type {string} */ file) => fs.readFileSync(file, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  // 读取路径用真实路由 handler（而不是只测 loadSession），才能钉住 /api/session 的 ts:null 口径。
+  async function readSession157(/** @type {string} */ name) {
+    const sent = /** @type {any} */ ({});
+    const res = { writeHead(code) { sent.status = code; sent.headers = arguments[1]; }, end(body) { sent.body = String(body); } };
+    const json = (/** @type {any} */ r, /** @type {number} */ code, /** @type {any} */ obj) => { r.writeHead(code, { 'Content-Type': 'application/json' }); r.end(JSON.stringify(obj)); };
+    const ctx = { req: {}, res, method: 'GET', p: '/api/session', url: new URL('http://127.0.0.1/api/session?file=' + encodeURIComponent(name)) };
+    const deps = { home: home157, state: { workingDir: home157 }, draftTexts: new Map() };
+    const handled = await ROUTE157.handle(ctx, deps, { json, readBody: async () => '', MAX_API_BODY: 1024 * 1024 });
+    assert.equal(handled, true, '读取路径必须命中 /api/session');
+    assert.equal(sent.status, 200, `读取 ${name} 必须 200，实际 ${sent.status} ${sent.body}`);
+    return JSON.parse(sent.body);
+  }
+  try {
+    // ① CLI / REPL / 调度共用 appendMessages：写入即补合法 ISO ts，role/content/顺序不变
+    {
+      const f = path.join(sessionsDir157, 'cli-157.jsonl');
+      const msgs = [
+        { role: 'user', content: '第一条' },
+        { role: 'assistant', content: '第二条' },
+      ];
+      SESS157.appendMessages(f, msgs);
+      const got = lines157(f);
+      assert.equal(got.length, 2, '写入条数/顺序不得改变');
+      assert.deepEqual(got.map((m) => [m.role, m.content]), [['user', '第一条'], ['assistant', '第二条']], 'role/content/顺序不得改变');
+      for (const m of got) {
+        assert.equal(typeof m.ts, 'string', '经 appendMessages 写入的消息必须带 ts（CLI/REPL/调度路径此前没有）');
+        assert.match(m.ts, ISO_RE157, `ts 必须是合法 ISO 字符串，实际 ${JSON.stringify(m.ts)}`);
+        assert.ok(!Number.isNaN(Date.parse(m.ts)), 'ts 必须可被 Date.parse');
+      }
+      assert.equal(new Set(got.map((m) => m.ts)).size, 1, '同一批写入使用同一个时间点（不逐条取时）');
+    }
+
+    // ② 幂等：已有 ts 不覆盖；同一对象重复写、压缩整文件重写都不得刷新时间
+    {
+      const f = path.join(sessionsDir157, 'idem-157.jsonl');
+      const fixed = '2026-01-02T03:04:05.000Z';
+      const withTs = { role: 'user', content: '已带时间', ts: fixed };
+      SESS157.appendMessages(f, [withTs]);
+      assert.equal(withTs.ts, fixed, '已有 ts 的消息经 appendMessages 后内存对象也不得被改写');
+      assert.equal(lines157(f)[0].ts, fixed, '已有 ts 必须原样保留（不得刷新）');
+
+      const bare = { role: 'assistant', content: '先无 ts' };
+      SESS157.appendMessages(f, [bare]);
+      const firstTs = lines157(f)[1].ts;
+      assert.equal(bare.ts, firstTs, 'appendMessages 必须把 ts 就地写回消息对象（供压缩重写复用）');
+      await new Promise((r) => setTimeout(r, 5));
+      SESS157.appendMessages(f, [bare]); // 追加再读再写：同一对象第二次写入
+      const all = lines157(f);
+      assert.equal(all.length, 3, '重复写入是追加，不得丢行');
+      assert.equal(all[1].ts, firstTs, '重复写入不得刷新已有 ts');
+      assert.equal(all[2].ts, firstTs, '同一消息重复写入必须保持同一个 ts');
+
+      // 自动压缩：用同一批已写盘消息整文件重写，历史时间不得被冲掉
+      SESS157.rewriteSession(f, all);
+      const rewritten = lines157(f);
+      assert.equal(rewritten.length, 3, '压缩重写后消息数不变');
+      assert.deepEqual(rewritten.map((m) => m.ts), [fixed, firstTs, firstTs], '整文件压缩重写不得刷新/丢失已有 ts');
+    }
+
+    // ③ 旧会话（无 ts）：读取返回 null，且绝不回填/改写历史文件（内容与 mtime 都不动）
+    {
+      const f = path.join(sessionsDir157, 'old-157.jsonl');
+      const body = [JSON.stringify({ role: 'user', content: '旧问题' }), JSON.stringify({ role: 'assistant', content: '旧回答' })].join('\n') + '\n';
+      fs.writeFileSync(f, body, { mode: 0o600 });
+      const past = new Date('2025-01-01T00:00:00.000Z');
+      fs.utimesSync(f, past, past);
+      const beforeMtime = fs.statSync(f).mtimeMs;
+      const got = await readSession157('old-157.jsonl');
+      assert.deepEqual(got.messages.map((m) => m.content), ['旧问题', '旧回答'], '旧会话 content/顺序不变');
+      assert.equal(fs.readFileSync(f, 'utf8'), body, '旧会话读取不得改写会话文件（不得回填 ts）');
+      assert.equal(fs.statSync(f).mtimeMs, beforeMtime, '旧会话读取不得触碰文件 mtime');
+      assert.equal(got.messages[0].ts, null, '旧会话缺失 ts 必须返回 null（不补、不用 mtime 冒充）');
+    }
+
+    // ④ 结构：ts 补齐只有 session.appendMessages 一份实现；Web 用户消息与回合新增都走它
+    {
+      const serverSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+      const sessionSrc = fs.readFileSync(path.join(srcDir, 'session.js'), 'utf8');
+      assert.ok(!/function\s+stampMessageTs\b/.test(serverSrc), 'Web 端不得再自建 stampMessageTs（ts 只允许一份实现）');
+      const webWrites = (serverSrc.match(/appendMessages\(session\.file/g) || []).length;
+      assert.ok(webWrites >= 2, `Web 落盘必须走 appendMessages（用户消息 + 回合新增至少 2 处），实际 ${webWrites} 处`);
+      const appendBody = (sessionSrc.match(/export function appendMessages\([\s\S]*?\n\}/) || [''])[0];
+      assert.ok(/stampMessageTs\(messages\)/.test(appendBody), 'appendMessages 必须调用统一的 stampMessageTs（唯一补齐点）');
+    }
+
+    // ⑤ 非法 ts（"abc"）：后端读取不崩（200），前端 msgTimeText 的 null/非法口径由 §3.84 测试覆盖
+    {
+      const f = path.join(sessionsDir157, 'badts-157.jsonl');
+      fs.writeFileSync(f, JSON.stringify({ role: 'user', content: '坏时间', ts: 'abc' }) + '\n', { mode: 0o600 });
+      const got = await readSession157('badts-157.jsonl');
+      assert.equal(got.messages.length, 1, '非法 ts 不得让整条消息丢失');
+      assert.equal(got.messages[0].content, '坏时间', '非法 ts 不得影响 content');
+      assert.equal(got.messages[0].ts, 'abc', '非法 ts 原样返回（前端 msgTimeText 负责不显示），后端不得崩');
+      assert.ok(Number.isNaN(Date.parse(got.messages[0].ts)), '夹具本身必须是不可解析的时间');
+    }
+
+    ok('v0.6.23 §3.87：ts 由 session.appendMessages 统一补齐（ISO/幂等/旧会话返回 null 且不改写/Web 不再自建/非法 ts 不崩）');
+  } finally {
+    safeRmSync(home157, { recursive: true, force: true });
+  }
+}
+
 process.exit(0);

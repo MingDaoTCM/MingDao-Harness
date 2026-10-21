@@ -19,7 +19,7 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：397（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：407（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
 
 > v0.6.20（§3.79）：界面重排回滚到 v0.6.18，`batch42-ui-p2`（15 条）与 `batch43-ui-shell`（12 条）
 > 断言的 P2/新骨架已不在代码里，随 `test/ui-p2.js` 一并移除（369 → 342）。
@@ -44,3 +44,7 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 > v0.6.23（§3.86）：新增 `batch47-lock-retry`（9 条）——锁获取把 EACCES 当致命、把 EPERM 当致命、
 > 重试耗尽折成「锁超时」、瞬时预算缩到 50ms、rename 不重试、tmp 写入不重试、写失败被静默吞掉、
 > 成功返回值少了 `error:null`、锁成功后不释放（388 → 397）。
+>
+> v0.6.23（§3.87）：新增 `batch48-ts`（10 条）——不补 ts、ts 不是 ISO、已有 ts 被覆盖、补在副本上
+> 导致重复写入刷新、压缩重写刷新时间、Web 自建第二份实现、Web 绕过 `appendMessages`、读取路径
+> 回填 ts、读取路径改写旧文件、非法 ts 读取崩溃（397 → 407）。
