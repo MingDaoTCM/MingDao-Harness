@@ -16925,10 +16925,13 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
     const crumbSrc = appSrc153.slice(appSrc153.indexOf('function renderCrumb(){'), appSrc153.indexOf('\nasync function refreshSessions(q){'));
     assert.ok(crumbSrc.length > 80, '（前置）应能定位 renderCrumb');
     const mkNodes = () => ({ '#crumbWs': { textContent: '' }, '#crumbSession': { textContent: '' } });
+    let crumbSync153 = 0;
     const runCrumb = (currentSession, sessionsCache, currentWorkspaceName, nodes) => {
       const $ = (id) => nodes[id] || null;
-      new Function('$', 'currentSession', 'sessionsCache', 'currentWorkspaceName', crumbSrc + '\nrenderCrumb();')(
-        $, currentSession, sessionsCache, currentWorkspaceName
+      // §158：renderCrumb 还会同步左栏当前会话高亮（syncSideNavActive）。抽取执行时把它作为
+      // 依赖注入并计数，保持真实调用链（不放宽断言，也不让抽取环境 ReferenceError）。
+      new Function('$', 'currentSession', 'sessionsCache', 'currentWorkspaceName', 'syncSideNavActive', crumbSrc + '\nrenderCrumb();')(
+        $, currentSession, sessionsCache, currentWorkspaceName, () => { crumbSync153 += 1; }
       );
     };
     const n1 = mkNodes();
@@ -16938,6 +16941,7 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
     const n2 = mkNodes();
     runCrumb(null, [], 'MingDao-Harness', n2);
     assert.equal(n2['#crumbSession'].textContent, '新对话', '没有当前会话时 crumb 必须回退「新对话」');
+    assert.equal(crumbSync153, 2, 'renderCrumb 每次都必须同步左栏当前会话高亮（syncSideNavActive）');
     assert.ok(/id="crumbWs"/.test(header153) && /id="crumbSession"/.test(header153), 'crumb 必须真的在顶栏里');
     const rsSrc = appSrc153.slice(appSrc153.indexOf('async function refreshSessions(q){'), appSrc153.indexOf('let searchTimer=null;'));
     assert.ok(/renderCrumb\(\);/.test(rsSrc), 'refreshSessions 后必须刷新 crumb（切会话/新对话/删除后同步）');
@@ -17714,6 +17718,219 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   } finally {
     safeRmSync(home157, { recursive: true, force: true });
   }
+}
+
+// ---------- 158. v0.6.24 §3.88：左侧栏（只增不删 / 会话分组 / 折叠记忆 / 三档断点） ----------
+// 接 §157。设计稿三栏的左栏是本次唯一新增：**顶栏既有入口一个都不许删**（v0.6.19 翻车点）。
+// 本节的 ② 是防翻车核心断言：逐个点名顶栏九个入口；①③④⑤ 覆盖左栏结构/数据复用/折叠/断点。
+{
+  const html158 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  const app158 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+
+  /** 取 app.js 里一个顶层 `function name(...) {...}` 的源码（闭合括号在行首）。 */
+  function fn158(name) {
+    const start = app158.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `（前置）app.js 必须定义 ${name}()`);
+    const end = app158.indexOf('\n}\n', start);
+    assert.ok(end > start, `（前置）${name}() 必须可完整切出`);
+    return app158.slice(start, end + 2);
+  }
+  /** 把顶层函数当表达式求值，按需注入闭包依赖（桩 DOM / 常量 / 同文件纯函数）。 */
+  function eval158(name, deps = {}) {
+    const keys = Object.keys(deps);
+    return new Function(...keys, `return (${fn158(name)});`)(...keys.map((k) => deps[k]));
+  }
+  /** 只实现本测试需要的 DOM 子集：createElement / appendChild / removeChild / 事件监听。 */
+  function el158(tag) {
+    return {
+      tagName: String(tag || '').toUpperCase(),
+      children: [],
+      className: '',
+      textContent: '',
+      title: '',
+      type: '',
+      value: '',
+      dataset: {},
+      attrs: {},
+      listeners: {},
+      appendChild(child) { this.children.push(child); return child; },
+      removeChild(child) { const i = this.children.indexOf(child); if (i >= 0) this.children.splice(i, 1); return child; },
+      get firstChild() { return this.children[0] || null; },
+      setAttribute(k, v) { this.attrs[k] = String(v); },
+      removeAttribute(k) { delete this.attrs[k]; },
+      addEventListener(type, fn) { (this.listeners[type] = this.listeners[type] || []).push(fn); },
+      dispatchEvent() { return true; },
+    };
+  }
+  const iAside158 = html158.indexOf('<aside id="sideNav"');
+  const iAsideEnd158 = html158.indexOf('</aside>', iAside158);
+  assert.ok(iAside158 >= 0 && iAsideEnd158 > iAside158, '（前置）必须存在并闭合 <aside id="sideNav">');
+  const aside158 = html158.slice(iAside158, iAsideEnd158);
+
+  // —— ① 左栏存在：位于 #trajRail 之后、<main> 之前；含新建对话 / 会话列表 / 工作空间 / 折叠按钮 ——
+  {
+    const iRail = html158.indexOf('<div id="trajRail">');
+    const iMain = html158.indexOf('<main>');
+    assert.ok(iRail >= 0 && iAside158 > iRail, '左栏 #sideNav 必须在现有窄条 #trajRail 之后（从左到右：窄条 → 左栏 → 主区）');
+    assert.ok(iMain > iAside158, '左栏 #sideNav 必须在 <main> 之前（不进入主区/不遮正文）');
+    for (const id of ['sideNavNew', 'sideNavCollapse', 'sideNavWs', 'sideNavSessions']) {
+      assert.ok(new RegExp(`id="${id}"`).test(aside158), `左栏必须包含 #${id}`);
+    }
+    assert.ok(/<select id="sideNavWs"/.test(aside158), '左栏工作空间必须是选择器（与顶栏 #wsSel 同源）');
+    assert.ok(/id="sideNavSessions"[^>]*role="list"/.test(aside158) || /role="list"[^>]*id="sideNavSessions"/.test(aside158),
+      '左栏会话列表 #sideNavSessions 必须声明 role="list"');
+    assert.ok(/<button class="rail-btn" id="sideNavRailBtn"/.test(html158), '<900 抽屉必须有窄条开关 #sideNavRailBtn');
+    assert.ok(!/<link[^>]+rel="stylesheet"/i.test(html158), '不引入外部设计稿 CSS（只允许 index.html 内既有 token 的内联样式）');
+    assert.ok(!/<link[^>]+design-platform|@import[^;]*design-platform/i.test(html158), '不得引入 design-platform.css / 设计稿整段样式');
+
+    const navCss158 = html158.slice(html158.indexOf('#sideNav{'), html158.indexOf('}', html158.indexOf('#sideNav{')) + 1);
+    for (const decl of ['position:fixed', 'left:42px', 'top:52px', 'width:240px', 'background:var(--bg2)', 'border-right:1px solid var(--border)']) {
+      assert.ok(navCss158.includes(decl), `#sideNav 必须 ${decl}（240px 固定左栏，复用既有 --bg2/--border）`);
+    }
+    assert.ok(/body\.side-wide #sideNav\{width:240px\}/.test(html158), '≥1180 左栏展开宽度必须是 240px');
+    assert.ok(/body\.side-wide\.side-collapsed #sideNav\{width:48px\}/.test(html158), '折叠态宽度必须是 48px');
+    assert.ok(/body\.side-mid #sideNav\{width:48px\}/.test(html158), '900–1180 必须自动折叠到 48px');
+    assert.ok(/body\.side-drawer #sideNav\{display:none/.test(html158), '<900 左栏默认收起（抽屉）');
+    assert.ok(/body\.side-drawer\.side-drawer-open #sideNav\{display:flex/.test(html158), '点窄条图标后抽屉必须能打开');
+    assert.ok(/body\.side-wide main,body\.side-wide footer\{margin-left:282px\}/.test(html158),
+      '≥1180 主区/输入区必须右移 282px（42 窄条 + 240 左栏），否则正文被左栏遮住');
+    assert.ok(/body\.side-mid main,body\.side-mid footer\{margin-left:90px\}/.test(html158),
+      '900–1180 主区/输入区必须只右移 90px（42 + 48）');
+  }
+
+  // —— ② 防翻车核心：顶栏既有入口逐个仍在（DOM id 唯一；一个都不许删/搬出 header） ——
+  {
+    const hStart158 = html158.indexOf('<header>');
+    const hEnd158 = html158.indexOf('</header>', hStart158);
+    assert.ok(hStart158 >= 0 && hEnd158 > hStart158, '（前置）必须能切出 <header>');
+    const header158 = html158.slice(hStart158, hEnd158);
+    const must158 = ['wsSel', 'sessions', 'sessMgrBtn', 'tasksBtn', 'newChat', 'themeBtn', 'costBadge', 'paletteBtn', 'cfgBtn'];
+    for (const id of must158) {
+      assert.ok(new RegExp(`id="${id}"`).test(header158), `顶栏入口 #${id} 必须仍在 <header> 内（本次只增不删）`);
+      assert.equal((html158.match(new RegExp(`id="${id}"`, 'g')) || []).length, 1, `#${id} 必须唯一（不允许搬到左栏时重复 id）`);
+      assert.ok(!new RegExp(`id="${id}"`).test(aside158), `#${id} 不得被搬进左栏（原控件位置保留）`);
+    }
+    assert.ok(/>新对话</.test(header158), '顶栏「新对话」按钮文案必须保留');
+    assert.ok(/id="sessions"[^>]*>[\s\S]{0,80}历史会话/.test(header158), '顶栏「历史会话」下拉必须保留');
+    assert.ok(/id="themeBtn"/.test(header158) && /切换明暗主题/.test(header158), '顶栏主题切换入口必须保留');
+    assert.ok(/id="cfgBtn"[^>]*title="设置"/.test(header158), '顶栏设置入口必须保留');
+    assert.ok(/<span class="badge badge-btn" id="costBadge"/.test(header158), '顶栏费用入口必须保留');
+  }
+
+  // —— ③ 会话列表：复用 sessionsGroupedCache 的四组渲染；当前会话高亮；点击写回 #sessions 并派发 change ——
+  {
+    const render158 = eval158('renderSideNavSessions', { document: { createElement: el158 } });
+    const groups158 = [
+      { key: 'today', title: '今天', items: [{ file: 'a.jsonl', label: '会话 A' }, { file: 'b.jsonl', label: '会话 B' }] },
+      { key: 'yesterday', title: '昨天', items: [{ file: 'c.jsonl', label: '会话 C' }] },
+      { key: 'week', title: '本周', items: [{ file: 'd.jsonl', label: '会话 D' }] },
+      { key: 'earlier', title: '更早', items: [{ file: 'e.jsonl', label: '会话 E' }] },
+    ];
+    const box158 = el158('div');
+    const picked158 = [];
+    const n158 = render158(box158, groups158, 'b.jsonl', (s) => picked158.push(s.file));
+    assert.equal(n158, 5, `四组共 5 条会话必须全部渲染，实际 ${n158}`);
+    assert.deepEqual(box158.children.filter((c) => c.className === 'sn-group').map((c) => c.textContent), ['今天', '昨天', '本周', '更早'],
+      '左栏会话列表必须按「今天/昨天/本周/更早」四组渲染');
+    const items158 = box158.children.filter((c) => /^sn-item/.test(c.className));
+    assert.equal(items158.length, 5, '每组条目都必须渲染成可点击项');
+    const active158 = items158.filter((c) => /(^|\s)on(\s|$)/.test(c.className));
+    assert.equal(active158.length, 1, '当前会话必须恰好一个高亮');
+    assert.equal(active158[0].dataset.file, 'b.jsonl', '当前会话高亮必须落在 currentSession 上');
+    assert.equal(active158[0].attrs['aria-current'], 'true', '当前会话必须带 aria-current="true"');
+    items158[3].listeners.click[0]();
+    assert.deepEqual(picked158, ['d.jsonl'], '点击左栏会话必须把该会话交给切换回调');
+
+    // 真实切换出口：写回 #sessions 并派发 change —— 复用既有 onchange，不新造加载逻辑
+    const dispatched158 = [];
+    const selStub158 = { value: '', dispatchEvent(ev) { dispatched158.push(ev); } };
+    const pick158 = eval158('pickSessionFromSideNav', {
+      $: () => selStub158,
+      Event: function Event(type) { this.type = type; },
+    });
+    pick158({ file: 'z.jsonl' });
+    assert.equal(selStub158.value, 'z.jsonl', '点击左栏会话必须写回顶栏 #sessions 的值');
+    assert.equal(dispatched158.length, 1, '必须派发一次 change 事件');
+    assert.equal(dispatched158[0].type, 'change', '派发的必须是 change（复用 #sessions 既有 handler）');
+
+    // 数据来源：refreshSessions 只把既有分组缓存交给左栏，不额外 fetch/轮询
+    const iRefresh158 = app158.indexOf('async function refreshSessions(');
+    const iRefreshEnd158 = app158.indexOf('\n}\n', iRefresh158);
+    const refresh158 = app158.slice(iRefresh158, iRefreshEnd158);
+    assert.ok(/renderSideNavSessions\(\$\('#sideNavSessions'\), sessionsGroupedCache, currentSession, pickSessionFromSideNav\)/.test(refresh158),
+      '左栏会话必须复用 refreshSessions 的 sessionsGroupedCache 与 currentSession');
+    const sideStart158 = app158.indexOf('// ==== v0.6.24 §3.88：左侧栏（会话列） ====');
+    const sideEnd158 = app158.indexOf('// ==== /v0.6.24 §3.88 ====', sideStart158);
+    assert.ok(sideStart158 >= 0 && sideEnd158 > sideStart158, '（前置）左栏代码段必须可定位');
+    const sideSrc158 = app158.slice(sideStart158, sideEnd158);
+    assert.ok(!/\bfetch\s*\(/.test(sideSrc158), '左栏不得新增网络请求（只读 refreshSessions 的数据）');
+    assert.ok(!/setInterval|setTimeout/.test(sideSrc158), '左栏不得引入轮询/定时刷新');
+  }
+
+  // —— ④ 折叠状态写 localStorage，并在重载后恢复（纯函数 + 接线断言） ——
+  {
+    const key158 = (app158.match(/const SIDE_NAV_STORAGE_KEY = '([^']+)';/) || [])[1];
+    assert.equal(key158, 'mingdao-sidenav-collapsed', '折叠偏好 key 必须是 mingdao-sidenav-collapsed');
+    const data158 = new Map();
+    const storage158 = {
+      getItem(k) { return data158.has(k) ? data158.get(k) : null; },
+      setItem(k, v) { data158.set(k, String(v)); },
+    };
+    const pref158 = eval158('sideNavCollapsedPref', { SIDE_NAV_STORAGE_KEY: key158 });
+    const write158 = eval158('writeSideNavCollapsed', { SIDE_NAV_STORAGE_KEY: key158 });
+    assert.equal(pref158(storage158), false, '默认（无记录）必须是展开态');
+    write158(storage158, true);
+    assert.equal(storage158.getItem(key158), '1', '折叠后 localStorage 必须写入 1');
+    assert.equal(pref158(storage158), true, '折叠状态必须可读回');
+    // 模拟页面重载：重新求值一次函数，只靠同一份 storage 恢复
+    const prefReload158 = eval158('sideNavCollapsedPref', { SIDE_NAV_STORAGE_KEY: key158 });
+    assert.equal(prefReload158(storage158), true, '重载后必须从 localStorage 恢复折叠状态');
+    write158(storage158, false);
+    assert.equal(storage158.getItem(key158), '0', '展开后 localStorage 必须写入 0');
+    assert.equal(prefReload158(storage158), false, '展开状态也必须可读回');
+    const init158 = fn158('initSideNav');
+    assert.ok(/sideNavCollapsedPref\(storage\)/.test(init158), 'initSideNav 必须读取折叠偏好');
+    const toggle158 = fn158('toggleSideNav');
+    assert.ok(/writeSideNavCollapsed\(storage, sideNavUserCollapsed\)/.test(toggle158), '折叠按钮必须把状态写回 localStorage');
+    assert.ok(/applySideNavLayout\(/.test(toggle158), '折叠后必须立即应用布局（不等重载）');
+    assert.ok(/syncSideNavActive\(\);/.test(fn158('renderCrumb')), 'renderCrumb 必须同步左栏当前会话高亮（syncSideNavActive）');
+  }
+
+  // —— ⑤ 三档断点：≥1180 240 / 900–1180 48 / <900 抽屉；类名与宽度同时成立 ——
+  {
+    const bp158 = eval158('sideNavBreakpoint');
+    const layout158 = eval158('sideNavLayout', { sideNavBreakpoint: bp158 });
+    const cls158 = eval158('sideNavClassNames');
+    const wide158 = layout158(1440, false);
+    assert.equal(wide158.mode, 'wide', '1440 必须落 wide 档');
+    assert.equal(wide158.width, 240, '1440 展开宽度必须是 240px');
+    assert.deepEqual(cls158(wide158), ['side-wide'], '1440 必须挂 side-wide 且不折叠');
+    const wideCollapsed158 = layout158(1440, true);
+    assert.equal(wideCollapsed158.width, 48, '1440 用户折叠后必须是 48px');
+    assert.deepEqual(cls158(wideCollapsed158), ['side-wide', 'side-collapsed'], '折叠态必须挂 side-collapsed');
+    assert.equal(layout158(1180, false).mode, 'wide', '1180 仍属三栏档');
+    assert.equal(layout158(1180, false).width, 240, '1180 展开宽度必须是 240px');
+    const mid158 = layout158(1000, false);
+    assert.equal(mid158.mode, 'mid', '1000 必须落 mid 档（900–1180）');
+    assert.equal(mid158.width, 48, '1000 必须自动折叠到 48px');
+    assert.equal(mid158.collapsed, true, '1000 默认必须是折叠态');
+    assert.deepEqual(cls158(mid158), ['side-mid'], '1000 必须挂 side-mid（而不是 side-wide）');
+    const drawer158 = layout158(880, false);
+    assert.equal(drawer158.mode, 'drawer', '880 必须落抽屉档');
+    assert.equal(drawer158.drawer, true, '880 必须标记为抽屉');
+    assert.equal(drawer158.width, 0, '880 抽屉默认不占宽（收起）');
+    assert.deepEqual(cls158(drawer158), ['side-drawer'], '880 必须挂 side-drawer');
+    assert.equal(layout158(900, false).mode, 'mid', '900 边界必须落 mid（含）');
+    assert.equal(layout158(899, false).mode, 'drawer', '899 必须落抽屉档');
+    // 断点接线：applyResponsiveLayout 必须调用 applySideNavLayout；抽屉开关必须绑 #sideNavRailBtn
+    const resp158 = fn158('applyResponsiveLayout');
+    assert.ok(/applySideNavLayout\(w\)/.test(resp158), '窗口 resize 必须同步左栏三档断点');
+    const init158 = fn158('initSideNav');
+    assert.ok(/\$\('#sideNavRailBtn'\)/.test(init158), '<900 抽屉必须绑定窄条图标 #sideNavRailBtn');
+    assert.ok(/toggleSideNav/.test(init158), '窄条图标/折叠按钮必须共用 toggleSideNav');
+  }
+
+  ok('v0.6.24 §3.88 左侧栏：仅新增 #sideNav（240/48/抽屉三档 + 主区右移）· 顶栏九个既有入口逐个仍在且 id 唯一 · 会话四组渲染/当前高亮/点击复用 #sessions change · 折叠偏好 localStorage 重载恢复 · 无新增网络请求/轮询');
 }
 
 process.exit(0);

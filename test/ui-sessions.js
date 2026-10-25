@@ -180,10 +180,17 @@ const pure = new Function(
     block + '\n' + domSrc + '\nreturn { addUser, newAiMsg };'
   )(document, chatEl, (s) => String(s), () => {}, () => {});
 
-  const sameDay = new Date(2026, 9, 21, 14, 32, 0);
-  const NOW = new Date(2026, 9, 21, 18, 0, 0);
+  // 时间夹具必须相对「今天」：写死 2026-10-21 会在跨过那天后必然失败（日历炸弹）。
+  const sameDay = new Date();
+  sameDay.setHours(14, 32, 0, 0);
+  const NOW = new Date();
+  NOW.setHours(18, 0, 0, 0);
+  const crossDay = new Date(NOW);
+  crossDay.setDate(crossDay.getDate() - 2);
+  crossDay.setHours(14, 32, 0, 0);
+  const crossText = String(crossDay.getMonth() + 1).padStart(2, '0') + '-' + String(crossDay.getDate()).padStart(2, '0') + ' 14:32';
   assert.equal(pure.msgTimeText(sameDay.toISOString(), NOW), '14:32', '同一天消息时间必须是 HH:mm');
-  assert.equal(pure.msgTimeText(new Date(2026, 9, 19, 14, 32).toISOString(), NOW), '10-19 14:32', '跨天消息时间必须是 MM-DD HH:mm');
+  assert.equal(pure.msgTimeText(crossDay.toISOString(), NOW), crossText, '跨天消息时间必须是 MM-DD HH:mm');
   for (const bad of [null, undefined, '', 'not-a-date']) {
     assert.equal(pure.msgTimeText(bad, NOW), '', `ts=${String(bad)} 必须返回空串（不显示）`);
     assert.ok(!/Invalid Date|undefined/.test(pure.msgTimeText(bad, NOW)), `ts=${String(bad)} 不得显示 Invalid Date/undefined`);

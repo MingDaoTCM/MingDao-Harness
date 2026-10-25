@@ -640,9 +640,71 @@ body.run-open #sessSheet{right:318px}
 #emptyState .es-lead,
 .empty-step .es-main span,
 .empty-step .es-state{color:var(--dim)}
+
+/* ============================================================================
+   v0.6.24 §3.88 左侧栏（设计稿三栏的标志性部分）
+   ——只新增左栏自己的样式，复用既有 token；不改顶栏高度、#runPanel 宽度、
+     既有断点与字号阶。布局：现有窄条 #trajRail(42) → 本栏(240/48) → 主区 → 右栏。
+   ============================================================================ */
+#sideNav{position:fixed;left:42px;top:52px;bottom:0;width:240px;min-width:0;background:var(--bg2);border-right:1px solid var(--border);z-index:34;display:flex;flex-direction:column;overflow:hidden;transition:width .16s ease}
+#sideNav .sn-head{flex:none;display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border)}
+#sideNav .sn-title{flex:1;min-width:0;font-size:12px;font-weight:600;color:var(--dim);letter-spacing:.03em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#sideNavCollapse{flex:none;width:26px;height:26px;padding:0;border-radius:7px;background:var(--bg3);font-size:13px;line-height:1;display:inline-flex;align-items:center;justify-content:center}
+#sideNav .sn-body{flex:1;min-height:0;display:flex;flex-direction:column;gap:8px;padding:10px 8px;overflow-y:auto;overscroll-behavior:contain}
+#sideNavNew{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;min-width:0;padding:8px 10px;border-radius:9px;border:1px solid var(--border);background:var(--bg3);color:var(--text);font-size:13px;font-weight:600;white-space:nowrap}
+#sideNavNew:hover{border-color:var(--accent2);color:var(--accent2)}
+#sideNavNew .sn-label{overflow:hidden;text-overflow:ellipsis}
+.sn-ws{display:flex;align-items:center;gap:6px;min-width:0;padding:0 2px}
+.sn-ws .sn-ws-ico{flex:none;font-size:13px;line-height:1;color:var(--dim)}
+#sideNavWs{flex:1;min-width:0;max-width:none;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:5px 6px;font-size:12px}
+#sideNavWsIcon{display:none;align-items:center;justify-content:center;width:36px;height:30px;padding:0;border-radius:8px;background:var(--bg3);font-size:14px;line-height:1}
+#sideNav .sn-sec-title{flex:none;font-size:10.5px;color:var(--dim);letter-spacing:.05em;padding:2px 6px;white-space:nowrap}
+#sideNavSessions{display:flex;flex-direction:column;gap:1px;min-width:0}
+#sideNavSessions .sn-group{font-size:10.5px;line-height:1.6;color:var(--dim);padding:7px 6px 2px;letter-spacing:.02em;white-space:nowrap}
+#sideNavSessions .sn-item{display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:6px 8px;border:0;border-radius:8px;background:transparent;color:var(--dim);text-align:left;font-size:12.5px;line-height:1.5;cursor:pointer}
+#sideNavSessions .sn-item:hover{background:var(--bg3);color:var(--text)}
+#sideNavSessions .sn-item.on{background:var(--bg3);color:var(--text);font-weight:600;box-shadow:inset 2px 0 0 var(--accent)}
+#sideNavSessions .sn-item-ico{flex:none;width:16px;text-align:center;font-size:13px}
+#sideNavSessions .sn-item-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#sideNavSessions .sn-empty{font-size:11.5px;color:var(--dim);padding:8px 6px;white-space:nowrap}
+#trajRail #sideNavRailBtn{display:none}
+/* —— 三档断点：≥1180 展开(240) / 900–1180 自动折叠(48) / <900 抽屉（默认收起） —— */
+body.side-wide #sideNav{width:240px}
+body.side-wide.side-collapsed #sideNav{width:48px}
+body.side-mid #sideNav{width:48px}
+body.side-drawer #sideNav{display:none;width:240px}
+body.side-drawer.side-drawer-open #sideNav{display:flex;z-index:55;box-shadow:12px 0 32px rgba(0,0,0,.45)}
+body.side-drawer #trajRail #sideNavRailBtn{display:flex}
+/* 主区/输入区右移，左栏不遮正文；顶栏保持整条横贯（高度/入口不动） */
+body.side-wide main,body.side-wide footer{margin-left:282px}
+body.side-wide.side-collapsed main,body.side-wide.side-collapsed footer{margin-left:90px}
+body.side-mid main,body.side-mid footer{margin-left:90px}
+body.side-drawer main,body.side-drawer footer{margin-left:0}
+/* 折叠态：只留图标 + tooltip（label/分组标题隐藏；折叠按钮本身是图标，保留用于展开） */
+body.side-collapsed .sn-title,
+body.side-mid .sn-title,
+body.side-collapsed #sideNavNew .sn-label,
+body.side-mid #sideNavNew .sn-label,
+body.side-collapsed .sn-sec-title,
+body.side-mid .sn-sec-title,
+body.side-collapsed #sideNavSessions .sn-group,
+body.side-mid #sideNavSessions .sn-group,
+body.side-collapsed #sideNavSessions .sn-item-label,
+body.side-mid #sideNavSessions .sn-item-label,
+body.side-collapsed .sn-ws,
+body.side-mid .sn-ws,
+body.side-mid #sideNavCollapse{display:none}
+body.side-mid .sn-head::before{content:'💬';font-size:14px;line-height:1;color:var(--dim)}
+body.side-collapsed #sideNavWsIcon,
+body.side-mid #sideNavWsIcon{display:inline-flex}
+body.side-collapsed .sn-head,body.side-mid .sn-head{padding:10px 6px;justify-content:center}
+body.side-collapsed #sideNav .sn-body,body.side-mid #sideNav .sn-body{padding:10px 6px;align-items:center}
+body.side-collapsed #sideNavNew,body.side-mid #sideNavNew{width:36px;padding:8px 0;gap:0}
+body.side-collapsed #sideNavSessions .sn-item,body.side-mid #sideNavSessions .sn-item{width:36px;justify-content:center;padding:6px 0;gap:0}
+body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions .sn-item.on{box-shadow:inset 0 0 0 1px var(--accent)}
 </style>
 </head>
-<body>
+<body class="side-wide">
 <header>
   <div class="logo">MingDao <span>Harness</span></div>
   <!-- v0.6.21 小步重排（§3.81）：顶栏只保留「我在哪」的当前位置；模型/预设/权限只在 #sessSheet 里改。 -->
@@ -666,7 +728,28 @@ body.run-open #sessSheet{right:318px}
 <div id="trajRail">
   <button class="rail-btn" id="trajRailBtn" title="轨迹（点击查看详情）">🧭</button>
   <button class="rail-btn" id="subRailBtn" title="子 Agent">🤖<span class="rail-badge" id="subBadge" style="display:none"></span></button>
+  <!-- §3.88：<900 时左栏收成抽屉，这个窄条图标负责打开/关闭（≥900 隐藏）。 -->
+  <button class="rail-btn" id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>
 </div>
+<!-- v0.6.24 §3.88 左侧栏：设计稿三栏的会话列。只新增；顶栏既有入口一个不删。
+     数据复用 refreshSessions() 的 sessionsGroupedCache；切换走 #sessions change；
+     工作空间镜像 #wsSel（原控件保留在顶栏原位）；新建对话复用 #newChat handler。 -->
+<aside id="sideNav" aria-label="会话侧栏">
+  <div class="sn-head">
+    <span class="sn-title">会话</span>
+    <button id="sideNavCollapse" type="button" title="折叠侧栏" aria-label="折叠侧栏" aria-expanded="true">«</button>
+  </div>
+  <div class="sn-body">
+    <button id="sideNavNew" type="button" title="新建对话">＋<span class="sn-label">新建对话</span></button>
+    <div class="sn-ws">
+      <span class="sn-ws-ico" aria-hidden="true">📁</span>
+      <select id="sideNavWs" title="工作空间（与顶栏 #wsSel 同源，切换走同一个 handler）"></select>
+    </div>
+    <button id="sideNavWsIcon" type="button" title="工作空间" aria-label="工作空间">📁</button>
+    <div class="sn-sec-title">最近会话</div>
+    <div id="sideNavSessions" role="list" aria-label="会话列表"></div>
+  </div>
+</aside>
 <main>
   <!-- P1-6 空态三步引导（v0.6.19 §3.70）：无会话 / 无消息时显示；示例任务只填入输入框，不自动发送。 -->
   <div id="emptyState" hidden>

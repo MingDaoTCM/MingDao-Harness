@@ -4790,3 +4790,56 @@ Web 写的消息有时间、非 Web 写的没有；旧会话（该字段引入�
 - Web 用户消息落盘后仍有一行「把 `persistUser.ts` 同步回 `messages` 末尾」的赋值（供压缩重写），
   它不是第二份补齐实现（时间值来自 `appendMessages`），但属于 Web 与内存数组的接线细节。
 - 未 tag / 改版本号 / publish / 动官网。
+
+## 3.88 已做（v0.6.24 左侧栏：设计稿三栏的会话列，只增不删）
+
+**来源 / 证据**：设计稿是「窄条 → 会话栏 → 主区 → 右栏」三栏骨架，而 v0.6.23 的界面只有
+42px 窄条 + 主区 + 右栏：新建对话、历史会话、工作空间全挤在顶栏，顶栏在 1000px 下已要横向滚动。
+左栏是设计稿的标志性部分，但 v0.6.19 的翻车教训是「重排时把顶栏入口删掉」——本次按**只增不删**做。
+
+**修法（`src/web/index.html` + `src/web/app.js`）**
+
+- 新增 `<aside id="sideNav">`：固定在既有窄条右侧（`left:42px`），宽 240px；折叠 48px；
+  ≥1180 展开、900–1180 自动折叠、<900 变抽屉（默认收起，窄条新增 `#sideNavRailBtn` 打开）。
+  主区/输入区用 `margin-left` 右移（282 / 90 / 0），**顶栏保持整条横贯、高度与入口不动**；
+  `#runPanel` 宽度、主题 token、字号阶均未改。
+- 内容只复用既有数据与 handler，不新增后端/请求/轮询：
+  - **新建对话** → 点击转发 `#newChat.click()`（同一 handler）；
+  - **会话列表** → `refreshSessions()` 已有的 `sessionsGroupedCache`（`groupSessionsByUpdatedAt`
+    的今天/昨天/本周/更早四组），当前会话高亮；点击写回 `#sessions.value` 并派发 `change`
+    （复用既有 onchange 切换逻辑）；
+  - **工作空间** → 新增 `#sideNavWs` 镜像顶栏 `#wsSel` 的选项与选中值，change 时写回 `#wsSel`
+    并派发 change（`__add__` / `__manage__` 也走原 handler）；顶栏 `#wsSel` 原控件、原 id、原位置保留；
+  - **折叠按钮** `#sideNavCollapse`：偏好写 `localStorage['mingdao-sidenav-collapsed']`，
+    `initSideNav()` 启动时恢复；折叠态只显示图标（label/分组标题隐藏），按钮保留 `title` tooltip。
+- 不引入设计稿 CSS / 外部样式表：只新增左栏自身规则，复用 `--bg2/--bg3/--border/--accent` 等既有 token。
+
+**断言与变异**
+
+- `test/smoke.js` 末尾新增 §158：
+  ① `#sideNav` 位置/结构（新建、会话列表、工作空间、折叠按钮、窄条开关），无外部 CSS；
+  ② **防翻车核心**：顶栏 `#wsSel` / `#sessions` / `#sessMgrBtn` / `#tasksBtn` / `#newChat` /
+     主题 / `#costBadge` / `#paletteBtn` / `#cfgBtn` 逐个仍在 `<header>` 且 id 唯一；
+  ③ 桩 DOM 渲染四组 + 当前高亮 + 点击回调；切换出口写回 `#sessions` 并派发 `change`；
+  ④ 折叠写 `localStorage` 并模拟重载恢复；
+  ⑤ 三档断点的类名/宽度（≥1180 240 / 900–1180 48 / <900 抽屉）与 resize 接线。
+- 新增 `test/mutate/batch49-side-nav.mjs`：**11/11 全中**（删顶栏 tasksBtn/newChat/wsSel、左栏缺列表、
+  只渲染第一组、点击不回传、不派发 change、折叠不落盘、900 断点改 800、折叠宽度 48→64、主区不右移）。
+  变异总数 407 → **418**（本提交只含本批 11 条；并行 §3.89 的 `batch50` 7 条由另一提交校正到 425）。
+
+**截图（真实 Electron，`scripts/ui-shot.mjs`）**
+
+- 1440×900、1180×900、1000×900、880×900（narrow）四档均实拍；1440 左栏 240 出现且会话按
+  「今天」分组；1000 自动折叠为 48px 图标列；880 默认收起为抽屉并由窄条 `☰` 打开。
+
+**门禁**
+
+- `npm run typecheck` / `node test/smoke.js` / `node test/e2e-web.js`（24）/
+  `node test/e2e-local.js` / `node test/api-contracts.js` 通过；
+  `node test/mutate/batch49-side-nav.mjs` 11/11；`node scripts/doc-lint.mjs` 通过。
+
+**未做 / 边界**
+
+- 未把顶栏入口搬进左栏（`#wsSel` 等全部保留原位），左栏工作空间是**镜像控件**而非移动；
+- 未改 `src/providers/**`、`src/agent.js`、`src/session.js`、`presets/**`、`desktop/**`、`ide/**`、
+  `scripts/ui-shot.mjs`；未 tag / 改版本号 / publish / 动官网。

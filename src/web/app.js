@@ -298,6 +298,191 @@ function msgTimeText(ts, now) {
 let generating = false; // 生成中：发送按钮复用为停止按钮
 let currentSession = null, thinking = null;
 
+// ==== v0.6.24 §3.88：左侧栏（会话列） ====
+// 只做「展示 + 转发」：会话数据来自 refreshSessions() 已有的 sessionsGroupedCache（不新增请求、
+// 不引入轮询）；点会话写回 #sessions 并派发 change（复用既有切换逻辑）；新建对话 / 工作空间
+// 分别复用 #newChat 与 #wsSel 的 handler。折叠偏好记忆在 localStorage。
+const SIDE_NAV_STORAGE_KEY = 'mingdao-sidenav-collapsed';
+let sideNavUserCollapsed = false;
+
+/** @param {any} storage */
+function sideNavCollapsedPref(storage) {
+  try { return !!storage && storage.getItem(SIDE_NAV_STORAGE_KEY) === '1'; } catch { return false; }
+}
+/** @param {any} storage @param {boolean} collapsed */
+function writeSideNavCollapsed(storage, collapsed) {
+  try { if (storage) storage.setItem(SIDE_NAV_STORAGE_KEY, collapsed ? '1' : '0'); } catch {}
+  return !!collapsed;
+}
+/** 三档断点：≥1180 三栏 / 900–1180 左栏自动折叠 / <900 抽屉。 */
+function sideNavBreakpoint(width) {
+  const w = Number(width) || 0;
+  if (w >= 1180) return 'wide';
+  if (w >= 900) return 'mid';
+  return 'drawer';
+}
+function sideNavLayout(width, pref) {
+  const mode = sideNavBreakpoint(width);
+  const collapsed = mode === 'mid' || (mode === 'wide' && !!pref);
+  return { mode, collapsed, width: mode === 'drawer' ? 0 : (collapsed ? 48 : 240), drawer: mode === 'drawer' };
+}
+function sideNavClassNames(layout) {
+  const out = [];
+  if (layout.mode === 'wide') out.push('side-wide');
+  if (layout.mode === 'mid') out.push('side-mid');
+  if (layout.mode === 'drawer') out.push('side-drawer');
+  if (layout.mode === 'wide' && layout.collapsed) out.push('side-collapsed');
+  return out;
+}
+/**
+ * 渲染左栏会话列表：只读分组缓存，四个分组标题 + 条目；当前会话高亮。
+ * @param {any} container @param {any[]} groups @param {any} current @param {(s:any)=>void} [onPick]
+ * @returns {number} 渲染的会话条数
+ */
+function renderSideNavSessions(container, groups, current, onPick) {
+  if (!container) return 0;
+  while (container.firstChild) container.removeChild(container.firstChild);
+  const list = Array.isArray(groups) ? groups : [];
+  if (!list.length) {
+    const empty = document.createElement('div');
+    empty.className = 'sn-empty';
+    empty.textContent = '暂无会话';
+    container.appendChild(empty);
+    return 0;
+  }
+  let n = 0;
+  for (const g of list) {
+    const head = document.createElement('div');
+    head.className = 'sn-group';
+    head.textContent = String(g.title || '');
+    container.appendChild(head);
+    for (const s of (Array.isArray(g.items) ? g.items : [])) {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'sn-item' + (s.file === current ? ' on' : '');
+      item.dataset.file = String(s.file || '');
+      item.title = String(s.label || s.file || '');
+      if (s.file === current) item.setAttribute('aria-current', 'true');
+      const ico = document.createElement('span');
+      ico.className = 'sn-item-ico';
+      ico.setAttribute('aria-hidden', 'true');
+      ico.textContent = '💬';
+      const label = document.createElement('span');
+      label.className = 'sn-item-label';
+      label.textContent = String(s.label || s.file || '');
+      item.appendChild(ico);
+      item.appendChild(label);
+      item.addEventListener('click', () => { if (typeof onPick === 'function') onPick(s); });
+      container.appendChild(item);
+      n += 1;
+    }
+  }
+  return n;
+}
+/** 点击左栏会话：写回顶栏 #sessions 并派发 change（复用既有 onchange 切换逻辑）。 */
+function pickSessionFromSideNav(s) {
+  const sel = $('#sessions');
+  if (!sel || !s || !s.file) return;
+  sel.value = s.file;
+  sel.dispatchEvent(new Event('change'));
+}
+/** 工作空间镜像：选项与选中值从顶栏 #wsSel 同步，切换仍交给原控件 handler。 */
+function syncSideNavWorkspace() {
+  const src = $('#wsSel'), dst = $('#sideNavWs');
+  if (!src || !dst) return;
+  while (dst.firstChild) dst.removeChild(dst.firstChild);
+  for (const o of src.options) {
+    const n = document.createElement('option');
+    n.value = o.value;
+    n.textContent = o.textContent;
+    dst.appendChild(n);
+  }
+  dst.value = src.value;
+  const icon = $('#sideNavWsIcon');
+  if (icon) {
+    const cur = src.options[src.selectedIndex];
+    icon.title = '工作空间' + (cur && cur.value ? '：' + String(cur.textContent || '').replace(/^●\s*/, '') : '（点此切换）');
+  }
+}
+/** 当前会话高亮（只切类，不重建列表，避免搜索/滚动位置抖动）。 */
+function syncSideNavActive() {
+  const box = $('#sideNavSessions');
+  if (!box) return;
+  for (const el of box.querySelectorAll('.sn-item')) {
+    const on = !!(currentSession && el.dataset && el.dataset.file === currentSession);
+    el.classList.toggle('on', on);
+    if (on) el.setAttribute('aria-current', 'true'); else el.removeAttribute('aria-current');
+  }
+}
+function syncSideNavToggle() {
+  const btn = $('#sideNavCollapse');
+  const mode = sideNavBreakpoint(window.innerWidth || 0);
+  const drawerOpen = document.body.classList.contains('side-drawer-open');
+  if (btn) {
+    btn.textContent = mode === 'drawer' ? (drawerOpen ? '×' : '☰') : (sideNavUserCollapsed ? '»' : '«');
+    btn.setAttribute('aria-expanded', String(mode === 'drawer' ? drawerOpen : !sideNavUserCollapsed));
+    btn.title = mode === 'drawer' ? (drawerOpen ? '关闭会话侧栏' : '打开会话侧栏') : (sideNavUserCollapsed ? '展开侧栏' : '折叠侧栏');
+  }
+  const rail = $('#sideNavRailBtn');
+  if (rail) { rail.classList.toggle('on', drawerOpen); rail.title = drawerOpen ? '关闭会话侧栏' : '打开会话侧栏'; }
+}
+function applySideNavLayout(width) {
+  const w = width == null ? (Number(window.innerWidth) || 0) : (Number(width) || 0);
+  const layout = sideNavLayout(w, sideNavUserCollapsed);
+  const names = sideNavClassNames(layout);
+  for (const c of ['side-wide', 'side-mid', 'side-drawer', 'side-collapsed']) {
+    document.body.classList.toggle(c, names.includes(c));
+  }
+  if (layout.mode !== 'drawer') document.body.classList.remove('side-drawer-open');
+  const nav = $('#sideNav');
+  if (nav) nav.classList.toggle('collapsed', layout.collapsed);
+  syncSideNavToggle();
+}
+function toggleSideNav() {
+  const mode = sideNavBreakpoint(window.innerWidth || 0);
+  if (mode === 'drawer') {
+    document.body.classList.toggle('side-drawer-open');
+    syncSideNavToggle();
+    return;
+  }
+  if (mode === 'mid') return; // 900–1180：自动折叠，不提供手动展开（避免挤窄主区）
+  sideNavUserCollapsed = !sideNavUserCollapsed;
+  let storage = null;
+  try { storage = window.localStorage; } catch {}
+  writeSideNavCollapsed(storage, sideNavUserCollapsed);
+  applySideNavLayout(window.innerWidth || 0);
+}
+function initSideNav() {
+  let storage = null;
+  try { storage = window.localStorage; } catch {}
+  sideNavUserCollapsed = sideNavCollapsedPref(storage);
+  const newBtn = $('#sideNavNew');
+  if (newBtn) newBtn.onclick = () => { const b = $('#newChat'); if (b) b.click(); };
+  const collapse = $('#sideNavCollapse');
+  if (collapse) collapse.onclick = toggleSideNav;
+  const rail = $('#sideNavRailBtn');
+  if (rail) rail.onclick = toggleSideNav;
+  const ws = $('#sideNavWs');
+  if (ws) ws.addEventListener('change', () => {
+    const main = $('#wsSel');
+    if (!main) return;
+    main.value = ws.value;
+    main.dispatchEvent(new Event('change'));
+  });
+  const wsIcon = $('#sideNavWsIcon');
+  if (wsIcon) wsIcon.onclick = () => {
+    const main = $('#wsSel');
+    if (!main) return;
+    try { main.focus(); } catch {}
+    try { if (typeof main.showPicker === 'function') { main.showPicker(); return; } } catch {}
+    try { main.click(); } catch {}
+  };
+  syncSideNavWorkspace();
+  renderSideNavSessions($('#sideNavSessions'), sessionsGroupedCache, currentSession, pickSessionFromSideNav);
+  applySideNavLayout();
+}
+// ==== /v0.6.24 §3.88 ====
+
 
 
 function newAiMsg(ts){ const el=document.createElement('div'); el.className='msg-ai'; const t=msgTimeText(ts); if(t){ const m=document.createElement('div'); m.className='msg-time'; m.textContent=t; el.appendChild(m); } chatEl.appendChild(el); scrollBottom(); return el; }
@@ -1337,6 +1522,7 @@ function applyResponsiveLayout(width) {
   const cls = layoutClassesFor(w);
   document.body.classList.toggle('narrow-side', cls.narrow);
   document.body.classList.toggle('narrow-run', cls.narrowRun);
+  applySideNavLayout(w); // §3.88：左栏三档断点与主区推开量
   syncRunPanel();
 }
 function initResponsive() {
@@ -2340,6 +2526,7 @@ function renderCrumb(){
   const w=$('#crumbWs'); if(w) w.textContent=currentWorkspaceName||'工作空间';
   const cur=sessionsCache.find((s)=>s&&s.file===currentSession);
   const c=$('#crumbSession'); if(c) c.textContent=cur?(cur.label||cur.file):(currentSession?String(currentSession).replace(/\.jsonl$/,''):'新对话');
+  syncSideNavActive();
 }
 async function refreshSessions(q){
   const u=q?'/api/sessions?q='+encodeURIComponent(q):'/api/sessions';
@@ -2354,6 +2541,8 @@ async function refreshSessions(q){
     for(const s of g.items){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; og.appendChild(o); }
     sel.appendChild(og);
   }
+  // §3.88：左栏只读同一份分组缓存（不额外请求/不轮询）
+  renderSideNavSessions($('#sideNavSessions'), sessionsGroupedCache, currentSession, pickSessionFromSideNav);
   if(currentSession&&!q) sel.value=currentSession;
   renderCrumb();
 }
@@ -2511,6 +2700,7 @@ async function refreshWsSel(){
   const mgr=document.createElement('option'); mgr.value='__manage__'; mgr.textContent='管理（重命名/删除/改目录）…';
   sel.appendChild(mgr);
   renderCrumb();
+  syncSideNavWorkspace(); // §3.88：左栏工作空间镜像顶栏选项/选中值
 }
 /** 命令面板与顶栏下拉共用的工作空间切换（携带当前会话，语义与旧路径一致）。 */
 async function applyWorkspaceSwitch(name){
@@ -2957,4 +3147,6 @@ async function openSessModal(){
 }
 $('#sessions').onchange=e=>{ if(e.target.value){ loadSession(e.target.value); } else { finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); renderCrumb(); } };
 if('serviceWorker' in navigator){ navigator.serviceWorker.register('/sw.js').catch(()=>{}); }
+// §3.88：左栏先接线（读折叠偏好 + 渲染一次）；init() 里的 refreshSessions 会再次用最新数据刷新。
+initSideNav();
 init();
