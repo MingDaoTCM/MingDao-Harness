@@ -3,6 +3,108 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.24（2026-10-25）— 新增左侧会话栏（三栏成型）+ 账本权限来源补全
+
+> 本版两件事：① **新增左侧会话栏**（§3.88，**只增不删**）——按设计稿补上「窄条 42 → 会话栏
+> 240（折叠 48；<900 覆盖式抽屉）→ 主区 → 右栏」，`+ 新建对话` / 工作空间 / 最近会话
+> （今天·昨天·本周·更早）第一次有常驻位置；顶栏九个既有入口**一个都没删**。
+> ② **账本 `permissionSource` 覆盖 worker / REPL**（§3.89）——新增枚举 `job`，
+> 后台/REPL 会话的 `auto`/`readonly` 是谁定的，事后能回答了。
+> 细节见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` **§3.88 / §3.89**。
+
+### 一、§3.88 左侧会话栏（`src/web/index.html` + `src/web/app.js`）
+
+**证据**：设计稿是「窄条 → 会话栏 → 主区 → 右栏」三栏骨架，而 v0.6.23 只有 42px 窄条 +
+主区 + 右栏：新建对话、历史会话、工作空间全挤在顶栏，1000px 下顶栏已要横向滚动。
+v0.6.19 的翻车教训是「重排时把顶栏入口删掉」——本次按**只增不删**做。
+
+**修法**：
+
+- 新增 `<aside id="sideNav">`，固定在既有窄条右侧（`left:42px`），宽 **240px**；折叠 **48px**；
+  **≥1180** 展开、**900–1180** 自动折叠为 48px 图标列、**<900** 变**覆盖式抽屉**
+  （默认收起，窄条新增 `#sideNavRailBtn` 打开）。主区/输入区 `margin-left` 右移
+  **282 / 90 / 0**，左栏不遮正文；**顶栏保持整条横贯、高度与九个入口不动**，
+  `#runPanel` 宽度、主题 token、字号阶均未改。
+- 内容只复用既有数据与 handler，**不新增后端、请求或轮询**：`+ 新建对话` 转发
+  `#newChat.click()`；最近会话复用 `refreshSessions()` 的 `sessionsGroupedCache`
+  （**今天/昨天/本周/更早**），当前会话高亮，点击写回 `#sessions.value` 并派发 `change`；
+  工作空间新增 `#sideNavWs` **镜像**顶栏 `#wsSel` 并回写、派发 `change`（顶栏原控件、
+  原 id、原位置保留）；折叠按钮把偏好写 `localStorage['mingdao-sidenav-collapsed']`，
+  `initSideNav()` 启动时恢复。不引入设计稿 CSS / 外部样式表，复用既有 token。
+- **防回归核心**：顶栏九个入口 `#wsSel` / `#sessions` / `#sessMgrBtn` / `#tasksBtn` /
+  `#newChat` / `#themeBtn` / `#costBadge` / `#paletteBtn` / `#cfgBtn` **全部保留且 id 唯一**，
+  `test/smoke.js` **§158** 逐个点名断言仍在 `<header>` 内。
+- **顺带修的测试日期炸弹**：`test/ui-sessions.js` 原用硬编码日期（2026-10-21），跨天必红；
+  改成**相对今天**构造夹具，batch46 ⑤/⑫ 由逃逸转为稳定断言（`ui-sessions` 套件仍是 5 项，
+  batch46 现 **12/12 全中**）。
+
+**测试与变异**：`test/smoke.js` 新增 §158（左栏结构/新建/会话四组/工作空间/折叠按钮；
+顶栏九个入口逐个点名 + id 唯一；桩 DOM 渲染与点击回传；折叠写 `localStorage` 并模拟重载恢复；
+三档断点类名与宽度 240/48/抽屉 + resize 接线）。新增 `test/mutate/batch49-side-nav.mjs`
+**11/11 全中**；变异总数 **407 → 418**（与 §3.89 合并后校正为 **425**）。
+
+### 二、§3.89 账本 `permissionSource` 补全 worker / REPL（`src/ledger.js` / `src/tasks/worker.js` / `src/commands/repl.js`）
+
+**证据**：§3.64 的 `run.start.permissionSource` 只覆盖 WebUI 与 CLI 前台。
+worker（后台任务/调度）不向 agent 传来源，REPL 的 `/preset` 切换会重建 `agentCfg` 并丢掉来源
+——两条路径的 `permissionSource` 恒为 `null`。worker 另有一处**生效值**口径问题：
+`agent.js` 记 `cfg.permission ?? permission.mode`，`--permission auto` 被
+`config.permission=readonly` 盖过时，账本记的是**没有生效**的 readonly。
+
+**修法**：
+
+- `src/ledger.js`：`PERMISSION_SOURCES` 新增 **`job`**（后台任务/调度任务规格显式指定的
+  `permission`）；`cli` 注释改为「保留给前台 CLI 的显式权限参数（当前无前台入口）」；
+  导出物来源图例同步补 `job`。**不复用 `explicit`**：`explicit` 是「本回合交互里选的」，
+  `job` 是提交任务时写进规格的，混用会让人误以为跑的时候有人按了权限档。
+- `src/tasks/worker.js`：来源口径 = 任务规格显式 `permission` → **`job`**；否则
+  `config.permission` → `config`；都没有 → `default`。同时把**降级后**的权限放进
+  `agentCfg.permission`，使账本 `permission` 记实际生效值（降级只改生效值，来源不变）。
+  不写回 `loadConfig()` 的 `cfg`。
+- `src/commands/repl.js`：启动时原地沿用入口（`cli.js`）算好的来源——未切预设 →
+  `config` / `default`（**不再写 `null`**）；`--preset` 已声明 permission → `preset`；
+  会话内 `/preset` 仅当预设声明、**且被反提权判定采纳了 `permission`** 才记 `preset`。
+- 兼容：`LEDGER_VERSION` 不变；旧账本（无该字段）`verify` 仍通过，`show` 只是少一行可选的
+  「权限来源」。`docs/CONFIG.md` 补完整枚举表与四类入口口径。
+
+**测试与变异**：`test/ledger-source.js` **7 组 → 11 组**（新增 worker 默认 → `config`；
+任务规格显式 permission → `job`，并钉住显式 `auto` 压过 `config=readonly` 的生效值；
+REPL 启动 → `config`/`default`；REPL `/preset` → `preset`；旧账本兼容回归保留）。
+新增 `test/mutate/batch50-perm-source.mjs` **7/7 全中**；变异总数 **407 → 425**（38 批）。
+
+### 三、验证
+
+- `npm run typecheck` → **0**；`npm run typecheck:strict` → **0 / 基线 0**
+- `node test/smoke.js` 单独跑 → **全部通过：156 组断言**（含新增 §158）
+- `node test/e2e-local.js` → 17 项；`node test/e2e-web.js` → 24 项；
+  `node test/e2e-schedule.js` → 11 项；`node test/api-contracts.js` → 8 项
+- `pack-ctx-privesc` 4 / `ledger-source` **11** / `model-names` 8 / `memory-recovery` 5 /
+  `ui-sessions` 5 → 全通过（batch46 变异 12/12）
+- `node test/mutate/selfcheck.mjs` → 自检通过；`npm run bench` → 5 套基准全通过
+- `node test/mutate/run.mjs` → **38/38 批、425/425 条全中、0 逃逸**
+- `node scripts/doc-lint.mjs` → 全通过；`node src/cli.js diagnose` → 报告正常、密钥脱敏
+- 发布提交只含五个发布文件；`git diff --name-only <门禁SHA>..<tagSHA> -- src test` → **0 行**
+- 发布树 Electron 截图：`/tmp/shots-0624`（1440×900）、`/tmp/shots-0624-1000`（1000×900）、
+  `/tmp/shots-0624-narrow`（narrow 880×900）
+
+### 四、已知边界（逐条如实登记）
+
+- **1180 整点不是严格三栏**：视口恰好 1180 时右栏仍按既有 `max-width:1180px` 规则
+  **不推开正文**（覆盖式），严格三栏需要 **>1180**；该既有规则本版未改。
+- **<900 的左栏是覆盖式抽屉**，不是推挤式：默认收起，由窄条 `☰` 打开，覆盖在主区之上。
+- **顶栏重复入口本轮未删**：`#wsSel` 与 `#sideNavWs`、`#newChat` 与左栏「+ 新建对话」
+  是**两份入口指向同一逻辑**；这是「只增不删」的刻意取舍，下一轮逐个迁出，本版未删/未移动
+  任何顶栏控件。
+- **REPL 无 `/permission` 命令**（当前不存在）：REPL 显式改权限仍只能靠 `/preset`（记
+  `preset`），因此本版不会在 REPL 路径产生 `explicit`；`explicit` 仍只由 WebUI 权限档写入。
+- **未改 `src/agent.js` 的 permission 取值顺序**（`cfg.permission ?? permission.mode`）：
+  worker 通过传入「已降级的生效值」修正自己的账本，其它入口口径不变。
+- 左栏工作空间是**镜像控件**：顶栏 `#wsSel` 仍是唯一真实状态源，左栏只回写并派发 `change`。
+- 左栏会话列表**只在 `refreshSessions()` 时刷新**（与既有下拉同一数据源），没有新增轮询；
+  未做虚拟滚动。
+- 本版未改 `src/providers/**`、`src/session.js`、`presets/**`、`desktop/**`（版本号除外）、
+  `ide/**`、`scripts/ui-shot.mjs`。
+
 ## v0.6.23（2026-10-21）— Windows 文件锁争用硬化 + 消息时间戳统一
 
 > 本版两件事：① **Windows 锁/重命名争用硬化**（§3.86）——把 NTFS delete-pending 与杀软/索引器
