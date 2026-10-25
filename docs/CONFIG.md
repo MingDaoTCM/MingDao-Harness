@@ -925,11 +925,29 @@ mingdao ledger verify <runId> --key <文件>     # 用指定公钥验签（本�
   顺手一次就会把签名密钥清掉、让全部历史账本变成"另一把密钥签发"。
 - **默认开启**：新账本在首次收尾时若本机还没有密钥会**自动生成**并签名（可选签名在合规上等于
   没有签名）。封条里带 `sig{alg,keyId,value}`，`run.end` 链内带 `sigKey`（公钥指纹）。
-- **`run.start.permissionSource`（v0.6.17 §3.64）**：记录本回合生效权限的**来源**——`explicit`
-  （用户/调用方显式选择，如 WebUI 权限档）/ `preset`（预设声明生效）/ `config`（`config.json`
-  的 `permission`）/ `cli`（后台/调度任务由 CLI 参数指定）/ `default`（以上都没有，落到内置缺省
-  `ask`；WebUI 的 `config` 分支在缺字段时也归 `config`）。`permission` 仍是生效值、`LEDGER_VERSION`
-  不变；旧账本没有该字段照样 `verify` 通过（`show` 只是少一行可选的「权限来源」）。
+- **`run.start.permissionSource`（v0.6.17 §3.64，v0.6.24 §3.89 补全 worker/REPL）**：记录本回合
+  生效权限的**来源**。`permission` 仍是生效值，两者分开记——单看生效值无法回答「是谁定的」。
+  **完整枚举**（`src/ledger.js` 的 `PERMISSION_SOURCES`；缺失/非法一律写 `null`，不猜）：
+
+  | 值 | 含义 |
+  | --- | --- |
+  | `explicit` | 用户/调用方在**本回合交互**里显式选择（WebUI 权限档） |
+  | `preset` | 预设声明并被采纳的 `permission`（已过反提权判定） |
+  | `config` | `config.json` 的 `permission` |
+  | `cli` | 前台 CLI 显式参数（保留值；`mingdao run --permission` 属后台任务，按下面的 `job` 记） |
+  | `job` | **后台任务/调度**的任务规格显式指定 `permission`（`mingdao run --permission ...`、`schedule add --permission ...`）。v0.6.24 §3.89 新增；刻意不复用 `explicit`，避免与「用户跑的时候按了权限档」混淆 |
+  | `default` | 以上都没有，落到内置缺省 `ask` |
+
+  **各入口取值口径**：
+
+  | 入口 | 写入值 | 时机 |
+  | --- | --- | --- |
+  | WebUI | `explicit` / `preset` / `config` | 显式权限档 → `explicit`；预设声明 → `preset`；都不发 → `config`（`resolveTurnPermission` 的既有语义，配置缺字段也归 `config`） |
+  | CLI 单次问答 | `preset` / `config` / `default` | `--preset` 声明 permission → `preset`；`config.permission` 存在 → `config`；否则 → `default` |
+  | 后台 worker / 调度 | `job` / `config` / `default` | 任务规格（含 `mingdao run --permission`、schedule 的 `permission`）显式指定 → `job`；否则 `config.permission` → `config`；都没有 → `default`。worker 的 `ask → readonly` 降级只改生效值，来源仍按上述口径记 |
+  | REPL | `preset` / `config` / `default` | 启动时 `--preset` 已声明 permission → `preset`；否则 `config`（有 `permission`）/ `default`（无）。会话内 `/preset` 且预设 permission 被采纳 → `preset`；仅换提示词/工具白名单的预设不冒充来源，沿用切换前的值。当前没有 `/permission` 命令 |
+
+  `LEDGER_VERSION` 不变；旧账本没有该字段照样 `verify` 通过（`show` 只是少一行可选的「权限来源」）。
 - **`ledger verify` 的三种结论**（前两者退出码 0，第三者非 0）：
 
   | 结论 | 含义 | 退出码 |

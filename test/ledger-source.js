@@ -10,6 +10,8 @@
 //   ② 只发预设 → permission=readonly, permissionSource=preset
 //   ③ 都不发 → web 记 config（resolveTurnPermission 的 config 分支，含内置缺省 ask）；CLI 无 permission 字段记 default
 //   ④ 旧账本（run.start 无 permissionSource）仍能 verify 通过（向后兼容红线）
+//   ⑤ v0.6.24 §3.89：后台 worker 默认 → config、任务规格显式 permission → job（新枚举）
+//   ⑥ v0.6.24 §3.89：REPL 启动（未切预设）→ config/default、/preset 后 → preset
 //
 // 运行：node test/ledger-source.js
 import assert from 'node:assert/strict';
@@ -172,6 +174,107 @@ async function cliRunStart({ permission, preset }) {
   assert.equal(s.permission, 'auto', 'CLI 应读取 config.permission');
   assert.equal(s.permissionSource, 'config', 'CLI 配置里的 permission 必须记为 config');
   ok('⑤ CLI config.permission → auto / config');
+}
+
+// ---------- 后台 worker（真子进程：cli.js run-worker） ----------
+/** 跑一个子进程并收集输出；`input` 给 REPL 这类交互入口喂 stdin。 */
+function runChild(args, h, { input = null, timeoutMs = 90000 } = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, args, {
+      cwd: work,
+      env: { ...process.env, MINGDAO_HOME: h },
+      stdio: [input === null ? 'ignore' : 'pipe', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (d) => (stdout += d));
+    child.stderr.on('data', (d) => (stderr += d));
+    child.stdin?.on('error', () => {}); // 子进程提前退出时避免 EPIPE 变成未捕获异常
+    if (input !== null) child.stdin.end(input);
+    const timer = setTimeout(() => child.kill('SIGKILL'), timeoutMs);
+    child.on('close', (status, signal) => {
+      clearTimeout(timer);
+      resolve({ status, signal, stdout, stderr });
+    });
+  });
+}
+
+/** 读独立 MINGDAO_HOME 里唯一一份账本的 run.start（不能调 readRun：它按本进程 home 找文件）。 */
+function soleStart(h, label) {
+  const dir = path.join(h, 'ledger');
+  const files = fs.existsSync(dir) ? fs.readdirSync(dir).filter((f) => f.endsWith('.jsonl')) : [];
+  assert.equal(files.length, 1, `${label} 应只生成一份账本，实际 ${files.length}（stderr 见调用方）`);
+  const events = fs.readFileSync(path.join(dir, files[0]), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
+  const start = events.find((e) => e.type === 'run.start');
+  assert.ok(start, `${label} 账本里应有 run.start`);
+  return start;
+}
+
+/** 写一份独立 home 的 config/credentials。 */
+function seedHome(prefix, cfgPatch) {
+  const h = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  fs.writeFileSync(path.join(h, 'config.json'), JSON.stringify({
+    provider: 'custom', model: 'test-model', baseUrl, contextBudget: 32000,
+    ledger: true, autoTitle: false, notify: false, ...cfgPatch,
+  }), { mode: 0o600 });
+  fs.writeFileSync(path.join(h, 'credentials.json'), JSON.stringify({ custom: 'sk-test-' + 'x'.repeat(20) }), { mode: 0o600 });
+  return h;
+}
+
+/** 跑一次后台 worker（`mingdao run-worker`），返回 run.start。 */
+async function workerRunStart({ permission, configPermission } = {}) {
+  const h = seedHome('mingdao-ledger-source-worker-', configPermission === undefined ? {} : { permission: configPermission });
+  const id = 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 4);
+  const args = [cliPath, 'run-worker', id, '--question', '你好'];
+  if (permission !== undefined) args.push('--permission', permission);
+  const r = await runChild(args, h);
+  assert.equal(r.status, 0, `worker 应退出 0（stderr: ${String(r.stderr || '').slice(-500)}）`);
+  return soleStart(h, 'worker');
+}
+
+/** 跑一次 REPL（无子命令 → 交互模式），可先喂一条 `/preset`，返回那一回合的 run.start。 */
+async function replRunStart({ preset, configPermission } = {}) {
+  const h = seedHome('mingdao-ledger-source-repl-', configPermission === undefined ? {} : { permission: configPermission });
+  const input = (preset ? `/preset ${preset}\n` : '') + '你好\n/exit\n';
+  const r = await runChild([cliPath], h, { input });
+  assert.equal(r.status, 0, `REPL 应退出 0（stderr: ${String(r.stderr || '').slice(-500)}）`);
+  return soleStart(h, 'REPL');
+}
+
+// ⑥ worker 默认（任务规格未指定 permission）→ 权限口径来自 config.json → config。
+//   注意：worker 的 ask 会降级 readonly，来源仍是 config（来源回答"谁定的"，不是"最终值"）。
+{
+  const s = await workerRunStart({ configPermission: 'readonly' });
+  assert.equal(s.permission, 'readonly', '⑥ worker 应读取 config.permission');
+  assert.equal(s.permissionSource, 'config', '⑥ worker 未显式指定权限时必须记 config（不能写 null）');
+  ok('⑥ worker 默认 → readonly / config');
+}
+
+// ⑦ 任务规格显式 permission → job（新枚举；不复用 explicit，也不能被 config.permission 压过）
+{
+  const s = await workerRunStart({ configPermission: 'readonly', permission: 'auto' });
+  assert.equal(s.permission, 'auto', '⑦ 任务规格显式 auto 必须是生效值（config.permission 不得盖过它）');
+  assert.equal(s.permissionSource, 'job', '⑦ 任务规格显式 permission 必须记为 job（新增枚举，不能写成 config/explicit）');
+  ok('⑦ worker 任务规格显式 permission → auto / job');
+}
+
+// ⑧ REPL 启动（未切预设）：config 有 permission → config；缺失 → default（不冒充 config）
+{
+  const withCfg = await replRunStart({ configPermission: 'ask' });
+  assert.equal(withCfg.permission, 'ask', '⑧ REPL 应读取 config.permission');
+  assert.equal(withCfg.permissionSource, 'config', '⑧ REPL 启动（config 有 permission）必须记 config（不能写 null）');
+  const withoutCfg = await replRunStart({});
+  assert.equal(withoutCfg.permission, 'ask', '⑧ REPL 无 permission 字段时应落到内置缺省 ask');
+  assert.equal(withoutCfg.permissionSource, 'default', '⑧ REPL 无 permission 字段时必须记 default（不能冒充 config）');
+  ok('⑧ REPL 启动 → config / default');
+}
+
+// ⑨ REPL 内 /preset 切换（预设声明 readonly 被采纳）→ preset
+{
+  const s = await replRunStart({ preset: 'ro', configPermission: 'ask' });
+  assert.equal(s.permission, 'readonly', '⑨ REPL /preset 的 readonly 应生效');
+  assert.equal(s.permissionSource, 'preset', '⑨ REPL 内切换预设必须记为 preset（不能沿用 config）');
+  ok('⑨ REPL /preset → readonly / preset');
 }
 
 // ---------- 旧账本兼容（无 permissionSource） ----------

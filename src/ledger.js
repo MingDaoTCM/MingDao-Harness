@@ -44,13 +44,23 @@ export const LEDGER_VERSION = 1;
  * 一次"来源不可见"的坑（界面选了自动、却被只读预设压着跑）迫使我们把来源写进账本：
  * 事后自查时，`permission:"auto"` 单看无法区分"用户显式选的"与"config 里本来就是 auto"。
  *
- * - `explicit`：用户/调用方在本回合显式选择（WebUI 的权限档、CLI 的显式参数）；
+ * - `explicit`：用户/调用方在**本回合**显式选择（WebUI 的权限档；前台 CLI 暂无 `--permission` 入口）；
  * - `preset`：由预设声明的 permission 生效（反提权判定已通过）；
  * - `config`：来自 `config.json` 的 `permission`；
- * - `cli`：后台/调度任务由 CLI 参数指定（`mingdao run --permission ...`）；
+ * - `cli`：保留给前台 CLI 的显式权限参数（当前没有前台 `--permission` 入口；
+ *   后台任务的 `--permission` 属于任务规格，按下面的 `job` 记）；
+ * - `job`：**后台任务/调度**的任务规格显式指定（`mingdao run --permission ...` /
+ *   `schedule add --permission ...` 落进 task/job 的 permission）——v0.6.24 §3.89 新增。
+ *   刻意不复用 `explicit`：那个值表示「用户在本回合的交互里选的」，而后台任务的权限
+ *   是**提交任务时写进规格**的，事后看到 `explicit` 会误以为有人在跑的时候按了权限档；
  * - `default`：以上都没有，落到内置缺省（`ask`）。
+ *
+ * 各入口的取值口径（完整表见 `docs/CONFIG.md`「账本来源签名」一节）：
+ *   WebUI → explicit / preset / config；CLI 前台 → preset / config / default（`cli` 为保留值，当前无写入路径）；
+ *   后台 worker → job（任务规格显式） / config（否则）；REPL → preset（本回合切了声明
+ *   permission 的预设） / config / default（启动时未切预设）。
  */
-export const PERMISSION_SOURCES = Object.freeze(['explicit', 'preset', 'config', 'cli', 'default']);
+export const PERMISSION_SOURCES = Object.freeze(['explicit', 'preset', 'config', 'cli', 'job', 'default']);
 /** 默认保留最近多少次运行（超出按 mtime 删最旧） */
 const DEFAULT_MAX_RUNS = 200;
 const GENESIS = '0'.repeat(16);
@@ -897,7 +907,7 @@ export function exportRun(/** @type {any} */ runId, { format = 'json' } = {}) {
   lines.push(`- 模型：${start?.model ?? '—'} · 会话：${start?.session ?? '—'} · 权限：${start?.permission ?? '—'}`);
   // v0.6.17 §3.64：来源是**可选**字段——旧账本没有它，这一行就整行不出现（输出契约不变）；
   // 新账本才有，且只增行、不改上面那行「权限：…」的既有形状。
-  if (start?.permissionSource) lines.push(`- 权限来源：${start.permissionSource}（explicit=显式选择 / preset=预设 / config=配置 / cli=命令行 / default=内置缺省）`);
+  if (start?.permissionSource) lines.push(`- 权限来源：${start.permissionSource}（explicit=显式选择 / preset=预设 / config=配置 / cli=命令行 / job=后台任务规格 / default=内置缺省）`);
   lines.push(`- 开始：${start?.at ? new Date(start.at).toISOString() : '—'}`);
   lines.push(`- 结束：${end ? `${end.status}（${end.ms}ms，${end.steps} 步）` : '未结束'}`);
   lines.push(`- 费用：${end?.priced ? `¥${Number(end.yuanTotal ?? 0).toFixed(4)}` : '**无法估算**（模型无价，不是 0 元）'}`);

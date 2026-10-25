@@ -4843,3 +4843,65 @@ Web 写的消息有时间、非 Web 写的没有；旧会话（该字段引入�
 - 未把顶栏入口搬进左栏（`#wsSel` 等全部保留原位），左栏工作空间是**镜像控件**而非移动；
 - 未改 `src/providers/**`、`src/agent.js`、`src/session.js`、`presets/**`、`desktop/**`、`ide/**`、
   `scripts/ui-shot.mjs`；未 tag / 改版本号 / publish / 动官网。
+
+## 3.89 已做（v0.6.24 账本 `permissionSource` 补全 worker / REPL，新增 `job`）
+
+**来源 / 证据**：§3.64 的 `run.start.permissionSource` 只覆盖了 WebUI 与 CLI 前台。
+`src/tasks/worker.js`（后台任务 / 调度）不向 agent 传来源，`src/commands/repl.js` 的 `/preset`
+切换会重建 `agentCfg` 并丢掉来源——两条路径的账本 `run.start.permissionSource` 恒为 `null`，
+事后无法回答「后台/REPL 会话的 auto/readonly 是谁定的」。worker 另有一处生效值口径问题：
+`agent.js` 记的是 `cfg.permission ?? permission.mode`，`mingdao run --permission auto` 被
+`config.permission=readonly` 盖过时，账本记下的是**没有生效**的 readonly。
+
+**修法**
+
+- `src/ledger.js`：`PERMISSION_SOURCES` 新增 `job`（后台任务 / 调度任务规格显式指定的
+  `permission`）；`cli` 的注释改为「保留给前台 CLI 的显式权限参数（当前无前台入口）」，
+  后台任务的 `--permission` 归 `job`；导出物的来源图例同步补 `job`。
+  **为什么不复用 `explicit`**：`explicit` 表示「用户在本回合交互里选的」，而 `job` 是提交任务时
+  写进规格的；混用会让事后看到 `explicit` 的人误以为跑的时候有人按了权限档。
+- `src/tasks/worker.js`：来源口径 = 任务规格显式 `permission` → `job`；否则 `config.permission`
+  → `config`；都没有 → `default`。同时把**降级后**的 `perm` 放进交给 agent 的 `agentCfg.permission`，
+  使账本 `permission` 记实际生效值（`ask → readonly` 降级只改生效值，来源仍按上述口径）。
+  不写回 `loadConfig()` 的 `cfg`，不影响 worker 其它配置。
+- `src/commands/repl.js`：启动时**原地**沿用入口（`cli.js`）算好的来源——未切预设 → `config`
+  （有 `config.permission`）/ `default`（无）；`--preset` 已声明 permission → `preset`；缺失时
+  按同一口径补齐，绝不写 `null`。会话内 `/preset` 仅当预设声明、且被反提权判定采纳了
+  `permission` 才记 `preset`；只换提示词/工具白名单/模型的预设不冒充来源，沿用切换前的值。
+- `docs/CONFIG.md`：账本一节补 `permissionSource` 的完整枚举表与 WebUI / CLI / worker / REPL
+  四类入口的取值口径（含新增 `job`）。
+- 兼容：`LEDGER_VERSION` 不变；旧账本（无该字段）`verify` 仍通过，`show` 只是少一行可选的
+  「权限来源」。
+
+**断言与变异**
+
+- `test/ledger-source.js`：7 组 → **11 组**。新增 4 组：worker 默认（无任务规格 permission）→
+  `config`；任务规格显式 permission → `job`（并钉住显式 `auto` 必须压过 `config=readonly` 的生效值）；
+  REPL 启动 → `config` / `default`；REPL `/preset` → `preset`。旧账本无字段仍 `verify` 通过、
+  `show` 不多出「权限来源」行的回归保留。
+- 新建 `test/mutate/batch50-perm-source.mjs`：**7/7 全中**——worker 写 null、任务规格记成 config、
+  worker 丢掉任务规格的生效权限、REPL 启动写 null、`/preset` 后不传来源、`PERMISSION_SOURCES`
+  漏 `job`、`verify` 把旧账本判失败。本批新增 7 条；全仓变异总数按 `test/mutate/README.md`
+  的计数行统一校正（与并行的 §3.88 UI 批合并后为 425）。
+
+**门禁**
+
+- `npm run typecheck`：通过。
+- `node test/ledger-source.js`：11 组通过。
+- `node test/smoke.js`：通过（最终工作树，含并行的 §3.88 左侧栏改动）。
+- `node test/ui-sessions.js`：5 项通过（§3.88 修掉硬编码日期炸弹后）。
+- `node test/e2e-local.js`：17 项通过；`node test/api-contracts.js`：8 项通过。
+- `node test/mutate/batch50-perm-source.mjs`：**7/7 全中**。
+- `node test/mutate/run.mjs --allow-dirty`（最终工作树，含 §3.88 + 本项）：**38/38 批次全中**
+  （含 batch50 7/7；改动未提交时跑，跑完自动还原、无残留）。
+- `node scripts/doc-lint.mjs`：通过（变异总数 425；`test/mutate/README.md` 计数行由本项从
+  418 校正为 425）。
+
+**未做 / 边界**
+
+- 没新增 REPL `/permission` 命令（当前不存在）：REPL 里显式改权限仍只能靠 `/preset`（记 `preset`），
+  因此本项不会在 REPL 路径产生 `explicit`；`explicit` 仍只由 WebUI 权限档写入。
+- 没改 `src/agent.js` 的 `permission: cfg.permission ?? permission.mode` 取值顺序（不在允许改动面）；
+  worker 通过传入「已降级的生效值」修正自己的账本，其它入口的既有口径不变。
+- 没改 `src/web/**`、`test/smoke.js`、`test/ui-sessions.js`、`presets/**`、`desktop/**`、`ide/**`；
+  `test/mutate/README.md` 只改了计数行（418 → 425）；未 tag / 改版本号 / publish / 动官网。

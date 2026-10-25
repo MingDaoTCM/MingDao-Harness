@@ -96,8 +96,16 @@ export async function runRepl(ctx) {
   const { io, cfg, home, pc0, opts, permission, workingDir, sessionUndoStore, mcpFacade, sessionRef, preset, withJournal, tuiState } = ctx;
   let presetBlock = ctx.presetBlock || ''; // v0.4.0 Agent Preset 系统提示定制段（/preset 可切换）
   let permissionNow = permission; // /preset 可换权限模式
-  // v0.4.0 Agent Preset：agent 用 agentCfg（预设 overlay 会话级生效）；cfg 保持干净供 saveConfig 持久化
-  let agentCfg = ctx.agentCfg || cfg;
+  // v0.4.0 Agent Preset：agent 用 agentCfg（预设 overlay 会话级生效）；cfg 保持干净供 saveConfig 持久化。
+  // v0.6.24 §3.89：REPL 启动时的来源沿用入口（cli.js）算好的值：未切预设 → `config`（config.json
+  // 有 permission）或 `default`（内置缺省）；`--preset` 已声明 permission → `preset`。这里只兜底
+  // 补齐、绝不写 null——"来源未知"与"来源就是配置"是两件事，REPL 属于后者。
+  // 这里**保持同一对象**（不拷贝）：cli.js 装配的首回合 agent 持有的 cfg 就是这个 agentCfg，
+  // 原地补来源才能让首回合同样可见；拷贝会让下面的补齐对已有 agent 失效。
+  let agentCfg = ctx.agentCfg || { ...cfg };
+  if (!agentCfg.permissionSource) {
+    agentCfg.permissionSource = cfg.permission !== undefined && cfg.permission !== null ? 'config' : 'default';
+  }
   let mcpManager = ctx.mcpManager;
   let modelName = ctx.modelName;
   let provider = ctx.provider;
@@ -300,7 +308,18 @@ export async function runRepl(ctx) {
         } else if (p.permission !== undefined) {
           over.permission = permOv.permission;
         }
-        agentCfg = { ...cfg, ...over, presetName: p.name };
+        // v0.6.24 §3.89：`/preset` 换了本会话的规则环境，来源必须跟着换。只有预设真的声明、
+        // 并被反提权判定采纳了 permission 才记 `preset`（与 cli.js 的 hasOwnProperty 同一口径）；
+        // 仅换提示词/工具白名单/模型的预设不冒充来源，沿用切换前的来源。
+        const permissionFromPreset = Object.prototype.hasOwnProperty.call(over, 'permission');
+        agentCfg = {
+          ...cfg,
+          ...over,
+          presetName: p.name,
+          permissionSource: permissionFromPreset
+            ? 'preset'
+            : agentCfg.permissionSource ?? (cfg.permission !== undefined && cfg.permission !== null ? 'config' : 'default'),
+        };
         if (over.model) await switchToModel(over.model, { silent: true, persist: false });
         presetBlock = presetSystemBlock(p);
         permissionNow = createPermission(agentCfg.permission ?? 'ask', io);

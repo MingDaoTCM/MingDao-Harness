@@ -49,6 +49,16 @@ export async function runWorkerTask(id, question, { permission, model, offpeak }
       perm = 'readonly';
       note = 'ask 权限下后台任务按只读执行';
     }
+    // v0.6.24 §3.89：把权限来源写进账本。此前 worker 路径恒写 null，后台任务/调度会话的
+    // `permission` 是 auto 还是 readonly 单看生效值无法区分「任务规格显式定的」与「配置来的」。
+    //   · 任务规格/CLI 显式给了 permission → `job`（**不复用 explicit**：那个值表示
+    //     "用户在本回合交互里选的"，提交任务时写进规格是另一回事；spawn 时它经
+    //     `--permission` 传入，语义仍是任务规格）；
+    //   · 否则权限口径来自 `config.json` → `config`；
+    //   · 配置里也没有 → 内置缺省 `default`（不冒充 config）。
+    // 生效值必须用**降级后**的 perm（ask → readonly 已在上面完成），否则账本会记下实际没生效的 ask。
+    const permissionSource = permission ? 'job' : cfg.permission !== undefined && cfg.permission !== null ? 'config' : 'default';
+    const agentCfg = { ...cfg, permission: perm, permissionSource };
     // 避峰（评估 A2/Kimi P-1）：高峰时段（北京工作日 9:00–12:00、14:00–18:00）
     // 自动顺延到最近闲时起点（12:00 / 18:00）执行，输入价省 50%
     if (offpeak && isPeakHour(new Date())) {
@@ -93,7 +103,7 @@ export async function runWorkerTask(id, question, { permission, model, offpeak }
       io,
       modelName,
       workingDir,
-      cfg,
+      cfg: agentCfg,
       mcp: mcpFacade || undefined,
       sessionRef,
       onCompact: (/** @type {any} */ msgs) => {
