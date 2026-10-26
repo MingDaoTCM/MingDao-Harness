@@ -3,6 +3,113 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.26（2026-10-26）— 本地引擎内存韧性 v2 + 布局断点修复
+
+> 本版两件事：① **内存恢复 v2**（§3.91，`src/agent.js` + `src/providers/index.js`）——
+> 本地引擎（Ollama 等）在上下文装不下时不再「压一次就放弃」：改为**两级压缩（硬上限 2 次重试）**，
+> 并把「这个端点装不下」**学到** `~/.mingdao/endpoint-limits.json`，**下一回合起手即用**
+> （`chat 预告` 注明来源）；子代理继承父回合的压缩预算，且自己也能两级压缩。
+> ② **布局断点修复**（§3.92，`src/web/index.html` + `src/web/app.js`）——<900 的窄条不再压住
+> 正文（主区/输入区右移 48px），右栏收起点 **1180 → 1100**（1100 / 1180 整点都是三栏）。
+> 细节见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` **§3.91 / §3.92**。
+
+### 一、内存恢复 v2：两级压缩 + 端点级学习 + 子代理继承（§3.91）
+
+**证据**：`~/.mingdao/logs/web-server.log` 在 10-18 / 10-19 / 10-26 三次出现同一形态——
+子代理跑到 31 轮 / 50 次工具调用后，本地引擎返回
+`insufficient memory … aborted before the allocator wall`，v0.6.18 的「一级压缩（×0.6）+ 一次重试」
+压到 19,660 仍被拒，整回合直接失败。三条根因：①只有一级压缩，没有下一级；②内核**不记住**
+「这个端点装不下」，下一回合又从 32,768 撞同一堵墙（建议里的 13,762 只是文案，没有落盘）；
+③子代理仍按父回合压缩**前**的预算发请求，父子预算不一致，29 分钟白跑。
+
+**修法**：
+
+- **两级压缩，硬上限 2 次重试**：`MEMORY_RECOVERY_LEVELS` 两级，比例都相对**本回合起手值**
+  （不是逐级连乘）：第 1 级预算 **×0.6** / 输出 **×0.5**；第 2 级预算 **×0.35** / 输出 **×0.25**；
+  下限预算 **4,096**、输出 **512**；`MAX_MEMORY_RETRIES = 2`，第三次失败直接报错，不存在无限重试。
+  每次重试各打一行日志（第几次 + 压缩前后数值），`done.note` 带完整链路
+  `32,768 → 19,660 → 11,468`。
+- **端点级学习**：`<mingdao-home>/endpoint-limits.json`，键 = 归一化 `baseUrl`，值
+  `{safeContextBudget, learnedAt, source:'memory-failure', attempts, maxOutputTokens}`。
+  **两级压缩都失败**才把「最后尝试的预算」写入；下一回合（`createAgent` / 每回合起手）
+  重读该文件，直接以 `safeContextBudget` 起手（用户配置本来更小则用户优先），并在 `chat 预告`
+  写明 `该端点曾因内存不足降级，本轮预算 N（来自 YYYY-MM-DD 的失败学习…）`。
+  恢复：连续 **3 次干净成功**（无压缩 / 无中断 / 无截断）→ 学习值 **+25%**，上限 = 用户配置预算。
+  读失败（损坏 / 权限）→ warn + 按无学习值继续且**不覆盖**损坏文件；写失败 → warn + 降级，
+  回合仍按正常内存失败文案收口，**不阻断会话**。
+- **子代理继承（两条都实现）**：父回合压缩时同步更新 `currentTurnBudget/currentTurnMaxOutput`，
+  `spawnTask` 用它们作为子代理的 `contextBudget/maxOutputTokens`；子代理自己也走同一套两级压缩
+  （独立于父回合，父回合没压缩时也能自救）。
+- **提示词与学习值对齐**：`describeUpstreamError` 的 hint 与最终失败文案改用**同一个学习值数字**
+  （`已把该端点内存安全预算记为 11,468（写入 …/endpoint-limits.json），下轮起手自动使用——config.contextBudget 也可手动调到 11,468`），
+  不再出现「建议值」与「实际起手值」分裂。
+- `docs/CONFIG.md` 的「本地引擎内存不足」一节按 v2 重写（两级表格、学习文件 schema、上调策略、边界）。
+
+### 二、布局断点修复：<900 窄条不再压正文、右栏收起点 1180→1100（§3.92）
+
+**证据**：负责人对 v0.6.25 指出两处已确认的布局缺陷（只动布局、不动功能）：①<900 左栏变成
+覆盖式抽屉后，44/42px 的固定窄条仍压住居中正文的左缘（880×900 截图里欢迎语/消息卡左缘落在
+窄条下方）；②`#runPanel` 的 `@media (max-width:1180px)` 在 1180 整点把右栏 `display:none`，
+1180 因此不是设计稿要求的三栏。
+
+**修法**：
+
+- **① <900 窄条不再压正文**：`body.side-drawer main,body.side-drawer footer` 的左边距由 0 改为
+  **48px**（44px 窄条 + 4px 间隙）；窄条仍是 `position:fixed`（不占文档流），补偿只加偏移、
+  不设宽度。880 下主区宽 832px、`#chat` 左缘 48px ≥ 窄条右缘 44px，正文不再被压，也不出现横向滚动。
+- **② 右栏收起点 1180 → 1100（由 `body.narrow-run` 收口）**：收起规则由
+  `@media (max-width:1180px)` 下调为 `@media (max-width:1100px)`，并加 `body.narrow-run` 限定
+  （`body.narrow-run #runPanel{display:none}`、`body.narrow-run.run-drawer #runPanel{display:flex}`）；
+  `narrow-run` 只在 `w < 1100` 时挂上，因此 **1100 与 1180 整点都是三栏**。
+- **③ 1101–1180 右栏 260px**：新增 `@media (min-width:1101px) and (max-width:1180px)`
+  （`#runPanel{width:260px}`、`body.run-open{padding-right:260px}`，`#sessSheet`/`#scrollBottomBtn`
+  同步右移），右栏仍可见、内部照常滚动，1180 三栏时正文仍有 638px。
+- **④ 1000 / 880 仍是抽屉**：左栏三档（1180 / 900）与左右抽屉的 `display:flex` 未动；
+  `src/web/app.js` 的 `layoutClassesFor()` 只改阈值：`narrowRun: w < 1180` → `w < 1100`。
+- **⑤ 测试夹具同步**：`test/mutate/batch38-ui-p1.mjs` ⑦ 的变异锚点写死了旧
+  `return { narrow: w < 900, narrowRun: w < 1180 };`，仅把该锚点的 `< 1180` 同步为 `< 1100`
+  （缺陷语义与断言「900px 以下必须收起侧栏」不变，**未放宽语义**）。
+
+### 三、测试与变异
+
+- `test/memory-recovery.js`：**5 项 → 11 项**（两级压缩各自生效、学习值落盘 / 生效 / 预告、
+  子代理继承、子代理自压缩、+25% 上调、损坏 / 不可写降级；保留云端 507 不重试、`n_ctx` clamp、
+  400/401/429 不触发）。
+- `test/mutate/batch40-memory-recovery.mjs` 按 v2 判据重写（**11/11**）；
+  新建 `test/mutate/batch52-memory-v2.mjs`（**11/11**）。
+- `test/smoke.js` 新增 **§160**（窄条不占流 / 48px 补偿 / 正文左缘 ≥ 窄条右缘 / 无横向滚动 /
+  1100 与 1180 整点三栏 / 1101–1180 右栏 260px / 1000 与 880 仍抽屉）。
+- 新建 `test/mutate/batch52-layout-bp.mjs`：**11/11**（收起点改回 1180、JS 阈值回退、补偿归零 /
+  缩到 30px、窄条恢复占流、1101–1180 右栏 `display:none`、左右抽屉丢失、补偿加 `min-width`
+  与 `body{overflow-x:auto}` 造成横向滚动、收起规则去掉 `narrow-run` 收口）。
+- 全仓变异总数 **439 → 461**（41 批；`test/mutate/README.md` 计数行同步）。
+
+### 四、验证
+
+- 本机 macOS，门禁在最终提交 `df615d31feb9821176e1a27ea38a7259bb1eddd4`（= `v0.6.25` 之后、发布提交之前）上跑，`MINGDAO_HOME` 为临时目录。
+- `typecheck` 0；`typecheck:strict` 当前 0 / 基线 0；`smoke` **156 组断言**（含新增 §160，单独跑）；
+  `e2e-local` 17 / `e2e-web` 24 / `e2e-schedule` 11 / `api-contracts` 8；
+  `pack-ctx-privesc` 4 组 / `ledger-source` 11 组 / `model-names` 8 组 /
+  `memory-recovery` **11** / `ui-sessions` 5 → 全通过。
+- `mutate/selfcheck` 14/14；`npm run bench` 5 套基准全通过；
+  `node test/mutate/run.mjs` → **41/41 批、461/461 条全中、0 逃逸**。
+- `scripts/doc-lint.mjs` 全通过（变异总数 461）；`src/cli.js diagnose` 报告正常、密钥脱敏。
+- 发布提交只含五个发布文件；`git diff --name-only df615d3..v0.6.26^{commit} -- src test` → **0 行**。
+
+### 五、已知边界（逐条如实登记）
+
+- **两级压缩后仍可能失败**：引擎显存是硬限制，本版只保证「有界地多试一次 + 记住能用的预算 +
+  给出一致的建议值」，不保证一定能跑完；若第 3 次仍失败，回合如实失败并给出该端点的学习值建议。
+- **学习值只按 `baseUrl` 记录，不含模型名**：同一个 Ollama 端口换成更小/更大的模型不会自动重置
+  学习值；换端口或反代地址会形成第二条记录（刻意：不同端口/反代可能对应不同显存与并发配置）。
+- **连续 3 次干净成功才 +25%**：恢复是**渐进的**，不会在一次成功后立刻回到用户配置；
+  上调后若再撞墙会被重新学下来（不保证一次收敛到最优值）。
+- **1180 顶栏右侧仍需横向滚动**：`hdr-right` 仍是 `overflow-x:auto` 的可滚动容器（v0.6.21 §3.83 既定），
+  本版只下调右栏收起点，未重排顶栏入口；1180 下仍可能需要横向滚动才能看到最右侧按钮。
+- **未在真 Windows / 真机逐按钮验收**：本版改动为内存恢复（本地引擎路径）与布局断点，
+  Windows 侧证据只有 CI 的 `test (windows-latest, 20)`；未在标准 Windows 账户上跑 `npm test`，
+  也未逐按钮点选验收。
+
 ## v0.6.25（2026-10-26）— UI 去重（左栏/顶栏/最近会话）+ 右栏标签上移与概览折叠
 
 > 本版只改 WebUI（`src/web/index.html` + `src/web/app.js`），按负责人的四条意见做「去重 + 提密度」：
