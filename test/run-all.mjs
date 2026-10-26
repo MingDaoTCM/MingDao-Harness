@@ -13,6 +13,8 @@ const SUITES = [
   ['e2e-web', 'node', ['test/e2e-web.js']],
   ['e2e-schedule', 'node', ['test/e2e-schedule.js']],
   ['api-contracts', 'node', ['test/api-contracts.js']],
+  // v0.6.26 §3.95：发版校验三态（ok/mismatch/unreachable）+ peel 失败不回退比较 tag 对象
+  ['verify-release', 'node', ['test/verify-release.js']],
   // v0.6.22 §3.84：会话列表分组 + 消息时间戳（纯函数 + /api/sessions 新增字段 + 旧会话 ts 兼容）
   ['ui-sessions', 'node', ['test/ui-sessions.js']],
   // v0.6.18 §3.74：本地引擎内存/显存不足 → 压缩上下文 + 输出减半 + 串行，只重试一次

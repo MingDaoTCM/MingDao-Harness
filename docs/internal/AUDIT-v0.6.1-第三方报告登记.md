@@ -5140,3 +5140,66 @@ Web 写的消息有时间、非 Web 写的没有；旧会话（该字段引入�
 - 1100–1180 右栏收窄到 260px 后内容区更紧凑，右栏内部滚动由既有 `.rp-body/.rp-tab` 承担，未新增
   滚动容器或改字号。
 
+
+## 3.95 已做（v0.6.26 工具债：`verify-release` 三态分类 + peel 失败不再假失败）
+
+**来源 / 证据**：`scripts/verify-release.mjs` 是每次发版收尾都要跑的最后一道闸，但 v0.6.24 发布后
+关机守护跑出了「✗ 四平台未对齐：1 项缺失/不一致 / GitHub/main：期望 1696b02f…，实得 取不到
+（spawnSync git ETIMEDOUT）」，而同一时刻负责人手工连跑三次全绿——**一次网络超时被渲染成了
+「发布不一致」**；同一版本发布时还出现过「peel 失败后回退未 peel 的 tag 得到 tag 对象
+`d2788e96`，与 main 比较必然不等」，同样是假失败。两处都直接浪费一整轮发布判断。
+
+**修法（`scripts/verify-release.mjs` 重构为纯函数 + 薄 I/O）**
+
+- 三态与退出码：`ok` → **0**；`mismatch`（真的不同 SHA / Release 或附件缺失 / npm 未发）→ **1**，
+  文案仍为「四平台未对齐……这不算发布完成」；`unreachable`（超时 / 网络 / DNS / HTTP 5xx /
+  鉴权限流）→ **2**，文案「取不到（网络/服务不可达）……这不是发布失败，请重试」并给出重跑建议。
+  两者同时存在时以 mismatch 优先（真问题不能被网络噪声掩盖）。
+- `--retry N`（默认 2）：**只对 unreachable 重试**（1s/2s 指数退避），mismatch/ok 一次即返回；
+  `--timeout-ms N`（默认 20000）。旧的「函数内部硬编码三次重试 + 60s 超时」拆成统一入口。
+- peel 失败：拿不到 `refs/tags/<tag>^{}` 时**不再回退比较未 peel 的 tag 对象**。先看未 peel 的 SHA
+  是否恰好等于本地提交（轻量 tag）；不等则尝试 GitHub API（`git/ref/tags/<tag>` → 必要时
+  `git/tags/<sha>`）取 peeled 提交，且**只有 API 的 tag 对象 SHA 与目标平台未 peel SHA 一致时才借用**
+  （防拿别的仓库/旧 tag 假绿）；仍取不到就按 unreachable（exit 2），文案写「无法确定 tag 指向的提交」。
+- 纯函数层导出：`classifyChecks`（→ `{exitCode, mismatches, unreachable, warnings}`）、
+  `makeMainCheck`、`makeTagCheck`、`withRetry`、`parseArgs`、`isTimeoutError`、`isUnreachableError`、
+  `isUnreachableHttp`、`formatSummary`；网络 / `git ls-remote` 只在薄 I/O 层，CLI 仅在直接执行时启动，
+  测试可直接 import。
+- **成功输出保持逐字不变**：`✓ 四平台一致（GitHub / Gitee / GitCode 的 main 与 tag 同 SHA，
+  Release 齐备，npm 已发该版本）`，发版脚本的 grep 不受影响；逐项行格式也不变（unreachable 的标记
+  用 `?` 与 mismatch 的 `✗` 区分）。
+
+**断言与变异**
+
+- 新建独立套件 `test/verify-release.js`（`node test/verify-release.js`，不连网、不起服务）：
+  ①全绿→0 且成功文案与旧版一致；②一个 mismatch→1 且文案「未对齐/不算发布完成」；
+  ③一个 unreachable→2 且文案含「不是发布失败」「重试」、不出现「未对齐」；
+  ④peel 失败→2（断言不回退比较 tag 对象；API 解析成功按提交判、API 也失败仍 2；轻量 tag 仍 ok）；
+  ⑤`--retry` 桩计数：ok/mismatch 各只调用 1 次，unreachable 调用 3 次（retry=2），抖动两次后成功
+  共 3 次且退避 100ms→200ms；⑥超时/DNS/HTTP 5xx→unreachable 且 exit 2，HTTP 404 仍为 mismatch。
+- 新建 `test/mutate/batch55-verify-release.mjs`：**7/7 全中**（unreachable 归 mismatch、peel 失败
+  回退比较 tag 对象、retry 对 mismatch 生效、超时不归类、exit code 1/2 对调、文案丢掉「不是发布失败」、
+  unreachable 不重试）。全仓变异总数 461 → **468**（本批 +7）；`test/mutate/README.md` 计数行由
+  另一道拥有，本次未改（登记实测值 468 供其校正）。
+- 接入：`test/run-all.mjs` 新增 `verify-release` 套件（`node test/run-all.mjs --suite=verify-release`
+  通过）；`.github/workflows/ci.yml` 新增**仅 Linux 腿**的同名步骤（带失败注解）。
+
+**门禁（本回合实测）**
+
+- `node test/verify-release.js`：6 项通过。
+- `node test/run-all.mjs --suite=verify-release`：1 套通过。
+- `node test/mutate/batch55-verify-release.mjs`：7/7 全中。
+- `set -a && . ./.env && set +a && node scripts/verify-release.mjs 0.6.26`：**exit 0**，逐项全绿。
+  （另用 `9.9.9` 实测 mismatch → exit 1；用 `--retry 0 --timeout-ms 1` 实测 unreachable → exit 2，
+  文案含「这不是发布失败，请重试」。）
+- `npm run typecheck`：通过。
+- `node scripts/doc-lint.mjs`：除「变异总数 README 461 vs 实际 468」外全绿；该计数行按分工由另一道
+  更新（本任务明确不改），其余 8 项守卫（链接/子命令/kind/模型 id/架构覆盖/API 表/只读工具/测试端口）通过。
+
+**未做 / 边界**
+
+- 未改 `src/**`、`test/smoke.js`、`test/mutate/README.md`、`presets/**`、`desktop/**`、`ide/**`；
+  未 tag / 改版本号 / publish / 动官网。
+- GitHub API peel 是「安全借用」：只接受与目标平台未 peel SHA 相同的 tag 对象；Gitee/GitCode 若
+  与 GitHub 的 tag 对象不一致，宁可 exit 2 也不拿 API 结果硬判，避免假绿。
+- 未新增并发读取（仍逐平台顺序执行）；网络健康时耗时与旧版相当，全不可达时按重试次数有界等待。
