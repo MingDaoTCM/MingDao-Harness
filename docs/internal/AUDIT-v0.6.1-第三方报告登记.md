@@ -5153,7 +5153,8 @@ Web 写的消息有时间、非 Web 写的没有；旧会话（该字段引入�
 
 - 三态与退出码：`ok` → **0**；`mismatch`（真的不同 SHA / Release 或附件缺失 / npm 未发）→ **1**，
   文案仍为「四平台未对齐……这不算发布完成」；`unreachable`（超时 / 网络 / DNS / HTTP 5xx /
-  鉴权限流）→ **2**，文案「取不到（网络/服务不可达）……这不是发布失败，请重试」并给出重跑建议。
+  鉴权限流，以及**任何 git 读取失败**——TLS/代理/凭据/仓库不可访问都算「无法判定」而非「不一致」）
+  → **2**，文案「取不到（网络/服务不可达）……这不是发布失败，请重试」并给出重跑建议。
   两者同时存在时以 mismatch 优先（真问题不能被网络噪声掩盖）。
 - `--retry N`（默认 2）：**只对 unreachable 重试**（1s/2s 指数退避），mismatch/ok 一次即返回；
   `--timeout-ms N`（默认 20000）。旧的「函数内部硬编码三次重试 + 60s 超时」拆成统一入口。
@@ -5176,9 +5177,10 @@ Web 写的消息有时间、非 Web 写的没有；旧会话（该字段引入�
   ③一个 unreachable→2 且文案含「不是发布失败」「重试」、不出现「未对齐」；
   ④peel 失败→2（断言不回退比较 tag 对象；API 解析成功按提交判、API 也失败仍 2；轻量 tag 仍 ok）；
   ⑤`--retry` 桩计数：ok/mismatch 各只调用 1 次，unreachable 调用 3 次（retry=2），抖动两次后成功
-  共 3 次且退避 100ms→200ms；⑥超时/DNS/HTTP 5xx→unreachable 且 exit 2，HTTP 404 仍为 mismatch。
+  共 3 次且退避 100ms→200ms；⑥超时/读失败（DNS、HTTP 5xx、TLS/代理/凭据）→unreachable 且 exit 2，
+  HTTP 404 仍为 mismatch。
 - 新建 `test/mutate/batch55-verify-release.mjs`：**7/7 全中**（unreachable 归 mismatch、peel 失败
-  回退比较 tag 对象、retry 对 mismatch 生效、超时不归类、exit code 1/2 对调、文案丢掉「不是发布失败」、
+  回退比较 tag 对象、retry 对 mismatch 生效、读失败不归类（超时→mismatch）、exit code 1/2 对调、文案丢掉「不是发布失败」、
   unreachable 不重试）。全仓变异总数 461 → **468**（本批 +7）；`test/mutate/README.md` 计数行由
   另一道拥有，本次未改（登记实测值 468 供其校正）。
 - 接入：`test/run-all.mjs` 新增 `verify-release` 套件（`node test/run-all.mjs --suite=verify-release`

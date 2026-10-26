@@ -135,7 +135,9 @@ export function isUnreachableHttp(status) {
 /** 一次 `git ls-remote` 读取的三态：读到 SHA=ok（是否相等由上层判）、报错=unreachable、没有=missing。 */
 export function classifyRead(read) {
   if (read && read.sha) return STATUS.OK;
-  if (read && read.error) return isUnreachableError(read.error) ? STATUS.UNREACHABLE : STATUS.MISMATCH;
+  // 任何读取失败都是「取不到」：TLS/代理/凭据/仓库不可访问同样属于「无法判定」，
+  // 而不是「SHA 读到且不同」。把这些归成 mismatch 会重复 v0.6.24 那类误报。
+  if (read && read.error) return STATUS.UNREACHABLE;
   return STATUS.MISMATCH;
 }
 
@@ -325,7 +327,7 @@ export function readGitRef(url, ref, { timeoutMs = DEFAULT_TIMEOUT_MS } = {}) {
 async function readWithRetry(url, ref, { timeoutMs, retryOpts }) {
   const { result, attempts } = await withRetry(async () => {
     const read = readGitRef(url, ref, { timeoutMs });
-    const status = read.sha ? STATUS.OK : read.error && isUnreachableError(read.error) ? STATUS.UNREACHABLE : STATUS.MISMATCH;
+    const status = read.sha ? STATUS.OK : read.error ? STATUS.UNREACHABLE : STATUS.MISMATCH;
     return { ...read, status };
   }, retryOpts);
   return { ...result, attempts };

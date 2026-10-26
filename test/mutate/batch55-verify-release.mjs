@@ -39,13 +39,13 @@ M.mutate({
   run: RUN,
 });
 
-// ④ 超时不归类为 unreachable：`spawnSync git ETIMEDOUT` 又变成 mismatch
+// ④ 读失败不归类为 unreachable：超时/TLS/代理又变成 mismatch
 M.mutate({
-  name: '④ 超时不归类（isTimeoutError 恒 false）',
+  name: '④ 读失败不归类为 unreachable（超时 → mismatch）',
   file: 'scripts/verify-release.mjs',
-  from: '  return /ETIMEDOUT|ESOCKETTIMEDOUT/i.test(code) || /ETIMEDOUT|timed out|timeout|SIGTERM|killed/i.test(message);',
-  to: '  return false;',
-  expect: ['ETIMEDOUT 必须识别为超时', '超时必须归类为 unreachable（不是 mismatch）'],
+  from: '  if (read && read.error) return STATUS.UNREACHABLE;',
+  to: '  if (read && read.error) return STATUS.MISMATCH;',
+  expect: ['超时必须归类为 unreachable（不是 mismatch）', '任何 git 读失败（含 TLS/代理/凭据）都归 unreachable，不是 mismatch'],
   run: RUN,
 });
 

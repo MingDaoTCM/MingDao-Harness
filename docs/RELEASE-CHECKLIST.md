@@ -433,7 +433,7 @@ node scripts/verify-release.mjs <版本>  # 四个渠道逐项核对，任一缺
 | --- | --- | --- |
 | `0` | `ok`：四平台同一 commit，Release 齐备，npm 已发该版本 | 通过 |
 | `1` | `mismatch`：**真的不一致**（SHA 不同 / Release 或附件缺失 / npm 未发该版本） | 发布未完成，按输出逐项补齐；**不要**当成网络问题重试了事 |
-| `2` | `unreachable`：**取不到**（超时 / 网络 / DNS / HTTP 5xx / 鉴权限流） | **这不是发布失败，请重试**；稍等几秒重跑即可，**不是回滚信号** |
+| `2` | `unreachable`：**取不到**（超时 / 网络 / DNS / HTTP 5xx / 鉴权限流，以及任何 git 读失败） | **这不是发布失败，请重试**；稍等几秒重跑即可，**不是回滚信号** |
 
 - `--retry N`（默认 2）：只对 **unreachable** 自动重试（指数退避）；`mismatch` 从不重试。
 - `--timeout-ms N`（默认 20000）：单次 `git ls-remote` / HTTP 请求的超时。

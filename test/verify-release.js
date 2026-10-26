@@ -186,8 +186,10 @@ const greenChecks = () => [
   assert.equal(isUnreachableHttp(503), true, 'HTTP 503 是 unreachable');
   assert.equal(isUnreachableHttp(429), true, 'HTTP 429（限流）是 unreachable');
   assert.equal(isUnreachableHttp(404), false, 'HTTP 404 是「Release 缺失」，必须 mismatch');
-  assert.equal(makeMainCheck({ platform: 'Gitee', localMain: A, read: { sha: null, error: 'fatal: could not read Username' } }).status, STATUS.MISMATCH, '非网络类 git 错误按 mismatch（不是网络抖动）');
-  ok('⑥ 超时 → unreachable/exit 2（HTTP 5xx 同；404 仍是 mismatch）');
+  // 任何 git 读失败都是「取不到」：TLS/代理/凭据问题不是「远端 SHA 与本地不同」，
+  // 归成 mismatch 会重复 v0.6.24 那类误报（读失败 ≠ 读到不同 SHA）。
+  assert.equal(makeMainCheck({ platform: 'Gitee', localMain: A, read: { sha: null, error: 'fatal: could not read Username' } }).status, STATUS.UNREACHABLE, '任何 git 读失败（含 TLS/代理/凭据）都归 unreachable，不是 mismatch');
+  ok('⑥ 超时/读失败 → unreachable/exit 2（HTTP 5xx 同；404 仍是 mismatch）');
 }
 
 console.log(`\n发布校验三态测试全部通过：${passed} 项 ✓`);
