@@ -5048,7 +5048,11 @@ Web 写的消息有时间、非 Web 写的没有；旧会话（该字段引入�
 - `node test/smoke.js`：通过（单独跑）。
 - `node test/e2e-local.js`：17 项通过；`node test/api-contracts.js`：8 项通过。
 - `node test/mutate/batch40-memory-recovery.mjs`：11/11；`node test/mutate/batch52-memory-v2.mjs`：11/11。
-- `node test/mutate/run.mjs --allow-dirty`：全批次全中（见提交前的运行日志）。
+- `node test/mutate/run.mjs --allow-dirty`：**40/41 批全中**。唯一红是 `batch38-ui-p1` ⑦
+  「变异点未找到」——工作树里同时有布局线未提交的 §3.92 改动（`narrowRun` 阈值 1180→1100），
+  该锚点归布局线在它的提交里更新，与 §3.91 改动的文件无关；在**本次提交的树**（`git worktree`
+  检出 `8d78246`）上单独复跑 `batch38-ui-p1`：**14/14**。本线两批（batch40 / batch52-memory-v2）
+  在整轮里均 **11/11**。
 - `node scripts/doc-lint.mjs`：唯一红是「变异总数 README 450 vs 实际 461」——计数行归布局线，
   其提交时校正为 461 即绿；其余 8 项守卫全过。
 
