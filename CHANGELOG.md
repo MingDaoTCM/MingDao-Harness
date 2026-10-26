@@ -3,6 +3,105 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.27（2026-10-26）— verify-release 三态 + 顶栏精简/兼容节点清理 + Windows 夹具修复
+
+> 本版三件事，都是「把上一轮留下的债收干净」：① **`verify-release` 三态**（§3.95）——
+> 发版收尾那道闸不再把一次网络超时说成「四平台不一致」：`ok=0` / `mismatch=1` /
+> **`unreachable=2`**，只有真不一致才退 1；peel 拿不到时也不再回退比较 tag 对象。
+> ② **界面清理与顶栏精简**（§3.94）——删掉 v0.6.25 留下的两个 hidden 兼容节点，
+> 顶栏可见入口 **13 → 11**、可交互控件 **10 → 8**，会话管理移入左栏「最近会话」。
+> ③ **Windows CI 夹具修复**（§3.93）——`memory-recovery` 不再用 `chmod` 造「不可写目录」
+> （Windows 上无效），改为 fs 门面注入，所有平台走同一条路径。细节见
+> `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` **§3.93 / §3.94 / §3.95**。
+
+### 一、`verify-release` 三态：网络不可达不再冒充「发布不一致」（§3.95）
+
+**证据**：`scripts/verify-release.mjs` 是每次发版收尾的最后一道闸，但 v0.6.24 发布后关机守护
+跑出了「✗ 四平台未对齐：GitHub/main 期望 1696b02f…，实得 取不到（spawnSync git ETIMEDOUT）」，
+而同一时刻负责人手工连跑三次全绿——**一次网络超时被渲染成了「发布不一致」**；同版还出现过
+peel 失败后回退未 peel 的 tag 对象（`d2788e96`）去和 main 比较，必然不等，同样是假失败。
+误报会训练人忽略这条告警，而它恰恰是防半发布的最后一道闸。
+
+**修法**：
+
+- **三态与退出码**：`ok` → **0**；`mismatch`（真的不同 SHA / Release 或附件缺失 / npm 未发）
+  → **1**，文案仍为「四平台未对齐……这不算发布完成」；`unreachable`（超时 / 网络 / DNS /
+  HTTP 5xx / 鉴权限流，以及**任何 git 读取失败**——TLS/代理/凭据/仓库不可访问都算「无法判定」
+  而非「不一致」）→ **2**，文案写「取不到（网络/服务不可达）……**这不是发布失败，请重试**」。
+  两者同时存在时以 mismatch 优先（真问题不能被网络噪声掩盖）。
+- **`--retry N`（默认 2）**：只对 unreachable 重试（1s/2s 指数退避），mismatch/ok 一次即返回；
+  **`--timeout-ms N`（默认 20000）**：单次 `git ls-remote` / HTTP 请求超时。
+- **peel 失败不回退比较 tag 对象**：拿不到 `refs/tags/<tag>^{}` 时，先看未 peel 的 SHA 是否
+  恰好等于本地提交（轻量 tag）；不等则经 GitHub API（`git/ref/tags/<tag>` → 必要时
+  `git/tags/<sha>`）取 peeled 提交，且**只有 API 的 tag 对象 SHA 与目标平台未 peel SHA 一致时
+  才借用**（防拿别的仓库/旧 tag 假绿）；仍取不到按 unreachable（exit 2），文案写
+  「无法确定 tag 指向的提交」。
+- 脚本重构为**纯函数 + 薄 I/O**（`classifyChecks` / `makeMainCheck` / `makeTagCheck` /
+  `withRetry` / `parseArgs` / `formatSummary` 等导出），**成功输出逐字不变**：
+  `✓ 四平台一致（GitHub / Gitee / GitCode 的 main 与 tag 同 SHA，Release 齐备，npm 已发该版本）`。
+
+**测试与变异**：新建独立套件 `test/verify-release.js`（不连网、不起服务）**6 项**：
+①全绿→0 且成功文案与旧版一致；②一个 mismatch→1 且文案「未对齐/不算发布完成」；
+③一个 unreachable→2 且文案含「不是发布失败」「重试」、不出现「未对齐」；
+④peel 失败→2（不回退比较 tag 对象；API 解析成功按提交判、API 也失败仍 2；轻量 tag 仍 ok）；
+⑤`--retry` 桩计数（ok/mismatch 各 1 次，unreachable 3 次，抖动两次后成功共 3 次且退避
+100ms→200ms）；⑥超时/读失败（DNS、HTTP 5xx、TLS/代理/凭据）→unreachable，HTTP 404 仍 mismatch。
+新建 `test/mutate/batch55-verify-release.mjs` **7/7 全中**；套件接入 `test/run-all.mjs` 与
+CI **仅 Linux 腿**。
+
+### 二、界面清理与顶栏精简（§3.94，`src/web/index.html` + `src/web/app.js`）
+
+**证据**：v0.6.25 为保住旧变异锚点保留了两个 hidden 兼容节点（`#legacyRailCompat` /
+`#newChatCompat`）；同时左栏会话列表上线后，顶栏「历史会话」`#sessions` 与「会话管理」
+`#sessMgrBtn` 与左栏重复。本轮只删冗余、不删能力。
+
+**修法**：
+
+- 删除 **`#newChatCompat`** 包裹层：`#newChat` 直接以 `hidden` 保留（左侧 `#sideNavNew` 与 ⌘K
+  复用同一 handler）。
+- 删除 **`#legacyRailCompat`**（连同其内 `#trajRailBtn` / `#subRailBtn`）：轨迹/子Agent 由右栏
+  四标签唯一承接；同步删掉 `#tasksBtn` / `#costBadge` handler 里对两个已删按钮的
+  `classList.remove('on')`——否则空引用会先抛错、标签切不动（这是删节点后真正的行为回归点）。
+- 顶栏「会话管理」移入左栏「最近会话」标题右侧：新增 `#sideNavSessMgr`（✎，复用
+  `openSessModal`）；原 `#sessMgrBtn` 只保留 hidden 兼容节点。
+- 顶栏「历史会话」`#sessions` 保留但加 `hidden`：左栏点击仍写回它并派发 change（能力不变）。
+- **顶栏可见入口 13 → 11（可交互控件 10 → 8）**：历史会话、会话管理不再显示；1440 截图中原先
+  被 `.hdr-right` 横向溢出挤出的「任务」按钮在腾出空间后露出。未引入设计稿 CSS、未改 `.app`
+  网格/顶栏高度/主题/字号。
+
+**测试与变异**：`test/smoke.js` 新增 **§162**（6 组断言：两个兼容节点及其子按钮不存在；
+新建入口唯一可见；右栏四标签绑定不丢；会话管理在左栏且复用 `openSessModal`；
+顶栏 8 个可交互/11 个可见项且 `#sessions`/`#sessMgrBtn`/`#newChat` 均 hidden；既有能力回归）。
+§159② 的包裹层断言同步改为「已删除 + `#newChat` 直接 hidden」；既有锚点同步
+（batch43① / 44⑤ / 45⑦ / 49② / 51③，缺陷语义未放宽）。新建 `batch54-cleanup` **10/10 全中**。
+
+### 三、Windows CI 夹具修复：`memory-recovery` 改用 fs 门面注入（§3.93）
+
+**证据**：v0.6.26 的 windows 腿红在 `test/memory-recovery.js`——⑧ 用
+`fs.chmodSync(home, 0o500)` 造「目录不可写」，而 **Windows（尤其 admin runner）上 chmod
+不阻止写入**，写入成功→没有「写入失败」warn→断言红；套件崩在 ⑧，batch40 的 ⑦–⑩
+因根本没跑到而连带被判「逃逸」。产品代码无回归。
+
+**修法（测试侧，无产品改动）**：⑧ 不再碰权限位，改为给 `endpoint-limits.json` 的**原子写临时
+文件注入 fs 门面**——只匹配 `dirname === home && basename.startsWith('.endpoint-limits.json.')
+&& endsWith('.tmp')`，第一次写抛 `EACCES`；注入在 `finally` 第一行还原，再用真实 fs 恢复备份，
+不污染后续用例。所有平台走同一条路径，不再依赖 POSIX 权限位。
+
+**测试与变异**：`test/smoke.js` 新增 **§161** 结构守卫（禁 chmod / 平台跳过 / `/tmp` 硬编码，
+要求门面作用域、两条 warn 断言与 `finally` 还原仍在）；新建
+`test/mutate/batch53-portable-fixtures.mjs` **6/6 全中**；`batch40` **11/11**（⑦–⑩ 重新被抓到），
+`batch52-memory-v2` 复跑 **11/11**。
+
+### 四、变异总数校正与门禁
+
+- `test/mutate/README.md` 的变异总数由 **461 校正为 484**（本轮 batch53 +6 / batch54 +10 /
+  batch55 +7 落库后的真实计数；`doc-lint` ⑥ 会校验文档数字 = 各 `batch*.mjs` 的 `name:` 条数）。
+- 全量变异：**44/44 批次、484 条全中、0 逃逸**。
+- 本机门禁逐项见发布报告；`verify-release` 套件（6 项）单独跑，`smoke` 单独跑。
+- 未改产品逻辑：发布提交只含 `CHANGELOG.md` / `RELEASE-NOTES-0.6.27.md` / `package.json` /
+  `package-lock.json` / `desktop/package.json`，`git diff --name-only <门禁SHA>..<tagSHA> -- src test`
+  为 **0 行**。
+
 ## v0.6.26（2026-10-26）— 本地引擎内存韧性 v2 + 布局断点修复
 
 > 本版两件事：① **内存恢复 v2**（§3.91，`src/agent.js` + `src/providers/index.js`）——
