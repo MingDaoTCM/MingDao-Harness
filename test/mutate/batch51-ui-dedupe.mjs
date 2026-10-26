@@ -42,13 +42,14 @@ M.mutate({
   run: SEC,
 });
 
-// ③ 顶栏「新对话」又可见：hidden 兼容节点被拿掉 hidden，与左侧入口重复
+// ③ 顶栏「新对话」又可见：hidden 兼容节点被拿掉 hidden，与左侧入口重复（v0.6.27 §3.94 已删
+//    #newChatCompat 包裹层，#newChat 直接以 hidden 保留——锚点同步到真实代码）
 M.mutate({
   name: '③ 顶栏 #newChat 去掉 hidden（可视入口变成两个）',
   file: 'src/web/index.html',
-  from: '<span id="newChatCompat" hidden>',
-  to: '<span id="newChatCompat">',
-  expect: ['顶栏「新对话」必须包在 hidden 兼容节点里'],
+  from: '<button id="newChat" hidden>新对话</button>',
+  to: '<button id="newChat">新对话</button>',
+  expect: ['顶栏「新对话」必须保留为 hidden 兼容节点'],
   run: SEC,
 });
 

@@ -17991,14 +17991,15 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
       '顶栏费用徽标必须仍走 activateRailTab(dash)');
   }
 
-  // —— ② 可见的新建入口只有左侧一个；#newChat 语义仍可用（顶栏是 hidden 兼容节点） ——
+  // —— ② 可见的新建入口只有左侧一个；#newChatCompat 已删除，#newChat 仅直接以 hidden 保留 ——
   {
     const hStart = html159.indexOf('<header>');
     const hEnd = html159.indexOf('</header>', hStart);
     assert.ok(hStart >= 0 && hEnd > hStart, '（前置）必须能切出 <header>');
     const header159 = html159.slice(hStart, hEnd);
-    const compat159 = /<span id="newChatCompat" hidden><button id="newChat">新对话<\/button><\/span>/.exec(header159);
-    assert.ok(compat159, '顶栏「新对话」必须包在 hidden 兼容节点里（可视入口只留左侧）');
+    assert.ok(!/id="newChatCompat"/.test(html159), '#newChatCompat 兼容节点必须已删除（v0.6.27 §3.94）');
+    const compat159 = /<button id="newChat" hidden>新对话<\/button>/.exec(header159);
+    assert.ok(compat159, '顶栏「新对话」必须保留为 hidden 兼容节点（§153/§155/§158 仍钉其 id）');
     assert.equal((html159.match(/id="newChat"/g) || []).length, 1, '#newChat 必须唯一（hidden 兼容节点）');
     const headerVisible159 = header159.replace(compat159[0], '');
     assert.ok(!/id="newChat"/.test(headerVisible159), '顶栏不得再有第二个可见的 #newChat');
@@ -18369,6 +18370,139 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   }
 
   ok('v0.6.26 §3.92 布局断点：<900 窄条 fixed 不占流 + 正文/输入区右移 48px（左缘 ≥ 窄条右缘、补偿不设宽）+ 右栏收起点 1180→1100（narrow-run 收口，1100/1180 整点三栏）+ 1101–1180 右栏 260px 仍可见 + 1000/880 抽屉不丢 + 正文无横向滚动');
+}
+
+// ---------- 162. v0.6.27 §3.94：清理 hidden 兼容节点 + 顶栏重复入口（会话管理移入左栏） ----------
+// 接 §160/§161。两件事：①删除 #legacyRailCompat / #newChatCompat（能力由右栏四标签 / 左栏 #sideNavNew 承接）；
+// ②顶栏「会话管理」入口移入左栏「最近会话」标题右侧（新入口 #sideNavSessMgr，复用 openSessModal；
+//   #sessMgrBtn 保留 hidden 兼容节点，因为 §153/§155/§158 仍钉它在 header），「历史会话」#sessions
+//   保留但 hidden。顶栏可见入口 13 → 11，能力一个不丢。
+{
+  const html162 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  const app162 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+
+  /** 取 header 里某个 id 的标签原文（第一个匹配；用于判断 hidden 属性）。 */
+  function tagOf162(html, id) {
+    const m = new RegExp(`<[a-z][^>]*\\bid="${id}"[^>]*>`).exec(html);
+    return m ? m[0] : '';
+  }
+  function header162(html) {
+    const i = html.indexOf('<header>');
+    const j = html.indexOf('</header>', i);
+    assert.ok(i >= 0 && j > i, '（前置）必须能切出 <header>');
+    return html.slice(i, j);
+  }
+  function aside162(html) {
+    const i = html.indexOf('<aside id="sideNav"');
+    const j = html.indexOf('</aside>', i);
+    assert.ok(i >= 0 && j > i, '（前置）必须能切出 #sideNav');
+    return html.slice(i, j);
+  }
+
+  // —— ① 两个 hidden 兼容节点已删除（不是继续藏着），旧窄条 id 不得以任何形式残留 ——
+  {
+    assert.ok(!/id="newChatCompat"/.test(html162), 'hidden 兼容节点 #newChatCompat 必须已删除（新建能力由 #sideNavNew 承接）');
+    assert.ok(!/id="legacyRailCompat"/.test(html162), 'hidden 兼容节点 #legacyRailCompat 必须已删除（轨迹/子Agent 由右栏四标签承接）');
+    assert.ok(!/\bid="trajRailBtn"/.test(html162) && !/\bid="subRailBtn"/.test(html162),
+      '旧窄条按钮 #trajRailBtn/#subRailBtn 不得以隐藏节点形式残留');
+    assert.ok(!/\$\('#trajRailBtn'\)/.test(app162) && !/\$\('#subRailBtn'\)/.test(app162),
+      'app.js 不得再引用已删除的窄条按钮（空引用会让「任务/费用」点击先抛错、标签切不动）');
+  }
+
+  // —— ② 新建入口唯一可见：左栏 #sideNavNew；#newChat 仅 hidden 兼容 ——
+  {
+    const aside = aside162(html162);
+    assert.ok(/<button id="sideNavNew"[^>]*>/.test(aside), '左栏「＋ 新建对话」#sideNavNew 必须仍在（唯一可见新建入口）');
+    assert.ok(!/id="sideNavNew"[^>]*hidden/.test(aside), '左栏 #sideNavNew 必须可见（唯一新建入口）');
+    assert.equal((html162.match(/id="sideNavNew"/g) || []).length, 1, '新建入口必须唯一');
+    const chatBtn = /<button id="newChat" hidden>新对话<\/button>/.exec(header162(html162));
+    assert.ok(chatBtn, '顶栏 #newChat 必须仅以 hidden 兼容节点保留（§153/§155/§158 仍钉其 id）');
+    const visible = header162(html162).replace(chatBtn[0], '');
+    assert.ok(!/id="newChat"/.test(visible), '顶栏不得再出现可见的「新对话」');
+    assert.ok(/const newBtn = \$\('#sideNavNew'\);[\s\S]{0,160}\$\('#newChat'\);[\s\S]{0,80}\.click\(\)/.test(app162),
+      '#sideNavNew 必须复用 #newChat handler（能力不丢）');
+  }
+
+  // —— ③ 轨迹 / 子Agent 仍可从右栏标签进入（删窄条兼容节点不能连入口一起丢） ——
+  {
+    for (const [id, name] of [['rtTrace', '轨迹'], ['rtSub', '子Agent']]) {
+      assert.ok(new RegExp(`<button id="${id}"[^>]*role="tab"`).test(html162), `右栏「${name}」标签按钮 #${id} 必须仍在`);
+    }
+    assert.ok(/id="tabTrace"/.test(html162) && /id="tabSub"/.test(html162), '轨迹/子Agent 面板必须仍在');
+    assert.ok(/const RAIL_TABS = \['trace', 'sub', 'tasks', 'dash'\];/.test(app162), '右栏四标签必须仍在（轨迹/子Agent 的唯一入口）');
+    assert.ok(/for \(const key of RAIL_TABS\) \{\n  const btn = \$\(RAIL_TAB_BUTTONS\[key\]\);/.test(app162), '四个标签按钮的点击绑定必须保留');
+  }
+
+  // —— ④ 会话管理入口在左栏「最近会话」标题右侧且可点（#sideNavSessMgr；#sessMgrBtn 保留 hidden 兼容） ——
+  {
+    const aside = aside162(html162);
+    assert.ok(/id="sideNavSessMgr"/.test(aside), '会话管理入口必须移入左栏（#sideNavSessMgr）');
+    assert.ok(!/id="sideNavSessMgr"[^>]*hidden/.test(aside), '左栏会话管理入口必须可见');
+    const iToggle = aside.indexOf('id="sideNavRecentToggle"');
+    const iMgr = aside.indexOf('id="sideNavSessMgr"');
+    const iList = aside.indexOf('id="sideNavSessions"');
+    assert.ok(iToggle >= 0 && iMgr > iToggle && iMgr < iList,
+      '会话管理入口必须在「最近会话」标题右侧、会话列表之前');
+    assert.ok(/if \(sideSessMgr\) sideSessMgr\.onclick = openSessModal;/.test(app162),
+      '左栏会话管理必须复用 openSessModal()（能力不新增、不丢失）');
+    assert.ok(/\$\('#sessMgrBtn'\)\.onclick=openSessModal;/.test(app162),
+      '原 #sessMgrBtn 的处理器必须保留（hidden 兼容节点仍然可点）');
+    const tag = tagOf162(header162(html162), 'sessMgrBtn');
+    assert.ok(tag && /(?:^|\s)hidden(?=\s|>|=)/.test(tag), '顶栏 #sessMgrBtn 必须是 hidden（本轮不改 §158 的九入口断言）');
+  }
+
+  // —— ⑤ 顶栏可见入口减少：可交互入口 10 → 8、全部可见项 13 → 11（历史会话/会话管理不再可见） ——
+  {
+    const header = header162(html162);
+    // 先钉「本轮移出的两个入口 + 旧 #newChat」为 hidden（先于计数，保证变异命中对应关键词）。
+    for (const id of ['sessions', 'sessMgrBtn', 'newChat']) {
+      const tag = tagOf162(header, id);
+      assert.ok(tag, `顶栏 #${id} 必须仍是 hidden 兼容节点（节点在、不可见；下一轮连断言一起删）`);
+      assert.ok(/(?:^|\s)hidden(?=\s|>|=)/.test(tag), `顶栏 #${id} 必须是 hidden（清理后不可见）`);
+    }
+    // 可交互入口（按钮 / 下拉 / 输入 / 可点徽标）：清理前 10 个（含 #sessions / #sessMgrBtn），清理后 8 个。
+    const interactive162 = [
+      ['⌘K', 'paletteBtn'], ['设置', 'cfgBtn'], ['运行', 'runChip'], ['主题', 'themeBtn'],
+      ['工作空间', 'wsSel'], ['会话搜索', 'sessionSearch'], ['任务', 'tasksBtn'], ['费用', 'costBadge'],
+    ];
+    for (const [label, id] of interactive162) {
+      const tag = tagOf162(header, id);
+      assert.ok(tag, `顶栏可交互入口「${label}」#${id} 必须仍在`);
+      assert.ok(!/(?:^|\s)hidden(?=\s|>|=)/.test(tag), `顶栏可交互入口「${label}」#${id} 必须可见`);
+    }
+    assert.equal(interactive162.length, 8, '顶栏可交互入口必须从 10 个减到 8 个');
+    // 全部可见项（含非可交互的品牌 / crumb / 路由沙箱徽标）：清理前 13 个，清理后 11 个。
+    for (const [label, re] of [['品牌 logo', /<div class="logo">/], ['当前会话 crumb', /id="crumb"/], ['路由/沙箱', /id="envBadge"/]]) {
+      assert.ok(re.test(header), `顶栏可见项「${label}」必须仍在`);
+    }
+    assert.equal(interactive162.length + 3, 11, '顶栏全部可见项必须从 13 个减到 11 个');
+    assert.ok(/<div class="spacer"><\/div>/.test(header), '顶栏 .spacer 必须仍在（右半区仍靠右）');
+  }
+
+  // —— ⑥ 既有关键能力回归：⌘K / 设置 / 四标签 / 状态条 / 错误卡 / 内联确认 ——
+  {
+    assert.ok(/const mod = e\.metaKey \|\| e\.ctrlKey;/.test(app162) && /togglePalette\(\)/.test(app162),
+      '⌘K / Ctrl+K 命令面板入口必须保留');
+    assert.ok(/id="paletteMask"/.test(html162) && /id="paletteBtn"/.test(html162), '命令面板节点与入口必须保留');
+    assert.ok(/id="cfgBtn"/.test(html162) && /id="cfgModal"/.test(html162) && /\$\('#cfgBtn'\)\.onclick=/.test(app162),
+      '设置入口与 #cfgModal 必须保留');
+    for (const id of ['rtTrace', 'rtSub', 'rtTasks', 'rtDash', 'tabTrace', 'tabSub', 'tabTasks', 'tabDash']) {
+      assert.ok(new RegExp(`id="${id}"`).test(html162), `右栏四标签节点 ${id} 必须仍在`);
+    }
+    const iStrip = html162.indexOf('id="runStrip"');
+    assert.ok(iStrip >= 0, '（前置）底部状态条 #runStrip 必须仍在');
+    const strip162 = html162.slice(iStrip, html162.indexOf('</div>', iStrip));
+    assert.deepEqual([...strip162.matchAll(/data-k="([a-z]+)"/g)].map((m) => m[1]).sort(),
+      ['cost', 'ctx', 'phase', 'tools', 'tps', 'ttft'], '底部状态条六项必须齐全');
+    assert.ok(/function errCardHtml\(/.test(app162) && /d\.className='err-card'/.test(app162) && /\.err-card\{/.test(html162),
+      '错误卡（折叠卡）渲染与样式必须保留');
+    assert.ok(/function askCardHtml\(/.test(app162) && /perm-acts/.test(app162) && /data-stop="1"/.test(app162)
+      && /\.perm-card\{/.test(html162), '内联权限确认三键（含停止）必须保留');
+    assert.ok(/\$\('#sessions'\)\.onchange=/.test(app162) && /function pickSessionFromSideNav/.test(app162),
+      '左栏点击切换仍复用 #sessions 的 change handler（能力不丢）');
+  }
+
+  ok('v0.6.27 §3.94 清理：删除 #newChatCompat/#legacyRailCompat（新建入口只剩左栏 #sideNavNew；轨迹/子Agent 由右栏四标签承接）· 会话管理移入左栏「最近会话」标题右侧（#sideNavSessMgr 复用 openSessModal，#sessMgrBtn 仅 hidden 兼容）· #sessions 保留 hidden · 顶栏可见入口 13→11 · ⌘K/设置/四标签/状态条/错误卡/内联确认不回归');
 }
 
 

@@ -498,6 +498,9 @@ function initSideNav() {
   if (collapse) collapse.onclick = toggleSideNav;
   const recentToggle = $('#sideNavRecentToggle');
   if (recentToggle) recentToggle.onclick = toggleRecentSessions;
+  // v0.6.27 §3.94：会话管理入口从左栏标题右侧进入，复用既有的 openSessModal（能力不新增、不丢失）。
+  const sideSessMgr = $('#sideNavSessMgr');
+  if (sideSessMgr) sideSessMgr.onclick = openSessModal;
   const rail = $('#sideNavRailBtn');
   if (rail) rail.onclick = toggleSideNav;
   const ws = $('#sideNavWs');
@@ -2567,8 +2570,8 @@ async function refreshCostBadge(){
 }
 refreshCostBadge(); setInterval(refreshCostBadge, 15000);
 // §3.82：顶栏费用徽标 = 打开右栏「仪表盘」标签（原有 📊 内容仍在 #dashPanel 里；关闭用 ✕/收起）。
+// v0.6.27 §3.94：旧窄条 #trajRailBtn/#subRailBtn 已删除，不再在这里清它们的 on 态（否则空引用抛错、标签切不动）。
 $('#costBadge').onclick=()=>{
-  $('#trajRailBtn').classList.remove('on'); $('#subRailBtn').classList.remove('on');
   activateRailTab('dash');
 };
 $('#dashClose').onclick=()=>{ setRunPanel(false); };
@@ -2584,8 +2587,8 @@ async function refreshStatusBar(){
 }
 refreshStatusBar(); setInterval(refreshStatusBar, 15000);
 // §3.82：顶栏「任务」= 打开右栏「任务」标签（右栏收起时也会展开；关闭用 ✕/收起）。
+// v0.6.27 §3.94：同上，旧窄条按钮已删除，不再清其 on 态。
 $('#tasksBtn').onclick=()=>{
-  $('#trajRailBtn').classList.remove('on'); $('#subRailBtn').classList.remove('on');
   activateRailTab('tasks');
 };
 $('#tpClose').onclick=()=>{ setRunPanel(false); };

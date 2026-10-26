@@ -13,11 +13,12 @@ import { makeMutator } from './lib.mjs';
 const M = makeMutator();
 const SEC = () => M.section('153');
 
-// ① 顶栏历史会话入口被删（用户无法切换历史会话；只剩一个不可点的空位）
+// ① 顶栏历史会话入口被删（用户无法切换历史会话；只剩一个不可点的空位）。
+//    v0.6.27 §3.94：#sessions 保留为 hidden 兼容节点（与左栏重复、计划下一轮移除），锚点同步到实际文本。
 M.mutate({
   name: '① 顶栏删掉历史会话入口 #sessions',
   file: 'src/web/index.html',
-  from: '  <select id="sessions" title="历史会话"><option value="">历史会话</option></select>\n',
+  from: '    <select id="sessions" title="历史会话" hidden><option value="">历史会话</option></select>\n',
   to: '',
   expect: ['顶栏必须保留历史会话入口 #sessions'],
   run: SEC,

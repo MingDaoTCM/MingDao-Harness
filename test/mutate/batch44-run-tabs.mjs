@@ -61,16 +61,15 @@ M.mutate({
   run: SEC,
 });
 
-// ⑤ 任务按钮不切页：入口还开右栏，但永远停在轨迹（用户点「任务」看不到任务）
+// ⑤ 任务按钮不切页：入口还开右栏，但永远停在轨迹（用户点「任务」看不到任务）。
+//    v0.6.27 §3.94 删掉旧窄条 #trajRailBtn/#subRailBtn 后，handler 里不再有清 on 态的两行，锚点同步。
 M.mutate({
   name: '⑤ 顶栏「任务」只开右栏、不切到任务标签',
   file: 'src/web/app.js',
   from: `$('#tasksBtn').onclick=()=>{
-  $('#trajRailBtn').classList.remove('on'); $('#subRailBtn').classList.remove('on');
   activateRailTab('tasks');
 };`,
   to: `$('#tasksBtn').onclick=()=>{
-  $('#trajRailBtn').classList.remove('on'); $('#subRailBtn').classList.remove('on');
   activateRailTab('trace');
 };`,
   expect: ['点顶栏「任务」必须切到任务标签'],

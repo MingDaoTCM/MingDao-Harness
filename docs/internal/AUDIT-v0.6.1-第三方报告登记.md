@@ -5205,3 +5205,81 @@ Web 写的消息有时间、非 Web 写的没有；旧会话（该字段引入�
 - GitHub API peel 是「安全借用」：只接受与目标平台未 peel SHA 相同的 tag 对象；Gitee/GitCode 若
   与 GitHub 的 tag 对象不一致，宁可 exit 2 也不拿 API 结果硬判，避免假绿。
 - 未新增并发读取（仍逐平台顺序执行）；网络健康时耗时与旧版相当，全不可达时按重试次数有界等待。
+
+## 3.94 已做（v0.6.27 界面债：删除 hidden 兼容节点 + 顶栏重复入口）
+
+**来源 / 证据**：v0.6.25（§3.90）为保住旧变异锚点保留了两个 hidden 兼容节点——`#legacyRailCompat`
+（原左窄条轨迹/子Agent）与 `#newChatCompat`（原顶栏新对话）；同时左栏会话列表上线后，顶栏的
+「历史会话」`#sessions` 与「会话管理」`#sessMgrBtn` 与左栏重复。本轮只删冗余、不删能力。
+
+**修法（`src/web/index.html` + `src/web/app.js`）**
+
+- 删除 `#newChatCompat` 包裹层：`#newChat` 直接以 `hidden` 保留（左侧 `#sideNavNew` 与 ⌘K 复用同一
+  handler）。保留原因是 §153/§155/§158 仍静态要求 header 内存在 `id="newChat"`（本轮不改这些断言）。
+- 删除 `#legacyRailCompat`（连同其内 `#trajRailBtn`/`#subRailBtn`）：轨迹/子Agent 由右栏四标签唯一承接；
+  同步删掉 `#tasksBtn`/`#costBadge` handler 里对两个已删按钮的 `classList.remove('on')`——否则空引用会
+  先抛错、标签切不动（这是删节点后真正的行为回归点，不是纯样式）。
+- 顶栏「会话管理」移入左栏「最近会话」标题右侧：新增 `#sideNavSessMgr`（✎，复用 `openSessModal`）；
+  原 `#sessMgrBtn` 只保留 hidden 兼容节点（§153/§155/§158 仍钉其在 header，本轮不改）。
+- 顶栏「历史会话」`#sessions` 保留但加 `hidden`：左栏点击仍写回它并派发 change（能力不变）；
+  计划下一轮连同 §158 的九入口断言一起移除。
+- 未引入设计稿 CSS、未改 `.app` 网格/顶栏高度/主题/字号；只加左栏标题行的 `.sn-sec-row` 与
+  `#sideNavSessMgr` 两条复用 token 的小样式（折叠态随标题行居中）。
+
+**删掉的 id / 能力承接**
+
+| 删除的 id | 能力由谁承接 |
+| --- | --- |
+| `#newChatCompat`（包裹层） | 左栏 `#sideNavNew`（唯一可见新建入口）+ `#newChat`（hidden，⌘K/左栏复用同一 handler） |
+| `#legacyRailCompat` | 右栏四标签 `#rtTrace`/`#rtSub`（及其面板 `#tabTrace`/`#tabSub`） |
+| `#trajRailBtn` / `#subRailBtn`（兼容节点内的空 span） | 同上（右栏「轨迹」「子Agent」标签） |
+| 顶栏可见的 `#sessMgrBtn`（节点保留 hidden） | 左栏 `#sideNavSessMgr`（复用 `openSessModal`） |
+| 顶栏可见的 `#sessions`（节点保留 hidden） | 左栏 `#sideNavSessions` 列表（点击写回 `#sessions` 并派发 change） |
+
+顶栏可见入口 **13 → 11**（可交互控件 **10 → 8**）：历史会话、会话管理不再显示；品牌/crumb/环境徽标
+等非交互项仍在。1440 截图中原先被 `.hdr-right` 横向溢出挤出的「任务」按钮在腾出空间后露出。
+
+**断言与变异**
+
+- `test/smoke.js` 末尾新增 §162：①`#newChatCompat`/`#legacyRailCompat`/`#trajRailBtn`/`#subRailBtn`
+  不存在；②新建入口唯一可见（`#sideNavNew`，`#newChat` 仅 hidden）；③右栏「轨迹」「子Agent」标签仍在
+  且四标签绑定不丢；④会话管理在左栏标题右侧且复用 `openSessModal`，原 `#sessMgrBtn` 保留 hidden；
+  ⑤顶栏可交互入口 8 个（清单：⌘K/设置/运行/主题/工作空间/搜索/任务/费用）、全部可见项 11 个、
+  `#sessions`/`#sessMgrBtn`/`#newChat` 均 hidden；⑥⌘K/设置/四标签/状态条六项/错误卡/内联确认回归。
+- §159② 的唯一改动：原断言要求 `#newChatCompat` 包裹层存在，改为「包裹层已删除 + `#newChat` 直接
+  hidden」——不改这条就与 §162① 互斥；其余节（§153/§155/§158）一字未改。
+- 既有变异锚点同步（缺陷语义不动）：batch44 ⑤（handler 里删掉两行窄条清理）、batch45 ⑦（`#sessions`
+  加 hidden）、batch49 ②（`#newChat` 加 hidden）、batch51 ③（`#newChatCompat` → `#newChat` hidden）。
+- 新建 `test/mutate/batch54-cleanup.mjs`：**10/10 全中**（恢复两个兼容节点、删/藏 `#sideNavNew`、
+  `#rtSub` id 丢失、删左栏会话管理、解绑 `openSessModal`、`#sessions`/`#sessMgrBtn` 去 hidden、
+  `#cfgModal` 改名）。本轮 +10；工作树 doc-lint 实测 **484** 条（含并行道 batch53 的 6 条；本轮提交树自身 478，A 的 batch53 落地后 484）。README 计数行由总控统一校正。
+
+**截图（真实 Electron，`scripts/ui-shot.mjs`；1440×900）**
+
+| 目录 | home.png 字节 | 结论 |
+| --- | --- | --- |
+| `/tmp/shots-clean-before` | 201862 | 改前：顶栏有「历史会话」下拉（`#sessMgrBtn` 被 `.hdr-right` 溢出挤出视口） |
+| `/tmp/shots-clean-after` | 201368 | 改后：顶栏无历史会话/会话管理；左栏「最近会话」右侧出现 ✎ |
+| `/tmp/shots-clean-after-manage` | 201368（sheet.png 325946） | `--open "#sessMgrBtn"` 打开「会话管理（重命名/删除）」弹层；sheet 截图里可见会话管理弹层 + 会话设置 |
+
+before 目录在 `d37d17e` 的独立 worktree 里截（避免把已改工作树当"改前"）；after 为主工作树。
+
+**门禁**
+
+- `npm run typecheck`：通过。
+- `node test/smoke.js`：通过（含新增 §162；§161 由并行任务补齐）。
+- `node test/e2e-web.js`：24 项通过；`node test/e2e-local.js`：17 项通过；
+  `node test/api-contracts.js`：8 项通过；`node test/ui-sessions.js`：5 项通过。
+- `node test/mutate/batch54-cleanup.mjs`：10/10 全中。
+- `node test/mutate/run.mjs`：43/43 全中（44 个批次里暂时移出并行道的 batch53/§161，A 回贴后总控复跑 44/44）。
+- `node scripts/doc-lint.mjs`：除「变异总数 README 461 vs 实际 484」外其余守卫通过；README 计数行
+  按分工由总控拥有，本任务不改（本轮 +10）。
+
+**未做 / 边界**
+
+- 未改 `src/providers/**`、`src/agent.js`、`src/model-discovery.js`、`test/memory-recovery.js`、
+  `test/mutate/batch40-memory-recovery.mjs`、`presets/**`、`desktop/**`、`ide/**`；未 tag / 改版本号 /
+  publish / 动官网。
+- 顶栏 `#sessions` / `#sessMgrBtn` / `#newChat` 仍是 hidden 兼容节点（为保证 §153/§155/§158 不改）；
+  计划下一轮连同旧断言一起移除。
+- 1440 视口下 `.hdr-right` 仍会横向滚动（既有设计，未改）；本轮只是减少了两个重复入口。

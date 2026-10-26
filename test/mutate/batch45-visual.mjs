@@ -74,11 +74,12 @@ M.mutate({
   run: SEC,
 });
 
-// ⑦ 历史会话移出可滚动容器：仍在顶栏，但不参与 .hdr-right 的横向滚动
+// ⑦ 历史会话移出可滚动容器：仍在顶栏，但不参与 .hdr-right 的横向滚动。
+//    v0.6.27 §3.94 起 #sessions 带 hidden（与左栏重复、计划下一轮移除），锚点同步。
 M.mutate({
   name: '⑦ 历史会话 #sessions 被移出 .hdr-right',
   file: 'src/web/index.html',
-  from: '    <select id="sessions" title="历史会话"><option value="">历史会话</option></select>\n    <button id="tasksBtn" title="任务面板">任务</button>',
+  from: '    <select id="sessions" title="历史会话" hidden><option value="">历史会话</option></select>\n    <button id="tasksBtn" title="任务面板">任务</button>',
   to: '    <button id="tasksBtn" title="任务面板">任务</button>',
   expect: ['#sessions 必须在 .hdr-right 容器内'],
   run: SEC,

@@ -18,11 +18,12 @@ M.mutate({
   run: SEC,
 });
 
-// ② 顶栏「新对话」入口被删（左栏有自己的新建按钮，不代表顶栏可以少）
+// ② 顶栏「新对话」入口被删（左栏有自己的新建按钮，不代表顶栏可以少）。
+//    v0.6.27 §3.94 起 #newChat 直接以 hidden 保留（#newChatCompat 包裹层已删），锚点同步。
 M.mutate({
   name: '② 删掉顶栏 #newChat',
   file: 'src/web/index.html',
-  from: '<button id="newChat">新对话</button>',
+  from: '<button id="newChat" hidden>新对话</button>',
   to: '',
   expect: ['顶栏入口 #newChat 必须仍在'],
   run: SEC,

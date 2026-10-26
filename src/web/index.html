@@ -682,6 +682,11 @@ body.run-open #sessSheet{right:318px}
 #sideNavWs{flex:1;min-width:0;max-width:none;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:5px 6px;font-size:12px}
 #sideNavWsIcon{display:none;align-items:center;justify-content:center;width:36px;height:30px;padding:0;border-radius:8px;background:var(--bg3);font-size:14px;line-height:1}
 #sideNav .sn-sec-title{flex:none;font-size:10.5px;color:var(--dim);letter-spacing:.05em;padding:2px 6px;white-space:nowrap}
+/* §3.94：「最近会话」标题右侧的会话管理入口（从顶栏移入；复用 openSessModal，不新增能力）。 */
+.sn-sec-row{display:flex;align-items:center;gap:2px;min-width:0}
+.sn-sec-row #sideNavRecentToggle{flex:1 1 auto;min-width:0}
+#sideNavSessMgr{flex:none;display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:0;border-radius:6px;background:transparent;color:var(--dim);font-size:12px;line-height:1;cursor:pointer}
+#sideNavSessMgr:hover{background:var(--bg3);color:var(--text)}
 /* §3.90：「最近会话」标题变成折叠开关；折叠后标题与计数仍在，只藏列表项。 */
 #sideNav button.sn-sec-title{display:flex;align-items:center;gap:6px;width:100%;min-width:0;border:0;border-radius:6px;background:transparent;font-family:inherit;font-weight:600;cursor:pointer;text-align:left}
 #sideNav button.sn-sec-title:hover{color:var(--text);background:var(--bg3)}
@@ -737,6 +742,7 @@ body.side-mid #sideNavWsIcon{display:inline-flex}
 body.side-collapsed .sn-head,body.side-mid .sn-head{padding:10px 6px;justify-content:center}
 body.side-collapsed #sideNav .sn-body,body.side-mid #sideNav .sn-body{padding:10px 6px;align-items:center}
 body.side-collapsed #sideNavNew,body.side-mid #sideNavNew{width:36px;padding:8px 0;gap:0}
+body.side-collapsed .sn-sec-row,body.side-mid .sn-sec-row{justify-content:center}
 body.side-collapsed #sideNavSessions .sn-item,body.side-mid #sideNavSessions .sn-item{width:36px;justify-content:center;padding:6px 0;gap:0}
 body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions .sn-item.on{box-shadow:inset 0 0 0 1px var(--accent)}
 </style>
@@ -757,21 +763,23 @@ body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions 
     <div class="spacer"></div>
     <span class="badge badge-btn" id="costBadge" title="省钱仪表盘（点击展开）" style="cursor:pointer">📊 —</span>
     <input id="sessionSearch" placeholder="搜索会话…" title="关键词检索历史会话">
-    <select id="sessions" title="历史会话"><option value="">历史会话</option></select>
-    <button id="tasksBtn" title="任务面板">任务</button><button id="sessMgrBtn" title="管理会话（重命名/删除）">✎</button>
-    <!-- v0.6.25 §3.90：顶栏「新对话」与左侧栏 #sideNavNew 重复，可视入口只留左侧。
-         保留 hidden 兼容节点：id/处理器语义不变（左侧按钮与 ⌘K 仍点它），只是不可见。 -->
-    <span id="newChatCompat" hidden><button id="newChat">新对话</button></span>
+    <!-- v0.6.27 §3.94：「历史会话」与左栏会话列表重复——保留 hidden 兼容节点（§158 仍钉顶栏入口），
+         计划下一轮连同断言一起移除。切换仍走 #sessions 的 change（左栏点击也写回这里）。 -->
+    <select id="sessions" title="历史会话" hidden><option value="">历史会话</option></select>
+    <button id="tasksBtn" title="任务面板">任务</button>
+    <!-- v0.6.27 §3.94：会话管理入口移入左栏「最近会话」标题右侧（#sideNavSessMgr，复用 openSessModal）；
+         原 #sessMgrBtn 只保留 hidden 兼容节点（§153/§155/§158 仍钉其在 header）。 -->
+    <button id="sessMgrBtn" title="管理会话（重命名/删除）" hidden>✎</button>
+    <!-- v0.6.27 §3.94：#newChatCompat 包裹层已删除；#newChat 直接以 hidden 保留，
+         左侧 #sideNavNew 与 ⌘K 继续复用同一个 handler（§153/§155/§158 仍钉其 id）。 -->
+    <button id="newChat" hidden>新对话</button>
   </div>
 </header>
 <div id="trajRail">
   <!-- §3.88：<900 时左栏收成抽屉，这个窄条图标负责打开/关闭（≥900 隐藏）。 -->
   <button class="rail-btn" id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>
 </div>
-<!-- v0.6.25 §3.90：旧窄条 🧭/🤖 与右栏四标签重复，已从可见窄条移除；轨迹/子Agent 只在
-     右栏「轨迹」「子Agent」标签可达。下面两个隐藏兼容节点不渲染、不绑定点击，仅让既有
-     class 清理与历史回归脚本保持空引用安全（#newChatCompat 同理）。 -->
-<span id="legacyRailCompat" hidden aria-hidden="true"><span id="trajRailBtn"></span><span id="subRailBtn"></span></span>
+<!-- v0.6.27 §3.94：#legacyRailCompat 隐藏兼容节点已删除；轨迹/子Agent 由右栏四标签唯一承接。 -->
 <!-- v0.6.24 §3.88 左侧栏：设计稿三栏的会话列。只新增；顶栏既有入口一个不删。
      数据复用 refreshSessions() 的 sessionsGroupedCache；切换走 #sessions change；
      工作空间镜像 #wsSel（原控件保留在顶栏原位）；新建对话复用 #newChat handler。 -->
@@ -787,9 +795,13 @@ body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions 
       <select id="sideNavWs" title="工作空间（与顶栏 #wsSel 同源，切换走同一个 handler）"></select>
     </div>
     <button id="sideNavWsIcon" type="button" title="工作空间" aria-label="工作空间">📁</button>
-    <button id="sideNavRecentToggle" type="button" class="sn-sec-title" aria-expanded="true" aria-controls="sideNavSessions" title="折叠最近会话">
-      <span class="sn-sec-chev" aria-hidden="true">▾</span><span class="sn-sec-label">最近会话</span><span class="sn-sec-count" id="sideNavRecentCount" title="当前会话数">0</span>
-    </button>
+    <div class="sn-sec-row">
+      <button id="sideNavRecentToggle" type="button" class="sn-sec-title" aria-expanded="true" aria-controls="sideNavSessions" title="折叠最近会话">
+        <span class="sn-sec-chev" aria-hidden="true">▾</span><span class="sn-sec-label">最近会话</span><span class="sn-sec-count" id="sideNavRecentCount" title="当前会话数">0</span>
+      </button>
+      <!-- v0.6.27 §3.94：会话管理（重命名/删除）入口，从顶栏移入「最近会话」标题右侧，复用 openSessModal。 -->
+      <button id="sideNavSessMgr" type="button" title="管理会话（重命名/删除）" aria-label="管理会话">✎</button>
+    </div>
     <div id="sideNavSessions" role="list" aria-label="会话列表"></div>
   </div>
 </aside>
