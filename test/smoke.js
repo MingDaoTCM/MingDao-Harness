@@ -18372,6 +18372,58 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   ok('v0.6.26 §3.92 布局断点：<900 窄条 fixed 不占流 + 正文/输入区右移 48px（左缘 ≥ 窄条右缘、补偿不设宽）+ 右栏收起点 1180→1100（narrow-run 收口，1100/1180 整点三栏）+ 1101–1180 右栏 260px 仍可见 + 1000/880 抽屉不丢 + 正文无横向滚动');
 }
 
+// ---------- 161. v0.6.27 §3.93：Windows CI 红——memory-recovery 的「不可写目录」夹具必须可移植 ----------
+// 起因（v0.6.26 windows-latest Step 19「变异验证」）：
+//   test/memory-recovery.js ⑧ 用 fs.chmodSync(home, 0o500) 造"目录不可写"，断言"写入失败必须有 warn"。
+//   但 Windows（尤其 admin runner）上 chmod 只改只读位，**不阻止**目录内创建/重命名 → 写其实成功
+//   → 没有 warn → 断言失败；套件崩在 ⑧，batch40 的 ⑦–⑩ 因为根本没跑到而连带被判"逃逸"。
+//   产品代码没有回归，错的是夹具的平台假设（"非 root 的 POSIX 权限位"）。
+// 修法：给 endpoint-limits.json 的**原子写临时文件**注入 fs 门面，第一次写就抛 EACCES，
+//   所有平台确定性走"写入失败 → warn → 不阻断会话"。本节点住防止回退：
+//   · 不得再用 chmod 造不可写；不得按 process.platform 分支/跳过（那会让 Windows 腿假绿）；
+//   · 门面必须精确只拦学习文件的临时写、必须在 finally 还原（否则污染后续用例）；
+//   · 两条 warn 断言（错误文案 + 日志）必须保留——删掉断言等于把守卫静音。
+//   扫描前先剥掉注释：注释里可以解释"为什么不能用 chmod"，那正是要留档的理由。
+{
+  const suite161 = fs.readFileSync(path.join(srcDir, '..', 'test', 'memory-recovery.js'), 'utf8');
+  const batch40161 = fs.readFileSync(path.join(srcDir, '..', 'test', 'mutate', 'batch40-memory-recovery.mjs'), 'utf8');
+  /** 去掉行/块注释（只用于结构扫描；字符串里的 http:// 不受影响）。 */
+  const code161 = (/** @type {string} */ s) =>
+    s.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/.*$/gm, '$1');
+
+  // ① 反面：不得再拿权限位造"不可写"。
+  assert.ok(!/\bchmod(?:Sync)?\b/.test(code161(suite161)),
+    'memory-recovery 套件不得使用 chmod 造「不可写」：Windows（含 admin runner）上 chmod 只改只读位、不阻止写入，夹具会假失败或假绿——必须改用 fs 门面注入，第一次写就抛 EACCES');
+  // ② 反面：不得按平台跳过/分支。
+  assert.ok(!/\bprocess\.platform\b/.test(code161(suite161)),
+    'memory-recovery 套件不得按平台跳过（process.platform）：if (win32) return / 跳过用例会让 Windows 腿不再验证「写入失败 → warn」，等于把 CI 红藏起来');
+  assert.ok(!/\b(?:it|test|describe)\.skip\b/.test(code161(suite161)) && !/\bskip\s*:\s*true\b/.test(code161(suite161)),
+    'memory-recovery 套件不得 skip 用例：「写入失败 → warn → 不阻断会话」是跨平台契约，不是某些平台才要的契约');
+  // ③ 反面：不得硬编码 POSIX 临时目录（Windows 上没有 /tmp）。
+  assert.ok(!/['"]\/tmp(?:\/|['"])/.test(code161(suite161)),
+    'memory-recovery 套件不得硬编码 /tmp：临时目录必须用 os.tmpdir() + path.join（Windows 上不存在 /tmp）');
+  // ④ 正面：必须真有 fs 门面注入，且第一次写就抛 EACCES。
+  assert.ok(/fs\.writeFileSync\s*=\s*function/.test(code161(suite161)) && /\.code\s*=\s*'EACCES'/.test(code161(suite161)),
+    'memory-recovery 套件必须用 fs 门面注入：拦截 endpoint-limits.json 的原子写临时文件、第一次写就抛 EACCES（不再依赖 chmod 的平台语义）');
+  // ⑤ 正面：门面必须精确作用域（只拦学习文件的 .tmp），不能把整个进程的写都弄挂。
+  assert.ok(/\.startsWith\(/.test(code161(suite161)) && /\.endsWith\('\.tmp'\)/.test(code161(suite161)),
+    'fs 门面必须按「学习文件的原子写临时文件」精确匹配（path.dirname + basename.startsWith + .tmp），不得放大到所有写入');
+  // ⑥ 正面：警告断言必须保留（错误文案 + 日志各一条）。删掉/弱化 = 守卫静音。
+  const warnHits161 = (suite161.match(/includes\('端点学习文件写入失败'\)/g) || []).length;
+  assert.ok(warnHits161 >= 2,
+    `memory-recovery 套件必须保留「写入失败」的两条 warn 断言（错误文案 + 日志各一条，实际 ${warnHits161} 条）——删掉断言等于把守卫静音`);
+  // ⑦ 正面：finally 必须还原 fs 门面，否则污染后面的用例（失败原因会指向错误的地方）。
+  assert.ok(/finally\s*\{[\s\S]{0,400}?fs\.writeFileSync\s*=\s*realWriteFileSync/.test(suite161),
+    '注入 fs 门面后必须在 finally 还原 fs.writeFileSync（否则后续用例/清理写入被污染，失败原因会指向错误的地方）');
+  // ⑧ batch40 也不得引入 chmod / /tmp / 平台分支（它只驱动套件，不该自带夹具假设）。
+  assert.ok(!/\bchmod(?:Sync)?\b/.test(code161(batch40161)),
+    'batch40 变异批不得用 chmod 造失败（它只驱动 memory-recovery 套件，平台假设已由套件的 fs 门面替代）');
+  assert.ok(!/['"]\/tmp(?:\/|['"])/.test(code161(batch40161)) && !/\bprocess\.platform\b/.test(code161(batch40161)),
+    'batch40 不得硬编码 /tmp 或按平台分支（临时目录统一由套件内的 os.tmpdir()/path.join 决定）');
+
+  ok('v0.6.27 §3.93：Windows CI 红——memory-recovery 的「不可写」夹具改为 fs 门面注入（第一次写 EACCES、所有平台同一路径），套件无 chmod / 无平台跳过 / 无 /tmp 硬编码，warn 断言与 finally 还原仍在');
+}
+
 // ---------- 162. v0.6.27 §3.94：清理 hidden 兼容节点 + 顶栏重复入口（会话管理移入左栏） ----------
 // 接 §160/§161。两件事：①删除 #legacyRailCompat / #newChatCompat（能力由右栏四标签 / 左栏 #sideNavNew 承接）；
 // ②顶栏「会话管理」入口移入左栏「最近会话」标题右侧（新入口 #sideNavSessMgr，复用 openSessModal；

@@ -5206,6 +5206,62 @@ Web 写的消息有时间、非 Web 写的没有；旧会话（该字段引入�
   与 GitHub 的 tag 对象不一致，宁可 exit 2 也不拿 API 结果硬判，避免假绿。
 - 未新增并发读取（仍逐平台顺序执行）；网络健康时耗时与旧版相当，全不可达时按重试次数有界等待。
 
+## 3.93 已做（v0.6.27 Windows CI 红：memory-recovery 的「不可写目录」夹具改为 fs 门面注入）
+
+**症状（v0.6.26 CI）**
+
+- `windows-latest` · Step 19「变异验证」失败：
+  `✗ 逃逸：⑦ 云端 507 也走压缩重试…`
+  `AssertionError: 不可写时错误文案必须有 warn（写入失败） at test/memory-recovery.js:375`。
+- 产品代码无回归，错的是夹具的平台假设：⑧ 用 `fs.chmodSync(home, 0o500)` 造"目录不可写"，
+  断言"写入失败必须有 warn"。Windows（尤其 admin runner）上 chmod 只改只读位，**不阻止**目录内
+  创建/重命名 → 写其实成功、没有 warn → 断言失败；套件崩在 ⑧，batch40 的 ⑦–⑩ 因为根本没跑到
+  而连带被判"逃逸"。
+
+**修法（测试侧，无产品改动）**
+
+- ⑧ 不再碰权限位：给 `endpoint-limits.json` 的**原子写临时文件**注入 fs 门面（与 smoke §156 的锁
+  测试同一手法）——只匹配 `dirname === home && basename.startsWith('.endpoint-limits.json.') &&
+  endsWith('.tmp')`，**第一次写就抛 EACCES**；原子写的 2s 瞬时拒绝预算耗尽后原样抛出，
+  `writeEndpointLimits` 捕获并返回 `{ok:false,error:'端点学习文件写入失败…'}`，agent 照常打 warn、
+  不阻断会话。所有平台走同一条路径，不再依赖"非 root 的 POSIX 权限位"。
+- 门面在 `finally` 第一行还原，再用真实 `fs` 恢复学习文件备份；不污染后续用例。
+- **不需要抽产品门面**：`writeEndpointLimits` 仍在 `src/providers/index.js`，本次未改 `src/**`
+  （fs 门面注入只在测试进程内生效，默认行为零变化）。
+- 同时扫描平台假设：`test/memory-recovery.js` 的临时目录本来就是 `os.tmpdir()+path.join`，
+  只有 ⑧ 用了 chmod，无 `/tmp` 硬编码、无路径分隔符拼接；`batch40` 无 chmod/`/tmp`/
+  `process.platform`，变异锚点由 `test/mutate/lib.mjs` 做 CRLF→LF 归一化。
+
+**断言与变异**
+
+- `test/smoke.js` 末尾新增 §161（结构守卫）：剥掉注释后扫描 `test/memory-recovery.js`——
+  ①不得出现 `chmod`（并说明 Windows 上 chmod 不阻止写入的理由）；②不得 `process.platform` 分支/
+  跳过的 `skip`；③不得硬编码 `/tmp`；④必须存在 `fs.writeFileSync = function` + `code='EACCES'`；
+  ⑤门面必须按 `.startsWith(...)`/`.endsWith('.tmp')` 精确限定；⑥两条 warn 断言（错误文案+日志）
+  必须都在；⑦`finally` 必须还原 `fs.writeFileSync`；⑧`batch40` 同样不得有 chmod/`/tmp`/平台分支。
+- 新建 `test/mutate/batch53-portable-fixtures.mjs`：**6/6 全中**（chmod 加回去、删日志 warn 断言、
+  注入改成平台跳过、注入后不还原、注入不抛错假装成功、第一次写放行第二次才抛）。
+- `node test/mutate/batch40-memory-recovery.mjs`：**11/11**，⑦–⑩ 重新被"抓到"（不再因套件崩在
+  ⑧ 而逃逸）；`batch52-memory-v2` 也复跑 **11/11**（证明改夹具没有放松既有判据）。
+
+**门禁（本回合实测）**
+
+- `npm run typecheck`：通过。
+- `node test/memory-recovery.js`：11 项通过。
+- `node test/smoke.js`：通过（含新增 §161）。
+- `node test/mutate/batch40-memory-recovery.mjs`：11/11 全中。
+- `node test/mutate/batch53-portable-fixtures.mjs`：6/6 全中。
+- `node test/mutate/run.mjs`：**44/44 批次全中、0 逃逸**（含 batch40 11/11、batch52 11/11、batch53 6/6；本地 `--allow-dirty`，CI 为干净树）。
+- `node scripts/doc-lint.mjs`：除「变异总数 README 461 vs 实际 484（本任务 +6，其余为并行批次；截至本次实测）」外其余守卫通过；README
+  计数行按分工由另一道拥有，本任务明确不改（本条 +6；并行批次另计，最终以 doc-lint 实测为准）。
+
+**未做 / 边界**
+
+- 未改 `test/mutate/README.md`、`src/web/**`、`src/agent.js`、`test/ledger-source.js`、`presets/**`、
+  `desktop/**`、`ide/**`；未 tag / 改版本号 / publish / 动官网。
+- Windows 腿只能由 CI 实跑确认；本地以"注入 EACCES 的门面"在 macOS 复现同一代码路径，不再依赖
+  chmod 语义。⑧ 的原子写 2s 重试预算会让单条用例固定多 ~2s（与原 chmod 夹具的耗时相同）。
+
 ## 3.94 已做（v0.6.27 界面债：删除 hidden 兼容节点 + 顶栏重复入口）
 
 **来源 / 证据**：v0.6.25（§3.90）为保住旧变异锚点保留了两个 hidden 兼容节点——`#legacyRailCompat`

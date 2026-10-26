@@ -16,7 +16,7 @@
 //   ⑤ 子代理自己也走同一套多级压缩（父回合没压缩时，子代理自己压两级仍能救回来）；
 //   ⑥ 连续 3 个干净成功 → 学习值 +25%（上限 = 用户配置预算）；
 //   ⑦ 学习文件损坏 → 不覆盖、不阻断，退化为"无学习值"且有 warn；
-//   ⑧ 学习文件不可写 → 不阻断，仍给出正常内存失败文案且有 warn；
+//   ⑧ 学习文件写入失败（fs 门面注入 EACCES，不依赖 chmod）→ 不阻断，仍给出正常内存失败文案且有 warn；
 //   ⑨ 云端端点 507 → 不重试（不对云 API 做压缩重试）；
 //   ⑩ 预检 n_ctx×0.8 clamp 行为不变；⑪ 非内存错误（400/401/429）行为不变。
 //
@@ -352,13 +352,37 @@ const taskCall = (id = 't1', prompt = '只读审计网络与安全防线', descr
 }
 
 // ---------------------------------------------------------------------------
-// ⑧ 学习文件不可写 → 不阻断，仍给出正常内存失败文案且有 warn
+// ⑧ 学习文件写入失败 → 不阻断，仍给出正常内存失败文案且有 warn
+//
+// v0.6.27 §3.93（windows-latest 红）：这里**不能**再用 `fs.chmodSync(home, 0o500)` 造"目录不可写"。
+// Windows（尤其 admin runner）上 chmod 只改只读位，**不阻止**目录内创建/重命名 —— 写其实成功、
+// 没有 warn，断言在 Windows 腿必红；套件还会崩在 ⑧，把 batch40 的 ⑦–⑩ 一起拖成"逃逸"。
+// 产品代码没有回归，错的是夹具的平台假设。改成给 endpoint-limits.json 的**原子写临时文件**
+// 注入一个 fs 门面：第一次写就抛 EACCES，所有平台确定性地走"写入失败 → warn"路径。
 // ---------------------------------------------------------------------------
 {
   const url = newUrl();
   const backup = fs.existsSync(limitsFile) ? fs.readFileSync(limitsFile, 'utf8') : null;
   fs.writeFileSync(limitsFile, JSON.stringify({ version: 1, endpoints: {} }) + '\n', 'utf8');
-  fs.chmodSync(home, 0o500); // 目录不可写：原子写的 rename 必然失败（本套件按非 root 运行；CI 即非 root）
+  const realWriteFileSync = fs.writeFileSync;
+  const limitsDir = path.dirname(limitsFile);
+  const limitsBase = path.basename(limitsFile);
+  let injectedFailures = 0;
+  // 门面只拦学习文件的原子写临时文件（.<basename>.<pid>.<hex>.tmp），不碰进程里其它写。
+  // 第一次写就抛 EACCES；EACCES 是原子写的"瞬时拒绝"，它会重试到 2s 预算耗尽后原样抛出。
+  fs.writeFileSync = function (/** @type {any} */ p, /** @type {any} */ data, /** @type {any} */ opts) {
+    const name = path.basename(String(p));
+    if (path.dirname(String(p)) === limitsDir && name.startsWith(`.${limitsBase}.`) && name.endsWith('.tmp')) {
+      injectedFailures += 1;
+      const err = /** @type {any} */ (new Error(`EACCES: permission denied, open '${String(p)}'（测试注入：学习文件写入失败）`));
+      err.code = 'EACCES';
+      err.errno = -13;
+      err.syscall = 'open';
+      err.path = String(p);
+      throw err;
+    }
+    return realWriteFileSync.call(fs, p, data, opts);
+  };
   let thrown = /** @type {any} */ (null);
   let logs = /** @type {string[]} */ ([]);
   try {
@@ -370,20 +394,22 @@ const taskCall = (id = 't1', prompt = '只读审计网络与安全防线', descr
     } catch (e) {
       thrown = e;
     }
-    assert.ok(thrown, '学习文件不可写不得阻断会话：仍按正常内存失败路径报错');
-    assert.ok(String(thrown?.message || '').includes('重试 2 次'), '不可写时仍应如实报出两级压缩后的失败');
-    assert.ok(String(thrown?.message || '').includes('端点学习文件写入失败'), '不可写时错误文案必须有 warn（写入失败）');
-    assert.ok(logs.join('\n').includes('端点学习文件写入失败'), '不可写时日志必须有 warn（写入失败）');
+    assert.ok(injectedFailures > 0, '注入的 fs 门面必须被真实调用（证明确实走到 endpoint-limits.json 的写入路径，而不是靠平台权限碰运气）');
+    assert.ok(thrown, '学习文件写入失败不得阻断会话：仍按正常内存失败路径报错');
+    assert.ok(String(thrown?.message || '').includes('重试 2 次'), '写入失败时仍应如实报出两级压缩后的失败');
+    assert.ok(String(thrown?.message || '').includes('端点学习文件写入失败'), '写入失败时错误文案必须有 warn（写入失败）');
+    assert.ok(logs.join('\n').includes('端点学习文件写入失败'), '写入失败时日志必须有 warn（写入失败）');
+    assert.ok(String(thrown?.message || '').includes('不阻断会话'), '写入失败必须明说"不阻断会话"（降级为无学习值继续）');
   } finally {
-    fs.chmodSync(home, 0o700);
+    fs.writeFileSync = realWriteFileSync; // 先还原门面，再用真实 fs 收拾现场（否则清理写也会被拦）
     if (backup == null) fs.rmSync(limitsFile, { force: true });
     else fs.writeFileSync(limitsFile, backup, 'utf8');
   }
   // 退化为无学习值：下一回合仍按配置预算起手
   const provider2 = { async chat() { return okReply('好'); } };
   const second = makeAgent(provider2, localCfg(url));
-  assert.equal(second.agent.budget, 32768, '学习文件不可写时下一回合必须退化为无学习值（按配置预算起手）');
-  ok('⑧ 学习文件不可写 → 不阻断/退化为无学习值且有 warn');
+  assert.equal(second.agent.budget, 32768, '学习文件写入失败时下一回合必须退化为无学习值（按配置预算起手）');
+  ok('⑧ 学习文件写入失败（fs 门面 EACCES）→ 不阻断/退化为无学习值且有 warn');
 }
 
 // ---------------------------------------------------------------------------
