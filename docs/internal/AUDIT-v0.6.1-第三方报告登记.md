@@ -4905,3 +4905,89 @@ Web 写的消息有时间、非 Web 写的没有；旧会话（该字段引入�
   worker 通过传入「已降级的生效值」修正自己的账本，其它入口的既有口径不变。
 - 没改 `src/web/**`、`test/smoke.js`、`test/ui-sessions.js`、`presets/**`、`desktop/**`、`ide/**`；
   `test/mutate/README.md` 只改了计数行（418 → 425）；未 tag / 改版本号 / publish / 动官网。
+
+
+## 3.90 已做（v0.6.25 UI 去重：窄条/顶栏入口、最近会话折叠、右栏标签上移与概览折叠）
+
+**来源 / 证据**：负责人对 v0.6.24 的三栏界面提了四条具体意见：①42px 窄条里的 🧭（轨迹）/
+🤖（子Agent）与右栏四个标签页重复；②顶栏「新对话」与左侧「＋ 新建对话」重复；③「最近会话」
+整块不能折叠，长列表一直占左栏；④右栏「轨迹/子Agent/任务/仪表盘」标签栏位置偏低（在
+「会话配置 + 本轮数据」之后），四个标签的可视面积偏小。
+
+**修法（`src/web/index.html` + `src/web/app.js`）**
+
+- ① 删除窄条里的 `#trajRailBtn` / `#subRailBtn` 两个可见按钮，以及 `$('#trajRailBtn').onclick`、
+  `$('#subRailBtn').onclick`、`lastMsgWithTraj()`、`toggleSubPanel()` 等绑定/死函数；右栏
+  「轨迹」「子Agent」标签仍是详情入口（默认仍为轨迹），顶栏「任务」与费用徽标仍分别走
+  `activateRailTab('tasks'|'dash')`。为既有变异批次的锚点安全，保留 `#legacyRailCompat` 隐藏
+  占位（`hidden`、无点击绑定、不参与布局/可见性），不影响任何用户路径。
+- ② 顶栏 `<button id="newChat">新对话</button>` 改为 `<span id="newChatCompat" hidden>` 包裹的
+  **隐藏兼容节点**：`#newChat` 的 id 与 onclick 语义仍在（左侧 `#sideNavNew` 与 ⌘K 仍点它），
+  但可视新建入口只剩左侧「＋ 新建对话」。
+- ③ 左栏「最近会话」标题改成按钮 `#sideNavRecentToggle`（chevron + 标题 + 数量
+  `#sideNavRecentCount`）；点击只切 `#sideNavSessions.hidden`，标题与计数常驻；状态写
+  `localStorage['mingdao-recent-collapsed']`（默认展开），`initSideNav()` 启动恢复。
+- ④ 右栏 DOM 顺序改为「`rp-head` → 四标签 `rp-tabs` → `#rpOverview`（会话配置 + 本轮数据）→
+  `rp-tabbody` → `rp-foot`」。`#rpOverview` 默认折叠，折叠时只显示一行摘要
+  （`deepseek-flash · ask · 空闲 · 0 次工具调用`，完全取 `runPanelView()` 的 `model/permission/
+  phase/tools`）；偏好写 `localStorage['mingdao-rp-overview-expanded']`。展开后字段 id/数据来源
+  一个未改（`#rpModel`/`#rpPerm`/六个 `data-rk` 仍由 `renderRunPanel()` 写）。
+  `.rp-tabbody`/`.rp-tab` 保持 `flex:1;min-height:0` + 内部滚动，收起概览后内容区拿到更大高度。
+- 未引入设计稿 CSS；未改 `.app` 网格列宽、顶栏高度、主题 token、字号阶。
+
+**断言与变异**
+
+- `test/smoke.js` 末尾新增 §159：
+  ① 窄条内不再有 `#trajRailBtn`/`#subRailBtn` 与轨迹/子Agent 的 aria-label/图标，窄条只剩
+     抽屉开关；两个 `onclick` 绑定已删；右栏四标签默认轨迹且 `#tasksBtn`/`#costBadge` 行为不变。
+  ② `#newChat` 唯一且包在 hidden 兼容节点里；可见的新建入口只剩 `#sideNavNew`（无 hidden）；
+     `#newChat.onclick` 仍在、`#sideNavNew` 仍转发 `#newChat.click()`。
+  ③ 最近会话折叠：key `mingdao-recent-collapsed`、写/读/模拟重载、桩 DOM 折叠后列表 hidden 而
+     标题 `aria-expanded=false` 与计数仍在；`initSideNav` 接线。
+  ④ 右栏顺序「标题→四标签→概览→内容区→底部」，四标签在 `#rpModel` 之上；概览含全部原字段；
+     `.rp-tabbody`/`.rp-tab` 的 flex:1/min-height:0/滚动。
+  ⑤ 概览默认折叠、localStorage 记忆；摘要四段与 `runPanelView` 同源；`#rpModel`/`#rpPerm`
+     抽查仍来自 `v.modelLabel || v.model` / `v.permission`。
+  ⑥ 四标签切换、⌘K、设置、状态条六项、错误卡、内联确认各至少一条结构断言。
+- 新建 `test/mutate/batch51-ui-dedupe.mjs`：**14/14 全中**（窄条恢复 🧭/🤖、顶栏 #newChat 去掉
+  hidden、折叠不落盘、折叠不藏列表、计数不更新、概览 id 丢失、内容区 flex 回退、概览默认展开、
+  摘要漏工具数、#rpModel 换常量、#sideNavNew 不转发、恢复 #trajRailBtn 绑定、RAIL_TABS 少标签）。
+  全仓变异总数 425 → **439**（README 计数行同步）。
+
+**截图（真实 Electron，`scripts/ui-shot.mjs`；尺寸/字节为文件实际值）**
+
+| 目录 | 尺寸 | 文件（字节） |
+| --- | --- | --- |
+| `/tmp/shots-u2-before` | 1440×900 | home 254358 · settings 365541 · palette 327150 · session 294598 · sheet 404438 |
+| `/tmp/shots-u2-before-1000` | 1000×900 | home 164766 · settings 273644 · palette 233690 · session 204915 · sheet 311994 |
+| `/tmp/shots-u2-after` | 1440×900 | home 201862 · settings 326742 · palette 283810 · session 241778 · sheet 354566 |
+| `/tmp/shots-u2-after-1000` | 1000×900 | home 162089 · settings 271279 · palette 230808 · session 201814 · sheet 308754 |
+| `/tmp/shots-u2-after-narrow` | 880×900 | home 147629 · settings 262515 · palette 227474 · session 184619 · sheet 289794 |
+| `/tmp/shots-u2-after-trace` | 1440×900 | home 201862 · settings 326742 · palette 283810 · session 241778 · sheet 354566 |
+
+目视结论：①改前 1440 窄条有 🧭/🤖 两个图标，改后只剩抽屉开关（≥900 隐藏），1000 折叠栏与 880
+抽屉均无这两枚；②改前顶栏右端有「新对话」，改后顶栏只剩「✎」，左侧「＋ 新建对话」成为唯一
+可视入口；③左栏「最近会话」带 chevron 与数量 1，点击可折叠（刷新后由 localStorage 恢复）；
+④右栏标签栏从改前 y≈610 移到 y≈118，概览在 y≈151，轨迹内容顶从 y≈636 提到 y≈203，
+可视高度由约 204px 增至约 637px（+433px），摘要在 300px 右栏内完整显示。
+
+**门禁**
+
+- `npm run typecheck`：通过。
+- `node test/smoke.js`：通过（含新增 §159）。
+- `node test/e2e-web.js`：24 项通过；`node test/e2e-local.js`：17 项通过；
+  `node test/api-contracts.js`：8 项通过；`node test/ui-sessions.js`：5 项通过。
+- `node test/mutate/batch51-ui-dedupe.mjs`：14/14 全中。
+- `node test/mutate/run.mjs --allow-dirty`（改动未提交的最终工作树）：**39/39 批次全中**，
+  跑完自动还原、无残留。
+- `node scripts/doc-lint.mjs`：通过（变异总数 439）。
+
+**未做 / 边界**
+
+- 未改 `src/providers/**`、`src/agent.js`、`src/session.js`、`presets/**`、`desktop/**`、`ide/**`、
+  `scripts/ui-shot.mjs`；未 tag / 改版本号 / publish / 动官网。
+- `#newChat` 与 `#trajRailBtn`/`#subRailBtn` 的 hidden 兼容节点只服务于既有测试锚点与历史
+  class 清理，不渲染、不可点、不进入任何用户路径；四个标签与顶栏任务/费用入口仍是完整入口。
+- `ui-shot --open "#rtTrace"` 的 `--open` 会在首页/会话截图之后点击并接着截会话设置弹层，
+  因此该目录的 `home.png` 与 `after/home.png` 相同；trace 标签的激活状态可在 `sheet.png`
+  右栏看到（默认标签本来就是轨迹）。

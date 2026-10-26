@@ -314,6 +314,41 @@ function writeSideNavCollapsed(storage, collapsed) {
   try { if (storage) storage.setItem(SIDE_NAV_STORAGE_KEY, collapsed ? '1' : '0'); } catch {}
   return !!collapsed;
 }
+
+// —— §3.90：「最近会话」整块可折叠（标题与计数常驻，只藏列表），偏好记 localStorage ——
+const RECENT_STORAGE_KEY = 'mingdao-recent-collapsed';
+let recentCollapsed = false;
+/** @param {any} storage */
+function recentCollapsedPref(storage) {
+  try { return !!storage && storage.getItem(RECENT_STORAGE_KEY) === '1'; } catch { return false; }
+}
+/** @param {any} storage @param {boolean} collapsed */
+function writeRecentCollapsed(storage, collapsed) {
+  try { if (storage) storage.setItem(RECENT_STORAGE_KEY, collapsed ? '1' : '0'); } catch {}
+  return !!collapsed;
+}
+/** @param {number} n 当前会话条数（只显示数字，标题「最近会话」始终可见） */
+function updateRecentCount(n) {
+  const el = $('#sideNavRecentCount');
+  if (el) el.textContent = String(Math.max(0, Number(n) || 0));
+}
+/** @param {boolean} collapsed 折叠只切 #sideNavSessions.hidden，不销毁列表节点 */
+function syncRecentCollapsed(collapsed) {
+  const box = $('#sideNavSessions');
+  if (box) box.hidden = !!collapsed;
+  const btn = $('#sideNavRecentToggle');
+  if (btn) {
+    btn.setAttribute('aria-expanded', String(!collapsed));
+    btn.title = collapsed ? '展开最近会话' : '折叠最近会话';
+  }
+}
+function toggleRecentSessions() {
+  recentCollapsed = !recentCollapsed;
+  let storage = null;
+  try { storage = window.localStorage; } catch {}
+  writeRecentCollapsed(storage, recentCollapsed);
+  syncRecentCollapsed(recentCollapsed);
+}
 /** 三档断点：≥1180 三栏 / 900–1180 左栏自动折叠 / <900 抽屉。 */
 function sideNavBreakpoint(width) {
   const w = Number(width) || 0;
@@ -456,10 +491,13 @@ function initSideNav() {
   let storage = null;
   try { storage = window.localStorage; } catch {}
   sideNavUserCollapsed = sideNavCollapsedPref(storage);
+  recentCollapsed = recentCollapsedPref(storage);
   const newBtn = $('#sideNavNew');
   if (newBtn) newBtn.onclick = () => { const b = $('#newChat'); if (b) b.click(); };
   const collapse = $('#sideNavCollapse');
   if (collapse) collapse.onclick = toggleSideNav;
+  const recentToggle = $('#sideNavRecentToggle');
+  if (recentToggle) recentToggle.onclick = toggleRecentSessions;
   const rail = $('#sideNavRailBtn');
   if (rail) rail.onclick = toggleSideNav;
   const ws = $('#sideNavWs');
@@ -478,7 +516,9 @@ function initSideNav() {
     try { main.click(); } catch {}
   };
   syncSideNavWorkspace();
-  renderSideNavSessions($('#sideNavSessions'), sessionsGroupedCache, currentSession, pickSessionFromSideNav);
+  const recentN = renderSideNavSessions($('#sideNavSessions'), sessionsGroupedCache, currentSession, pickSessionFromSideNav);
+  updateRecentCount(recentN);
+  syncRecentCollapsed(recentCollapsed);
   applySideNavLayout();
 }
 // ==== /v0.6.24 §3.88 ====
@@ -1545,6 +1585,51 @@ for (const key of RAIL_TABS) {
 }
 setRailTab('trace');
 
+// ==== v0.6.25 §3.90：右栏「概览」（会话配置 + 本轮数据）可折叠 ====
+// 默认折叠，折叠时只显示一行摘要（模型 · 权限 · 阶段 · 工具数）；偏好记 localStorage。
+// 展开后的字段与数据来源不变：仍由 renderRunPanel() 写 #rpModel/#rpPerm/六个 data-rk。
+const RP_OVERVIEW_STORAGE_KEY = 'mingdao-rp-overview-expanded';
+let rpOverviewExpanded = false;
+/** @param {any} storage */
+function rpOverviewPref(storage) {
+  try { return !!storage && storage.getItem(RP_OVERVIEW_STORAGE_KEY) === '1'; } catch { return false; }
+}
+/** @param {any} storage @param {boolean} expanded */
+function writeRpOverview(storage, expanded) {
+  try { if (storage) storage.setItem(RP_OVERVIEW_STORAGE_KEY, expanded ? '1' : '0'); } catch {}
+  return !!expanded;
+}
+/** 折叠时的一行摘要：完全复用 runPanelView() 的字段，不另算数据。 */
+function rpOverviewSummary(v) {
+  const x = v || {};
+  return [x.model || x.modelLabel, x.permission, x.phase, x.tools].filter((s) => s != null && s !== '').join(' · ') || '—';
+}
+/** @param {boolean} expanded 只切 hidden/aria，不销毁字段节点（id 与数据来源不变） */
+function syncRpOverview(expanded) {
+  rpOverviewExpanded = !!expanded;
+  const body = $('#rpOverviewBody');
+  if (body) body.hidden = !rpOverviewExpanded;
+  const head = $('#rpOverviewHead');
+  if (head) {
+    head.setAttribute('aria-expanded', String(rpOverviewExpanded));
+    head.title = rpOverviewExpanded ? '折叠概览' : '展开概览（会话配置 + 本轮数据）';
+  }
+}
+function toggleRpOverview() {
+  let storage = null;
+  try { storage = window.localStorage; } catch {}
+  writeRpOverview(storage, !rpOverviewExpanded);
+  syncRpOverview(!rpOverviewExpanded);
+}
+function initRpOverview() {
+  let storage = null;
+  try { storage = window.localStorage; } catch {}
+  const head = $('#rpOverviewHead');
+  if (head) head.onclick = toggleRpOverview;
+  syncRpOverview(rpOverviewPref(storage));
+}
+initRpOverview();
+
 // —— 工具时间线 DOM：一张卡 + 可复用行（开始/完成不换节点） ——
 function toolStepNode(step) {
   const li = document.createElement('li'); li.className = step.liClass;
@@ -1696,6 +1781,8 @@ function renderRunPanel() {
   set('#rpPreset', v.preset);
   set('#rpPerm', v.permission);
   set('#rpPermSrc', '来源：' + v.permissionSource + '（' + v.permissionSourceLabel + '）');
+  // §3.90：折叠概览的一行摘要与展开后的字段同源（同一个 v，不同展示）。
+  set('#rpOverviewSum', rpOverviewSummary(v));
   const total = Number(runState.contextTotal) || 0;
   const used = Math.max(0, Number(runState.contextUsed) || 0);
   const pct = total ? Math.min(100, Math.round((used / total) * 100)) : 0;
@@ -2374,8 +2461,7 @@ function openTraj(msg){
     // 点击标题定位到聊天中的对应工具卡
     list.appendChild(div);
   }
-  // §3.82：轨迹入口不再单独开旧浮层——切到右栏「轨迹」标签（旧面板与其 #tjList 仍在 DOM 里）。
-  $('#trajRailBtn').classList.add('on');
+  // §3.82：轨迹详情在右栏「轨迹」标签；§3.90 起窄条不再有 🧭 入口，旧面板渲染保留但不再挂可见入口。
   activateRailTab('trace');
 }
 // 面板布局同步：§3.82 起轨迹/子代理/任务/仪表盘都在右栏标签页内，
@@ -2390,19 +2476,8 @@ function syncPanelLayout(){
   // §3.73：窄屏右栏收起时，轨迹/子Agent 在对话流末尾显示；右栏（抽屉）一开就让位。
   syncTraceDock();
 }
-$('#tjClose').onclick=()=>{ setRunPanel(false); $('#trajRailBtn').classList.remove('on'); };
-$('#trajRailBtn').onclick=()=>{
-  // §3.82：轨迹入口 = 打开右栏并切到「轨迹」标签（没有轨迹时也切过去，显示空态）。
-  const m=lastMsgWithTraj();
-  if(m && m._traj && m._traj.length){ openTraj(m); return; }
-  $('#trajRailBtn').classList.add('on');
-  activateRailTab('trace');
-};
-function lastMsgWithTraj(){
-  const msgs=[...document.querySelectorAll('#chat .msg-ai')].reverse();
-  for(const m of msgs){ if(m._traj && m._traj.length) return m; }
-  return msgs.length ? msgs[0] : null;
-}
+$('#tjClose').onclick=()=>{ setRunPanel(false); };
+// §3.90：窄条 🧭 入口已删除（与右栏「轨迹」标签重复）；轨迹只在右栏标签可达。
 function renderSubPanel(){
   const count=sessionSubs.length;
   const badge=$('#subBadge'); if(badge){ badge.style.display=count>0?'':'none'; badge.textContent=count>99?'99+':String(count); }
@@ -2422,14 +2497,8 @@ function renderSubPanel(){
   }
   if(!count) list.innerHTML='<div class="empty" style="color:var(--faint);font-size:12px;padding:10px">本会话还没有子 Agent（task 工具会派生子 Agent）</div>';
 }
-const toggleSubPanel=()=>{
-  // §3.82：子Agent 入口 = 打开右栏并切到「子Agent」标签（不再单独开旧浮层）。
-  renderSubPanel();
-  activateRailTab('sub');
-  $('#subRailBtn').classList.add('on');
-};
-$('#subRailBtn').onclick=toggleSubPanel;
-$('#sbClose').onclick=()=>{ setRunPanel(false); $('#subRailBtn').classList.remove('on'); };
+// §3.90：窄条 🤖 入口已删除（与右栏「子Agent」标签重复）；子Agent 只在右栏标签可达。
+$('#sbClose').onclick=()=>{ setRunPanel(false); };
 // —— 任务面板（多会话并行） ——
 function setBtn(){
   // §138：停止点击后立刻有可见反馈（「停止中…」+ 禁用防连点），回合真正收尾后由 finally 复位。
@@ -2541,8 +2610,9 @@ async function refreshSessions(q){
     for(const s of g.items){ const o=document.createElement('option'); o.value=s.file; o.textContent=s.label; og.appendChild(o); }
     sel.appendChild(og);
   }
-  // §3.88：左栏只读同一份分组缓存（不额外请求/不轮询）
-  renderSideNavSessions($('#sideNavSessions'), sessionsGroupedCache, currentSession, pickSessionFromSideNav);
+  // §3.88：左栏只读同一份分组缓存（不额外请求/不轮询）；§3.90 同步折叠标题上的会话数
+  const recentN = renderSideNavSessions($('#sideNavSessions'), sessionsGroupedCache, currentSession, pickSessionFromSideNav);
+  updateRecentCount(recentN);
   if(currentSession&&!q) sel.value=currentSession;
   renderCrumb();
 }

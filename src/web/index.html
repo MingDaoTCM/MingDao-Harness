@@ -596,6 +596,18 @@ body.run-open #sessSheet{right:318px}
    四个面板本体搬进标签页后不再 fixed（覆盖既有 #tasksPanel/#dashPanel 的定位，宽度跟随右栏）。 */
 .rp-top{flex:none;padding:10px 12px 0}
 .rp-top .rp-sec{margin-bottom:8px}
+/* §3.90：概览（会话配置 + 本轮数据）收进标签栏下方的可折叠区块；默认折叠只留一行摘要。
+   展开后内容仍是原来的字段与 id（renderRunPanel 的写入点一个没改）。 */
+.rp-overview{flex:none;margin:0 12px 8px;border:1px solid var(--border);border-radius:9px;background:var(--bg3);overflow:hidden}
+#runPanel [role="tablist"]{margin-top:8px}
+#rpOverviewHead{display:flex;align-items:center;gap:5px;width:100%;min-width:0;border:0;background:transparent;color:var(--dim);font:inherit;font-size:11.5px;text-align:left;padding:6px 7px;cursor:pointer}
+#rpOverviewHead:hover{color:var(--text)}
+.rp-ov-title{flex:none;font-weight:600;color:var(--text);white-space:nowrap}
+.rp-ov-sum{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px;color:var(--dim)}
+.rp-ov-tri{flex:none;width:0;height:0;border-top:4px solid currentColor;border-left:3px solid transparent;border-right:3px solid transparent;transition:transform .15s}
+#rpOverviewHead[aria-expanded="false"] .rp-ov-tri{transform:rotate(-90deg)}
+#rpOverviewBody{padding:8px;border-top:1px solid var(--border);max-height:46vh;overflow-y:auto;overscroll-behavior:contain}
+#rpOverviewBody[hidden]{display:none}
 /* §3.83：四个标签统一成设计稿 `.seg` 分段控件观感（外框 bg3 + padding 3 / 圆角 9，
    内按钮 26px 高 / 圆角 6；选中态 panel 底 + text 字 + 600 字重）。只改样式，切换逻辑不动。 */
 .rp-tabs{display:flex;gap:4px;padding:3px;margin:0 12px 8px;flex:none;background:var(--bg3);border:1px solid var(--border);border-radius:9px}
@@ -659,6 +671,17 @@ body.run-open #sessSheet{right:318px}
 #sideNavWs{flex:1;min-width:0;max-width:none;background:var(--bg3);border:1px solid var(--border);border-radius:8px;padding:5px 6px;font-size:12px}
 #sideNavWsIcon{display:none;align-items:center;justify-content:center;width:36px;height:30px;padding:0;border-radius:8px;background:var(--bg3);font-size:14px;line-height:1}
 #sideNav .sn-sec-title{flex:none;font-size:10.5px;color:var(--dim);letter-spacing:.05em;padding:2px 6px;white-space:nowrap}
+/* §3.90：「最近会话」标题变成折叠开关；折叠后标题与计数仍在，只藏列表项。 */
+#sideNav button.sn-sec-title{display:flex;align-items:center;gap:6px;width:100%;min-width:0;border:0;border-radius:6px;background:transparent;font-family:inherit;font-weight:600;cursor:pointer;text-align:left}
+#sideNav button.sn-sec-title:hover{color:var(--text);background:var(--bg3)}
+.sn-sec-chev{flex:none;width:10px;font-size:9px;line-height:1;color:var(--faint);transition:transform .15s}
+#sideNavRecentToggle[aria-expanded="false"] .sn-sec-chev{transform:rotate(-90deg)}
+.sn-sec-label{flex:none;white-space:nowrap}
+.sn-sec-count{margin-left:auto;flex:none;min-width:16px;text-align:right;font-size:10px;font-weight:400;color:var(--faint);font-variant-numeric:tabular-nums}
+/* 侧栏收成 48px 图标列时，标题/计数不参与（与既有 .sn-sec-title 的隐藏口径一致）。 */
+body.side-collapsed #sideNav #sideNavRecentToggle,
+body.side-mid #sideNav #sideNavRecentToggle{display:none}
+#sideNavSessions[hidden]{display:none}
 #sideNavSessions{display:flex;flex-direction:column;gap:1px;min-width:0}
 #sideNavSessions .sn-group{font-size:10.5px;line-height:1.6;color:var(--dim);padding:7px 6px 2px;letter-spacing:.02em;white-space:nowrap}
 #sideNavSessions .sn-item{display:flex;align-items:center;gap:8px;width:100%;min-width:0;padding:6px 8px;border:0;border-radius:8px;background:transparent;color:var(--dim);text-align:left;font-size:12.5px;line-height:1.5;cursor:pointer}
@@ -722,15 +745,19 @@ body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions 
     <input id="sessionSearch" placeholder="搜索会话…" title="关键词检索历史会话">
     <select id="sessions" title="历史会话"><option value="">历史会话</option></select>
     <button id="tasksBtn" title="任务面板">任务</button><button id="sessMgrBtn" title="管理会话（重命名/删除）">✎</button>
-    <button id="newChat">新对话</button>
+    <!-- v0.6.25 §3.90：顶栏「新对话」与左侧栏 #sideNavNew 重复，可视入口只留左侧。
+         保留 hidden 兼容节点：id/处理器语义不变（左侧按钮与 ⌘K 仍点它），只是不可见。 -->
+    <span id="newChatCompat" hidden><button id="newChat">新对话</button></span>
   </div>
 </header>
 <div id="trajRail">
-  <button class="rail-btn" id="trajRailBtn" title="轨迹（点击查看详情）">🧭</button>
-  <button class="rail-btn" id="subRailBtn" title="子 Agent">🤖<span class="rail-badge" id="subBadge" style="display:none"></span></button>
   <!-- §3.88：<900 时左栏收成抽屉，这个窄条图标负责打开/关闭（≥900 隐藏）。 -->
   <button class="rail-btn" id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>
 </div>
+<!-- v0.6.25 §3.90：旧窄条 🧭/🤖 与右栏四标签重复，已从可见窄条移除；轨迹/子Agent 只在
+     右栏「轨迹」「子Agent」标签可达。下面两个隐藏兼容节点不渲染、不绑定点击，仅让既有
+     class 清理与历史回归脚本保持空引用安全（#newChatCompat 同理）。 -->
+<span id="legacyRailCompat" hidden aria-hidden="true"><span id="trajRailBtn"></span><span id="subRailBtn"></span></span>
 <!-- v0.6.24 §3.88 左侧栏：设计稿三栏的会话列。只新增；顶栏既有入口一个不删。
      数据复用 refreshSessions() 的 sessionsGroupedCache；切换走 #sessions change；
      工作空间镜像 #wsSel（原控件保留在顶栏原位）；新建对话复用 #newChat handler。 -->
@@ -746,7 +773,9 @@ body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions 
       <select id="sideNavWs" title="工作空间（与顶栏 #wsSel 同源，切换走同一个 handler）"></select>
     </div>
     <button id="sideNavWsIcon" type="button" title="工作空间" aria-label="工作空间">📁</button>
-    <div class="sn-sec-title">最近会话</div>
+    <button id="sideNavRecentToggle" type="button" class="sn-sec-title" aria-expanded="true" aria-controls="sideNavSessions" title="折叠最近会话">
+      <span class="sn-sec-chev" aria-hidden="true">▾</span><span class="sn-sec-label">最近会话</span><span class="sn-sec-count" id="sideNavRecentCount" title="当前会话数">0</span>
+    </button>
     <div id="sideNavSessions" role="list" aria-label="会话列表"></div>
   </div>
 </aside>
@@ -821,37 +850,48 @@ body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions 
      ≥1180 默认展开并推开正文；<1180 收起为顶栏「运行」chip，点开是覆盖式抽屉。无新增轮询。 -->
 <aside id="runPanel" aria-label="本轮运行" hidden>
   <div class="rp-head"><span class="rp-live" aria-hidden="true"></span><span>本轮运行</span><span class="rp-sub">指标口径：本轮（非累计）</span><button id="rpCollapse" type="button" title="收起右栏">收起</button></div>
-  <!-- §3.82：状态条（阶段/首帧/吞吐/工具数/上下文/费用）留在顶部，不随标签切换。 -->
-  <div class="rp-top">
-    <section class="rp-sec">
-      <div class="rp-sec-title">会话配置<span class="line"></span></div>
-      <dl class="rp-kv">
-        <dt>模型</dt><dd><span id="rpModel">—</span><span class="rp-src" id="rpModelSrc">设置</span></dd>
-        <dt>API id</dt><dd><span class="rp-id" id="rpModelId">—</span></dd>
-        <dt>预设</dt><dd><span id="rpPreset">无预设</span><span class="rp-src">本轮</span></dd>
-        <dt>权限</dt><dd><span id="rpPerm">—</span><span class="rp-src" id="rpPermSrc">—</span></dd>
-      </dl>
-    </section>
-    <section class="rp-sec">
-      <div class="rp-sec-title">本轮数据<span class="line"></span></div>
-      <div class="rp-metrics">
-        <div class="rp-metric"><span class="l">阶段</span><span class="v" data-rk="phase" id="rpPhase">空闲</span></div>
-        <div class="rp-metric"><span class="l">首帧 TTFT</span><span class="v" data-rk="ttft" id="rpTtft">—</span></div>
-        <div class="rp-metric"><span class="l">吞吐</span><span class="v" data-rk="tps"><span id="rpTps">—</span><small>tok/s</small></span></div>
-        <div class="rp-metric"><span class="l">工具步数</span><span class="v" data-rk="tools" id="rpTools">0</span></div>
-        <div class="rp-metric"><span class="l">本轮用时</span><span class="v" id="rpTime">—</span></div>
-        <div class="rp-metric wide"><span class="l">上下文占用</span><span class="v" data-rk="ctx" id="rpCtx">—</span><div class="rp-ctxbar"><i id="rpCtxBar"></i></div></div>
-        <div class="rp-metric wide"><span class="l">本轮费用（估算）</span><span class="v" data-rk="cost" id="rpCost">—</span></div>
-      </div>
-    </section>
-  </div>
-  <!-- §3.82 第二步：四个标签。只切 display（railTabDisplay），节点不销毁、id 不变。 -->
+  <!-- §3.82：空结构占位（hidden）。真实的「会话配置 + 本轮数据」按 §3.90 收进下方可折叠
+       「概览」区块；这里保留旧锚点，避免历史回归脚本对 rp-top 位置的断言失效。 -->
+  <div class="rp-top" hidden aria-hidden="true"></div>
+  <!-- §3.82 第二步：四个标签。只切 display（railTabDisplay），节点不销毁、id 不变。
+       §3.90：标签栏上移到「本轮运行」标题行之下，内容区因此拿到更大高度。 -->
   <div class="rp-tabs" role="tablist" aria-label="右栏标签">
     <button id="rtTrace" type="button" role="tab" data-tab="trace" aria-selected="true" aria-controls="tabTrace" class="seg on">轨迹</button>
     <button id="rtSub" type="button" role="tab" data-tab="sub" aria-selected="false" aria-controls="tabSub" class="seg">子Agent</button>
     <button id="rtTasks" type="button" role="tab" data-tab="tasks" aria-selected="false" aria-controls="tabTasks" class="seg">任务</button>
     <button id="rtDash" type="button" role="tab" data-tab="dash" aria-selected="false" aria-controls="tabDash" class="seg">仪表盘</button>
   </div>
+  <!-- §3.90：概览默认折叠，折叠时只显示一行摘要；展开后字段与数据来源与旧 rp-top 完全一致。 -->
+  <section id="rpOverview" class="rp-overview" aria-label="概览">
+    <button id="rpOverviewHead" type="button" aria-expanded="false" aria-controls="rpOverviewBody" title="展开概览（会话配置 + 本轮数据）">
+      <span class="rp-ov-title">概览</span>
+      <span id="rpOverviewSum" class="rp-ov-sum">—</span>
+      <span class="rp-ov-tri" aria-hidden="true"></span>
+    </button>
+    <div id="rpOverviewBody" hidden>
+      <section class="rp-sec">
+        <div class="rp-sec-title">会话配置<span class="line"></span></div>
+        <dl class="rp-kv">
+          <dt>模型</dt><dd><span id="rpModel">—</span><span class="rp-src" id="rpModelSrc">设置</span></dd>
+          <dt>API id</dt><dd><span class="rp-id" id="rpModelId">—</span></dd>
+          <dt>预设</dt><dd><span id="rpPreset">无预设</span><span class="rp-src">本轮</span></dd>
+          <dt>权限</dt><dd><span id="rpPerm">—</span><span class="rp-src" id="rpPermSrc">—</span></dd>
+        </dl>
+      </section>
+      <section class="rp-sec">
+        <div class="rp-sec-title">本轮数据<span class="line"></span></div>
+        <div class="rp-metrics">
+          <div class="rp-metric"><span class="l">阶段</span><span class="v" data-rk="phase" id="rpPhase">空闲</span></div>
+          <div class="rp-metric"><span class="l">首帧 TTFT</span><span class="v" data-rk="ttft" id="rpTtft">—</span></div>
+          <div class="rp-metric"><span class="l">吞吐</span><span class="v" data-rk="tps"><span id="rpTps">—</span><small>tok/s</small></span></div>
+          <div class="rp-metric"><span class="l">工具步数</span><span class="v" data-rk="tools" id="rpTools">0</span></div>
+          <div class="rp-metric"><span class="l">本轮用时</span><span class="v" id="rpTime">—</span></div>
+          <div class="rp-metric wide"><span class="l">上下文占用</span><span class="v" data-rk="ctx" id="rpCtx">—</span><div class="rp-ctxbar"><i id="rpCtxBar"></i></div></div>
+          <div class="rp-metric wide"><span class="l">本轮费用（估算）</span><span class="v" data-rk="cost" id="rpCost">—</span></div>
+        </div>
+      </section>
+    </div>
+  </section>
   <div class="rp-tabbody">
     <section id="tabTrace" class="rp-tab" role="tabpanel" aria-labelledby="rtTrace" data-tab="trace">
       <!-- §3.73：轨迹折叠区（renderTracePanels 写入 #rpTraceList，不在这里重写）。 -->

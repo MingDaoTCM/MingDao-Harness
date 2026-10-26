@@ -17933,4 +17933,256 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   ok('v0.6.24 §3.88 左侧栏：仅新增 #sideNav（240/48/抽屉三档 + 主区右移）· 顶栏九个既有入口逐个仍在且 id 唯一 · 会话四组渲染/当前高亮/点击复用 #sessions change · 折叠偏好 localStorage 重载恢复 · 无新增网络请求/轮询');
 }
 
+// ---------- 159. v0.6.25 §3.90：UI 去重（窄条/顶栏）+ 最近会话折叠 + 右栏标签上移与概览折叠 ----------
+// 接 §158。负责人四条意见：①窄条 🧭/🤖 与右栏四标签重复 → 删按钮与绑定；②顶栏「新对话」与
+// 左栏「＋ 新建对话」重复 → 只留左侧（#newChat 语义用 hidden 兼容节点保留）；③「最近会话」可折叠
+// 并记 localStorage；④右栏四标签上移到标题下、会话配置+本轮数据收进默认折叠的「概览」，内容区拿回高度。
+// 本节只锁这四件事与既有能力不回归；旧的 §154/§158 继续钉四标签与左侧栏。
+{
+  const html159 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  const app159 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+
+  /** 取 app.js 里一个顶层 `function name(...) {...}` 的源码（闭合括号在行首）。 */
+  function fn159(name) {
+    const start = app159.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `（前置）app.js 必须定义 ${name}()`);
+    const end = app159.indexOf('\n}\n', start);
+    assert.ok(end > start, `（前置）${name}() 必须可完整切出`);
+    return app159.slice(start, end + 2);
+  }
+  /** 把顶层函数当表达式求值，按需注入闭包依赖（桩 DOM / 常量 / 同文件纯函数）。 */
+  function eval159(name, deps = {}) {
+    const keys = Object.keys(deps);
+    return new Function(...keys, `return (${fn159(name)});`)(...keys.map((k) => deps[k]));
+  }
+  /** 取一条单行 CSS 规则的全文（selector{...}）。 */
+  function rule159(selector) {
+    const i = html159.indexOf(selector + '{');
+    assert.ok(i >= 0, `（前置）应能定位 CSS 规则：${selector}`);
+    const j = html159.indexOf('}', i);
+    assert.ok(j > i, `（前置）CSS 规则未闭合：${selector}`);
+    return html159.slice(i, j + 1);
+  }
+
+  // —— ① 左窄条不再有轨迹/子Agent 按钮（id/aria-label 都不在），其它图标与右栏入口不丢 ——
+  {
+    const iRail = html159.indexOf('<div id="trajRail">');
+    assert.ok(iRail >= 0, '（前置）必须有窄条 #trajRail');
+    const iRailEnd = html159.indexOf('</div>', iRail);
+    assert.ok(iRailEnd > iRail, '（前置）窄条必须闭合');
+    const rail159 = html159.slice(iRail, iRailEnd);
+    assert.ok(!/id="trajRailBtn"/.test(rail159), '左窄条不得再有轨迹按钮 #trajRailBtn');
+    assert.ok(!/id="subRailBtn"/.test(rail159), '左窄条不得再有子Agent按钮 #subRailBtn');
+    assert.ok(!/aria-label="轨迹|title="轨迹|🧭/.test(rail159), '左窄条不得再有轨迹图标或 aria-label');
+    assert.ok(!/aria-label="子 ?Agent|title="子 ?Agent|🤖/.test(rail159), '左窄条不得再有子Agent图标或 aria-label');
+    assert.ok(/<button class="rail-btn" id="sideNavRailBtn"/.test(rail159), '窄条必须保留抽屉开关 #sideNavRailBtn');
+    assert.equal((rail159.match(/class="rail-btn"/g) || []).length, 1, '窄条只保留抽屉开关一个可见按钮');
+    assert.ok(!/\$\('#trajRailBtn'\)\.onclick/.test(app159), '轨迹窄条按钮的点击绑定必须删除');
+    assert.ok(!/\$\('#subRailBtn'\)\.onclick/.test(app159), '子Agent 窄条按钮的点击绑定必须删除');
+    // 右栏四标签仍是轨迹/子Agent 的入口：默认轨迹 + 四按钮/四面板齐全
+    assert.ok(/let activeRailTab = 'trace';/.test(app159), '右栏默认标签必须仍是轨迹');
+    for (const id of ['rtTrace', 'rtSub', 'rtTasks', 'rtDash', 'tabTrace', 'tabSub', 'tabTasks', 'tabDash']) {
+      assert.ok(new RegExp(`id="${id}"`).test(html159), `右栏标签 ${id} 必须仍在（删除窄条入口不能连右栏一起丢）`);
+    }
+    // 顶栏「任务」/费用徽标入口行为不变
+    assert.ok(/\$\('#tasksBtn'\)\.onclick=\(\)=>\{[\s\S]{0,240}activateRailTab\('tasks'\);/.test(app159),
+      '顶栏「任务」必须仍走 activateRailTab(tasks)');
+    assert.ok(/\$\('#costBadge'\)\.onclick=\(\)=>\{[\s\S]{0,240}activateRailTab\('dash'\);/.test(app159),
+      '顶栏费用徽标必须仍走 activateRailTab(dash)');
+  }
+
+  // —— ② 可见的新建入口只有左侧一个；#newChat 语义仍可用（顶栏是 hidden 兼容节点） ——
+  {
+    const hStart = html159.indexOf('<header>');
+    const hEnd = html159.indexOf('</header>', hStart);
+    assert.ok(hStart >= 0 && hEnd > hStart, '（前置）必须能切出 <header>');
+    const header159 = html159.slice(hStart, hEnd);
+    const compat159 = /<span id="newChatCompat" hidden><button id="newChat">新对话<\/button><\/span>/.exec(header159);
+    assert.ok(compat159, '顶栏「新对话」必须包在 hidden 兼容节点里（可视入口只留左侧）');
+    assert.equal((html159.match(/id="newChat"/g) || []).length, 1, '#newChat 必须唯一（hidden 兼容节点）');
+    const headerVisible159 = header159.replace(compat159[0], '');
+    assert.ok(!/id="newChat"/.test(headerVisible159), '顶栏不得再有第二个可见的 #newChat');
+    assert.ok(!/>新对话<\/button>/.test(headerVisible159), '顶栏不得再有可见的「新对话」按钮');
+    assert.equal((html159.match(/>新对话<\/button>/g) || []).length, 1, '「新对话」按钮文案只允许出现在 hidden 兼容节点里');
+
+    const iAside = html159.indexOf('<aside id="sideNav"');
+    const iAsideEnd = html159.indexOf('</aside>', iAside);
+    const aside159 = html159.slice(iAside, iAsideEnd);
+    assert.ok(/id="sideNavNew"/.test(aside159), '左侧「＋ 新建对话」必须保留');
+    assert.ok(!/id="sideNavNew"[^>]*hidden/.test(aside159), '左侧「＋ 新建对话」必须可见');
+    assert.equal((html159.match(/id="sideNavNew"/g) || []).length, 1, '左侧新建入口必须唯一');
+
+    // 语义：点左侧按钮 = 点 #newChat（既有 handler 原样保留）
+    assert.ok(/\$\('#newChat'\)\.onclick=/.test(app159), '#newChat 处理器必须仍在（顶栏入口只是隐藏，语义不丢）');
+    assert.ok(/const newBtn = \$\('#sideNavNew'\);[\s\S]{0,160}\$\('#newChat'\);[\s\S]{0,80}\.click\(\)/.test(app159),
+      '#sideNavNew 必须复用 #newChat handler（点它等效）');
+    for (const id of ['paletteBtn', 'cfgBtn', 'tasksBtn', 'costBadge', 'runChip', 'sideNavRailBtn']) {
+      assert.ok(new RegExp(`id="${id}"`).test(html159), `删除顶栏新对话不得连带删掉 #${id}`);
+    }
+  }
+
+  // —— ③ 「最近会话」可折叠：localStorage 记忆、折叠后列表隐藏而标题/计数仍在 ——
+  {
+    const key159 = (app159.match(/const RECENT_STORAGE_KEY = '([^']+)';/) || [])[1];
+    assert.equal(key159, 'mingdao-recent-collapsed', '最近会话折叠 key 必须是 mingdao-recent-collapsed');
+    const data159 = new Map();
+    const storage159 = {
+      getItem(k) { return data159.has(k) ? data159.get(k) : null; },
+      setItem(k, v) { data159.set(k, String(v)); },
+    };
+    const pref159 = eval159('recentCollapsedPref', { RECENT_STORAGE_KEY: key159 });
+    const write159 = eval159('writeRecentCollapsed', { RECENT_STORAGE_KEY: key159 });
+    assert.equal(pref159(storage159), false, '最近会话默认必须是展开态');
+    write159(storage159, true);
+    assert.equal(storage159.getItem(key159), '1', '折叠最近会话必须写 localStorage（mingdao-recent-collapsed）');
+    assert.equal(eval159('recentCollapsedPref', { RECENT_STORAGE_KEY: key159 })(storage159), true, '重载后必须能读回折叠状态');
+    write159(storage159, false);
+    assert.equal(storage159.getItem(key159), '0', '展开也必须写回 0');
+    assert.equal(eval159('recentCollapsedPref', { RECENT_STORAGE_KEY: key159 })(storage159), false, '展开状态可读回');
+
+    const box159 = { hidden: false };
+    const btn159 = { attrs: {}, title: '', setAttribute(k, v) { this.attrs[k] = String(v); } };
+    const apply159 = eval159('syncRecentCollapsed', {
+      $: (sel) => (sel === '#sideNavSessions' ? box159 : (sel === '#sideNavRecentToggle' ? btn159 : null)),
+    });
+    apply159(true);
+    assert.equal(box159.hidden, true, '折叠后 #sideNavSessions 必须隐藏，标题与计数仍在');
+    assert.equal(btn159.attrs['aria-expanded'], 'false', '折叠后标题按钮必须 aria-expanded=false');
+    apply159(false);
+    assert.equal(box159.hidden, false, '展开后列表必须恢复显示');
+    assert.equal(btn159.attrs['aria-expanded'], 'true', '展开后标题按钮必须 aria-expanded=true');
+
+    const count159 = { textContent: '' };
+    eval159('updateRecentCount', { $: () => count159 })(5);
+    assert.equal(count159.textContent, '5', '折叠标题必须显示当前会话数量（5）');
+
+    // 标题与列表是兄弟节点：折叠列表不会藏标题；标题按钮默认无 hidden
+    const iAside159 = html159.indexOf('<aside id="sideNav"');
+    const aside159 = html159.slice(iAside159, html159.indexOf('</aside>', iAside159));
+    const iToggle159 = aside159.indexOf('id="sideNavRecentToggle"');
+    const iList159 = aside159.indexOf('id="sideNavSessions"');
+    assert.ok(iToggle159 >= 0 && iList159 > iToggle159, '「最近会话」标题必须在列表之前且独立存在（折叠只藏列表）');
+    assert.ok(/最近会话/.test(aside159.slice(iToggle159, iList159)), '标题文案「最近会话」必须可见');
+    assert.ok(/id="sideNavRecentCount"/.test(aside159.slice(iToggle159, iList159)), '标题行必须带会话数量 #sideNavRecentCount');
+    const init159 = fn159('initSideNav');
+    assert.ok(/recentCollapsedPref\(storage\)/.test(init159), 'initSideNav 必须读取最近会话折叠偏好');
+    assert.ok(/\$\('#sideNavRecentToggle'\)[\s\S]{0,80}toggleRecentSessions/.test(init159), '标题必须绑定折叠开关');
+    const toggle159 = fn159('toggleRecentSessions');
+    assert.ok(/writeRecentCollapsed\(storage, recentCollapsed\)/.test(toggle159), '折叠开关必须写回 localStorage');
+    assert.ok(/syncRecentCollapsed\(recentCollapsed\)/.test(toggle159), '折叠后必须立即应用（不等重载）');
+  }
+
+  // —— ④ 右栏 DOM 顺序：标题 → 四标签 → 概览（会话配置+本轮数据）→ 内容区；内容区 flex:1/min-height:0 ——
+  {
+    const iRun = html159.indexOf('<aside id="runPanel"');
+    assert.ok(iRun >= 0, '（前置）必须有 #runPanel');
+    const iRunEnd = html159.indexOf('<!-- P1-5 会话设置弹层 -->', iRun);
+    assert.ok(iRunEnd > iRun, '（前置）必须能切出 #runPanel');
+    const run159 = html159.slice(iRun, iRunEnd);
+    const iHead = run159.indexOf('class="rp-head"');
+    const iTabs = run159.indexOf('<div class="rp-tabs"');
+    const iOverview = run159.indexOf('id="rpOverview"');
+    const iBody = run159.indexOf('<div class="rp-tabbody"');
+    const iFoot = run159.indexOf('class="rp-foot"');
+    assert.ok(iHead >= 0 && iTabs > iHead, '右栏顺序必须是「标题 → 四标签 → 概览 → 内容区 → 底部」');
+    assert.ok(iTabs < iOverview, '右栏顺序必须是「标题 → 四标签 → 概览 → 内容区 → 底部」');
+    assert.ok(iOverview < iBody, '右栏顺序必须是「标题 → 四标签 → 概览 → 内容区 → 底部」');
+    assert.ok(iBody < iFoot, '右栏顺序必须是「标题 → 四标签 → 概览 → 内容区 → 底部」');
+    // 四标签确实在旧的会话配置字段之上（标签上移）
+    assert.ok(iTabs < run159.indexOf('id="rpModel"'), '四个标签必须移到会话配置（#rpModel）之上');
+    // 会话配置 + 本轮数据都在概览里
+    const overview159 = run159.slice(iOverview, iBody);
+    for (const id of ['rpModel', 'rpModelId', 'rpPreset', 'rpPerm', 'rpPhase', 'rpTtft', 'rpTps', 'rpTools', 'rpTime', 'rpCtx', 'rpCost']) {
+      assert.ok(new RegExp(`id="${id}"`).test(overview159), `概览必须收进 ${id}（原字段一个不删）`);
+    }
+    // 标签内容区：flex:1 + min-height:0 + 内部滚动（标签本体同样吃满高度）
+    const bodyCss159 = rule159('.rp-tabbody');
+    for (const decl of ['flex:1', 'min-height:0', 'overflow:hidden']) {
+      assert.ok(bodyCss159.includes(decl), `标签内容区 .rp-tabbody 必须 ${decl}`);
+    }
+    const tabCss159 = rule159('.rp-tab');
+    for (const decl of ['flex:1', 'min-height:0', 'overflow-y:auto']) {
+      assert.ok(tabCss159.includes(decl), `标签页 .rp-tab 必须 ${decl}（内容区拿到更大高度并可内部滚动）`);
+    }
+  }
+
+  // —— ⑤ 概览默认折叠、偏好可记忆；展开后字段与原有数据来源一致（模型/权限抽查） ——
+  {
+    const key159 = (app159.match(/const RP_OVERVIEW_STORAGE_KEY = '([^']+)';/) || [])[1];
+    assert.equal(key159, 'mingdao-rp-overview-expanded', '概览偏好 key 必须是 mingdao-rp-overview-expanded');
+    const data159 = new Map();
+    const storage159 = {
+      getItem(k) { return data159.has(k) ? data159.get(k) : null; },
+      setItem(k, v) { data159.set(k, String(v)); },
+    };
+    const pref159 = eval159('rpOverviewPref', { RP_OVERVIEW_STORAGE_KEY: key159 });
+    const write159 = eval159('writeRpOverview', { RP_OVERVIEW_STORAGE_KEY: key159 });
+    assert.equal(pref159(storage159), false, '概览默认必须折叠');
+    write159(storage159, true);
+    assert.equal(storage159.getItem(key159), '1', '展开概览必须写 localStorage');
+    assert.equal(eval159('rpOverviewPref', { RP_OVERVIEW_STORAGE_KEY: key159 })(storage159), true, '重载后必须恢复展开状态');
+    write159(storage159, false);
+    assert.equal(storage159.getItem(key159), '0', '折叠概览必须写回 0');
+    assert.equal(eval159('rpOverviewPref', { RP_OVERVIEW_STORAGE_KEY: key159 })(storage159), false, '折叠状态可读回');
+
+    const bodyEl = { hidden: false };
+    const headEl = { attrs: {}, title: '', setAttribute(k, v) { this.attrs[k] = String(v); } };
+    const sync159 = eval159('syncRpOverview', {
+      $: (sel) => (sel === '#rpOverviewBody' ? bodyEl : (sel === '#rpOverviewHead' ? headEl : null)),
+    });
+    sync159(false);
+    assert.equal(bodyEl.hidden, true, '折叠时概览内容必须隐藏（只留一行摘要）');
+    assert.equal(headEl.attrs['aria-expanded'], 'false', '折叠时标题按钮必须 aria-expanded=false');
+    sync159(true);
+    assert.equal(bodyEl.hidden, false, '展开后会话配置/本轮数据必须显示');
+    assert.equal(headEl.attrs['aria-expanded'], 'true', '展开后标题按钮必须 aria-expanded=true');
+
+    // 摘要与展开字段同源：runPanelView → rpOverviewSummary
+    const strip159 = () => ({ phase: '空闲', ttft: '—', tps: '—', ctx: '—', tools: '0 次工具调用', cost: '—' });
+    const view159 = eval159('runPanelView', { runStripView: strip159, permissionSourceLabel: () => '内置默认' });
+    const v159 = view159({ turnModel: 'deepseek-flash', presetName: '', permissionMode: 'ask', permissionSource: 'default' }, false);
+    const summary159 = eval159('rpOverviewSummary')(v159);
+    assert.equal(summary159, 'deepseek-flash · ask · 空闲 · 0 次工具调用',
+      '摘要必须同时含模型/权限/阶段/工具数，且取自 runPanelView 同一份数据');
+
+    const rp159 = fn159('renderRunPanel');
+    assert.ok(/set\('#rpModel', v\.modelLabel \|\| v\.model\);/.test(rp159),
+      '概览展开后的 #rpModel 必须仍来自 runPanelView()（modelLabel || model）');
+    assert.ok(/set\('#rpPerm', v\.permission\);/.test(rp159),
+      '概览展开后的 #rpPerm 必须仍来自 runPanelView()（permission）');
+    assert.ok(/set\('#rpOverviewSum', rpOverviewSummary\(v\)\);/.test(rp159), '折叠摘要必须由 renderRunPanel 用同一个 v 更新');
+    const iRun159 = html159.indexOf('<aside id="runPanel"');
+    const run159 = html159.slice(iRun159, html159.indexOf('<!-- P1-5 会话设置弹层 -->', iRun159));
+    for (const rk of ['phase', 'ttft', 'tps', 'tools', 'ctx', 'cost']) {
+      assert.ok(new RegExp(`data-rk="${rk}"`).test(run159), `右栏六项 data-rk=${rk} 必须仍在`);
+    }
+    const init159 = fn159('initRpOverview');
+    assert.ok(/rpOverviewPref\(storage\)/.test(init159), 'initRpOverview 必须读取折叠偏好');
+    assert.ok(/syncRpOverview\(/.test(init159), 'initRpOverview 必须立即应用折叠状态');
+  }
+
+  // —— ⑥ 既有能力不回归：四标签切换 / ⌘K / 设置 / 状态条六项 / 错误卡 / 内联确认（各一条结构断言） ——
+  {
+    assert.ok(/const RAIL_TABS = \['trace', 'sub', 'tasks', 'dash'\];/.test(app159), '四标签切换的 RAIL_TABS 必须保留');
+    assert.ok(/for \(const key of RAIL_TABS\) \{\n  const btn = \$\(RAIL_TAB_BUTTONS\[key\]\);/.test(app159), '四个标签按钮的点击绑定必须保留');
+    assert.ok(/id="rtTrace"[^>]*class="seg on"/.test(html159) && /id="rtSub"/.test(html159)
+      && /id="rtTasks"/.test(html159) && /id="rtDash"/.test(html159), '四标签按钮必须齐全');
+    assert.ok(/const mod = e\.metaKey \|\| e\.ctrlKey;/.test(app159) && /togglePalette\(\)/.test(app159),
+      '⌘K / Ctrl+K 命令面板入口必须保留');
+    assert.ok(/id="paletteMask"/.test(html159) && /id="paletteBtn"/.test(html159), '命令面板节点与入口必须保留');
+    assert.ok(/id="cfgBtn"/.test(html159) && /id="cfgModal"/.test(html159) && /\$\('#cfgBtn'\)\.onclick=/.test(app159),
+      '设置入口与 #cfgModal 必须保留');
+    const strip159 = html159.slice(html159.indexOf('id="runStrip"'), html159.indexOf('</div>', html159.indexOf('id="runStrip"')));
+    assert.deepEqual([...strip159.matchAll(/data-k="([a-z]+)"/g)].map((m) => m[1]).sort(),
+      ['cost', 'ctx', 'phase', 'tools', 'tps', 'ttft'], '底部状态条六项必须齐全');
+    assert.ok(/function errCardHtml\(/.test(app159) && /d\.className='err-card'/.test(app159) && /\.err-card\{/.test(html159),
+      '错误卡（折叠卡）渲染与样式必须保留');
+    assert.ok(/function askCardHtml\(/.test(app159) && /perm-acts/.test(app159) && /data-stop="1"/.test(app159)
+      && /\.perm-card\{/.test(html159), '内联权限确认三键（含停止）必须保留');
+  }
+
+  ok('v0.6.25 §3.90 UI 去重：窄条删 🧭/🤖 且右栏四标签入口不丢 · 顶栏 #newChat 收进 hidden 兼容节点、可视新建入口只剩左侧 · 最近会话可折叠（localStorage + 标题/计数常驻）· 右栏顺序「标题→四标签→概览→内容区」（概览默认折叠、字段同源、内容区 flex:1/min-height:0）· ⌘K/设置/状态条六项/错误卡/内联确认不回归');
+}
+
+
 process.exit(0);
