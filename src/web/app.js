@@ -349,7 +349,7 @@ function toggleRecentSessions() {
   writeRecentCollapsed(storage, recentCollapsed);
   syncRecentCollapsed(recentCollapsed);
 }
-/** 三档断点：≥1180 三栏 / 900–1180 左栏自动折叠 / <900 抽屉。 */
+/** 左栏三档断点：≥1180 展开(240) / 900–1180 自动折叠(48) / <900 抽屉。右栏收起点见 layoutClassesFor（<1100）。 */
 function sideNavBreakpoint(width) {
   const w = Number(width) || 0;
   if (w >= 1180) return 'wide';
@@ -1435,7 +1435,7 @@ function mergeSubagentProgress(pending, sub) {
     status: 'running',
   });
 }
-/** 窄窗口（<1180 右栏收起）且右栏不可见时，轨迹落到对话流末尾的可折叠区块。 */
+/** 窄窗口（<1100 右栏收起）且右栏不可见时，轨迹落到对话流末尾的可折叠区块。 */
 function traceDockVisible(width, panelVisible) {
   return layoutClassesFor(width).narrowRun && !panelVisible;
 }
@@ -1444,10 +1444,11 @@ function traceFocusTarget(width, panelVisible) {
   return traceDockVisible(width, panelVisible) ? 'dock' : 'panel';
 }
 
-// —— 窄屏断点：<900 侧栏收起；<1180 右栏收起（同一判据供 initResponsive 与断言使用） ——
+// —— 窄屏断点：<900 侧栏收起；<1100 右栏收起（同一判据供 initResponsive 与断言使用） ——
+// §3.92：右栏收起点由 1180 下调到 1100，1180 整点恢复三栏（1180–1101 右栏 260px）。
 function layoutClassesFor(width) {
   const w = Number(width) || 0;
-  return { narrow: w < 900, narrowRun: w < 1180 };
+  return { narrow: w < 900, narrowRun: w < 1100 };
 }
 
 // ============================================================================
@@ -1547,7 +1548,7 @@ function initTheme() {
 }
 initTheme();
 
-// —— 右栏「本轮运行」：<1180 收起为抽屉；宽屏默认展开；不做任何新轮询 ——
+// —— 右栏「本轮运行」：<1100 收起为抽屉；宽屏默认展开；不做任何新轮询 ——
 function syncRunPanel() {
   const el = $('#runPanel'); if (!el) return;
   // §3.82：四个面板都在右栏标签页内，右边缘只剩右栏一个抽屉（显隐由 syncPanelLayout 统一算）。
@@ -1803,7 +1804,7 @@ $('#rpCompact').onclick = () => renderBanner({ text: '⚠ Web 端没有 /compact
 // §3.73 轨迹 / 子 Agent 收纳：
 //   · 对话流：每轮只留**一行**摘要（.trace-row > .trace-summary），不再内联工具卡；
 //   · 宽屏：详情在右栏「轨迹 / 子Agent」两个可折叠区；
-//   · 窄屏（<1180 右栏收起）：同样的两块在对话流末尾的 #traceDock 里（JS 切换 hidden）。
+//   · 窄屏（<1100 右栏收起）：同样的两块在对话流末尾的 #traceDock 里（JS 切换 hidden）。
 //   · 统计口径：对话流摘要与右栏轮头都调用 traceRoundForMsg → traceRoundView，只有一套。
 // ============================================================================
 function traceRoundForMsg(msg, now) {

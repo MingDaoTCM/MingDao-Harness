@@ -69,11 +69,12 @@ M.mutate({
 });
 
 // ⑦ 断点类名不切（900px 以下侧栏不收起——窄窗又回到横向拥挤）
+// §3.92：右栏收起点从 1180 下调到 1100，锚点同步到当前 layoutClassesFor（仅阈值，判据语义不变）。
 M.mutate({
   name: '⑦ 900px 以下不再判定 narrow（侧栏不收起）',
   file: 'src/web/app.js',
-  from: '  return { narrow: w < 900, narrowRun: w < 1180 };',
-  to: '  return { narrow: false, narrowRun: w < 1180 };',
+  from: '  return { narrow: w < 900, narrowRun: w < 1100 };',
+  to: '  return { narrow: false, narrowRun: w < 1100 };',
   expect: ['900px 以下必须收起侧栏'],
   run: SEC,
 });

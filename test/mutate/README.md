@@ -19,7 +19,7 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：439（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：461（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
 
 > v0.6.20（§3.79）：界面重排回滚到 v0.6.18，`batch42-ui-p2`（15 条）与 `batch43-ui-shell`（12 条）
 > 断言的 P2/新骨架已不在代码里，随 `test/ui-p2.js` 一并移除（369 → 342）。
@@ -48,3 +48,8 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 > v0.6.23（§3.87）：新增 `batch48-ts`（10 条）——不补 ts、ts 不是 ISO、已有 ts 被覆盖、补在副本上
 > 导致重复写入刷新、压缩重写刷新时间、Web 自建第二份实现、Web 绕过 `appendMessages`、读取路径
 > 回填 ts、读取路径改写旧文件、非法 ts 读取崩溃（397 → 407）。
+>
+> v0.6.26（§3.92）：新增 `batch52-layout-bp`（11 条）——右栏收起点改回 1180、JS `narrowRun` 判据回退、
+> <900 正文补偿归零/缩到 30px、窄条恢复占流、1101–1180 右栏被 `display:none`、左/右抽屉丢失、
+> 正文补偿加 `min-width` 与 `overflow-x:auto` 造成横向滚动、收起规则去掉 `narrow-run` 收口
+> （§3.91 的 `batch52-memory-v2` 11 条先落地；439 + 11 + 11 = 461）。

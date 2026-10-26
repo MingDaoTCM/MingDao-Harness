@@ -18184,5 +18184,192 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   ok('v0.6.25 §3.90 UI 去重：窄条删 🧭/🤖 且右栏四标签入口不丢 · 顶栏 #newChat 收进 hidden 兼容节点、可视新建入口只剩左侧 · 最近会话可折叠（localStorage + 标题/计数常驻）· 右栏顺序「标题→四标签→概览→内容区」（概览默认折叠、字段同源、内容区 flex:1/min-height:0）· ⌘K/设置/状态条六项/错误卡/内联确认不回归');
 }
 
+// ---------- 160. v0.6.26 §3.92：布局断点修正（<900 窄条不再压正文 + 1180 整点三栏 / 右栏收起点 1100） ----------
+// 接 §159。两个已确认的布局缺陷（只动布局，不动功能）：
+// ①<900 左栏收成覆盖式抽屉后，44/42px 固定窄条仍压住居中正文左缘 → 主区/输入区右移 48px，
+//   窄条继续 fixed（不占文档流）；②#runPanel 的 @media (max-width:1180px) 在 1180 整点把右栏收起
+//   → 收起点下调到 1100，且由 body.narrow-run（<1100）收口，保证 1100/1180 整点仍是三栏；
+//   1101–1180 右栏收窄到 260px 但仍可见（内部滚动）；1000/880 仍是抽屉。正文不得横向滚动。
+{
+  const html160 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  const app160 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+
+  /** 去掉 CSS 注释并把连续空白压成一个空格（选择器/查询串按它比较）。 */
+  const css160 = html160.replace(/\/\*[\s\S]*?\*\//g, '');
+  const squeeze160 = (s) => String(s).replace(/\s+/g, ' ').trim();
+  /**
+   * 按花括号配对把一条规则的块体切出来（不用贪婪正则，避免把后面的规则吞进来）。
+   * @param {string} src @param {number} openIdx
+   * @returns {number}
+   */
+  function blockEnd160(src, openIdx) {
+    let depth = 1;
+    let j = openIdx + 1;
+    while (j < src.length && depth > 0) {
+      if (src[j] === '{') depth += 1;
+      else if (src[j] === '}') depth -= 1;
+      j += 1;
+    }
+    return j;
+  }
+  /** 解析顶层规则与 @media 块（媒体查询内的规则只归到对应块，不混进顶层）。 */
+  function parseCss160(src) {
+    const top = new Map();
+    const medias = [];
+    let i = 0;
+    while (i < src.length) {
+      const open = src.indexOf('{', i);
+      if (open < 0) break;
+      const end = blockEnd160(src, open);
+      const head = squeeze160(src.slice(i, open));
+      const body = src.slice(open + 1, end - 1);
+      if (/^@media\s*\(/.test(head)) {
+        // 媒体查询可能有多段括号（min-width:1101px) and (max-width:1180px），统一去掉括号再比较。
+        const query = squeeze160(head.replace(/^@media\s*/, '').replace(/[()]/g, ' '));
+        medias.push({ query, body });
+      } else {
+        top.set(head, body.trim());
+      }
+      i = end;
+    }
+    return { top, medias };
+  }
+  /** 在给定块体内按 selector 取声明（选择器逐字比较，仅压缩空白）。 */
+  function rule160(src, selector) {
+    const target = squeeze160(selector);
+    let i = 0;
+    while (i < src.length) {
+      const open = src.indexOf('{', i);
+      if (open < 0) return null;
+      const end = blockEnd160(src, open);
+      if (squeeze160(src.slice(i, open)) === target) return src.slice(open + 1, end - 1).trim();
+      i = end;
+    }
+    return null;
+  }
+  const parsed160 = parseCss160(css160);
+  /** 顶层 + 全部 @media 里找第一条匹配规则（用于跨断点共享的声明）。 */
+  function findRule160(selector) {
+    const key = squeeze160(selector);
+    if (parsed160.top.has(key)) return parsed160.top.get(key) || '';
+    for (const m of parsed160.medias) {
+      const r = rule160(m.body, selector);
+      if (r != null) return r;
+    }
+    return '';
+  }
+  /**
+   * @param {string} decl @param {string} prop
+   * @returns {number}
+   */
+  function px160(decl, prop) {
+    const m = new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*(-?[\\d.]+)px`).exec(decl || '');
+    return m ? Number(m[1]) : NaN;
+  }
+  /** 取 app.js 顶层函数源码（闭合括号在行首，与 §158/§159 同款）。 */
+  function fn160(name) {
+    const start = app160.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `（前置）app.js 必须定义 ${name}()`);
+    const end = app160.indexOf('\n}\n', start);
+    assert.ok(end > start, `（前置）${name}() 必须可完整切出`);
+    return app160.slice(start, end + 2);
+  }
+  const layout160 = new Function(`${fn160('layoutClassesFor')}\nreturn layoutClassesFor;`)();
+  const media160 = (query) => parsed160.medias.filter((m) => m.query === squeeze160(query));
+
+  // —— ① <900：窄条只做抽屉开关，不再压正文左缘（补偿 ≥ 窄条右边界 + 不设固定宽度） ——
+  {
+    const railCss = parsed160.top.get('#trajRail') || '';
+    assert.ok(/position:\s*(?:fixed|absolute)/.test(railCss),
+      '窄条必须脱离文档流（fixed/absolute），不得占流挤压正文');
+    const railW = px160(findRule160('body.narrow-side #trajRail'), 'width');
+    assert.equal(railW, 44, '<900 窄条宽度必须是 44px（正文补偿量按它算）');
+    const comp = findRule160('body.side-drawer main,body.side-drawer footer');
+    assert.ok(comp, '<900 side-drawer 必须给正文/输入区补偿偏移（margin-left）');
+    const ml = px160(comp, 'margin-left');
+    assert.ok(Number.isFinite(ml) && ml >= railW,
+      `880 下正文容器左缘必须 ≥ 窄条右边界（补偿 ${ml}px ≥ 窄条 ${railW}px）`);
+    assert.ok(!/(?:^|;)\s*(?:min-)?width\s*:/.test(comp),
+      '窄屏补偿只加偏移、不得给正文设固定宽度（否则会出现横向滚动）');
+    // 880：主区宽 880−48=832，居中正文 #chat 宽 832（<860），左缘 = 48 ≥ 窄条右缘 44
+    const chatLeft880 = ml + Math.max(0, (880 - ml - 860) / 2);
+    assert.ok(chatLeft880 >= railW,
+      `880 下 #chat 左缘（${chatLeft880}px）必须 ≥ 窄条右缘（${railW}px）`);
+    assert.ok(/max-width:\s*860px/.test(parsed160.top.get('#chat') || ''),
+      '正文容器 #chat 必须保留 max-width:860px');
+    assert.ok(/min-width:\s*0/.test(parsed160.top.get('main') || ''),
+      '主区 main 必须 min-width:0（允许收缩，不撑出横向滚动）');
+    assert.ok(/overflow-x:\s*hidden/.test(parsed160.top.get('body') || ''),
+      'body 必须禁止横向滚动（overflow-x:hidden）');
+  }
+
+  // —— ② 右栏收起点是 1100：max-width:1100px 存在、由 narrow-run 收口、1180 不再收起右栏 ——
+  {
+    const b1100 = media160('max-width:1100px');
+    assert.ok(b1100.length >= 1, '右栏收起点必须是 1100（必须有 @media (max-width:1100px) 规则）');
+    const collapse = b1100
+      .map((m) => squeeze160(m.body))
+      .find((b) => /body\.narrow-run #runPanel\{display:\s*none\}/.test(b));
+    assert.ok(collapse, '右栏收起规则必须写在 max-width:1100px 且由 body.narrow-run 收口（1100 整点仍是三栏）');
+    const b1180 = media160('max-width:1180px');
+    assert.ok(b1180.length >= 1, '1180 的其它既有规则（右栏副标题收起）可以保留');
+    for (const m of b1180) {
+      assert.ok(!/#runPanel\{[^}]*display:\s*none/.test(squeeze160(m.body)),
+        'max-width:1180px 不得再有收起 #runPanel 的规则');
+    }
+    assert.deepEqual(layout160(1099), { narrow: false, narrowRun: true }, '1099 必须收起右栏（<1100 才收）');
+    assert.deepEqual(layout160(1100), { narrow: false, narrowRun: false }, '1100 整点必须已是三栏（narrowRun=false）');
+    assert.deepEqual(layout160(1180), { narrow: false, narrowRun: false }, '1180 整点必须已是三栏（narrowRun=false）');
+  }
+
+  // —— ③ 1100–1180 右栏 260px 仍可见（正文只让 260px，1180 三栏仍有 638px 正文） ——
+  {
+    const mid = parsed160.medias.find((m) => m.query === 'min-width:1101px and max-width:1180px');
+    assert.ok(mid, '1101–1180 必须有独立规则（右栏收窄但仍可见）');
+    const runMid = rule160(mid.body, '#runPanel');
+    assert.equal(px160(runMid, 'width'), 260, '1101–1180 右栏宽度必须是 260px（仍可见，可内部滚动）');
+    const padMid = rule160(mid.body, 'body.run-open');
+    assert.equal(px160(padMid, 'padding-right'), 260, '1101–1180 正文只让出 260px（与右栏同宽）');
+    assert.ok(!/display:\s*none/.test(squeeze160(mid.body)), '1101–1180 右栏必须可见，不得 display:none');
+    const wideMain = px160(findRule160('body.side-wide main,body.side-wide footer'), 'margin-left');
+    assert.equal(wideMain, 282, '（前置）≥1180 左栏展开时主区仍右移 282px（不改既有列宽）');
+    assert.ok(1180 - wideMain - 260 >= 400,
+      `1180 三栏时正文仍有 ${1180 - wideMain - 260}px（不出现横向滚动）`);
+  }
+
+  // —— ④ 1000/880 仍是抽屉（右栏收起 + 左栏抽屉，不因下调断点而丢失） ——
+  {
+    const drawer = media160('max-width:1100px')
+      .map((m) => rule160(m.body, 'body.narrow-run.run-drawer #runPanel'))
+      .find((r) => r != null);
+    assert.ok(drawer && /display:\s*flex/.test(drawer),
+      '1000/880 右栏抽屉必须仍在（body.narrow-run.run-drawer #runPanel display:flex）');
+    assert.deepEqual(layout160(1000), { narrow: false, narrowRun: true }, '1000 必须仍收起右栏（抽屉），不得变三栏');
+    assert.deepEqual(layout160(880), { narrow: true, narrowRun: true }, '880 必须仍同时收起左右栏（抽屉）');
+    const sideDrawer = parsed160.top.get('body.side-drawer #sideNav') || '';
+    assert.ok(/display:\s*none/.test(sideDrawer), '<900 左栏默认仍必须是抽屉（display:none）');
+    const sideOpen = parsed160.top.get('body.side-drawer.side-drawer-open #sideNav') || '';
+    assert.ok(/display:\s*flex/.test(sideOpen), '<900 左栏抽屉仍必须能点开（display:flex）');
+  }
+
+  // —— ⑤ 正文不横向滚动：正文容器不设最小宽度 + 各视口正文宽度为正 ——
+  {
+    const chat = parsed160.top.get('#chat') || '';
+    assert.ok(!/(?:^|;)\s*min-width\s*:/.test(chat), '正文容器 #chat 不得有 min-width（窄屏会被撑出横向滚动）');
+    // 880（side-drawer 48）/1000（side-mid 90，右栏抽屉）/1100（side-mid 90 + 右栏 300）/1180（side-wide 282 + 右栏 260）
+    const widths = {
+      880: 880 - 48,
+      1000: 1000 - 90,
+      1100: 1100 - 90 - 300,
+      1180: 1180 - 282 - 260,
+    };
+    for (const [w, content] of Object.entries(widths)) {
+      assert.ok(content >= 320, `${w}px 视口正文可用宽度必须 ≥320px（实际 ${content}px，否则横向滚动/不可读）`);
+    }
+  }
+
+  ok('v0.6.26 §3.92 布局断点：<900 窄条 fixed 不占流 + 正文/输入区右移 48px（左缘 ≥ 窄条右缘、补偿不设宽）+ 右栏收起点 1180→1100（narrow-run 收口，1100/1180 整点三栏）+ 1101–1180 右栏 260px 仍可见 + 1000/880 抽屉不丢 + 正文无横向滚动');
+}
+
 
 process.exit(0);

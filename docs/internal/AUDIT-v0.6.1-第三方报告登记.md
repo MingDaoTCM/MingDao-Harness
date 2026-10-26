@@ -5064,3 +5064,79 @@ Web 写的消息有时间、非 Web 写的没有；旧会话（该字段引入�
   上调采用 +25% 的探索步长，若上调后失败会重新学下来（不保证一次收敛到最优值）。
 - 端点键是 `baseUrl`（含端口）：同一引擎换端口/反代会形成两条学习记录，这是刻意的（不同端口可能对应不同并发/显存配置）。
 
+## 3.92 已做（v0.6.26 布局断点：<900 窄条不再压正文、右栏收起点 1180→1100）
+
+**来源 / 证据**：负责人对 v0.6.25 指出两处已确认的布局缺陷（只动布局，不动功能）：①<900 左栏变成
+覆盖式抽屉后，既有的 44/42px 固定窄条仍压住居中正文的左缘（880×900 截图中欢迎语/消息卡左缘落在
+窄条下方）；②`#runPanel` 的 `@media (max-width:1180px)` 在 1180 整点把右栏 `display:none`，导致
+1180 不是设计稿要求的三栏。
+
+**修法（`src/web/index.html` + 必要的 `src/web/app.js` 阈值）**
+
+- ① `body.side-drawer main,body.side-drawer footer` 的左边距由 0 改为 **48px**（44px 窄条 + 4px 间隙）；
+  窄条仍是 `position:fixed`（不占文档流），补偿只加偏移、不设宽度。880 下主区宽 832px、`#chat`
+  左缘 48px ≥ 窄条右缘 44px，正文不再被压，也不会出现横向滚动。
+- ② 右栏收起规则由 `@media (max-width:1180px)` 下调为 `@media (max-width:1100px)`，并加
+  `body.narrow-run` 限定：`body.narrow-run #runPanel{display:none}`、`body.narrow-run.run-drawer
+  #runPanel{display:flex;...}`。`narrow-run` 只在 `w < 1100` 时挂上，因此 **1100 整点不命中收起**，
+  仍是三栏；`<1100` 才收成抽屉。
+- ③ 新增 `@media (min-width:1101px) and (max-width:1180px)`：`#runPanel{width:260px}`、
+  `body.run-open{padding-right:260px}`，`#sessSheet`/`#scrollBottomBtn` 同步右移 18/26px；
+  右栏仍可见、内部照常滚动，1180 三栏时正文仍有 638px。
+- ④ `src/web/app.js` 的 `layoutClassesFor()` 只改阈值：`narrowRun: w < 1180` → `w < 1100`，
+  `traceDockVisible`/右栏默认展开随之对齐；左栏三档（1180/900）、≥1200 列宽、顶栏高度、主题、
+  字号阶均未动。未引入设计稿 CSS、未删入口。
+- ⑤ 唯一测试夹具同步：`test/mutate/batch38-ui-p1.mjs` ⑦ 的变异锚点写死了旧
+  `return { narrow: w < 900, narrowRun: w < 1180 };`，阈值下调后锚点找不到；仅把该锚点的
+  `< 1180` 同步为 `< 1100`（缺陷语义与断言“900px 以下必须收起侧栏”不变）。
+
+**断言与变异**
+
+- `test/smoke.js` 末尾新增 §160：①窄条 `fixed/absolute`（不占流）、<900 窄条 44px、补偿 48px ≥ 44px、
+  补偿不设固定宽度、880 下 `#chat` 左缘 48px ≥ 窄条右缘 44px、`body{overflow-x:hidden}`；
+  ②`@media (max-width:1100px)` 存在且收起由 `body.narrow-run` 收口、`max-width:1180px` 不再有
+  `#runPanel{display:none}`、`layoutClassesFor(1099)=narrowRun:true`、`1100/1180=narrowRun:false`；
+  ③1101–1180 右栏 260px + 正文只让 260px + 1180 三栏正文 ≥400px；④1000/880 仍收起、左右抽屉
+  `display:flex` 不丢；⑤`#chat` 无 min-width、880/1000/1100/1180 正文可用宽度均 ≥320px。
+- 新建 `test/mutate/batch52-layout-bp.mjs`：**11/11 全中**（右栏收起点改回 1180、JS 阈值回退、
+  补偿归零/缩到 30px、窄条恢复占流、1101–1180 右栏被 `display:none`、右/左抽屉丢失、补偿加
+  `min-width` 与 `body{overflow-x:auto}` 造成横向滚动、收起规则去掉 `narrow-run` 收口）。
+- 全仓变异总数 450 → **461**（§3.91 的 11 条先落地 + 本批 11 条）；`test/mutate/README.md` 计数行
+  按 `doc-lint` 实测值校正为 461。
+
+**截图（真实 Electron，`scripts/ui-shot.mjs`；尺寸/字节为文件实际值）**
+
+| 目录 | 尺寸 | home.png 字节 | 结论 |
+| --- | --- | --- | --- |
+| `/tmp/shots-bp-before/880` | 880×900 | 147629 | 改前正文左缘 10px，被 44px 窄条压住 |
+| `/tmp/shots-bp-before/1180` | 1180×900 | 154899 | 改前 1180 右栏收起（两栏） |
+| `/tmp/shots-bp-after/880` | 880×900 | 150930 | 改后正文左缘 48px，窄条不再压正文 |
+| `/tmp/shots-bp-after/1180` | 1180×900 | 190862 | 改后 1180 三栏（左 240 + 正文 + 右 260） |
+| `/tmp/shots-bp-after/1100` | 1100×900 | 174515 | 改后 1100 三栏（左折叠 48 + 正文 + 右 300） |
+
+同一目录另外四张（settings/palette/session/sheet）均为对应视口 880×900 / 1180×900 / 1100×900，
+例如 after/880 sheet 293764、after/1180 sheet 329826、after/1100 sheet 319994 字节。
+
+目视结论：①880 欢迎语与「轨迹与子 Agent」卡片的左缘整体右移，画面左侧 0–44px 只剩窄条抽屉开关，
+不再遮挡正文；②1180 右栏「本轮运行」完整出现（标签/概览/轨迹），与左栏、正文构成三栏；
+③1100 左栏自动折叠为 48px 图标列、右栏 300px 仍完整可见，仍是三栏而非抽屉；④三张图均无横向滚动条。
+
+**门禁**
+
+- `npm run typecheck`：通过。
+- `node test/smoke.js`：通过（含新增 §160）。
+- `node test/e2e-web.js`：24 项通过；`node test/e2e-local.js`：17 项通过；
+  `node test/api-contracts.js`：8 项通过；`node test/ui-sessions.js`：5 项通过。
+- `node test/mutate/batch52-layout-bp.mjs`：11/11 全中。
+- `node test/mutate/run.mjs`：41/41 批次全中（含修正 batch38 锚点后的全量复跑）。
+- `node scripts/doc-lint.mjs`：通过（变异总数 461）。
+
+**未做 / 边界**
+
+- 未改 `src/providers/**`、`src/agent.js`、`test/memory-recovery.js`、`presets/**`、`desktop/**`、
+  `ide/**`；未 tag / 改版本号 / publish / 动官网。
+- 左栏三档断点仍保持 1180/900（§3.88 既定），本次只下调右栏收起点；因此 1100–1180 左栏为自动折叠
+  48px 图标列 + 正文 + 右栏 260px（仍是三栏，非抽屉）。
+- 1100–1180 右栏收窄到 260px 后内容区更紧凑，右栏内部滚动由既有 `.rp-body/.rp-tab` 承担，未新增
+  滚动容器或改字号。
+
