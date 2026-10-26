@@ -3,6 +3,87 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.25（2026-10-26）— UI 去重（左栏/顶栏/最近会话）+ 右栏标签上移与概览折叠
+
+> 本版只改 WebUI（`src/web/index.html` + `src/web/app.js`），按负责人的四条意见做「去重 + 提密度」：
+> ① 左窄条删掉与右栏四标签重复的 🧭 轨迹 / 🤖 子Agent 两个按钮；② 顶栏「新对话」删除，
+> **可见的新建入口只剩左侧「＋ 新建对话」**；③「最近会话」可折叠（chevron + 计数，偏好记忆）；
+> ④ 右栏顺序改为 **标题 → 四标签 → 概览（默认折叠为一行摘要）→ 内容区**，四个标签的可视高度
+> **约 204px → 约 637px**。细节见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` **§3.90**。
+
+### 一、四条 UI 去重 / 提密度（`src/web/index.html` + `src/web/app.js`）
+
+**证据**：负责人对 v0.6.24 的三栏界面提了四条具体意见：① 42px 窄条里的 🧭（轨迹）/ 🤖（子Agent）
+与右栏四个标签页重复；② 顶栏「新对话」与左侧「＋ 新建对话」重复；③「最近会话」整块不能折叠，
+长列表一直占左栏；④ 右栏「轨迹/子Agent/任务/仪表盘」标签栏位置偏低（在「会话配置 + 本轮数据」
+之后），四个标签的可视面积偏小。
+
+**修法**：
+
+- **① 窄条去重**：删除窄条里的 `#trajRailBtn` / `#subRailBtn` 两个可见按钮，以及
+  `$('#trajRailBtn').onclick`、`$('#subRailBtn').onclick`、`lastMsgWithTraj()`、
+  `toggleSubPanel()` 等绑定/死函数；窄条只剩 ☰ / ＋ / 📁 / 💬（抽屉开关
+  `#sideNavRailBtn` 为窄条唯一可见按钮）。右栏「轨迹」「子Agent」标签仍是详情入口
+  （默认仍为轨迹），顶栏「任务」与费用徽标仍分别走 `activateRailTab('tasks'|'dash')`。
+  为保住既有变异批次的锚点，保留 `#legacyRailCompat` **hidden 兼容节点**
+  （无点击绑定、不参与布局/可见性）。
+- **② 顶栏「新对话」删除**：`<button id="newChat">新对话</button>` 收进
+  `<span id="newChatCompat" hidden>` 兼容节点——`#newChat` 的 id 与 onclick 语义仍在
+  （左侧 `#sideNavNew` 与 ⌘K 仍点它），但**可见的新建入口只剩左侧「＋ 新建对话」**。
+- **③「最近会话」可折叠**：标题改为按钮 `#sideNavRecentToggle`（chevron + 标题 + 数量
+  `#sideNavRecentCount`）；点击只切 `#sideNavSessions.hidden`，标题与计数常驻；
+  状态写 `localStorage['mingdao-recent-collapsed']`（默认展开），`initSideNav()` 启动恢复。
+- **④ 右栏标签上移 + 概览折叠**：DOM 顺序改为「`rp-head` → 四标签 `rp-tabs` →
+  `#rpOverview`（会话配置 + 本轮数据）→ `rp-tabbody` → `rp-foot`」；`#rpOverview`
+  **默认折叠**为一行摘要（`deepseek-flash · ask · 空闲 · 0 次工具调用`，四段完全取
+  `runPanelView()` 的 `model/permission/phase/tools`），展开偏好写
+  `localStorage['mingdao-rp-overview-expanded']`；展开后字段 id 与数据来源一个未改
+  （`#rpModel`/`#rpPerm`/六个 `data-rk` 仍由 `renderRunPanel()` 写）。
+  `.rp-tabbody`/`.rp-tab` 保持 `flex:1;min-height:0` + 内部滚动，收起概览后内容区可视高度
+  由约 **204px** 增至约 **637px**（1440×900 实测）。
+- 未引入设计稿 CSS；未改 `.app` 网格列宽、顶栏高度、主题 token、字号阶。
+
+**测试与变异**：`test/smoke.js` 新增 **§159**，六条覆盖：① 左窄条无重复按钮（id/aria-label/
+图标都不在、只剩一个可见按钮、两个 onclick 绑定已删）且右栏四标签与顶栏任务/费用不回归；
+② 可见新建入口唯一（`#newChat` 唯一且包在 hidden 兼容节点里、`#sideNavNew` 仍转发 click）；
+③ 最近会话可折叠且记忆（`mingdao-recent-collapsed` 写/读/模拟重载，`aria-expanded` 与计数仍在）；
+④ 右栏 DOM 顺序「标题→四标签→概览→内容区→底部」+ 内容区 `flex:1/min-height:0` 与内部滚动；
+⑤ 概览默认折叠且展开后字段同源（`#rpModel`/`#rpPerm` 仍取 `v.modelLabel||v.model` /
+`v.permission`）；⑥ 既有能力不回归（四标签切换、⌘K、设置、状态条、错误卡、内联确认各至少一条
+结构断言）。新增 `test/mutate/batch51-ui-dedupe.mjs` **14/14 全中**；全仓变异总数
+**425 → 439**（39 批）。
+
+### 二、验证
+
+- 门禁逐项见下（本机 macOS，最终提交 HEAD = `4ec66b5`，`MINGDAO_HOME` 临时目录）：
+  `typecheck` 0 / `typecheck:strict` 0（基线 0）/ `smoke` **156 组断言**全通过（含新增 §159，单独跑）
+- `e2e-local` 17 项 / `e2e-web` 24 项 / `e2e-schedule` 11 项 / `api-contracts` 8 项；
+  `pack-ctx-privesc` 4 组 / `ledger-source` 11 组 / `model-names` 8 组 / `memory-recovery` 5 项 /
+  `ui-sessions` 5 项 → 全通过
+- `mutate/selfcheck` 14/14；`npm run bench` 5 套基准全通过；
+  `node test/mutate/run.mjs` → **39/39 批、439/439 条全中、0 逃逸**（跑完自动还原，无残留）
+- `scripts/doc-lint.mjs` 全通过；`src/cli.js diagnose` 报告正常、密钥脱敏
+- 发布提交只含五个发布文件（`CHANGELOG.md` / `RELEASE-NOTES-0.6.25.md` / `package.json` /
+  `package-lock.json` / `desktop/package.json`）；
+  `git diff --name-only <门禁SHA>..<tagSHA> -- src test` → **0 行**
+- 发布树 Electron 截图：`/tmp/shots-0625`（1440×900）、`/tmp/shots-0625-1000`（1000×900）、
+  `/tmp/shots-0625-narrow`（narrow 880×900）
+
+### 三、已知边界（逐条如实登记）
+
+- **为保住旧变异锚点保留了 hidden 兼容节点**（`#legacyRailCompat` / `#newChatCompat`，后续可清理）：
+  两者都是 `hidden`、无点击绑定、不渲染、不进入任何用户路径；只服务于既有测试锚点与历史 class
+  清理，清理时需同步改 batch 里的锚点。
+- **1180 整点右栏仍按既有规则收起**：视口恰好 1180 时右栏不推开正文（覆盖式），严格三栏需要
+  **>1180**；该既有规则本版未改。
+- **<900 左栏为覆盖式抽屉**：默认收起，由窄条 ☰ 打开，覆盖在主区之上，不改变正文宽度。
+- **880px 下既有窄条会压住正文左缘**（v0.6.23 起存在，**未修**）：窄条是固定定位、
+  主区 `margin-left` 在 <900 归零，因此抽屉收起时正文左缘仍被 42px 窄条覆盖。
+- **顶栏其余重复入口本轮未删**：历史会话 `#sessions` / 会话管理 `#sessMgrBtn` 与左栏
+  「最近会话」仍是两份入口指向同一逻辑；本轮只处理负责人点名的「新对话」与窄条两枚。
+- 未改 `src/providers/**`、`src/session.js`、`src/agent.js`、`presets/**`、`desktop/**`
+  （版本号除外）、`ide/**`、`scripts/ui-shot.mjs`；不新增后端、请求或轮询。
+
 ## v0.6.24（2026-10-25）— 新增左侧会话栏（三栏成型）+ 账本权限来源补全
 
 > 本版两件事：① **新增左侧会话栏**（§3.88，**只增不删**）——按设计稿补上「窄条 42 → 会话栏
