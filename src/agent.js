@@ -20,7 +20,18 @@ import { redactSecrets } from './redact.js';
 import { checkCostGuard, costGuardConfig, todayCost, preflightBlockMessage, roundGuardAction } from './cost-guard.js';
 import { recordCacheStats, packDailyCost } from './cachestats.js';
 import { estimateCost, cacheSplit, isPeakHour } from './pricing.js';
-import { resolveProviderConfig, createProvider, localGateSnapshot, localConcurrencyLimit, isMemoryPressureError } from './providers/index.js';
+import {
+  resolveProviderConfig,
+  createProvider,
+  localGateSnapshot,
+  localConcurrencyLimit,
+  isMemoryPressureError,
+  // v0.6.26 §3.91：端点级内存安全预算的读/学/上调（文件读失败一律降级为"无学习值"）
+  endpointLimitFor,
+  learnEndpointMemoryFailure,
+  noteEndpointSuccess,
+  ENDPOINT_UPGRADE_SUCCESS_STREAK,
+} from './providers/index.js';
 import { compileConstraints, checkPreTool, checkPostTool, checkOutput, blockedOutputText } from './constraints.js';
 import { createLedger, newRunId } from './ledger.js';
 import { registerEgressSink } from './net-guard.js';
@@ -79,12 +90,63 @@ export const DEFAULT_NO_PROGRESS_TIMEOUT_MS = 3600000;
  *  形态下多等 15s（相对默认 60 分钟是 0.4%），换"子代理自己的结论能回传父回合"。 */
 export const SUBAGENT_WAIT_GRACE_MS = 15000;
 
-/** 本地引擎内存不足时允许的**降级重试次数**（v0.6.18 §3.74）。
+/** 本地引擎内存不足时的**多级压缩**策略（v0.6.26 §3.91）。
  *
- *  只允许一次：内存墙不是网络抖动——同一份大 prompt 重发只会再撞一次。第一次失败后
- *  agent 会压缩上下文 + 输出减半 + 强制串行；第二次仍失败就如实报错，绝不无限重试。
- *  抽成常量是为了让"最多一次"可被断言/变异钉住（不是散在 if 里的魔法值）。 */
-export const MAX_MEMORY_RETRIES = 1;
+ *  真机三次同形态失败（10-18 / 10-19 / 10-26）证明"只压一级、只重试一次"不够：
+ *  32,768 → 19,660 之后仍被引擎拒绝，整回合直接失败，而更狠的一级（0.35）没人试过。
+ *  两级都相对**本回合起手预算**计算（不是逐级连乘），这样日志/文档里的数值一一对应，
+ *  不会被"0.6×0.35"这种连乘悄悄压到系统提示都放不下：
+ *    第 1 级：预算 ×0.6（32,768 → 19,660）、输出 ×0.5（8,192 → 4,096）；
+ *    第 2 级：预算 ×0.35（32,768 → 11,468）、输出 ×0.25（8,192 → 2,048）。
+ *  下限：预算 4,096（再低连系统提示 + 一轮工具结果都放不下）、输出 512。
+ *  抽成常量是为了让"最多 2 次 / 每级参数"可被断言与变异钉住。 */
+export const MEMORY_RECOVERY_LEVELS = Object.freeze([
+  Object.freeze({ budgetRatio: 0.6, maxOutputRatio: 0.5, minBudget: 4096, minMaxOutput: 512 }),
+  Object.freeze({ budgetRatio: 0.35, maxOutputRatio: 0.25, minBudget: 4096, minMaxOutput: 512 }),
+]);
+
+/** 内存降级重试的**硬性上限** = 压缩级数（2）。绝不允许无限重试。 */
+export const MAX_MEMORY_RETRIES = MEMORY_RECOVERY_LEVELS.length;
+
+/**
+ * 第 retry 级压缩后的预算/输出上限（纯函数，便于断言/变异）。
+ * @param {{ budget: number, maxOutput: number, retry: number }} input
+ * @returns {{ level: number, budget: number, maxOutput: number }}
+ */
+export function memoryRecoveryTarget({ budget, maxOutput, retry }) {
+  const want = Math.max(1, Math.floor(Number(retry) || 1));
+  const idx = Math.min(MEMORY_RECOVERY_LEVELS.length, want) - 1;
+  const level = MEMORY_RECOVERY_LEVELS[idx];
+  return {
+    level: idx + 1,
+    budget: Math.max(level.minBudget, Math.floor((Number(budget) || 0) * level.budgetRatio)),
+    maxOutput: Math.max(level.minMaxOutput, Math.floor((Number(maxOutput) || 0) * level.maxOutputRatio)),
+  };
+}
+
+/** 学习值日期：ISO → YYYY-MM-DD（给"来自 YYYY-MM-DD 的失败学习"用，时区固定 UTC，避免跨时区漂一天）。 */
+function fmtLearnedDate(/** @type {any} */ value) {
+  const d = new Date(value);
+  return Number.isNaN(d.getTime()) ? '未知日期' : d.toISOString().slice(0, 10);
+}
+
+/**
+ * 端点学习值的「chat 预告」文案（纯函数）：必须同时说清**本轮预算是多少**与**这个数字从哪来**。
+ * 只报"预算已降级"而不给出处，用户无法判断该不该相信它（也无法判断要不要手动调回去）。
+ * @param {{ budget?: number, record?: any }} input
+ * @returns {string}
+ */
+export function endpointLearnedNotice({ budget, record } = {}) {
+  const safe = Math.floor(Number(record?.safeContextBudget) || 0);
+  const used = Math.floor(Number(budget) || 0);
+  if (!(safe > 0) || !(used > 0)) return '';
+  const how = record?.source === 'success-upgrade' ? '成功上调' : '失败学习';
+  return (
+    `📉 该端点曾因内存不足降级，本轮预算 ${fmtTok(used)}` +
+    `（来自 ${fmtLearnedDate(record?.learnedAt)} 的${how}；端点安全预算 ${fmtTok(safe)}）`
+  );
+}
+
 
 /** 解析无进展阈值：非正/非有限一律回落默认（fail-safe，防"配置写 0 就静默失去看门狗"）。 */
 export function resolveNoProgressTimeoutMs(/** @type {any} */ cfg) {
@@ -158,12 +220,16 @@ const fmtTok = (/** @type {any} */ n) => Number(n || 0).toLocaleString('en-US');
  * v0.6.15（§3.59 第 3 条）：本地端点**已有在途请求**（父回合/子代理/预检之一）时加一句强警告——
  * 真机 8081 的内存拒绝就是"父子回合同时 prefill"撞出来的；串行化已经兜住资源，但用户仍应
  * 知道"并发会加剧内存压力、应减少子代理"。
+ *
+ * v0.6.26 §3.91：`learned`（端点学习值）存在时，预告里必须写明"本轮预算 N 来自哪天的失败学习"——
+ * 用户看到预算比自己配置的小，必须能一眼知道是内核学的、不是配置被改了。
  * @param {{ promptTokens: number, contextWindow?: number, isLocal?: boolean,
  *           firstTokenMs?: number, budget?: number, probe?: any,
- *           localBusy?: boolean, localActive?: number, localQueued?: number, localConcurrency?: number }} input
+ *           localBusy?: boolean, localActive?: number, localQueued?: number, localConcurrency?: number,
+ *           learned?: any }} input
  * @returns {{ text: string, warn: boolean, promptTokens: number, ratio: number, estimateMs: number|null }}
  */
-export function prefillForecast({ promptTokens, contextWindow, isLocal, firstTokenMs, budget, probe = null, localBusy = false, localActive = 0, localQueued = 0, localConcurrency = 1 }) {
+export function prefillForecast({ promptTokens, contextWindow, isLocal, firstTokenMs, budget, probe = null, localBusy = false, localActive = 0, localQueued = 0, localConcurrency = 1, learned = null }) {
   const p = Math.max(0, Math.round(Number(promptTokens) || 0));
   const win = Number(contextWindow) > 0 ? Number(contextWindow) : 0;
   const ratio = win > 0 ? p / win : 0;
@@ -217,7 +283,9 @@ export function prefillForecast({ promptTokens, contextWindow, isLocal, firstTok
   // v0.6.13（A 追加）：把**端点预检**结果并进这条预告——"这个端点行不行"与"这次要 prefill 多少"
   // 必须一起出现在发送前，而不是等出事后翻日志（引擎实际加载的模型名与配置名不一致也在这里说）。
   const probeLine = probe && probe.note ? `\n   端点预检：${probe.note}` : '';
-  return { text: `${head}\n   ${timing}${probeLine}${advice}${concurrencyNote}`, warn: warn || Boolean(concurrencyNote), promptTokens: p, ratio, estimateMs: est ? est.ms : null };
+  // v0.6.26 §3.91：端点学习值必须出现在**发送前的预告**里（预算为什么比配置小、这个数字从哪来）。
+  const learnedNote = endpointLearnedNotice({ budget, record: learned });
+  return { text: `${head}\n   ${timing}${probeLine}${advice}${concurrencyNote}${learnedNote ? `\n   ${learnedNote}` : ''}`, warn: warn || Boolean(concurrencyNote), promptTokens: p, ratio, estimateMs: est ? est.ms : null };
 }
 
 /**
@@ -294,8 +362,12 @@ export function zeroToolCallNotice({ modelRounds, steps = 0, taskLike = false })
  * v0.6.18 §3.74：额外返回 `recoverableByShrinking`——**只有本地端点**的内存/显存不足
  * 才是"压缩上下文 + 降输出 + 串行重试一次"能救的；云端 API 的 507/内存报错不在此列
  * （云端的容量/配额不是本地上下文能改的，对云 API 做压缩重试只会多烧一次请求）。
+ *
+ * v0.6.26 §3.91：`learned`（该端点的学习值）存在时，建议里必须给出**与学习值一致**的数字
+ * （"已把该端点预算记为 N，下轮自动使用"），而不是再抛一个"调到 N 左右"的临时建议——
+ * 后者正是真机上"日志给了 13,762、下一回合仍按 32,768 撞墙"的原因。
  * @param {any} err
- * @param {{ isLocal?: boolean }} [opts]
+ * @param {{ isLocal?: boolean, learned?: any }} [opts]
  * @returns {{ message: string, hint: string|null, status: number|null, recoverableByShrinking: boolean }}
  */
 export function describeUpstreamError(/** @type {any} */ err, opts = {}) {
@@ -304,6 +376,11 @@ export function describeUpstreamError(/** @type {any} */ err, opts = {}) {
   const t = raw.toLowerCase();
   const memoryPressure = isMemoryPressureError(err);
   const recoverableByShrinking = Boolean(memoryPressure && opts?.isLocal === true);
+  const learnedSafe = Math.floor(Number(opts?.learned?.safeContextBudget) || 0);
+  const learnedHint =
+    learnedSafe > 0
+      ? `该端点的内存安全预算已记为 ${fmtTok(learnedSafe)}（来自 ${fmtLearnedDate(opts?.learned?.learnedAt)} 的失败学习），下轮起手自动使用。`
+      : '';
   /** @type {string|null} */
   let hint = null;
   if (/jinja|template|no user query|parser for this template/.test(t)) {
@@ -318,10 +395,12 @@ export function describeUpstreamError(/** @type {any} */ err, opts = {}) {
     hint =
       '本地引擎**内存/显存不足**，但它**未崩溃**（原文：engine shed its caches and stays up——引擎自己丢弃缓存后仍在运行）。' +
       '**不要重启引擎**（重启不会增加显存，反而要重新加载模型）。处置：压缩上下文（减小 config.contextBudget 或 /compact）、' +
-      '减少并发子任务/并行会话（同一本地端点已按 config.localConcurrency 串行化），然后可直接重试——引擎通常会自行恢复。';
+      '减少并发子任务/并行会话（同一本地端点已按 config.localConcurrency 串行化），然后可直接重试——引擎通常会自行恢复。' +
+      learnedHint;
   } else if (/memory_refusal|insufficient memory|gib|内存不足|内存拒绝/.test(t)) {
     hint =
-      '本地引擎**内存/显存不足**（在 prefill 前就拒绝了）。处置：压缩上下文（减小 config.contextBudget 或 /compact）、减少并发子任务，或重启模型服务释放内存后重试。';
+      '本地引擎**内存/显存不足**（在 prefill 前就拒绝了）。处置：压缩上下文（减小 config.contextBudget 或 /compact）、减少并发子任务，或重启模型服务释放内存后重试。' +
+      learnedHint;
   } else if (/首 token 等待超限|流式响应空闲超限|请求总时长超限/.test(raw)) {
     hint =
       '这是**内核自己的超时**（不是上游报错）：端点连上了但迟迟不产出。本地大模型长上下文 prefill 很慢——可调大 config.timeout.firstTokenMs/streamIdleMs/totalMs，' +
@@ -438,6 +517,15 @@ export function startsInReadOnlyPhase(cfg, lastUserText, packActive) {
   return !hasWriteIntent(t) && looksLikeQuestion(t);
 }
 
+/** 该模型请求实际发往的 baseUrl（端点级学习/并发闸门共用同一口径；取不到时返回 ''）。 */
+function resolveEndpointBaseUrl(/** @type {any} */ cfg, /** @type {any} */ modelName) {
+  try {
+    return String(resolveProviderConfig(cfg, modelName)?.baseUrl || cfg?.baseUrl || '');
+  } catch {
+    return String(cfg?.baseUrl || '');
+  }
+}
+
 /**
  * 创建 Agent 循环（调用方只需传 provider/permission/io/modelName/workingDir，其余可选）
  * @param {{ provider: any, permission: any, io: any, modelName: any, workingDir: any,
@@ -450,6 +538,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // v0.3.2 模型自适应：预算按模型上下文窗口推导（留输出余量 + 75% 舒适区），
   // 自定义/本地小模型不再套 128000 默认撑爆窗口；prompt 永不逼近窗口边缘（prefill 不爆炸）。
   const caps = resolveModelCaps(cfg, modelName);
+  // v0.6.26 §3.91：子代理实例（spawnTask 传入 parentProgress / 子任务标记）。子代理的成功**不**计入
+  // 端点"连续干净成功"——一个父回合里可能跑多个子代理，否则一次回合就能把 +25% 的上调门槛凑满。
+  const isSubagent = Boolean(cfg?.parentProgress || cfg?.subagentLabel);
   // safeBudget 恒用：即使用户显式 contextBudget 也套「窗口−输出−余量」上限与 75% 舒适区，
   // 防显式值撑爆窗口（本地模型窗口可能只有 32k/131k，用户却留了默认 128000）。
   const safeB = safeBudget(cfg, caps);
@@ -461,7 +552,20 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     configuredBudget: Number(cfg?.contextBudget) > 0 ? Number(cfg.contextBudget) : null,
     engineCtx: cfg?.endpointProbe?.engineCtx ?? null,
   });
-  const budget = budgetClamp.budget ?? safeB;
+  const configuredBudget = budgetClamp.budget ?? safeB;
+  // v0.6.26 §3.91（端点级学习）：该 baseUrl 若曾"多级压缩后仍失败"，**本回合起手就用学到的
+  // safeContextBudget**，而不是每回合从同一个注定失败的预算重撞一次（真机三次同形态失败）。
+  // 读文件失败只打一条 warn 并退化为"无学习值"，绝不影响会话（见 readEndpointLimits）。
+  const endpointBaseUrl = resolveEndpointBaseUrl(cfg, modelName);
+  const learnedLookup = endpointLimitFor(endpointBaseUrl);
+  if (learnedLookup.error) {
+    try { if (io?.print) io.print(style(`⚠ ${learnedLookup.error}`, C.yellow)); } catch {}
+  }
+  const learnedBudget = Math.floor(Number(learnedLookup.record?.safeContextBudget) || 0);
+  // 只在学习值**确实小于**配置预算时接管；配置本来就比学习值小时，用户的选择优先。
+  const learnedApplied = Boolean(learnedBudget > 0 && learnedBudget < configuredBudget);
+  const budget = learnedApplied ? learnedBudget : configuredBudget;
+  const learnedStart = learnedApplied ? { ...learnedLookup.record, appliedBudget: budget } : null;
   const budgetClampNotice = budgetClamp.clamped ? budgetClamp.notice : '';
   // maxOutput 也按窗口封顶：显式配超大 maxOutputTokens 时，prompt(预算)+output 仍不得越过窗口
   // （预算已按 caps.maxOutputTokens 留余量，但显式值可能更大——此处兜底，防服务端截断/拒绝）
@@ -523,6 +627,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // spawnTask 用它把父回合的"无进展截止时刻"传给子代理：子代理树必须一起收口，
   // 否则 24 个并行子代理各自跑满自己的看门狗，父回合看起来就是"挂了几小时"。
   let currentTurnProgress = /** @type {any} */ (null);
+  // v0.6.26 §3.91（子代理继承）：本回合**实际生效**的预算/输出上限（内存压缩后立刻更新）。
+  // spawnTask 必须读它，否则父回合已压到 19,660、子代理仍按 32,768 发——真机那次「子代理
+  // 已跑 31 轮 / 50 次工具调用、29 分钟白跑」正是父子预算不一致的直接后果。
+  let currentTurnBudget = /** @type {number|null} */ (null);
+  let currentTurnMaxOutput = /** @type {number|null} */ (null);
+  // 本回合的端点学习值（runTurn 内按回合重读；runTurnInner 的发送前预告据此说明预算出处）。
+  let turnLearned = /** @type {any} */ (null);
+  // 本回合最后一次请求实际发往的端点（费用护栏降级可能换模型；成功学习要记在真正的端点上）。
+  let currentRequestBaseUrl = '';
   // 会话级共享：调用方传入则复用（/model 切换、子代理均共享，undo 不丢失）
   const undo = undoStore || { backups: new Map() };
   const stepLimit = maxSteps || MAX_STEPS;
@@ -589,13 +702,17 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       workingDir,
       cfg: {
         ...cfg,
-        contextBudget: Math.min(budget, 64000),
+        // v0.6.26 §3.91（子代理继承）：优先用**父回合当前生效**的预算/输出上限——
+        // 父回合因内存不足压到 19,660/4,096 后，子代理不得再按 32,768/8,192 发（那会再次撞墙）。
+        // 子代理自己也会走同一套多级压缩（createAgent 内部逻辑相同），两条路都保留。
+        contextBudget: Math.min(currentTurnBudget ?? budget, 64000),
+        maxOutputTokens: currentTurnMaxOutput ?? maxOutput,
         ...(currentTurnProgress
           ? { turnProgressDeadlineAt: currentTurnProgress.lastProgressAt + currentTurnProgress.noProgressMs }
           : {}),
-        // 下面是 v0.6.13（问题 3）补的两项。**上面三行一个字都不动**：那个 spread 是 §139 与
-        // batch28 ⑥ 共同钉住的形状（改缩进/换写法会让既有变异变成"变异点未找到"——本轮实际踩到过），
-        // 而它现在的语义只当"spawn 时刻的快照兜底"，真正的判据是 parentProgress（活引用）。
+        // 下面是 v0.6.13（问题 3）补的两项。**上面 `turnProgressDeadlineAt` 那个 spread 一个字都不动**：
+        // 它是 §139 与 batch28 ⑥ 共同钉住的形状（改缩进/换写法会让既有变异变成"变异点未找到"——
+        // 本轮实际踩到过），而它现在的语义只当"spawn 时刻的快照兜底"，真正的判据是 parentProgress（活引用）。
         ...(currentTurnProgress ? { parentProgress: currentTurnProgress } : {}),
         ...(description ? { subagentLabel: description } : {}),
         onSubagentProgress: (/** @type {any} */ info) => {
@@ -779,14 +896,20 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     };
   }
 
-  async function runTurnInner(/** @type {any} */ messages) {
+  async function runTurnInner(/** @type {any} */ messages, /** @type {number} */ startBudget = budget) {
     let steps = 0;
     let finish = null;
-    // v0.6.18 §3.74：本回合实际生效的 prompt 预算 / 输出上限——内存不足时**只在本回合内**
-    // 压小（contextBudget ×0.6、maxOutputTokens ×0.5），不写回用户配置。
-    let turnBudget = budget;
-    let turnMaxOutput = maxOutput;
-    /** 本回合已用掉的内存降级重试次数（上限 MAX_MEMORY_RETRIES，默认 1）。 */
+    // v0.6.18 §3.74 / v0.6.26 §3.91：本回合实际生效的 prompt 预算 / 输出上限——内存不足时
+    // **只在本回合内**按 MEMORY_RECOVERY_LEVELS 逐级压小，不写回用户配置。
+    // turnBase* 是"起手值"，两级压缩都相对它计算（不是逐级连乘），保证日志数值与文档一致。
+    let turnBaseBudget = startBudget;
+    let turnBaseMaxOutput = maxOutput;
+    let turnBudget = turnBaseBudget;
+    let turnMaxOutput = turnBaseMaxOutput;
+    // 子代理继承用：本回合当前生效值（压缩后立即更新，见 spawnTask）。
+    currentTurnBudget = turnBudget;
+    currentTurnMaxOutput = turnMaxOutput;
+    /** 本回合已用掉的内存降级重试次数（硬性上限 MAX_MEMORY_RETRIES = 2）。 */
     let memoryRetries = 0;
     lastMemoryRecovery = null;
     /** v0.6.3（M-16）：本回合是否出现过"上游提前关流"（回答可能不完整）。
@@ -1378,6 +1501,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             localActive: gate.active,
             localQueued: gate.queued,
             localConcurrency: localConcurrencyLimit(cfg),
+            // v0.6.26 §3.91：只在**本回合第一次**请求的预告里说明"预算来自哪天的失败学习"
+            // （后续每轮重复同一条说明只会刷屏）。
+            learned: turnProgress.llmCalls === 0 ? turnLearned : null,
           });
           turnProgress.forecast = f;
           // 首次请求一定说；之后只在命中告警线时说（否则每步一条横幅会刷屏）
@@ -1392,6 +1518,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       lastRequestStartAt = llmT0;
       turnProgress.llmCalls += 1;
       turnProgress.phase = '发请求（等首帧）';
+      // v0.6.26 §3.91：本次请求实际发往的端点（费用护栏可能把 activeModel 降级到别家模型，
+      // 端点学习必须记在**真正发请求的那个 baseUrl** 上，而不是 agent 创建时的模型）。
+      const requestBaseUrl = resolveEndpointBaseUrl(cfg, activeModel);
+      currentRequestBaseUrl = requestBaseUrl;
       try {
         res = await provider.chat({
           model: activeModel,
@@ -1399,6 +1529,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           tools: toolsFor(readOnlyPhase, turnStrippedSet),
           temperature,
           maxTokens: turnMaxOutput,
+          // v0.6.26 §3.91：把本回合**实际生效**的 prompt 预算一并传给 provider。
+          // openai-compatible 会忽略它（不属于协议字段）；它的用途是让端点级学习、诊断与
+          // 回归套件能断言"这一请求到底按多大预算发的"（子代理继承也靠它验证）。
+          budget: turnBudget,
           // MiniMax P0：仅当 activeModel 声明支持 reasoning 才发送（否则 400 终止回合）；'off' 显式禁用例外
           reasoningEffort: modelPreset(activeModel)?.supportsReasoning || reasoningEffort === 'off' ? reasoningEffort : undefined,
           // v0.6.18 §3.74：发生过内存降级后，本回合后续请求**一律压回单并发**（即便用户把
@@ -1484,16 +1618,18 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 直接终结合合并透出降级提示，不计入空轮、不注入续写重试（内存未释放必再 507，空烧请求）。
         const e = /** @type {any} */ (err);
         // ---------------------------------------------------------------------------
-        // v0.6.18 §3.74：**本地引擎内存/显存不足 → 压缩上下文 + 降输出 + 强制串行，重试一次**
+        // v0.6.26 §3.91：**多级压缩（最多 2 次）+ 端点级学习 + 子代理继承**
         //
-        // 真机（v0.6.17，8081 qwen）：子代理并发/长解码导致显存峰值超限，引擎在 prefill 前拒绝，
-        // 整回合直接失败；而当时上下文只有 ≈2,773 tokens、预算 32,768——压小预算/输出上限后
-        // 极可能成功。这里不再立刻判失败，而是**只对本地端点**做一次有界降级重试：
-        //   · contextBudget ×0.6（下限 4k，避免压到连系统提示都放不下）；
-        //   · maxOutputTokens ×0.5（只用于本回合后续请求）；
-        //   · 该次重试传 localConcurrency=1（provider 的 acquireLocalSlot 会把并发上限压回 1）；
-        //   · 只重试一次：memoryRetryUsed 一旦置真，第二次失败就如实抛错（不无限重试）。
-        // 云端端点不在此列：云 API 的 507/容量问题不是本地上下文能改的，压缩重试只会多烧一次请求。
+        // 真机证据（~/.mingdao/logs/web-server.log，10-18 / 10-19 / 10-26 三次同形态）：
+        //   子代理「审计网络与安全防线」已跑 31 轮 / 50 次工具调用
+        //   然后 `insufficient memory … aborted before the allocator wall`
+        //   旧恢复只压一级（32,768 → 19,660）、只重试一次，仍失败就整回合失败。
+        // 现在：
+        //   · 第 1 级：预算 ×0.6、输出 ×0.5；第 2 级：预算 ×0.35、输出 ×0.25（都相对起手值）；
+        //   · 每级都打日志（第几次 / 压缩前后数值），**硬性上限 2 次**，绝不无限重试；
+        //   · 两级都失败 → 把最后尝试的预算写成该端点的 safeContextBudget（endpoint-limits.json），
+        //     下一回合起手直接用它（不再从同一个注定失败的预算重撞一次）；
+        //   · 云端端点不在此列：云 API 的 507/容量问题不是本地上下文能改的，压缩重试只会多烧一次请求。
         // ---------------------------------------------------------------------------
         let localEndpoint = false;
         try {
@@ -1506,41 +1642,85 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         const localMemory = describeUpstreamError(e, { isLocal: localEndpoint });
         if (localMemory.recoverableByShrinking) {
           if (memoryRetries >= MAX_MEMORY_RETRIES) {
-            // 第二次仍失败：不掩盖，把压缩前后数值、重试次数、具体建议一起抛给用户/日志。
+            // 两级压缩都失败：**先学习、再报错**——学习值要立刻落盘并出现在建议里，
+            // 否则用户看到的建议与下回合实际预算继续分裂（真机正是这样）。
             const rec = /** @type {any} */ (lastMemoryRecovery) || {};
-            const suggest = Math.max(4096, Math.floor(Number(rec.toBudget) > 0 ? Number(rec.toBudget) * 0.7 : 8192));
+            let learned = /** @type {any} */ (null);
+            try {
+              learned = learnEndpointMemoryFailure(requestBaseUrl, {
+                budget: Number(rec.toBudget) > 0 ? Number(rec.toBudget) : turnBudget,
+                maxOutput: turnMaxOutput,
+                attempts: Math.max(1, memoryRetries),
+                at: Date.now(),
+              });
+            } catch (learnErr) {
+              learned = {
+                ok: false,
+                record: null,
+                file: '',
+                error: `端点学习失败：${(/** @type {any} */ (learnErr))?.message || learnErr}——本轮按无学习值继续`,
+              };
+            }
+            const learnedBudget = learned?.ok ? Math.floor(Number(learned.record?.safeContextBudget) || 0) : 0;
+            // 建议文案必须与学习值**同一个数字**（describeUpstreamError 负责把 hint 对齐）。
+            const finalDiag = describeUpstreamError(e, { isLocal: localEndpoint, learned: learned?.ok ? learned.record : null });
+            const budgetChain =
+              Array.isArray(rec.history) && rec.history.length
+                ? rec.history.map((/** @type {any} */ h) => fmtTok(h.fromBudget)).concat(fmtTok(rec.toBudget)).join(' → ')
+                : `${fmtTok(rec.fromBudget)} → ${fmtTok(rec.toBudget)}`;
+            const outputChain =
+              Array.isArray(rec.history) && rec.history.length
+                ? rec.history.map((/** @type {any} */ h) => fmtTok(h.fromMaxOutput)).concat(fmtTok(rec.toMaxOutput)).join(' → ')
+                : `${fmtTok(rec.fromMaxOutput)} → ${fmtTok(rec.toMaxOutput)}`;
+            const learnedText =
+              learned?.ok && learnedBudget > 0
+                ? `已把该端点内存安全预算记为 ${fmtTok(learnedBudget)}（写入 ${learned.file}），下轮起手自动使用——` +
+                  `config.contextBudget 也可手动调到 ${fmtTok(learnedBudget)}。`
+                : `⚠ ${learned?.error || '端点学习值未写入'}——本轮按无学习值继续，不阻断会话。`;
             const detail =
-              `本地引擎内存不足：已压缩上下文（${fmtTok(rec.fromBudget)} → ~${fmtTok(rec.toBudget)}）、` +
-              `输出上限 ${fmtTok(rec.fromMaxOutput)} → ${fmtTok(rec.toMaxOutput)}，并重试 1 次（最多一次），仍失败——不再重试。` +
-              `建议：把 config.contextBudget 调到 ${fmtTok(suggest)} 左右（或更低），关闭其他占用显存的模型进程/并行会话，` +
-              `并在引擎侧调大 --ctx-size 或使用 q8 KV 量化。`;
-            try { io.print(style(`⚠ ${localMemory.message}\n   ${detail}`, C.yellow)); } catch {}
-            const enriched = new Error(`${localMemory.message}\n   ${localMemory.hint || ''}\n   ↩ ${detail}`);
+              `本地引擎内存不足：已压缩上下文 ${memoryRetries} 级（${budgetChain}）、输出上限 ${outputChain}，` +
+              `并重试 ${memoryRetries} 次（硬性上限 ${MAX_MEMORY_RETRIES}），仍失败——不再重试。${learnedText}` +
+              `请关闭其他占用显存的模型进程/并行会话，并在引擎侧调大 --ctx-size 或使用 q8 KV 量化。`;
+            try { io.print(style(`⚠ ${finalDiag.message}\n   ${finalDiag.hint || ''}\n   ↩ ${detail}`, C.yellow)); } catch {}
+            const enriched = new Error(`${finalDiag.message}\n   ${finalDiag.hint || ''}\n   ↩ ${detail}`);
             /** @type {any} */ (enriched).status = e?.status ?? 507;
             if (e?.headers !== undefined) /** @type {any} */ (enriched).headers = e.headers;
             throw enriched;
           }
           memoryRetries += 1;
+          const target = memoryRecoveryTarget({ budget: turnBaseBudget, maxOutput: turnBaseMaxOutput, retry: memoryRetries });
           const fromBudget = turnBudget;
           const fromMaxOutput = turnMaxOutput;
-          // 压缩比例 0.6、下限 4096：0.6 在真机 32,768 → ~19,660 的区间内足够把 KV cache 峰值压下来；
-          // 再低会伤任务质量，且 4k 以下连系统提示 + 一轮工具结果都放不下（重启永远失败）。
-          turnBudget = Math.max(4096, Math.floor(fromBudget * 0.6));
-          turnMaxOutput = Math.max(256, Math.floor(fromMaxOutput * 0.5));
-          lastMemoryRecovery = {
-            attempts: memoryRetries,
+          turnBudget = target.budget;
+          turnMaxOutput = target.maxOutput;
+          // 子代理继承：压缩后的值必须立刻对后续 spawnTask 可见（见 spawnTask 的 cfg）。
+          currentTurnBudget = turnBudget;
+          currentTurnMaxOutput = turnMaxOutput;
+          const attempt = {
+            level: target.level,
             fromBudget,
             toBudget: turnBudget,
             fromMaxOutput,
             toMaxOutput: turnMaxOutput,
             at: Date.now(),
           };
+          const prevHistory = Array.isArray(lastMemoryRecovery?.history) ? lastMemoryRecovery.history : [];
+          lastMemoryRecovery = {
+            attempts: memoryRetries,
+            fromBudget: turnBaseBudget,
+            toBudget: turnBudget,
+            fromMaxOutput: turnBaseMaxOutput,
+            toMaxOutput: turnMaxOutput,
+            history: [...prevHistory, attempt],
+            at: Date.now(),
+          };
           const msg =
-            `♻ 因本地引擎内存不足，已压缩上下文（${fmtTok(fromBudget)} → ~${fmtTok(turnBudget)}）、` +
-            `输出上限 ${fmtTok(fromMaxOutput)} → ${fmtTok(turnMaxOutput)}，并重试一次（串行化：并发上限 1）`;
+            `♻ 内存降级重试 第 ${memoryRetries}/${MAX_MEMORY_RETRIES} 次：因本地引擎内存不足，已压缩上下文` +
+            `（${fmtTok(fromBudget)} → ~${fmtTok(turnBudget)}）、输出上限 ${fmtTok(fromMaxOutput)} → ${fmtTok(turnMaxOutput)}` +
+            `（串行化：并发上限 1）`;
           try { io.print(style(msg, C.yellow)); } catch {}
           turnNotes.push(msg);
-          turnProgress.phase = '内存降级重试（已压缩上下文）';
+          turnProgress.phase = `内存降级重试（第 ${memoryRetries}/${MAX_MEMORY_RETRIES} 次压缩）`;
           turnProgress.memoryRecovery = lastMemoryRecovery;
           steps = Math.max(0, steps - 1); // 重试不额外消耗一步，避免 maxSteps=1 时根本没机会重试
           continue;
@@ -2334,14 +2514,62 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       try { io.print(style(budgetClampNotice, C.yellow)); } catch {}
       turnNotes.push(budgetClampNotice);
     }
-    const r = await runTurnInner(messages);
+    // v0.6.26 §3.91：**每回合重读**端点学习值——同一 agent 连续多回合时，上一回合可能刚学到一个
+    // 更低的预算（或成功上调了一个更高的值）；只用 createAgent 时读到的那份会过时。
+    // 学习值只在**低于**当前起手预算时接管（配置本来就小 → 用户选择优先）。
+    let startBudget = budget;
+    turnLearned = learnedStart;
+    const freshLearned = endpointLimitFor(endpointBaseUrl);
+    if (freshLearned.error) {
+      try { io.print(style(`⚠ ${freshLearned.error}`, C.yellow)); } catch {}
+    }
+    const freshSafe = Math.floor(Number(freshLearned.record?.safeContextBudget) || 0);
+    if (freshSafe > 0 && freshSafe < budget) {
+      startBudget = freshSafe;
+      turnLearned = { ...freshLearned.record, appliedBudget: freshSafe };
+    }
+    let r = /** @type {any} */ (null);
+    try {
+      r = await runTurnInner(messages, startBudget);
+    } finally {
+      turnLearned = null;
+      currentTurnBudget = null;
+      currentTurnMaxOutput = null;
+    }
+    // v0.6.26 §3.91（端点级学习·上调）：**干净成功**（无内存压缩、无中断/无进展/截断）才计数，
+    // 连续 3 次把学习值 +25%（上限 = 用户配置的预算）。上调后若再撞内存墙，
+    // 两级压缩仍失败会把它重新学下来——降级与恢复都基于真实结果。
+    if (!isSubagent && r && r.text && !r.aborted && !r.stalled && !r.truncated && !lastMemoryRecovery) {
+      try {
+        const success = noteEndpointSuccess(currentRequestBaseUrl || endpointBaseUrl, {
+          budget: startBudget,
+          ceiling: configuredBudget,
+        });
+        if (success?.raised && success.record) {
+          const msg =
+            `📈 该端点已连续 ${ENDPOINT_UPGRADE_SUCCESS_STREAK} 次干净成功：内存安全预算上调 ` +
+            `${fmtTok(success.previous?.safeContextBudget)} → ${fmtTok(success.record.safeContextBudget)}（+25%），下轮起手使用`;
+          try { io.print(style(msg, C.green)); } catch {}
+          turnNotes.push(msg);
+        }
+      } catch {}
+    }
+    currentRequestBaseUrl = '';
     const notes = turnNotes.filter(Boolean);
     if (lastMemoryRecovery && r) {
       const rec = lastMemoryRecovery;
       const final = r.aborted ? '重试后被中断' : r.stalled ? '重试后无进展中止' : r.text ? '重试后成功' : '重试后仍无正文';
+      const chain =
+        Array.isArray(rec.history) && rec.history.length
+          ? rec.history.map((/** @type {any} */ h) => fmtTok(h.fromBudget)).concat(fmtTok(rec.toBudget)).join(' → ')
+          : `${fmtTok(rec.fromBudget)} → ${fmtTok(rec.toBudget)}`;
+      const outChain =
+        Array.isArray(rec.history) && rec.history.length
+          ? rec.history.map((/** @type {any} */ h) => fmtTok(h.fromMaxOutput)).concat(fmtTok(rec.toMaxOutput)).join(' → ')
+          : `${fmtTok(rec.fromMaxOutput)} → ${fmtTok(rec.toMaxOutput)}`;
       notes.push(
-        `↩ 内存降级重试（${Number(rec.attempts) || 1} 次）：上下文预算 ${fmtTok(rec.fromBudget)} → ${fmtTok(rec.toBudget)}、` +
-          `输出上限 ${fmtTok(rec.fromMaxOutput)} → ${fmtTok(rec.toMaxOutput)}；${final}。`
+        `↩ 内存降级重试（${Number(rec.attempts) || 0} 次，最多 ${MAX_MEMORY_RETRIES} 次，已压缩上下文）：预算 ${chain}、` +
+          `输出上限 ${outChain}；${final}。`
       );
     }
     if (notes.length && r && typeof r === 'object') {

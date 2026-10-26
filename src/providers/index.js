@@ -18,6 +18,7 @@ import { modelPreset, providerPreset } from '../models.js';
 import { mingdaoHome } from '../config.js';
 import { resolveApiKey, getStoredKey } from '../credentials.js';
 import { isLocalBaseUrl } from '../model-caps.js';
+import { atomicWriteJsonSync } from '../atomic-write.js';
 
 // ---------------------------------------------------------------------------
 // 本地端点并发闸门（v0.6.15，登记 §3.59 四条待办之首）
@@ -252,6 +253,220 @@ export async function acquireLocalSlot(/** @type {any} */ baseUrl, opts = {}) {
 /** 仅供测试：清空全部队列（不影响已取得名额的释放函数）。 */
 export function __resetLocalGates() {
   localGates.clear();
+}
+
+// ---------------------------------------------------------------------------
+// 端点级「内存安全预算」学习（v0.6.26 §3.91）
+//
+// 真机证据（~/.mingdao/logs/web-server.log，三次同一形态：10-18 / 10-19 / 10-26）：
+//   08:59:14 chat 进度 … 子代理「审计网络与安全防线」已跑 31 轮 / 50 次工具调用
+//   09:00:22 chat 错误 … insufficient memory … aborted before the allocator wall
+//   ↩ 已压缩上下文（32,768 → ~19,660）、输出上限 4,096 → 2,048，并重试 1 次，仍失败
+//            建议：把 config.contextBudget 调到 13,762 左右…
+// 问题不在"没有压缩"，而在**每一回合都从同一个注定失败的预算重新撞一次**：用户看到了建议，
+// 但内核自己不记住；下一次开新会话（或同一端点的另一个模型）又按 32,768 发。
+//
+// 这里把「该 baseUrl 的内存安全预算」持久化到 <mingdao-home>/endpoint-limits.json：
+//   · 键 = 归一化后的 baseUrl（同一个端点的不同写法命中同一条记录）；
+//   · 值 = { safeContextBudget, learnedAt, source: 'memory-failure', … }；
+//   · **两级压缩后仍失败**才写入（调用方保证），后续回合直接以 safeContextBudget 起手；
+//   · 之后连续 3 个"干净成功"的回合把学习值 +25%（上限 = 用户配置的预算），
+//     如果上调后又撞内存墙，两级压缩仍失败会把它重新学下来——降级/恢复都基于证据。
+//   · 文件读/写失败**绝不阻断会话**：所有函数都返回 {ok, error}，由调用方降级为"无学习值"并打 warn。
+// ---------------------------------------------------------------------------
+
+/** 学习文件名（放在 <mingdao-home> 下，与 config.json 同级）。 */
+export const ENDPOINT_LIMITS_FILE = 'endpoint-limits.json';
+/** 文件格式版本（未来字段演进时用于识别旧文件）。 */
+export const ENDPOINT_LIMITS_VERSION = 1;
+/** 学习值上调策略：连续这么多次干净成功，才允许 +25%。 */
+export const ENDPOINT_UPGRADE_SUCCESS_STREAK = 3;
+/** 每次上调的比例（只作用于学习值本身，且不超过用户配置预算）。 */
+export const ENDPOINT_UPGRADE_RATIO = 1.25;
+/** 学习值下限：低于它连系统提示 + 一轮工具结果都放不下，学习就没有意义。 */
+export const ENDPOINT_MIN_SAFE_BUDGET = 1024;
+
+/** 学习文件路径（测试可换 MINGDAO_HOME 隔离）。 */
+export function endpointLimitsFile() {
+  return path.join(mingdaoHome(), ENDPOINT_LIMITS_FILE);
+}
+
+/** 端点键：归一化 baseUrl（去尾部斜杠），与本地并发闸门同一口径。 */
+export function endpointKeyOf(/** @type {any} */ baseUrl) {
+  return normalizeLocalBaseUrl(baseUrl);
+}
+
+/**
+ * 读取端点学习表。**任何读失败都降级为空表 + error**，绝不抛：
+ *   · 不存在（ENOENT）→ ok:true、空表（首次运行，不是错误）；
+ *   · 不可读 / 解析失败 / 结构不对 → ok:false、空表、error 带文件路径与原因。
+ * 调用方拿到 ok:false 时必须按"无学习值"继续，只打一条 warn。
+ * @returns {{ ok: boolean, exists: boolean, file: string, version: number, endpoints: Record<string, any>, error: string|null }}
+ */
+export function readEndpointLimits() {
+  const file = endpointLimitsFile();
+  /** @type {{ ok: boolean, exists: boolean, file: string, version: number, endpoints: Record<string, any>, error: string|null }} */
+  const base = { ok: true, exists: false, file, version: ENDPOINT_LIMITS_VERSION, endpoints: {}, error: null };
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (err) {
+    if (/** @type {any} */ (err)?.code === 'ENOENT') return base;
+    return {
+      ...base,
+      ok: false,
+      error: `端点学习文件读取失败（${file}）：${(/** @type {any} */ (err))?.message || err}——本轮按无学习值继续`,
+    };
+  }
+  // BOM：合法 JSON + 文件头 BOM = JSON.parse 直接抛（与 config.json 同一处理）
+  const text = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (err) {
+    return {
+      ...base,
+      exists: true,
+      ok: false,
+      error: `端点学习文件不能解析（${file}）：${(/** @type {any} */ (err))?.message || err}——本轮按无学习值继续（文件保持原样，避免覆盖可人工修复的数据）`,
+    };
+  }
+  const eps = data?.endpoints;
+  if (!eps || typeof eps !== 'object' || Array.isArray(eps)) {
+    return {
+      ...base,
+      exists: true,
+      ok: false,
+      error: `端点学习文件缺少 endpoints 对象（${file}）——本轮按无学习值继续（文件保持原样）`,
+    };
+  }
+  /** @type {Record<string, any>} */
+  const endpoints = {};
+  for (const [key, value] of Object.entries(eps)) {
+    const n = Number(/** @type {any} */ (value)?.safeContextBudget);
+    if (!(n > 0)) continue; // 单条记录坏了只跳过它，不拖垮整张表
+    endpoints[endpointKeyOf(key)] = {
+      .../** @type {any} */ (value),
+      safeContextBudget: Math.max(ENDPOINT_MIN_SAFE_BUDGET, Math.floor(n)),
+    };
+  }
+  return { ...base, exists: true, version: Number(data?.version) || ENDPOINT_LIMITS_VERSION, endpoints };
+}
+
+/** 写整张学习表（原子写 + 0600）。失败返回 {ok:false,error}，绝不抛。 */
+function writeEndpointLimits(/** @type {Record<string, any>} */ endpoints) {
+  const file = endpointLimitsFile();
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    atomicWriteJsonSync(file, { version: ENDPOINT_LIMITS_VERSION, endpoints });
+    return { ok: true, error: null, file };
+  } catch (err) {
+    return {
+      ok: false,
+      error: `端点学习文件写入失败（${file}）：${(/** @type {any} */ (err))?.message || err}——本轮按无学习值继续`,
+      file,
+    };
+  }
+}
+
+/**
+ * 查该端点的学习值（纯读，不写入）。
+ * @param {any} baseUrl
+ * @returns {{ key: string, record: any|null, ok: boolean, error: string|null, file: string }}
+ */
+export function endpointLimitFor(/** @type {any} */ baseUrl) {
+  const key = endpointKeyOf(baseUrl);
+  const file = endpointLimitsFile();
+  if (!key) {
+    // 没有 baseUrl（例如自定义 Provider 模块）：不是错误，只是没有可学习的键。
+    return { key: '', record: null, ok: true, error: null, file };
+  }
+  const r = readEndpointLimits();
+  return { key, record: r.endpoints[key] || null, ok: r.ok, error: r.error, file: r.file };
+}
+
+/**
+ * 记录一次「多级压缩后仍失败」：把**最后尝试的预算**写成该端点的 safeContextBudget。
+ *
+ * 为什么记最后尝试的值而不是原配置：下一次回合的起手预算必须来自"已经压到的最低一级"，
+ * 否则同一个注定失败的预算会每回合重撞一次（真机三次同形态失败的根因）。
+ * 学习值是**起手上限**，不是"保证成功"——若它仍失败，下一回合会在它基础上继续按级压缩；
+ * 若连续失败，值会逐回合向下棘轮，直到某一回合成功为止。
+ * @param {any} baseUrl
+ * @param {{ budget: number, maxOutput?: number|null, attempts?: number, at?: number, source?: string }} [opts]
+ * @returns {{ ok: boolean, key: string, record: any|null, previous: any|null, error: string|null, file: string }}
+ */
+export function learnEndpointMemoryFailure(/** @type {any} */ baseUrl, { budget, maxOutput = null, attempts = 2, at = Date.now(), source = 'memory-failure' } = /** @type {any} */ ({})) {
+  const key = endpointKeyOf(baseUrl);
+  const file = endpointLimitsFile();
+  const empty = { ok: false, key, record: null, previous: null, error: null, file };
+  if (!key) return { ...empty, ok: true, error: null };
+  const rawBudget = Number(budget);
+  if (!(rawBudget > 0)) {
+    return { ...empty, error: `端点学习值未写入：预算无效（${String(budget)}）——本轮按无学习值继续` };
+  }
+  const r = readEndpointLimits();
+  if (!r.ok) {
+    // 文件坏了/读不出：**不覆盖**（可能还能人工救回来），只降级为无学习值。
+    return { ...empty, error: `${r.error}；本次不写入，避免覆盖可能需要人工修复的文件` };
+  }
+  const previous = r.endpoints[key] || null;
+  const nowIso = new Date(Number(at) || Date.now()).toISOString();
+  const record = {
+    safeContextBudget: Math.max(ENDPOINT_MIN_SAFE_BUDGET, Math.floor(rawBudget)),
+    learnedAt: nowIso,
+    source,
+    attempts: Math.max(1, Math.floor(Number(attempts) || 1)),
+    ...(Number(maxOutput) > 0 ? { maxOutputTokens: Math.floor(Number(maxOutput)) } : {}),
+    failures: (Number(previous?.failures) || 0) + 1,
+    successStreak: 0,
+    lastFailedAt: nowIso,
+  };
+  const w = writeEndpointLimits({ ...r.endpoints, [key]: record });
+  return { ok: w.ok, key, record: w.ok ? record : null, previous, error: w.error, file };
+}
+
+/**
+ * 记录一次**干净成功**（本回合既没有内存压缩、也没有中断/无进展）：连续
+ * ENDPOINT_UPGRADE_SUCCESS_STREAK 次后把学习值上调 ENDPOINT_UPGRADE_RATIO（+25%）。
+ *
+ * 上调的上限是 `ceiling`（调用方传**用户配置的预算**，即"用户本来想要多大"），
+ * 所以学习值只会朝用户明确要过的方向恢复，不会一路涨到窗口上限。
+ * 这不是"猜一个更大的值去冒险"：上调后若再次撞内存墙，两级压缩仍失败会把它重新学下来
+ * （见 learnEndpointMemoryFailure）——降级有证据、恢复也有证据，形成闭环。
+ *
+ * 没有学习值的端点不写文件（不为"成功"凭空造学习值）。
+ * @param {any} baseUrl
+ * @param {{ budget: number, ceiling?: number, at?: number }} [opts]
+ * @returns {{ ok: boolean, key: string, record: any|null, previous: any|null, raised: boolean, streak: number, error: string|null, file: string }}
+ */
+export function noteEndpointSuccess(/** @type {any} */ baseUrl, { budget, ceiling = 0, at = Date.now() } = /** @type {any} */ ({})) {
+  const key = endpointKeyOf(baseUrl);
+  const file = endpointLimitsFile();
+  const empty = { ok: true, key, record: null, previous: null, raised: false, streak: 0, error: null, file };
+  if (!key) return empty;
+  const r = readEndpointLimits();
+  if (!r.ok) return { ...empty, ok: false, error: r.error };
+  const previous = r.endpoints[key] || null;
+  if (!previous) return empty; // 没学过就没有可上调的值（不为"成功"凭空造学习值）
+  const used = Math.floor(Number(budget) || 0);
+  const cap = Math.max(Math.floor(Number(ceiling) || 0), used, Number(previous.safeContextBudget) || 0);
+  const nowIso = new Date(Number(at) || Date.now()).toISOString();
+  const streak = (Number(previous.successStreak) || 0) + 1;
+  /** @type {any} */
+  let next = { ...previous, successStreak: streak, lastSuccessAt: nowIso, lastSuccessBudget: used };
+  let raised = false;
+  if (streak >= ENDPOINT_UPGRADE_SUCCESS_STREAK) {
+    const target = Math.min(Math.floor(Number(previous.safeContextBudget) * ENDPOINT_UPGRADE_RATIO), cap);
+    if (target > Number(previous.safeContextBudget)) {
+      next = { ...next, safeContextBudget: target, learnedAt: nowIso, source: 'success-upgrade', successStreak: 0 };
+      raised = true;
+    } else {
+      next = { ...next, successStreak: 0 };
+    }
+  }
+  const w = writeEndpointLimits({ ...r.endpoints, [key]: next });
+  return { ok: w.ok, key, record: w.ok ? next : null, previous, raised: w.ok && raised, streak, error: w.error, file };
 }
 
 // v0.6.3（下游 Dify 工作流反馈）：`customModels` 的条目其实是**两种东西**，此前混为一谈——

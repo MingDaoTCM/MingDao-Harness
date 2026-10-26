@@ -4991,3 +4991,72 @@ Web 写的消息有时间、非 Web 写的没有；旧会话（该字段引入�
 - `ui-shot --open "#rtTrace"` 的 `--open` 会在首页/会话截图之后点击并接着截会话设置弹层，
   因此该目录的 `home.png` 与 `after/home.png` 相同；trace 标签的激活状态可在 `sheet.png`
   右栏看到（默认标签本来就是轨迹）。
+
+## 3.91 已做（v0.6.26 开发线：内存恢复 v2——多级压缩 / 端点级学习 / 子代理继承）
+
+**真机证据**
+
+`~/.mingdao/logs/web-server.log` 同一形态在 10-18 / 10-19 / 10-26 各出现一次：
+
+```
+08:59:14 chat 进度 … 正在等待工具 task（已 1695s）· 子代理「审计网络与安全防线」已跑 31 轮 / 50 次工具调用，最后进展 3s 前
+09:00:22 chat 错误 … insufficient memory … aborted before the allocator wall
+  ↩ 本地引擎内存不足：已压缩上下文（32,768 → ~19,660）、输出上限 4,096 → 2,048，并重试 1 次（最多一次），仍失败
+   建议：把 config.contextBudget 调到 13,762 左右…
+```
+
+根因三条：①v0.6.18 只压一级（×0.6）、只重试一次，19,660 仍被拒就没有下一级；②内核**不记住**
+"这个端点装不下"——下一回合又从 32,768 撞同一堵墙（建议里给了 13,762，但它只是文案，没有任何落盘）；
+③子代理仍按父回合压缩**前**的预算发请求，父子预算不一致，29 分钟白跑。
+
+**改了什么**
+
+1. **多级压缩（硬性上限 2 次）**：`MEMORY_RECOVERY_LEVELS` 两级，比例都相对**本回合起手值**：
+   第 1 级预算 ×0.6 / 输出 ×0.5；第 2 级预算 ×0.35 / 输出 ×0.25；下限预算 4096、输出 512。
+   每次重试打一行日志（第几次 + 压缩前后数值），`done.note` 带完整链路
+   `32,768 → 19,660 → 11,468`；`MAX_MEMORY_RETRIES = 2`，第 3 次失败直接报错，不存在无限重试。
+2. **端点级学习**：`<mingdao-home>/endpoint-limits.json`，键 = 归一化 `baseUrl`，值
+   `{safeContextBudget, learnedAt, source:'memory-failure', attempts, maxOutputTokens}`。
+   **两级压缩都失败**才把"最后尝试的预算"写入；下一回合 `createAgent`/每回合起手都重读该文件，
+   直接以 `safeContextBudget` 起手（若用户配置本来更小则用户优先），并在 `chat 预告` 里写明
+   `该端点曾因内存不足降级，本轮预算 N（来自 YYYY-MM-DD 的失败学习…）`。
+   恢复策略：连续 **3 次干净成功**（无压缩/中断/截断）→ 学习值 +25%，上限 = 用户配置预算；
+   上调后再撞墙会被重新学下来。文件读失败（损坏/权限）→ warn + 按无学习值继续且**不覆盖**损坏文件；
+   写失败 → warn + 降级，回合仍按正常内存失败文案收口，**不阻断会话**。
+3. **子代理继承（两条都实现）**：父回合压缩时同步更新 `currentTurnBudget/currentTurnMaxOutput`，
+   `spawnTask` 用它们作为子代理的 `contextBudget/maxOutputTokens`；子代理自己也走同一套两级压缩
+   （独立于父回合，父回合没压缩时也能自救）。
+4. **提示词对齐学习值**：`describeUpstreamError` 的 hint 与最终失败文案都用**同一个学习值数字**
+   （"已把该端点内存安全预算记为 11,468（写入 …/endpoint-limits.json），下轮起手自动使用——config.contextBudget
+   也可手动调到 11,468"），不再给临时建议值与实际起手值分裂。
+
+**断言与变异**
+
+- `test/memory-recovery.js`：5 项 → **11 项**（新增多级压缩两级、学习值落盘/生效/预告、子代理继承、
+  子代理自压缩、+25% 上调、损坏/不可写降级；保留云端 507 不重试、n_ctx clamp、400/401/429 不变）。
+- `test/mutate/batch40-memory-recovery.mjs`：按 v2 判据重写，**11/11 全中**。
+- 新建 `test/mutate/batch52-memory-v2.mjs`：**11/11 全中**（第 2 级不降预算/不降输出、学习值不落盘、
+  学习值不生效、子代理不继承、多一次重试、建议与学习值脱节、损坏文件被覆盖、写失败直接抛、
+  上调比例错、学早了）。
+- 全仓变异总数 450 → **461**（新增 11 条）。`test/mutate/README.md` 的计数行由布局线（§3.92，
+  后提交者）统一校正，本线未改该文件。
+
+**门禁**
+
+- `npm run typecheck`：通过。
+- `node test/memory-recovery.js`：11 项通过。
+- `node test/smoke.js`：通过（单独跑）。
+- `node test/e2e-local.js`：17 项通过；`node test/api-contracts.js`：8 项通过。
+- `node test/mutate/batch40-memory-recovery.mjs`：11/11；`node test/mutate/batch52-memory-v2.mjs`：11/11。
+- `node test/mutate/run.mjs --allow-dirty`：全批次全中（见提交前的运行日志）。
+- `node scripts/doc-lint.mjs`：唯一红是「变异总数 README 450 vs 实际 461」——计数行归布局线，
+  其提交时校正为 461 即绿；其余 8 项守卫全过。
+
+**未做 / 边界**
+
+- 未改 `src/web/**`、`test/smoke.js`、`test/mutate/README.md`、`presets/**`、`desktop/**`、`ide/**`；
+  未 tag / 改版本号 / publish / 动官网。
+- 学习值是"起手上限"而非成功保证：若它仍失败，本回合会继续按级压缩，学习值也会在后续失败中继续向下棘轮；
+  上调采用 +25% 的探索步长，若上调后失败会重新学下来（不保证一次收敛到最优值）。
+- 端点键是 `baseUrl`（含端口）：同一引擎换端口/反代会形成两条学习记录，这是刻意的（不同端口可能对应不同并发/显存配置）。
+
