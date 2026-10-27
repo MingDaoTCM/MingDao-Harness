@@ -5648,3 +5648,95 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   落在路由层 `misc.js`，`entry.finish` 是唯一收尾入口。
 - 客户端断开时的 `res.on('close')` 中止路径未改：仍先 abort，再由主回合收尾；本次只保证早期异常与
   正常路径都走 `finishChat`。
+
+## 3.97 已做（v0.6.29 同步服务加固：H-02 损坏状态 / H-03 改密配对 TOCTOU / M-01 畸形 URL / M-02 账号限流 + M-14 安全默认）
+
+**来源 / 证据**：第三方审计报告 §4.3 H-02、H-03、§4.4 M-01、M-02；minimax 报告 M-14。四条均按报告
+给的探针在 `src/sync-server.js` 复现：损坏 users.json 后注册返回 200 并覆盖原数据；可控 scrypt 屏障下
+旧密码配对在改密完成后仍拿到新 token；原始 socket 发 `GET http://[::1 HTTP/1.1` 悬挂到客户端超时；
+3 个来源 IP 对同一账号各 5 次错误配对全部 401。
+
+**修法（`src/sync-server.js`）**
+
+- **H-02 严格读取 + schema + 隔离备份**
+  - `readState()` 只有 **ENOENT** 返回 `{}`；读取失败 / 空文件 / JSON 解析失败 / 顶层不是对象 /
+    字段类型不符一律抛 `StateCorruptError`，不再把损坏当空库。
+  - users/devices/meta/shares/accepted 各有最小 schema（顶层对象、salt/hash/tokenHash/owner/name/
+    savedAs/mtime/size 类型、credentialVersion 非负整数、危险键 `__proto__`/`constructor` 拒绝）；
+    写前 `writeState()` 再校验一次（读侧漏网也写不出去）。
+  - 损坏时由 handler 统一回 **500 + `code:"STATE_CORRUPT"` + 文件名 + 备份名**；备份是
+    `<file>.corrupt-<时间戳>[-n]`，用**复制**而非 rename（原文件字节一个不动），同秒重名顺延编号；
+    原件不可读（EACCES）时回退到硬链接备份（link 只看目录权限），仍不覆盖任何既有文件。
+  - 写路径的读取顺序也调整了：push/delete/share-accept/change-password 都先严格读 meta/accepted/
+    devices，再落任何文件——不会出现"文件已写、元数据报 500"的半截状态；pull 的 404 不再吞掉 meta 损坏。
+- **H-03 credentialVersion**
+  - 用户记录新增单调 `credentialVersion`（旧记录缺失视为 0；注册写入 0）。
+  - `doPair` 仍锁外 `scrypt`，入锁后**重读 users 并比较版本**；版本变了 → 401（不新增设备）。
+  - `doChangePassword` 锁内核对验证时的预期版本；不一致 → 409（并发改密只有一个成功）。
+    成功后 `credentialVersion = expected + 1` 并吊销全部设备。
+- **M-01 畸形 request-target**
+  - URL 解析收进内层 try；解析失败 → 400 + `Connection: close`；外层 `handle(...).catch` 不再空吞：
+    未发头 → 500，已发头 → `res.destroy()`。
+- **M-02 两维限流**
+  - 拆成来源桶（IP+路由，60s/10 次）与账号桶（路由+规范化账号，跨 IP 共享；5 次失败后 5s 起指数退避，
+    上限 5min，成功即清零）。任一命中即 429，账号桶只在失败认证后累计（pair/password；
+    register 只对"用户名已占用"计），避免误锁正常用户。
+- **M-14 安全默认（行为变更）**
+  - `SYNC_HOST` 默认 `0.0.0.0` → **`127.0.0.1`**；`MINGDAO_SYNC_REGISTRATION` 默认 `open` → **`closed`**。
+  - 迁移缓冲：**未显式设置**注册变量且监听回环地址时，回环来源仍可自助注册（本机首启/测试）；
+    一旦绑定非回环地址即默认 closed；显式设置 `closed` 连回环也拒绝（`invite`/`open` 仍可显式开启）。
+  - 启动日志明确打印监听地址、注册策略与迁移命令；默认明文模式的"非回环告警"只在非回环时出现。
+
+**迁移方式（写给已有部署）**
+
+- 之前靠默认 `0.0.0.0` 对外提供服务的部署：升级后需显式 `SYNC_HOST=0.0.0.0`（并配置
+  `SYNC_CERT`/`SYNC_KEY`），否则只监听本机。
+- 注册：已有账号无需任何改动（配对/同步/改密不受影响）。要接纳新用户，显式设
+  `MINGDAO_SYNC_REGISTRATION=invite` + `MINGDAO_SYNC_INVITE_CODES=码1,码2`（推荐）或 `open`；
+  本机自建可继续用回环首启注册。
+- `docs/CONFIG.md`/`docs/CONFIG.en.md` 里 SYNC_HOST/注册默认值仍是旧值——本轮改动面不含这两个文件，
+  需在文档批次同步（已如实登记在此）。
+
+**断言与变异**
+
+- 新建 `test/sync-hardening.js`（`node test/sync-hardening.js`，失败非 0）：**24/24 项通过**。
+  ① H-02：截断/空文件/数组/权限错误/不存在五种 users.json 形态，只有"不存在"可初始化；
+  其余写接口 500、原文件字节不变、备份字节一致；devices/meta/shares/accepted 各一次 schema 违例；
+  另加两条**读侧**证据（users schema 违例时配对必须 500 而非 401、meta 违例时会话列表必须 500 而非 200）；
+  同秒二次损坏两份备份都保留。
+  ② H-03：可控 scrypt 屏障复现"旧配对先验证、改密先完成、配对后入锁"→ 401、无新设备、旧 token 401、
+  新密码正常；并发改密 [200,409] 且只有一个新密码可用；legacy 缺版本按 0 处理并写 1。
+  ③ M-01：原始 socket 发 `GET http://[::1 HTTP/1.1` 6 次，全部 <1s 回 400 并关闭；20 次后活动连接不增长；
+  随后 /healthz 200。
+  ④ M-02：多来源（可信 XFF 模拟）同账号第 6 次 429、锁定期间正确密码也 429、不同账号不被连坐；
+  单 IP 第 11 次 429；成功认证清零。
+  ⑤ M-14：默认子进程日志为 127.0.0.1 + 注册 closed + 回环首启说明；绑定 0.0.0.0 默认拒绝注册；
+  显式 closed 回环也拒绝。
+- 新建 `test/mutate/batch57-sync-hardening.mjs`：16 条（损坏当空库、所有读错误初始化、schema 被跳过、
+  不备份、rename 走原件、备份覆盖、去掉配对版本核对、去掉改密版本核对、URL 解析移出 try、
+  畸形目标不写响应、账号桶退回 IP+账号、账号预检短路、成功不清零、默认监听 0.0.0.0、注册默认 open、
+  删回环首启引导）。**16/16 已在隔离副本逐条预演命中**；本树因全局变异锁被其他 lane 占用，
+  **batch57 未在本树实跑**，由收尾全量门禁覆盖（见下）。
+
+**门禁**
+
+- `npm run typecheck`：通过。
+- `node test/sync-hardening.js`：24/24 项通过。
+- `node test/smoke.js`：通过（首跑因并行会话在共享 `/tmp` 留下 `mingdao-skill-git-*` 触发 BUG-010 断言，
+  与本改动无关；重跑 EXIT 0，含全部同步相关小节）。
+- `node test/e2e-local.js`：17 项通过（含 sync CLI 登录/推送/拉取/改密/分享）。
+- `node scripts/doc-lint.mjs`：仅 ⑥ 变异总数不一致（README 写 492，当次实际 541——含本轮 batch57 16 条与
+  并行 lane 的 batch58/59/60；按约束未改 README，由收尾统一校正）。
+- `node test/mutate/batch57-sync-hardening.mjs`：**未在本树实跑**（全局锁被 68374 的 clean full run 占用）；
+  16 条已在隔离副本逐条验证，全部命中。收尾全量 `run.mjs` 为权威门禁。
+
+**未做 / 边界**
+
+- 未改 `test/smoke.js`、`test/mutate/README.md`、`test/run-all.mjs`、`.github/workflows/ci.yml`。
+- M-19（pair 404/401 用户名枚举 + push 无速率限制）未修：`sync.js` 依赖 404 判断"用户不存在→自动注册"，
+  改成统一 401 会破坏客户端首登；账号桶已限制枚举频率，但响应区分仍在。留待 M-19 专项。
+- M-02 的多来源用 `SYNC_TRUST_PROXY=1` + XFF 模拟（本机 macOS 没有 127.0.0.0/8 别名，绑 127.0.0.2
+  会 EADDRNOTAVAIL）；真实直连的多 IP 未在本机实测。不可信直连时 XFF 仍被忽略。
+- 权限错误（EACCES）的备份依赖硬链接；不支持硬链接的文件系统只能记录 `state-quarantine-failed`，
+  无法留备份（原件仍不覆盖）。
+- 未 tag / 改版本号 / publish / 动官网；`src/sync.js` 无需透传 credentialVersion，未改。
