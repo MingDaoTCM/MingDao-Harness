@@ -164,7 +164,10 @@ M.mutate({
   file: 'src/memory.js',
   from: ['  lockFileSync(memoryLockFile(), () => {', '    appendFilePrivateSync(memoryFile(), add.map('].join('\n'),
   to: ['  ((/** @type {any} */ fn) => fn())(() => { // 变异：无锁追加', '    appendFilePrivateSync(memoryFile(), add.map('].join('\n'),
-  expect: ['并发追加 + 去重不得丢条目'],
+    // Windows 上没有 O_APPEND 之外的一致性保证：去掉锁之后，去重的原子替换会与并发的追加
+  // 撞在同一个文件上，先以 EBUSY 暴露（同样是「未加锁」的后果，只是失败形态不同），
+  // 因此这里接受 EBUSY 作为被抓到的证据；POSIX 上仍是原来的数据丢失断言。
+  expect: ['并发追加 + 去重不得丢条目', 'EBUSY'],
   run: SUITE,
 });
 

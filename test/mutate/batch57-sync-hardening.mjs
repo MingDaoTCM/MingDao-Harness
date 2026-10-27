@@ -25,7 +25,19 @@ M.mutate({
 });
 
 // ② H-02：把 ENOENT 与其他读取错误混为一谈（权限错误也初始化）
-M.mutate({
+//
+// Windows 上**不可验证**：套件构造「非 ENOENT 读失败」的夹具是 000 权限，而 Windows 的 chmod
+// 只切换只读属性、不阻止读取（套件 §H-02 权限用例本身已按平台能力跳过）。没有观测面就不该
+// 让这条变异在 Windows 上"逃逸"、把整条腿染红——如实跳过并打印原因。
+const mutateUnlessWindows = (m) => {
+  if (process.platform === 'win32') {
+    console.log(`⚠ 跳过：${m.name}（Windows 无 000 权限语义，构造不出非 ENOENT 读失败；套件同一用例亦跳过）`);
+    return;
+  }
+  M.mutate(m);
+};
+
+mutateUnlessWindows({
   name: '② 只有 ENOENT 可初始化的约束被放宽（任何读失败 return {}）',
   file: 'src/sync-server.js',
   from: `    if (err && err.code === 'ENOENT') return {};`,
