@@ -65,8 +65,8 @@ M.mutate({
 M.mutate({
   name: '⑤ §118 lastSeen 写盘不再包 try/catch（写失败会把整个同步服务带走）',
   file: 'src/sync-server.js',
-  from: '      try {\n        await withWriteLock(() => {\n          const devices = readJson(devicesFile(), {});\n          if (devices[dev.username]?.[dev.deviceId]) {\n            devices[dev.username][dev.deviceId] = dev.device;\n            writeJson(devicesFile(), devices);\n          }\n        });\n      } catch (/** @type {any} */ e) {\n        // lastSeen 写失败不影响本次请求的语义（它只是"最近在线"标记），但必须留痕而不是崩掉进程\n        log(\'lastSeen-write-failed\', dev.username, String(e?.message || e));\n      }',
-  to: '      await withWriteLock(() => {\n        const devices = readJson(devicesFile(), {});\n        if (devices[dev.username]?.[dev.deviceId]) {\n          devices[dev.username][dev.deviceId] = dev.device;\n          writeJson(devicesFile(), devices);\n        }\n      });',
+  from: '      try {\n        await withWriteLock(() => {\n          const devices = readDevices();\n          if (devices[dev.username]?.[dev.deviceId]) {\n            devices[dev.username][dev.deviceId] = dev.device;\n            writeDevices(devices);\n          }\n        });\n      } catch (/** @type {any} */ e) {\n        // lastSeen 写失败不影响本次请求的语义（它只是"最近在线"标记），但必须留痕而不是崩掉进程\n        log(\'lastSeen-write-failed\', dev.username, String(e?.message || e));\n      }',
+  to: '      await withWriteLock(() => {\n        const devices = readDevices();\n        if (devices[dev.username]?.[dev.deviceId]) {\n          devices[dev.username][dev.deviceId] = dev.device;\n          writeDevices(devices);\n        }\n      });',
   expect: ['lastSeen 的写锁必须被 await'],
   run: SEC('118'),
 });
