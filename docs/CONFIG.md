@@ -379,9 +379,12 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
 设备 token 存凭证库（`credentials.json` 的 `sync` 字段），配置里只留非秘密项。自建自签证书
 过渡阶段可加 `"insecure": true`（正式证书就绪后删除）。详见 README「云同步与多用户协作」。
 
-同步**服务端**（`mingdao sync-server`）支持注册开关环境变量：
-`MINGDAO_SYNC_REGISTRATION=open|invite|closed`（默认 open）+ `MINGDAO_SYNC_INVITE_CODES=码1,码2`
-（invite 模式生效），公网自建建议至少 `invite`。
+同步**服务端**（`mingdao sync-server`）的安全默认（**v0.6.29 起变更**）：
+`SYNC_HOST` 默认 **`127.0.0.1`**（仅本机），注册默认 **`closed`**。对外提供服务需显式设置
+`SYNC_HOST=0.0.0.0` 并配置 `SYNC_CERT`/`SYNC_KEY`（TLS）；接纳新用户需显式设置
+`MINGDAO_SYNC_REGISTRATION=invite` + `MINGDAO_SYNC_INVITE_CODES=码1,码2`（推荐）或 `open`。
+**已有账号不受影响**（配对/同步/改密不变）；本机首启在「未显式配置 + 只监听回环 + 回环来源」时
+仍可自助注册。公网自建建议至少 `invite`。
 
 ## 会话日志与「带上文」（跨会话连续性）
 

@@ -632,11 +632,11 @@ The **sync server** (`mingdao sync-server`) is configured by environment variabl
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `SYNC_HOST` / `SYNC_PORT` | `0.0.0.0` / `443` | Listen address |
+| `SYNC_HOST` / `SYNC_PORT` | `127.0.0.1` / `443` | Listen address. **Changed in v0.6.29**: loopback only by default; set `SYNC_HOST=0.0.0.0` (plus TLS) to serve other hosts |
 | `SYNC_DATA_DIR` | `/var/lib/mingdao-sync` | Data directory |
 | `SYNC_CERT` / `SYNC_KEY` | none | Both must be set together; setting only one refuses to start instead of silently serving plaintext |
 | `SYNC_ALLOW_INSECURE`, `SYNC_TRUST_PROXY` | off | Only for trusted reverse-proxy deployments |
-| `MINGDAO_SYNC_REGISTRATION` | `open` | `open` / `invite` / `closed` |
+| `MINGDAO_SYNC_REGISTRATION` | `closed` | `open` / `invite` / `closed`. **Changed in v0.6.29**: `closed` by default; when the variable is unset, a loopback listener still allows self-registration from loopback clients (local first run). Set `invite` (recommended) or `open` to accept new users |
 | `MINGDAO_SYNC_INVITE_CODES` | none | Comma-separated codes, used when registration is `invite`. At least `invite` is recommended for public deployments |
 
 ---

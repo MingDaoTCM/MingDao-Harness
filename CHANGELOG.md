@@ -3,6 +3,167 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.29（2026-10-27）— v0.6.28 审计修复：4 高危 + 13 中低危 + 测试隔离
+
+> 本版是**安全/状态一致性专项**：关闭第三方代码审计的**全部 4 条高危**（H-01 畸形 `request-target`
+> 杀进程、H-02 损坏状态被当空库覆盖、H-03 改密↔配对 TOCTOU、H-04 改 `baseUrl` 后仍向旧端点发
+> 请求与凭据），以及 minimax 报告的 **13 条中低危**（M-01/M-02/M-03/M-08/M-09/M-10/M-11/M-12/
+> M-13/M-14/M-17/L-9/L-13），并修掉并行跑 smoke 的测试隔离假红。
+> **⚠ 其中 M-14 是行为变更**：`SYNC_HOST` 默认 `0.0.0.0` → `127.0.0.1`、注册默认 `open` → `closed`；
+> 对外部署必须显式配置（升级步骤见 `RELEASE-NOTES-0.6.29.md`）。
+> 细节登记见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` §3.97（同步）/ §3.98（Web）/ §3.99（Provider）/ §4.1（状态）。
+
+### 一、Web 高危：单个畸形请求不再杀进程（H-01）+ 聊天早期异常不留假 `running`（M-03）
+
+**证据**：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL(...)` 在 `dispatch(...).catch(...)`
+之外同步抛 `TypeError: Invalid URL`，整个 Web 进程退出——一个未认证请求即可打掉全部会话。
+M-03：把 `session-workspaces.json.lock` 制造成不可满足的锁后，客户端收到「获取文件锁超时」，
+但 `/api/tasks` 仍 `running:1`、任务仍 `running`、`onBusy` 只记录到 `true`。
+
+**修法**：
+
+- H-01：新增导出纯函数 `parseRequestTarget(raw)` 作为**唯一解析点**——只接受 origin-form；
+  拒绝空目标、控制字符、协议相对 `//`、反斜杠（WHATWG 会把 `\` 当 `/`）、绝对形式 URI、
+  超长目标（>8192B）与 URL 解析异常（非法 IPv6/端口）。`http.createServer` 回调整体进同步
+  `try/catch`：解析失败 → **400 + `Connection: close`**，不进入认证与域分发；解析后的其它同步
+  异常 → 未发头 500 / 已发头 `res.end()` / 再失败 `res.destroy()`。**没有**引入
+  `process.on('uncaughtException')` 兜底（报告明确反对）。兼容边界：本服务是 origin server，
+  代理形式的绝对 URI 现在一律 400（反代需求见已知边界）。
+- M-03：任务注册后立即定义幂等 `finishChat(error?)`：清 5s `progressTimer` → 解除挂起确认/中止
+  回调 → 释放会话 claim（含改名迁移键）→ 置终态与耗时 → `notifyBusy()` → 发 SSE error →
+  `res.end()` → `pruneTasks()`；`finished` 保证重复调用无副作用。附件错误、同会话忙、Provider
+  不可用、工作空间锁、落盘失败、建会话失败与主路径 `finally` **全部**复用同一函数；
+  `routes/domains/misc.js` 的 `/api/chat` 再包一层 `try/catch/finally` 调 `entry.finish` 兜底。
+
+**验证**：`test/web-robustness.js` **8 项**（解析表驱动 6 合法/15 非法；7 类畸形目标后进程存活且
+`/api/state` 与静态页仍 200；4 个 M-03 故障点逐一断言 SSE 恰好 1 条 error、任务 `failed`、
+`running=0`、`onBusy` 恰好 `true→false`、计时器已清、同会话可再次请求）。
+
+### 二、同步服务：损坏状态不再被当空库覆盖（H-02）+ 改密↔配对 TOCTOU（H-03）+ 畸形 URL（M-01）+ 双维限流（M-02）+ 安全默认（M-14）
+
+**证据**：预置含 Alice 数据但语法损坏的 `users.json`，注册 `newuser` 返回 200，写回后原数据
+全丢；可控 `scrypt` 屏障下「旧密码配对先验证、改密先完成、配对后入锁」仍拿到新设备令牌；
+原始 socket 发畸形目标后连接悬挂到客户端超时；3 个来源 IP 对同一账号各 5 次错误配对全部 401
+（限流只绑 IP）。
+
+**修法**：
+
+- **H-02 严格读取 + schema + 隔离备份**：`readState()` **只有 `ENOENT`** 返回 `{}`；读取失败 /
+  空文件 / JSON 解析失败 / 顶层不是对象 / 字段类型不符一律抛 `StateCorruptError`。users、devices、
+  meta、shares、accepted 各有最小 schema（含 `credentialVersion` 非负整数、拒绝 `__proto__` 等
+  危险键），写前**再校验一次**。损坏时统一回 **500 + `code:"STATE_CORRUPT"` + 文件名 + 备份名**；
+  备份为 `<file>.corrupt-<时间戳>[-n]`，用**复制**而非 rename（**原文件字节一个不动**），同秒重名
+  顺延；原件不可读（EACCES）时回退硬链接备份。push/delete/share-accept/change-password 先严格读
+  meta/accepted/devices 再落盘，避免「文件已写、元数据报 500」的半截状态。
+- **H-03 `credentialVersion`**：用户记录新增单调 `credentialVersion`（旧记录缺失视为 0）。`doPair`
+  仍在锁外跑 `scrypt`，**入锁后重读 users 比对版本**，变了 → 401 且不新增设备；`doChangePassword`
+  锁内核对预期版本，不一致 → 409（并发改密只有一个成功），成功后版本 +1 并吊销全部设备。
+- **M-01**：同步服务的 URL 解析收进内层 `try`，失败 → 400 + `Connection: close`；外层
+  `handle(...).catch` 不再空吞：未发头 500、已发头 `res.destroy()`。
+- **M-02 两维限流**：拆成**来源桶**（IP + 路由，60s/10 次）与**账号桶**（路由 + 规范化账号，
+  跨 IP 共享；5 次失败后 5s 起指数退避、上限 5min，成功即清零）。任一命中即 429；账号桶只在
+  失败认证后累计（register 只对「用户名已占用」计），避免误锁正常用户。
+- **M-14 安全默认（行为变更）**：`SYNC_HOST` 默认 `0.0.0.0` → **`127.0.0.1`**；
+  `MINGDAO_SYNC_REGISTRATION` 默认 `open` → **`closed`**。迁移缓冲：**未显式设置**注册变量且
+  监听回环地址时，回环来源仍可自助注册（本机首启/测试）；绑定非回环即默认 closed；显式 `closed`
+  连回环也拒绝（`invite`/`open` 仍可显式开启）。启动日志明确打印监听地址、注册策略与迁移命令。
+
+**验证**：`test/sync-hardening.js` **24 项**（五种损坏形态只有「不存在」可初始化、其余 500 且原件
+字节不变/备份字节一致；devices/meta/shares/accepted 各一次 schema 违例；读侧同样 500；同秒二次
+损坏两份备份都保留；H-03 时序复现 401/无新设备/旧 token 401，并发改密 `[200,409]`，legacy 缺版本
+按 0 处理；M-01 六次畸形全部 <1s 400 并关闭，20 次后活动连接不增长；M-02 多来源同账号第 6 次 429、
+锁定期间正确密码也 429、不同账号不被连坐、成功清零；M-14 默认日志为 `127.0.0.1` + `closed`、
+绑 `0.0.0.0` 默认拒绝注册、显式 closed 回环也拒绝）。
+
+### 三、Provider 高危：改 `baseUrl` 后仍向旧端点发请求与凭据（H-04）+ SSE/脱敏/掩码（M-08/M-09/M-13/L-9）
+
+**证据**：对话到端点 A（返回 `reply-a`）→ `setBaseUrl` 切到 B 返回 200 → 第二轮仍返回 `reply-a`；
+A 共记录 10 次请求、B 为 0，A 仍收到 `Authorization: Bearer …`（含自动标题、记忆等后续请求）。
+
+**修法**：
+
+- **H-04**：provider 缓存键从「只按模型名」改为「模型 + 出网配置指纹」——**代际号 + `baseUrl` +
+  `apiKey` 的 sha256 摘要 + `timeout`**；新增 `invalidateProviderCache()`（代际 +1、清 provider
+  实例**与本地端点预检备忘**）。`setBaseUrl`（含清空）、Key 增删、自定义模型增删改、超时修改
+  全部走它；创建期间配置再变化时**旧实例不写回缓存**；已开始的旧任务持旧实例自然结束。
+- **M-08**：SSE 改为**事件级解析**——同一事件的多行 `data:` 按规范以 `\n` 连接，空行派发；
+  坏帧 warn 一次并在返回值 `badFrames` 计数（预览先脱敏再截断，告警不成为新泄露面）；兼容
+  「不发空行、每行一个完整 JSON」的网关；`[DONE]` 立即派发，其后紧跟的 usage 尾帧仍被捕获。
+- **M-09**：`parseStream` 读取循环 `try/finally`，成功/失败/中断/坏帧一律幂等 `reader.cancel()`。
+- **M-13**：`SECRET_PREFIXES` 新增 `hf_`、`shpat_`、`dckr_pat_`、`xai-`、`gsk_`、`pplx-`、`r8_`、
+  `npm_`、`sk_live_`、`sk_test_`、`fal_`（每行带 `sample`）；敏感名段增加 `passphrase`。子进程
+  env 增加 `SSH_PASSPHRASE`、`PGPASSWORD`、`DATABASE_URL`、`MYSQL_URL`、`POSTGRES_URL`、
+  `REDIS_URL`、`MONGODB_URI`、`AMQP_URL`、`RABBITMQ_URL`，并加「库类型 + `*_URL|URI|DSN`」兜底。
+- **L-9**：新增 `maskKeyTail()`（固定形态 `…末4位`，≤8 位回 `******`），`/api/models-config` 全部
+  改用它，**浏览器侧不再拿到前 6 位**；本机 CLI 的 `maskKey` 保留「前 6…后 4」（受既有
+  `test/smoke.js:958` 约束，已登记），该口径已写入 `docs/CONFIG.md`。
+
+**验证**：`test/provider-hardening.js` **5 组**（A/B 双桩端点：切 B 后 A 请求数不再增长、A 不再收到
+Bearer 与第二问正文，同地址重写/清空/并发切换均只到 B；多行拼接 + 坏帧计数 + `[DONE]` 后 usage；
+注入 reader 抛错断言 `cancel()` 被调用；每个新增前缀与 env 名各有断言，且断言「这些前缀必须有
+对应行」防表驱动假绿；`maskKeyTail` 与 HTTP `keyMasked` 均不含前 6 位）。
+
+### 四、状态一致性：`emptyRounds`/`finish` 复位 + 检查点/索引/记忆加锁（M-10/L-13/M-17/M-11/M-12）
+
+- **M-10 `emptyRounds` 永不复位**：文案写「**连续** N 轮」、实现是**累计**，于是「空→有进展→空→空」
+  在第 4 次请求被误中止。现在有进展即复位：成功且不重复的工具轮、非 `length` 截断的非空模型轮
+  （失败/重复调用不算进展，截断轮即使有正文也不清零）；阈值与文案不变。
+- **L-13 `finish` 跨轮残留**：`finish = res.finish ?? finish` 在网关不返回 `finish_reason` 时会保留
+  上一轮的 `length`，把正常收尾记成 `capped/truncated`。每个模型请求开始重置 `finish = null`。
+- **M-17 `saveTaskState` 无锁并存**：抽出 `writeTaskStateLocked(sessionName, ts, merge)` 作为**唯一
+  临界区**，裸写（`merge=false`）与合并写（`merge=true`）共用同一把 `<检查点>.lock`；
+  锁内才 `loadTaskState → mergeTaskState → atomicWrite`，异步合并写复用同一实现（可重入）。
+- **M-11 会话索引分片无锁写**：读-改-写抽成 `syncShardGroup`，调用方持 `<分片>.json.lock`
+  （256 片，不同分片仍可并行）；主循环、旧索引迁移、无存活会话分片清理三处 RMW 全部持锁。
+  锁不可用时维持「本次检索仍可用」——内存计算、**不落盘**、记 `shardWriteError()`，**绝不退回
+  无锁整片写**。
+- **M-12 `AGENTS.md` 去重/删除无锁**：`appendMemory` / `dedupeMemory` / `removeMemoryLines` /
+  `writeMemory` 四条写路径共用 `<AGENTS.md>.lock`，去重/删除的读-改-写与备份全程在锁内。
+
+**验证**：`test/state-integrity.js` **9 项**（连续空轮第 3 次中止 vs 空-有进展-空-空不中止、阈值
+边界；上一轮 `length` 不影响下一轮 `truncated`；跨进程持锁 500ms 期间裸写必须等待 ≥300ms、
+8 路并发合并 artifacts 并集不丢；2 个真子进程同时同步同一分片 60+60 条终态 120/120；4 路追加
+1000 条与 `dedupeMemory` 并发后逐条仍在）。
+
+### 五、测试隔离：并发跑 smoke 不再假红（§120 私有 `TMPDIR`）
+
+**证据**：两个 worktree 同时跑 `node test/smoke.js` 时，§120 的「失败路径不得留下临时目录」断言
+报 `mingdao-skill-git-*`——那是**另一个 run 正在用**的目录；旧断言扫的是全机共享 `os.tmpdir()`。
+
+**修法（只改测试，产品零改动）**：§120 开始处建**本 run 私有目录**
+`os.tmpdir()/mingdao-smoke-<pid>-<epoch>-<rand>`，把 `TMPDIR`（POSIX）/`TMP`+`TEMP`（Windows）
+指向它；`leftovers120()` 只扫该私有目录，保留前/后快照差集语义，段末恢复原值并删除。
+新增**结构守卫**：smoke 源文件不得在全局临时目录上列目录、残留扫描必须只针对 `runTmpRoot120`、
+`os.tmpdir()` 必须等于私有根。
+**验证**：同噪声下改前必红、改后 191 项全过；并发双 worktree 两边 `EXIT:0`；故障注入（额外漏一个
+`mingdao-skill-git-*`）断言仍红——守卫没有被放宽。
+
+### 六、接线与变异（492 → 541）
+
+- 四个新套件已进 `test/run-all.mjs` 与 CI（仅 Linux 腿）：`sync-hardening`（24）、`web-robustness`（8）、
+  `provider-hardening`（5 组）、`state-integrity`（9）。
+- 新增变异批次 `batch57-sync-hardening`（16）、`batch58-web-robustness`（10）、
+  `batch59-provider-hardening`（12）、`batch60-state-integrity`（11）；全仓变异总数 **492 → 541**，
+  权威全量 `node test/mutate/run.mjs` **49/49 批、541/541 条全中**（`test/mutate/README.md` 计数行同步）。
+
+### 七、验证与已知边界
+
+- 最终 HEAD 上逐项门禁：`typecheck` 0、`typecheck:strict` 当前 0 / 基线 0、`smoke` 单独跑全绿、
+  `run-all`（六套套件 + 四新套件 + bench + 自验）全绿、`mutate` **49/49 / 541 条**、`doc-lint` 全绿、
+  `diagnose` 正常（密钥脱敏）。
+- 发布提交只含版本/日志/发布说明文件；`git diff --name-only <门禁SHA>..<tag> -- src test` → **0 行**。
+- **未修 M-19**：pair 的 404/401 用户名枚举与 push 无速率限制——`src/sync.js` 依赖 404 判断
+  「用户不存在 → 自动注册」，统一改 401 会破坏客户端首登，需先改客户端自动注册协议；账号桶已限制
+  枚举频率，但响应区分仍在。**另 3 条中危也未修**：M-15/M-16（同步推送/拉取的状态增量与
+  `localMtime` 丢失，导致重复全量推送）与 M-18（压缩回退丢 `usage`、费用少计），
+  它们牵动同步协议/账本口径，与 M-19 的客户端协议改动一并留到下一波；minimax 其余 L 项
+  与第 2/3 波修复同样留待后续版本。
+- 其它边界：CLI `maskKey` 仍保留前 6 位（`smoke:958` 约束）；M-02 多来源用 `SYNC_TRUST_PROXY=1`
+  + XFF 模拟（本机 macOS 无 `127.0.0.2` 别名），真实多 IP 未实测；EACCES 备份依赖硬链接；
+  绝对形式 URI 现在一律 400（反代需另做显式放行）；Windows 真机未验，以 CI `test (windows-latest, 20)`
+  腿与四个桌面构建为准。
+
+
 ## v0.6.28（2026-10-27）— 去掉空窄条 + 面板不遮顶栏（--hdr-h 不变量）+ TTFT 提示去重
 
 > 本版三件事，都来自负责人的实测反馈：① **左侧 42px 空窄条**（按钮在 v0.6.27 已删、列还在白占宽）
