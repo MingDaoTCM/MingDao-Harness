@@ -9517,8 +9517,20 @@ process.stdout.write('done');`
   const TS120 = await import(pathToFileURL(path.join(srcDir, 'task-state.js')).href);
   const prevHome120 = process.env.MINGDAO_HOME;
   const home120 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-batch9-'));
+  // 【v0.6.28 §4.2 并发隔离】产品（src/skill-lib.js）在 `os.tmpdir()` 下建 `mingdao-skill-*` /
+  // `mingdao-skill-git-*`，而 os.tmpdir() 是**全机共享**的：两个 smoke 同时跑（不同 worktree）时，
+  // A 扫 /tmp 会看到 B 正在用的临时目录，把"别人在用"误判成"本 run 泄漏"→ 假红（真机复现：
+  // `任何失败路径都不得留下临时目录，实际：mingdao-skill-git-xs3PjG`）。
+  // 修法：本段把 TMPDIR（POSIX）/ TMP+TEMP（Windows 上 os.tmpdir() 的实际取值来源）指向
+  // **本 run 私有目录**（`<os.tmpdir()>/mingdao-smoke-<pid>-<epoch>-<random>`），残留断言只扫它；
+  // 用前/后快照差集，语义不变（仍抓"失败路径在本 run 里留下临时目录"）。
+  const runTmpRoot120 = fs.mkdtempSync(path.join(os.tmpdir(), `mingdao-smoke-${process.pid}-${Date.now()}-`));
+  const prevTmp120 = { TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP };
+  process.env.TMPDIR = runTmpRoot120;
+  process.env.TMP = runTmpRoot120;
+  process.env.TEMP = runTmpRoot120;
   const tmpPrefix120 = 'mingdao-skill-';
-  const leftovers120 = () => fs.readdirSync(os.tmpdir()).filter((f) => f.startsWith(tmpPrefix120));
+  const leftovers120 = () => fs.readdirSync(runTmpRoot120).filter((f) => f.startsWith(tmpPrefix120));
   try {
     // ① BUG-010：安装器的临时目录必须**任何路径**都能清掉（原来只在"校验失败"这一条早退上删）
     {
@@ -9693,9 +9705,42 @@ process.stdout.write('done');`
       assert.ok(/Sec-Fetch-Site/.test(cfgDoc120), 'CONFIG.md 必须写明跨站浏览器请求一律拒绝');
       assert.ok(/auth-token=-/.test(cfgDoc120), 'CONFIG.md 必须写明 --auth-token=- 从 stdin 读、字面量会进 argv');
     }
+
+    // ⑤ 【v0.6.28 §4.2】**结构守卫**：残留扫描不得再落回全局临时目录。
+    // 为什么需要：上面三条行为断言只证明"本次调用没留残留"；而"把扫描范围改回全局 os.tmpdir()"
+    // 这类回归单跑永远绿、只在并发时假红——没有绊线就没人发现（本条正是为它加的）。
+    // 自指排除：绊线里的正则字面量在源码文本中是转义形态（`readdirSync\(`），不会命中自己；
+    // 读取的是**本仓库的 smoke.js 源文件**（用 srcDir 推导，§120 被 extractSection 抽成
+    // 独立脚本运行时同样指向真身，见 test/mutate/lib.mjs#extractSection）。
+    {
+      const smokeSrc120 = fs.readFileSync(path.join(srcDir, '..', 'test', 'smoke.js'), 'utf8').replace(/\r\n?/g, '\n');
+      assert.ok(
+        !/readdirSync\([^\n]*tmpdir\(\)[^\n]*\)/.test(smokeSrc120),
+        'smoke 不得在全局临时目录上列目录找残留（并发的另一个 smoke 会把对方正在用的临时目录当成自己的残留 → 假红）'
+      );
+      assert.ok(
+        /fs\.readdirSync\(runTmpRoot120\)/.test(smokeSrc120),
+        '临时目录残留扫描必须只针对本 run 私有 TMPDIR（runTmpRoot120）'
+      );
+      assert.equal(
+        fs.realpathSync(os.tmpdir()),
+        fs.realpathSync(runTmpRoot120),
+        '（前置）本段的 TMPDIR/TMP/TEMP 必须已指向本 run 私有目录，否则残留断言扫的仍是全局临时目录'
+      );
+      assert.deepEqual(
+        leftovers120(),
+        [],
+        `本 run 私有 TMPDIR 内不得残留任何临时目录（失败路径泄漏的兜底扫描），实际：${leftovers120().join(', ')}`
+      );
+    }
   } finally {
     if (prevHome120 === undefined) delete process.env.MINGDAO_HOME;
     else process.env.MINGDAO_HOME = prevHome120;
+    for (const [k, v] of Object.entries(prevTmp120)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    safeRmSync(runTmpRoot120, { recursive: true, force: true });
     safeRmSync(home120, { recursive: true, force: true });
   }
   ok('v0.6.3 批九 上游能力与文档：安装器临时目录 finally 清理 + 检查点路径穿越设防 + 令牌不进 argv + 文档跟上实现');

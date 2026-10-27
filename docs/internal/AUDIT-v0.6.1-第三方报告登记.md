@@ -5740,3 +5740,67 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
 - 权限错误（EACCES）的备份依赖硬链接；不支持硬链接的文件系统只能记录 `state-quarantine-failed`，
   无法留备份（原件仍不覆盖）。
 - 未 tag / 改版本号 / publish / 动官网；`src/sync.js` 无需透传 credentialVersion，未改。
+
+## 4.2 v0.6.28 修复：并发跑 smoke 的「临时目录残留」断言假红（只改测试隔离：按 run 私有 TMPDIR + 源码结构守卫）
+
+> 来源：真机上**两个 worktree 同时跑** `node test/smoke.js` 时报
+> `任何失败路径都不得留下临时目录，实际：mingdao-skill-git-xs3PjG`。
+> 佐证（同树并行 lane 的门禁记录，见上一节）："首跑因并行会话在共享 `/tmp` 留下
+> `mingdao-skill-git-*` 触发 BUG-010 断言，与本改动无关；重跑 EXIT 0"——独立复现了同一假红。
+> 定性：**测试隔离缺陷，不是产品缺陷**——产品（`src/skill-lib.js`）的清理本身是对的；
+> 旧断言扫描的是**全机共享**的 `os.tmpdir()`，把「另一个 smoke 正在用」误判成「本 run 泄漏」。
+> 同一族问题此前也误红过并发跑 smoke / 变异（§120）。
+
+### 4.2.1 建目录的到底是谁
+
+- `src/skill-lib.js:385`（`installFromGit`）：`fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-git-'))`；
+- `src/skill-lib.js:328`（`installFromUrl`）：`fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-skill-'))`；
+- 两者都在 `finally` 里 `fs.rmSync(tmp)`（产品侧正确）。断言侧 `test/smoke.js` §120 的
+  `leftovers120()` 原来扫 `fs.readdirSync(os.tmpdir())`（前缀 `mingdao-skill-`）→ 会看到别的 run 的目录。
+
+### 4.2.2 复现
+
+- **并发双 worktree**（`/tmp/smoke-a`、`/tmp/smoke-b`，同一提交）同时跑：改前实测**两次都绿**
+  （竞态窗口只有 `installFromGit` 那几十毫秒，属"偶发"——所以必须用确定性复现给证据）。
+- **确定性复现（改前必红）**：在 `os.tmpdir()` 里每 10ms 建一个 `mingdao-skill-git-live-*`、
+  存活 1.5s（模拟"另一个 smoke 正在用"），改前跑一次：
+  `安装中途失败后**不得留下临时目录**（BUG-010…）实际：mingdao-skill-git-live-1KHTZK`
+  ——报的正是噪声目录，不是本 run 的残留。
+- **同一噪声下的改后**：191 项全过、退出码 0。
+
+### 4.2.3 修法（只动测试，产品零改动）
+
+- §120 开始处建**本 run 私有目录** `os.tmpdir()/mingdao-smoke-<pid>-<epoch>-<random>`
+  （`mkdtempSync`），把 `TMPDIR`（POSIX）/ `TMP`+`TEMP`（Windows 上 `os.tmpdir()` 的实际来源）
+  指向它；段末恢复原值并删除私有目录。
+- `leftovers120()` 只扫这个私有目录；保留原来的**前/后快照差集**语义（仍抓"本 run 的失败路径
+  留下临时目录"），段末再加一条兜底断言：私有目录里不得有任何 `mingdao-skill-*` 残留。
+- **结构守卫**（防"改回全局扫描"这类单跑永远绿、只在并发时假红的回归）：读 `test/smoke.js`
+  源文件断言 ① 不得在全局临时目录上列目录（文本绊线，正则字面量用转义形态自指排除）
+  ② 残留扫描必须只针对 `runTmpRoot120` ③ 前置：`os.tmpdir()` 必须等于私有根。
+  守卫用 `srcDir` 推导 smoke.js 路径，§120 被 `extractSection()` 抽成独立脚本（变异验证）时仍读真身。
+
+### 4.2.4 验证
+
+- `node test/smoke.js` **单跑 ×3**：全绿（每次约 2m32s）。
+- **并发双 worktree**（a/b 同时跑）：`A_EXIT:0` / `B_EXIT:0`，两边都绿。
+- **改前 vs 改后同噪声**：改前红（噪声目录被当成本 run 残留）→ 改后绿。
+- **故障注入（证明守卫没被放宽）**：`--import` 预载把 `fs.mkdtempSync` 包一层，
+  让 `installFromGit` 建目录后**额外漏掉一个** `mingdao-skill-git-*`；断言仍红：
+  `installFromGit 中途失败后**不得留下临时目录**（BUG-010…）实际：mingdao-skill-git-oESP2f`。
+- **结构守卫自身被验证**：把 `leftovers120()` 改回扫 `os.tmpdir()` 后单跑 §120（抽取脚本）→
+  红在 `smoke 不得在全局临时目录上列目录找残留`；未改回时同一抽取脚本全过
+  （`第 120 节：全部通过`，§120 的变异抽取兼容性未被破坏）。
+- `node scripts/doc-lint.mjs`：仅 ⑥ 红（README 写 492、实际 541；`test/mutate/README.md`
+  按任务书禁止改动，未同步计数），其余 8 项绿。
+
+### 4.2.5 未做 / 边界（必须说明）
+
+- 只改 `test/smoke.js`（§120 的残留断言与其辅助函数）与本文；**未改 `src/**`**、
+  `test/run-all.mjs`、`test/mutate/README.md`、`.github/workflows/ci.yml`；未 tag / 改版本号 / publish。
+- 隔离只覆盖 **§120 的残留扫描**；smoke 其余各处仍直接 `mkdtemp(os.tmpdir())`（名字唯一、互不冲突），
+  没有把整个 smoke 的 TMPDIR 都切走——那会改变大量既有夹具的落点，超出"小修复"的边界。
+- 并发假红的**真实并发**双跑未能在本机复现（窗口窄，两次都绿）；用 churn 对同一判据做了确定性复现。
+  结论是"旧判据扫全机共享目录 → 必然可能假红；新判据只扫本 run"，**不是**"并发问题已绝迹"。
+- 迭代期间 `os.tmpdir()` 里一直有并发 smoke 产生的 `mingdao-skill-*` 目录（正常在飞）；改后的断言
+  不再依赖这些目录是否存在。
