@@ -3,6 +3,75 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 docs/QA-REPORT.md 与 git 历史。
 
 
+## v0.6.28（2026-10-27）— 去掉空窄条 + 面板不遮顶栏（--hdr-h 不变量）+ TTFT 提示去重
+
+> 本版三件事，都来自负责人的实测反馈：① **左侧 42px 空窄条**（按钮在 v0.6.27 已删、列还在白占宽）
+> 整体删除，左栏贴 `left:0`，正文补偿 `282/90/48` → **`240/48/0`**，`<900` 的抽屉开关移入顶栏；
+> ② **固定面板不再遮挡顶栏**：header `position:relative;z-index:70`，新增 `--hdr-h` 不变量
+> （加载 / resize / `ResizeObserver` 实测 header 高度写入，所有面板 `top:var(--hdr-h,56px)`，
+> 不再写死 52）；③ **TTFT 每回合只打一行**：`llmCalls === 1` 才打印，长审计不再被十几次
+> 「⏱ 首帧」刷屏。细节见 `docs/internal/AUDIT-v0.6.1-第三方报告登记.md` **§3.96**。
+
+### 一、删除空的左窄条 `#trajRail`（§3.96，`src/web/index.html` + `src/web/app.js`）
+
+**证据**：`#trajRail` 里的轨迹/子Agent 按钮在 v0.6.25 已删，但 42px 的固定列还在：左栏从
+`left:42px` 才开始、正文补偿里也一直含着这 42px；负责人截图里左缘能直接看到这条空列。
+
+**修法**：
+
+- 删除 `#trajRail` 元素与全部相关 CSS（`#trajRail`、`.rail-btn`、`.rail-badge`、
+  `body.narrow-side #trajRail{width:44px}`）；
+- `#sideNav` 从 `left:42px` 改为 `left:0`；布局补偿改为**只留左栏自身宽度**：
+  `side-wide 282→240`、`side-wide.side-collapsed 90→48`、`side-mid 90→48`、
+  `<900 side-drawer 48→0`（覆盖式抽屉默认不占列，正文左缘回到 0）；
+- `<900` 的抽屉开关不能丢：`#sideNavRailBtn` 从窄条移入顶栏，只在 `body.side-drawer` 显示，
+  仍复用 `toggleSideNav`；宽屏/mid 由左栏自带的折叠按钮负责，顶栏开关不占列；
+- `#trajPanel` **保留**（不是死节点）：`openTraj()` 仍写 `#tjList`、`#tjClose` 仍绑定，
+  只是 `left:42px → 0`、`top` 改为 `var(--hdr-h,56px)`。
+
+### 二、面板不再遮挡顶栏：`--hdr-h` 不变量（§3.96）
+
+**证据**：所有固定面板（右栏、任务、子Agent、轨迹、仪表盘、左栏）都写死 `top:52px`；header 的真实
+高度不是常数（`padding` + `min-height` + 横向滚动条/字体），一旦被撑到 56+ 面板就会压住顶栏。
+
+**修法**：
+
+- `header{position:relative;z-index:70}`——高于右栏抽屉 60、任务/子Agent/轨迹 40、仪表盘 45；
+  `.modal-mask` 同步 `50 → 90`，避免顶栏浮到模态遮罩之上（模态期间 header 仍不可点）。
+- 新增 `syncHeaderHeight()`：用 `header.getBoundingClientRect().height || offsetHeight` 实测，
+  写入 `document.documentElement.style.setProperty('--hdr-h', h+'px')`；`applyResponsiveLayout()`
+  在加载与 resize 都调用，并用 `ResizeObserver` 兜住顶栏自身尺寸变化（无该 API 时回退到两次测量）。
+- 六处固定面板的 `top` 统一为 `var(--hdr-h,56px)`：`#runPanel`、`#tasksPanel`、`#subPanel`、
+  `#trajPanel`、`#dashPanel`、`#sideNav`（含窄屏右栏抽屉）；全文不再有 `top:52px`。
+
+**实测（880 视口，Electron 真实渲染）**：`--hdr-h=52px`、`panelTop=52`、`gap=0`、
+`headerZ=70 > panelZ=60`；把 header 人为撑到 68 后 `--hdr-h=68`、`overlap=false`。
+本机覆盖式滚动条下 header 就是 52，所以旧视觉上不一定看得出遮挡——但面板 `top` 已不依赖 52。
+
+### 三、TTFT 提示去重（§3.96，`src/agent.js`）
+
+**证据**：本地模型长审计每回合十几次模型请求，`⏱ 首帧 …` 每 30s 以上就打印，同一回合反复刷屏。
+
+**修法**：`if (turnProgress.llmCalls === 1 || ttft >= 30000)` → `if (turnProgress.llmCalls === 1)`，
+每回合只在第 1 次模型请求打印一行；首帧值仍在状态条/右栏可见。
+**未做**「后续请求明显劣化警告」：现有 `firstTokenAt` 是回合级的，用它量后续请求会得到负值，
+不为一条提示改测量口径（如实登记在发布说明「已知边界」）。
+
+### 四、测试与变异（492 条）
+
+- `test/smoke.js` 新增 **§163**：①`#trajRail` 元素/CSS 不存在、左栏 `left:0`、240/48/0 补偿、
+  正文左缘几何（880 左缘 0、1440 紧邻左栏）、抽屉开关在顶栏、`#trajPanel` 仍被 handler 使用；
+  ②header `z-index:70` 高于所有面板、六处面板 `top:var(--hdr-h,56px)`、无 `top:52px`、JS 加载/
+  resize 实测写入；③桩 agent 跑 3 次模型请求，`⏱ 首帧` 只出现 1 次（行为断言）；④四标签/⌘K/
+  设置/状态条六项/错误卡/内联确认/左栏新建入口不回归。
+- 新建 `test/mutate/batch56-layout-ttft.mjs` **8/8 全中**（恢复空窄条 / 恢复 `.rail-btn` /
+  删 header z-index / 面板 z-index 反超 header / `top` 写死 52 / 删 JS 写 `--hdr-h` /
+  TTFT 每轮都打 / `<900` 恢复 48px 补偿）。
+- **同步旧锚点（未放宽语义）**：§158/§159/§160 原静态断言「窄条必须存在、44px、正文补偿 48px」，
+  与 §163「窄条必须不存在、正文左缘 0」互斥，只能做**只改旧窄条事实**的最小同步；同时同步
+  batch49 ⑪ 的 `margin-left`、batch51 ①② 的窄条锚点、batch52 ③④⑤⑦⑧ 的窄条/补偿锚点。
+- 变异总数 **484 → 492**（batch56 8 条）。
+
 ## v0.6.27（2026-10-26）— verify-release 三态 + 顶栏精简/兼容节点清理 + Windows 夹具修复
 
 > 本版三件事，都是「把上一轮留下的债收干净」：① **`verify-release` 三态**（§3.95）——
