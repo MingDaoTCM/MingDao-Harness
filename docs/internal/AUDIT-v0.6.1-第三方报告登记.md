@@ -5560,10 +5560,11 @@ before 目录在 `d37d17e` 的独立 worktree 里截（避免把已改工作树�
 - `node test/e2e-local.js`：17 项通过（同上隔离树）。
 - `node test/mutate/batch60-state-integrity.mjs`：**11/11 全中**（M-10×4、L-13×2、M-17×2、
   M-11×1、M-12×2）。
-- `node test/mutate/run.mjs`：在 `a7ce4c0` + 本批（批次 1–56 + 60）上全中；并行道的
-  批 57–59 当时尚未提交，故未纳入本次全量口径。
-- `node scripts/doc-lint.mjs`：仅 ⑥ 变异总数红（README 仍写 492；脚本实际数 = 492 + 本批 11 +
-  并行道批 57–59 的条数，`test/mutate/README.md` 按任务书**禁止改动**，未同步计数）。其余 8 项全绿。
+- `node test/mutate/run.mjs`（全量）：**49 批 / 541 条**。本批在 `a7ce4c0` + 本批的 503 条口径下
+  **46/46 批全中**；在含并行道全部提交的 `5e28b66` 上 48/49，唯一未命中是 `batch23 ⑤` 的锚点漂移
+  （sync-server 重构后旧锚点失配；并行道已在 `e7a5e07` 修复，HEAD 上单独复跑通过；与本批改动文件无关）。
+- `node scripts/doc-lint.mjs`：**全部通过**（并行道收口提交把 README 变异总数 492→541，其中含本批 11；
+  `test/state-integrity.js` 已接入 `test/run-all.mjs` 与 CI）。
 
 ### 4.1.7 未做 / 边界（必须说明）
 
