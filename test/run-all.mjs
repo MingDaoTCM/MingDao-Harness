@@ -25,6 +25,14 @@ const SUITES = [
   ['ledger-source', 'node', ['test/ledger-source.js']],
   // 审计 M-1 §2.1 第 4 条（Pack 反向提权）：工具拿到的 ctx 必须被裁剪 + 冻结
   ['pack-ctx-privesc', 'node', ['test/pack-ctx-privesc.js']],
+  // v0.6.29 审计收口：同步服务（H-02 损坏严格读 / H-03 凭证版本 / M-01 畸形 URL / M-02 双维限流 / M-14 安全默认）
+  ['sync-hardening', 'node', ['test/sync-hardening.js']],
+  // v0.6.29 审计收口：Web 请求目标解析与聊天收尾（H-01 进程存活 / M-03 幂等收尾）
+  ['web-robustness', 'node', ['test/web-robustness.js']],
+  // v0.6.29 审计收口：provider 代际缓存 / SSE 多行与 reader 释放 / 脱敏与掩码（H-04, M-8, M-9, M-13, L-9）
+  ['provider-hardening', 'node', ['test/provider-hardening.js']],
+  // v0.6.29 审计收口：轮次状态复位与并发写加锁（minimax M-10, L-13, M-17, M-11, M-12）
+  ['state-integrity', 'node', ['test/state-integrity.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];
