@@ -17767,35 +17767,38 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   assert.ok(iAside158 >= 0 && iAsideEnd158 > iAside158, '（前置）必须存在并闭合 <aside id="sideNav">');
   const aside158 = html158.slice(iAside158, iAsideEnd158);
 
-  // —— ① 左栏存在：位于 #trajRail 之后、<main> 之前；含新建对话 / 会话列表 / 工作空间 / 折叠按钮 ——
+  // —— ① 左栏存在：空窄条已删除，左栏直接贴 left:0、<main> 之前；含新建对话 / 会话列表 / 工作空间 / 折叠按钮 ——
   {
-    const iRail = html158.indexOf('<div id="trajRail">');
     const iMain = html158.indexOf('<main>');
-    assert.ok(iRail >= 0 && iAside158 > iRail, '左栏 #sideNav 必须在现有窄条 #trajRail 之后（从左到右：窄条 → 左栏 → 主区）');
-    assert.ok(iMain > iAside158, '左栏 #sideNav 必须在 <main> 之前（不进入主区/不遮正文）');
+    assert.ok(!/id="trajRail"/.test(html158), '§3.96：空窄条 #trajRail 必须已删除（不得再占 42px 空列）');
+    assert.ok(iAside158 >= 0 && iMain > iAside158, '左栏 #sideNav 必须在 <main> 之前（不进入主区/不遮正文）');
     for (const id of ['sideNavNew', 'sideNavCollapse', 'sideNavWs', 'sideNavSessions']) {
       assert.ok(new RegExp(`id="${id}"`).test(aside158), `左栏必须包含 #${id}`);
     }
     assert.ok(/<select id="sideNavWs"/.test(aside158), '左栏工作空间必须是选择器（与顶栏 #wsSel 同源）');
     assert.ok(/id="sideNavSessions"[^>]*role="list"/.test(aside158) || /role="list"[^>]*id="sideNavSessions"/.test(aside158),
       '左栏会话列表 #sideNavSessions 必须声明 role="list"');
-    assert.ok(/<button class="rail-btn" id="sideNavRailBtn"/.test(html158), '<900 抽屉必须有窄条开关 #sideNavRailBtn');
+    const hStartRail158 = html158.indexOf('<header>');
+    const hEndRail158 = html158.indexOf('</header>', hStartRail158);
+    const headerRail158 = html158.slice(hStartRail158, hEndRail158);
+    assert.ok(/<button id="sideNavRailBtn"[^>]*>☰<\/button>/.test(headerRail158),
+      '<900 抽屉开关 #sideNavRailBtn 必须在顶栏内（空窄条已删除，不再挂窄条）');
     assert.ok(!/<link[^>]+rel="stylesheet"/i.test(html158), '不引入外部设计稿 CSS（只允许 index.html 内既有 token 的内联样式）');
     assert.ok(!/<link[^>]+design-platform|@import[^;]*design-platform/i.test(html158), '不得引入 design-platform.css / 设计稿整段样式');
 
     const navCss158 = html158.slice(html158.indexOf('#sideNav{'), html158.indexOf('}', html158.indexOf('#sideNav{')) + 1);
-    for (const decl of ['position:fixed', 'left:42px', 'top:52px', 'width:240px', 'background:var(--bg2)', 'border-right:1px solid var(--border)']) {
+    for (const decl of ['position:fixed', 'left:0', 'top:var(--hdr-h,56px)', 'width:240px', 'background:var(--bg2)', 'border-right:1px solid var(--border)']) {
       assert.ok(navCss158.includes(decl), `#sideNav 必须 ${decl}（240px 固定左栏，复用既有 --bg2/--border）`);
     }
     assert.ok(/body\.side-wide #sideNav\{width:240px\}/.test(html158), '≥1180 左栏展开宽度必须是 240px');
     assert.ok(/body\.side-wide\.side-collapsed #sideNav\{width:48px\}/.test(html158), '折叠态宽度必须是 48px');
     assert.ok(/body\.side-mid #sideNav\{width:48px\}/.test(html158), '900–1180 必须自动折叠到 48px');
     assert.ok(/body\.side-drawer #sideNav\{display:none/.test(html158), '<900 左栏默认收起（抽屉）');
-    assert.ok(/body\.side-drawer\.side-drawer-open #sideNav\{display:flex/.test(html158), '点窄条图标后抽屉必须能打开');
-    assert.ok(/body\.side-wide main,body\.side-wide footer\{margin-left:282px\}/.test(html158),
-      '≥1180 主区/输入区必须右移 282px（42 窄条 + 240 左栏），否则正文被左栏遮住');
-    assert.ok(/body\.side-mid main,body\.side-mid footer\{margin-left:90px\}/.test(html158),
-      '900–1180 主区/输入区必须只右移 90px（42 + 48）');
+    assert.ok(/body\.side-drawer\.side-drawer-open #sideNav\{display:flex/.test(html158), '点顶栏开关后抽屉必须能打开');
+    assert.ok(/body\.side-wide main,body\.side-wide footer\{margin-left:240px\}/.test(html158),
+      '≥1180 主区/输入区必须右移 240px（只让左栏宽度，不再含空窄条），否则正文被左栏遮住');
+    assert.ok(/body\.side-mid main,body\.side-mid footer\{margin-left:48px\}/.test(html158),
+      '900–1180 主区/输入区必须只右移 48px（左栏宽度本身）');
   }
 
   // —— ② 防翻车核心：顶栏既有入口逐个仍在（DOM id 唯一；一个都不许删/搬出 header） ——
@@ -17964,21 +17967,19 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
     return html159.slice(i, j + 1);
   }
 
-  // —— ① 左窄条不再有轨迹/子Agent 按钮（id/aria-label 都不在），其它图标与右栏入口不丢 ——
+  // —— ① 空窄条已整体删除；轨迹/子Agent 只在右栏四标签；<900 抽屉开关仍在顶栏 ——
   {
-    const iRail = html159.indexOf('<div id="trajRail">');
-    assert.ok(iRail >= 0, '（前置）必须有窄条 #trajRail');
-    const iRailEnd = html159.indexOf('</div>', iRail);
-    assert.ok(iRailEnd > iRail, '（前置）窄条必须闭合');
-    const rail159 = html159.slice(iRail, iRailEnd);
-    assert.ok(!/id="trajRailBtn"/.test(rail159), '左窄条不得再有轨迹按钮 #trajRailBtn');
-    assert.ok(!/id="subRailBtn"/.test(rail159), '左窄条不得再有子Agent按钮 #subRailBtn');
-    assert.ok(!/aria-label="轨迹|title="轨迹|🧭/.test(rail159), '左窄条不得再有轨迹图标或 aria-label');
-    assert.ok(!/aria-label="子 ?Agent|title="子 ?Agent|🤖/.test(rail159), '左窄条不得再有子Agent图标或 aria-label');
-    assert.ok(/<button class="rail-btn" id="sideNavRailBtn"/.test(rail159), '窄条必须保留抽屉开关 #sideNavRailBtn');
-    assert.equal((rail159.match(/class="rail-btn"/g) || []).length, 1, '窄条只保留抽屉开关一个可见按钮');
+    assert.ok(!/id="trajRail"/.test(html159), '空窄条必须删除（不得恢复 #trajRail）');
+    assert.ok(!/\.rail-btn|\.rail-badge/.test(html159), '空窄条的 .rail-btn/.rail-badge 样式必须一并删除');
+    assert.ok(!/id="trajRailBtn"/.test(html159), '不得恢复轨迹窄条按钮 #trajRailBtn');
+    assert.ok(!/id="subRailBtn"/.test(html159), '不得恢复子Agent窄条按钮 #subRailBtn');
     assert.ok(!/\$\('#trajRailBtn'\)\.onclick/.test(app159), '轨迹窄条按钮的点击绑定必须删除');
     assert.ok(!/\$\('#subRailBtn'\)\.onclick/.test(app159), '子Agent 窄条按钮的点击绑定必须删除');
+    const hStart159 = html159.indexOf('<header>');
+    const hEnd159 = html159.indexOf('</header>', hStart159);
+    const header159 = html159.slice(hStart159, hEnd159);
+    assert.ok(/<button id="sideNavRailBtn"[^>]*>☰<\/button>/.test(header159),
+      '<900 抽屉开关必须移到顶栏 #sideNavRailBtn（空窄条删除后不能丢掉入口）');
     // 右栏四标签仍是轨迹/子Agent 的入口：默认轨迹 + 四按钮/四面板齐全
     assert.ok(/let activeRailTab = 'trace';/.test(app159), '右栏默认标签必须仍是轨迹');
     for (const id of ['rtTrace', 'rtSub', 'rtTasks', 'rtDash', 'tabTrace', 'tabSub', 'tabTasks', 'tabDash']) {
@@ -18278,24 +18279,25 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   const layout160 = new Function(`${fn160('layoutClassesFor')}\nreturn layoutClassesFor;`)();
   const media160 = (query) => parsed160.medias.filter((m) => m.query === squeeze160(query));
 
-  // —— ① <900：窄条只做抽屉开关，不再压正文左缘（补偿 ≥ 窄条右边界 + 不设固定宽度） ——
+  // —— ① 空窄条已删除：左栏贴 left:0；<900 正文左缘 = 0（不再有 42/44px 空列） ——
   {
-    const railCss = parsed160.top.get('#trajRail') || '';
-    assert.ok(/position:\s*(?:fixed|absolute)/.test(railCss),
-      '窄条必须脱离文档流（fixed/absolute），不得占流挤压正文');
-    const railW = px160(findRule160('body.narrow-side #trajRail'), 'width');
-    assert.equal(railW, 44, '<900 窄条宽度必须是 44px（正文补偿量按它算）');
+    assert.ok(!/id="trajRail"/.test(html160), '空窄条必须已删除（#trajRail 不得存在）');
+    assert.ok(!/#trajRail\{|body\.narrow-side #trajRail\{|\.rail-btn\{|\.rail-badge\{/.test(html160),
+      '空窄条的 CSS（#trajRail / body.narrow-side #trajRail / .rail-btn / .rail-badge）必须一并删除');
+    const sideCss160 = parsed160.top.get('#sideNav') || '';
+    assert.ok(/(?:^|;)\s*left:\s*0(?:;|$)/.test(sideCss160),
+      '左栏必须贴左缘（left:0），不得再为已删除的空窄条留 42px');
     const comp = findRule160('body.side-drawer main,body.side-drawer footer');
-    assert.ok(comp, '<900 side-drawer 必须给正文/输入区补偿偏移（margin-left）');
+    assert.ok(comp, '<900 side-drawer 必须显式声明正文/输入区偏移（即使为 0）');
     const ml = px160(comp, 'margin-left');
-    assert.ok(Number.isFinite(ml) && ml >= railW,
-      `880 下正文容器左缘必须 ≥ 窄条右边界（补偿 ${ml}px ≥ 窄条 ${railW}px）`);
+    assert.equal(ml, 0,
+      `880 下正文左缘必须为 0（实际 ${ml}px；空窄条已删除，不得再补偿 48px）`);
     assert.ok(!/(?:^|;)\s*(?:min-)?width\s*:/.test(comp),
       '窄屏补偿只加偏移、不得给正文设固定宽度（否则会出现横向滚动）');
-    // 880：主区宽 880−48=832，居中正文 #chat 宽 832（<860），左缘 = 48 ≥ 窄条右缘 44
+    // 880：主区宽 880，居中正文 #chat 宽 860，容器左缘 = 0（不再是 48）
     const chatLeft880 = ml + Math.max(0, (880 - ml - 860) / 2);
-    assert.ok(chatLeft880 >= railW,
-      `880 下 #chat 左缘（${chatLeft880}px）必须 ≥ 窄条右缘（${railW}px）`);
+    assert.equal(chatLeft880, 10,
+      `880 下 #chat 左缘（${chatLeft880}px）必须只剩居中留白，不得被空窄条压住`);
     assert.ok(/max-width:\s*860px/.test(parsed160.top.get('#chat') || ''),
       '正文容器 #chat 必须保留 max-width:860px');
     assert.ok(/min-width:\s*0/.test(parsed160.top.get('main') || ''),
@@ -18333,7 +18335,7 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
     assert.equal(px160(padMid, 'padding-right'), 260, '1101–1180 正文只让出 260px（与右栏同宽）');
     assert.ok(!/display:\s*none/.test(squeeze160(mid.body)), '1101–1180 右栏必须可见，不得 display:none');
     const wideMain = px160(findRule160('body.side-wide main,body.side-wide footer'), 'margin-left');
-    assert.equal(wideMain, 282, '（前置）≥1180 左栏展开时主区仍右移 282px（不改既有列宽）');
+    assert.equal(wideMain, 240, '（前置）≥1180 左栏展开时主区右移 240px（只等于左栏宽度，空窄条已删）');
     assert.ok(1180 - wideMain - 260 >= 400,
       `1180 三栏时正文仍有 ${1180 - wideMain - 260}px（不出现横向滚动）`);
   }
@@ -18357,19 +18359,19 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   {
     const chat = parsed160.top.get('#chat') || '';
     assert.ok(!/(?:^|;)\s*min-width\s*:/.test(chat), '正文容器 #chat 不得有 min-width（窄屏会被撑出横向滚动）');
-    // 880（side-drawer 48）/1000（side-mid 90，右栏抽屉）/1100（side-mid 90 + 右栏 300）/1180（side-wide 282 + 右栏 260）
+    // 880（side-drawer 不占列）/1000（side-mid 48，右栏抽屉）/1100（side-mid 48 + 右栏 300）/1180（side-wide 240 + 右栏 260）
     const widths = {
-      880: 880 - 48,
-      1000: 1000 - 90,
-      1100: 1100 - 90 - 300,
-      1180: 1180 - 282 - 260,
+      880: 880,
+      1000: 1000 - 48,
+      1100: 1100 - 48 - 300,
+      1180: 1180 - 240 - 260,
     };
     for (const [w, content] of Object.entries(widths)) {
       assert.ok(content >= 320, `${w}px 视口正文可用宽度必须 ≥320px（实际 ${content}px，否则横向滚动/不可读）`);
     }
   }
 
-  ok('v0.6.26 §3.92 布局断点：<900 窄条 fixed 不占流 + 正文/输入区右移 48px（左缘 ≥ 窄条右缘、补偿不设宽）+ 右栏收起点 1180→1100（narrow-run 收口，1100/1180 整点三栏）+ 1101–1180 右栏 260px 仍可见 + 1000/880 抽屉不丢 + 正文无横向滚动');
+  ok('v0.6.28 §3.96 布局：空窄条删除（左栏贴 left:0、无 42/44px 空列）+ <900 正文左缘 0 + 主区右移量=左栏宽度（240/48）+ 右栏收起点 1100 与 1101–1180 右栏 260px 仍可见 + 1000/880 抽屉不丢 + 正文无横向滚动');
 }
 
 // ---------- 161. v0.6.27 §3.93：Windows CI 红——memory-recovery 的「不可写目录」夹具必须可移植 ----------
@@ -18557,5 +18559,204 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
   ok('v0.6.27 §3.94 清理：删除 #newChatCompat/#legacyRailCompat（新建入口只剩左栏 #sideNavNew；轨迹/子Agent 由右栏四标签承接）· 会话管理移入左栏「最近会话」标题右侧（#sideNavSessMgr 复用 openSessModal，#sessMgrBtn 仅 hidden 兼容）· #sessions 保留 hidden · 顶栏可见入口 13→11 · ⌘K/设置/四标签/状态条/错误卡/内联确认不回归');
 }
 
+// ---------- 163. v0.6.28 §3.96：左侧空窄条删除 + 顶栏/面板高度不变量 + TTFT 只打一次 ----------
+// 负责人实测三条：①左侧 42px 空列白占宽；②「任务」右栏在 header 实际高度 >52px 时盖住顶栏；
+// ③本地模型长审计里 ⏱ 首帧 每次模型请求都打印、刷十几次。本节是行为/结构断言（不是源码文本）。
+{
+  const html163 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
+  const app163 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
+  const agentSrc163 = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+  /** 取一条单行 CSS 规则（selector{...}）。 */
+  function rule163(selector) {
+    const i = html163.indexOf(selector + '{');
+    assert.ok(i >= 0, `（前置）应能定位 CSS 规则：${selector}`);
+    const j = html163.indexOf('}', i);
+    assert.ok(j > i, `（前置）CSS 规则未闭合：${selector}`);
+    return html163.slice(i, j + 1);
+  }
+  /** 取面板的**定位规则**（同名选择器可能先出现在媒体查询的宽度覆盖里，跳过它们）。 */
+  function panelRule163(selector) {
+    let from = 0;
+    for (;;) {
+      const i = html163.indexOf(selector + '{', from);
+      assert.ok(i >= 0, `（前置）应能定位面板定位规则：${selector}`);
+      const j = html163.indexOf('}', i);
+      assert.ok(j > i, `（前置）CSS 规则未闭合：${selector}`);
+      const css = html163.slice(i, j + 1);
+      if (/position:\s*(?:fixed|absolute)/.test(css)) return css;
+      from = j;
+    }
+  }
+  /** 取 CSS 声明里的 px 值。 */
+  function px163(decl, prop) {
+    const m = new RegExp(`(?:^|[;{])\\s*${prop}\\s*:\\s*(-?[\\d.]+)(?:px)?`).exec(decl || '');
+    return m ? Number(m[1]) : NaN;
+  }
+  /** 取 app.js 顶层函数源码（闭合括号在行首）。 */
+  function fn163(name) {
+    const start = app163.indexOf(`function ${name}(`);
+    assert.ok(start >= 0, `（前置）app.js 必须定义 ${name}()`);
+    const end = app163.indexOf('\n}\n', start);
+    assert.ok(end > start, `（前置）${name}() 必须可完整切出`);
+    return app163.slice(start, end + 2);
+  }
+
+  // —— ① 空窄条删除：元素/CSS/补偿全部消失；左栏贴 left:0；正文左缘 0（或紧邻左栏） ——
+  {
+    assert.ok(!/id="trajRail"/.test(html163), '空窄条必须删除（#trajRail 元素不得存在）');
+    assert.ok(!/#trajRail\{|body\.narrow-side #trajRail\{|\.rail-btn\{|\.rail-badge\{/.test(html163),
+      '空窄条 CSS（#trajRail / body.narrow-side #trajRail / .rail-btn / .rail-badge）必须一并删除');
+    const sideCss163 = rule163('#sideNav');
+    assert.ok(/(?:^|[;{])\s*left:\s*0(?:;|$)/.test(sideCss163), '左栏必须贴左缘 left:0（不得再为已删窄条留 42px）');
+    assert.equal(px163(rule163('body.side-wide main,body.side-wide footer'), 'margin-left'), 240,
+      '≥1180 正文/输入区右移量必须只等于左栏宽度 240px（42px 空列已删）');
+    assert.equal(px163(rule163('body.side-mid main,body.side-mid footer'), 'margin-left'), 48,
+      '900–1180 正文/输入区右移量必须只等于折叠左栏 48px');
+    assert.equal(px163(rule163('body.side-drawer main,body.side-drawer footer'), 'margin-left'), 0,
+      '<900 正文左缘必须为 0（空窄条已删，不得再补偿 48px）');
+    // 正文左缘几何：880 下 #chat 容器左缘 = 0（只剩居中留白 10），1440 下紧邻左栏右缘 240。
+    const left880 = 0 + Math.max(0, (880 - 0 - 860) / 2);
+    assert.ok(left880 < 240, `880 下正文左缘（${left880}px）不得被任何 42/44px 空列推走`);
+    const gap1440 = Math.max(0, (1440 - 240 - 860) / 2);
+    assert.equal(gap1440, 170,
+      '1440 下正文容器与左栏之间只能是居中留白 170px（不得再被任何 42px 空列推走）');
+    // 窄条开关不能丢：<900 抽屉开关已移到顶栏。
+    const hStart163 = html163.indexOf('<header>');
+    const hEnd163 = html163.indexOf('</header>', hStart163);
+    assert.ok(hStart163 >= 0 && hEnd163 > hStart163, '（前置）必须能切出 <header>');
+    assert.ok(/<button id="sideNavRailBtn"[^>]*>☰<\/button>/.test(html163.slice(hStart163, hEnd163)),
+      '<900 抽屉开关 #sideNavRailBtn 必须留在顶栏（删窄条不能连入口一起丢）');
+    // #trajPanel 是遗留面板：openTraj() 仍写 #tjList、#tjClose 仍绑定，故保留；但不能再带窄条 left:42。
+    const trajCss163 = panelRule163('#trajPanel');
+    assert.ok(/(?:^|[;{])\s*left:\s*0(?:;|$)/.test(trajCss163), '#trajPanel 若保留必须 left:0（不得再依赖已删窄条）');
+    assert.ok(/function openTraj\(/.test(app163) && /#tjList/.test(app163) && /\$\('#tjClose'\)\.onclick=/.test(app163),
+      '#trajPanel 仍被 openTraj()/#tjClose 使用，不能当死节点删掉（若将来删 handler 再一起删）');
+  }
+
+  // —— ② 顶栏永远是面板上界：header z-index 最高；所有面板 top 用 --hdr-h；JS 实测写入 ——
+  {
+    const headerCss163 = rule163('header');
+    assert.ok(/position:\s*relative/.test(headerCss163), 'header 必须 position:relative（参与层叠，才能压住面板）');
+    const hz163 = px163(headerCss163, 'z-index');
+    assert.equal(hz163, 70, 'header 必须 z-index:70（硬性不变量）');
+    const panelRules = {
+      '#runPanel': panelRule163('#runPanel'),
+      '#tasksPanel': panelRule163('#tasksPanel'),
+      '#subPanel': panelRule163('#subPanel'),
+      '#trajPanel': panelRule163('#trajPanel'),
+      '#dashPanel': panelRule163('#dashPanel'),
+      '#sideNav': panelRule163('#sideNav'),
+    };
+    let maxPanelZ = 0;
+    for (const [sel, css] of Object.entries(panelRules)) {
+      const z = px163(css, 'z-index');
+      if (Number.isFinite(z)) maxPanelZ = Math.max(maxPanelZ, z);
+      assert.ok(/top:\s*var\(--hdr-h,\s*56px\)/.test(css), `${sel} 的 top 必须使用 var(--hdr-h,56px)，不得写死 52`);
+    }
+    const drawerCss163 = (/\bbody\.narrow-run\.run-drawer #runPanel\{[^}]*\}/.exec(html163) || [''])[0];
+    assert.ok(/top:\s*var\(--hdr-h,\s*56px\)/.test(drawerCss163), '窄屏右栏抽屉的 top 同样必须用 var(--hdr-h,56px)');
+    const drawerZ163 = px163(drawerCss163, 'z-index');
+    assert.ok(Number.isFinite(drawerZ163) && hz163 > drawerZ163,
+      `header z-index(${hz163}) 必须大于右栏抽屉 z-index(${drawerZ163})`);
+    assert.ok(hz163 > maxPanelZ, `header z-index(${hz163}) 必须大于所有固定面板（最大 ${maxPanelZ}）`);
+    assert.ok(!/top:52px/.test(html163), '不得再有写死 top:52px 的固定面板（顶栏实际高度 >52 时会压住）');
+    // JS：加载 + resize 都实测 header 高度并写入 --hdr-h（默认 56 只是首帧兜底）。
+    const syncHdr163 = fn163('syncHeaderHeight');
+    assert.ok(/offsetHeight|getBoundingClientRect\(\)\.height/.test(syncHdr163), '必须实测 header 高度（offsetHeight/getBoundingClientRect）');
+    assert.ok(/setProperty\('--hdr-h',\s*h \+ 'px'\)/.test(syncHdr163), "必须写入 document.documentElement.style.setProperty('--hdr-h', h+'px')");
+    const apply163 = fn163('applyResponsiveLayout');
+    assert.ok(/syncHeaderHeight\(\)/.test(apply163), 'applyResponsiveLayout 必须调用 syncHeaderHeight（加载/resize 共用）');
+    const initResp163 = fn163('initResponsive');
+    assert.ok(/applyResponsiveLayout\(\)/.test(initResp163), 'initResponsive 必须调用 applyResponsiveLayout（页面加载即测量）');
+    assert.ok(/window\.addEventListener\('resize',\s*\(\)\s*=>\s*applyResponsiveLayout\(\)\)/.test(initResp163),
+      'resize 必须重新 applyResponsiveLayout（顶栏高度变化后面板 top 跟着变）');
+  }
+
+  // —— ③ TTFT：桩 agent 连跑 3 次模型请求 → ⏱ 首帧 只出现 1 次（行为断言） ——
+  {
+    const tmp163 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-smoke163-'));
+    const prints163 = [];
+    let calls163 = 0;
+    const io163 = {
+      prints: prints163,
+      print: (t = '') => { prints163.push(String(t)); },
+      writeText() {}, writeReasoning() {}, beginTurn() {}, endTurn() {},
+      startSpinner() {}, stopSpinner() {}, renderToolStart() {}, renderTool() {},
+      renderTodo() {}, renderToolDenied() {}, confirm: async () => true,
+      onSigint: () => () => {},
+    };
+    const provider163 = {
+      async chat(/** @type {any} */ { onDelta }) {
+        calls163 += 1;
+        await new Promise((r) => setTimeout(r, 15));
+        onDelta?.({ text: '增量' + calls163 });
+        if (calls163 < 3) {
+          return {
+            text: '',
+            toolCalls: [{ id: `c163-${calls163}`, type: 'function', function: { name: 'ls', arguments: JSON.stringify({ path: '.' }) } }],
+            usage: { prompt_tokens: 10, completion_tokens: 2 },
+            finish: 'tool_calls',
+          };
+        }
+        return { text: '三次请求完成', toolCalls: null, usage: { prompt_tokens: 20, completion_tokens: 4 }, finish: 'stop' };
+      },
+    };
+    try {
+      const agent163 = createAgent({
+        provider: provider163,
+        permission: { mode: 'auto', async check() { return true; } },
+        io: io163,
+        modelName: 'local-x',
+        workingDir: tmp163,
+        cfg: { permission: 'auto', audit: false, ledger: false },
+      });
+      const res163 = await agent163.runTurn([{ role: 'user', content: '连续请求三次，验证 TTFT 只打印一次' }]);
+      const tp163 = /** @type {any} */ (io163.turnProgress);
+      assert.equal(calls163, 3, `（前置）桩必须真的被调用 3 次，实际 ${calls163}`);
+      assert.equal(tp163.llmCalls, 3, 'llmCalls 必须如实累计到 3');
+      assert.equal(res163.text, '三次请求完成', '（前置）回合应正常收尾');
+      const ttftLines163 = prints163.filter((t) => t.includes('⏱ 首帧'));
+      // 把原始输出打出来：报告里的“3 次请求只打印 1 次”必须是可复现的实测，而不是源码推断。
+      console.log('  [§163] 3 次模型请求实际打印的 TTFT 行：' + JSON.stringify(ttftLines163));
+      assert.equal(ttftLines163.length, 1, `3 次模型请求只允许打印 1 次 ⏱ 首帧，实际 ${ttftLines163.length} 次：${JSON.stringify(ttftLines163)}`);
+      assert.ok(ttftLines163[0].includes('第 1 次模型请求'), '唯一那行必须属于第 1 次模型请求');
+      assert.ok(!prints163.some((t) => t.includes('第 2 次模型请求') && t.includes('⏱ 首帧')),
+        '第 2/3 次请求必须静默（状态条已有首帧值）');
+      assert.ok(/if \(turnProgress\.llmCalls === 1\) \{/.test(agentSrc163),
+        'TTFT 打印条件必须是「本回合第 1 次模型请求」，不得恢复每轮都打');
+    } finally {
+      safeRmSync(tmp163, { recursive: true, force: true });
+    }
+  }
+
+  // —— ④ 既有能力不回归：四标签 / ⌘K / 设置 / 状态条 / 错误卡 / 内联确认 / 左栏新建入口 ——
+  {
+    assert.ok(/const RAIL_TABS = \['trace', 'sub', 'tasks', 'dash'\];/.test(app163), '右栏四标签必须保留');
+    for (const id of ['rtTrace', 'rtSub', 'rtTasks', 'rtDash', 'tabTrace', 'tabSub', 'tabTasks', 'tabDash']) {
+      assert.ok(new RegExp(`id="${id}"`).test(html163), `四标签节点 #${id} 必须仍在`);
+    }
+    assert.ok(/const mod = e\.metaKey \|\| e\.ctrlKey;/.test(app163) && /togglePalette\(\)/.test(app163),
+      '⌘K / Ctrl+K 命令面板必须保留');
+    assert.ok(/id="paletteMask"/.test(html163) && /id="paletteBtn"/.test(html163), '命令面板节点/入口必须保留');
+    assert.ok(/id="cfgBtn"/.test(html163) && /id="cfgModal"/.test(html163) && /\$\('#cfgBtn'\)\.onclick=/.test(app163),
+      '设置入口与 #cfgModal 必须保留');
+    const iStrip163 = html163.indexOf('id="runStrip"');
+    assert.ok(iStrip163 >= 0, '（前置）底部状态条 #runStrip 必须仍在');
+    const strip163 = html163.slice(iStrip163, html163.indexOf('</div>', iStrip163));
+    assert.deepEqual([...strip163.matchAll(/data-k="([a-z]+)"/g)].map((m) => m[1]).sort(),
+      ['cost', 'ctx', 'phase', 'tools', 'tps', 'ttft'], '状态条六项必须齐全');
+    assert.ok(/function errCardHtml\(/.test(app163) && /\.err-card\{/.test(html163), '错误卡必须保留');
+    assert.ok(/function askCardHtml\(/.test(app163) && /perm-acts/.test(app163) && /data-stop="1"/.test(app163)
+      && /\.perm-card\{/.test(html163), '内联权限确认（含停止）必须保留');
+    const iAside163 = html163.indexOf('<aside id="sideNav"');
+    const asideEnd163 = html163.indexOf('</aside>', iAside163);
+    const aside163 = html163.slice(iAside163, asideEnd163);
+    assert.ok(/id="sideNavNew"/.test(aside163), '左栏新建入口 #sideNavNew 必须保留');
+    assert.ok(/\$\('#sideNavNew'\)[\s\S]{0,160}\$\('#newChat'\)/.test(fn163('initSideNav')),
+      '左栏新建入口必须继续复用 #newChat handler');
+  }
+
+  ok('v0.6.28 §3.96 布局/性能：空窄条 #trajRail 及 42/44px 补偿全删（左栏贴 left:0、<900 正文左缘 0、主区右移=左栏宽度）+ header z-index 70 高于所有面板且 top 统一 var(--hdr-h,56px)、JS 加载/resize 实测写入 + TTFT 每回合只打 1 次（3 次请求行为实测）+ 四标签/⌘K/设置/状态条/错误卡/内联确认/左栏新建不回归');
+}
 
 process.exit(0);

@@ -501,6 +501,7 @@ function initSideNav() {
   // v0.6.27 §3.94：会话管理入口从左栏标题右侧进入，复用既有的 openSessModal（能力不新增、不丢失）。
   const sideSessMgr = $('#sideNavSessMgr');
   if (sideSessMgr) sideSessMgr.onclick = openSessModal;
+  // §3.96：抽屉开关现在在顶栏（#sideNavRailBtn），仍走同一个 toggleSideNav。
   const rail = $('#sideNavRailBtn');
   if (rail) rail.onclick = toggleSideNav;
   const ws = $('#sideNavWs');
@@ -1561,8 +1562,32 @@ function syncRunPanel() {
 }
 function setRunPanel(open) { runPanelOpen = Boolean(open); syncRunPanel(); }
 function toggleRunPanel() { setRunPanel(!runPanelOpen); }
+/**
+ * §3.96：把顶栏**实测高度**写进 --hdr-h，所有固定面板的 top 都用 var(--hdr-h,56px)。
+ * 顶栏高度不是常数（padding + min-height + 横向滚动条/字体），所以不写死 52/56；
+ * 页面加载、窗口 resize、以及顶栏自身尺寸变化（ResizeObserver）时都重新测量。
+ * @returns {number} 本次量到的像素高度
+ */
+function syncHeaderHeight() {
+  const hd = document.querySelector('header');
+  if (!hd) return 0;
+  const h = Math.round(hd.getBoundingClientRect().height || hd.offsetHeight || 0);
+  if (h > 0) document.documentElement.style.setProperty('--hdr-h', h + 'px');
+  return h;
+}
+let headerHeightObserver = null;
+function watchHeaderHeight() {
+  try {
+    if (typeof ResizeObserver !== 'function' || headerHeightObserver) return;
+    const hd = document.querySelector('header');
+    if (!hd) return;
+    headerHeightObserver = new ResizeObserver(() => syncHeaderHeight());
+    headerHeightObserver.observe(hd);
+  } catch { /* 老浏览器没有 ResizeObserver：加载/resize 两次测量已覆盖 */ }
+}
 function applyResponsiveLayout(width) {
   const w = width == null ? (Number(window.innerWidth) || 0) : Number(width) || 0;
+  syncHeaderHeight();
   const cls = layoutClassesFor(w);
   document.body.classList.toggle('narrow-side', cls.narrow);
   document.body.classList.toggle('narrow-run', cls.narrowRun);
@@ -1575,6 +1600,7 @@ function initResponsive() {
     responsiveInitialized = true;
   }
   applyResponsiveLayout();
+  watchHeaderHeight();
   window.addEventListener('resize', () => applyResponsiveLayout());
   const chip = $('#runChip'); if (chip) chip.onclick = toggleRunPanel;
   const col = $('#rpCollapse'); if (col) col.onclick = () => setRunPanel(false);
@@ -2570,7 +2596,7 @@ async function refreshCostBadge(){
 }
 refreshCostBadge(); setInterval(refreshCostBadge, 15000);
 // §3.82：顶栏费用徽标 = 打开右栏「仪表盘」标签（原有 📊 内容仍在 #dashPanel 里；关闭用 ✕/收起）。
-// v0.6.27 §3.94：旧窄条 #trajRailBtn/#subRailBtn 已删除，不再在这里清它们的 on 态（否则空引用抛错、标签切不动）。
+// v0.6.27 §3.94：旧的左侧窄条按钮已删除，不再在这里清它们的 on 态（否则空引用抛错、标签切不动）。
 $('#costBadge').onclick=()=>{
   activateRailTab('dash');
 };

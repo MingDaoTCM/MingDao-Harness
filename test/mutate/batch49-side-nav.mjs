@@ -109,13 +109,13 @@ M.mutate({
   run: SEC,
 });
 
-// ⑪ 主区不右移：左栏盖住正文（300px 三栏只剩两栏叠加）
+// ⑪ 主区不右移：左栏盖住正文（v0.6.28 §3.96 起右移量=左栏 240px，不再含空窄条）
 M.mutate({
   name: '⑪ 删掉主区右移规则（左栏遮正文）',
   file: 'src/web/index.html',
-  from: 'body.side-wide main,body.side-wide footer{margin-left:282px}\n',
+  from: 'body.side-wide main,body.side-wide footer{margin-left:240px}\n',
   to: '',
-  expect: ['主区/输入区必须右移 282px'],
+  expect: ['主区/输入区必须右移 240px'],
   run: SEC,
 });
 

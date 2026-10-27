@@ -8,37 +8,25 @@ import { makeMutator } from './lib.mjs';
 const M = makeMutator();
 const SEC = () => M.section('159');
 
-// ① 窄条恢复 🧭：与右栏「轨迹」标签重复的入口又回来了
+// ① 恢复空窄条 + 🧭：v0.6.28 §3.96 已把空窄条整体删除，这里把它和重复的轨迹入口一起装回来
 M.mutate({
-  name: '① 窄条恢复轨迹按钮 #trajRailBtn',
+  name: '① 恢复空窄条与轨迹按钮 #trajRailBtn',
   file: 'src/web/index.html',
-  from: `<div id="trajRail">
-  <!-- §3.88：<900 时左栏收成抽屉，这个窄条图标负责打开/关闭（≥900 隐藏）。 -->
-  <button class="rail-btn" id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>
-</div>`,
-  to: `<div id="trajRail">
-  <button class="rail-btn" id="trajRailBtn" title="轨迹（点击查看详情）">🧭</button>
-  <!-- §3.88：<900 时左栏收成抽屉，这个窄条图标负责打开/关闭（≥900 隐藏）。 -->
-  <button class="rail-btn" id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>
-</div>`,
-  expect: ['左窄条不得再有轨迹按钮 #trajRailBtn'],
+  from: '  <button id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>',
+  to: `  <div id="trajRail"><button class="rail-btn" id="trajRailBtn" title="轨迹（点击查看详情）">🧭</button></div>
+  <button id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>`,
+  expect: ['空窄条必须删除（不得恢复 #trajRail）'],
   run: SEC,
 });
 
-// ② 窄条恢复 🤖：子Agent 入口与右栏「子Agent」标签重复
+// ② 恢复空窄条 + 🤖：子Agent 入口与右栏「子Agent」标签重复
 M.mutate({
-  name: '② 窄条恢复子Agent按钮 #subRailBtn',
+  name: '② 恢复空窄条与子Agent按钮 #subRailBtn',
   file: 'src/web/index.html',
-  from: `<div id="trajRail">
-  <!-- §3.88：<900 时左栏收成抽屉，这个窄条图标负责打开/关闭（≥900 隐藏）。 -->
-  <button class="rail-btn" id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>
-</div>`,
-  to: `<div id="trajRail">
-  <button class="rail-btn" id="subRailBtn" title="子 Agent">🤖</button>
-  <!-- §3.88：<900 时左栏收成抽屉，这个窄条图标负责打开/关闭（≥900 隐藏）。 -->
-  <button class="rail-btn" id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>
-</div>`,
-  expect: ['左窄条不得再有子Agent按钮 #subRailBtn'],
+  from: '  <button id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>',
+  to: `  <div id="trajRail"><button class="rail-btn" id="subRailBtn" title="子 Agent">🤖</button></div>
+  <button id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>`,
+  expect: ['空窄条必须删除（不得恢复 #trajRail）'],
   run: SEC,
 });
 

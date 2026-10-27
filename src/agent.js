@@ -1575,8 +1575,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             turnProgress.lastTtftMs = ttft;
             if (turnProgress.ttftMs == null) turnProgress.ttftMs = ttft;
             turnProgress.phase = '解码中（收到增量）';
-            // TTFT 留一行：首次请求必说；后续请求只在"慢"（≥30s）时说——那正是需要被看见的情形
-            if (turnProgress.llmCalls === 1 || ttft >= 30000) {
+            // v0.6.28 §3.96：TTFT 每回合只在**第 1 次模型请求**时打印一行；后续请求静默
+            // （状态条/右栏已有首帧值）。长审计里本地模型会有十几次请求，重复打印只会刷屏。
+            // 可选的"后续明显劣化警告"本轮未实现：现有 firstTokenAt 是回合级的，
+            // 不能用来量后续请求的 TTFT（否则会得到负值），不为一条提示去改测量口径。
+            if (turnProgress.llmCalls === 1) {
               try {
                 io.print(style(`⏱ 首帧 ${(ttft / 1000).toFixed(1)}s（第 ${turnProgress.llmCalls} 次模型请求；本地模型这一项直接反映 prefill 快慢）`, C.dim));
               } catch {}

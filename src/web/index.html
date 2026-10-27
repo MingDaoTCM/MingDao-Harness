@@ -58,10 +58,18 @@ body.dash-open{padding-right:400px}
 }
 @media (max-width:560px){
   body.traj-open,body.sub-open,body.tasks-open,body.dash-open{padding:0}
-  #trajPanel{width:calc(100vw - 42px);left:42px}
+  #trajPanel{width:100vw;left:0}
   #subPanel,#tasksPanel,#dashPanel{width:100vw}
 }
-header{min-height:52px;display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--bg2);flex:none;flex-wrap:nowrap;white-space:nowrap;overflow-x:auto}
+/* v0.6.28 §3.96：顶栏是**所有固定面板的上界**——position:relative + z-index:70（高于右栏抽屉 60、
+   任务/子Agent/轨迹 40、仪表盘 45）。面板 top 统一用 --hdr-h（app.js 在加载/resize 时实测
+   header.offsetHeight 写入；默认回落 56px），不再靠"再多加几 px"的猜测。 */
+header{min-height:52px;display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--border);background:var(--bg2);flex:none;flex-wrap:nowrap;white-space:nowrap;overflow-x:auto;position:relative;z-index:70}
+/* §3.96：<900 左栏是覆盖式抽屉，开关放在顶栏（仅抽屉档可见）。旧空窄条已删除：
+   它不再占列、不再压正文左缘，也不再有任何 rail 按钮/徽标样式。 */
+#sideNavRailBtn{display:none;align-items:center;justify-content:center;padding:6px 10px;font-size:14px;line-height:1}
+body.side-drawer #sideNavRailBtn{display:inline-flex}
+body.side-drawer.side-drawer-open #sideNavRailBtn{border-color:var(--accent2);color:var(--accent2)}
 header .logo{font-weight:700;font-size:16px;color:var(--accent);letter-spacing:.5px;flex:none}
 header .logo span{color:var(--text)}
 header .badge{font-size:12px;color:var(--dim);background:var(--bg3);border:1px solid var(--border);padding:2px 10px;border-radius:20px;flex:none;overflow:hidden;text-overflow:ellipsis;max-width:180px}
@@ -96,7 +104,8 @@ header .hdr-right::-webkit-scrollbar-track{background:transparent}
 }
 @media (max-width:860px){main{padding:14px 0 8px}#chat{padding:0 10px}#envBadge{display:none!important}#sessionSearch{max-width:110px}#modelSel{max-width:110px}#permSel{max-width:120px}#sessions{max-width:110px}#wsSel{max-width:96px}header{gap:6px;padding:8px 8px}header .logo span{display:none}}
 #sessionSearch:focus{outline:none;border-color:var(--accent2)}
-#tasksPanel{position:fixed;right:0;top:52px;bottom:0;width:280px;background:var(--bg2);border-left:1px solid var(--border);z-index:40;display:flex;flex-direction:column}
+/* §3.96：所有左右固定面板的 top 都跟随 --hdr-h（顶栏实测高度），面板永不压住顶栏。 */
+#tasksPanel{position:fixed;right:0;top:var(--hdr-h,56px);bottom:0;width:280px;background:var(--bg2);border-left:1px solid var(--border);z-index:40;display:flex;flex-direction:column}
 /* P0-1 常驻运行状态条（v0.6.18 §3.68）：对话区/输入区上方**唯一**一行运行信息。
    六个字段：阶段 · 首帧 · tokens/s · 上下文 · 工具步数 · 本轮费用。
    窄窗口允许换行成两行（flex-wrap），不横贯聊天窗口、不新增轮询——由既有 progress 事件驱动。 */
@@ -113,14 +122,9 @@ header .hdr-right::-webkit-scrollbar-track{background:transparent}
 #runStrip .rs-bg{cursor:pointer;color:var(--warn);white-space:nowrap}
 #runStrip .rs-bg:hover{color:var(--text)}
 @media (max-width:860px){#runStrip{gap:3px 8px;padding:5px 8px;font-size:11.5px}}
-/* 左侧轨迹固定栏 + 右侧子代理面板（布局重构：轨迹在左、子代理在右） */
-#trajRail{position:fixed;left:0;top:52px;bottom:0;width:42px;background:var(--bg2);border-right:1px solid var(--border);z-index:35;display:flex;flex-direction:column;align-items:center;padding-top:10px;gap:10px}
-#trajRail .rail-btn{width:34px;height:34px;border-radius:10px;border:1px solid var(--border);background:var(--bg3);cursor:pointer;font-size:15px;display:flex;align-items:center;justify-content:center}
-#trajRail .rail-btn:hover{border-color:var(--accent2);color:var(--accent2)}
-#trajRail .rail-btn.on{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#06121a;border:none}
-#trajRail .rail-btn{position:relative}
-#trajRail .rail-badge{position:absolute;top:-4px;right:-4px;min-width:14px;height:14px;padding:0 3px;border-radius:8px;background:var(--err);color:#fff;font-size:9.5px;line-height:14px;text-align:center;font-weight:700}
-#subPanel{position:fixed;right:0;top:52px;bottom:0;width:320px;background:var(--bg2);border-left:1px solid var(--border);z-index:40;display:flex;flex-direction:column}
+/* §3.96：左侧空窄条已整体删除（含其按钮/徽标样式）。
+   左栏 #sideNav 直接贴 left:0；<900 抽屉开关 #sideNavRailBtn 在顶栏（见上）。 */
+#subPanel{position:fixed;right:0;top:var(--hdr-h,56px);bottom:0;width:320px;background:var(--bg2);border-left:1px solid var(--border);z-index:40;display:flex;flex-direction:column}
 .sb-head{padding:12px 14px;font-size:14px;font-weight:600;border-bottom:1px solid var(--border);color:var(--accent2);display:flex;align-items:center;gap:8px}
 .sb-head button{margin-left:auto}
 #sbList{flex:1;overflow-y:auto;padding:8px}
@@ -135,8 +139,9 @@ header .hdr-right::-webkit-scrollbar-track{background:transparent}
 .msg-meta{display:flex;gap:8px;align-items:center;font-size:11.5px;color:var(--faint);padding:0 2px 4px}
 .trajBtn{cursor:pointer;background:var(--bg3);border:1px solid var(--border);color:var(--dim);border-radius:20px;padding:2px 10px;font-size:11.5px}
 .trajBtn:hover{color:var(--text);border-color:var(--accent2)}
-/* 轨迹面板（与任务面板互斥展示）：置于聊天窗口左侧（DSH 式侧栏） */
-#trajPanel{position:fixed;left:42px;top:52px;bottom:0;width:252px;background:var(--bg2);border-right:1px solid var(--border);z-index:40;display:flex;flex-direction:column;box-shadow:4px 0 24px rgba(0,0,0,.35)}
+/* 轨迹面板（与任务面板互斥展示）：保留给 openTraj()/#tjClose（仍写 #tjList），默认 display:none；
+   已无窄条，故 left:0；top 同样跟随 --hdr-h。 */
+#trajPanel{position:fixed;left:0;top:var(--hdr-h,56px);bottom:0;width:252px;background:var(--bg2);border-right:1px solid var(--border);z-index:40;display:flex;flex-direction:column;box-shadow:4px 0 24px rgba(0,0,0,.35)}
 .tj-head{padding:12px 14px;font-size:14px;font-weight:600;border-bottom:1px solid var(--border);color:var(--accent2);display:flex;align-items:center;gap:8px}
 .tj-head button{margin-left:auto}
 #tjClose,#sbClose{font-size:12px;white-space:nowrap;padding:3px 10px}
@@ -275,7 +280,8 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 #hint{font-size:11.5px;color:var(--faint);margin-top:6px;max-width:860px;margin-left:auto;margin-right:auto}
 #statusBar{font-size:11.5px;color:var(--faint);margin-top:2px;max-width:860px;margin-left:auto;margin-right:auto;font-variant-numeric:tabular-nums;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 @media (max-width:560px){footer{padding:10px 8px}#composer{gap:6px}#composer #permSel{min-width:52px;padding:8px 4px}#composer #reasoningSel{min-width:44px;padding:8px 4px}#composer #modelSel{min-width:72px;padding:8px 4px}#composer #presetSel{min-width:64px;max-width:88px;padding:8px 4px}#attachBtn{padding:10px 9px}}
-.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:50}
+/* §3.96：header 抬到 70 后，模态遮罩必须仍在 header 之上（模态期间顶栏不可点）——50 → 90。 */
+.modal-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);display:flex;align-items:center;justify-content:center;z-index:90}
 .modal{background:var(--panel);border:1px solid var(--border);border-radius:14px;width:min(520px,92vw);padding:18px;max-height:88vh;overflow-y:auto}
 /* 设置多级菜单（审计：一拉到底改为左侧分组导航 + 右侧面板） */
 .cfg-modal{width:min(880px,94vw);display:flex;flex-direction:column;overflow:hidden}
@@ -383,7 +389,7 @@ footer{flex:none;border-top:1px solid var(--border);background:var(--bg2);paddin
 .shortcut-note{grid-column:1/-1;font-size:11.5px;color:var(--faint);border-top:1px solid var(--border);padding-top:9px}
 
 /* —— 右侧「本轮运行」面板 —— */
-#runPanel{position:fixed;right:0;top:52px;bottom:0;width:300px;background:var(--bg2);border-left:1px solid var(--border);z-index:36;display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.18)}
+#runPanel{position:fixed;right:0;top:var(--hdr-h,56px);bottom:0;width:300px;background:var(--bg2);border-left:1px solid var(--border);z-index:36;display:flex;flex-direction:column;box-shadow:-8px 0 24px rgba(0,0,0,.18)}
 body.run-open{padding-right:300px}
 body.run-open #scrollBottomBtn{right:326px}
 .rp-head{display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border);font-size:13px;font-weight:600;color:var(--text);flex:none}
@@ -477,7 +483,7 @@ body.run-open #scrollBottomBtn{right:326px}
 @media (max-width:1100px){
   body.narrow-run.run-open{padding-right:0}
   body.narrow-run #runPanel{display:none}
-  body.narrow-run.run-drawer #runPanel{display:flex;top:52px;width:300px;max-width:92vw;z-index:60;box-shadow:-12px 0 32px rgba(0,0,0,.4)}
+  body.narrow-run.run-drawer #runPanel{display:flex;top:var(--hdr-h,56px);width:300px;max-width:92vw;z-index:60;box-shadow:-12px 0 32px rgba(0,0,0,.4)}
 }
 
 /* —— 会话设置弹层（收编模型 / 预设 / 权限三件套）——
@@ -562,7 +568,6 @@ body.run-open #sessSheet{right:318px}
   body.narrow-side #sessionSearch,body.narrow-side #envBadge,body.narrow-side #costBadge{display:none!important}
   body.narrow-side #paletteBtn span.palette-label{display:none}
   body.narrow-side #sessions{max-width:110px}
-  body.narrow-side #trajRail{width:44px}
   body.narrow-side #runChip{padding:6px 8px}
   body.narrow-side #emptyState{padding:0 12px}
   #emptyState h2{font-size:18px}
@@ -573,7 +578,7 @@ body.run-open #sessSheet{right:318px}
 /* 自绘悬浮气泡 tooltip（替换原生 title）：暗色悬浮层 + 阴影，跟随锚点居中，越界自动回弹 */
 .mdtip{position:fixed;z-index:1000;max-width:320px;background:var(--bg3);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:7px 11px;font-size:12px;line-height:1.6;box-shadow:0 8px 24px rgba(0,0,0,.55);pointer-events:none;white-space:pre-line;word-break:break-word;display:none}
 /* —— 省钱仪表盘（v0.3.1 顶部入口，真·仪表盘） —— */
-#dashPanel{position:fixed;right:0;top:52px;bottom:0;width:400px;max-width:94vw;background:var(--bg2);border-left:1px solid var(--border);z-index:45;display:flex;flex-direction:column;box-shadow:-8px 0 32px rgba(0,0,0,.4)}
+#dashPanel{position:fixed;right:0;top:var(--hdr-h,56px);bottom:0;width:400px;max-width:94vw;background:var(--bg2);border-left:1px solid var(--border);z-index:45;display:flex;flex-direction:column;box-shadow:-8px 0 32px rgba(0,0,0,.4)}
 .dash-head{padding:12px 14px;font-size:14px;font-weight:700;color:var(--accent);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px}
 .dash-head .dash-sub{font-size:11.5px;color:var(--faint);font-weight:400}
 .dash-head button{margin-left:auto;padding:2px 8px;font-size:12px}
@@ -667,9 +672,9 @@ body.run-open #sessSheet{right:318px}
 /* ============================================================================
    v0.6.24 §3.88 左侧栏（设计稿三栏的标志性部分）
    ——只新增左栏自己的样式，复用既有 token；不改顶栏高度、#runPanel 宽度、
-     既有断点与字号阶。布局：现有窄条 #trajRail(42) → 本栏(240/48) → 主区 → 右栏。
+     既有断点与字号阶。§3.96 起布局：左栏(240/48) 贴 left:0 → 主区 → 右栏（空窄条已删）。
    ============================================================================ */
-#sideNav{position:fixed;left:42px;top:52px;bottom:0;width:240px;min-width:0;background:var(--bg2);border-right:1px solid var(--border);z-index:34;display:flex;flex-direction:column;overflow:hidden;transition:width .16s ease}
+#sideNav{position:fixed;left:0;top:var(--hdr-h,56px);bottom:0;width:240px;min-width:0;background:var(--bg2);border-right:1px solid var(--border);z-index:34;display:flex;flex-direction:column;overflow:hidden;transition:width .16s ease}
 #sideNav .sn-head{flex:none;display:flex;align-items:center;gap:8px;padding:10px 12px;border-bottom:1px solid var(--border)}
 #sideNav .sn-title{flex:1;min-width:0;font-size:12px;font-weight:600;color:var(--dim);letter-spacing:.03em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 #sideNavCollapse{flex:none;width:26px;height:26px;padding:0;border-radius:7px;background:var(--bg3);font-size:13px;line-height:1;display:inline-flex;align-items:center;justify-content:center}
@@ -706,22 +711,19 @@ body.side-mid #sideNav #sideNavRecentToggle{display:none}
 #sideNavSessions .sn-item-ico{flex:none;width:16px;text-align:center;font-size:13px}
 #sideNavSessions .sn-item-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 #sideNavSessions .sn-empty{font-size:11.5px;color:var(--dim);padding:8px 6px;white-space:nowrap}
-#trajRail #sideNavRailBtn{display:none}
 /* —— 三档断点：≥1180 展开(240) / 900–1180 自动折叠(48) / <900 抽屉（默认收起） —— */
 body.side-wide #sideNav{width:240px}
 body.side-wide.side-collapsed #sideNav{width:48px}
 body.side-mid #sideNav{width:48px}
 body.side-drawer #sideNav{display:none;width:240px}
 body.side-drawer.side-drawer-open #sideNav{display:flex;z-index:55;box-shadow:12px 0 32px rgba(0,0,0,.45)}
-body.side-drawer #trajRail #sideNavRailBtn{display:flex}
-/* 主区/输入区右移，左栏不遮正文；顶栏保持整条横贯（高度/入口不动） */
-body.side-wide main,body.side-wide footer{margin-left:282px}
-body.side-wide.side-collapsed main,body.side-wide.side-collapsed footer{margin-left:90px}
-body.side-mid main,body.side-mid footer{margin-left:90px}
-/* §3.92：<900 左栏收成抽屉时，44px 窄条只做抽屉开关，不再压住居中正文的左缘。
-   主区/输入区右移 48px（44 窄条 + 4px 间隙）；只加偏移不设宽度，窄屏不会出现横向滚动。
-   窄条本身仍是 position:fixed，不参与文档流。 */
-body.side-drawer main,body.side-drawer footer{margin-left:48px}
+/* 主区/输入区右移，左栏不遮正文；顶栏保持整条横贯（高度/入口不动）。
+   §3.96：右移量 = 左栏宽度本身（240 / 48），不再含已删的空窄条；
+   <900 左栏是覆盖式抽屉、默认不占列，正文左缘回到 0（不得再补偿 48px）。 */
+body.side-wide main,body.side-wide footer{margin-left:240px}
+body.side-wide.side-collapsed main,body.side-wide.side-collapsed footer{margin-left:48px}
+body.side-mid main,body.side-mid footer{margin-left:48px}
+body.side-drawer main,body.side-drawer footer{margin-left:0px}
 /* 折叠态：只留图标 + tooltip（label/分组标题隐藏；折叠按钮本身是图标，保留用于展开） */
 body.side-collapsed .sn-title,
 body.side-mid .sn-title,
@@ -749,6 +751,9 @@ body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions 
 </head>
 <body class="side-wide">
 <header>
+  <!-- §3.96：空窄条已删除。左栏在 <900 收成覆盖式抽屉，这个开关只在 drawer 档可见
+       （wide/mid 由 left:0 的左栏自带折叠按钮），不再占任何一列。 -->
+  <button id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>
   <div class="logo">MingDao <span>Harness</span></div>
   <!-- v0.6.21 小步重排（§3.81）：顶栏只保留「我在哪」的当前位置；模型/预设/权限只在 #sessSheet 里改。 -->
   <span id="crumb" class="badge" title="当前工作空间 › 当前会话"><span id="crumbWs">工作空间</span><span aria-hidden="true"> › </span><b id="crumbSession">新对话</b></span>
@@ -775,10 +780,7 @@ body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions 
     <button id="newChat" hidden>新对话</button>
   </div>
 </header>
-<div id="trajRail">
-  <!-- §3.88：<900 时左栏收成抽屉，这个窄条图标负责打开/关闭（≥900 隐藏）。 -->
-  <button class="rail-btn" id="sideNavRailBtn" title="会话侧栏（打开/关闭）">☰</button>
-</div>
+<!-- v0.6.28 §3.96：左侧空窄条已整体删除；抽屉开关移入顶栏 #sideNavRailBtn。 -->
 <!-- v0.6.27 §3.94：#legacyRailCompat 隐藏兼容节点已删除；轨迹/子Agent 由右栏四标签唯一承接。 -->
 <!-- v0.6.24 §3.88 左侧栏：设计稿三栏的会话列。只新增；顶栏既有入口一个不删。
      数据复用 refreshSessions() 的 sessionsGroupedCache；切换走 #sessions change；

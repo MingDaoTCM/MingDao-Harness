@@ -5339,3 +5339,87 @@ before 目录在 `d37d17e` 的独立 worktree 里截（避免把已改工作树�
 - 顶栏 `#sessions` / `#sessMgrBtn` / `#newChat` 仍是 hidden 兼容节点（为保证 §153/§155/§158 不改）；
   计划下一轮连同旧断言一起移除。
 - 1440 视口下 `.hdr-right` 仍会横向滚动（既有设计，未改）；本轮只是减少了两个重复入口。
+
+## 3.96 已做（v0.6.28 布局/性能：空窄条删除 + 顶栏/面板高度不变量 + TTFT 去重）
+
+**来源 / 证据**：负责人三处实测反馈——①`#trajRail` 里的轨迹/子Agent 按钮在 v0.6.25 已删，左侧仍留
+42px 空列白占宽（截图 `/tmp/shots-fix-before/home.png` 左缘可见）；②`#runPanel` 等面板写死
+`top:52px`，header 实际高度超过 52（padding/横向滚动条）时会被面板盖住；③本地模型长审计每回合十几次
+模型请求，`⏱ 首帧` 每次都打印，刷屏。
+
+**修法（`src/web/index.html` + `src/web/app.js` + `src/agent.js`）**
+
+- 删除 `#trajRail` 元素与全部 CSS（`#trajRail`、`.rail-btn`、`.rail-badge`、
+  `body.narrow-side #trajRail{width:44px}`）；左栏 `#sideNav` 从 `left:42px` 改为 `left:0`。
+- 清理布局补偿：`body.side-wide main/footer` 282→240、折叠态 90→48、`side-mid` 90→48、
+  `<900 side-drawer` 48→`0px`（只保留左栏宽度本身，正文左缘回到 0；不再有 42/44 空列）。
+- `<900` 抽屉开关不能丢：`#sideNavRailBtn` 从窄条移入顶栏（`body.side-drawer` 时才显示），仍复用
+  `toggleSideNav`；宽屏/mid 由左栏自带折叠按钮，顶栏开关不占列。
+- `#trajPanel`（v0.6.24 前的遗留面板）**仍被 handler 使用**：`openTraj()` 继续写 `#tjList`，
+  `#tjClose` 仍绑定 `setRunPanel(false)`，所以保留；但 `left:42px`→`left:0`，`top` 改用 `--hdr-h`。
+  它不是死节点，不能随窄条一起删。
+- header 改为 `position:relative;z-index:70`（高于右栏抽屉 60、任务/子Agent/轨迹 40、仪表盘 45）；
+  同时把 `.modal-mask` 50→90，避免顶栏浮到模态遮罩之上（模态期间 header 仍不可点）。
+- 新增 `--hdr-h` 不变量：`syncHeaderHeight()` 用 `header.getBoundingClientRect().height || offsetHeight`
+  实测，`document.documentElement.style.setProperty('--hdr-h', h+'px')`；`applyResponsiveLayout()` 在
+  页面加载与 resize 都调用它，并用 `ResizeObserver` 兜住顶栏自身尺寸变化。所有固定面板（`#runPanel`、
+  `#tasksPanel`、`#subPanel`、`#trajPanel`、`#dashPanel`、`#sideNav`、窄屏右栏抽屉）的 `top` 统一为
+  `var(--hdr-h,56px)`，不再出现 `top:52px`。
+- `agent.js` TTFT：`if (turnProgress.llmCalls === 1 || ttft >= 30000)` → `if (turnProgress.llmCalls === 1)`，
+  每回合只在第 1 次模型请求打印一次，后续静默（状态条/右栏仍有首帧值）。可选的“后续明显劣化警告”
+  本轮**未实现**：现有 `firstTokenAt` 是回合级的，用它量后续请求会得到负值，不为一条提示改测量口径。
+
+**断言与变异**
+
+- `test/smoke.js` 末尾新增 §163：①`#trajRail` 元素/CSS 均不存在、左栏 `left:0`、240/48/0 补偿、正文
+  左缘几何（880 容器左缘 0、1440 与左栏相邻）、抽屉开关在顶栏、`#trajPanel` 仍被 handler 使用；
+  ②header `z-index:70` 大于所有面板、六处面板 `top:var(--hdr-h,56px)`、无 `top:52px`、JS 加载/resize
+  实测写入；③桩 agent 跑 3 次模型请求，`⏱ 首帧` 只出现 1 次（行为断言，不是源码文本）；
+  ④四标签/⌘K/设置/状态条六项/错误卡/内联确认/左栏新建入口不回归。
+- 新建 `test/mutate/batch56-layout-ttft.mjs`：**8/8 全中**（恢复空窄条、恢复 `.rail-btn`、删 header
+  z-index、面板 z-index 反超 header、`top` 写死 52、删除 JS 写 `--hdr-h`、TTFT 每轮都打、
+  <900 恢复 48px 补偿）。
+- **必须说明的改动面冲突**：§158/§159/§160 原本静态断言“窄条必须存在、44px、正文补偿 48px”，
+  与 §163“窄条必须不存在、正文左缘 0”互斥；若只追加 §163，`node test/smoke.js` 不可能通过。
+  因此对这三节做了**只改旧窄条事实**的最小同步（其余断言一字未动）；同时同步 batch49 ⑪ 的
+  `margin-left` 锚点、batch51 ①② 的窄条锚点、batch52 ③④⑤⑦⑧ 的窄条/补偿锚点。
+  新增/修改后变异总数 **492**（484 + batch56 的 8），`test/mutate/README.md` 计数行已按 doc-lint 实测更新。
+
+**截图（真实 Electron，`scripts/ui-shot.mjs`；1440×900 / 880×900）**
+
+| 目录 / 文件 | 尺寸 | 字节 | 结论 |
+| --- | --- | --- | --- |
+| `/tmp/shots-fix-before/home.png` | 1440×900 | 201368 | 改前：左缘 42px 空列（侧栏从 x=42 才开始） |
+| `/tmp/shots-fix-after/home.png` | 1440×900 | 200631 | 改后：空列消失，左栏从 x=0 开始，正文左缘紧邻 240 |
+| `/tmp/shots-fix-after-task/sheet.png` | 1440×900 | 350938 | `--open "#tasksBtn"` 后任务抽屉 + 会话设置（顶栏完整可见） |
+| `/tmp/shots-fix-after-880/home.png` | 880×900 | 147010 | 改后：窄屏无空列，抽屉开关在顶栏 ☰ |
+| `/tmp/shots-fix-after-880-task/sheet.png` | 880×900 | 274409 | `--open "#tasksBtn"` 打开右栏；面板从 header 下缘开始 |
+| `/tmp/shots-fix-task-1440/task.png` | 1440×900 | 197659 | 直接截「任务」抽屉：`headerH=52/--hdr-h=52px/panelTop=52/gap=0/headerZ=70>panelZ=36` |
+| `/tmp/shots-fix-task-880/task.png` | 880×900 | 135921 | 直接截「任务」抽屉：`headerH=52/--hdr-h=52px/panelTop=52/gap=0/headerZ=70>panelZ=60`、`mainLeft=0`、`chatLeft=10`、`trajRail=false` |
+
+本机（macOS 覆盖式滚动条）header 实测就是 52px，所以“>52 盖住顶栏”的旧视觉在本机截图里不出现；
+但面板 `top` 已不再依赖 52：实测 `--hdr-h=52px`、面板 `top=header.bottom`、`gap=0`，header z-index 高于
+所有面板。Windows/非覆盖滚动条把 header 撑到 56+ 时，面板会跟着下移。
+
+**门禁**
+
+- `npm run typecheck`：通过。
+- `node test/smoke.js`：通过（含新增 §163；原始输出见下）。
+- `node test/e2e-web.js`：24 项通过；`node test/e2e-local.js`：17 项通过；
+  `node test/api-contracts.js`：8 项通过；`node test/ui-sessions.js`：5 项通过。
+- `node test/mutate/batch56-layout-ttft.mjs`：8/8 全中；`node test/mutate/run.mjs --allow-dirty`：全批次全中。
+- `node scripts/doc-lint.mjs`：全部通过（变异总数实际 492 = README 492）。
+
+§163 的 TTFT 实测原始输出：
+
+```text
+[§163] 3 次模型请求实际打印的 TTFT 行：["⏱ 首帧 0.0s（第 1 次模型请求；本地模型这一项直接反映 prefill 快慢）"]
+```
+
+**未做 / 边界**
+
+- 未改 `src/providers/**`、`src/model-discovery.js`、`src/session.js`、`presets/**`、`desktop/**`、
+  `ide/**`、`scripts/ui-shot.mjs`；未 tag / 改版本号 / publish / 动官网。
+- TTFT 的“后续明显劣化警告”可选未做（原因见上）；如要做，需先把每请求 TTFT 与回合首帧分开计量。
+- 空窄条里的抽屉开关移入顶栏是必要的能力承接；若将来改成其他入口，§163 的 `#sideNavRailBtn` 断言需同步。
+- `<900` 左栏仍是覆盖式抽屉（打开时覆盖正文），这是 §3.88 的既有交互，本轮只去掉空窄条、不改成推挤布局。

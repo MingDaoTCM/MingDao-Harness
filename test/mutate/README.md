@@ -19,7 +19,7 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：484（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：492（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
 
 > v0.6.20（§3.79）：界面重排回滚到 v0.6.18，`batch42-ui-p2`（15 条）与 `batch43-ui-shell`（12 条）
 > 断言的 P2/新骨架已不在代码里，随 `test/ui-p2.js` 一并移除（369 → 342）。
@@ -53,3 +53,7 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 > <900 正文补偿归零/缩到 30px、窄条恢复占流、1101–1180 右栏被 `display:none`、左/右抽屉丢失、
 > 正文补偿加 `min-width` 与 `overflow-x:auto` 造成横向滚动、收起规则去掉 `narrow-run` 收口
 > （§3.91 的 `batch52-memory-v2` 11 条先落地；439 + 11 + 11 = 461）。
+>
+> v0.6.28（§3.96）：新增 `batch56-layout-ttft`（8 条）——恢复 #trajRail 空窄条/`.rail-btn` 样式、
+> 删除 header 的 z-index、面板 z-index 反超 header、面板 top 写死 52px、删除 JS 写入 `--hdr-h`、
+> TTFT 恢复每轮都打、<900 正文恢复 48px 窄条补偿（484 → 492）。

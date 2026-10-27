@@ -1,10 +1,10 @@
-// 批五十二（v0.6.26 §3.92：布局断点修正）的变异验证。
+// 批五十二（v0.6.26 §3.92 / v0.6.28 §3.96：布局断点修正）的变异验证。
 //
-// 两个已确认的布局缺陷（只动布局，不动功能）：
-// ①<900 左栏收成覆盖式抽屉后，44/42px 固定窄条仍压住居中正文左缘；
+// 已确认的布局缺陷（只动布局，不动功能）：
+// ①<900 左栏收成覆盖式抽屉后，旧的固定空窄条仍压住居中正文左缘；
 // ②#runPanel 的 @media (max-width:1180px) 把右栏在 1180 整点收起，导致 1180 不是三栏。
-// 修法：窄条保持 fixed、主区/输入区右移 48px（补偿 ≥ 窄条宽度且不设固定宽度）；
-// 右栏收起点下调到 1100 并由 body.narrow-run（<1100）收口，1101–1180 右栏 260px 仍可见。
+// v0.6.28 §3.96 起空窄条整体删除：左栏贴 left:0，<900 正文左缘回 0，主区右移量只等于左栏宽度。
+// 右栏收起点仍是 1100 并由 body.narrow-run（<1100）收口，1101–1180 右栏 260px 仍可见。
 // 本批把每一处逐个改回缺陷，test/smoke.js §160 必须当场红。
 import { makeMutator } from './lib.mjs';
 const M = makeMutator();
@@ -32,33 +32,33 @@ M.mutate({
   run: SEC,
 });
 
-// ③ <900 正文补偿归零：窄条又压住居中正文左缘（v0.6.23 起的老缺陷）
+// ③ 把已回退的窄条补偿又加回来：<900 正文左缘重新变成 48px（空列又出现）
 M.mutate({
-  name: '③ <900 正文/输入区补偿归零（窄条压正文）',
+  name: '③ <900 正文/输入区恢复 48px 窄条补偿（空列回归）',
   file: 'src/web/index.html',
-  from: 'body.side-drawer main,body.side-drawer footer{margin-left:48px}',
-  to: 'body.side-drawer main,body.side-drawer footer{margin-left:0}',
-  expect: ['880 下正文容器左缘必须 ≥ 窄条右边界'],
+  from: 'body.side-drawer main,body.side-drawer footer{margin-left:0px}',
+  to: 'body.side-drawer main,body.side-drawer footer{margin-left:48px}',
+  expect: ['880 下正文左缘必须为 0'],
   run: SEC,
 });
 
-// ④ 窄条恢复占文档流：fixed→relative，即使有补偿也会把正文挤走
+// ④ 左栏又为已删除的空窄条让位：left:0 → left:42px（正文左缘被推到 282）
 M.mutate({
-  name: '④ 窄条恢复占流（position:fixed → relative）',
+  name: '④ 左栏恢复 left:42px（为已删除的空窄条让位）',
   file: 'src/web/index.html',
-  from: '#trajRail{position:fixed;left:0;top:52px;',
-  to: '#trajRail{position:relative;left:0;top:52px;',
-  expect: ['窄条必须脱离文档流（fixed/absolute），不得占流挤压正文'],
+  from: '#sideNav{position:fixed;left:0;',
+  to: '#sideNav{position:fixed;left:42px;',
+  expect: ['左栏必须贴左缘（left:0）'],
   run: SEC,
 });
 
-// ⑤ 补偿小于窄条宽度：48px→30px，正文左缘仍落进 44px 窄条里
+// ⑤ 补偿改成 30px：既不是 0、也不是左栏宽度，正文仍被一段空列压住
 M.mutate({
-  name: '⑤ 正文补偿 48px 缩到 30px（< 44px 窄条）',
+  name: '⑤ <900 正文补偿 0 → 30px（空列回归）',
   file: 'src/web/index.html',
-  from: 'body.side-drawer main,body.side-drawer footer{margin-left:48px}',
+  from: 'body.side-drawer main,body.side-drawer footer{margin-left:0px}',
   to: 'body.side-drawer main,body.side-drawer footer{margin-left:30px}',
-  expect: ['880 下正文容器左缘必须 ≥ 窄条右边界'],
+  expect: ['880 下正文左缘必须为 0'],
   run: SEC,
 });
 
@@ -76,8 +76,8 @@ M.mutate({
 M.mutate({
   name: '⑦ <1100 右栏抽屉 display:none（抽屉丢失）',
   file: 'src/web/index.html',
-  from: 'body.narrow-run.run-drawer #runPanel{display:flex;top:52px;',
-  to: 'body.narrow-run.run-drawer #runPanel{display:none;top:52px;',
+  from: 'body.narrow-run.run-drawer #runPanel{display:flex;top:var(--hdr-h,56px);',
+  to: 'body.narrow-run.run-drawer #runPanel{display:none;top:var(--hdr-h,56px);',
   expect: ['1000/880 右栏抽屉必须仍在'],
   run: SEC,
 });
@@ -86,8 +86,8 @@ M.mutate({
 M.mutate({
   name: '⑧ 窄屏补偿给正文加 min-width:900px（横向溢出）',
   file: 'src/web/index.html',
-  from: 'body.side-drawer main,body.side-drawer footer{margin-left:48px}',
-  to: 'body.side-drawer main,body.side-drawer footer{margin-left:48px;min-width:900px}',
+  from: 'body.side-drawer main,body.side-drawer footer{margin-left:0px}',
+  to: 'body.side-drawer main,body.side-drawer footer{margin-left:0px;min-width:900px}',
   expect: ['窄屏补偿只加偏移、不得给正文设固定宽度（否则会出现横向滚动）'],
   run: SEC,
 });
