@@ -93,13 +93,26 @@ export function removeStoredKey(providerName) {
   return setStoredKey(providerName, null);
 }
 
-// 脱敏展示：只显示首 6 位与末 4 位，永不输出完整 Key。
+// 脱敏展示（**本机 CLI 专用**）：显示首 6 位与末 4 位，便于在终端里认出"是哪把 key"。
+// 注意：这**不是** HTTP 返回口径——v0.6.29（minimax L-9）起，所有 /api/* 响应一律改用
+// `maskKeyTail()`（只回末 4 位），因为 Web 响应会进浏览器历史/截图/剪贴板，首 6 位同样是
+// 不该外露的指纹信息。保留本函数是为了 `mingdao key list` 等本机终端输出不退化。
 /** @param {any} key */
 export function maskKey(key) {
   if (!key) return null;
   const s = String(key);
   if (s.length <= 10) return '******';
   return s.slice(0, 6) + '…' + s.slice(-4);
+}
+
+// HTTP/API 返回口径（v0.6.29，minimax L-9）：**只回末 4 位**，固定长度、不含任何前缀字符。
+// 例：`sk-live-abcdef…wxyz` → `…wxyz`。过短（≤8）用固定 `******`，不回显长度以外的信息。
+/** @param {any} key */
+export function maskKeyTail(key) {
+  if (!key) return null;
+  const s = String(key);
+  if (s.length <= 8) return '******';
+  return '…' + s.slice(-4);
 }
 
 // 统一的 Key 解析链：环境变量 → 本地凭证库 → config.json 显式字段

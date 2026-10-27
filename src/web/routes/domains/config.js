@@ -5,7 +5,7 @@ import crypto from 'node:crypto';
 import { DEFAULT_MODEL } from '../../../models.js';
 import path from 'node:path';
 import { loadConfig, saveConfig } from '../../../config.js';
-import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../../../credentials.js';
+import { setStoredKey, removeStoredKey, getStoredKey, maskKeyTail } from '../../../credentials.js';
 import { availableModels, fetchProviderModels, providerHasKey, isDiscoveredModel, resolveDefaultModel, resolveRoutingDefaults, modelsCatalogNote } from '../../../model-discovery.js';
 import { createProvider, resolveProviderConfig } from '../../../providers/index.js';
 import { MODELS, PROVIDERS, modelPreset } from '../../../models.js';
@@ -59,7 +59,17 @@ function endpointChangeGuard(current, next, submitted) {
  */
 export async function handle({ req, res, method, p, url }, deps, shared) {
   const { json, readBody, MAX_API_BODY } = shared;
-  const { cfg, home, state, providerCache, getProviderFor, mcpFacade } = deps;
+  const { cfg, home, state, providerCache, invalidateProviderCache, getProviderFor, mcpFacade } = deps;
+
+  // v0.6.29（审计 H-04）：配置变更统一走「代际失效」——provider 实例与本地端点预检备忘一起清。
+  // 旧版只 providerCache.clear()，而 setBaseUrl 连这一步都没有：切换后旧实例的 chat 闭包仍用
+  // 创建时的 baseUrl/apiKey，正文和 Authorization 继续发往旧端点。未注入该函数的旧调用方
+  // 退回 clear，保持向后兼容。
+  /** @param {string} reason */
+  const dropProviderCache = (reason) => {
+    if (typeof invalidateProviderCache === 'function') invalidateProviderCache(reason);
+    else providerCache.clear();
+  };
 
   if (method === 'GET' && p === '/api/state') {
     const sessions = listSessions(home)
@@ -217,7 +227,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         else if (body.timeout[k] === null || body.timeout[k] === '') delete cfg.timeout[k];
       }
       // 超时在 createProvider 时按 cfg 固化进实例，改后清缓存让新值即时生效（否则要重启）
-      providerCache.clear();
+      dropProviderCache('timeout');
     }
     if (body.reasoningEffort !== undefined) {
       const re = String(body.reasoningEffort);
@@ -261,7 +271,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         baseUrl: pp.baseUrl,
         envKey: pp.envKey || null,
         keyState: stored ? 'stored' : env ? 'env' : 'none',
-        keyMasked: stored ? maskKey(stored) : null,
+        keyMasked: stored ? maskKeyTail(stored) : null,
       };
     });
     const customModels = Object.entries(cfg.customModels || {}).map(([name, cm]) => {
@@ -275,7 +285,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         contextWindow: Number(cm.contextWindow) > 0 ? Number(cm.contextWindow) : null,
         maxOutputTokens: Number(cm.maxOutputTokens) > 0 ? Number(cm.maxOutputTokens) : null,
         keyState: stored ? 'stored' : 'none',
-        keyMasked: stored ? maskKey(stored) : null,
+        keyMasked: stored ? maskKeyTail(stored) : null,
       };
     });
     json(res, 200, {
@@ -300,13 +310,13 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (!key) return json(res, 400, { error: 'Key 不能为空（删除请用 removeProviderKey）' });
       const sk = setStoredKey(provider, key);
       if (sk && sk.ok === false) return json(res, 400, { error: sk.error }); // v0.6.7（M-1）：凭证库损坏时拒绝写并如实报错
-      providerCache.clear(); // 质检：Key 立即生效（缓存持有旧无 Key 实例 → 此前需重启）
+      dropProviderCache('setProviderKey'); // 质检：Key 立即生效（缓存持有旧无 Key 实例 → 此前需重启）
       // 设置 Key 后立即拉取线上真实模型名单（失败不影响 Key 保存，回退预设）
       const fr = provider === 'custom' ? { error: '自定义服务商无模型列表' } : await fetchProviderModels(cfg, provider, { force: true });
       return json(res, 200, {
         ok: true,
         provider,
-        keyMasked: maskKey(key),
+        keyMasked: maskKeyTail(key),
         models: fr.models || [],
         modelsNote: fr.error ? `模型列表暂用预设（拉取失败：${fr.error}），稍后可用「刷新模型」重试` : null,
       });
@@ -323,7 +333,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       const provider = String(body.provider || '').trim();
       if (!/** @type {Record<string, any>} */ (PROVIDERS)[provider]) return json(res, 400, { error: `未知服务商 ${provider}` });
       removeStoredKey(provider);
-      providerCache.clear(); // 质检：Key 删除立即生效
+      dropProviderCache('removeProviderKey'); // 质检：Key 删除立即生效
       return json(res, 200, { ok: true, provider });
     }
     // —— 自定义模型增删改 ——
@@ -376,7 +386,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       }
       saveConfig(cfg);
       // baseUrl 改动影响 isLocal 判定 → 超时档位变化；清缓存让新超时/新端点即时生效
-      providerCache.clear();
+      dropProviderCache('customModel');
       return json(res, 200, { ok: true, name });
     }
     if (action === 'removeCustom') {
@@ -390,7 +400,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         cfg.model = state.modelName;
       }
       saveConfig(cfg);
-      providerCache.clear();
+      dropProviderCache('removeCustom');
       return json(res, 200, { ok: true, name, model: state.modelName });
     }
     // 质检（自定义模型连通性）：发起一次最小对话验证 baseUrl+Key 可用
@@ -416,8 +426,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (!key) return json(res, 400, { error: 'Key 不能为空' });
       const sk2 = setStoredKey(`custom:${name}`, key);
       if (sk2 && sk2.ok === false) return json(res, 400, { error: sk2.error }); // v0.6.7（M-1）
-      providerCache.clear(); // 质检：Key 立即生效
-      return json(res, 200, { ok: true, name, keyMasked: maskKey(key) });
+      dropProviderCache('setCustomKey'); // 质检：Key 立即生效
+      return json(res, 200, { ok: true, name, keyMasked: maskKeyTail(key) });
     }
     // —— 当前服务商 API 地址覆盖 ——
     if (action === 'setBaseUrl') {
@@ -444,6 +454,9 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       cfg.baseUrl = baseUrl || undefined;
       if (cfg.baseUrl === undefined) delete cfg.baseUrl;
       saveConfig(cfg);
+      // H-04 的**根因**：此前保存后直接 200，缓存里仍是旧 baseUrl 的实例。
+      // 清空 baseUrl 同样要失效（否则新任务继续用旧端点，而不是按「缺少 baseUrl」显式失败）。
+      dropProviderCache(baseUrl ? 'setBaseUrl' : 'clearBaseUrl');
       return json(res, 200, { ok: true, baseUrl: cfg.baseUrl || '' });
     }
     return json(res, 400, { error: '未知操作：setProviderKey|removeProviderKey|addCustom|updateCustom|removeCustom|setCustomKey|setBaseUrl' });

@@ -25,8 +25,38 @@ const SENSITIVE_ENV_SEGMENT = new RegExp(`(^|_)(${[...ENV_SECRET_SEGMENTS].join(
 // bash 工具里 git-over-SSH / ssh-agent 全部失效（macOS 常态：push/pull 走 SSH 时必用）。
 // 它是**连接句柄**而非凭据，显式放行；其余变量的过滤语义不变。
 const ENV_ALWAYS_KEEP = new Set(['SSH_AUTH_SOCK']);
-export const isSensitiveEnv = (/** @type {any} */ k) =>
-  !ENV_ALWAYS_KEEP.has(String(k)) && (SENSITIVE_ENV_PAIR.test(k) || SENSITIVE_ENV_SEGMENT.test(k));
+// v0.6.29（minimax M-13）：段词表判据抓不到的两类真实凭据变量——
+//   · **整词无下划线**：`PGPASSWORD` / `SSH_PASSPHRASE`（`passphrase` 已进段词表，这里保留显式名单）；
+//   · **连接串**：`DATABASE_URL` / `MYSQL_URL` / `REDIS_URL` / `MONGODB_URI` 等，URL 里直接带账号密码。
+// 名单逐条有测试（test/provider-hardening.js），新增时同时补 sample，避免"表里有规则但不认得你的 key"。
+const SENSITIVE_ENV_NAMES = new Set([
+  // SSH_PASSPHRASE 由共用段词表 `passphrase` 覆盖（同时让 SSH_PASSPHRASE=... 的日志行也被脱敏）
+  'PGPASSWORD',
+  'DATABASE_URL',
+  'DATABASE_URI',
+  'DATABASE_DSN',
+  'MYSQL_URL',
+  'MYSQL_URI',
+  'POSTGRES_URL',
+  'POSTGRES_URI',
+  'POSTGRESQL_URL',
+  'PG_URL',
+  'REDIS_URL',
+  'REDIS_URI',
+  'MONGODB_URI',
+  'MONGO_URL',
+  'AMQP_URL',
+  'RABBITMQ_URL',
+  'ELASTIC_URL',
+  'CLICKHOUSE_URL',
+]);
+// 同族未知变量（如 `MY_DATABASE_URL`、`CACHE_REDIS_URI`）：按「库类型 + URL/URI/DSN」形态兜底。
+const SENSITIVE_ENV_CONN_URL = /^(?:[A-Z0-9]+_)*(?:DATABASE|MYSQL|POSTGRES|POSTGRESQL|PG|REDIS|MONGO|MONGODB|AMQP|RABBITMQ|KAFKA|ELASTIC|CLICKHOUSE)_(?:URL|URI|DSN)$/i;
+export const isSensitiveEnv = (/** @type {any} */ k) => {
+  const name = String(k);
+  if (ENV_ALWAYS_KEEP.has(name)) return false;
+  return SENSITIVE_ENV_NAMES.has(name.toUpperCase()) || SENSITIVE_ENV_CONN_URL.test(name) || SENSITIVE_ENV_PAIR.test(name) || SENSITIVE_ENV_SEGMENT.test(name);
+};
 
 // 审计修复（v0.4.6）：导出供 config.tools 子进程复用——此前它是唯一不筛敏感变量的子进程入口
 // （bash / hooks / MCP 都筛），与全项目「默认剥离 *_API_KEY/*_TOKEN/*_SECRET」口径不一致。

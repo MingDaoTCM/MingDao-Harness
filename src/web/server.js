@@ -357,6 +357,45 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   //   正是"没重测、直接念旧结论"），而同一回合其实完全可用（:803 首帧 8.7s、:844 已跑 21m）。
   //   结论：`probeMemoUsable()` 判保鲜期（成功 10 分钟 / 失败 60s），过期就重测。
   const probeByModel = new Map();
+  // v0.6.29（审计报告 H-04）：**Provider 缓存必须按"出网配置指纹"分代**。
+  //
+  // 原实现 `providerCache` 只按模型名缓存，切换 baseUrl 时若某条路径忘了 `clear()`（setBaseUrl 就是），
+  // 旧实例的 chat 闭包会继续用**创建时固化**的 baseUrl/apiKey 出网——界面显示已切到 B，
+  // 实际主回答、自动标题、记忆提取仍把正文和 `Authorization: Bearer …` 发给 A（报告实测 A 收到 10 次）。
+  //
+  // 这里把「代际号 + baseUrl + 凭证摘要 + 超时配置」纳入缓存键，并让 `invalidateProviderCache()`
+  // 同时清 provider 与预检备忘：**新任务永远拿不到旧代际实例**；已经开始的旧任务仍持旧实例自然结束
+  // （不强行中断，避免打断用户正在看的回答）。
+  let providerGeneration = 0;
+  /** 出网配置指纹：apiKey 只取 sha256 摘要（不进 Map 键、不落日志）。 */
+  const providerFingerprint = (/** @type {any} */ m) => {
+    const pc = resolveProviderConfig(cfg, m) || {};
+    const keyDigest = crypto.createHash('sha256').update(String(pc.apiKey || '')).digest('hex').slice(0, 16);
+    let timeout = '';
+    try {
+      timeout = JSON.stringify(cfg?.timeout ?? null);
+    } catch {
+      timeout = '';
+    }
+    return `${providerGeneration}\u0000${String(pc.baseUrl || '')}\u0000${keyDigest}\u0000${timeout}`;
+  };
+  const providerCacheKey = (/** @type {any} */ m) => `${m}\u0000${providerFingerprint(m)}`;
+  const probeCacheKey = (/** @type {any} */ m) => `${m}\u0000${providerFingerprint(m)}`;
+  /**
+   * 配置代际失效：provider 实例 + 本地端点预检备忘一起清。
+   * 预检结果含 endpoint/TTFT，旧端点的结论绝不能套到新端点上（否则自适应超时也会跟着错代际）。
+   * @param {string} [reason]
+   */
+  const invalidateProviderCache = (reason = '配置变更') => {
+    providerGeneration += 1;
+    const instances = providerCache.size;
+    const probes = probeByModel.size;
+    providerCache.clear();
+    probeByModel.clear();
+    try {
+      srvlog(`provider 代际 ${providerGeneration}：${reason}（清实例 ${instances} / 预检备忘 ${probes}）`);
+    } catch {}
+  };
   /** 该模型是否属于"本地端点"（baseUrl 是回环/内网，或 customModels 显式声明 local:true）。 */
   const isLocalModel = (/** @type {any} */ m) => {
     try {
@@ -376,7 +415,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
    *   ③ 探针慢 → 单次尝试 1.5s + 退避 + 总预算 15s 封顶（见 probeEndpoint），不会把回合发起拖成几十秒。
    */
   async function ensureProbe(/** @type {any} */ m) {
-    const memo = probeByModel.get(m);
+    const pk = probeCacheKey(m); // 与 provider 同代际：切端点后旧预检结论立即失效
+    const memo = probeByModel.get(pk);
     if (probeMemoUsable(memo)) return memo.value;
     if (!isLocalModel(m)) return null;
     let probe = null;
@@ -402,13 +442,16 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     } catch (/** @type {any} */ e) {
       srvlog(`预检 ${m} 失败（忽略，按默认超时继续）：${String(e?.message || e)}`);
     }
-    probeByModel.set(m, { at: Date.now(), value: probe });
+    probeByModel.set(pk, { at: Date.now(), value: probe });
     if (probeByModel.size > 50) probeByModel.delete(probeByModel.keys().next().value);
     return probe;
   }
   /** @param {any} m */
   async function getProviderFor(m) {
-    if (!providerCache.has(m)) {
+    // H-04：缓存键 = 模型 + 出网配置指纹 + 代际号。配置一变，新任务自然落到新键；
+    // 即便某个调用方忘了 clear，也不会复用旧实例（两层保险，clear/代际另有一层）。
+    const cacheKey = providerCacheKey(m);
+    if (!providerCache.has(cacheKey)) {
       // 建 provider 之前先预检：本地端点按实测 TTFT 自适应 config.timeout.firstTokenMs
       // （providers/index.js 只认 cfg.timeout，因此这里把自适应值**合进 cfg**再建实例）。
       // 取舍：用户显式配的 firstTokenMs 优先；没配时"地板"仍是既有默认（本地 600s），
@@ -428,9 +471,16 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
           srvlog(`预检自适应 ${m} firstTokenMs=${adapt.firstTokenMs}（${adapt.basis}）`);
         }
       } catch {}
-      providerCache.set(m, await createProvider(cfgForProvider, m));
+      const created = await createProvider(cfgForProvider, m);
+      // 创建期间配置又变了：这个实例属于旧代际，**不写回缓存**（否则新任务可能拿到它）。
+      // 发起它的旧任务照常拿到 `created` 并自然结束——不强杀在途回合。
+      if (providerCacheKey(m) === cacheKey) {
+        providerCache.set(cacheKey, created);
+        if (providerCache.size > 32) providerCache.delete(providerCache.keys().next().value);
+      }
+      return created;
     }
-    return providerCache.get(m);
+    return providerCache.get(cacheKey);
   }
   const provider = await getProviderFor(modelName);
   const undoStore = { backups: new Map() };
@@ -1213,7 +1263,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
 
   const dispatch = createApiDispatch({
     json, srvlog, readBody, cfg, home,
-    providerCache, getProviderFor, tasks,
+    providerCache, invalidateProviderCache, getProviderFor, tasks,
     MAX_CONCURRENT, pruneTasks, handleChat,
     mcpFacade, provider, validateRemoteUrl, isPrivateHost,
     authEnabled, tokenMatches, requestToken, trustedHost, INDEX_HTML, draftTexts, startupCwd, sessionMemoryCache,

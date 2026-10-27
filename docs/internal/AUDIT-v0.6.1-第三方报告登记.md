@@ -5423,3 +5423,61 @@ before 目录在 `d37d17e` 的独立 worktree 里截（避免把已改工作树�
 - TTFT 的“后续明显劣化警告”可选未做（原因见上）；如要做，需先把每请求 TTFT 与回合首帧分开计量。
 - 空窄条里的抽屉开关移入顶栏是必要的能力承接；若将来改成其他入口，§163 的 `#sideNavRailBtn` 断言需同步。
 - `<900` 左栏仍是覆盖式抽屉（打开时覆盖正文），这是 §3.88 的既有交互，本轮只去掉空窄条、不改成推挤布局。
+
+## 3.99 已做（v0.6.29 Provider 加固：H-04 缓存/SSE/脱敏/掩码——代码审计 H-04 + minimax M-8/M-9/M-13/L-9）
+
+**来源**：`../MingDao-Harness-v0.6.28-代码审计报告.md` H-04；`../MingDao-Harness-v0.6.28-minimax代码审计报告.md` M-8/M-9/M-13/L-9。
+
+**修复**
+
+- **H-04（改 baseUrl 未清 Provider 缓存，高危）**：`src/web/server.js` 的 provider 缓存从「只按模型名」改为
+  「模型 + 出网配置指纹（代际号 / baseUrl / apiKey 的 sha256 摘要 / timeout）」，并新增
+  `invalidateProviderCache()`：代际 +1、清 provider 实例 **与本地端点预检备忘**（旧端点的 TTFT/endpoint
+  不能套到新端点）。`src/web/routes/domains/config.js` 的 `setBaseUrl`（含清空 baseUrl）、Key 增删、
+  自定义模型增删改、超时修改全部改走该函数（未注入时退回 `providerCache.clear()`）。
+  创建期间配置若又变化，旧实例**不写回缓存**；已开始的旧任务持旧实例自然结束，不强杀。
+- **M-8（SSE 多行 data / 坏帧静默丢弃）**：`src/providers/openai-compatible.js` 改为事件级解析：
+  同一事件的多行 `data:` 按 SSE 规范以 `\n` 连接，空行派发；坏帧只 warn 一次并在返回值 `badFrames`
+  计数（预览先 `redactSecrets` 再截断，告警不成为新泄露面）。兼容「不发空行、每行一个完整 JSON」的网关；
+  `[DONE]` 立即派发，保证其后紧跟（无空行）的 usage 尾帧仍被捕获。
+- **M-9（SSE 抛错不取消 reader）**：`parseStream` 的读取循环包进 `try/finally`，成功/失败/中断/坏帧
+  一律 `try { await reader.cancel() } catch {}`（幂等；drain 提前退出也释放）。
+- **M-13（脱敏词表 / 子进程 env 漏形态）**：`SECRET_PREFIXES` 新增 `hf_`、`shpat_`、`dckr_pat_`、`xai-`
+  以及同类高置信 `gsk_`、`pplx-`、`r8_`、`npm_`、`sk_live_`/`sk_test_`、`fal_`（每行带 `sample`）；
+  `SECRET_NAME_SEGMENTS` 增加 `passphrase`（`SSH_PASSPHRASE=…` 日志行同时被脱敏）。`src/tools/bash.js`
+  的敏感 env 增加 `PGPASSWORD`、`SSH_PASSPHRASE`（走段词表）、`DATABASE_URL`/`MYSQL_URL`/`POSTGRES_URL`/
+  `REDIS_URL`/`MONGODB_URI`/`AMQP_URL`/`RABBITMQ_URL` 等，并增加「库类型 + URL/URI/DSN」形态兜底
+  （如 `MY_DATABASE_URL`、`CACHE_REDIS_URI`）。
+- **L-9（`maskKey` 经 HTTP 回前 6 位）**：`src/credentials.js` 新增 `maskKeyTail()`（固定形态 `…末4位`，
+  ≤8 位回 `******`）；`/api/models-config` 全部改用该函数，**浏览器侧不再拿到前 6 位**。
+  本机 CLI（`mingdao key list` 等）保留 `maskKey` 的「前 6…后 4」，避免终端辨认能力退化；
+  该口径已写入 `docs/CONFIG.md`。
+
+**断言与变异**
+
+- 新建 `test/provider-hardening.js`（独立套件，5 组）：①H-04 两个可区分桩端点 A/B + 真 Web：
+  「对话 A → 切 B → 再对话」，断言第二轮主回答与自动标题只到 B、A 的请求数不再增长、A 不再收到
+  `Authorization` 或第二问正文；另测同地址重写、清空 baseUrl、并发切换；②M-8 多行拼接 + 坏帧 warn/计数
+  + `[DONE]` 后 usage；③M-9 注入 reader 抛错/error 帧/正常结束，桩断言 `cancel()` 被调用；
+  ④M-13 每个新增前缀与 env 名各有 sample/断言（并断言「这些前缀必须有对应行」，防止删行后表驱动假绿）；
+  ⑤L-9 `maskKeyTail` + HTTP `keyMasked` 均不含前 6 位。
+- 新建 `test/mutate/batch59-provider-hardening.mjs`：**12/12 全中**（H-04 恢复旧缓存、M-8 三条、
+  M-9、M-13 六条、L-9）。
+- 实测证据（H-04）：切 B 前 A 收到主回答+标题；切 B 后 A 请求数保持不变（不再收到 Bearer/正文），
+  B 收到主回答 + 自动标题；同地址重写/并发切换后新任务仍只到 B；清空 baseUrl 后 A/B 均不再收到请求。
+
+**门禁**
+
+- `npm run typecheck`：通过。
+- `node test/provider-hardening.js`：5 组全部通过。
+- `node test/e2e-web.js`：24 项通过；`node test/api-contracts.js`：8 项通过。
+- `node test/mutate/batch59-provider-hardening.mjs`：12/12 全中。
+
+**未做 / 边界**
+
+- 未改 `test/smoke.js` / `test/run-all.mjs` / `test/mutate/README.md` / CI；`test/mutate/README.md` 的
+  变异总数（492）因此未加 12，`scripts/doc-lint.mjs` 的 ⑥ 会红（按本轮约束如实说明，未改该文件）。
+- `maskKey`（本机 CLI 口径）仍保留前 6 位，仅 HTTP 出口改为 tail-only；若要求 CLI 也 tail-only，
+  需同步改 `test/smoke.js:958`（本轮禁止改 smoke）。
+- 未 tag / 改版本号 / publish / 动官网。
+

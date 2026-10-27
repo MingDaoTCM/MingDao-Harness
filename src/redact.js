@@ -7,7 +7,7 @@ import os from 'node:os';
 // 密钥词（按 `_`/`-` 分段后**整段相等**才算命中，避免 `monkey` 这类子串误伤）
 export const SECRET_NAME_SEGMENTS = new Set([
   'key', 'keys', 'apikey', 'token', 'secret', 'password', 'passwd', 'pwd', 'pass',
-  'credential', 'credentials', 'auth', 'authorization', 'cookie', 'session',
+  'credential', 'credentials', 'auth', 'authorization', 'cookie', 'session', 'passphrase',
 ]);
 // v0.6.7（报告一 M-3）：子进程 env 过滤（bash/hooks/MCP）与脱敏器必须**同一份词表**——
 // 此前两份各自维护，bash 那份漏了 `key` 段：`OPENAI_KEY` / `ANTHROPIC_KEY` / `GITHUB_KEY`
@@ -55,6 +55,20 @@ export const SECRET_PREFIXES = [
   { vendor: 'Dify 知识库 Key', re: /\bdataset-[A-Za-z0-9]{20,}/g, mask: 'dataset-***', sample: sampleOf('dataset-') },
   // 其余厂商（GitHub / AWS / Slack / Google）：整体掩码
   { vendor: 'GitHub/AWS/Slack/Google', re: KEY_PREFIX, mask: '***', sample: sampleOf('ghp_') },
+  // v0.6.29（minimax M-13）：审计点名的四类常见形态（hf_/shpat_/dckr_pat_/xai-）此前完全不被识别。
+  // 每一行都带 sample，由 test/provider-hardening.js 的**显式前缀 + 表驱动**双重断言：
+  // 只遍历表证明不了"这一行还在"——删掉一行表仍能自洽通过，所以还必须断言"这些前缀必须有行"。
+  { vendor: 'Hugging Face', re: /\bhf_[A-Za-z0-9]{20,}/g, mask: 'hf_***', sample: sampleOf('hf_') },
+  { vendor: 'Shopify Admin Token', re: /\bshpat_[A-Za-z0-9]{20,}/g, mask: 'shpat_***', sample: sampleOf('shpat_') },
+  { vendor: 'Docker Personal Access Token', re: /\bdckr_pat_[A-Za-z0-9_-]{20,}/g, mask: 'dckr_pat_***', sample: sampleOf('dckr_pat_') },
+  { vendor: 'xAI', re: /\bxai-[A-Za-z0-9]{20,}/g, mask: 'xai-***', sample: sampleOf('xai-') },
+  // 同类高置信前缀（同样"长得像 key、不像普通标识"，误伤风险低）
+  { vendor: 'Groq', re: /\bgsk_[A-Za-z0-9]{20,}/g, mask: 'gsk_***', sample: sampleOf('gsk_') },
+  { vendor: 'Perplexity', re: /\bpplx-[A-Za-z0-9]{20,}/g, mask: 'pplx-***', sample: sampleOf('pplx-') },
+  { vendor: 'Replicate', re: /\br8_[A-Za-z0-9]{20,}/g, mask: 'r8_***', sample: sampleOf('r8_') },
+  { vendor: 'npm Token', re: /\bnpm_[A-Za-z0-9]{20,}/g, mask: 'npm_***', sample: sampleOf('npm_') },
+  { vendor: 'Stripe Secret Key（live/test）', re: /\bsk_(?:live|test)_[A-Za-z0-9]{16,}/g, mask: 'sk_***', sample: sampleOf('sk_live_') },
+  { vendor: 'fal.ai', re: /\bfal_[A-Za-z0-9]{20,}/g, mask: 'fal_***', sample: sampleOf('fal_') },
 ];
 
 export function redactSecrets(/** @type {any} */ text) {

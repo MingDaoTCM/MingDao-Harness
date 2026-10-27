@@ -6,6 +6,8 @@
  * @typedef {Error & { status?: number, headers?: Headers }} ApiError
  */
 
+import { redactSecrets } from '../redact.js';
+
 // 部分网关/本地推理框架在拒绝请求（如 507 memory_refusal）时不回非 2xx，而是回
 // 200 + {"error":{"code":507,"message":"memory_refusal"}}，或 SSE 首帧夹带 error 对象。
 // 若不识别，会被当作「空输出」吞掉，误报成「模型本轮没有输出正文。」（MacBook 本地 mtplx 507 根因）。
@@ -153,6 +155,13 @@ export function parseNonStream(/** @type {any} */ json, /** @type {any} */ onDel
 // 解析 SSE 流：处理跨 chunk 断行、增量 content / reasoning_content / tool_calls。
 // onActivity：每收到一个有效 SSE 数据帧即回调（含 usage-only 帧），供上层做「首 token 等待/流式空闲」超时仲裁——
 // 长上下文 prefill 时服务端可能 200s+ 无正文，靠「有帧到达」而非「有正文」判定存活，避免误杀慢 prefill。
+//
+// v0.6.29（minimax M-8/M-9）：
+//   · 多行 `data:` 是 SSE 规范的一部分（同一事件的多行以 `\n` 连接，空行才派发）。此前逐行解析，
+//     多行 JSON 帧必然 `JSON.parse` 失败并被静默 `return`——正文/usage 直接消失，且没有任何日志。
+//   · 坏帧**不得静默丢**：至少 warn 一次并在返回值里计数（`badFrames`）；「降级必须可见」是本项目纪律。
+//   · 任何异常路径（read 抛错 / error 帧 / JSON 坏帧后上抛）都必须在 finally 里 cancel reader，
+//     否则长驻 WebUI 会累积半开的 HTTP 连接（M-9）。
 export async function parseStream(/** @type {any} */ body, /** @type {any} */ onDelta, /** @type {any} */ onActivity) {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -164,22 +173,43 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
   let autoKey = 0;
   let usage = null;
   let /** @type {any} */ finish = null;
-
   let doneFlag = false;
-  const handleLine = (/** @type {any} */ lineRaw) => {
-    const line = lineRaw.trim();
-    if (!line.startsWith('data:')) return;
-    const data = line.slice(5).trim();
+  let badFrames = 0;
+  let badFrameWarned = false;
+
+  // 事件缓冲：SSE 规范里 `data:` 可以出现多行，空行才把整个事件派发出去。
+  /** @type {string[]} */
+  const dataLines = [];
+
+  /** 坏帧只 warn 一次（首个），其余只计数——避免每帧刷屏，同时保证「丢了什么」可见。 */
+  const noteBadFrame = (/** @type {string} */ data, /** @type {any} */ err) => {
+    badFrames += 1;
+    if (badFrameWarned) return;
+    badFrameWarned = true;
+    // 坏帧内容可能本身含密钥/正文：先脱敏再截断，告警不能成为新的泄露面。
+    let preview = String(data).replace(/\s+/g, ' ').slice(0, 120);
+    try {
+      preview = redactSecrets(preview);
+    } catch {}
+    console.warn(`[MingDao] SSE 坏帧已忽略（首个；后续只计数，累计 ${badFrames}）：${preview}（${String(err?.message || err)}）`);
+  };
+
+  /** 派发当前 data: 缓冲；返回 true 表示收到 [DONE]（调用方据此停止本块的逐行消费）。 */
+  const dispatchEvent = () => {
+    if (!dataLines.length) return false;
+    const data = dataLines.join('\n'); // SSE 规范：事件内多行 data 以 \n 连接
+    dataLines.length = 0;
     if (data === '[DONE]') {
       finish = /** @type {any} */ finish || 'stop';
       doneFlag = true;
-      return true; // 通知外层终止读取（审计 P2-4：[DONE] 后不再消费残帧、不挂到超时）
+      return true;
     }
     let json;
     try {
       json = JSON.parse(data);
-    } catch {
-      return;
+    } catch (e) {
+      noteBadFrame(data, e);
+      return false;
     }
     // 200 流里夹带 error 帧（本地内存拒绝等）：立即上抛，不当作空输出吞掉
     const se = extractStreamError(json);
@@ -187,7 +217,7 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
     // 注意：DeepSeek/OpenAI 流式最后一块常是 usage-only（choices 为空），必须先取 usage 再判 choices
     if (json.usage) usage = json.usage;
     const choice = json?.choices?.[0];
-    if (!choice) return;
+    if (!choice) return false;
     const d = choice.delta ?? {};
     if (d.content && !doneFlag) {
       content += d.content;
@@ -227,6 +257,39 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
       }
     }
     if (choice.finish_reason) finish = choice.finish_reason;
+    return false;
+  };
+
+  /** 追加一行 data: 值；兼容「不发空行、每行都是完整 JSON」的网关。 */
+  const pushData = (/** @type {string} */ value) => {
+    if (!value) return; // 空 data 行是心跳，不是坏帧
+    if (dataLines.length) {
+      const pending = dataLines.join('\n');
+      let complete = false;
+      try {
+        JSON.parse(pending);
+        complete = true;
+      } catch {}
+      // 上一行已经是完整事件 → 先派发，避免把两个事件拼成一个坏帧。
+      // （[DONE] 由下面的立即派发分支处理，不依赖这里。）
+      if (complete) dispatchEvent();
+    }
+    if (value === '[DONE]') {
+      // [DONE] 不可能跨行：立即派发，保证其后紧跟的 usage 尾帧（部分网关不发空行）仍能解析。
+      dataLines.push(value);
+      dispatchEvent();
+      return;
+    }
+    dataLines.push(value);
+  };
+
+  /** 消费一行原始文本；返回 true 表示 [DONE]（供内层循环提前收口）。 */
+  const consumeLine = (/** @type {string} */ lineRaw) => {
+    const line = lineRaw.trim();
+    if (!line) return dispatchEvent(); // 空行 = 事件边界
+    if (!line.startsWith('data:')) return false; // event/id/retry/注释：不影响 data 缓冲
+    pushData(line.slice(5).trim());
+    return false;
   };
 
   // P1-6（v0.4.5）：[DONE] 后不再无限等待网关关流——此前外层 for 继续 read 至流关闭，
@@ -246,29 +309,36 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
       clearTimeout(t);
     }
   };
-  for (;;) {
-    const { done, value } = await (doneFlag ? readDrain() : reader.read());
-    if (done) break;
-    if (value == null) {
-      // 排空超时：不再等，取消 reader 释放连接（防火墙/网关持流不关的场景）
-      reader.cancel().catch(() => {});
-      break;
+  try {
+    for (;;) {
+      const { done, value } = await (doneFlag ? readDrain() : reader.read());
+      if (done) break;
+      if (value == null) {
+        // 排空超时：不再等，取消 reader 释放连接（防火墙/网关持流不关的场景）
+        try { await reader.cancel(); } catch {}
+        break;
+      }
+      buf += decoder.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        // 有帧到达即视为「活着」：prefill 阶段服务端可能先发 usage-only/空帧，正文迟迟不来，
+        // 靠帧到达刷新上层流式空闲计时器（首 token 等待则仍由「无任何帧」触发）
+        if (line.trim()) onActivity?.();
+        if (consumeLine(line)) break;
+      }
     }
-    buf += decoder.decode(value, { stream: true });
-    let nl;
-    while ((nl = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, nl);
-      buf = buf.slice(nl + 1);
-      // 有帧到达即视为「活着」：prefill 阶段服务端可能先发 usage-only/空帧，正文迟迟不来，
-      // 靠帧到达刷新上层流式空闲计时器（首 token 等待则仍由「无任何帧」触发）
-      if (line.trim()) onActivity?.();
-      if (handleLine(line)) break;
-    }
+  } finally {
+    // M-9：成功/失败/中断/坏帧一律释放连接。cancel 是幂等的，重复调用无害；
+    // 但**绝不能**只在正常路径调用——那正是连接泄漏的来源。
+    try { await reader.cancel(); } catch {}
   }
   // 收尾：残行（网关最后一帧不带换行）与多字节字符冲刷——decode 残余并入 buf 统一走行解析，
   // 不再直接拼进 content（此前尾字节绕过 doneFlag/行解析，流中途截断时正文混入杂质）
   buf += decoder.decode();
-  if (buf.trim()) handleLine(buf); // [DONE] 后残留 usage 尾帧仍吸收（正文/推理已被 doneFlag 拦截）
+  if (buf.trim()) consumeLine(buf); // [DONE] 后残留 usage 尾帧仍吸收（正文/推理已被 doneFlag 拦截）
+  dispatchEvent(); // 末尾事件缺少空行分隔时也必须派发（不能静默丢最后一帧）
 
   const toolCalls = [...calls.entries()]
     .sort((a, b) => {
@@ -289,5 +359,5 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
   // 半个回答被当完整交付、无任何告警——空完成与真完成在账本/界面上完全一样。
   // 判据：既没拿到 [DONE]（doneFlag），也没有 finish_reason，却已经有正文/工具调用。
   const truncated = !doneFlag && finish == null && (content.length > 0 || reasoning.length > 0 || calls.size > 0);
-  return { text: content, reasoning, toolCalls: toolCalls.length ? toolCalls : null, usage, finish, truncated };
+  return { text: content, reasoning, toolCalls: toolCalls.length ? toolCalls : null, usage, finish, truncated, badFrames };
 }

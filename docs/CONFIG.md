@@ -577,6 +577,11 @@ API id，不参与 `modelLabels`（其条目仍带 `id`，等于自定义模型�
 
 自定义模型的 Key 存凭证库 `custom:<模型名>` 键下；增删改建议直接用 WebUI 设置面板完成。
 
+> **Key 掩码口径（v0.6.29）**：WebUI / HTTP API（`/api/models-config` 的 `keyMasked`）只返回
+> **末 4 位**（固定形态 `…wxyz`），**不再回显前 6 位**——Web 响应可能进入浏览器历史、截图或
+> 剪贴板，前缀也是不该外露的指纹。本机 CLI（`mingdao key list`）仍显示「前 6…后 4」，
+> 便于在终端里辨认是哪把 Key；完整 Key 任何出口都不会返回。
+
 自定义端点若跑的是 DeepSeek 系模型（模型名不以 `deepseek` 开头时默认走启发式估算、预算误差
 可达 ±2 倍），加 `"tokenizer": "deepseek"` 即按官方词表精确计数：
 
