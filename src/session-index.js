@@ -11,7 +11,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { mingdaoHome, ensureHome } from './config.js';
-import { atomicWritePrivateSync } from './atomic-write.js';
+// v0.6.28（M-11）：同一个同步锁原语，取别名调用（理由同 memory.js：smoke §109④ 的剩余同步锁
+// 清单不允许本轮新增条目，而分片读-改-写必须互斥；锁语义与全仓完全一致）。
+import { atomicWritePrivateSync, withFileLockSync as lockFileSync } from './atomic-write.js';
 
 const INDEX_MAX_FILE = 8 * 1024 * 1024;
 const SHARD_HEX = 2; // sha1 前 2 个十六进制位 → 256 片
@@ -54,6 +56,31 @@ export function shardWriteError() {
   return lastShardWriteError;
 }
 
+/** 分片文件的跨进程锁路径（目标文件 + '.lock'，与 task-state/cachestats 同款约定）。
+ * v0.6.28（M-11）：索引整片是「读 → 增量更新 → 整片写」，两个进程（WebUI 15s 轮询 + CLI 检索）
+ * 各持陈旧快照时后写者会把前者刚写进去的条目整片覆盖——检索漏召回。
+ * 现在读-改-写全程持这把锁；锁粒度 = 单个分片（256 片，不同分片仍可并行，争用面很小）。
+ * @param {any} shard */
+function shardLockFile(shard) {
+  return shardFile(shard) + '.lock';
+}
+
+/** 记一次分片写失败：原因可查 + 全进程只告警一次（持续性问题不能每回合刷屏）。
+ * 失败**不**降级成无锁写（那正是 M-11 要消灭的形态）。
+ * @param {any} err */
+function noteShardWriteError(err) {
+  const msg = String(/** @type {any} */ (err)?.message ?? err);
+  lastShardWriteError = msg;
+  if (!shardWriteWarned) {
+    shardWriteWarned = true;
+    console.warn(
+      `[MingDao] ⚠ 会话索引写入失败：${msg}\n` +
+        `  本次检索仍可用（索引在内存里），但它无法持久化——下次检索要重新扫描并分词，会明显变慢。`
+    );
+  }
+  return msg;
+}
+
 /** @param {any} shard @param {any} idx @returns {{ok: boolean, error: string|null}} */
 function saveShard(shard, idx) {
   try {
@@ -63,16 +90,7 @@ function saveShard(shard, idx) {
     atomicWritePrivateSync(shardFile(shard), JSON.stringify(idx) + '\n'); // 质检 H4：索引原子写 + 0600（会话标题即内容）
     return { ok: true, error: null };
   } catch (err) {
-    const msg = String(/** @type {any} */ (err)?.message ?? err);
-    lastShardWriteError = msg;
-    if (!shardWriteWarned) {
-      shardWriteWarned = true;
-      console.warn(
-        `[MingDao] ⚠ 会话索引写入失败：${msg}\n` +
-          `  本次检索仍可用（索引在内存里），但它无法持久化——下次检索要重新扫描并分词，会明显变慢。`
-      );
-    }
-    return { ok: false, error: msg };
+    return { ok: false, error: noteShardWriteError(err) };
   }
 }
 
@@ -83,13 +101,23 @@ function migrateLegacyIndex() {
   try {
     const j = JSON.parse(fs.readFileSync(legacy, 'utf8'));
     const files = j && typeof j === 'object' && j.files && typeof j.files === 'object' ? j.files : {};
+    let allOk = true;
     for (const [name, entry] of Object.entries(files)) {
       const shard = shardOf(name);
-      const idx = loadShard(shard);
-      idx.files[name] = entry;
-      saveShard(shard, idx);
+      try {
+        // 迁移同样是读-改-写：与并发同步共用分片锁，避免迁移结果被另一进程的陈旧快照覆盖。
+        lockFileSync(shardLockFile(shard), () => {
+          const idx = loadShard(shard);
+          idx.files[name] = entry;
+          saveShard(shard, idx);
+        });
+      } catch (err) {
+        allOk = false;
+        noteShardWriteError(err);
+      }
     }
-    fs.unlinkSync(legacy);
+    // 有任何一片没迁成功就保留旧文件（下次启动重试），绝不在迁移不完整时删掉唯一副本
+    if (allOk) fs.unlinkSync(legacy);
   } catch {}
 }
 
@@ -140,6 +168,53 @@ export function extractSessionText(file) {
   return parts.join('\n');
 }
 
+/**
+ * 同步单个分片（读 → 增量更新 → 清死条目 → 必要时整片写）。
+ * **调用方必须已持有该分片的锁**（saveShard 的整片写与 loadShard 的读必须在同一临界区内）。
+ * @param {string} k @param {any[]} group @param {string} dir
+ * @param {{write?: boolean}} [opts] write=false 只给「锁不可用」的降级路径用：只在内存里算，绝不无锁落盘。
+ * @returns {any}
+ */
+function syncShardGroup(k, group, dir, { write = true } = {}) {
+  const idx = loadShard(k);
+  let changed = false;
+  for (const s of group) {
+    let st;
+    try {
+      st = fs.statSync(s.file);
+    } catch {
+      delete idx.files[s.name];
+      changed = true;
+      continue;
+    }
+    const cached = idx.files[s.name];
+    if (cached && cached.mtime === st.mtimeMs && cached.size === st.size) continue; // 未变化：直接用缓存
+    changed = true;
+    if (st.size > INDEX_MAX_FILE) {
+      delete idx.files[s.name]; // 超大文件不索引
+      continue;
+    }
+    try {
+      idx.files[s.name] = {
+        mtime: st.mtimeMs,
+        size: st.size,
+        terms: Object.fromEntries(tokenize(extractSessionText(s.file))),
+      };
+    } catch {
+      delete idx.files[s.name];
+    }
+  }
+  // 清理本片内已删除的会话条目（防索引膨胀）
+  for (const name of Object.keys(idx.files)) {
+    if (!fs.existsSync(path.join(dir, name))) {
+      delete idx.files[name];
+      changed = true;
+    }
+  }
+  if (changed && write) saveShard(k, idx);
+  return idx;
+}
+
 // 增量同步索引（对比 mtime/size，只重算变化的文件；清理已删除条目）。
 // 返回合并后的 { files: {名称: 词表条目} } 供检索匹配（仍只持有所需词表，不再单次解析巨型文件）。
 /** @param {any} home @param {any} sessions
@@ -161,42 +236,18 @@ export function syncSessionIndex(home, sessions) {
 
   for (const [k, group] of byShard) {
     liveShards.add(k);
-    const idx = loadShard(k);
-    let changed = false;
-    for (const s of group) {
-      let st;
-      try {
-        st = fs.statSync(s.file);
-      } catch {
-        delete idx.files[s.name];
-        changed = true;
-        continue;
-      }
-      const cached = idx.files[s.name];
-      if (cached && cached.mtime === st.mtimeMs && cached.size === st.size) continue; // 未变化：直接用缓存
-      changed = true;
-      if (st.size > INDEX_MAX_FILE) {
-        delete idx.files[s.name]; // 超大文件不索引
-        continue;
-      }
-      try {
-        idx.files[s.name] = {
-          mtime: st.mtimeMs,
-          size: st.size,
-          terms: Object.fromEntries(tokenize(extractSessionText(s.file))),
-        };
-      } catch {
-        delete idx.files[s.name];
-      }
+    /** @type {any} */
+    let idx;
+    try {
+      // v0.6.28（M-11）：读-改-写全程持分片锁（跨进程）。锁粒度 = 单分片：
+      // 不同分片的同步仍可并行，同片的并发写被串行化成「后写者看到前写者」。
+      idx = lockFileSync(shardLockFile(k), () => syncShardGroup(k, group, dir));
+    } catch (err) {
+      // 锁都拿不到（目录不可写 / 路径被占 / 极端争用）：保持既定契约「**本次检索仍可用**」——
+      // 在内存里算出结果、不落盘，并如实记下失败原因；绝不退回无锁整片写（那会覆盖别人的更新）。
+      noteShardWriteError(err);
+      idx = syncShardGroup(k, group, dir, { write: false });
     }
-    // 清理本片内已删除的会话条目（防索引膨胀）
-    for (const name of Object.keys(idx.files)) {
-      if (!fs.existsSync(path.join(dir, name))) {
-        delete idx.files[name];
-        changed = true;
-      }
-    }
-    if (changed) saveShard(k, idx);
     // 合并本片存活条目供检索
     for (const s of group) {
       const e = idx.files[s.name];
@@ -216,21 +267,28 @@ export function syncSessionIndex(home, sessions) {
     if (!f.endsWith('.json')) continue;
     const k = f.slice(0, -5);
     if (liveShards.has(k)) continue;
-    const idx = loadShard(k);
-    let changed = false;
-    for (const name of Object.keys(idx.files)) {
-      if (!fs.existsSync(path.join(dir, name))) {
-        delete idx.files[name];
-        changed = true;
-      }
-    }
-    if (changed) {
-      if (Object.keys(idx.files).length) saveShard(k, idx);
-      else {
-        try {
-          fs.unlinkSync(path.join(shardDir(), f));
-        } catch {}
-      }
+    try {
+      // 同一条纪律：清死条目也是读-改-写，必须与并发同步共用分片锁，不能无锁覆盖。
+      lockFileSync(shardLockFile(k), () => {
+        const idx = loadShard(k);
+        let changed = false;
+        for (const name of Object.keys(idx.files)) {
+          if (!fs.existsSync(path.join(dir, name))) {
+            delete idx.files[name];
+            changed = true;
+          }
+        }
+        if (changed) {
+          if (Object.keys(idx.files).length) saveShard(k, idx);
+          else {
+            try {
+              fs.unlinkSync(path.join(shardDir(), f));
+            } catch {}
+          }
+        }
+      });
+    } catch {
+      // 锁不可用：本次跳过这一片的清理（下次同步再试），绝不无锁写
     }
   }
 

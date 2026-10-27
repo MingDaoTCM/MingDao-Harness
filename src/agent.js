@@ -1002,6 +1002,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       zeroToolCalls: ensureZeroToolCallNotice(),
     });
     let aborted = false;
+    // 连续空/截断输出计数（防止无限续写）。v0.6.28（M-10）：**必须真的复位**——
+    // 有进展的工具轮（成功且不重复，与看门狗同判据）与有内容的模型轮都会清零，
+    // 否则「3 次非连续空轮」会被误判成「连续 3 轮」而中止（文案与实现的判据必须一致）。
     let emptyRounds = 0; // 连续空/截断输出计数（防止无限续写）
     // v0.6.13（A）：本轮用户消息是否为"任务态"（含写/执行意图）——用于收尾时的「0 次工具调用」提示
     const turnUserTaskLike = hasWriteIntent(String([...messages].reverse().find((m) => m?.role === 'user')?.content ?? ''));
@@ -1294,6 +1297,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       const roundUsageStart = { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens || 0, prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens || 0 };
       while (steps < stepLimit) {
       steps += 1;
+      // v0.6.28（L-13）：`finish` 是**本次模型请求**的 finish_reason，不是回合级状态。
+      // 每步开始重置，且只由本步的 res.finish 写入（见下方赋值）——否则上一轮 length/capped
+      // 会残留到下一轮正常回复，把 `truncated`/`capped` 判给一次正常收尾。
+      finish = null;
       // v0.6.5（审计 BUG-025，实测复现）：Ctrl+C 落在**工具执行期间**时，此前只把 `aborted`
       // 置真、却没有任何收敛点——工具跑完仍会走回这里发出**下一次请求**（实测：SIGINT 之后
       // chat 仍被调用 2 次）。这里与工具循环里的检查一起把它收口成「立刻停止、如实回报 aborted」。
@@ -1769,10 +1776,15 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         throw err;
       }
 
+      // v0.6.28（L-13）：`?? finish` 只在**本步**已写入时才有值；上面每步开始已重置为 null，
+      // 因此缺失 finish_reason 时这里落到 null，绝不会把上一步的 length/capped 带进本轮收尾。
       finish = res.finish ?? finish;
       // v0.6.3（M-16）：上游**提前关流**（没有 [DONE]、也没有 finish_reason）说明这次回答很可能是半截的。
       // 此前它与正常结束完全无法区分：用户拿到半句、账本记 done、也没有任何告警。
       // 这里至少做到"说出来"——置标记并在界面上提示，让人知道该复核输出而不是直接采信。
+      // v0.6.28（M-10）：**有内容的模型轮**复位空轮计数。`finish === 'length'` 的轮次不算
+      // （正文即使非空也是被截断的半截，正是本护栏要计数的形态），否则截断续写护栏会被清零。
+      if (String(res.text || '').trim() && res.finish !== 'length') emptyRounds = 0;
       if (res.truncated) {
         upstreamTruncated = true;
         try {
@@ -2050,6 +2062,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (toolOk && repeatedBefore === 0) markProgress(`工具 ${prep.name} 返回`);
           else if (toolOk) { turnProgress.unproductive += 1; turnProgress.repeatedCalls = (turnProgress.repeatedCalls || 0) + 1; }
           else turnProgress.unproductive += 1;
+          // v0.6.28（M-10）：有进展的工具轮复位空轮计数（失败/重复调用不算进展，与看门狗同判据）。
+          if (toolOk && repeatedBefore === 0) emptyRounds = 0;
           // 省钱 B3：逐工具调用/耗时累加（费用二级分账的 byTool 维度）
           const ts = toolStats.get(prep.name) || { calls: 0, ms: 0 };
           ts.calls += 1;

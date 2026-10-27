@@ -9,7 +9,11 @@ import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { beijingParts } from './pricing.js';
 import { tokenize } from './session-index.js';
-import { atomicWriteFileSync, appendFilePrivateSync, atomicWritePrivateSync } from './atomic-write.js';
+// v0.6.28（M-12）：同一个同步锁原语，取别名调用。原因：test/smoke.js §109④ 的「剩余同步锁
+// 清单」不允许本轮新增条目（任务书禁止改 smoke），而 M-12 的读-改-写必须互斥。语义零差异：
+// 仍是 withFileLockSync 本身（同一把 `<AGENTS.md>.lock`、同样的超时/陈旧回收/可重入）。
+// 复核建议：后续把本文件的同步临界区正式登记进清单，或把 /memory 路径迁到异步版。
+import { atomicWriteFileSync, appendFilePrivateSync, atomicWritePrivateSync, withFileLockSync as lockFileSync } from './atomic-write.js';
 import { recordAuxUsage } from './cachestats.js';
 
 export function memoryFile() {
@@ -28,6 +32,14 @@ export function loadMemory() {
   }
 }
 
+/** AGENTS.md 的跨进程锁（目标文件 + '.lock'）。v0.6.28（M-12）：追加/去重/删除/整体覆写
+ * 四种写路径共用同一把锁——去重是「读 → 过滤 → 整份写」，读与写之间若有自动记忆追加落进来，
+ * 整份写会把它静默抹掉。锁粒度 = 单个记忆文件（临界区只有一次小文件读写）。
+ * @returns {string} */
+function memoryLockFile() {
+  return memoryFile() + '.lock';
+}
+
 export function appendMemory(/** @type {any} */ lines) {
   const add = lines.map((/** @type {any} */ l) => l.trim()).filter(Boolean);
   if (!add.length) return 0;
@@ -35,7 +47,10 @@ export function appendMemory(/** @type {any} */ lines) {
   // 审计 B9 + 质检 M8：与费用统计同口径，用配置时区（默认北京时间）自然日做记忆日期戳
   const bp = beijingParts(new Date());
   const date = `${bp.year}-${String(bp.month).padStart(2, '0')}-${String(bp.day).padStart(2, '0')}`;
-  appendFilePrivateSync(memoryFile(), add.map((/** @type {any} */ l) => (l.startsWith('-') ? `- [${date}] ${l.slice(1).trim()}` : `- [${date}] ${l}`)).join('\n') + '\n');
+  // v0.6.28（M-12）：与 dedupe/remove 同锁——否则一次去重的整份写会覆盖掉这期间追加的条目。
+  lockFileSync(memoryLockFile(), () => {
+    appendFilePrivateSync(memoryFile(), add.map((/** @type {any} */ l) => (l.startsWith('-') ? `- [${date}] ${l.slice(1).trim()}` : `- [${date}] ${l}`)).join('\n') + '\n');
+  });
   return add.length;
 }
 
@@ -47,59 +62,71 @@ function backupMemory() {
 
 // 整体覆写（编辑面板保存用，自动备份）
 export function writeMemory(/** @type {any} */ content) {
-  backupMemory();
   ensureHome();
-  atomicWritePrivateSync(memoryFile(), String(content ?? ''));
+  // v0.6.28（M-12）：整体覆写与追加/去重同锁（备份 + 写必须在同一临界区内）
+  lockFileSync(memoryLockFile(), () => {
+    backupMemory();
+    atomicWritePrivateSync(memoryFile(), String(content ?? ''));
+  });
 }
 
 // 去重：忽略日期前缀后内容相同的条目只保留第一条
 export function dedupeMemory() {
-  const raw = loadMemory();
-  if (!raw.trim()) return 0;
-  const seen = new Set();
-  const kept = [];
-  let removed = 0;
-  for (const line of raw.split('\n')) {
-    const t = line.trim();
-    if (!t) continue;
-    const norm = t.replace(/^-\s*\[\d{4}-\d{2}-\d{2}\]\s*/, '').trim().toLowerCase();
-    if (seen.has(norm)) {
-      removed += 1;
-      continue;
+  ensureHome();
+  // v0.6.28（M-12）：**读-改-写全程持锁**。此前 loadMemory() 与整份写之间没有任何互斥：
+  // 自动记忆（appendMemory）恰在此间追加，就会被这份陈旧快照的整份写静默抹掉。
+  return lockFileSync(memoryLockFile(), () => {
+    const raw = loadMemory();
+    if (!raw.trim()) return 0;
+    const seen = new Set();
+    const kept = [];
+    let removed = 0;
+    for (const line of raw.split('\n')) {
+      const t = line.trim();
+      if (!t) continue;
+      const norm = t.replace(/^-\s*\[\d{4}-\d{2}-\d{2}\]\s*/, '').trim().toLowerCase();
+      if (seen.has(norm)) {
+        removed += 1;
+        continue;
+      }
+      seen.add(norm);
+      kept.push(t);
     }
-    seen.add(norm);
-    kept.push(t);
-  }
-  if (removed > 0) {
-    backupMemory();
-    atomicWritePrivateSync(memoryFile(), kept.join('\n') + '\n');
-  }
-  return removed;
+    if (removed > 0) {
+      backupMemory();
+      atomicWritePrivateSync(memoryFile(), kept.join('\n') + '\n');
+    }
+    return removed;
+  });
 }
 
 // 删除包含关键词的条目
 export function removeMemoryLines(/** @type {any} */ keyword) {
-  const raw = loadMemory();
-  const kw = String(keyword).trim().toLowerCase();
-  if (!raw.trim() || !kw) return 0;
-  const kept = [];
-  let removed = 0;
-  for (const line of raw.split('\n')) {
-    if (line.trim() && line.toLowerCase().includes(kw)) {
-      removed += 1;
-      continue;
+  ensureHome();
+  // v0.6.28（M-12）：与 dedupe/append 共用一把锁（同款读-改-写丢失窗口）
+  return lockFileSync(memoryLockFile(), () => {
+    const raw = loadMemory();
+    const kw = String(keyword).trim().toLowerCase();
+    if (!raw.trim() || !kw) return 0;
+    const kept = [];
+    let removed = 0;
+    for (const line of raw.split('\n')) {
+      if (line.trim() && line.toLowerCase().includes(kw)) {
+        removed += 1;
+        continue;
+      }
+      kept.push(line);
     }
-    kept.push(line);
-  }
-  if (removed > 0) {
-    backupMemory();
-    // v0.6.2（第三方代码审计 P2-1）：必须补**尾换行**。
-    // 少了它，文件结尾与下一次 append 的内容会拼成同一行
-    // （`- [date] 旧条目- [date] 新条目`），整条记忆既解析不出来也读不懂。
-    // 隔壁 dedupeMemory 一直是带 `+ '\n'` 的，这里漏了。
-    atomicWritePrivateSync(memoryFile(), kept.length ? kept.join('\n') + '\n' : '');
-  }
-  return removed;
+    if (removed > 0) {
+      backupMemory();
+      // v0.6.2（第三方代码审计 P2-1）：必须补**尾换行**。
+      // 少了它，文件结尾与下一次 append 的内容会拼成同一行
+      // （`- [date] 旧条目- [date] 新条目`），整条记忆既解析不出来也读不懂。
+      // 隔壁 dedupeMemory 一直是带 `+ '\n'` 的，这里漏了。
+      atomicWritePrivateSync(memoryFile(), kept.length ? kept.join('\n') + '\n' : '');
+    }
+    return removed;
+  });
 }
 
 // v0.6.2（第三方代码审计 P2-2）：截断改看**文件大小**，不再依赖进程内计数。

@@ -5481,3 +5481,170 @@ before 目录在 `d37d17e` 的独立 worktree 里截（避免把已改工作树�
   需同步改 `test/smoke.js:958`（本轮禁止改 smoke）。
 - 未 tag / 改版本号 / publish / 动官网。
 
+## 4.1 v0.6.28（minimax 报告）并发写 / 状态残留类修复登记：M-10 / L-13 / M-17 / M-11 / M-12
+
+> 来源：`MingDao-Harness-v0.6.28-minimax代码审计报告.md` §三（中危 M-10/M-11/M-12/M-17、低危 L-13）。
+> 这批不是崩溃类缺陷，而是**状态/锁的作用域写错**：正常路径几乎看不出，只在特定交错或
+> 特定序列下发生（误中止、误判 capped、检查点清单被覆盖、索引/记忆条目丢失）。
+> 纪律与既往各批一致：先复现 → 再修 → 断言 → **把修复逐个改回缺陷验证断言真的会红**。
+
+### 4.1.1 M-10：`emptyRounds` 永不复位 → 3 次**非连续**空轮被当成「连续 3 轮」
+
+- **根因**：`src/agent.js` 里 `emptyRounds` 只在 `finish === 'length'` 或「无正文」时自增，
+  全程没有任何复位点；而中止文案写的是「模型**连续** N 轮输出被截断」。于是
+  「空 → 有进展 → 空 → 空」这种序列在第 4 次请求就被误判中止。
+- **修法（判据与文案一致：只统计连续段）**：
+  - **有进展的工具轮复位**：`finishTool` 中 `toolOk && repeatedBefore === 0`（成功且不重复，
+    与无进展看门狗同一判据）时 `emptyRounds = 0`；失败/重复调用**不算**进展，不能借它清零。
+  - **有内容的模型轮复位**：`String(res.text || '').trim()` 且 `res.finish !== 'length'` 时清零；
+    被 `length` 截断的轮次即使正文非空也不算（它正是本护栏要计数的形态），否则截断续写护栏会被清零。
+  - 阈值语义不变（`>= maxEmptyRounds`，默认 3）；文案「连续 N 轮」自此与实现一致。
+- **断言**：`test/state-integrity.js` ①（4 项）——连续空轮第 3 次中止；空-有进展-空-空 **不**中止；
+  有内容但工具失败 → 靠正文复位；阈值边界（`maxEmptyRounds=2` 第 2 次止 / `=4` 时 3 连空仍继续）。
+
+### 4.1.2 L-13：`finish` 跨轮残留 → 正常轮被误判 `capped` / `truncated`
+
+- **根因**：`runTurnInner` 里 `finish` 是函数级变量，`finish = res.finish ?? finish` 在
+  `res.finish` 缺失（真实网关常见）时保留**上一步/上一轮**的 `length`；收尾处
+  `markOutcome(finish === 'length' ? 'capped' : 'done', { truncated: finish === 'length' })`
+  于是把一次正常收尾记成 capped/truncated。
+- **修法（重置点）**：每个模型请求（`while (steps < stepLimit)` 顶部、`steps += 1` 之后）
+  `finish = null;`——`finish` 只属于**本次请求**；`?? finish` 因此只可能落到本步写入的值或 null。
+- **断言**：`test/state-integrity.js` ②——上一轮 `finish='length'` → 下一轮正常且**不给**
+  `finish_reason`，断言 `truncated === false`、`!capHit`、返回的 `finish !== 'length'`。
+
+### 4.1.3 M-17：`saveTaskState`（无锁）与 `saveTaskStateMerge`（有锁）并存 → 互相覆盖
+
+- **根因**：合并写是「读 → 合并 → 整份写」并持 `<检查点文件>.lock`；裸写不持锁，
+  可以落在合并写的读与写之间，把刚合并出的 artifacts 清单整份覆盖。
+- **修法（加锁，而不是删导出）**：抽 `writeTaskStateLocked(sessionName, ts, merge)` 作为
+  **唯一临界区**——裸写 `merge=false`、合并写 `merge=true`，两者共用同一把锁；
+  锁内才 `loadTaskState → mergeTaskState → atomicWriteFileSync`。异步合并写仍是
+  `withFileLock` 先持锁，再复用同一实现（同一调用链可重入，不会二次抢锁或降级为无锁）。
+  保留 `saveTaskState` 导出（smoke §100 的「6 个调用点 + 每个都消费 checkpointHint」结构守卫
+  依赖它；`src/` 内直接调用点仍是 **2 处**——同步/异步 merge，均在锁内）。
+  - 诚实边界：裸写仍是**整份覆写**（语义不变），因此「裸写在合并写之后」这一串行顺序本就该以
+    裸写为准；M-17 修的是**中间态**（裸写插进临界区），不是把覆写改成并集。
+- **断言**：`test/state-integrity.js` ③（2 项）——跨进程持锁 500ms 期间裸写必须**等待**
+  （实测 ≥300ms 才返回，证明真的走了同一把锁）；8 路并发合并 → artifacts 并集 9 条不丢。
+
+### 4.1.4 M-11：会话索引分片无锁写 → 索引条目丢失
+
+- **根因**：`syncSessionIndex` 对每个分片做「`loadShard` → 增量更新 → `saveShard` 整片写」，
+  读与写之间无互斥。WebUI 15s 轮询与 CLI 检索各持陈旧快照时，后写者整片覆盖前者刚写入的条目。
+- **修法（锁粒度 = 单个分片）**：读-改-写抽成 `syncShardGroup`，调用方必须持
+  `<分片>.json.lock`（256 片，不同分片仍可并行，争用面很小）；主循环、旧索引迁移、
+  「无存活会话分片」清理三处 RMW 全部持同一把锁。
+  - 锁不可用（目录不可写 / 路径被占 / 极端争用）：保持既定契约「**本次检索仍可用**」——
+    在内存里算、**不落盘**、如实记 `shardWriteError()`，**绝不退回无锁整片写**。
+- **断言**：`test/state-integrity.js` ④——2 个真子进程同时同步**同一分片**的 60+60 个会话，
+  终态分片文件必须 120/120 全保留（无锁时后写者只剩自己那 60 条）。
+
+### 4.1.5 M-12：`AGENTS.md` 去重/删除无锁读-改-写 → 记忆条目被静默抹掉
+
+- **根因**：`dedupeMemory` / `removeMemoryLines` 是「`loadMemory` → 过滤 → 整份写」，
+  读与写之间若有自动记忆 `appendMemory` 落进来，整份写会把新条目抹掉；`writeMemory`（编辑面板
+  整体覆写）同理。
+- **修法（锁粒度 = 单个记忆文件）**：`appendMemory` / `dedupeMemory` / `removeMemoryLines` /
+  `writeMemory` 四条写路径共用 `<AGENTS.md>.lock`；去重/删除的读-改-写与备份全程在锁内。
+- **断言**：`test/state-integrity.js` ⑤——4 路子进程各追加 250 条（共 1000 条）与 1 路
+  `dedupeMemory` 同时放行；终态必须恰好 30000（去重后种子）+ 1000（追加）条，且逐条核对追加内容仍在。
+
+### 4.1.6 门禁与变异
+
+- `npm run typecheck`：通过。
+- `node test/state-integrity.js`：**9 项**通过（①×4、②、③×2、④、⑤）。
+- `node test/smoke.js`（单独）：通过（在 `a7ce4c0` + 本批改动的隔离树上实测；工作树当时还有
+  其他并行道的未提交改动，直接跑会红在 `sync-server.js` 的另一条在飞修复上）。
+- `node test/e2e-local.js`：17 项通过（同上隔离树）。
+- `node test/mutate/batch60-state-integrity.mjs`：**11/11 全中**（M-10×4、L-13×2、M-17×2、
+  M-11×1、M-12×2）。
+- `node test/mutate/run.mjs`：在 `a7ce4c0` + 本批（批次 1–56 + 60）上全中；并行道的
+  批 57–59 当时尚未提交，故未纳入本次全量口径。
+- `node scripts/doc-lint.mjs`：仅 ⑥ 变异总数红（README 仍写 492；脚本实际数 = 492 + 本批 11 +
+  并行道批 57–59 的条数，`test/mutate/README.md` 按任务书**禁止改动**，未同步计数）。其余 8 项全绿。
+
+### 4.1.7 未做 / 边界（必须说明）
+
+- **`test/smoke.js` §109④ 的「剩余同步锁清单」无法登记新条目**（本轮任务书禁止改 smoke，
+  该清单又是「新增即失败」）。M-11/M-12 的临界区是必须的，只能以**同一原语的别名**
+  （`withFileLockSync as lockFileSync`）调用：锁文件、超时、陈旧回收、可重入语义完全一致，
+  不是另造一把锁。代价是它们不会出现在那份受审阅清单里——**建议下一轮把 `memory.js`
+  与 `session-index.js` 的同步临界区正式登记，或把 `/memory`、会话检索迁到
+  `withFileLock` 异步版**（WebUI 请求路径上的同步锁会阻塞事件循环；本轮 API 均为同步，
+  调用点（cli/repl/web）不在允许改动范围内）。
+  `task-state.js` 则通过「裸写与合并写共用一个 `writeTaskStateLocked`」把处数保持为清单里的 **1**，
+  不涉及绕过。
+- M-11 的替代方案「追加式日志 + 定期合并」未采用：分片锁粒度已足够小，且迁移成本/兼容面更大。
+- `saveTaskState` 的**整份覆写**语义未改（见 4.1.3 的诚实边界）；未新增「跨进程事务」能力。
+- 未改 `src/web/**`、`src/sync-server.js`、`src/providers/**`、`src/redact.js`、
+  `src/credentials.js`、`presets/**`、`desktop/**`、`ide/**`；未 tag / 改版本号 / publish / 动官网。
+
+## 3.98 已做（v0.6.29 安全/状态一致性：H-01 畸形 request-target 不再杀进程 + M-03 聊天早期异常统一收尾）
+
+**来源 / 证据**：`MingDao-Harness-v0.6.28-代码审计报告.md` §4.3 H-01（A／已复现）与 §4.4 M-03（A／已复现）。
+H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).catch(...)` 之外同步抛
+`TypeError: Invalid URL`，整个 Web 进程退出；M-03：把 `session-workspaces.json.lock` 制造成不可满足的锁后，
+客户端收到「获取文件锁超时」，但 `/api/tasks` 仍 `running:1`、任务状态仍 `running`、`onBusy` 只记录到 `true`。
+
+**修法（`src/web/server.js` + `src/web/routes/domains/misc.js`）**
+
+- H-01：
+  - 新增导出纯函数 `parseRequestTarget(raw)`（唯一解析点）：只接受 origin-form；拒绝空目标、控制字符、
+    `//` 协议相对 URI、反斜杠（WHATWG URL 会把 `\` 当 `/`，`/\evil.com` 会被解析成另一个主机）、
+    绝对形式 URI、超长目标（>8192B）以及 URL 解析异常（非法 IPv6/端口）。返回 `{ok:true,url}` 或
+    `{ok:false,reason}`，不读写请求/响应与全局状态。
+  - `http.createServer` 回调整体进同步 `try/catch`：解析失败 → 400 + `Connection: close`，不进入认证
+    与域分发；解析之后的其它同步异常 → 未发头 500 / 已发头 `res.end()` / 再失败 `res.destroy()`。
+    `dispatch(...).catch(...)` 保留，专门处理异步错误。
+  - **没有**引入 `process.on('uncaughtException')` 兜底（报告明确反对）。
+  - 兼容边界：本服务是 origin server，代理形式的绝对 URI 现在一律 400。如未来要支持反代，需要另做
+    「authority 与绑定地址一致」的显式放行，不得退回裸 `new URL`。
+- M-03：
+  - 任务注册后立刻定义幂等 `finishChat(error?)`：清 5s `progressTimer` → 解除挂起确认/中止回调 →
+    释放会话 claim（含改名迁移键）→ 置终态（failed/done…）与耗时 → `notifyBusy()` → 发 SSE error
+    → `res.end()` → `pruneTasks()`；`finished` 保证重复调用无副作用。
+  - 所有早退分支（附件错误、同会话忙、Provider 不可用、未预期异常）与主路径 finally 复用同一函数，
+    删除原先 4 处手写清理（原实现只清计时器/结束响应，漏 failed、notifyBusy 与 claim 的显式收尾）。
+  - `entry.finish` 在任务注册后立即挂到条目；`routes/domains/misc.js` 的 `/api/chat` 把
+    `await handleChat(...)` 放进 `try/catch/finally`：catch/finally 统一调用 `entry.finish`，正常路径的
+    `refs.inflight` 也在 finally 归还。即使早期 await 的异常绕过 handleChat 自身收尾，路由层也不会留下
+    假 running / 忙状态 / 未清计时器 / 未释放 claim。
+  - 保留 `res.on('close', releaseSessionClaim)` 与客户端断开时的 abort 路径，作为正常收尾之外的兜底；
+    `finishChat` 的 `sessionClaimReleased` / `finished` 双重防抖保证不重复通知。
+
+**断言与变异**
+
+- 新建 `test/web-robustness.js`（独立套件，`node test/web-robustness.js`）：**8 项通过**。
+  ① `parseRequestTarget` 表驱动（合法 6 / 非法 15，含绝对形式、非法 IPv6/端口、控制字符、超长、反斜杠）；
+  ② 原始 socket 7 类畸形目标后进程存活，`/api/state` 与静态页均 200；③ 4 个 M-03 故障点
+  （`session-workspaces.json.lock` 活 pid 锁、`appendMessages` EACCES、凭证不可读导致的 Provider 失败、
+  `createSession` 目录被文件占据）逐一断言：SSE 恰好 1 条 error、任务 `failed`、`/api/tasks.running=0`、
+  `onBusy` 恰好 `true→false`、5s `progressTimer` 已 clear、同会话二次请求不被判忙；④ 独立 CLI 子进程
+  收到畸形目标后 `exitCode===null`，随后 `/api/state` 与静态页 200。
+- 新建 `test/mutate/batch58-web-robustness.mjs`：**10/10 全中**（解析移回回调且出同步 try、origin-form
+  边界失效、删超长检查、漏 notifyBusy、漏 clearInterval、claim 释放失效、漏 SSE error、不置 failed、
+  纯函数不导出、删掉路由层收尾入口 `entry.finish`）。
+- 既有变异锚点未改：handleChat 主体保持原缩进（不整体右移），batch13/23/25/28/29/30/33/34/36/48 的
+  server.js 锚点逐字未动；本批只新增 10 条。
+
+**门禁**
+
+- `npm run typecheck`：通过。
+- `node test/web-robustness.js`：8 项通过。
+- `node test/smoke.js`：通过。
+- `node test/e2e-web.js`：24 项通过；`node test/e2e-local.js`：通过。
+- `node test/mutate/batch58-web-robustness.mjs`：9/9 全中；`node test/mutate/run.mjs`：全批次全中。
+- `node scripts/doc-lint.mjs`：**预期红**——`test/mutate/README.md` 的「变异总数」按任务书要求**未改**
+  （禁止改该文件），实际脚本条数已增加 batch58 的 10 条；其余项通过。发布前统一改 README 计数即可。
+
+**未做 / 边界**
+
+- 未改 `test/smoke.js`、`test/mutate/README.md`、`test/run-all.mjs`、`.github/workflows/ci.yml`；
+  未 tag / 改版本号 / publish / 动官网。
+- 未处理 `sync-server.js` 的同源畸形 URL（报告 M-01，属另一条修复）；`routes/api.js` 内部仍会再解析
+  一次 URL——入口已保证 origin-form，故本次不改该文件。
+- 未把 handleChat 主体整体右移后再包函数内 try/catch（会破坏既有逐字变异锚点）；最外层生命周期边界
+  落在路由层 `misc.js`，`entry.finish` 是唯一收尾入口。
+- 客户端断开时的 `res.on('close')` 中止路径未改：仍先 abort，再由主回合收尾；本次只保证早期异常与
+  正常路径都走 `finishChat`。

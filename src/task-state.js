@@ -37,8 +37,45 @@ export function loadTaskState(sessionName) {
   }
 }
 
+/** 检查点写入的**唯一**临界区（锁内读-合并-写）：裸写（merge=false）与合并写（merge=true）共用，
+ * 因而也共用同一把 `<检查点文件>.lock`。v0.6.28（M-17）。
+ * @param {string} file @param {any} sessionName @param {any} ts @param {boolean} merge
+ * @returns {{ok: boolean, error: string|null}} */
+function writeTaskStateFileLocked(file, sessionName, ts, merge) {
+  return withFileLockSync(file + '.lock', () => {
+    // 合并版在**锁内**读旧值（锁外读就是 BUG-068 的陈旧快照覆盖）；ts 在这里被替换成要落盘的值。
+    if (merge) ts = mergeTaskState(loadTaskState(sessionName), ts);
+    const dir = taskStateDir();
+    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+    atomicWriteFileSync(taskStateFile(sessionName), JSON.stringify(ts) + '\n', { mode: 0o600 });
+    return { ok: true, error: null };
+  });
+}
+
+/** 校验会话名（非法名不得写到检查点目录之外）后进入唯一临界区。
+ * @param {any} sessionName @param {any} ts @param {boolean} merge
+ * @returns {{ok: boolean, error: string|null}} */
+function writeTaskStateLocked(sessionName, ts, merge) {
+  let file;
+  try {
+    file = taskStateFile(sessionName);
+  } catch (err) {
+    return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
+  }
+  try {
+    return writeTaskStateFileLocked(file, sessionName, ts, merge);
+  } catch (err) {
+    return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
+  }
+}
+
 /**
- * 落盘检查点，**返回结果而不再静默吞掉**（v0.6.2，audit-report B-WS-1/2 的第二处）。
+ * 落盘检查点（整份覆写）。**返回结果而不再静默吞掉**（v0.6.2，audit-report B-WS-1/2 的第二处）。
+ *
+ * v0.6.28（M-17）：无锁版与「合并版」并存时，一次裸写可以落在 merge 的读 → 合并 → 写 中间，
+ * 把刚合并出来的检查点清单整份覆盖掉。现在两者**共用同一个临界区实现**
+ * （writeTaskStateLocked，同一把 `<检查点文件>.lock`）：裸写要么发生在 merge 之前、要么之后，
+ * 不再有中间态。merge 版在锁内读-合并-写，靠 withFileLockSync 的调用链可重入复用同一把锁。
  *
  * 为什么这里必须可见：跑满步数时 agent 会打印「继续方式：直接发送『继续』即可」——
  * 那是**一个承诺**。而真正写检查点的是调用方（cli/web/repl），写在 banner **之后**。
@@ -49,14 +86,7 @@ export function loadTaskState(sessionName) {
  * @returns {{ok: boolean, error: string|null}}
  */
 export function saveTaskState(sessionName, ts) {
-  try {
-    const dir = taskStateDir();
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    atomicWriteFileSync(taskStateFile(sessionName), JSON.stringify(ts) + '\n', { mode: 0o600 });
-    return { ok: true, error: null };
-  } catch (err) {
-    return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
-  }
+  return writeTaskStateLocked(sessionName, ts, false);
 }
 
 /**
@@ -122,17 +152,8 @@ export function saveTaskStateMerge(sessionName, ts) {
   // 原实现是「读 → 合并 → 整份写」，读与写之间没有互斥，后写者拿着**陈旧快照**覆盖前者。
   // `atomicWriteFileSync` 只保证"不写半截"，不保证"不丢更新"。本仓已有跨进程锁原语，
   // 这里直接复用（与 cachestats / audit 的追加-轮转同锁同款）。
-  let file;
-  try {
-    file = taskStateFile(sessionName); // 非法会话名在这里抛 → 如实转成 {ok:false}（不写到目录之外）
-  } catch (err) {
-    return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
-  }
-  try {
-    return withFileLockSync(file + '.lock', () => saveTaskState(sessionName, mergeTaskState(loadTaskState(sessionName), ts)));
-  } catch (err) {
-    return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
-  }
+  // v0.6.28（M-17）：与裸写共用 writeTaskStateLocked 的同一个临界区（合并语义由 merge 标志选择）
+  return writeTaskStateLocked(sessionName, ts, true);
 }
 
 /**
@@ -149,7 +170,9 @@ export async function saveTaskStateMergeAsync(sessionName, ts) {
     return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
   }
   try {
-    return await withFileLock(file + '.lock', () => saveTaskState(sessionName, mergeTaskState(loadTaskState(sessionName), ts)));
+    // 锁在异步原语里先拿到；writeTaskStateLocked 的同步锁因**同一条调用链已持锁**而直接复用
+    // （AsyncLocalStorage 的 held 集合），既不会二次抢锁，也不会把合并写降级成无锁。
+    return await withFileLock(file + '.lock', () => saveTaskStateMerge(sessionName, ts));
   } catch (err) {
     return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err) };
   }
