@@ -5554,8 +5554,9 @@ before 目录在 `d37d17e` 的独立 worktree 里截（避免把已改工作树�
 
 - `npm run typecheck`：通过。
 - `node test/state-integrity.js`：**9 项**通过（①×4、②、③×2、④、⑤）。
-- `node test/smoke.js`（单独）：通过（在 `a7ce4c0` + 本批改动的隔离树上实测；工作树当时还有
-  其他并行道的未提交改动，直接跑会红在 `sync-server.js` 的另一条在飞修复上）。
+- `node test/smoke.js`（单独）：通过（在本提交的 `git archive` 隔离树 + 私有 `TMPDIR` 实测；
+  共享 `/tmp` 下并行 smoke 遗留的 `mingdao-skill-*` 目录会让旧版「临时目录残留」断言环境性假红，
+  工作树里已有并行道的 TMPDIR 隔离修复、本批未重复实现）。
 - `node test/e2e-local.js`：17 项通过（同上隔离树）。
 - `node test/mutate/batch60-state-integrity.mjs`：**11/11 全中**（M-10×4、L-13×2、M-17×2、
   M-11×1、M-12×2）。
