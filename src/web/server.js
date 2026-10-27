@@ -191,6 +191,48 @@ function json(res, code, obj) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// H-01（v0.6.28 审计）：畸形 request-target 的解析必须是**纯函数 + 同步边界内**。
+//
+// 旧实现把 `new URL(String(req.url || '/'), 'http://localhost')` 直接写在 http 回调里、
+// 且在 `dispatch(...).catch(...)` **之外**同步执行。Promise 的 .catch 捕不到它前面的同步异常，
+// 源码也没有 uncaughtException 兜底 —— 原始 TCP 发 `GET http://[::1 HTTP/1.1` 即可让整个
+// WebUI 进程退出（报告实测 stderr 指向 :1229）。
+//
+// 现在解析只此一份：非法目标返回 `{ok:false,reason}`，由回调回 400 并关连接；
+// 回调整体还套一层同步 try/catch（防御解析之后的其它同步异常）。
+// 这里**不**接受代理形式的绝对 URI（`http://host/path`）/ 协议相对 URI（`//host`）/
+// 反斜杠（WHATWG URL 会把 `\` 当 `/`，`/\evil.com` 会被解析成另一个主机）/ 控制字符 /
+// 超长目标 —— 本服务是 origin server，只应收到 origin-form。
+// ---------------------------------------------------------------------------
+const MAX_REQUEST_TARGET = 8192;
+/**
+ * 解析 HTTP request-target（origin-form）。纯函数：不改请求/响应，不读全局状态。
+ * @param {any} raw
+ * @returns {{ok: true, url: URL} | {ok: false, reason: string}}
+ */
+export function parseRequestTarget(raw) {
+  if (typeof raw !== 'string' || raw === '') return { ok: false, reason: '请求目标为空' };
+  if (raw.length > MAX_REQUEST_TARGET) return { ok: false, reason: `请求目标过长（>${MAX_REQUEST_TARGET} 字节）` };
+  // 原始控制字符（含 CR/LF/NUL/TAB）不得出现在 request-target 里
+  if (/[\u0000-\u001f\u007f]/.test(raw)) return { ok: false, reason: '请求目标含控制字符' };
+  // origin-form：必须以单个 '/' 开头；'//' 是协议相对 URI，'\' 会被 URL 解析器当成 '/'
+  if (!raw.startsWith('/') || raw.startsWith('//') || raw.includes('\\')) {
+    return { ok: false, reason: '仅接受 origin-form 请求目标（不以 / 开头或含 // / \\）' };
+  }
+  let url;
+  try {
+    url = new URL(raw, 'http://localhost');
+  } catch {
+    return { ok: false, reason: '请求目标不是合法 URL（IPv6/端口等格式错误）' };
+  }
+  // 防御性复核：origin-form 不应改变作者/协议（`new URL` 的容错行为不应被信任）
+  if (url.protocol !== 'http:' || url.hostname !== 'localhost' || url.port !== '') {
+    return { ok: false, reason: '请求目标解析后主机/端口/协议异常' };
+  }
+  return { ok: true, url };
+}
+
 /** 读取请求体。limit 默认 40MB（附件 base64 上限：4×5MB 图片 + 文本）；
  * 普通 JSON 接口必须显式传较小 limit（质检 A4；此前第二参数被忽略 → 1MB 限制形同虚设）。 */
 /** @param {any} req @param {number} [limit] */
@@ -628,6 +670,80 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     // 完整的每客户端作用域需要引入客户端 cookie 作用域语义（产品决策，见 docs/internal/AUDIT-v0.4.6.md T2）。
     const taskId = `t${crypto.randomBytes(8).toString('hex')}`;
     const entry = /** @type {any} */ ({ res, send: null, abortHandler: null, pendingAsk: null, session: null, startedAt: Date.now(), status: 'running', message: '', durationMs: 0 });
+    // M-03（v0.6.28 审计）：任务一旦注册就拥有**幂等收尾** finishChat()。
+    //
+    // 旧实现的收尾（清计时器/挂起确认、释放会话 claim、置终态、notifyBusy、res.end、prune）
+    // 只写在 `agent.runTurn` 外层那一个 finally 里；而任务注册之后、走到那个 finally 之前还有
+    // resolveVisionSupport / 自动路由 / setSessionWorkspace / 会话落盘 / Provider 创建等多个 await。
+    // 这些早期异常会直接跳到 routes/domains/misc.js 的外层兜底，兜底只发一条 SSE error + res.end
+    // + pruneTasks()，于是 /api/tasks 永远显示 running、onBusy 停在 true、5s 进度计时器继续跑。
+    //
+    // 现在把收尾收敛成**唯一函数**：所有早退分支（附件错误、会话忙、Provider 不可用、意外异常）
+    // 与主路径 finally 都调它；重复调用由 finished 保证无副作用。entry.finish 同时暴露给路由层
+    // 的 try/catch/finally（misc.js）作为最后一道边界——即使这里再冒出未预期异常，也不会漏收尾。
+    let progressTimer = /** @type {any} */ (null);
+    let finished = false;
+    /** @type {() => void} */
+    let releaseSessionClaim = () => {};
+    /** 显式早退分支的错误载体：prefix 为 '' 表示沿用该分支既有的用户可见文案（不加「对话失败：」）。 */
+    const chatFailure = (/** @type {any} */ message, /** @type {any} */ prefix = '') => ({ __chatFailure: true, message: String(message ?? ''), prefix: String(prefix) });
+    /** @param {any} [cause] */
+    const finishChat = (cause) => {
+      if (finished) return;
+      finished = true;
+      // ① 计时器 / 挂起确认 / 中止回调
+      if (progressTimer) {
+        try {
+          clearInterval(progressTimer);
+        } catch {}
+        progressTimer = null;
+      }
+      if (entry.pendingAsk) {
+        try {
+          entry.pendingAsk.resolve('');
+        } catch {}
+        entry.pendingAsk = null;
+      }
+      entry.abortHandler = null;
+      // ② 释放会话 claim（未占用时是 no-op；重复调用由 sessionClaimReleased 防抖）
+      try {
+        releaseSessionClaim();
+      } catch {}
+      // ③ 终态与耗时（正常路径调用方已先置 done/aborted/stalled/capped）
+      let message = '';
+      let prefix = '';
+      if (cause) {
+        const explicit = Boolean(cause && typeof cause === 'object' && cause.__chatFailure === true);
+        message = explicit ? String(cause.message ?? '') : String(cause?.message || cause);
+        prefix = explicit ? String(cause.prefix ?? '') : '对话失败：';
+        entry.status = 'failed';
+      } else if (entry.status === 'running') {
+        // 防御：没有任何结局却被收尾 —— 绝不留假 running
+        entry.status = 'failed';
+        message = '任务在未完成时结束（内部收尾兜底）';
+        prefix = '对话失败：';
+      }
+      entry.durationMs = Date.now() - entry.startedAt;
+      // ④ 忙状态（必须在置终态之后：notifyBusy 按 status==='running' 计算）
+      notifyBusy();
+      // ⑤ 错误事件（结束响应之前；send 已清空时直接写 res，保证客户端一定看到 error）
+      if (message) {
+        try {
+          if (entry.send) entry.send({ type: 'error', message: prefix + message });
+          else res.write(`data: ${JSON.stringify({ type: 'error', message: prefix + message, taskId })}\n\n`);
+        } catch {}
+      }
+      // ⑥ 结束响应
+      try {
+        res.end();
+      } catch {}
+      // ⑦ prune + 释放闭包
+      entry.send = null;
+      try {
+        pruneTasks();
+      } catch {}
+      srvlog('chat 收尾 ' + taskId + ' status=' + entry.status + ' 耗时=' + entry.durationMs + 'ms' + (message ? ' 错误=' + message : ''));
+    };
     srvlog('chat 开始 ' + taskId + ' session=' + (body.file || '新会话') + ' 消息长度=' + String(body.message || '').length);
     tasks.set(taskId, entry);
     notifyBusy(); // 进入 running → 忙
@@ -638,6 +754,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       } catch {}
     };
     entry.send = send;
+    entry.finish = finishChat; // 路由层最外层 try/catch/finally 的入口（见 routes/domains/misc.js）
     // 进度心跳（审计：长时间健康生成的可感知性——模型持续输出工具参数期间可能长时间
     // 无任何 SSE 事件，界面看似卡死；每 8 秒发一次 progress，前端实时显示已工作时长/步数，
     // 同时充当客户端无活动看门狗的活动源）
@@ -711,7 +828,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
           })
       );
     };
-    const progressTimer = setInterval(() => {
+    progressTimer = setInterval(() => {
       try {
         const tp = /** @type {any} */ (io?.turnProgress);
         // 质检（静默深度优化）：progress 附带阶段语义与子代理数，客户端顶部常驻活动条据此实时播报
@@ -755,12 +872,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     const visionSupported = await resolveVisionSupport(cfg, modelName);
     const built = buildUserContent(userMessage, body.attachments, visionSupported);
     if (built.error) {
-      entry.status = 'failed';
-      notifyBusy();
-      send({ type: 'error', message: built.error });
-      clearInterval(progressTimer);
-      res.end();
-      pruneTasks(); // 质检 L3：早退分支与主路径一致清理任务占位
+      finishChat(chatFailure(built.error));
       return;
     }
 
@@ -779,12 +891,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     // v0.4.7（T10）：同一会话串行化——已有回合在跑就直接拒绝并给出引导（不同会话可并行）
     const sessKey = session.file;
     if (busySessions.has(sessKey)) {
-      entry.status = 'failed';
-      notifyBusy();
-      send({ type: 'error', message: '该会话已有任务在运行：请等待它完成，或新建会话后再并行（不同会话之间仍可并行）。' });
-      clearInterval(progressTimer);
-      res.end();
-      pruneTasks();
+      finishChat(chatFailure('该会话已有任务在运行：请等待它完成，或新建会话后再并行（不同会话之间仍可并行）。'));
       return;
     }
     busySessions.add(sessKey);
@@ -800,7 +907,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       busySessions.add(key);
     };
     let sessionClaimReleased = false;
-    const releaseSessionClaim = () => {
+    releaseSessionClaim = () => {
       if (sessionClaimReleased) return;
       sessionClaimReleased = true;
       for (const k of claimedKeys) busySessions.delete(k);
@@ -1052,13 +1159,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         // 预检失败**不得**影响本回合发起（"尽力而为：失败只降级不阻断"）——这里只留一行日志。
         srvlog(`chat 预检失败（忽略，按既有默认继续） ${taskId} ${String(e?.message || e)}`);
       }
-    } catch (/** @type {any} */ err) {      entry.status = 'failed';
-      notifyBusy();
-      entry.durationMs = Date.now() - entry.startedAt;
-      send({ type: 'error', message: `模型 ${runModel} 不可用：${String(err?.message || err)}` });
-      clearInterval(progressTimer);
-      res.end();
-      pruneTasks();
+    } catch (/** @type {any} */ err) {
+      finishChat(chatFailure(`模型 ${runModel} 不可用：${String(err?.message || err)}`));
       return;
     }
     // v0.4.4：长任务费用逐轮入账——记录已按轮入账的累计 usage，最终补记最后一轮 + 兜底总结的剩余。
@@ -1245,19 +1347,12 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         session: path.basename(session.file),
       });
     } catch (/** @type {any} */ err) {
-      entry.status = 'failed';
-      notifyBusy();
-      entry.durationMs = Date.now() - entry.startedAt;
+      // 主回合异常：finishChat 负责置 failed、发 SSE error、清计时器/claim、notifyBusy、结束响应
       srvlog('chat 错误 ' + taskId + ' ' + String(err?.message || err));
-      send({ type: 'error', message: String(err?.message || err) });
+      finishChat(err);
     } finally {
-      clearInterval(progressTimer);
-      srvlog('chat 收尾 ' + taskId + ' res.end 前（客户端将收到流结束）');
-      entry.abortHandler = null;
-      entry.pendingAsk = null;
-      entry.send = null;
-      res.end();
-      pruneTasks();
+      // 正常路径也统一走同一收尾（幂等；重复调用无副作用）
+      finishChat();
     }
   }
 
@@ -1272,40 +1367,68 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     refs: { get inflight() { return inflight; }, set inflight(v) { inflight = v; } },
   });
   const server = http.createServer((req, res) => {
-    // v0.6.18 §3.68：/api/state 的响应体在配置域（routes/domains/config.js）里组装，而本轮允许的
-    // 后端改动面只有本文件——在这一层按路径补 permissionSource，避免与并行执行者争同一个文件。
-    // v0.6.19 §3.76（P2）：同时补只读的 defaults（设置项「默认值」列的数据源；不参与判定）。
-    // 只补 GET /api/state 的成功响应；其余 API/静态资源原样通过。
-    if (req.method === 'GET' && new URL(String(req.url || '/'), 'http://localhost').pathname === '/api/state') {
-      const rawEnd = res.end.bind(res);
-      /**
-       * @param {any} chunk
-       * @param {any[]} rest
-       */
-      const patchedEnd = (chunk, ...rest) => {
+    // H-01：整个回调（含 request-target 解析、响应头补丁安装与 dispatch 调用）都在同步 try 内。
+    // 任何解析/装配阶段的同步异常都收敛到这一层，绝不允许冒泡成 uncaughtException 终止进程。
+    try {
+      const parsed = parseRequestTarget(req.url);
+      if (!parsed.ok) {
+        // 非法目标：400 + 结束/关闭连接（不进入认证与域分发）。
         try {
-          if (res.statusCode === 200 && (typeof chunk === 'string' || Buffer.isBuffer(chunk))) {
-            const body = JSON.parse(String(chunk));
-            if (body && body.ok === true && Array.isArray(body.permissions)) {
-              body.permissionSource = statePermissionSource();
-              body.defaults = SETTING_DEFAULTS;
-              chunk = JSON.stringify(body);
-            }
-          }
+          res.setHeader('Connection', 'close');
         } catch {}
-        return rawEnd(chunk, ...rest);
-      };
-      /** @type {any} */ (res).end = patchedEnd;
-    }
-    dispatch(req, res).catch((e) => {
-      if (!res.headersSent) {
-        json(res, e?.status || 500, { error: e?.message || '服务器内部错误' });
-      } else {
-        try {
+        json(res, 400, { error: `非法请求目标：${parsed.reason}` });
+        return;
+      }
+      const target = parsed.url;
+      // v0.6.18 §3.68：/api/state 的响应体在配置域（routes/domains/config.js）里组装，而本轮允许的
+      // 后端改动面只有本文件——在这一层按路径补 permissionSource，避免与并行执行者争同一个文件。
+      // v0.6.19 §3.76（P2）：同时补只读的 defaults（设置项「默认值」列的数据源；不参与判定）。
+      // 只补 GET /api/state 的成功响应；其余 API/静态资源原样通过。
+      if (req.method === 'GET' && target.pathname === '/api/state') {
+        const rawEnd = res.end.bind(res);
+        /**
+         * @param {any} chunk
+         * @param {any[]} rest
+         */
+        const patchedEnd = (chunk, ...rest) => {
+          try {
+            if (res.statusCode === 200 && (typeof chunk === 'string' || Buffer.isBuffer(chunk))) {
+              const body = JSON.parse(String(chunk));
+              if (body && body.ok === true && Array.isArray(body.permissions)) {
+                body.permissionSource = statePermissionSource();
+                body.defaults = SETTING_DEFAULTS;
+                chunk = JSON.stringify(body);
+              }
+            }
+          } catch {}
+          return rawEnd(chunk, ...rest);
+        };
+        /** @type {any} */ (res).end = patchedEnd;
+      }
+      // 异步错误仍由 dispatch 的 .catch 处理（同步异常已被外层 try 捕获）。
+      dispatch(req, res).catch((e) => {
+        if (!res.headersSent) {
+          json(res, e?.status || 500, { error: e?.message || '服务器内部错误' });
+        } else {
+          try {
+            res.end();
+          } catch {}
+        }
+      });
+    } catch (e) {
+      // 同步边界兜底：未发头 → 500；已发头 → 结束；两者都失败 → 销毁连接，绝不冒泡。
+      try {
+        if (!res.headersSent) {
+          json(res, 500, { error: String((/** @type {any} */ (e))?.message || e) });
+        } else {
           res.end();
+        }
+      } catch {
+        try {
+          res.destroy();
         } catch {}
       }
-    });
+    }
   });
 
   await /** @type {Promise<void>} */ (new Promise((resolve, reject) => {

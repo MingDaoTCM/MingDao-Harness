@@ -39,20 +39,48 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       res.end();
       return true;
     }
+    /**
+     * M-03（v0.6.28 审计）：路由层是覆盖整个聊天生命周期的**最外层边界**。
+     * handleChat 在任务注册后立刻把幂等 finishChat 挂到 entry.finish；这里在 catch/finally
+     * 统一调用它——即使 handleChat 在早期 await 抛出、绕过它自己的收尾，也不会留下
+     * 假 running / 忙状态 / 未清的 5s 计时器 / 未释放的会话 claim。
+     * @param {any} [error]
+     * @returns {boolean} 是否找到并调用了任务收尾
+     */
+    const finishChatForResponse = (error) => {
+      let hit = false;
+      for (const entry of tasks.values()) {
+        if (entry?.res !== res) continue;
+        try {
+          if (typeof entry.finish === 'function') {
+            hit = true;
+            entry.finish(error);
+          }
+        } catch {}
+      }
+      return hit;
+    };
     try {
       await handleChat(res, body);
     } catch (/** @type {any} */ err) {
-      // 兜底（审计：「点发送无反应」根因防护）：handleChat 内任意未捕获异常若直接外抛，
-      // SSE 已开流却无事件 → 前端永远停在「正在思考…」。此处统一转为 error 事件回给界面。
-      try {
-        res.write(`data: ${JSON.stringify({ type: 'error', message: '对话失败：' + String(err?.message || err) })}\n\n`);
-      } catch {}
-      try {
-        res.end();
-      } catch {}
-      pruneTasks();
+      // 兜底（审计：「点发送无反应」根因防护）：handleChat 若把异常直接外抛（理论上不应再发生），
+      // 优先走它会话自己的幂等收尾（置 failed / 发 error / 恢复忙状态 / 清计时器与 claim）；
+      // 连任务都没注册成功时才退回纯 SSE 错误 + res.end。
+      const finished = finishChatForResponse(err);
+      if (!finished) {
+        try {
+          res.write(`data: ${JSON.stringify({ type: 'error', message: '对话失败：' + String(err?.message || err) })}\n\n`);
+        } catch {}
+        try {
+          res.end();
+        } catch {}
+        pruneTasks();
+      }
+    } finally {
+      // 幂等：正常路径 handleChat 内部已收尾；异常路径 catch 已收尾；这里再叫一次无副作用。
+      finishChatForResponse();
+      refs.inflight -= 1; // 与请求生命周期绑定：任何退出路径都必须归还并发槽
     }
-    refs.inflight -= 1; // 与 handleChat 的 finally 无关：handleChat 内部路径全部会返回/结束
     return true;
   }
 
