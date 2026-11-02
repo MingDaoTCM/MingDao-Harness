@@ -130,6 +130,14 @@ pattern 来自模型输出，而模型输出又可被它读到的网页/文件�
   不再依赖「恰好并发」的时序运气。
 - **`doc-lint ⑩` 新守卫**：`src/**` 出现 `// 变异：` 残留即 CI 红。本版据此修掉了
   `74ec0a1` 误提交的 `pendingTool: null` 变异残留（`1ba5b1f`）。
+- **Windows 变异腿三处平台差异**（v0.6.29 留的尾，本版一并收）：
+  ① `freeze-hardening` 的子进程探针用**裸绝对路径**动态 `import`——POSIX 恰好当文件路径接受，
+  Windows 上 `D:\…` 被解析成 `d:` scheme 直接抛 `ERR_UNSUPPORTED_ESM_URL_SCHEME`，整批变异被
+  误判成「逃逸」；改走 `pathToFileURL`。
+  ② `fs-integrity-hardening` 的「Windows 模拟下 mode 应为 0600」在**真 Windows** 上没有观测面
+  （`chmod` 不改变 `stat.mode`，实测 438 ≠ 384）；真 Windows 只断言可观测的返回值
+  （`chmod: 'applied'`）并**打印跳过**，POSIX 宿主上的 win32 模拟仍断言 mode 位。
+  ③ `batch60 ⑩` 接受 `EBUSY` 作为「去重失去锁」的证据（与同批 ⑪ 同口径）。
 
 ### 五、接线与统计
 

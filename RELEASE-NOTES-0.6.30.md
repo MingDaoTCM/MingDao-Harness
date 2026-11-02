@@ -216,6 +216,14 @@ warn 可见；恢复后下一次迁移成功。
   不靠时序运气。
 - **`doc-lint ⑩` 新守卫**：`src/**` 出现 `// 变异：` 残留即 CI 红；本版据此修掉了
   `74ec0a1` 误提交的 `pendingTool: null` 变异残留。
+- **Windows 变异腿三处平台差异**（v0.6.29 发布说明里登记为「留待下一版一并修」，本版收口）：
+  1. `test/freeze-hardening.js` 的子进程探针用**裸绝对路径**动态 `import`——POSIX 上恰好被当成
+     文件路径接受，Windows 上 `D:\…` 会被解析成 scheme `d:`，抛
+     `ERR_UNSUPPORTED_ESM_URL_SCHEME` 直接崩 → 整批变异被误判「逃逸」。改走 `pathToFileURL`。
+  2. `test/fs-integrity-hardening.js` 的「Windows 模拟下 mode 应为 0600」在**真 Windows** 上
+     没有观测面（`chmod` 不改变 `stat.mode`，实测 438 ≠ 384）→ 真 Windows 只断言可观测的
+     返回值（`chmod: 'applied'`）并**打印跳过**；POSIX 宿主上的 win32 模拟仍断言 mode 位。
+  3. `batch60 ⑩` 接受 `EBUSY` 作为「去重失去锁」的证据（与同批 ⑪ 同口径）。
 - **接线**：`freeze-hardening` / `permission-hardening` / `credential-hardening` /
   `agent-context-hardening` / `fs-integrity-hardening` / `sync-registration-hardening`
   六个新套件接入 `run-all` 与 CI（**仅 Linux 腿**）。
@@ -281,6 +289,5 @@ warn 可见；恢复后下一次迁移成功。
 - **Windows 原子写没有目录 fsync**：`dirFsync: 'skipped'`（平台无对应语义），文件 fsync 与
   显式 `chmod` 仍生效。
 - **六个新套件的 CI 步骤只在 Linux 腿**：Windows 腿不跑（避免时长翻倍与平台假红）；
-  Windows 上的行为以 `smoke` / `run-all` 的既有套件与桌面构建为准。
-- **`test/freeze-hardening.js` 头部注释误写「v0.6.31」**：纯注释笔误（非断言、非行为），
-  因发布提交不触碰 `src/` / `test/` 而**未在本版修正**，留待下一版随手改。
+  Windows 上的行为以 `smoke` / `run-all` 的既有套件、**变异全量**与桌面构建为准
+  （本版已把变异腿的三处平台差异修掉，Windows 腿应转绿；仍以实际 CI 为准）。
