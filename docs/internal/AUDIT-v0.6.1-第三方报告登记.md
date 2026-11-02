@@ -5806,3 +5806,63 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   结论是"旧判据扫全机共享目录 → 必然可能假红；新判据只扫本 run"，**不是**"并发问题已绝迹"。
 - 迭代期间 `os.tmpdir()` 里一直有并发 smoke 产生的 `mingdao-skill-*` 目录（正常在飞）；改后的断言
   不再依赖这些目录是否存在。
+
+## 5.1 v0.6.31 事件循环冻结加固：grep ReDoS（C-1 / H-13）与 beijingParts 计时（H-1）
+
+来源：v0.6.29 代码审计报告 §5.3 C-1、§5.10 H-13；v0.6.29 修复情况核验报告 H-1。
+两份独立审计都把这两条列为严重/高危，共同点是**同步**工作落在事件循环主线程、输入来自不可信文本
+（模型给的 grep pattern / 20KB 单行文件 / 2 万条费用记录）——触发后 HTTP、SSE、权限弹窗、watchdog
+一起冻死。
+
+### 5.1.1 A1：grep ReDoS 判据漏「相邻无界量词」与语义等价写法
+
+- **改前实测**（本机 v0.6.29）：`pattern=a*a*a*a*a*a*a*a*b` + 20KB 单行文件 → 外部 45s 超时后
+  kill，退出码 **124**（进程同步阻塞，连 `setTimeout` watchdog 都不触发）；
+  `^(\d|[\d])+$` 对 29 字符输入同步阻塞 **9652ms**（审计报告 H-13 记 19028ms / 19.0s）。
+- **修法**：
+  1. `src/regex-safety.js` 补「顶层相邻无界量词」判据：相邻两条原子量词都无上界且**前者的末字符集
+     与后者的首字符集相交**即拒绝（`a*a*`、`\d+\d*`、`.*.*`、`(ab)+b*`）；`a*b*`、`\s*\w+`、
+     `\d+\.\d+`、`a{1,3}a{1,3}` 不误伤。
+  2. 交替分支判据从「源码首字符」改为**归一化字符集**比较：`\d` 与 `[\d]` 都归一为数字区间，
+     `^(\d|[\d])+$` 与 `(a|aa)+` 同判；空分支（`(a|)+`）与嵌套组（`((a|ab)x)+`）同判。
+     `hasAmbiguousAlternation` 同时并入相邻无界量词，**不改 `constraints.js`** 即让 Pack 的
+     `output-forbid` / `result-forbid` 走同一口径。
+  3. `src/tools/fs-tools.js` 删除自维护的两份弱判据，**只复用 `patternRejectionReason`**；
+     5s 预算**下推到行级**：`testLine` 前后各查一次预算，行循环在 `budgetHit` 后立即停扫。
+  4. 拒绝原因带「正则被拒：」前缀原样透给模型（不再静默放行/静默拒绝）。
+- **改后实测**：12 个恶意 pattern（含交替型 `(x|xx)+`、`(a|aa)+`、`^(\d|[\d])+$`、嵌套组、
+  相邻无界量词）全部 **0–1ms 被拒**，PoC 退出码 0；20KB 单行正常 grep（`a+b`）**145ms**（≤2s）。
+- **断言**：`test/freeze-hardening.js` 35 条（12+1 恶意 pattern 逐条 + 9 个正常 pattern +
+  grep 子进程硬超时 + 行级预算假时钟 + Pack/约束引擎 + 单一来源结构守卫）。
+
+### 5.1.2 A2：`beijingParts` 每次新建 2 个 `Intl.DateTimeFormat`
+
+- **改前实测**：本机 2 万次 `beijingParts` **849.6ms**（0.042 ms/op）；2 万条 `costBreakdown`
+  **994ms**（审计机 0.408 ms/op → 8.16s；前端两个 15s 轮询器叠加即冻 WebUI）。
+- **修法**：按 tz 缓存 `Intl.DateTimeFormat`（`wall` / `peak` 两种，Map）；缓存时区合法性判定；
+  `costBreakdown` 的 byDay **预先算 14 个北京日界 + 明日日界再分桶**（每条记录只做数值比较），
+  不再逐条 `beijingParts`；未来日记录与旧实现一样不计入输出窗口。
+- **改后实测**：2 万次 `beijingParts` **79.5–128ms**（≈10–100×，绝对 <500ms）；2 万条
+  `costBreakdown` **1–16ms**（≈62×）；一次 `costBreakdown` 的 ICU 格式化 **62 次**（与 2 万条无关）。
+- **对拍**：同一批 2 万条时间戳（含 12:00 / 18:00 / 23:59:59 / 00:00:01、跨月/跨年、未来日、
+  14 天窗口外旧记录）与**旧逐条格式化算法**逐条一致（byDay 深比较 + today 汇总）。
+
+### 5.1.3 验证与变异
+
+- `test/freeze-hardening.js`：35 条断言全过（约 0.7s）；在 HEAD 干净 worktree 上复跑通过。
+- `test/mutate/batch61-freeze-hardening.mjs`：**14/14 全中**（判据换回旧的、去掉 formatter 缓存、
+  只在文件间检查预算、预算改 Infinity、分桶改回逐条格式化、未来日边界等）。
+- `npm run typecheck` / `node test/e2e-local.js` 通过；`test/smoke.js` 在干净 worktree 单跑通过
+  （共享工作树当时有其它并行道的未提交改动，曾导致无关断言红，非本条改动）。
+- 未改 `test/smoke.js`、`test/mutate/README.md`、`test/run-all.mjs`、`.github/workflows/ci.yml`；
+  未 tag / 改版本号 / publish。
+
+### 5.1.4 未做 / 边界（必须说明）
+
+- 静态判据是**保守**的：`(abc|abd)+`、`.*\d+` 这类「首字符重叠/任意字符后接量词」也会被拒
+  （宁可让作者改写，也不在主线程上赌 V8 的优化）。这是刻意 fail-closed，不是遗漏。
+- 行级预算只能在**两次 `re.test` 之间**检查；单次 `re.test` 内部仍无法中断（JS 正则没有超时 API）。
+  真正兜底是装载时判据；预算只是「静态判据漏了某种形态」时的最后一道止损，且对大目录/多文件有效。
+- 未引入 worker/vm 隔离或线性时间引擎（审计建议的彻底方案）——本轮按任务边界只做判据收口 + 预算下推
+  + formatter 缓存；`beijingParts` 的 formatter 缓存按 tz 键长期驻留，配置切换时区会新增键（不回收）。
+- `costMonthlyReport` 仍按条 `beijingParts`（缓存后已快），未改为预分桶——不在本条范围。

@@ -341,6 +341,20 @@ export function costBreakdown() {
   // v0.5.0 A4：垂域 Pack 分账（来自 ctx.llm 的标记记录；cost 为 null 不入总额，取 packCost 展示）
   const byPack = /** @type {Map<string, {prompt: number, completion: number, cost: number, calls: number}>} */ (new Map());
   const start = beijingDayStart().getTime();
+  // v0.6.31（核验报告 H-1）：byDay **预计算 14 个北京日界再分桶**（此前每条记录一次
+  // beijingParts → 2 万条 = 2 万次 ICU 格式化，单请求阻塞 0.85~8.16 秒）。
+  // 日界本身用 beijingDayStart 算（与旧实现「start - i*86400000 → beijingParts」同一个自然日，
+  // 跨夏令时也一致）；分桶只用数值比较，与记录条数线性相关。
+  const DAYS = 14;
+  /** @type {number[]} */
+  const dayBounds = [];
+  for (let i = DAYS - 1; i >= 0; i--) dayBounds.push(beijingDayStart(new Date(start - i * 86400000)).getTime());
+  // 明日 0 点（+36h 跨过夏令时 23/25 小时日）：未来日记录在旧实现里 key 也不在输出窗口，直接排除。
+  const tomorrowStart = beijingDayStart(new Date(start + 36 * 3600000)).getTime();
+  const dayKeys = dayBounds.map((t) => {
+    const p = beijingParts(new Date(t));
+    return `${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+  });
   let totalCost = 0;
   let totalSaved = 0;
   let today = 0;
@@ -381,20 +395,15 @@ export function costBreakdown() {
         byTool.set(t.tool, tt);
       }
     }
-    if (e.at) {
-      const p = beijingParts(new Date(e.at));
-      const key = `${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
+    if (e.at && e.at >= dayBounds[0] && e.at < tomorrowStart) {
+      let idx = DAYS - 1;
+      while (idx > 0 && e.at < dayBounds[idx]) idx -= 1;
+      const key = dayKeys[idx];
       byDay.set(key, (byDay.get(key) || 0) + (e.cost || 0));
     }
   }
-  // 补全近 14 天（含无记录的 0 值日），保证折线 x 轴连续
-  const days = /** @type {Array<{day: string, cost: number}>} */ ([]);
-  for (let i = 13; i >= 0; i--) {
-    const d = new Date(start - i * 86400000);
-    const p = beijingParts(d);
-    const key = `${String(p.month).padStart(2, '0')}-${String(p.day).padStart(2, '0')}`;
-    days.push({ day: key, cost: byDay.get(key) || 0 });
-  }
+  // 折线 x 轴连续（含无记录的 0 值日）：key 与旧实现逐条一致
+  const days = dayKeys.map((day) => ({ day, cost: byDay.get(day) || 0 }));
   return {
     totalCost,
     totalSaved,

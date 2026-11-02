@@ -95,16 +95,50 @@ function peakCfg() {
   return tzCache;
 }
 
+// —— Intl.DateTimeFormat 缓存（核验报告 H-1 / 本轮 A2）——
+// 旧实现每次 beijingParts() 都 new 两个 Intl.DateTimeFormat（activeTimezone 校验一个 + 墙钟一个），
+// 实测 0.04~0.41 ms/op；costBreakdown() 对 2 万条记录逐条格式化 → 单请求阻塞 0.85~8.16 秒，
+// 前端两个 15s 轮询器叠加就能把 WebUI 冻死。formatter 构造/ICU 绑定只与时区有关，按 tz 缓存即可。
+/** @type {Map<string, Intl.DateTimeFormat>} */
+const formatterCache = new Map();
+/** @type {Map<string, boolean>} */
+const tzValidity = new Map();
+
+/** 取缓存的 formatter（构造可能抛 RangeError；调用方决定回退）。 @param {string} tz @param {'wall'|'peak'} kind */
+function formatterFor(tz, kind) {
+  const key = `${kind}|${tz}`;
+  let f = formatterCache.get(key);
+  if (f) return f;
+  f =
+    kind === 'peak'
+      ? new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short', hour: 'numeric', hourCycle: 'h23' })
+      : new Intl.DateTimeFormat('en-US', {
+          timeZone: tz,
+          year: 'numeric',
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hourCycle: 'h23',
+        });
+  formatterCache.set(key, f);
+  return f;
+}
+
+/** formatToParts → { type: value }（一次遍历；避免每个字段都 find 一遍）。 @param {Intl.DateTimeFormatPart[]} parts */
+function partsObject(parts) {
+  /** @type {Record<string, string>} */
+  const out = {};
+  for (const p of parts) out[p.type] = p.value;
+  return out;
+}
+
 /** 取某时刻在指定时区的「星期 + 小时」（h23）。时区非法时 Intl 会抛，由调用方决定回退。 */
 function peakWallClock(/** @type {Date} */ date, /** @type {string} */ timezone) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: timezone,
-    weekday: 'short',
-    hour: 'numeric',
-    hourCycle: 'h23',
-  }).formatToParts(date);
-  const weekday = parts.find((p) => p.type === 'weekday')?.value;
-  const hour = Number(parts.find((p) => p.type === 'hour')?.value);
+  const parts = partsObject(formatterFor(timezone, 'peak').formatToParts(date));
+  const weekday = parts.weekday;
+  const hour = Number(parts.hour);
   return { weekday, hour };
 }
 
@@ -135,46 +169,38 @@ export function isPeakHour(date = new Date()) {
 // —— 计价时区墙钟工具（避峰调度/费用护栏按天统计用，零依赖 Intl） ——
 // v0.4.6：抽出「生效时区」解析（坏配置回退 Asia/Shanghai，绝不让计费/护栏崩溃）。
 function activeTimezone() {
+  const tz = peakCfg().timezone;
+  const known = tzValidity.get(tz);
+  if (known !== undefined) return known ? tz : 'Asia/Shanghai';
   try {
-    const tz = peakCfg().timezone;
-    new Intl.DateTimeFormat('en-US', { timeZone: tz }).format(); // 非法时区在此抛错
+    formatterFor(tz, 'wall').format(); // 非法时区在此抛错（formatter 只构造一次，之后走缓存）
+    tzValidity.set(tz, true);
     return tz;
   } catch {
+    tzValidity.set(tz, false);
     return 'Asia/Shanghai';
   }
 }
 
 /** @param {Date} date @param {string} tz 该时刻在 tz 的墙钟与 UTC 的偏移（毫秒） */
 function tzOffsetMs(date, tz) {
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(date);
-  const g = (/** @type {any} */ t) => Number(parts.find((/** @type {any} */ p) => p.type === t)?.value);
-  const asUtc = Date.UTC(g('year'), g('month') - 1, g('day'), g('hour'), g('minute'), g('second'));
+  const parts = partsObject(formatterFor(tz, 'wall').formatToParts(date));
+  const asUtc = Date.UTC(Number(parts.year), Number(parts.month) - 1, Number(parts.day), Number(parts.hour), Number(parts.minute), Number(parts.second));
   return asUtc - Math.floor(date.getTime() / 1000) * 1000;
 }
 
 export function beijingParts(date = new Date()) {
   const tz = activeTimezone();
-  const parts = new Intl.DateTimeFormat('en-US', {
-    timeZone: tz,
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hourCycle: 'h23',
-  }).formatToParts(date);
-  const g = /** @type {(t: any) => number} */ ((t) => Number(parts.find((p) => p.type === t)?.value));
-  return { year: g('year'), month: g('month'), day: g('day'), hour: g('hour'), minute: g('minute'), second: g('second') };
+  // H-1：formatter 按 tz 缓存（此前每次调用都新建 2 个 Intl.DateTimeFormat）
+  const parts = partsObject(formatterFor(tz, 'wall').formatToParts(date));
+  return {
+    year: Number(parts.year),
+    month: Number(parts.month),
+    day: Number(parts.day),
+    hour: Number(parts.hour),
+    minute: Number(parts.minute),
+    second: Number(parts.second),
+  };
 }
 
 // 时区墙钟 → Date。

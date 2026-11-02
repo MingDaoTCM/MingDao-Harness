@@ -4,7 +4,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { MAX_FILE_READ_BYTES } from '../web/constants.js';
-import { hasAmbiguousAlternation } from '../regex-safety.js'; // v0.6.7（M-5）：与约束引擎共用同一份 ReDoS 判定
+import { patternRejectionReason } from '../regex-safety.js'; // v0.6.7（M-5）/ v0.6.31（C-1）：ReDoS 判定的**唯一来源**
 
 const MAX_SCAN_FILES = 20000;
 const MAX_GLOB_RESULTS = 1000;
@@ -502,14 +502,6 @@ export function glob(args, ctx) {
 }
 
 /**
- * 判定「同前缀歧义分支被量词修饰」这一 ReDoS 形态（v0.4.6）。
- * 提取 `(…|…)` 后紧跟量词的分组，若存在两个分支首字符相同（分支前缀重叠），
- * 则形如 (a|aa)+ / (\d|\d\d)+ 会在失败匹配时指数回溯。
- * 保守起见只看首字符：`(foo|bar)+`、`(get|post)+` 这类无重叠分支不会误伤。
- * @param {string} pattern
- */
-
-/**
  * @param {any} args
  * @param {any} ctx
  */
@@ -517,18 +509,11 @@ export function grep(args, ctx) {
   try {
     const pattern = String(args.pattern ?? '');
     if (!pattern) return { ok: false, error: '缺少 pattern 参数。' };
-    if (pattern.length > 500) return { ok: false, error: 'pattern 过长（>500 字符）。' };
-    // 拒绝嵌套量词类灾难回溯模式（如 (a+)+b），避免同步 ReDoS 卡死事件循环
-    if (/\([^)]*[+*][^)]*\)[+*{]/.test(pattern)) {
-      return { ok: false, error: 'pattern 疑似灾难性回溯（嵌套量词），请改写为等价安全形式。' };
-    }
-    // P2 修复（v0.4.6）：上面的嵌套量词检查覆盖不到「歧义分支 + 外层量词」这一大类
-    // （`(a|aa)+$` 的括号里没有任何量词，直接放行）——实测 20KB 行 n=60 时同步回溯 >180s，
-    // 冻结整个 Node 进程（WebView/全部会话/SSE 一起卡死，同步阻塞连 setTimeout 都不触发）。
-    // 这里补一条精确判定：分组内以 `|` 分支、且**存在两个分支首字符相同**（重叠前缀 → 指数回溯）。
-    if (hasAmbiguousAlternation(pattern)) {
-      return { ok: false, error: 'pattern 疑似灾难性回溯（同前缀歧义分支被量词修饰，如 (a|aa)+），请改写为等价安全形式。' };
-    }
+    // v0.6.31（核验报告 C-1 / 代码审计 H-13）：**只复用 regex-safety.patternRejectionReason**，
+    // 不再在本文件维护第二份更弱的判据（旧判据连 `a*a*a*a*a*a*a*a*b`、`^(\d|[\d])+$` 都放行，
+    // 实测 20KB 单行同步回溯 >45s，watchdog 都不触发）。拒绝原因原样透出，模型才知道怎么改。
+    const unsafe = patternRejectionReason(pattern);
+    if (unsafe) return { ok: false, error: `正则被拒：${unsafe}` };
     let re;
     try {
       re = new RegExp(pattern);
@@ -537,16 +522,26 @@ export function grep(args, ctx) {
     }
     // 单行截断：超长行（如压缩的 JS/日志）截到 20KB 再匹配，防止正则开销失控
     const MAX_LINE = 20 * 1024;
+    // v0.4.6：总时间预算——即使静态检查漏过某种回溯形态，也不让一次 grep 无限期占用事件循环。
+    // v0.6.31（C-1）：预算**下推到行级**——旧实现只在「每个文件开始前」检查，单行内的
+    // `re.test` 一旦回溯爆炸就再也回不到检查点（20KB 单行即可冻结 45s+，watchdog 不触发）。
+    // 现在 testLine **前后各查一次**预算，行循环在 budgetHit 后立即停止 walkFiles。
+    const grepStart = Date.now();
+    const GREP_BUDGET_MS = 5000;
+    const overBudget = () => Date.now() - grepStart > GREP_BUDGET_MS;
+    let budgetHit = false;
     /** @type {(line: any) => any} */
-    const testLine = (line) => (line.length > MAX_LINE ? re.test(line.slice(0, MAX_LINE)) : re.test(line));
+    const testLine = (line) => {
+      if (overBudget()) { budgetHit = true; return false; }
+      const target = line.length > MAX_LINE ? line.slice(0, MAX_LINE) : line;
+      const hit = re.test(target);
+      if (overBudget()) budgetHit = true;
+      return hit;
+    };
     const root0 = boundedPath(ctx, args.path || '.');
     if (!root0.ok) return root0;
     const root = root0.path;
     const include = args.include ? globToRegExp(String(args.include)) : null;
-    // v0.4.6：总时间预算——即使静态检查漏过某种回溯形态，也不让一次 grep 无限期占用事件循环。
-    const grepStart = Date.now();
-    const GREP_BUDGET_MS = 5000;
-    let budgetHit = false;
     /** @type {any[]} */
     const matches = [];
     let truncated = false;
@@ -575,7 +570,9 @@ export function grep(args, ctx) {
       const rel = path.relative(root, full).split(path.sep).join('/');
       const lines = text.split('\n');
       for (let i = 0; i < lines.length; i++) {
-        if (testLine(lines[i])) {
+        const hit = testLine(lines[i]);
+        if (budgetHit) return false; // 行级预算用尽：立刻停扫（不再读完本文件/后续文件）
+        if (hit) {
           matches.push(`${rel}:${i + 1}: ${lines[i].trimEnd()}`);
           if (matches.length >= MAX_GREP_MATCHES) {
             truncated = true;
@@ -589,7 +586,7 @@ export function grep(args, ctx) {
       ? `\n…[匹配超过 ${MAX_GREP_MATCHES} 条，已截断；已扫描 ${scannedFiles} 个文件]`
       : `\n[已扫描 ${scannedFiles} 个文件]`;
     if (budgetHit) {
-      output += `\n…[已用满 ${GREP_BUDGET_MS / 1000}s 时间预算，提前停止扫描；请缩小路径范围或改写 pattern]`;
+      output += `\n…[已用满 ${GREP_BUDGET_MS / 1000}s 时间预算（行级检查），提前停止扫描；请缩小路径范围或改写 pattern]`;
     }
     return { ok: true, output };
   } catch (/** @type {any} */ err) {
