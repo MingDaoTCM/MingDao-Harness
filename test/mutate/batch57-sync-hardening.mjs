@@ -202,13 +202,15 @@ M.mutate({
   run: RUN,
 });
 
-// ⑯ M-14：回环首启引导被删（默认 closed 后本机自建直接锁死）
+// ⑯ M-14：本机首启的**显式**引导被删（默认 closed 后本机自建直接锁死）
+// v0.6.30（N-10）：引导不再从请求推断回环来源，而是 MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION=1
+// + 本机直连；这里把整条显式放行路径删掉，套件的「显式允许后应 200」必须当场红。
 M.mutate({
-  name: '⑯ 删除"监听回环 + 回环来源"的首启注册引导',
+  name: '⑯ 删除显式「本机直连自助注册」引导',
   file: 'src/sync-server.js',
-  from: `  if (REGISTRATION_AUTO && isLoopbackHost(listenHost) && isLoopbackIp(clientIp(req))) return 'open';`,
+  from: `  if (REGISTRATION_AUTO && ALLOW_LOOPBACK_REGISTRATION && isDirectLoopback(req)) return 'open';`,
   to: `  if (false) return 'open';`,
-  expect: ['默认本机首启应可注册'],
+  expect: ['显式 ALLOW_LOOPBACK_REGISTRATION=1 时本机直连应可注册'],
   run: RUN,
 });
 

@@ -60,6 +60,9 @@ function endpointChangeGuard(current, next, submitted) {
 export async function handle({ req, res, method, p, url }, deps, shared) {
   const { json, readBody, MAX_API_BODY } = shared;
   const { cfg, home, state, providerCache, invalidateProviderCache, getProviderFor, mcpFacade } = deps;
+  // v0.6.30（H-11）：WebUI 是否配置了访问令牌。无令牌时服务处于「本机信任」模式——同机任意进程
+  // 都能 POST /api/chat 并自行应答权限确认，因此**权限档位 auto 必须要求令牌**（见 POST /api/config）。
+  const tokenAuthEnabled = deps.authEnabled === true;
 
   // v0.6.29（审计 H-04）：配置变更统一走「代际失效」——provider 实例与本地端点预检备忘一起清。
   // 旧版只 providerCache.clear()，而 setBaseUrl 连这一步都没有：切换后旧实例的 chat 闭包仍用
@@ -95,6 +98,9 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       // 首次使用引导：当前模型无可用 API Key 时前端显示「去 ⚙ 设置填 Key」横幅
       keyReady: Boolean((resolveProviderConfig(cfg, state.modelName) || {}).apiKey),
       permissions: ['ask', 'auto', 'readonly'],
+      // H-11 可见性：无令牌时 auto 不可选的真实原因必须能被界面/调用方读到，而不是只在提交时报错。
+      permissionAutoAllowed: tokenAuthEnabled,
+      permissionNote: tokenAuthEnabled ? null : '未配置访问令牌：本机信任模式下只能选「询问 / 只读」；启用 auto 需先配置访问令牌（mingdao web --auth-token 或 config.json 的 web.token）。',
       permission: cfg.permission ?? 'ask',
       sandbox: cfg.sandbox || 'off',
       sandboxSupported: detectSandbox() !== 'none',
@@ -176,6 +182,19 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       const perm = String(body.permission);
       if (!['ask', 'auto', 'readonly'].includes(perm)) {
         return json(res, 400, { error: '权限模式必须是 ask / auto / readonly' });
+      }
+      // v0.6.30（H-11）：**无令牌的 WebUI 不得把权限档位改成 auto**。
+      // 无令牌＝本机信任模式：同机任意进程（或共享 CI 上的其它用户）都能 POST /api/chat 并自行
+      // 应答权限确认——auto 等于把"确认"这道门整个移除。只允许收紧到 ask/readonly；
+      // 配置令牌（web.token / --auth-token / MINGDAO_WEB_TOKEN）后不再受限。
+      if (perm === 'auto' && !tokenAuthEnabled) {
+        return json(res, 403, {
+          error:
+            '未配置访问令牌：本机信任模式下权限只能选「询问 / 只读」，不能改为 auto（同机任意进程可 POST /api/chat 并自答权限确认）。' +
+            '请先启用访问令牌（mingdao web --auth-token <令牌>，或 config.json 的 web.token / 环境变量 MINGDAO_WEB_TOKEN）后重试。',
+          code: 'PERMISSION_AUTO_REQUIRES_TOKEN',
+          permissionAutoAllowed: false,
+        });
       }
       next.permission = perm;
     }

@@ -6,6 +6,10 @@
 //   SYNC_CERT / SYNC_KEY  提供后走 HTTPS（Let's Encrypt 证书路径）
 //   MINGDAO_SYNC_REGISTRATION  注册开关：invite（需邀请码）| closed（默认）| open（不推荐）
 //   MINGDAO_SYNC_INVITE_CODES  邀请码列表（逗号分隔，仅 invite 模式生效）
+//   MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION=1  显式允许「本机直连」自助注册（默认 0 = 不豁免）
+//   SYNC_TRUST_PROXY=1 / SYNC_TRUST_PROXY_HOPS=<n>  仅在可信反代后开启；未设时完全忽略 XFF
+//   SYNC_REQUESTS_PER_MIN  每账号每分钟数据接口请求上限（默认 60）
+//   SYNC_QUOTA_MB_PER_DAY  每账号每日同步字节配额，单位 MB（默认 512；0 = 不限制）
 // 数据布局：
 //   <DATA_DIR>/users.json                 {用户名: {salt, hash, createdAt}}
 //   <DATA_DIR>/devices.json               {用户名: {设备ID: {name, tokenHash, createdAt, lastSeen}}}
@@ -16,6 +20,8 @@
 
 import http from 'node:http';
 import https from 'node:https';
+import net from 'node:net';
+import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
@@ -34,12 +40,59 @@ const MAX_BODY = 20 * 1024 * 1024;
 const MAX_FILE = 20 * 1024 * 1024;
 const startedAt = Date.now();
 // 注册开关（P3-10）：公网自建时用 invite/closed 限制自助注册。
-// v0.6.29（M-14）：默认从 open 改为 closed。为了不把「本机首启自建」直接锁死，未显式设置该变量、
-// 且服务只监听回环地址时，仍允许**回环来源**完成本机注册（日志会写明）；一旦绑定非回环地址，
-// 默认一律 closed。显式设置该变量时以显式值为准（closed 就是 closed，含回环）。
+// v0.6.29（M-14）：默认从 open 改为 closed。
+// v0.6.30（N-10）：**不再从请求推断「本机来源」**。旧实现的「监听回环 + 回环来源即放行」在两种
+// 真实形态下失效：① TRUST_PROXY=1 时 clientIp 取 XFF 第一段（客户端自填）→ 伪造 127.0.0.1 即注册；
+// ② 文档推荐的「回环监听 + nginx 反代」下所有外部客户端的 socket.remoteAddress 都是 127.0.0.1。
+// 现在默认 closed **无条件**成立；本机首启必须由部署方显式声明 ALLOW_LOOPBACK_REGISTRATION=1，
+// 且只对「本机直连」（无代理配置、无任何转发头）生效。显式 closed 仍然连本机也拒绝。
 const REGISTRATION_ENV = process.env.MINGDAO_SYNC_REGISTRATION;
 const REGISTRATION = String(REGISTRATION_ENV || 'closed').trim().toLowerCase();
 const REGISTRATION_AUTO = !REGISTRATION_ENV;
+const ALLOW_LOOPBACK_REGISTRATION = String(process.env.MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION || '') === '1';
+// v0.6.30（N-10 的第二条显式引导）：默认 closed + 首次启动（users.json 为空）时，生成一个**一次性**
+// 本机引导码文件（0600，路径含实际端口）。只有能读到本机文件的客户端（`mingdao sync login` 会自动
+// 读取并随注册请求提交）才能用它完成首启；经反代/远程的外部客户端没有本地文件访问权 → 仍 403。
+// 每个码只能成功注册一次：成功后**轮换**（旧码作废、写新码），因此本机首启期可继续创建多个账号；
+// 服务器关闭时删除文件。这样既保留了「本机信任」的多账号用法，又不把 closed 重新变成对全网开放。
+/** @type {string|null} */
+let bootstrapCode = null;
+/** @type {string|null} */
+let bootstrapCodeFile = null;
+/** @type {number|string|null} */
+let bootstrapPort = null;
+/** @param {number|string} port */
+function bootstrapCodePath(port) {
+  return path.join(os.tmpdir(), `mingdao-sync-bootstrap-${port}.txt`);
+}
+/** @param {number|string} port */
+function armBootstrapCode(port) {
+  clearBootstrapCode(true);
+  const code = crypto.randomBytes(16).toString('hex');
+  const file = bootstrapCodePath(port);
+  try {
+    fs.writeFileSync(file, `${code}\n`, { mode: 0o600 });
+    bootstrapCode = code;
+    bootstrapCodeFile = file;
+    bootstrapPort = port;
+    log(`本机首启引导码：${file}（一次性；每次注册成功后轮换；仅本机直连且能读到该文件时可用）`);
+  } catch (e) {
+    console.warn(new Date().toISOString(), '本机首启引导码生成失败：' + String(/** @type {any} */ (e)?.message || e));
+  }
+}
+/** @param {boolean} [removeFile] */
+function clearBootstrapCode(removeFile = true) {
+  if (removeFile && bootstrapCodeFile) {
+    try {
+      fs.unlinkSync(bootstrapCodeFile);
+    } catch (e) {
+      console.warn(new Date().toISOString(), '清理本机首启引导码失败：' + String(/** @type {any} */ (e)?.message || e));
+    }
+  }
+  bootstrapCode = null;
+  bootstrapCodeFile = null;
+  bootstrapPort = null;
+}
 const INVITE_CODES = new Set(
   String(process.env.MINGDAO_SYNC_INVITE_CODES || '')
     .split(',')
@@ -403,26 +456,142 @@ function isValidSessionName(n) {
 }
 
 // ---------- 限速（防爆破/枚举；内存表，进程级） ----------
-const TRUST_PROXY = process.env.SYNC_TRUST_PROXY === '1'; // 仅部署在可信反代后时开启
+// v0.6.30（N-10）：SYNC_TRUST_PROXY_HOPS 是显式声明「服务端前有几跳可信反代」。
+// 未设 TRUST_PROXY / HOPS 时 **完全忽略 X-Forwarded-For**（旧实现永远信任它，轮换即可重置来源桶）。
+const TRUST_PROXY = process.env.SYNC_TRUST_PROXY === '1'; // 仅部署在可信反代后时开启（兼容旧配置）
+const TRUST_PROXY_HOPS_RAW = Number(process.env.SYNC_TRUST_PROXY_HOPS || 0);
+const TRUST_PROXY_HOPS = Number.isInteger(TRUST_PROXY_HOPS_RAW) && TRUST_PROXY_HOPS_RAW > 0 ? TRUST_PROXY_HOPS_RAW : 0;
+const PROXY_TRUSTED = TRUST_PROXY || TRUST_PROXY_HOPS > 0;
 const SOURCE_WINDOW_MS = 60000;
 const ACCOUNT_FAIL_LIMIT = 5;
 const ACCOUNT_FAIL_WINDOW_MS = 15 * 60 * 1000;
 const ACCOUNT_BACKOFF_BASE_MS = 5000;
-const ACCOUNT_BACKOFF_MAX_MS = 5 * 60 * 1000;
+// N-17：账号锁定退避必须有上限，否则攻击者持续用他人用户名打失败即可把真实用户永久锁在 5min。
+// 60s 仍能有效压住分布式爆破（配合来源桶 10 次/分钟），同时给真实用户一个确定的恢复上界。
+const ACCOUNT_BACKOFF_MAX_MS = 60 * 1000;
 /** @type {Map<string, { t0: number, n: number }>} */
 const sourceBuckets = new Map();
 /** @type {Map<string, { failures: number[], last: number }>} */
 const accountBuckets = new Map();
+// ---------- 数据面配额（N-3） ----------
+// 每账号每分钟请求数 + 每账号每日字节配额。按 **UTC 日** 分桶，进程内记账（重启后清零）。
+/** @param {string} name @param {number} fallback */
+function positiveNumberEnv(name, fallback) {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+const REQUESTS_PER_MIN_PER_ACCOUNT = Math.max(1, Math.floor(positiveNumberEnv('SYNC_REQUESTS_PER_MIN', 60)));
+const QUOTA_MB_PER_DAY = positiveNumberEnv('SYNC_QUOTA_MB_PER_DAY', 512);
+const DAILY_QUOTA_BYTES = Math.floor(QUOTA_MB_PER_DAY * 1024 * 1024);
+/** @type {Map<string, { day: string, reqT0: number, reqN: number, bytes: number }>} */
+const accountUsage = new Map();
+/** @returns {string} */
+function utcDayKey() {
+  return new Date().toISOString().slice(0, 10);
+}
+/** @param {string} username */
+function usageFor(username) {
+  const day = utcDayKey();
+  let u = accountUsage.get(username);
+  if (!u || u.day !== day) {
+    u = { day, reqT0: 0, reqN: 0, bytes: 0 };
+    accountUsage.set(username, u);
+  }
+  return u;
+}
+/**
+ * 每账号每分钟请求数上限。返回剩余等待毫秒（0 = 放行）。
+ * @param {string} username
+ * @returns {{ retryAfterMs: number } | null}
+ */
+function accountRequestLimited(username) {
+  const u = usageFor(username);
+  const now = Date.now();
+  if (now - u.reqT0 >= SOURCE_WINDOW_MS) {
+    u.reqT0 = now;
+    u.reqN = 1;
+    return null;
+  }
+  u.reqN += 1;
+  if (u.reqN > REQUESTS_PER_MIN_PER_ACCOUNT) {
+    return { retryAfterMs: Math.max(1, u.reqT0 + SOURCE_WINDOW_MS - now) };
+  }
+  return null;
+}
+/**
+ * 每日字节配额预检；`addBytes` 为本次将写入/读出的字节数。
+ * @param {string} username
+ * @param {number} addBytes
+ * @returns {{ usedBytes: number, limitBytes: number, resetAt: string } | null}
+ */
+function quotaExceeded(username, addBytes) {
+  if (DAILY_QUOTA_BYTES <= 0) return null; // 显式 0 = 关闭每日配额
+  const u = usageFor(username);
+  if (u.bytes + Math.max(0, addBytes) > DAILY_QUOTA_BYTES) {
+    const tomorrow = new Date();
+    tomorrow.setUTCHours(24, 0, 0, 0);
+    return { usedBytes: u.bytes, limitBytes: DAILY_QUOTA_BYTES, resetAt: tomorrow.toISOString() };
+  }
+  return null;
+}
+/** @param {string} username @param {number} bytes */
+function noteQuotaBytes(username, bytes) {
+  if (DAILY_QUOTA_BYTES <= 0) return;
+  usageFor(username).bytes += Math.max(0, bytes);
+}
+/** @param {string} ip */
+function normalizeIp(ip) {
+  let out = String(ip || '').trim().replace(/^"|"$/g, '');
+  // XFF 可能带端口（IPv4:port）或 IPv6 方括号，先剥掉再判合法性。
+  if (/^\[[^\]]+\](?::\d+)?$/.test(out)) out = out.slice(1, out.indexOf(']'));
+  else if (/^\d+\.\d+\.\d+\.\d+:\d+$/.test(out)) out = out.split(':')[0];
+  // IPv4-mapped IPv6（::ffff:127.0.0.1）与裸 IPv4 必须落进同一个桶，否则同一来源能被拆成两份配额。
+  if (out.toLowerCase().startsWith('::ffff:')) out = out.slice(7);
+  return out;
+}
+/**
+ * XFF 链里**最靠近服务端**的那一跳（右起）。SYNC_TRUST_PROXY_HOPS=n 时取右起第 n 跳。
+ * 取第一段是错的：标准反代是「追加」，客户端在最前，第一段完全是客户端自填。
+ * @param {any} req
+ * @returns {string[]}
+ */
+function forwardedChain(req) {
+  const raw = req.headers['x-forwarded-for'];
+  if (!raw) return [];
+  return String(raw)
+    .split(',')
+    .map((s) => normalizeIp(s))
+    .filter((s) => net.isIP(s) !== 0);
+}
 /** @param {any} req */
 function clientIp(req) {
-  let ip = String(req.socket?.remoteAddress || 'x');
-  if (TRUST_PROXY) {
-    const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
-    if (/^[\d.]+$/.test(xff) || xff.includes(':')) ip = xff;
-  }
-  // IPv4-mapped IPv6（::ffff:127.0.0.1）与裸 IPv4 必须落进同一个桶，否则同一来源能被拆成两份配额。
-  if (ip.toLowerCase().startsWith('::ffff:')) ip = ip.slice(7);
-  return ip;
+  const direct = normalizeIp(String(req.socket?.remoteAddress || 'x'));
+  // 未显式声明可信反代：XFF 一律不参与身份判定（否则轮换 XFF 就能绕过来源桶）。
+  if (!PROXY_TRUSTED) return direct;
+  const chain = forwardedChain(req);
+  if (!chain.length) return direct;
+  const idx = TRUST_PROXY_HOPS > 0 ? chain.length - TRUST_PROXY_HOPS : chain.length - 1;
+  return idx >= 0 ? chain[idx] : direct;
+}
+/** @param {any} req */
+function hasProxyHeaders(req) {
+  return Boolean(
+    req.headers['x-forwarded-for'] ||
+      req.headers['x-real-ip'] ||
+      req.headers['forwarded'] ||
+      req.headers['x-forwarded-proto'] ||
+      req.headers['x-forwarded-host']
+  );
+}
+/**
+ * 「本机直连」必须是**服务端可判定的事实**，而不是客户端声称的地址：
+ * 没有启用任何可信反代配置、请求不带任何转发头、socket 对端本身是回环。
+ * 这样「回环监听 + nginx 反代」形态下（对端恒为 127.0.0.1）不会被误判成直连。
+ * @param {any} req
+ */
+function isDirectLoopback(req) {
+  if (PROXY_TRUSTED || hasProxyHeaders(req)) return false;
+  return isLoopbackIp(normalizeIp(String(req.socket?.remoteAddress || 'x')));
 }
 /** @param {string} ip */
 function isLoopbackIp(ip) {
@@ -485,6 +654,8 @@ function accountKey(route, account) {
 }
 /**
  * 账号维度（跨 IP，v0.6.29 M-02）：返回仍需等待的毫秒数，0 = 未限流。
+ * v0.6.30（N-17）：退避上限压到 60s（见 ACCOUNT_BACKOFF_MAX_MS），且只有**已存在**的账号会
+ * 被记入失败（调用方必须保证 notFound 不记账）——否则攻击者可用任意用户名制造跨 IP 的账号级 DoS。
  * @param {string} route
  * @param {string} account
  * @returns {number}
@@ -495,7 +666,7 @@ function accountWaitMs(route, account) {
   const now = Date.now();
   b.failures = b.failures.filter((t) => now - t < ACCOUNT_FAIL_WINDOW_MS);
   if (b.failures.length < ACCOUNT_FAIL_LIMIT) return 0;
-  // 指数退避：第 5 次失败锁 5s，之后 10s/20s…上限 5min；成功认证立即清零。
+  // 指数退避：第 5 次失败锁 5s，之后 10s/20s…**上限 60s**；成功认证立即清零。
   const backoff = Math.min(ACCOUNT_BACKOFF_MAX_MS, ACCOUNT_BACKOFF_BASE_MS * 2 ** (b.failures.length - ACCOUNT_FAIL_LIMIT));
   const wait = b.last + backoff - now;
   return wait > 0 ? wait : 0;
@@ -614,40 +785,30 @@ async function withWriteLock(fn) {
     release();
   }
 }
-/** @type {any} */
-let registerLock = null;
+// v0.6.30（N-16）：users.json 上**只允许一把互斥锁**（就是上面的 writeLock）。
+// 旧实现另起一个 registerLock 写 users.json，与 doPair/doChangePassword 的 writeLock 互不相干——
+// 并发下注册的陈旧 users 快照会覆盖改密刚写入的 credentialVersion，H-03 的单调性前提直接不成立。
+// 现在注册也走 withWriteLock：锁内重读 + 校验名字未被占用（N-15 的锁外 hash 见下）。
 /** @param {any} body */
 async function doRegister(body) {
   const username = String(body.username || '').trim();
   const password = String(body.password || '');
   if (!isValidUsername(username)) return { error: '用户名需 2–32 位字母/数字/._-' };
   if (password.length < 8) return { error: '密码至少 8 位' };
-  // 审计 P2-10：注册用进程内互斥，避免并发同名注册双双成功（后写覆盖）
-  if (!registerLock) {
-    registerLock = new Promise((resolve) => {
-      queueMicrotask(() => resolve(undefined));
-    });
-  }
-  const prev = registerLock;
-  /** @type {any} */
-  let release;
-  registerLock = new Promise((resolve) => {
-    release = resolve;
-  });
-  await prev;
-  try {
-    // 审计 BUG-064：盐与哈希（~18ms 的 CPU 活）在**拿锁之前**算好，锁内只剩纯同步的读改写
-    const salt = crypto.randomBytes(12).toString('hex');
-    const hash = await hashPassword(password, salt);
+  // N-15：盐与哈希（~18ms CPU）必须在**锁外**算好。文件头注释的不变量是「锁内不做 CPU 等待」；
+  // 旧实现把 await scrypt 放在 registerLock 里，注册并发时锁被 CPU 等待拉长，且与 withWriteLock
+  // 交叉时无法保证 users.json 的读改写原子性。
+  const salt = crypto.randomBytes(12).toString('hex');
+  const hash = await hashPassword(password, salt);
+  return withWriteLock(() => {
     const users = readUsers(); // H-02：损坏/不合 schema → 抛错，绝不返回空库后覆盖
+    // N-15/N-16：锁内**重读**并重查名字——hash 在锁外算的这段时间里可能已有同名注册成功。
     if (users[username]) return { conflict: '用户名已存在' };
     users[username] = { salt, hash, credentialVersion: 0, createdAt: Date.now() };
     writeUsers(users);
     log('register', username);
     return { ok: true, username };
-  } finally {
-    release();
-  }
+  });
 }
 
 /** @param {any} body */
@@ -960,17 +1121,18 @@ function rejectRequestTarget(req, res) {
   }
 }
 /**
- * v0.6.29（M-14）：默认 closed。未显式设置 MINGDAO_SYNC_REGISTRATION、且服务只监听回环地址时，
- * 仍允许**回环来源**完成本机注册（本机自建首启的迁移缓冲，日志会写明）；一旦绑定非回环地址，
- * 默认一律 closed。显式设置该变量时以显式值为准（closed 就是 closed，含回环）。
+ * v0.6.30（N-10）：默认 closed **无条件**成立。旧实现在「未显式配置 + 监听回环 + 回环来源」时
+ * 自动放行，但"回环来源"是客户端可控的（TRUST_PROXY 下取 XFF 第一段）或部署形态决定的
+ * （回环监听 + nginx 反代时每个外部客户端都是 127.0.0.1）。
+ * 本机首启只能由部署方**显式声明** MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION=1 开启，且仅对
+ * 「本机直连、无任何转发头、未启用可信反代配置」生效；经代理进来的请求一律 closed。
  * @param {any} req
- * @param {any} listenHost
  * @returns {'open'|'invite'|'closed'}
  */
-function registrationModeFor(req, listenHost) {
+function registrationModeFor(req) {
   if (REGISTRATION === 'invite') return 'invite';
   if (REGISTRATION === 'open') return 'open';
-  if (REGISTRATION_AUTO && isLoopbackHost(listenHost) && isLoopbackIp(clientIp(req))) return 'open';
+  if (REGISTRATION_AUTO && ALLOW_LOOPBACK_REGISTRATION && isDirectLoopback(req)) return 'open';
   return 'closed';
 }
 /**
@@ -1018,13 +1180,31 @@ async function handle(req, res, listenHost) {
       const acct = normalizeAccount(body.username);
       const acctWait = accountWaitMs('/api/register', acct);
       if (acctWait) return json(res, 429, { error: '该用户名的尝试过于频繁，请稍后再试', retryAfterMs: acctWait });
-      const mode = registrationModeFor(req, listenHost);
-      if (mode === 'closed') return json(res, 403, { error: '注册已关闭（管理员已禁用自助注册）' });
+      const mode = registrationModeFor(req);
+      let usedBootstrapCode = false;
+      if (mode === 'closed') {
+        // N-10 的第二条显式引导：默认 closed + 首启生成的一次性本机引导码。
+        // 只接受「码匹配 + 本机直连」——远程/经反代的客户端读不到本机 0600 文件，仍是 403。
+        const code = String(body.inviteCode || '').trim();
+        usedBootstrapCode = Boolean(code && bootstrapCode && safeEqualHex(code, bootstrapCode) && isDirectLoopback(req));
+        if (!usedBootstrapCode) {
+          return json(res, 403, {
+            error:
+              '注册已关闭（管理员已禁用自助注册）。本机首启请使用服务器启动日志中生成的一次性引导码' +
+              '（mingdao sync login 会自动读取）；或由管理员显式设置 MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION=1（仅直连生效）。',
+          });
+        }
+      }
       if (mode === 'invite') {
         const code = String(body.inviteCode || '').trim();
         if (!code || !INVITE_CODES.has(code)) return json(res, 403, { error: '需要有效邀请码才能注册' });
       }
       const r = await doRegister(body);
+      // 一次性引导码：注册成功后**轮换**（旧码立即作废）；失败不消耗，允许修正用户名/密码后重试。
+      if (usedBootstrapCode && r.ok) {
+        if (bootstrapPort !== null) armBootstrapCode(bootstrapPort);
+        else clearBootstrapCode(true);
+      }
       // 注册不是认证：只有"用户名已被占用"这种可被用来枚举的失败才计入账号桶；
       // 密码太短/用户名非法等输入错误不累计，避免用户打错几次就被锁。
       if (r.ok) resetAccount('/api/register', acct);
@@ -1043,7 +1223,9 @@ async function handle(req, res, listenHost) {
       if (acctWait) return json(res, 429, { error: '该账号尝试过于频繁，请稍后再试', retryAfterMs: acctWait });
       const r = await doPair(body);
       if (r.ok) resetAccount('/api/pair', acct);
-      else if (r.notFound || r.unauthorized) noteAccountFailure('/api/pair', acct);
+      // N-17①③：账号桶只对**已存在**账号的失败认证计数。用户不存在仅由来源桶限流——
+      // 否则攻击者拿任意用户名打失败也能把（不存在/他人的）账号推进退避。
+      else if (r.unauthorized) noteAccountFailure('/api/pair', acct);
       if (r.notFound) return json(res, 404, r);
       if (r.unauthorized) return json(res, 401, r);
       return json(res, 200, r);
@@ -1087,16 +1269,69 @@ async function handle(req, res, listenHost) {
       return json(res, 200, { ok: true, sessions: doListSessions(dev.username) });
     }
     if (req.method === 'POST' && p === '/api/sessions/push') {
+      // N-3（M-07）：数据面配额——每账号每分钟请求数 + 每日字节。超限必须 429 且说明可见。
+      const reqGate = accountRequestLimited(dev.username);
+      if (reqGate) {
+        return json(res, 429, {
+          error: `数据接口请求过于频繁：每账号每分钟最多 ${REQUESTS_PER_MIN_PER_ACCOUNT} 次，请 ${Math.ceil(reqGate.retryAfterMs / 1000)}s 后重试`,
+          code: 'ACCOUNT_RATE_LIMIT',
+          limit: REQUESTS_PER_MIN_PER_ACCOUNT,
+          windowMs: SOURCE_WINDOW_MS,
+          retryAfterMs: reqGate.retryAfterMs,
+        });
+      }
       const body = await parseBody(req);
       if (body.__error) return json(res, 400, { error: 'JSON 解析失败' });
+      const bytes = typeof body.content === 'string' ? Buffer.byteLength(body.content) : 0;
+      const over = quotaExceeded(dev.username, bytes);
+      if (over) {
+        return json(res, 429, {
+          error:
+            `今日同步字节配额已用尽：每账号 ${QUOTA_MB_PER_DAY}MB/日，已用 ${(over.usedBytes / 1048576).toFixed(2)}MB、` +
+            `本次需 ${(bytes / 1048576).toFixed(2)}MB；配额将于 ${over.resetAt}（UTC 零点）重置。` +
+            '如确需更大配额，请管理员调高 SYNC_QUOTA_MB_PER_DAY。',
+          code: 'DAILY_QUOTA_EXCEEDED',
+          usedBytes: over.usedBytes,
+          limitBytes: over.limitBytes,
+          requestedBytes: bytes,
+          resetAt: over.resetAt,
+        });
+      }
       const r = await doPush(dev.username, body);
       if (r.error) return json(res, 400, r);
+      noteQuotaBytes(dev.username, bytes); // 只在成功后记账
       return json(res, 200, r);
     }
     if (req.method === 'POST' && p === '/api/sessions/pull') {
+      const reqGate = accountRequestLimited(dev.username);
+      if (reqGate) {
+        return json(res, 429, {
+          error: `数据接口请求过于频繁：每账号每分钟最多 ${REQUESTS_PER_MIN_PER_ACCOUNT} 次，请 ${Math.ceil(reqGate.retryAfterMs / 1000)}s 后重试`,
+          code: 'ACCOUNT_RATE_LIMIT',
+          limit: REQUESTS_PER_MIN_PER_ACCOUNT,
+          windowMs: SOURCE_WINDOW_MS,
+          retryAfterMs: reqGate.retryAfterMs,
+        });
+      }
       const body = await parseBody(req);
       const r = doPull(dev.username, String(body.name || '').trim());
       if (r.notFound) return json(res, 404, r);
+      const bytes = Buffer.byteLength(String(r.content || ''));
+      const over = quotaExceeded(dev.username, bytes);
+      if (over) {
+        return json(res, 429, {
+          error:
+            `今日同步字节配额已用尽：每账号 ${QUOTA_MB_PER_DAY}MB/日，已用 ${(over.usedBytes / 1048576).toFixed(2)}MB、` +
+            `本次需 ${(bytes / 1048576).toFixed(2)}MB；配额将于 ${over.resetAt}（UTC 零点）重置。` +
+            '如确需更大配额，请管理员调高 SYNC_QUOTA_MB_PER_DAY。',
+          code: 'DAILY_QUOTA_EXCEEDED',
+          usedBytes: over.usedBytes,
+          limitBytes: over.limitBytes,
+          requestedBytes: bytes,
+          resetAt: over.resetAt,
+        });
+      }
+      noteQuotaBytes(dev.username, bytes);
       return json(res, 200, r);
     }
     if (req.method === 'POST' && p === '/api/sessions/delete') {
@@ -1183,15 +1418,17 @@ export function runSyncServer({ port, host, dataDir, cert, key } = {}) {
     log('⚠ 注册：open（自助注册开放；公网部署不推荐，建议 invite + 邀请码）');
   } else if (REGISTRATION === 'invite') {
     log(`注册：invite（需要邀请码，已配置 ${INVITE_CODES.size} 个）`);
-  } else if (REGISTRATION_AUTO && loopback) {
+  } else if (REGISTRATION_AUTO && ALLOW_LOOPBACK_REGISTRATION) {
     log(
-      '注册：closed（v0.6.29 起的默认）—— 本机回环来源可自助注册用于首启；' +
-        '对外提供服务请显式设置 MINGDAO_SYNC_REGISTRATION=invite 并配置 MINGDAO_SYNC_INVITE_CODES（或 open，不推荐）'
+      '注册：closed（默认）—— 已显式允许本机直连自助注册（MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION=1）；' +
+        '仅当请求来自本机直连且不带任何转发头时生效，经反代/带 XFF 的请求仍按 closed 拒绝；' +
+        '对外提供服务请用 MINGDAO_SYNC_REGISTRATION=invite + MINGDAO_SYNC_INVITE_CODES（或 open，不推荐）'
     );
   } else {
     log(
-      '注册：closed（默认，不接受自助注册）—— 已有账号仍可配对/同步；' +
-        '如确需开放，请显式设置 MINGDAO_SYNC_REGISTRATION=invite + MINGDAO_SYNC_INVITE_CODES（或 open，不推荐）'
+      '注册：closed（默认，不接受自助注册）—— 本机首启也不自动放行；' +
+        '确需本机直连自助注册请显式设置 MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION=1（带 XFF/经反代不生效）；' +
+        '对外提供服务请用 MINGDAO_SYNC_REGISTRATION=invite + MINGDAO_SYNC_INVITE_CODES（或 open，不推荐）'
     );
   }
   /** @type {(req: any, res: any) => void} */
@@ -1249,7 +1486,27 @@ export function runSyncServer({ port, host, dataDir, cert, key } = {}) {
       new Date().toISOString(),
       `MingDao 同步服务已启动 http${certFile ? 's' : ''}://${listenHost}:${actualPort} · 数据目录 ${dir}`
     );
+    // v0.6.30（N-10）：默认 closed + 首次启动（还没有任何账号）时生成本机一次性引导码。
+    // 显式 open/invite/closed 与显式 ALLOW_LOOPBACK_REGISTRATION 都不生成（前两者有自己的入口，
+    // 后者已有更明确的开关）。
+    const staleBootstrap = bootstrapCodePath(actualPort);
+    if (fs.existsSync(staleBootstrap)) {
+      try {
+        fs.unlinkSync(staleBootstrap); // 上次异常退出（SIGKILL）留下的旧码，不能继续可用
+      } catch (e) {
+        console.warn(new Date().toISOString(), '清理陈旧本机首启引导码失败：' + String(/** @type {any} */ (e)?.message || e));
+      }
+    }
+    if (REGISTRATION === 'closed' && REGISTRATION_AUTO && !ALLOW_LOOPBACK_REGISTRATION) {
+      try {
+        const users = readUsers();
+        if (!Object.keys(users).length) armBootstrapCode(actualPort);
+      } catch {
+        // 状态损坏时不生成引导码：让管理员先修复 users.json（否则会用首启路径掩盖损坏）。
+      }
+    }
   });
+  server.on('close', () => clearBootstrapCode(true));
   return server;
 }
 

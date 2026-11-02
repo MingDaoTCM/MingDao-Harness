@@ -635,9 +635,13 @@ The **sync server** (`mingdao sync-server`) is configured by environment variabl
 | `SYNC_HOST` / `SYNC_PORT` | `127.0.0.1` / `443` | Listen address. **Changed in v0.6.29**: loopback only by default; set `SYNC_HOST=0.0.0.0` (plus TLS) to serve other hosts |
 | `SYNC_DATA_DIR` | `/var/lib/mingdao-sync` | Data directory |
 | `SYNC_CERT` / `SYNC_KEY` | none | Both must be set together; setting only one refuses to start instead of silently serving plaintext |
-| `SYNC_ALLOW_INSECURE`, `SYNC_TRUST_PROXY` | off | Only for trusted reverse-proxy deployments |
-| `MINGDAO_SYNC_REGISTRATION` | `closed` | `open` / `invite` / `closed`. **Changed in v0.6.29**: `closed` by default; when the variable is unset, a loopback listener still allows self-registration from loopback clients (local first run). Set `invite` (recommended) or `open` to accept new users |
+| `SYNC_ALLOW_INSECURE` | off | Only for an explicitly acknowledged plaintext intranet deployment |
+| `SYNC_TRUST_PROXY` / `SYNC_TRUST_PROXY_HOPS` | off / unset | Only behind a trusted reverse proxy. `SYNC_TRUST_PROXY_HOPS=<n>` takes the n-th hop from the **right** of `X-Forwarded-For` (`1` = rightmost). When neither is set, `X-Forwarded-For` is **ignored entirely** (so rotating it cannot reset rate limits) |
+| `MINGDAO_SYNC_REGISTRATION` | `closed` | `open` / `invite` / `closed`. **v0.6.30 (N-10)**: `closed` is unconditional and is no longer inferred from the request source. Local first-run bootstrap requires the explicit switch below; set `invite` (recommended) or `open` to accept new users |
+| `MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION` | `0` | Set to `1` to allow self-registration **only for a direct local connection** (no trusted-proxy config, no forwarding headers, loopback socket peer). Never takes effect when the request arrived through a proxy or carries `X-Forwarded-For`. A first-run one-time bootstrap code file (`os.tmpdir()/mingdao-sync-bootstrap-<port>.txt`, mode 0600, auto-read by `mingdao sync login`, rotated after each successful registration, removed on shutdown) provides the second explicit local-bootstrap path under the default `closed` mode |
 | `MINGDAO_SYNC_INVITE_CODES` | none | Comma-separated codes, used when registration is `invite`. At least `invite` is recommended for public deployments |
+| `SYNC_REQUESTS_PER_MIN` | `60` | Per-account request limit for `/api/sessions/push` and `/api/sessions/pull`; exceeding it returns `429` with `ACCOUNT_RATE_LIMIT` and `retryAfterMs` |
+| `SYNC_QUOTA_MB_PER_DAY` | `512` | Per-account daily byte quota (MB) for push + pull; exceeding it returns `429` with `DAILY_QUOTA_EXCEEDED`, `usedBytes`, `limitBytes` and `resetAt`. `0` disables the daily byte quota |
 
 ---
 
@@ -1028,8 +1032,8 @@ tampered Packs are refused and flagged).
 | `MINGDAO_LOCK_TIMEOUT_MS`, `MINGDAO_LOCK_STALE_MS` | file locking | Tune lock waits / staleness (diagnostics, tests) |
 | `MINGDAO_BATCH_TIMEOUT_MS`, `MINGDAO_BATCH_POLL_MS`, `MINGDAO_BATCH_MAX_BYTES` | `mingdao batch` | Request timeout (120 s), poll base interval (5 s), result size cap (32 MiB) |
 | `MINGDAO_TOKENIZER_RETRY_MS` | tokenizer | Retry interval after a failed vocabulary load |
-| `MINGDAO_SYNC_REGISTRATION`, `MINGDAO_SYNC_INVITE_CODES` | `mingdao sync-server` | Registration mode (`open` / `invite` / `closed`) and invite codes |
-| `SYNC_HOST`, `SYNC_PORT`, `SYNC_DATA_DIR`, `SYNC_CERT`, `SYNC_KEY`, `SYNC_ALLOW_INSECURE`, `SYNC_TRUST_PROXY` | `mingdao sync-server` | Server binding, TLS and proxy settings |
+| `MINGDAO_SYNC_REGISTRATION`, `MINGDAO_SYNC_INVITE_CODES`, `MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION` | `mingdao sync-server` | Registration mode (`open` / `invite` / `closed`), invite codes, and the explicit direct-loopback bootstrap switch (`0` by default) |
+| `SYNC_HOST`, `SYNC_PORT`, `SYNC_DATA_DIR`, `SYNC_CERT`, `SYNC_KEY`, `SYNC_ALLOW_INSECURE`, `SYNC_TRUST_PROXY`, `SYNC_TRUST_PROXY_HOPS`, `SYNC_REQUESTS_PER_MIN`, `SYNC_QUOTA_MB_PER_DAY` | `mingdao sync-server` | Server binding, TLS, trusted-proxy hop selection, and per-account data-plane quotas |
 | `EDITOR` / `VISUAL` | REPL | Editor used by `/memory edit`. Colour is decided solely by `process.stdout.isTTY`, not by `NO_COLOR` / `FORCE_COLOR` |
 
 ---

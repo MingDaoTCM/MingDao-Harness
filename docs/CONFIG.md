@@ -410,12 +410,31 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
 设备 token 存凭证库（`credentials.json` 的 `sync` 字段），配置里只留非秘密项。自建自签证书
 过渡阶段可加 `"insecure": true`（正式证书就绪后删除）。详见 README「云同步与多用户协作」。
 
-同步**服务端**（`mingdao sync-server`）的安全默认（**v0.6.29 起变更**）：
+同步**服务端**（`mingdao sync-server`）的安全默认（**v0.6.29 起变更，v0.6.30 收紧**）：
 `SYNC_HOST` 默认 **`127.0.0.1`**（仅本机），注册默认 **`closed`**。对外提供服务需显式设置
 `SYNC_HOST=0.0.0.0` 并配置 `SYNC_CERT`/`SYNC_KEY`（TLS）；接纳新用户需显式设置
 `MINGDAO_SYNC_REGISTRATION=invite` + `MINGDAO_SYNC_INVITE_CODES=码1,码2`（推荐）或 `open`。
-**已有账号不受影响**（配对/同步/改密不变）；本机首启在「未显式配置 + 只监听回环 + 回环来源」时
-仍可自助注册。公网自建建议至少 `invite`。
+**已有账号不受影响**（配对/同步/改密不变）。
+
+- **本机首启**：v0.6.30（N-10）起默认 closed **无条件**成立，不再按「回环来源」自动放行
+  （反代部署下外部客户端的 socket 恒为 `127.0.0.1`，且 `X-Forwarded-For` 可由客户端自填）。
+  本机直连自助注册有两条**显式**引导：① 设置 `MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION=1`——仅当
+  请求来自本机直连、未启用可信反代配置且不带任何转发头时生效；② 默认 closed 且首次启动（还没有
+  账号）时，服务端在 `os.tmpdir()/mingdao-sync-bootstrap-<端口>.txt`（0600）生成**一次性引导码**，
+  本机 `mingdao sync login` 会自动读取并随注册请求提交；每成功注册一次即轮换（旧码失效），服务器
+  关闭时删除文件。经代理/带 `X-Forwarded-For` 的请求即使持有引导码也仍被拒绝。
+- **可信反代**：`SYNC_TRUST_PROXY=1` 或 `SYNC_TRUST_PROXY_HOPS=<n>` 才读 `X-Forwarded-For`。
+  `SYNC_TRUST_PROXY_HOPS=1` 取**右起第 1 跳**（最靠近服务端）；未设置这两个变量时完全忽略 XFF，
+  来源限流不可用轮换 XFF 绕过。
+- **数据面配额**：`/api/sessions/push`、`/api/sessions/pull` 每账号每分钟最多
+  `SYNC_REQUESTS_PER_MIN`（默认 **60**）次，每日字节配额 `SYNC_QUOTA_MB_PER_DAY`
+  （默认 **512** MB，`0` = 关闭）；超限返回 429，并带 `ACCOUNT_RATE_LIMIT` /
+  `DAILY_QUOTA_EXCEEDED`、`usedBytes`、`limitBytes`、`resetAt` 等可见说明。
+- **WebUI 权限**：未配置访问令牌时只能选 `ask` / `readonly`，`auto` 会被服务端拒绝
+  （`PERMISSION_AUTO_REQUIRES_TOKEN`）；`/api/state` 的 `permissionAutoAllowed` / `permissionNote`
+  会说明该限制。配置 `web.token` / `--auth-token` / `MINGDAO_WEB_TOKEN` 后不再受限。
+
+公网自建建议至少 `invite`。
 
 ## 会话日志与「带上文」（跨会话连续性）
 

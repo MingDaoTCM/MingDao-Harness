@@ -271,9 +271,17 @@ let base = await startWeb(work1);
   const badJ = await bad.json();
   assert.equal(bad.status, 400, '无 Key 的模型应拒绝');
   assert.ok(String(badJ.error).includes('API Key'));
-  const back = await (await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'test-model', permission: 'auto' }) })).json();
-  assert.equal(back.ok, true);
-  ok('界面配置：权限切换 / 模型列表 / 无 Key 拒绝');
+  // v0.6.30（H-11）：无令牌 WebUI 不得把权限改成 auto（同机任意进程可 POST /api/chat 并自答确认）。
+  const back = await fetch(base + '/api/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: 'test-model', permission: 'auto' }) });
+  const backJ = await back.json();
+  assert.equal(back.status, 403, '无令牌 WebUI 改 auto 必须被拒');
+  assert.equal(backJ.code, 'PERMISSION_AUTO_REQUIRES_TOKEN', '拒绝应带可见错误码');
+  ok('界面配置：权限切换 / 模型列表 / 无 Key 拒绝 / 无令牌 auto 拒绝');
+
+  // 后续聊天用例需要 auto：绕开被限制的改档入口，直接把 auto 写进 config.json 后重启
+  // （H-11 只约束服务端改档入口，不禁止用户显式声明的配置）。
+  writeConfig('auto');
+  base = await startWeb(work1);
 }
 
 // ---------- 2. 聊天流：text + tool + done（auto 权限） ----------

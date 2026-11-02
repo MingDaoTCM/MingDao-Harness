@@ -6193,3 +6193,102 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   抽取不到（函数被删/改名）即失败，不会静默假绿。
 - E2 的迁移是**一次性**的：迁移成功后旧文件删除；失败保留并重试，但不会在多进程下做跨进程迁移协调
   （分片锁已串行化单条目写入，迁移本身仍可能被另一进程重复执行，结果幂等）。
+
+## 5.6 v0.6.30 同步注册边界 / 锁纪律 / 数据面配额 / WebUI 权限（N-10、N-15、N-16、N-17、N-3、H-11）
+
+本轮只处理第三方核验报告里**最严重的新引入问题 N-10**，以及同一文件（`src/sync-server.js`）的三处
+不变量/竞态（N-15/N-16/N-17），外加数据面无配额（N-3/报告三 M-07）与无令牌 WebUI 可改 auto（H-11）。
+
+### 5.6.1 N-10（★）默认 closed 可被请求头/回环反代击穿
+
+- **复现**：`poc-m14.mjs`（`TRUST_PROXY=1` + 伪造 `X-Forwarded-For: 127.0.0.1` → 注册 200）与
+  `poc-m14b.mjs`（文档推荐的「回环监听 + nginx 反代」，外部客户端 socket 恒为 127.0.0.1 → 注册 200）。
+- **根因**：`registrationModeFor` 用客户端可控的 `clientIp(req)` 推断「本机来源」；`clientIp` 在
+  `TRUST_PROXY=1` 时取 XFF **第一段**（客户端自填）。
+- **修法**：
+  1. 删除「回环 IP 即允许注册」的隐式豁免，默认 closed **无条件**成立；
+  2. 本机首启改为显式声明 `MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION=1`，且只对 `isDirectLoopback(req)`
+     生效——未启用可信反代配置、不带任何转发头（XFF/X-Real-IP/Forwarded/X-Forwarded-Proto/Host）、
+     socket 对端为回环；显式 `MINGDAO_SYNC_REGISTRATION=closed` 仍优先；
+     另实现报告建议的第二条引导：默认 closed 且首次启动（无账号）时生成 0600 一次性引导码文件
+     `os.tmpdir()/mingdao-sync-bootstrap-<端口>.txt`，本机 `syncLogin` 自动读取并随注册提交；
+     每次成功注册后轮换旧码、服务器关闭时删除；经代理/带 XFF 的请求即使有码也拒绝；
+  3. `clientIp`：`SYNC_TRUST_PROXY_HOPS=<n>` 取 XFF 右起第 n 跳（n=1 = 最右）；只设
+     `SYNC_TRUST_PROXY=1` 时取最右侧；两者都未设时**完全忽略 XFF**；
+  4. 来源限流仍用同一 `clientIp`（否则轮换 XFF 可重置来源桶）。
+- **断言**：`test/sync-registration-hardening.js` F1×12——两条 PoC 场景均 403、默认本机直连也 403、
+  显式开关 + 直连 200、显式开关 + 代理/XFF 仍 403、HOPS=1 按右起取值、未设 TRUST_PROXY 时轮换 XFF
+  12 次第 11/12 次 429、显式 closed 优先、首启引导码无码 403/有效码 200/旧码轮换失效、
+  引导码经代理即使有码也 403。
+
+### 5.6.2 N-15 / N-16 / N-17：锁内 await、两把锁、账号级 DoS
+
+- **N-15**：`doRegister` 把盐/哈希（`await scrypt`）移到 `withWriteLock` **之前**；锁内只做同步的
+  读-改-写，并**重读** users.json 校验名字未被占用（hash 在锁外期间可能已有同名注册）。
+- **N-16**：删除 `registerLock`，注册与 `doPair`/`doChangePassword` 统一走 `withWriteLock`；
+  `users.json` 上只剩一把互斥量，H-03 的 `credentialVersion` 单调性前提成立。
+- **N-17**：① `/api/pair` 的 `notFound` 不再计入账号桶（不存在用户名只受来源桶约束）；
+  ② 账号退避上限从 5min 收紧到 **60s**、成功认证清零、退避窗口 15min 后自动失效，真实用户不会被
+  持续失败永久锁死；③ 账号桶与来源桶任一超限都 429（行为不变）。
+- **断言**：F2×9——结构守卫（hash 早于 withWriteLock、无 registerLock、退避上限 60s）、hash 被挂起时
+  并发 pair 不被拖住、并发同名/不同名注册、不存在用户名重复 8 次全 404、已存在账号第 6 次 429、
+  退避到期后正确密码恢复且成功清零。
+
+### 5.6.3 N-3（报告三 M-07）：数据面无配额
+
+- **修法**：`/api/sessions/push` 与 `/api/sessions/pull` 共用每账号每分钟请求桶
+  `SYNC_REQUESTS_PER_MIN`（默认 **60**）与每日字节配额 `SYNC_QUOTA_MB_PER_DAY`（默认 **512MB**，
+  `0` = 关闭）。超限 429 并带 `ACCOUNT_RATE_LIMIT` / `DAILY_QUOTA_EXCEEDED`、`usedBytes`、
+  `limitBytes`、`requestedBytes`、`resetAt`（UTC 零点）与中文说明；字节只在成功 push/pull 后记账。
+- **断言**：F3×5——push 第 6 次 429、pull 共用同一桶、第二次 600KB push 超 1MB 配额 429、
+  pull 字节也计入配额、默认值与 `0=关闭` 的源码守卫。
+
+### 5.6.4 H-11（报告三）：无令牌 WebUI 不得改 auto
+
+- **修法**：`POST /api/config` 在 `permission=auto` 且 `deps.authEnabled !== true` 时返回 403
+  `PERMISSION_AUTO_REQUIRES_TOKEN`，不写 config.json；`ask` / `readonly` 不受限。
+  `GET /api/state` 增加 `permissionAutoAllowed` 与 `permissionNote`，让限制在界面上可见。
+  配置令牌（`web.token` / `--auth-token` / `MINGDAO_WEB_TOKEN`）后不再受限。
+- **断言**：F4×4——无令牌 auto 403 且不落盘、ask/readonly 200、state 暴露 false+原因、
+  有令牌 auto 200 且 state 暴露 true。
+
+### 5.6.5 门禁与变异
+
+- `npm run typecheck`：通过。
+- `node test/sync-registration-hardening.js`：**30/30** 通过（F1×12 / F2×9 / F3×5 / F4×4）。
+- `node test/mutate/batch66-sync-registration.mjs`：**13/13** 全中（F1×5、F2×4、F3×2、F4×2）。
+- `node test/sync-hardening.js`：**24/24** 通过；M-14 的同进程注册入口显式设为 open，默认值/开关
+  全部用子进程验证（`startServerChild` 会先清空继承的 `SYNC_TRUST_PROXY` /
+  `MINGDAO_SYNC_REGISTRATION` / 允许开关）。
+- `test/mutate/batch57-sync-hardening.mjs` 的 ⑯ 锚点随注册引导改为「显式 ALLOW 开关 + 直连」同步更新。
+- `node test/smoke.js`（单独）：**通过**（进程内同步用例经首启引导码自动完成本机注册，未改 smoke）。
+- `node test/e2e-local.js`：**17/17 通过**（同一引导码路径）。
+- `node scripts/doc-lint.mjs`：只剩「变异总数」计数红（新增 batch66 13 条；README 由统一收口更新）。
+
+### 5.6.6 未做 / 边界（必须说明）
+
+- **未改** `test/smoke.js`、`test/mutate/README.md`、`test/run-all.mjs`、`.github/workflows/ci.yml`；
+  未改任务书列出的 `src/agent.js`、`src/context.js`、`src/providers/**`、`src/safe-fetch.js`、
+  `src/redact.js`、`src/ledger.js`、`src/permissions.js`、`src/tools/**`、`src/regex-safety.js`、
+  `src/pricing.js`、`src/session-index.js`、`src/memory.js`、`src/atomic-write.js`、`src/session.js`、
+  `src/web/server.js`。
+- **超出原"允许改动"清单的三处必要调整**：`test/sync-hardening.js` 的 M-14 用例（默认改为显式开关，
+  否则旧断言与 N-10 修复直接冲突）、`test/mutate/batch57-sync-hardening.mjs` 的 ⑯ 锚点（旧锚点已随
+  漏洞代码删除）、`src/sync.js` 的 `syncLogin`（本机首启时自动读取服务端生成的一次性引导码，否则
+  `smoke`/`e2e-local` 的进程内同步闭环无法注册——任务书禁止改 smoke）。三者都未放宽任何断言。
+- 首启引导码是「本机信任」的延展：文件 0600、只在默认 closed 且无账号时生成、每次成功注册后轮换、
+  服务器关闭时删除；能读本机临时目录的同用户进程本就能读写数据目录，不构成新的权限边界。
+  它防的是**远程/经反代**的外部客户端（没有本地文件访问权），不是同机恶意进程。
+- 引导码文件路径含实际端口；多实例/容器内 `os.tmpdir()` 不共享时，`syncLogin` 读不到码，需要改用
+  显式 `MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION=1` 或 invite。
+- 每日配额是**进程内、按 UTC 日**记账：服务重启后从 0 重新累计，且多进程/多实例部署不共享配额。
+  这是有意的第一版（不新增磁盘状态文件、不引入跨进程锁），文档已写明默认值。
+- `SYNC_TRUST_PROXY=1` 而未设 `SYNC_TRUST_PROXY_HOPS` 时取 XFF 最右侧一跳；多级反代（>1 跳）必须
+  显式设置 HOPS，否则来源仍可能落在中间代理 IP 上（不会回到"取第一段"的可伪造行为）。
+- 显式允许本机注册的判据是「无代理配置 + 无转发头 + socket 回环」。一个会**剥掉**所有转发头的本机
+  反代仍可能被误判成直连——这是已知边界，正确部署应配置 `SYNC_TRUST_PROXY(_HOPS)`（此时直连豁免
+  自动关闭）。
+- WebUI 权限限制只约束**服务端改档入口**（`POST /api/config`）；已存在于 config.json 的 `auto` 不会
+  被静默改写，避免替用户改配置。前端静态 `<select>` 的选项未改（`src/web/app.js`/`index.html` 不在
+  允许改动面），限制通过 403 文案与 `/api/state.permissionAutoAllowed` 表达。
+

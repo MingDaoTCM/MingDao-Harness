@@ -142,6 +142,26 @@ export function syncStatus() {
 
 // 登录/注册 + 设备配对：注册失败（用户不存在）先注册再配对
 /**
+ * v0.6.30（N-10）：默认 closed 的本机首启引导码。服务端首次启动（无账号）会把一次性码写到
+ * `os.tmpdir()/mingdao-sync-bootstrap-<端口>.txt`（0600）。仅当目标就是本机回环地址时才尝试读取；
+ * 远程服务器不会有这个本地文件。读不到/格式不对就返回空串，注册请求照常发出（服务端会 403）。
+ * @param {string} base
+ * @returns {string}
+ */
+function localBootstrapCode(base) {
+  try {
+    const u = new URL(base);
+    const host = u.hostname.replace(/^\[|\]$/g, '');
+    if (!(host === 'localhost' || host === '::1' || /^127\./.test(host))) return '';
+    const port = u.port || (u.protocol === 'https:' ? '443' : '80');
+    const code = fs.readFileSync(path.join(os.tmpdir(), `mingdao-sync-bootstrap-${port}.txt`), 'utf8').trim();
+    return /^[a-f0-9]{32}$/i.test(code) ? code : '';
+  } catch {
+    return '';
+  }
+}
+
+/**
  * @param {{ url?: any, username?: any, password?: any, deviceName?: any, insecure?: any }} opts
  */
 export async function syncLogin({ url, username, password, deviceName, insecure = false }) {
@@ -162,7 +182,11 @@ export async function syncLogin({ url, username, password, deviceName, insecure 
       pair = { notFound: true }; // 用户不存在 → 先注册
     }
     if (pair.notFound) {
-      const reg = await apiCall(base, '/api/register', { username: name, password }, undefined, TIMEOUT_MS, loginInsecure);
+      /** @type {any} */
+      const regBody = { username: name, password };
+      const bootstrapCode = localBootstrapCode(base);
+      if (bootstrapCode) regBody.inviteCode = bootstrapCode; // v0.6.30 N-10：本机首启一次性引导码
+      const reg = await apiCall(base, '/api/register', regBody, undefined, TIMEOUT_MS, loginInsecure);
       if (reg.error) return { error: reg.error };
       pair = await apiCall(base, '/api/pair', { username: name, password, deviceName: dev }, undefined, TIMEOUT_MS, loginInsecure);
     }

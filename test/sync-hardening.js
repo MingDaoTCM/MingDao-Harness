@@ -19,6 +19,10 @@
 // 通过 `SYNC_TRUST_PROXY=1` + `X-Forwarded-For` 模拟——这正是限流在生产可信反代下看到的身份来源。
 
 process.env.SYNC_TRUST_PROXY = '1';
+// v0.6.30（N-10）：默认 closed 不再从请求推断「本机来源」，而本套件的同进程用例需要注册测试账号。
+// 注册边界的默认值/显式开关由下面用**子进程**切换 env 的 M-14 用例覆盖；同进程只把注册入口
+// 显式设为 open，避免「TRUST_PROXY=1 下没有直连豁免」把账号准备步骤全部拦成 403。
+process.env.MINGDAO_SYNC_REGISTRATION = 'open';
 
 import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
@@ -571,8 +575,15 @@ await test('M-02 不同账号互不影响 + 成功认证清零账号桶', async 
  */
 async function startServerChild(extraEnv) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-sync-child-'));
+  // v0.6.30（N-10）：子进程默认继承测试进程的 SYNC_TRUST_PROXY / MINGDAO_SYNC_REGISTRATION=open，
+  // 那样 M-14 的「默认值」用例测到的就不是默认值了——必须先清空，再由 extraEnv 显式覆盖。
+  const env = { ...process.env, SYNC_PORT: '0', SYNC_DATA_DIR: dir };
+  for (const k of ['SYNC_TRUST_PROXY', 'SYNC_TRUST_PROXY_HOPS', 'MINGDAO_SYNC_REGISTRATION', 'MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION']) {
+    delete env[k];
+  }
+  Object.assign(env, extraEnv);
   const child = spawn(process.execPath, [path.join(srcDir, 'sync-server.js')], {
-    env: { ...process.env, SYNC_PORT: '0', SYNC_DATA_DIR: dir, ...extraEnv },
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   let out = '';
@@ -596,28 +607,35 @@ async function startServerChild(extraEnv) {
   return { child, dir, port, out: () => out, stop, host: (out.match(/已启动 http\S*:\/\/([^:]+):/) || [])[1] };
 }
 
-await test('M-14 默认监听 127.0.0.1 + 注册 closed（回环首启可自助注册）', async () => {
-  const child = await startServerChild({});
+await test('M-14 默认监听 127.0.0.1 + 注册 closed（显式允许后本机直连可自助注册）', async () => {
+  // v0.6.30（N-10）：默认 closed 不再从请求推断「本机来源」；本机首启必须显式声明
+  // MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION=1，且只对直连（未启用可信反代、无转发头）生效。
+  // 本文件顶部为模拟多来源 IP 设置了 SYNC_TRUST_PROXY=1，这里必须对子进程清掉。
+  const child = await startServerChild({
+    SYNC_TRUST_PROXY: '',
+    MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION: '1',
+  });
   try {
     assert.equal(child.host, '127.0.0.1', `默认监听地址必须是 127.0.0.1（实际 ${child.host}）`);
     assert.ok(/注册：closed/.test(child.out()), '启动日志必须明确写出注册默认 closed');
-    assert.ok(/本机回环/.test(child.out()), '启动日志必须说明回环首启例外');
-    const res = await post(child.port, '/api/register', { username: 'localboot', password: 'password123' }, '127.0.0.51');
-    assert.equal(res.status, 200, `默认本机首启应可注册（实际 ${res.status} ${res.text}）`);
+    assert.ok(/本机直连/.test(child.out()), '启动日志必须说明显式开关只对直连生效');
+    const res = await post(child.port, '/api/register', { username: 'localboot', password: 'password123' });
+    assert.equal(res.status, 200, `显式 ALLOW_LOOPBACK_REGISTRATION=1 时本机直连应可注册（实际 ${res.status} ${res.text}）`);
   } finally {
     await child.stop();
   }
 });
 
 await test('M-14 绑定非回环地址（0.0.0.0）时默认拒绝自助注册', async () => {
-  await withServer(
-    async ({ port }) => {
-      const res = await registerVia(port, 'remoteuser', 'password123', '127.0.0.52');
-      assert.equal(res.status, 403, `非回环绑定默认必须拒绝注册（实际 ${res.status} ${res.text}）`);
-      assert.ok(/注册已关闭/.test(res.json?.error || ''), '错误信息应说明注册已关闭');
-    },
-    { host: '0.0.0.0' }
-  );
+  // 同进程的注册入口已为其它用例显式设为 open；默认值必须用独立子进程验证（env 由 helper 清空）。
+  const child = await startServerChild({ SYNC_HOST: '0.0.0.0' });
+  try {
+    const res = await post(child.port, '/api/register', { username: 'remoteuser', password: 'password123' });
+    assert.equal(res.status, 403, `非回环绑定默认必须拒绝注册（实际 ${res.status} ${res.text}）`);
+    assert.ok(/注册已关闭/.test(res.json?.error || ''), '错误信息应说明注册已关闭');
+  } finally {
+    await child.stop();
+  }
 });
 
 await test('M-14 显式 MINGDAO_SYNC_REGISTRATION=closed：回环也拒绝', async () => {
