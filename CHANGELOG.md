@@ -3,6 +3,154 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.30（2026-11-02）— 二轮审计修复：4 个严重级 + N-10/N-11/N-12 + 门禁可信度
+
+> 本版回应第三方《v0.6.29 修复情况核验报告》（下称「核验」）与两份 v0.6.29 复审报告，收口三类问题：
+> ① **v0.6.29 一行未动的 4 条严重级**（C-1 ReDoS 冻结 / C-2 重定向带走凭据 / C-3 SSE 兜底
+> `tool_call_id` 撞号 / C-4 `withSessionLock` 无条件 delete）；② **v0.6.29 自己新引入的 3 条**
+> （N-10 注册绕过 / N-11 请求路径同步锁冻结 / N-12 迁移失败仍删唯一副本）；③ 其余高危与中危
+> （凭据脱敏、deny 绕过、git 只读、fetch 出网、多模态计数、原子写 fsync、配额、Intl 性能）。
+> 同时修掉**门禁自身**的两条假红与一条可静默逃逸的变异，并给 `src/**` 加了「变异残留」CI 守卫。
+>
+> **⚠ 本版有三个行为变更**：同步注册**默认 `closed` 且无条件**（本机首启也需显式开关或一次性引导码）、
+> **`fetch` 在未配置 `config.net` 时默认拒绝出网**、**`git` 只读工具改为选项白名单（fail-closed）**。
+> 另：**无令牌的 WebUI 不能把权限改成 `auto`**、同步数据面新增**每账号 60 次/分 + 512MB/日**配额。
+> 升级步骤逐条见 `RELEASE-NOTES-0.6.30.md`。
+
+### 一、四个严重级：四个 PoC 从「原样复现」变为「拒绝 / 正确」
+
+#### C-1　grep 的 ReDoS 判据漏「相邻无界量词」→ 事件循环完全冻结
+
+**证据（核验 §3.1）**：`pattern=a*a*a*a*a*a*a*a*b` + 目录内 1 个 20KB 单行文件，
+`node audit-evidence/poc-2-grep-redos-freeze.mjs` **退出码 124**（45s 超时被杀，
+连 watchdog 定时器都无法触发——事件循环完全冻结）；`patternRejectionReason` 返回 `null`
+（放行）；`fs-tools.js` 的 5 秒预算**只在文件之间**检查，单行内的 `testLine` 没有任何检查点。
+pattern 来自模型输出，而模型输出又可被它读到的网页/文件通过提示注入影响。
+
+**修法**：
+
+- `src/regex-safety.js` 增加**顶层相邻无界量词**判定：相邻两个原子量词都无上界（`*`/`+`/`{n,}`）
+  且首/末字符集**相交**时拒绝（`a*a*`、`a+a+`、`\d*\d*`）。字符集求交而非「同类即拒」，
+  因此 `(abc|abd)+`、`[a-z]+@[a-z]+` 这类**首末字符不同**的组合不再误伤。
+- 交替分支判定从「分支首字符集相交就拒」换成 **NFA 语言级判定**：每个分支编译成 NFA
+  （Thompson 构造，组按分支展开、量词按计数展开，带状态数/乘积预算），只拒
+  **分支语言有交集**或**一支是另一支的前缀**。于是 `(abc|abd)+`、`.*\d+`、
+  `\w+\s+\d+`、`[a-z]+@[a-z]+` 全部**放行**；`(a|aa)+`、`(a+)+`、`a*a*`、`(\d|[\d])+`、
+  `(a|)+` 仍然**拒绝**。
+- `src/tools/fs-tools.js` **删掉自维护的第二份弱判据**，只复用一个 `patternRejectionReason`；
+  **5s 预算下推到行级**，行循环里每次 `testLine` 前后都查预算，超时立即停扫并回报。
+
+**验证**（`test/freeze-hardening.js` A1）：同一 PoC **45s 超时 124 → 0ms 被拒**；
+正常 grep 20KB 单行 **145ms**；12 个恶意 pattern 全部被装载时拒绝且原因可见；
+5s 预算用**假时钟**证明行级检查确实存在（不是只看返回值）。
+
+#### C-2　safe-fetch 跨源重定向不剥凭据头 → Provider API Key 被 302 带走
+
+**证据（核验 §3.1）**：`poc-1-redirect-credential-leak.mjs` 里重定向目标收到
+`Authorization: Bearer sk-VICTIM-FULL-SECRET-KEY-1234567890`；而 `net-guard.js` 里
+**正确实现早就写好了**（注释还标着审计 BUG-034），两条路径的差距一直留着。
+`model-discovery.js` 传 `allowPrivate: true`，所以重定向目标还可以是内网地址。
+
+**修法**：`src/net-guard.js` 抽出**唯一**的 `prepareRedirectHeaders(headers, from, to)`：
+协议 / 端口 / 主机任一变化即判跨源，`https→http` 另记**降级**；返回
+`{ headers, crossOrigin, downgrade, stripped }`。`safe-fetch` 与 `net-guard` 的重定向循环
+**共用同一份**判定与裁剪（不再各写一套）。`allowPrivate` **只在首跳**（以及首跳同源的重定向）
+生效，跨源后一律按公网口径复检。跨源（含降级）后剥 `Authorization` / `Cookie` / `Proxy-Authorization`。
+
+**验证**（`test/credential-hardening.js` B1）：PoC 目标 **0 命中**、收到的
+`Authorization` 为 `null`；同源重定向仍保留头、`https→http` 降级也剥头；
+`allowPrivate` 跨源后不再豁免内网地址。
+
+#### C-3　SSE 兜底 `tool_call_id` 只用工具名 → 会话永久 400
+
+**证据（核验 §3.1）**：`openai-compatible.js` 的 `id: c.id || \`call_${c.name || 'x'}\``——
+同名工具并行调用（并行 read / 并行 grep / 多城市天气）会生成两条相同 id，下一轮请求被网关 400；
+消息已落盘，**该会话之后每一轮都必然 400**。v0.6.29 改过同一个文件（M-8/M-9），却漏了这 1 行。
+
+**修法**：兜底 id 改为 `call_<name>_<idx>_<ts/rand>`（序号 + 随机后缀，跨响应不重复），
+并用 `usedIds` 集合去重：显式 id 与另一条兜底 id 恰好同名时继续加 `_<n>` 直到唯一。
+
+**验证**（`test/agent-context-hardening.js` D4）：同一响应内两条同名并行调用 → id 不同且
+全部进入 `usedIds`；重复回放 200 次无碰撞。
+
+#### C-4　`withSessionLock` 无条件 delete → 第 4 个并发任务的互斥失效
+
+**证据（核验 §3.1）**：A 的 cleanup 把 B/C 刚入队的链也删掉，`poc-3-session-lock-race.mjs`
+的执行序是 `A start | A end | B start | D start | D end | B end | C start | C end`——**D 与 B 重叠**。
+后果：`appendMessages` 与 `rewriteSession` 并发 → **用户消息凭空消失**。
+
+**修法**：cleanup 只在 `sessionLocks.get(file) === tail`（自己仍是尾链）时才 delete，
+否则保留后来者；`releaseSessionClaim` 的键迁移逻辑不变。
+
+**验证**（`test/fs-integrity-hardening.js` E1）：四个并发任务的进入/退出区间**两两不重叠**，
+且尾链在全部结束后被清空（无泄漏）。
+
+### 二、v0.6.29 自己新引入的三条
+
+- **N-10 注册绕过**：默认 `closed` 改为**无条件**——删掉「回环 IP 即允许」的隐式豁免
+  （伪造 `X-Forwarded-For: 127.0.0.1` 就能自助注册）。本机首启改为两条显式路径：
+  `MINGDAO_SYNC_ALLOW_LOOPBACK_REGISTRATION=1`（**仅**本机直连、无代理配置、无转发头）
+  与**首启一次性引导码**（`os.tmpdir()/mingdao-sync-bootstrap-<port>.txt`，`0600`，
+  每注册一次轮换，关闭即删）。`clientIp` 改为 `SYNC_TRUST_PROXY_HOPS=n` 时取
+  **XFF 右起第 n 跳**（左起第一段客户端可自填）；**未设则完全忽略 XFF**（轮换 XFF 仍按来源桶限流）。
+  两条 PoC（伪造 XFF / 回环 + 反代形态）**均 403**，显式 `ALLOW` 的直连 200。
+- **N-11 请求路径同步锁冻结**：新增 `syncSessionIndexAsync` / `searchSessionsAsync` /
+  `appendMemoryAsync` / `writeMemoryAsync` / `dedupeMemoryAsync`；WebUI 的 `/api/sessions?q=`、
+  `finalizeSession`、`POST /api/memory` 改用异步版；同步版保留给 CLI / REPL 并注明边界。
+  PoC 实测事件循环**冻结 2008ms → 不冻结**（100ms 心跳全程正常触发）。
+- **N-12 迁移失败仍删唯一副本**：`saveShard` 的 `{ok:false}` 参与 `allOk`；任一分片写失败
+  即**保留旧索引**、打印可见 warn、下次自动重试，不再出现「新索引没写成、旧索引已删」。
+
+### 三、其余高危 / 中危（逐条）
+
+| 项 | 问题 | 修法 |
+| --- | --- | --- |
+| 凭据·账本 | 脱敏只逐「叶子值」执行，`{api_key:'…'}` 的**键名与值被拆开** → 明文落盘 | 键名层脱敏：`api_key\|token\|password\|secret\|credential\|authorization\|cookie\|private_key` 等整值 `***` |
+| 凭据·单一来源 | 脱敏词表与子进程 env 名单**各一份**（`PGPASSWORD` 进了 env 侧没进脱敏表） | `src/redact.js` 导出唯一名单与函数，`tools/bash.js` 再导出同一函数；补 `MY_CRED`、大写 `SK-` 形态 |
+| 授权·deny | `/bin/rm`、`env rm`、`sudo -u x rm`、`xargs rm`、`sh -c "rm"`、`\rm`、`r''m` 全绕过 | deny 归一化：basename、剥 `env/sudo/doas/xargs/command/builtin/exec/nohup/time/nice/timeout/stdbuf/setsid/watch/busybox`、`sh -c`/`eval` 递归、**全名 + 基名双匹配**；`denyStrict` 保持严格档不解释脚本 |
+| 授权·git | `git` 全量列为只读：`blame --contents` 读仓库外文件；`branch <名>`/`tag <名>` 建 ref 免询问 | 只读**白名单化**（`ALLOWED_LONG` / `ALLOWED_SHORT`）：未登记选项一律拒绝；`branch`/`tag` 仅允许列 ref 的形态；`stash`/`remote`/`push` 等写类子命令拒绝 |
+| 授权·fetch | `fetch` 在只读集合里 + 未配置 `config.net` 时闸门不安装 → 零确认外传 | `fetch` 移出只读集合；**未配置 `config.net` = 默认拒绝出网**（fail-closed），并给出放行指引 |
+| Agent·多模态 | `content` 数组被 `String()` 成 `[object Object]` → 204KB 图文只计 13 token | 按 `parts` 逐块计数（文本 + 图片按尺寸估算），同一 PoC 计出数千 token |
+| Agent·裁剪 | `trimMessages` 尾部贪心遇超预算即 break → **最新用户消息被整条丢弃** | 末条必留；中间截断改**二分**并在消息里标注截断 |
+| Agent·中断 | 只清最后一条消息 → 孤儿 `tool_calls` 让会话永久 400 | 中断时按 `tool_call_id` **补齐孤儿占位**（等量、同序） |
+| Agent·顺序 | 拒绝项就地 push、成功项执行完才 push → `tool` 消息与 `tool_calls` 顺序不一致 | 按 `tool_calls` **原序回填**结果/拒绝 |
+| 写完整性 | 原子写只 rename，不 fsync 文件与目录 | 补文件 + 目录 `fsync`；Windows 显式标 `skipped` 并 `chmod` 收权（不再依赖继承 ACL） |
+| 会话列表 | `listSessionsDetailed` 单个 `stat` 失败清空整个列表 | 逐项 `try/catch`，坏条目跳过并计数，列表仍返回 |
+| 同步·配额 | 数据面无限流 | 每账号 **60 次/分**（`SYNC_REQUESTS_PER_MIN`）+ **512MB/日**（`SYNC_QUOTA_MB_PER_DAY`）；超限 429 并返回用量；0 = 关闭 |
+| Web·权限 | 无令牌（回环）也能把 `permission` 改成 `auto` | 无令牌拒绝 → **403 `PERMISSION_AUTO_REQUIRES_TOKEN`** |
+| 性能·Intl | `beijingParts` 每次新建 2 个 `Intl.DateTimeFormat`；2 万条 `costBreakdown` 阻塞 ~1s | formatter 缓存 + 按**北京日预分桶**：2 万条 `costBreakdown` **994ms → 17ms**、`beijingParts` **849ms → 72ms**，且与旧逐条算法**逐条对拍一致**（含 12:00 / 18:00 / 23:59:59 / 00:00:01 边界） |
+
+### 四、门禁可信度（本轮的另一半）
+
+- **两条时限假红**改为「**软阈值告警 + 硬上限**」：慢机器只告警，超硬上限才失败
+  （阈值按平台/负载给余量，不再用「本机跑多快」当判据）。
+- **`batch57 ②` 改能力探测**：root 容器下「读失败」观测面不存在，旧写法会**静默逃逸**
+  （变异未被抓到却显示通过）；现在先探测能力，不具备则**如实跳过并计入跳过数**，CI 可见。
+- **新增 `M-17c` 确定性断言**：merge 遇持锁**必须等待**（真子进程持锁 + 时间窗断言），
+  不再依赖「恰好并发」的时序运气。
+- **`doc-lint ⑩` 新守卫**：`src/**` 出现 `// 变异：` 残留即 CI 红。本版据此修掉了
+  `74ec0a1` 误提交的 `pendingTool: null` 变异残留（`1ba5b1f`）。
+
+### 五、接线与统计
+
+- **六个新套件**接入 `test/run-all.mjs` 与 CI（仅 Linux 腿，避免 Windows 腿时长翻倍与平台假红）：
+  `freeze-hardening`（A1/A2）、`permission-hardening`（C1/C2/C3）、`credential-hardening`（B1/B2/B3）、
+  `agent-context-hardening`（D1–D5）、`fs-integrity-hardening`（E1–E5）、
+  `sync-registration-hardening`（F1–F4 + 配额/权限）。
+- **新增变异批次**：`batch63-permission-hardening`、`batch64-agent-context`、
+  `batch65-fs-integrity`、`batch66-sync-registration`（配合既有批次扩条）。
+  全仓变异总数 **541 → 627**，权威全量 `node test/mutate/run.mjs` = **55/55 批、627/627 条全中**。
+- **最终 HEAD 门禁**：`typecheck` 0、`typecheck:strict` 当前 0 / 基线 0、`smoke`（单独跑）全绿、
+  `run-all` **22 套全绿**、`mutate` 55/55、`doc-lint` 全绿、`diagnose` 正常（密钥/路径脱敏）。
+- 发布提交只含版本与文档；`git diff --name-only <门禁SHA>..<tag> -- src test` → **0 行**。
+
+### 六、文档漂移
+
+- `SECURITY.md` / `README.en.md` 支持版本 **0.6.14 → 0.6.30**；
+- `ARCHITECTURE.md` 模块计数统一为 **90**（与 `doc-lint ⑤` 同源）；
+- 去掉指向不存在 `docs/QA-REPORT.md` 的链接；
+- `batch52` 重号拆开（`batch52-memory-v2.mjs` → `batch52b-memory-v2.mjs`，并同步 README 计数）。
+
 ## v0.6.29（2026-10-27）— v0.6.28 审计修复：4 高危 + 13 中低危 + 测试隔离
 
 > 本版是**安全/状态一致性专项**：关闭第三方代码审计的**全部 4 条高危**（H-01 畸形 `request-target`
