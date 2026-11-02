@@ -6106,3 +6106,90 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
 - **`finishTurn` 只补齐最后一条带 `tool_calls` 的 assistant**（当前回合/最近损坏点）；
   更早的历史损坏不在本轮回填范围内，避免把占位插到无关历史位置造成新的顺序问题。
 - 未提高任何上下文预算/窗口常量；D2 只改计数口径，未改 `signal`/超时/端点学习/压缩触发线。
+
+## 5.5 v0.6.30 文件锁与写完整性（E1–E5：会话锁互斥 / 迁移副本 / 请求路径同步锁 / fsync+Windows 权限 / 列表单点失败）
+
+> 来源：`MingDao-Harness-v0.6.29-代码审计报告.md` 的核验证据（`../v0.6.29-核验证据-PoC脚本/`）。
+> 纪律与既往各批一致：**先复现 → 修 → 断言 → 变异**；其中 E2/E3 是 v0.6.29 自己引入的回归。
+
+### 5.5.1 E1（严重）`withSessionLock` 无条件 delete → 第 4 个并发互斥失效
+
+- **根因**：`src/web/server.js` 的 cleanup 每次都 `sessionLocks.delete(file)`，不核对"当前链还是不是我这一环"。
+  A（短任务）完成时把 B/C 刚挂上的链一起删掉 → A 之后提交的 D 看到"无锁"立刻开跑，与仍在途的 B 重叠；
+  同一会话的 append 与 compact 整文件重写交错，用户消息被覆盖丢失。
+- **复现**：PoC-3（A 50ms / B 300ms / C 200ms，A 完成后提交 D）——改前 `D@100 B@51..351`，D 与 B 重叠。
+- **修法**：cleanup 判据改为**引用相等** `if (sessionLocks.get(file) === tail) sessionLocks.delete(file)`；
+  `tail` 吞掉结果/异常，只在 settle 后 GC，异常路径也会执行（无内存泄漏）。
+- **断言**：`test/fs-integrity-hardening.js` E1（5 项）——A/B/C/D 零重叠且执行序 A→B→C→D；
+  5 个任务（含首任务结束后才提交的 2 个）最大并发 1、不跳队；正常/异常路径散场后 map 为空。
+
+### 5.5.2 E2（中，v0.6.29 回归）迁移失败仍删唯一副本
+
+- **根因**：`saveShard` 把写失败**吞成 `{ok:false}` 不抛**，而 `migrateLegacyIndex` 只靠 try/catch 置 `allOk`
+  → 写失败时 `allOk` 仍为 true，`sessions-index.json` 照删，唯一副本永久丢失。
+- **复现**：`poc-migrate.mjs`——改前"❌ 已被删除"，改后"✅ 在"。
+- **修法**：`const r = migrateOneEntry(...); if (!r.ok) allOk = false;`（同步/异步迁移同一判据）；
+  `allOk === false` 时保留旧文件并打印可见日志（下次启动重试）；迁移成功的旧文件删除失败也不再误报。
+- **断言**：E2（3 项）——一个分片写失败 → 旧文件保留 + 可见日志 + `shardWriteError()` 可查；
+  修好障碍后重试 → 两个分片迁移成功、旧文件才删除；无旧文件时正常同步无回归。
+
+### 5.5.3 E3（高，v0.6.29 回归）请求路径上的同步锁冻结事件循环
+
+- **根因**：v0.6.28 为 M-11/M-12 引入了同步锁：`src/session-index.js` 的 `syncSessionIndex`（WebUI 会话检索）
+  与 `src/memory.js` 的 `appendMemory`（会话收尾）/`writeMemory`/`dedupeMemory`（`POST /api/memory`）都在请求路径上。
+  实测另一进程持锁 2.5s 时 100ms 心跳 **0 次**、冻结 1983ms（`poc-blocking.mjs`）。
+- **修法**：请求路径改用同文件已有的**异步 `withFileLock`**：
+  - `session-index.js` 新增 `syncSessionIndexAsync`（迁移也用 `migrateLegacyIndexAsync`）；同步版保留给 CLI/REPL，
+    注释写明"CLI 可用同步、请求路径必须异步"；
+  - `session.js` 新增 `searchSessionsAsync`（同一套匹配/片段逻辑），`GET /api/sessions?q=` 改 await 异步版；
+  - `memory.js` 新增 `appendMemoryAsync` / `writeMemoryAsync` / `dedupeMemoryAsync`；`finalizeSession`（会话收尾）
+    与 `POST /api/memory` 全部改异步版；同步版保留给 CLI/REPL。
+- **断言**：E3（5 项）——持锁 2.4s 调异步版：等待 ≥1.5s 且 100ms 心跳 ≥15 次（索引/去重/覆写三处）；
+  同步版仍可用于 CLI（同步返回对象）；三条请求路径 + 会话收尾的结构守卫（变异即红）。
+
+### 5.5.4 E4（严重）原子写无 fsync + Windows 权限失效
+
+- **根因**：`atomicWriteFileSync` 是 `writeFileSync(tmp)` + `renameSync`，全仓 `fsync` 调用数为 0——
+  掉电/内核复位后 rename 可能先于数据落盘（0 字节/半截）；Windows 上 `mode:0o600` 被忽略（实测 0666）。
+- **修法**：写 tmp 后 `open(tmp,'r+') + fsyncSync + closeSync`；rename 后对目录 `open(dir,'r') + fsyncSync`
+  （POSIX；Windows 不支持 → 标记 `skipped` 不阻断）；Windows 写后显式 `chmodSync(target, mode)`，
+  失败只记 warning 不阻断，但 `fileFsync/dirFsync/chmod/warnings` 必须在**返回值里可见**。失败路径仍清理 tmp、原始 errno 上抛。
+- **断言**：E4（7 项）——桩计数证明文件 fsync 与目录 fsync 都真的被调用（返回值可见）；
+  `platform=win32` 模拟走 chmod 兜底且目录 fsync 标记 skipped；chmod 失败 → 写入不阻断 + 可见 warning；
+  成功/覆盖/失败（目标保持旧值、无 .tmp 残留）语义不回归。
+
+### 5.5.5 E5（高）`listSessions` 单点 stat 失败 → 全列表为空
+
+- **根因**：`fs.statSync` 在包住整个 `readdir+map` 的 try 里，一个坏条目（悬空链接/权限/并发删除/网络盘 EIO）
+  就清空整个列表：用户看到"会话全没了"，最近会话/搜索/同步推送一起空。
+- **修法**：新增 `listSessionsDetailed(home)`——每个条目独立 try/catch，失败**跳过并计数**（`skipped`），
+  其余照常返回；打印可见 warning（含文件名与原因）。`listSessions()` 保持数组形状（兼容既有调用方）。
+- **断言**：E5（4 项）——1 个不可 stat + 3 个正常 → 列表 3 条 + skipped 1 条 + 可见 warning；
+  `listSessions` 兼容形状不变；全好时 skipped=0 且不误报；目录缺失返回空而非抛错。
+
+### 5.5.6 门禁与变异
+
+- `npm run typecheck`：通过。
+- `node test/fs-integrity-hardening.js`：**23 项**通过（E1×5 / E2×3 / E3×5 / E4×7 / E5×4）。
+- `node test/mutate/batch65-fs-integrity.mjs`：**14/14 全中**（E1×2、E2×2、E3×3、E4×5、E5×2；
+  其中"目录 fsync"一条在 Windows 上如实跳过——Windows 无目录 fsync 语义，套件同一用例按平台分支）。
+- `node test/smoke.js`（单独）：通过；§103 静默吞写清单与 §109④ 同步锁清单处数不变
+  （E3 的迁移只在 memory/session-index 内改用异步版，未新增受审阅清单条目）。
+- `node test/e2e-web.js` / `node test/e2e-local.js`：见本次提交记录（单独串行跑）。
+- `node test/mutate/run.mjs`（全量）：见本次提交记录（与他道共享工作树，按串行结果登记）。
+
+### 5.5.7 未做 / 边界（必须说明）
+
+- **未改** `test/smoke.js`、`test/mutate/README.md`、`test/run-all.mjs`、`.github/workflows/ci.yml`（按任务书由统一收口处理）；
+  未改 `src/agent.js`、`src/context.js`、`src/providers/**`、`src/safe-fetch.js`、`src/redact.js`、`src/ledger.js`、
+  `src/permissions.js`、`src/tools/**`、`src/regex-safety.js`、`src/pricing.js`（其他道在改）。
+- **E3 的 WebUI 路由改动超出原"允许改动"清单**：`src/web/routes/domains/sessions.js`（1 行 await）与
+  `src/session.js` 的 `searchSessionsAsync` 是"会话检索走异步锁"的必要链路——不改这两处，`/api/sessions?q=`
+  仍会同步锁等待；已在代码注释里写明同步版只服务 CLI/REPL。
+- E4 的目录 fsync **只在 POSIX** 真正执行；Windows 上按要求 try/catch 跳过并标记 `skipped`，不是"做到了强持久化"。
+- E4 的 Windows 权限兜底只是 `chmod`（NTFS 上主要影响只读位），不等于 ACL 级私有化；真实 Windows 腿的 0666 实测
+  仍以 CI 为准。
+- E1 的测试以源码抽取方式驱动 server.js 内部闭包（函数未导出，直接跑真实 HTTP 并发需要模型桩）；
+  抽取不到（函数被删/改名）即失败，不会静默假绿。
+- E2 的迁移是**一次性**的：迁移成功后旧文件删除；失败保留并重试，但不会在多进程下做跨进程迁移协调
+  （分片锁已串行化单条目写入，迁移本身仍可能被另一进程重复执行，结果幂等）。

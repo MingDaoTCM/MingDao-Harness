@@ -5,7 +5,7 @@ import path from 'node:path';
 import {
   listSessions,
   loadSession,
-  searchSessions,
+  searchSessionsAsync,
   relativeTime,
   sessionPreview,
 } from '../../../session.js';
@@ -76,7 +76,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       };
     };
     const found = q
-      ? searchSessions(home, q, { limit: 30 }).map((/** @type {any} */ s) => decorate(s, `${relativeTime(s.mtime)} · ${s.snippet}`))
+      // v0.6.30（E3）：请求路径必须走异步版——索引进程锁争用时不能冻结事件循环。
+      ? (await searchSessionsAsync(home, q, { limit: 30 })).map((/** @type {any} */ s) => decorate(s, `${relativeTime(s.mtime)} · ${s.snippet}`))
       : listSessions(home).slice(0, 30).map((s) => decorate(s, `${relativeTime(s.mtime)} · ${sessionPreview(s.file)}`));
     json(res, 200, { ok: true, sessions: found });
     return true;

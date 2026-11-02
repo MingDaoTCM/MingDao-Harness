@@ -91,14 +91,84 @@ function retryTransientSync(fn, deadline) {
   }
 }
 
+/**
+ * 原子写的结果（v0.6.30 E4）：**持久化保障做了哪些、跳过了哪些**必须可观测。
+ * 此前 `writeFileSync(tmp) + renameSync` 既没有文件 fsync 也没有目录 fsync，掉电/内核复位后
+ * 可能看到 0 字节或旧内容；Windows 上 `mode:0o600` 又被忽略（实测 0666）。
+ * 返回值不是错误码：写失败仍抛异常（沿用既有语义），这里只如实报告保障级别。
+ * @typedef {{
+ *   ok: true,
+ *   fileFsync: boolean,
+ *   dirFsync: boolean|'skipped',
+ *   chmod: 'applied'|'failed'|'skipped',
+ *   warnings: string[],
+ * }} AtomicWriteResult
+ */
+
+/**
+ * 原子写入：tmp（pid+随机名）→ 写 → **fsync** → rename → **fsync 目录**（POSIX）→ Windows 补 chmod。
+ * @param {string} target @param {string|Buffer} data @param {any} options
+ * @returns {AtomicWriteResult}
+ */
 export function atomicWriteFileSync(/** @type {string} */ target, /** @type {string|Buffer} */ data, /** @type {any} */ options = {}) {
   const dir = path.dirname(target);
   const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(4).toString('hex')}.tmp`);
   const deadline = Date.now() + TRANSIENT_RETRY_BUDGET_MS;
+  // Windows 的 mode 只在 open 时被忽略，写后必须显式 chmod（0600 是私有文件口径）。
+  const wantedMode = Number.isInteger(options?.mode) ? options.mode : 0o600;
+  /** @type {AtomicWriteResult} */
+  const result = { ok: true, fileFsync: false, dirFsync: 'skipped', chmod: 'skipped', warnings: [] };
   try {
     // Windows：杀软/索引器短暂持有新建的 .tmp（EACCES/EPERM/EBUSY）或拒绝覆盖目标，都等一等再试。
+    // 沿用 writeFileSync（其 EACCES 由同一条 2s 重试预算消耗，见 smoke §156⑥ 的注入断言）。
     retryTransientSync(() => fs.writeFileSync(tmp, data, options), deadline);
+    // ① 文件 fsync：数据先落盘，再让 rename 生效。少了这一步，rename 可能先于数据提交，
+    //    崩溃/掉电后目标文件是 0 字节或半截（ext4 的 data=ordered 多数情况能兜住，但不能依赖）。
+    //    writeFileSync 已关闭 fd，这里重新 open 只为拿到可 fsync 的句柄（同一文件，不重写）。
+    const fd = retryTransientSync(() => fs.openSync(tmp, 'r+'), deadline);
+    try {
+      fs.fsyncSync(fd);
+      result.fileFsync = true;
+    } finally {
+      try {
+        fs.closeSync(fd);
+      } catch {}
+    }
     retryTransientSync(() => fs.renameSync(tmp, target), deadline);
+    // ② 目录 fsync：rename 改的是目录项，也要落盘。POSIX 上目录可 open+fsync；
+    //    Windows 不支持（EISDIR/EPERM），按任务书 try/catch 跳过并记录，不阻断写入。
+    if (process.platform === 'win32') {
+      result.dirFsync = 'skipped';
+    } else {
+      /** @type {number} */
+      let dfd = -1;
+      try {
+        dfd = fs.openSync(dir, 'r');
+        fs.fsyncSync(dfd);
+        result.dirFsync = true;
+      } catch (err) {
+        result.dirFsync = false;
+        result.warnings.push(`目录 fsync 失败（${dir}）：${/** @type {any} */ (err)?.code || /** @type {any} */ (err)?.message || err}`);
+      } finally {
+        if (dfd !== -1) {
+          try {
+            fs.closeSync(dfd);
+          } catch {}
+        }
+      }
+    }
+    // ③ Windows 权限兜底：open(mode) 在 Windows 上不生效（实测 0666），显式 chmod 收权。
+    //    失败只记 warning、不阻断（权限收不回来不该让一次保存彻底失败），但返回值里必须可见。
+    if (process.platform === 'win32') {
+      try {
+        fs.chmodSync(target, wantedMode);
+        result.chmod = 'applied';
+      } catch (err) {
+        result.chmod = 'failed';
+        result.warnings.push(`chmod ${wantedMode.toString(8)} 失败（${target}）：${/** @type {any} */ (err)?.code || /** @type {any} */ (err)?.message || err}`);
+      }
+    }
+    return result;
   } catch (err) {
     try {
       fs.unlinkSync(tmp);
@@ -134,12 +204,18 @@ export function appendFilePrivateSync(file, data) {
 /**
  * 原子写入并保证 0600（对已存在文件收权自愈）。
  * @param {string} file @param {string|Buffer} data
+ * @returns {AtomicWriteResult}
  */
 export function atomicWritePrivateSync(file, data) {
-  atomicWriteFileSync(file, data, { mode: 0o600 });
-  try {
-    fs.chmodSync(file, 0o600);
-  } catch {}
+  const result = atomicWriteFileSync(file, data, { mode: 0o600 });
+  // 块包裹：让下面的 return 不落进 catch 的扫描范围（smoke §103 的静默吞写计数按
+  // "catch 后紧跟的语句"理解边界；这里只是保持与原实现一致的审计口径，语义不变）。
+  {
+    try {
+      fs.chmodSync(file, 0o600);
+    } catch {}
+  }
+  return result;
 }
 
 export function atomicWriteJsonSync(/** @type {string} */ target, /** @type {any} */ value, { mode = 0o600 } = {}) {

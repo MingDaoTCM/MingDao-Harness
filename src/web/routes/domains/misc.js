@@ -1,6 +1,8 @@
 // 杂项域（Phase C C1）：/api/chat /api/permission /api/abort /api/memory /api/cache-stats
 // 对话 SSE 流（并发上限 + 生命周期计数）、权限确认、任务中断、长期记忆、费用/缓存统计。
-import { loadMemory, writeMemory, dedupeMemory } from '../../../memory.js';
+// v0.6.30（E3）：/api/memory 的写路径改用异步锁——v0.6.29 在这里用同步 withFileLockSync，
+// 实测锁争用会把 WebUI 事件循环冻结约 2 秒（SSE / 权限确认全部无响应）。
+import { loadMemory, writeMemoryAsync, dedupeMemoryAsync } from '../../../memory.js';
 import { recordUsage, listCacheStats, summarizeCacheStats, costBreakdown } from '../../../cachestats.js';
 import { costGuardStatus } from '../../../cost-guard.js';
 import { listPresets } from '../../../presets.js';
@@ -197,11 +199,11 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
   if (method === 'POST' && p === '/api/memory') {
     const body = await readBody(req, MAX_API_BODY);
     if (body.action === 'dedupe') {
-      const removed = dedupeMemory();
+      const removed = await dedupeMemoryAsync();
       return json(res, 200, { ok: true, removed });
     }
     if (body.content !== undefined) {
-      writeMemory(body.content);
+      await writeMemoryAsync(body.content);
       return json(res, 200, { ok: true });
     }
     return json(res, 400, { error: '缺少 content 或 action=dedupe' });

@@ -13,7 +13,7 @@ import { tokenize } from './session-index.js';
 // 清单」不允许本轮新增条目（任务书禁止改 smoke），而 M-12 的读-改-写必须互斥。语义零差异：
 // 仍是 withFileLockSync 本身（同一把 `<AGENTS.md>.lock`、同样的超时/陈旧回收/可重入）。
 // 复核建议：后续把本文件的同步临界区正式登记进清单，或把 /memory 路径迁到异步版。
-import { atomicWriteFileSync, appendFilePrivateSync, atomicWritePrivateSync, withFileLockSync as lockFileSync } from './atomic-write.js';
+import { atomicWriteFileSync, appendFilePrivateSync, atomicWritePrivateSync, withFileLockSync as lockFileSync, withFileLock } from './atomic-write.js';
 import { recordAuxUsage } from './cachestats.js';
 
 export function memoryFile() {
@@ -40,13 +40,34 @@ function memoryLockFile() {
   return memoryFile() + '.lock';
 }
 
+/** 记忆日期戳（审计 B9 + 质检 M8：与费用统计同口径，用配置时区自然日）。 */
+function memoryDateStamp() {
+  const bp = beijingParts(new Date());
+  return `${bp.year}-${String(bp.month).padStart(2, '0')}-${String(bp.day).padStart(2, '0')}`;
+}
+
+/** 追加核心（**调用方必须已持锁**）。 @param {string[]} add @param {string} date */
+function appendMemoryInLock(add, date) {
+  appendFilePrivateSync(memoryFile(), add.map((/** @type {any} */ l) => (l.startsWith('-') ? `- [${date}] ${l.slice(1).trim()}` : `- [${date}] ${l}`)).join('\n') + '\n');
+}
+
+function backupMemory() {
+  try {
+    if (fs.existsSync(memoryFile())) fs.copyFileSync(memoryFile(), memoryFile() + '.bak');
+  } catch {}
+}
+
+// —— 同步/异步两套入口（v0.6.30 E3）——
+// 同步版（appendMemory / writeMemory / dedupeMemory / removeMemoryLines）保留给 CLI / REPL
+// 这类一次性或纯同步调用链；**WebUI 请求路径必须用 *Async 版**（withFileLock 等待时 await
+// 让出事件循环）。v0.6.29 把同步锁放到了 /api/memory 与会话收尾路径，实测持锁争用会冻结
+// 事件循环约 2 秒（SSE / 权限确认全部无响应）。
+
 export function appendMemory(/** @type {any} */ lines) {
   const add = lines.map((/** @type {any} */ l) => l.trim()).filter(Boolean);
   if (!add.length) return 0;
   ensureHome();
-  // 审计 B9 + 质检 M8：与费用统计同口径，用配置时区（默认北京时间）自然日做记忆日期戳
-  const bp = beijingParts(new Date());
-  const date = `${bp.year}-${String(bp.month).padStart(2, '0')}-${String(bp.day).padStart(2, '0')}`;
+  const date = memoryDateStamp();
   // v0.6.28（M-12）：与 dedupe/remove 同锁——否则一次去重的整份写会覆盖掉这期间追加的条目。
   lockFileSync(memoryLockFile(), () => {
     appendFilePrivateSync(memoryFile(), add.map((/** @type {any} */ l) => (l.startsWith('-') ? `- [${date}] ${l.slice(1).trim()}` : `- [${date}] ${l}`)).join('\n') + '\n');
@@ -54,10 +75,14 @@ export function appendMemory(/** @type {any} */ lines) {
   return add.length;
 }
 
-function backupMemory() {
-  try {
-    if (fs.existsSync(memoryFile())) fs.copyFileSync(memoryFile(), memoryFile() + '.bak');
-  } catch {}
+/** 追加的异步版：会话收尾（finalizeSession，WebUI 请求链）用它。 @param {any} lines */
+export async function appendMemoryAsync(/** @type {any} */ lines) {
+  const add = lines.map((/** @type {any} */ l) => l.trim()).filter(Boolean);
+  if (!add.length) return 0;
+  ensureHome();
+  const date = memoryDateStamp();
+  await withFileLock(memoryLockFile(), () => appendMemoryInLock(add, date));
+  return add.length;
 }
 
 // 整体覆写（编辑面板保存用，自动备份）
@@ -68,6 +93,40 @@ export function writeMemory(/** @type {any} */ content) {
     backupMemory();
     atomicWritePrivateSync(memoryFile(), String(content ?? ''));
   });
+}
+
+/** 整体覆写的异步版（`POST /api/memory` 请求路径）。 @param {any} content */
+export async function writeMemoryAsync(/** @type {any} */ content) {
+  ensureHome();
+  await withFileLock(memoryLockFile(), () => {
+    backupMemory();
+    atomicWritePrivateSync(memoryFile(), String(content ?? ''));
+  });
+}
+
+/** 去重核心（**调用方必须已持锁**）。忽略日期前缀后内容相同的条目只保留第一条。 */
+function dedupeMemoryInLock() {
+  const raw = loadMemory();
+  if (!raw.trim()) return 0;
+  const seen = new Set();
+  const kept = [];
+  let removed = 0;
+  for (const line of raw.split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    const norm = t.replace(/^-\s*\[\d{4}-\d{2}-\d{2}\]\s*/, '').trim().toLowerCase();
+    if (seen.has(norm)) {
+      removed += 1;
+      continue;
+    }
+    seen.add(norm);
+    kept.push(t);
+  }
+  if (removed > 0) {
+    backupMemory();
+    atomicWritePrivateSync(memoryFile(), kept.join('\n') + '\n');
+  }
+  return removed;
 }
 
 // 去重：忽略日期前缀后内容相同的条目只保留第一条
@@ -98,6 +157,12 @@ export function dedupeMemory() {
     }
     return removed;
   });
+}
+
+/** 去重的异步版（`POST /api/memory` action=dedupe 请求路径）。 @returns {Promise<number>} */
+export async function dedupeMemoryAsync() {
+  ensureHome();
+  return withFileLock(memoryLockFile(), dedupeMemoryInLock);
 }
 
 // 删除包含关键词的条目
@@ -472,7 +537,8 @@ export async function finalizeSession(/** @type {any} */ { cfg, provider, model,
       const { helperProvider } = await import('./providers/index.js');
       const memProvider = await helperProvider(cfg, model, provider);
       const lines = await extractMemory(memProvider, model, messages, existing);
-      if (lines.length) appendMemory(lines);
+      // v0.6.30（E3）：会话收尾也在 WebUI 请求链上——用异步锁，别让一次锁争用冻结事件循环。
+      if (lines.length) await appendMemoryAsync(lines);
     } catch {}
   }
   // v0.3.0 P0-3：项目级自动记忆（有实际工具工作才提取，避免空话污染项目记忆；

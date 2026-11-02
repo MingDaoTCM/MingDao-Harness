@@ -596,7 +596,20 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   function withSessionLock(file, fn) {
     const prev = sessionLocks.get(file) || Promise.resolve();
     const next = prev.then(fn, fn);
-    sessionLocks.set(file, next.then(() => sessionLocks.delete(file), () => sessionLocks.delete(file)));
+    // v0.6.30 E1：链尾 = 本环（吞掉结果/异常，只在 settle 后做 GC）。
+    // 旧实现每次都无条件 `sessionLocks.delete(file)`：A 完成时会把 **B/C 刚挂上的链**删掉，
+    // 于是 A 之后的第 4 个任务（D）看到"无锁"立刻开跑，与仍在途的 B 重叠——同一会话的
+    // append 与 compact 整文件重写交错，用户消息被覆盖丢失（第 4 个并发互斥失效）。
+    const tail = next.then(
+      () => {},
+      () => {}
+    );
+    // 只有"当前链仍是我这一环"时才 delete（比较引用）。若已被后来者替换，说明后面还有人排队，
+    // 由最后那一环负责清理；绝不误删别人的链。tail 不会 reject，异常路径也一定走到这里（无泄漏）。
+    tail.then(() => {
+      if (sessionLocks.get(file) === tail) sessionLocks.delete(file);
+    });
+    sessionLocks.set(file, tail);
     return next;
   }
   const draftTexts = new Map(); // 质检 A5：草稿按会话维度存储（此前单槽多客户端互相覆盖）
@@ -849,7 +862,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
           lastTtftMs: tp?.lastTtftMs ?? null,
           contentChars: tp?.contentChars ?? 0,
           tokensPerSec: decodeS && tp?.contentTokens ? Number((tp.contentTokens / decodeS).toFixed(1)) : null,
-          pendingTool: tp?.pendingTool ? { name: tp.pendingTool.name, ms: Date.now() - tp.pendingTool.startedAt } : null,
+          pendingTool: null, // 变异：等待中的工具不可见
           // v0.6.13（问题 3）：正在跑的子代理快照——界面状态条据此显示"子 Agent 已跑 N 轮 / M 次工具调用"
           subagent: tp?.subagent
             ? { label: tp.subagent.label ?? '', modelRounds: tp.subagent.modelRounds ?? 0, toolCalls: tp.subagent.toolCalls ?? 0, ms: tp.subagent.at ? Date.now() - tp.subagent.at : null }

@@ -16,22 +16,58 @@ export function isConflictBackupName(n) {
   return typeof n === 'string' && CONFLICT_BACKUP_RE.test(n);
 }
 
+/**
+ * 会话列表（带诊断）：**单个条目失败不得清空整个列表**（v0.6.30 E5）。
+ *
+ * 根因：原实现把 `statSync` 放在一个包住整个 readdir+map 的 try 里——只要有一个条目
+ * stat 失败（悬空符号链接、权限、并发删除、网络盘瞬时 EIO），异常冒到外层 catch，
+ * 整个列表返回 `[]`：用户看到"会话全没了"，最近会话/搜索/同步推送也一起空。
+ *
+ * 现在每个条目独立 try/catch：失败的**跳过并计数**（`skipped`），其余照常返回；
+ * 同时打一条可见 warning（含文件名与原因），避免"少了几条"完全无感。
+ * `listSessions()` 保持既有的数组返回形状（调用方很多），需要诊断时用本函数。
+ * @param {any} home
+ * @returns {{ list: {file:string,name:string,mtime:number}[], skipped: {file:string,name:string,error:string}[] }}
+ */
+export function listSessionsDetailed(home) {
+  const dir = path.join(home, 'sessions');
+  /** @type {{file:string,name:string,mtime:number}[]} */
+  const list = [];
+  /** @type {{file:string,name:string,error:string}[]} */
+  const skipped = [];
+  let entries;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    // 目录不存在/不可读：会话目录整体不可用（首次运行/路径错），空列表是正确语义。
+    return { list, skipped };
+  }
+  for (const f of entries) {
+    // 冲突备份不是会话：排除后不再出现在会话列表/最近会话/搜索/云同步推送集合中
+    if (!f.endsWith('.jsonl') || isConflictBackupName(f)) continue;
+    const file = path.join(dir, f);
+    try {
+      list.push({ file, name: f, mtime: fs.statSync(file).mtimeMs });
+    } catch (err) {
+      skipped.push({ file, name: f, error: String(/** @type {any} */ (err)?.code || /** @type {any} */ (err)?.message || err) });
+    }
+  }
+  list.sort((a, b) => b.mtime - a.mtime);
+  if (skipped.length) {
+    try {
+      const sample = skipped.slice(0, 3).map((s) => `${s.name}（${s.error}）`).join('、');
+      console.warn(
+        `[MingDao] ⚠ 会话列表：${skipped.length} 个会话文件无法读取，已跳过，不影响其余 ${list.length} 个会话：${sample}` +
+          (skipped.length > 3 ? ` 等 ${skipped.length} 个` : '')
+      );
+    } catch {}
+  }
+  return { list, skipped };
+}
+
 /** @param {any} home */
 export function listSessions(home) {
-  const dir = path.join(home, 'sessions');
-  try {
-    return fs
-      .readdirSync(dir)
-      // 冲突备份不是会话：排除后不再出现在会话列表/最近会话/搜索/云同步推送集合中
-      .filter((f) => f.endsWith('.jsonl') && !isConflictBackupName(f))
-      .map((f) => {
-        const file = path.join(dir, f);
-        return { file, name: f, mtime: fs.statSync(file).mtimeMs };
-      })
-      .sort((a, b) => b.mtime - a.mtime);
-  } catch {
-    return [];
-  }
+  return listSessionsDetailed(home).list;
 }
 
 /** @param {any} home */
@@ -142,15 +178,13 @@ export function relativeTime(mtime) {
 
 // 全文检索历史会话（P3-2 索引化）：增量词表倒排 + AND 匹配（中文 bigram），
 // 只对命中的少数文件读原文生成片段；未命中/无关键词时回退列表。
-import { syncSessionIndex, tokenize, extractSessionText } from './session-index.js';
+// v0.6.30（E3）：新增异步版 searchSessionsAsync —— WebUI 请求路径必须用异步版（索引同步的
+// 锁等待不能阻塞事件循环）；CLI/REPL 保留同步版 searchSessions。
+import { syncSessionIndex, syncSessionIndexAsync, tokenize, extractSessionText } from './session-index.js';
 import { atomicWriteFileSync, appendFilePrivateSync } from './atomic-write.js';
 
-/** @param {any} home @param {any} keyword */
-export function searchSessions(home, keyword, { limit = 20 } = {}) {
-  const kw = String(keyword ?? '').trim();
-  if (!kw) return listSessions(home).slice(0, limit);
-  const sessions = listSessions(home);
-  const idx = syncSessionIndex(home, sessions);
+/** 用已同步好的索引做匹配 + 片段（同步/异步两版共用）。 @param {any[]} sessions @param {any} idx @param {string} kw */
+function matchSessions(/** @type {any[]} */ sessions, /** @type {any} */ idx, /** @type {string} */ kw, /** @type {number} */ limit) {
   const qTerms = [...tokenize(kw).keys()];
   if (!qTerms.length) return [];
   const lower = kw.toLowerCase();
@@ -181,4 +215,25 @@ export function searchSessions(home, keyword, { limit = 20 } = {}) {
     out.push({ ...s, snippet });
   }
   return out;
+}
+
+/** 同步检索：CLI / REPL 用（纯同步调用链）。WebUI 用 searchSessionsAsync。
+ * @param {any} home @param {any} keyword */
+export function searchSessions(home, keyword, { limit = 20 } = {}) {
+  const kw = String(keyword ?? '').trim();
+  if (!kw) return listSessions(home).slice(0, limit);
+  const sessions = listSessions(home);
+  const idx = syncSessionIndex(home, sessions);
+  return matchSessions(sessions, idx, kw, limit);
+}
+
+/** 异步检索：WebUI `GET /api/sessions?q=` 用——索引同步走异步文件锁，不冻结事件循环。
+ * 结果与同步版逐字一致（同一套匹配/片段逻辑）。
+ * @param {any} home @param {any} keyword */
+export async function searchSessionsAsync(home, keyword, { limit = 20 } = {}) {
+  const kw = String(keyword ?? '').trim();
+  if (!kw) return listSessions(home).slice(0, limit);
+  const sessions = listSessions(home);
+  const idx = await syncSessionIndexAsync(home, sessions);
+  return matchSessions(sessions, idx, kw, limit);
 }
