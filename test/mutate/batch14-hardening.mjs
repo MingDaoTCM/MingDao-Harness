@@ -43,9 +43,15 @@ M.mutate({
 
 M.mutate({
   name: '⑤ P3-6：denyStrict 的包装执行判定被去掉（sh -c 直达）',
+  // v0.6.30 授权边界提交（98bda7a）把 deny 判定改成「归一化后匹配」：`sh -c 'rm …'` 会先被
+  // canonicalizeCommand 拆出真命令并命中 deny，单关旧的 SHELL_WRAPPER 分支已不再改变行为。
+  // 变异必须同时绕过「归一化命中」与旧分支，才能复现「包装执行直达」这一缺陷。
   file: 'src/permissions.js',
-  from: '  if (denyStrict && deny.length > 0 && name === \'bash\' && SHELL_WRAPPER.test(String(args?.command ?? \'\'))) {',
-  to: '  if (false && denyStrict && deny.length > 0 && name === \'bash\' && SHELL_WRAPPER.test(String(args?.command ?? \'\'))) {',
+  from: `  if (hitDeny) return { decision: 'deny', reason: 'rule-deny', rule: hitDeny, denyStrict };
+  // denyStrict + 包装执行：deny 规则看不穿参数里的命令，只能整体拒绝（给出可操作的指引）
+  if (denyStrict && deny.length > 0 && name === 'bash' && SHELL_WRAPPER.test(String(args?.command ?? ''))) {`,
+  to: `  if (hitDeny && !/sh\\s+-c|bash\\s+-c|eval/i.test(String(args?.command ?? ''))) return { decision: 'deny', reason: 'rule-deny', rule: hitDeny, denyStrict };
+  if (false && denyStrict && deny.length > 0 && name === 'bash' && SHELL_WRAPPER.test(String(args?.command ?? ''))) {`,
   expect: ['denyStrict 下必须拦'],
   run: SEC,
 });
