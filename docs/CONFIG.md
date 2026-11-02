@@ -339,6 +339,14 @@ bash 工具**默认**从子进程环境中剥离敏感变量（`*_API_KEY`、`*_
 { "bashEnvKeep": ["NPM_TOKEN"], "bashEnvFilter": false }
 ```
 
+v0.6.29 起，**子进程 env 名单与日志脱敏词表是同一份判定**（`src/redact.js` 的
+`SENSITIVE_ENV_NAMES` / `SECRET_NAME_SEGMENTS` / `isSensitiveEnvName`）：`PGPASSWORD`、
+`MY_CRED`（`*_CRED` 段）、`DATABASE_URL` / `*_URL|URI|DSN` 连接串，以及大写 `SK-` 前缀
+都同时覆盖"从子进程剔除"与"日志/账本/审计脱敏"两侧；新增一项只改这一处，测试会扫源码
+禁止第二份名单。账本另在**对象层**按键名整值掩码（`api_key`/`apikey`/`token`/`password`/
+`passwd`/`secret`/`credential`/`authorization`/`cookie`/`private_key` 等，大小写与 `-`/`_`
+归一），再叠加值级规则做双保险（`redactDeep` 导出路径同样适用）。
+
 ## 定价覆盖
 
 内置价格表数据时点为 2026-08（`/api/state` 的 `pricingAsOf` 字段），官方调价后无需等

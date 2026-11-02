@@ -8,6 +8,11 @@ import os from 'node:os';
 export const SECRET_NAME_SEGMENTS = new Set([
   'key', 'keys', 'apikey', 'token', 'secret', 'password', 'passwd', 'pwd', 'pass',
   'credential', 'credentials', 'auth', 'authorization', 'cookie', 'session', 'passphrase',
+  // v0.6.29（核验报告 §5.1 N-1/N-2）：**同一份词表**必须同时覆盖日志与子进程 env。
+  //   · PGPASSWORD 是整词（没有下划线可分段），此前只进了 bash 的 env 名单 → 日志里明文；
+  //   · MY_CRED 的 `cred` 段此前不在词表里 → `MY_CRED=…` 原样保留；
+  //   · `sso` / `privatekey` 是同一类"整词凭据名"（privatekey 对应无下划线的写法）。
+  'pgpassword', 'cred', 'sso', 'privatekey',
 ]);
 // v0.6.7（报告一 M-3）：子进程 env 过滤（bash/hooks/MCP）与脱敏器必须**同一份词表**——
 // 此前两份各自维护，bash 那份漏了 `key` 段：`OPENAI_KEY` / `ANTHROPIC_KEY` / `GITHUB_KEY`
@@ -15,6 +20,69 @@ export const SECRET_NAME_SEGMENTS = new Set([
 // 唯一例外是 `pwd`：`PWD` 是每个 shell 都有的标准变量（不是凭据），
 // 按它过滤会让子进程少一个常用变量 —— 所以 env 侧用下面这份去掉 pwd 的集合。
 export const ENV_SECRET_SEGMENTS = new Set([...SECRET_NAME_SEGMENTS].filter((x) => x !== 'pwd'));
+
+// ── 子进程 env 的敏感名单（**与脱敏词表同源**，v0.6.29 核验报告 §5.1）──────────────
+//
+// 这里曾是 `src/tools/bash.js` 里的一份手写名单。v0.6.29 的 M-13 修复把 `PGPASSWORD`
+// 加进了那一份、却忘了脱敏词表 → 「被认定为敏感并剔除」与「日志里原样保留」同时成立。
+// 两份名单各自演化必然漂移，所以名单只留这一处；bash/hooks/MCP 都从这里取。
+//
+// 判据分三层（顺序与语义见 isSensitiveEnvName）：
+//   ① 显式整词名单：没有下划线可分段的名字（PGPASSWORD）与连接串（DATABASE_URL 等）；
+//   ② 同族连接串兜底：`MY_DATABASE_URL` / `CACHE_REDIS_URI` 这类前缀自定义名；
+//   ③ `*_API_KEY` / `*_ACCESS_KEY` / `PRIVATE_KEY` 等复合名（与脱敏器的段词表互补）。
+export const SENSITIVE_ENV_NAMES = new Set([
+  'PGPASSWORD',
+  'DATABASE_URL', 'DATABASE_URI', 'DATABASE_DSN',
+  'MYSQL_URL', 'MYSQL_URI',
+  'POSTGRES_URL', 'POSTGRES_URI', 'POSTGRESQL_URL', 'PG_URL',
+  'REDIS_URL', 'REDIS_URI',
+  'MONGODB_URI', 'MONGO_URL',
+  'AMQP_URL', 'RABBITMQ_URL', 'ELASTIC_URL', 'CLICKHOUSE_URL',
+]);
+/** 同族未知变量（如 `MY_DATABASE_URL`、`CACHE_REDIS_URI`）：按「库类型 + URL/URI/DSN」形态兜底。 */
+export const SENSITIVE_ENV_CONN_URL = /^(?:[A-Z0-9]+_)*(?:DATABASE|MYSQL|POSTGRES|POSTGRESQL|PG|REDIS|MONGO|MONGODB|AMQP|RABBITMQ|KAFKA|ELASTIC|CLICKHOUSE)_(?:URL|URI|DSN)$/i;
+/** 复合名兜底（`OPENAI_API_KEY` 等；段词表也覆盖 `_key`，两条互为保险）。 */
+export const SENSITIVE_ENV_PAIR = /(api[_-]?key|access[_-]?key|client[_-]?secret|private[_-]?key)/i;
+/** 连接句柄而非凭据：SSH_AUTH_SOCK 被 `auth` 段规则误判会让 git-over-SSH / ssh-agent 失效。 */
+export const ENV_ALWAYS_KEEP = new Set(['SSH_AUTH_SOCK']);
+const ENV_SECRET_SEGMENT_RE = new RegExp(`(^|_)(${[...ENV_SECRET_SEGMENTS].join('|')})(_|$)`, 'i');
+/** 子进程环境变量名是否敏感（bash / hooks / MCP 的唯一判据）。 */
+export function isSensitiveEnvName(/** @type {any} */ k) {
+  const name = String(k ?? '');
+  if (ENV_ALWAYS_KEEP.has(name)) return false;
+  if (SENSITIVE_ENV_NAMES.has(name.toUpperCase())) return true;
+  if (SENSITIVE_ENV_CONN_URL.test(name)) return true;
+  if (SENSITIVE_ENV_PAIR.test(name)) return true;
+  return ENV_SECRET_SEGMENT_RE.test(name);
+}
+
+// ── 对象键名判定（账本结构感知脱敏，v0.6.29 安全批 B3）────────────────────────────
+//
+// 账本此前是**逐叶子值**脱敏：`redactSecrets` 的赋值式规则要看到 `key=value` 连在一起，
+// 而 `{api_key:'plain', token:'…'}` 是把键名与值拆成两个参数传进来的 → 两者都漏。
+// 这里给出按**键名**判定的单一表：大小写与 `-`/`_` 归一后命中即整值掩码（见 ledger.redactDeep）。
+// 刻意**不含** `session`：账本 run.start 的 session 是会话文件名，不是凭据。
+export const SECRET_OBJECT_KEY_NAMES = new Set([
+  'key', 'keys', 'apikey', 'api_key', 'api_secret', 'apisecret', 'secret_key', 'secretkey',
+  'token', 'access_token', 'accesstoken', 'refresh_token', 'refreshtoken', 'auth_token', 'authtoken',
+  'bearer', 'bearer_token', 'password', 'passwd', 'secret', 'secrets',
+  'credential', 'credentials', 'authorization', 'cookie', 'cookies',
+  'private_key', 'privatekey', 'client_secret', 'clientsecret',
+  'passphrase', 'cred', 'sso', 'auth',
+]);
+/** 键名归一：小写 + `-`→`_`（`API-KEY` 与 `api_key` 必须同判）。 */
+export function normalizeSecretName(/** @type {any} */ key) {
+  return String(key ?? '').trim().toLowerCase().replace(/-/g, '_');
+}
+/** 该对象键名是否应整值掩码（账本/导出共用）。 */
+export function isSecretObjectKey(/** @type {any} */ key) {
+  const n = normalizeSecretName(key);
+  if (!n) return false;
+  if (SECRET_OBJECT_KEY_NAMES.has(n)) return true;
+  // `x_api_key` / `private_key` / `api-key` 等复合名：任一段命中即可。
+  return n.split('_').some((seg) => SECRET_OBJECT_KEY_NAMES.has(seg));
+}
 const KEY_PREFIX = /(ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{10,}|AIza[A-Za-z0-9_-]{30,})/g;
 
 // v0.6.3（审计 H-1/H-2）：**脱敏器自身的覆盖缺口**。
@@ -45,8 +113,9 @@ const JWT_TOKEN = /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{6,}/
 const sampleOf = (/** @type {string} */ prefix) => prefix + 'x'.repeat(24);
 
 export const SECRET_PREFIXES = [
-  // DeepSeek / OpenAI 风格：保留前缀便于排查"配了哪一类 key"
-  { vendor: 'sk- 系（DeepSeek/OpenAI 等）', re: /(sk-[A-Za-z0-9_-]{6,})/g, mask: 'sk-***', sample: sampleOf('sk-') },
+  // DeepSeek / OpenAI 风格：保留前缀便于排查"配了哪一类 key"。
+  // v0.6.29（核验报告 §5.1 N-2）：前缀匹配必须**大小写不敏感**——`SK-xxxx` 此前原样漏出。
+  { vendor: 'sk- 系（DeepSeek/OpenAI 等）', re: /sk-[A-Za-z0-9_-]{6,}/gi, mask: 'sk-***', sample: sampleOf('sk-') },
   // Dify 应用 API Key：`app-` + 一长串 base62（下游每把都是这个形态）。
   // 刻意**不含** `-`/`_`：否则 `app-deployment-config-2024` 这类普通标识会被误掩，
   // 而脱敏器一旦误伤就会被人关掉——保守与可用之间，这条选"只认纯 base62 长串"。
@@ -70,6 +139,9 @@ export const SECRET_PREFIXES = [
   { vendor: 'Stripe Secret Key（live/test）', re: /\bsk_(?:live|test)_[A-Za-z0-9]{16,}/g, mask: 'sk_***', sample: sampleOf('sk_live_') },
   { vendor: 'fal.ai', re: /\bfal_[A-Za-z0-9]{20,}/g, mask: 'fal_***', sample: sampleOf('fal_') },
 ];
+/** 值形态表的对外名字：与 `SENSITIVE_ENV_NAMES` / `SECRET_OBJECT_KEY_NAMES` 同属**唯一来源**，
+ * 供 credentials 等需要值级脱敏的模块引用，避免在别处再抄一份前缀表。 */
+export const SECRET_VALUE_PATTERNS = SECRET_PREFIXES;
 
 export function redactSecrets(/** @type {any} */ text) {
   let s = String(text ?? '');
@@ -95,7 +167,9 @@ export function redactSecrets(/** @type {any} */ text) {
     /(["']?)([A-Za-z0-9][A-Za-z0-9_-]{0,63})\1(\s*[=:]\s*)(["']?)([^\s"',}]{5,})/g,
     (/** @type {string} */ m, /** @type {string} */ qn, /** @type {string} */ name, /** @type {string} */ sep, /** @type {string} */ qv, /** @type {string} */ val) => {
       const segs = String(name).toLowerCase().split(/[_-]+/);
-      if (!segs.some((x) => SECRET_NAME_SEGMENTS.has(x))) return m;
+      // v0.6.29 安全批 B2：**同一份判定**也覆盖子进程 env 名单（DATABASE_URL/MY_DATABASE_URL/
+      // PGPASSWORD…）。否则"env 侧认定敏感、日志侧原样保留"会再次分裂——那正是本批要修的漂移。
+      if (!segs.some((x) => SECRET_NAME_SEGMENTS.has(x)) && !isSensitiveEnvName(name)) return m;
       // 认证方案名本身不是凭据：`Authorization: Bearer <token>` 由上面那条 Bearer 规则
       // 负责掩掉 token，这里若连 `Bearer` 一起掩，审计行会退化成 `Authorization: *** ***`（可读性白损）
       if (/^(bearer|basic|token|digest)$/i.test(val)) return m;

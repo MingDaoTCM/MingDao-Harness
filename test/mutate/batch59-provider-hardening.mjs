@@ -133,17 +133,21 @@ M.mutate({
 // ⑨ M-13：PGPASSWORD 从敏感 env 名单移除（无下划线的整词凭据）
 M.mutate({
   name: '⑨ M-13 移除 PGPASSWORD 敏感 env',
-  file: 'src/tools/bash.js',
+  // v0.6.29 安全批 B2：敏感名单收口到 src/redact.js（唯一来源），锚点随之迁移。
+  // PGPASSWORD 同时被「env 显式名单」与「脱敏段词表」两条规则覆盖（刻意的双保险），
+  // 单删一条行为仍被另一条兜住——由 credential-hardening 的**名单归属断言**抓单侧缺失。
+  file: 'src/redact.js',
   from: "  'PGPASSWORD',\n",
   to: '',
-  expect: ['PGPASSWORD 必须被判为敏感 env'],
-  run: SUITE,
+  expect: ['PGPASSWORD 必须在环境名单里'],
+  run: () => M.suite('test/credential-hardening.js'),
 });
 
 // ⑩ M-13：连接串兜底正则失效 → MY_DATABASE_URL / CACHE_REDIS_URI 透传
 M.mutate({
   name: '⑩ M-13 连接串 env 正则失效',
-  file: 'src/tools/bash.js',
+  // v0.6.29 安全批 B2：连接串正则同在 src/redact.js 的唯一来源表里。
+  file: 'src/redact.js',
   from: "const SENSITIVE_ENV_CONN_URL = /^(?:[A-Z0-9]+_)*(?:DATABASE|MYSQL|POSTGRES|POSTGRESQL|PG|REDIS|MONGO|MONGODB|AMQP|RABBITMQ|KAFKA|ELASTIC|CLICKHOUSE)_(?:URL|URI|DSN)$/i;",
   to: 'const SENSITIVE_ENV_CONN_URL = /^NEVER_MATCH$/i; // mutated',
   expect: ['MY_DATABASE_URL 必须被判为敏感 env'],

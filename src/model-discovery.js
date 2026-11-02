@@ -974,6 +974,8 @@ export async function fetchProviderModels(/** @type {any} */ cfg, /** @type {any
       // 迁到 safe-fetch 单一来源。allowPrivate: 服务商端点是**用户自己配置**的
       // （本地 vLLM / Ollama 就是内网地址，这是产品明确支持的场景），与 CLI 显式输入 URL 同口径；
       // 逐跳仍会做「非 http(s) 跳转拒绝 + 跳数上限 + 大小上限」这些与私网无关的防护。
+      // v0.6.29 安全批 B1：allowPrivate 现在**只在首跳（及首跳同源）生效**——本地端点返回 302
+      // 指向内网/元数据时会被逐跳复检拒绝，而不是"一路放行"；跨源跳转同时剥离凭据头。
       const _r = await safeFetchText(`${base}/models`, {
         timeoutMs: 8000,
         maxBytes: 2 * 1024 * 1024,

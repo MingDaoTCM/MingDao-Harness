@@ -23,7 +23,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { atomicWriteFileSync, atomicWritePrivateSync, appendFilePrivateSync } from './atomic-write.js';
 import { mingdaoHome, ensureHome } from './config.js';
-import { redactSecrets, redactSensitive } from './redact.js';
+import { redactSecrets, redactSensitive, isSecretObjectKey } from './redact.js';
 
 /**
  * v1：字段只增不改（变更需在 docs/internal/CHANGELOG-PACK.md 同款变更日志里记录）。
@@ -82,6 +82,33 @@ export function digestOf(/** @type {any} */ value) {
 }
 
 /**
+ * 结构化预脱敏：在**对象层**按键名整值掩码（v0.6.29 代码审计 H-14 的修复）。
+ *
+ * 为什么必须有这一层：`redactSecrets` 的赋值式规则要看到 `key=value` 连在一起，
+ * 而账本拿到的是 `{api_key:'plain', token:'…'}`——键名和值是两个参数，规则看不到分隔符，
+ * 于是两者都原样落盘。这里先按**键名**（大小写与 `-`/`_` 归一，见 redact.isSecretObjectKey）
+ * 把值整棵替换成 `***`，再交给值级规则做第二遍（双保险）。
+ * 命中即整值替换：`{customCredentials:{whatever:'plain'}}` 这类"值本身是对象"的也必须整棵掩掉，
+ * 否则内层键名无害时又会漏出去。
+ * @param {any} value @param {number} [depth]
+ * @returns {any}
+ */
+function maskSecretObjectValues(/** @type {any} */ value, depth = 0) {
+  if (depth > 4) return value;
+  if (Array.isArray(value)) return value.slice(0, 100).map((v) => maskSecretObjectValues(v, depth + 1));
+  if (!value || typeof value !== 'object') return value;
+  const entries = Object.entries(value);
+  /** @type {any} */
+  const out = {};
+  // 与 redactDeep 同样的键数上限：只递归前 100 个键，其余**原样浅拷贝**（它们随后会被
+  // redactDeep 截断、不会落到账本里）。不能像旧实现那样对 10 万键整棵递归——那正是
+  // v0.6.7 P3-7 修掉的写账本卡顿；同时保留键数，让 redactDeep 仍能显式标记「已截断」。
+  for (const [k, v] of entries.slice(0, 100)) out[k] = isSecretObjectKey(k) ? '***' : maskSecretObjectValues(v, depth + 1);
+  for (const [k, v] of entries.slice(100)) out[k] = v;
+  return out;
+}
+
+/**
  * 递归脱敏（有界深度 + 有界长度），返回**新对象**，绝不改动调用方数据。
  * 数组按元素递归；非字符串标量原样保留（数字/布尔不需要脱敏）。
  *
@@ -95,6 +122,8 @@ export function digestOf(/** @type {any} */ value) {
  * @returns {any}
  */
 export function redactDeep(value, depth = 0, fn = redactSecrets) {
+  // 只在顶层做一次结构化预脱敏；内部递归沿用同一份已掩码的树（避免每层重复按键名判定）。
+  if (depth === 0) value = maskSecretObjectValues(value);
   if (depth > 4) return '[过深已截断]';
   if (value === null || value === undefined) return value;
   if (typeof value === 'string') return fn(value).slice(0, MAX_TEXT);

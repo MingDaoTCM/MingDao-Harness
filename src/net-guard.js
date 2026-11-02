@@ -225,6 +225,60 @@ export function stripHeadersForCrossOrigin(headers) {
   return new Headers(keep);
 }
 
+/** URL 的**有效端口**（显式端口优先；省略时按协议取默认端口）。 */
+function effectivePort(/** @type {URL} */ u) {
+  if (u.port) return u.port;
+  if (u.protocol === 'https:') return '443';
+  if (u.protocol === 'http:') return '80';
+  return '';
+}
+
+/**
+ * 重定向时是否必须剥离凭据头——**唯一判定**（v0.6.29 安全批 B1）。
+ *
+ * 为什么单独成一个函数：`net-guard` 的全局 fetch 跟随器与 `safe-fetch` 的
+ * `node:http(s)` 跟随器是**两条传输路径**，但「这一跳该不该带凭据」只能有一个答案。
+ * 此前 safe-fetch 自己写了一套"只跟不剥"的实现，等于同一规则两份口径、最弱的那份说了算
+ *（与 ssrf-guard / 脱敏词表同一个根因）。
+ *
+ * 触发条件（任一即剥，且都属于**语义上的 origin 变化**）：
+ *   · 协议变化（https→http 的**降级**必须单独给理由，日志要可见）；
+ *   · 端口变化（http://a:8080 → http://a:9090 也是跨源）；
+ *   · 主机名变化。
+ * 同源（协议/主机/有效端口都相同）保留凭据——登录跳转、补斜杠等常见形态不该丢头。
+ * @param {any} from @param {any} to
+ * @returns {{ strip: boolean, reason: 'same-origin'|'protocol-downgrade'|'protocol-change'|'port-change'|'host-change'|'unparseable' }}
+ */
+export function redirectCredentialDecision(/** @type {any} */ from, /** @type {any} */ to) {
+  /** @type {URL} */ let a;
+  /** @type {URL} */ let b;
+  try {
+    a = new URL(String(from));
+    b = new URL(String(to));
+  } catch {
+    // 解析不了就无法证明同源——按跨源处理（fail-closed）
+    return { strip: true, reason: 'unparseable' };
+  }
+  if (a.protocol !== b.protocol) {
+    return { strip: true, reason: a.protocol === 'https:' && b.protocol === 'http:' ? 'protocol-downgrade' : 'protocol-change' };
+  }
+  if (effectivePort(a) !== effectivePort(b)) return { strip: true, reason: 'port-change' };
+  if (a.hostname.toLowerCase() !== b.hostname.toLowerCase()) return { strip: true, reason: 'host-change' };
+  return { strip: false, reason: 'same-origin' };
+}
+
+/**
+ * 为下一跳准备请求头：跨源就按反向白名单裁剪，同源原样返回。
+ * 两条跟随路径（net-guard 的 fetch / safe-fetch 的 node:http）都必须走这里，
+ * 不要各自决定「哪些头能带」。
+ * @param {any} headers @param {any} from @param {any} to
+ * @returns {{ strip: boolean, reason: string, headers: any }}
+ */
+export function prepareRedirectHeaders(/** @type {any} */ headers, /** @type {any} */ from, /** @type {any} */ to) {
+  const decision = redirectCredentialDecision(from, to);
+  return { ...decision, headers: decision.strip ? stripHeadersForCrossOrigin(headers) : headers };
+}
+
 /**
  * 安装出网闸门（幂等）。未配置 config.net → 不安装，返回 false。
  * @param {any} rawNet cfg.net
@@ -335,11 +389,11 @@ export function installEgressGate(/** @type {any} */ rawNet) {
         // `Authorization: Bearer sk-…`。与 mode 无关：warn 放行的是「出网」，不该顺手把凭据送出去。
         // v0.6.7（报告 1 M-4）：改**反向白名单**（见 stripHeadersForCrossOrigin）——
         // 黑名单只删得掉三个头，`x-api-key` 之类的自定义凭据头会原样泄漏给重定向目标。
-        try {
-          if (new URL(next).origin !== new URL(String(current)).origin && curInit?.headers) {
-            curInit = { ...curInit, headers: stripHeadersForCrossOrigin(curInit.headers) };
-          }
-        } catch {}
+        // 判定与裁剪都走 prepareRedirectHeaders（与 safe-fetch 共用同一份，见该函数注释）。
+        const prep = prepareRedirectHeaders(curInit?.headers, String(current), next);
+        if (prep.strip && curInit?.headers) {
+          curInit = { ...curInit, headers: prep.headers };
+        }
         try {
           await res.body?.cancel(); // 释放上一跳的连接，避免重定向链堆积
         } catch {}

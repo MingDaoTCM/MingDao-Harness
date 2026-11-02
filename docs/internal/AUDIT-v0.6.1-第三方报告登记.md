@@ -5873,6 +5873,78 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   + formatter 缓存；`beijingParts` 的 formatter 缓存按 tz 键长期驻留，配置切换时区会新增键（不回收）。
 - `costMonthlyReport` 仍按条 `beijingParts`（缓存后已快），未改为预分桶——不在本条范围。
 
+## 5.2 v0.6.29 凭据外泄加固：跨源重定向 / 脱敏词表单源 / 账本对象层脱敏（B1-B3）
+
+来源：v0.6.29 代码审计报告 H-14、v0.6.29 修复情况核验报告 §5.1（N-1/N-2）；另外两条
+（跨源 302 带走 Provider API Key、allowPrivate 沿重定向链透传）由本轮 PoC 实测复现。
+三条问题的共同根因仍是**同一规则多份实现，最弱的那份说了算**。
+
+### 5.2.1 B1：跨源重定向剥凭据头 + allowPrivate 只在首跳
+
+- **改前实测**（PoC-1，`http://127.0.0.1:A/v1/models` → 302 → `http://127.0.0.1:B/steal`，
+  `allowPrivate:true`、`Authorization: Bearer sk-VICTIM…`）：目标收到**完整** Bearer 与 Cookie。
+- **修法**：
+  1. `src/net-guard.js` 新增 `redirectCredentialDecision()` / `prepareRedirectHeaders()`：
+     协议变化（https→http 单独给 `protocol-downgrade`）、端口变化、主机名变化即跨源，
+     跨源按**反向白名单**裁剪（Authorization/Cookie/Proxy-Authorization/X-Api-Key 全剥，
+     Accept/User-Agent 保留），同源原样保留。全局 fetch 跟随器与 `safe-fetch` 都只调这一份。
+  2. `src/safe-fetch.js` 删除自己的跟随/剥头逻辑；`allowPrivate` **只对第 0 跳与首跳同源**
+     生效，跨源重定向目标重新走 `resolveHostGuarded`（私网/回环/元数据 fail-closed）。
+  3. 跳数默认上限 10；每一跳、跨源剥离、https→http 降级都写 stderr 可见日志
+     （`[MingDao] ↪ …`）。
+- **改后实测**：同一 PoC 的 302 目标命中 **0** 次，`Authorization`/`Cookie` 均为 `null`
+  （请求在第二跳判定处被拒）；同一判定函数下同源 `strip:false`、跨主机/端口/降级
+  `strip:true`（Authorization/Cookie/X-Api-Key 全为 `null`）。
+
+### 5.2.2 B2：敏感名与值形态的**单一来源**
+
+- **改前实测**：`redactSecrets('PGPASSWORD=hunter2hunter2')` 原样返回（env 侧已剔除、日志侧明文）；
+  `MY_CRED=` 与大写 `SK-` 同样明文。
+- **修法**：名单与判定全部收口到 `src/redact.js` 一处——
+  `SENSITIVE_ENV_NAMES`（含 PGPASSWORD 与各类 `*_URL/*_URI/*_DSN`）、`SENSITIVE_ENV_CONN_URL`、
+  `SECRET_NAME_SEGMENTS`（新增 `pgpassword`/`cred`/`sso`/`privatekey`）、`SECRET_OBJECT_KEY_NAMES`；
+  `src/tools/bash.js` 的 `isSensitiveEnv` 直接再导出 `isSensitiveEnvName`（同一函数对象、
+  hooks/MCP 同受益），本文件不再持有任何名单；赋值式脱敏也复用同一判定（`DATABASE_URL=…`
+  等连接串日志行因此同时被掩码）；`SK-` 前缀改为大小写不敏感。`credentials.js` 与 `ledger.js`
+  同样从该文件取（值级表 / 对象键名判定），不复制表。
+- **结构守卫**：`test/credential-hardening.js` 扫 `src/**/*.js`（去注释），除 `redact.js`
+  外出现 `'PGPASSWORD'`/`'DATABASE_URL'` 等名单字面量即红；同时断言 bash 无第二份名单、
+  四个消费方均从 `redact.js` 导入。
+- **改后实测**：PGPASSWORD/MY_CRED/大写 SK-/SSH_PASSPHRASE/OPENAI_KEY/AWS_SECRET_ACCESS_KEY/
+  DATABASE_URL/MY_DATABASE_URL/JSON 引号键 9 类全部掩码；`buildChildEnv` 实际剔除同名变量。
+
+### 5.2.3 B3：账本对象层按键名整值掩码
+
+- **改前实测**：`redactDeep({api_key:'plainsecretvalue123', password:'hunter2', nested:{token:'…'}})`
+  原样返回；明文同时落 `ledger/*.jsonl` 与 `ledger export`。
+- **修法**：`redactDeep` 顶层先走 `maskSecretObjectValues()`——按键名（大小写与 `-`/`_` 归一，
+  含 `api_key/apikey/token/password/passwd/secret/credential/authorization/cookie/private_key`
+  等）**整值替换 `***`**（值本身是对象也整棵掩），再保留原值级脱敏做双保险；写入与导出
+  共用 `redactDeep`，两条路径都生效。刻意排除 `session`，避免把会话文件名当凭据。
+- **改后实测**：H-14 原复现对象三键全部 `***`；`API-KEY`/`apiKey`/`X-Api-Key`/`PRIVATEKEY`
+  等归一命中；`firstTokenMs`/`usage.prompt_tokens`/`model` 等非凭据字段不被误掩；
+  `tool.call.args` 明文不落盘、`exportRun` JSON 中键保留值 `***`。
+
+### 5.2.4 验证与变异
+
+- `node test/credential-hardening.js`：**36 组全部通过**（B1 14 / B2 15 / B3 7）。
+- `test/mutate/batch62-credential-hardening.mjs`：**15/15 全中**（退回自己的跟随逻辑、
+  allowPrivate 透传、跳数回退 5、删降级/跳数日志、判定忽略端口与协议、剥头白名单失效、
+  删 PGPASSWORD/段词表、大写 SK- 回退、赋值式不看 env 名单、bash 自建判定、
+  账本退回叶子级、键名归一去掉小写化）。
+- `npm run typecheck`、`node test/api-contracts.js` 通过；`test/smoke.js` 的 §95/§126/§128/§130
+  相关断言通过（共享工作树当时混有其它并行道未提交改动，全量 smoke 的静默吞写计数白名单
+  由其它道同步，非本条改动）。
+
+### 5.2.5 未做 / 边界
+
+- 回环/私网重定向在 `allowPrivate` 首跳后**一律拒绝**（严于"同源例外"）：因此 PoC-1 的
+  目标不是"收到剥头后的请求"，而是**根本没收到请求**；跨源剥头由同一判定函数单测覆盖。
+- https→http 降级的可见日志由"判定函数 + 源码分支"断言固定；未在测试里起真实 TLS 服务
+  （需要自签证书）。
+- 未改 `test/smoke.js`、`test/mutate/README.md`、`test/run-all.mjs`、`.github/workflows/ci.yml`；
+  未 tag / 改版本号 / publish。
+
 ## 5.3 已做（v0.6.30 授权边界：C1 deny 归一化 / C2 git 白名单化 / C3 fetch 与外网默认拒绝）
 
 来源：报告四（`MingDao-Harness-v0.6.29-审计报告.md`）S1/H2、报告三 C-06/H-12。三条都是

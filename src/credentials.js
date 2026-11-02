@@ -10,6 +10,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { atomicWriteFileSync } from './atomic-write.js';
+import { redactSecrets } from './redact.js';
+
+/**
+ * 值级脱敏（凭证库错误/诊断文本用）。
+ *
+ * **不在本文件维护第二份前缀表**：规则唯一来源是 `redact.js` 的 `SECRET_VALUE_PATTERNS`
+ * ——v0.6.29 的教训就是「同一件事两份名单」，凭证层再抄一份必然再次漂移。
+ * @param {any} text
+ */
+export function redactCredentialText(/** @type {any} */ text) {
+  return redactSecrets(text); // 复用同一套规则（前缀表/赋值式/URL 内嵌凭据），不在这里重写循环
+}
 
 export function credentialsPath() {
   return path.join(mingdaoHome(), 'credentials.json');
@@ -34,7 +46,7 @@ export function readCredentialsStrict() {
     raw = fs.readFileSync(credentialsPath(), 'utf8');
   } catch (err) {
     if (/** @type {any} */ (err)?.code === 'ENOENT') return { ok: true, missing: true, data: {}, error: null };
-    return { ok: false, missing: false, data: {}, error: String(/** @type {any} */ (err)?.message ?? err) };
+    return { ok: false, missing: false, data: {}, error: redactCredentialText(String(/** @type {any} */ (err)?.message ?? err)) };
   }
   try {
     // 容错 BOM：Windows 上 PowerShell 的 `Set-Content -Encoding UTF8` 会写出 BOM，
@@ -46,7 +58,8 @@ export function readCredentialsStrict() {
     }
     return { ok: true, missing: false, data, error: null };
   } catch (err) {
-    return { ok: false, missing: false, data: {}, error: String(/** @type {any} */ (err)?.message ?? err) };
+    // 解析失败的原文可能被某些运行时带进 message（含文件片段）；先过同一套值级规则再外露。
+    return { ok: false, missing: false, data: {}, error: redactCredentialText(String(/** @type {any} */ (err)?.message ?? err)) };
   }
 }
 

@@ -6,7 +6,7 @@
 // 非 Linux 或未安装 bwrap 时自动降级为 off，并在结果中注明（不静默假装沙箱）。
 
 import { spawn, spawnSync } from 'node:child_process';
-import { ENV_SECRET_SEGMENTS } from '../redact.js';
+import { isSensitiveEnvName } from '../redact.js';
 import { spawnOpts } from '../proc.js';
 
 const MAX_OUTPUT = 20000;
@@ -15,48 +15,12 @@ const MAX_TIMEOUT_SECONDS = 600;
 // 敏感环境变量过滤（P1-5 + 评估 P2-3）：默认常开——模型驱动的命令不应直接读到 API Key/凭证
 // （一条 env 即可泄露），与沙箱档位解耦；config.bashEnvKeep 按名放行，config.bashEnvFilter=false
 // 整体关闭（回到完全透传）。
-const SENSITIVE_ENV_PAIR = /(api[_-]?key|access[_-]?key|client[_-]?secret|private[_-]?key)/i;
-// v0.6.7（报告一 M-3）：段词表改为**与脱敏器共用同一来源**（ENV_SECRET_SEGMENTS）——
-// 此前这里手写一份且漏了 `key` 段：`OPENAI_KEY`/`ANTHROPIC_KEY`/`GITHUB_KEY` 原样透传子进程，
-// 一条 `env` 就把密钥送进模型上下文。两份词表各自演化必然漂移（本仓已多次登记同款教训）。
-const SENSITIVE_ENV_SEGMENT = new RegExp(`(^|_)(${[...ENV_SECRET_SEGMENTS].join('|')})(_|$)`, 'i');
-// 审计 P3-6（v0.4.2）：导出供 hooks.js 复用——hook 子进程 env 与 bash 工具同口径过滤敏感变量。
-// P3 修复（v0.4.6）：SSH_AUTH_SOCK 会被 `(^|_)auth(_|$)` 段规则误判为敏感变量而剥离，导致
-// bash 工具里 git-over-SSH / ssh-agent 全部失效（macOS 常态：push/pull 走 SSH 时必用）。
-// 它是**连接句柄**而非凭据，显式放行；其余变量的过滤语义不变。
-const ENV_ALWAYS_KEEP = new Set(['SSH_AUTH_SOCK']);
-// v0.6.29（minimax M-13）：段词表判据抓不到的两类真实凭据变量——
-//   · **整词无下划线**：`PGPASSWORD` / `SSH_PASSPHRASE`（`passphrase` 已进段词表，这里保留显式名单）；
-//   · **连接串**：`DATABASE_URL` / `MYSQL_URL` / `REDIS_URL` / `MONGODB_URI` 等，URL 里直接带账号密码。
-// 名单逐条有测试（test/provider-hardening.js），新增时同时补 sample，避免"表里有规则但不认得你的 key"。
-const SENSITIVE_ENV_NAMES = new Set([
-  // SSH_PASSPHRASE 由共用段词表 `passphrase` 覆盖（同时让 SSH_PASSPHRASE=... 的日志行也被脱敏）
-  'PGPASSWORD',
-  'DATABASE_URL',
-  'DATABASE_URI',
-  'DATABASE_DSN',
-  'MYSQL_URL',
-  'MYSQL_URI',
-  'POSTGRES_URL',
-  'POSTGRES_URI',
-  'POSTGRESQL_URL',
-  'PG_URL',
-  'REDIS_URL',
-  'REDIS_URI',
-  'MONGODB_URI',
-  'MONGO_URL',
-  'AMQP_URL',
-  'RABBITMQ_URL',
-  'ELASTIC_URL',
-  'CLICKHOUSE_URL',
-]);
-// 同族未知变量（如 `MY_DATABASE_URL`、`CACHE_REDIS_URI`）：按「库类型 + URL/URI/DSN」形态兜底。
-const SENSITIVE_ENV_CONN_URL = /^(?:[A-Z0-9]+_)*(?:DATABASE|MYSQL|POSTGRES|POSTGRESQL|PG|REDIS|MONGO|MONGODB|AMQP|RABBITMQ|KAFKA|ELASTIC|CLICKHOUSE)_(?:URL|URI|DSN)$/i;
-export const isSensitiveEnv = (/** @type {any} */ k) => {
-  const name = String(k);
-  if (ENV_ALWAYS_KEEP.has(name)) return false;
-  return SENSITIVE_ENV_NAMES.has(name.toUpperCase()) || SENSITIVE_ENV_CONN_URL.test(name) || SENSITIVE_ENV_PAIR.test(name) || SENSITIVE_ENV_SEGMENT.test(name);
-};
+//
+// v0.6.29（核验报告 §5.1）：**名单与判定都收口到 redact.js 这一处**。
+// 此前这里是手写的 SENSITIVE_ENV_NAMES + 段词表，v0.6.29 的 M-13 修复只把 PGPASSWORD
+// 加进了这一份、忘了脱敏词表 → 「env 侧剔除、日志侧明文」。现在本文件不再持有任何名单，
+// `isSensitiveEnv` 就是脱敏器那套判定的再导出（同一个函数对象，结构断言可验）。
+export const isSensitiveEnv = isSensitiveEnvName;
 
 // 审计修复（v0.4.6）：导出供 config.tools 子进程复用——此前它是唯一不筛敏感变量的子进程入口
 // （bash / hooks / MCP 都筛），与全项目「默认剥离 *_API_KEY/*_TOKEN/*_SECRET」口径不一致。

@@ -18,7 +18,21 @@ import { resolveHostGuarded } from './ssrf-guard.js';
 // 因此出网闸门（config.net 白名单/记账）此前完全看不到这条出口——
 // 「skill 下载 / registry 拉取 / 模型发现」三条自动路径成了闸门的盲区。
 // 现在每一跳都显式过闸（与 src/sync.js 对 node:https 的做法同款：不经全局 fetch 就显式 decideEgress）。
-import { guardEgress } from './net-guard.js';
+import { guardEgress, prepareRedirectHeaders } from './net-guard.js';
+
+/**
+ * 重定向链的**可见日志**（v0.6.29 安全批 B1）。
+ *
+ * 为什么必须写 stderr 而不是只在返回值里：下载路径（技能库/模型发现）在自动流程里，
+ * 用户看不到返回值。协议降级（https→http）尤其必须可见——它本身就是一次安全性下降，
+ * 静默接受等于让用户以为"一直是 HTTPS"。跳数也一起打，重定向链变长时可被察觉。
+ * @param {string} msg
+ */
+function logRedirect(/** @type {string} */ msg) {
+  try {
+    process.stderr.write(`[MingDao] ↪ ${msg}\n`);
+  } catch {}
+}
 
 /**
  * 发一次 GET 并返回一个最小响应对象（status / headers / _res）。
@@ -84,11 +98,14 @@ function readBodyCapped(res, maxBytes) {
  * @param {{ timeoutMs?: number, maxBytes?: number, allowPrivate?: boolean, headers?: any, maxHops?: number, lookup?: any }} [opts]
  *   allowPrivate：**仅**用于「本地用户显式输入 URL」的场景（如 CLI `mingdao skill install <url>`），
  *   表示用户自担意图、允许内网地址；WebUI / registry 等自动路径必须保持 false。
+ *   **只对首跳（以及与首跳同源的重定向）生效**——跨源重定向后按公网口径重新判定，
+ *   否则「允许本机 Ollama」会变成「允许内网任意主机」（v0.6.29 安全批 B1）。
+ *   maxHops：重定向链上限，默认 10。
  *   lookup：测试注入缝（转发给 ssrf-guard，用于离线证明"判定用解析后地址、连接用钉住地址"）。
  * @returns {Promise<{text?: string, status?: number, contentType?: string, headers?: any, error?: string}>} 成功给 text/status/contentType，失败给 error（不抛异常，便于调用方统一处理）
  */
 export async function safeFetchText(/** @type {any} */ url, opts = {}) {
-  const { timeoutMs = 20000, maxBytes = 2 * 1024 * 1024, allowPrivate = false, headers = null, maxHops = 5, lookup: lookupImpl = null } = opts;
+  const { timeoutMs = 20000, maxBytes = 2 * 1024 * 1024, allowPrivate = false, headers = null, maxHops = 10, lookup: lookupImpl = null } = opts;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
@@ -98,32 +115,66 @@ export async function safeFetchText(/** @type {any} */ url, opts = {}) {
     } catch {
       return { error: 'URL 无效' };
     }
+    // 首跳 origin：allowPrivate 的豁免**只对首跳本身**（以及首跳同源的重定向）成立。
+    // 原因（v0.6.29 安全批 B1）：model-discovery 对用户自配的本地端点传 allowPrivate:true，
+    // 若该端点返回 302 指向 169.254.169.254/内网，旧实现会把 allowPrivate 一路带过去，
+    // 等于用户"允许本机模型"变成了"允许访问任意内网"。
+    const firstOrigin = cur.origin;
+    /** @type {any} */
+    let outboundHeaders = headers;
+    let redirects = 0;
     let res = /** @type {any} */ (null);
     for (let hop = 0; hop <= maxHops; hop += 1) {
-      // 每一跳都要判定：初始地址与**每一个**重定向目标（判定 + fail-closed + IP 钉扎都在 ssrf-guard 里）
+      // 每一跳都要判定：初始地址与**每一个**重定向目标（判定 + fail-closed + IP 钉扎都在 ssrf-guard 里）。
+      // allowPrivate 只在第 0 跳、或重定向后仍与首跳**同源**时生效——跨源后的目标一律按公网口径复检。
+      const privateAllowed = allowPrivate && (hop === 0 || cur.origin === firstOrigin);
       const ch = String(cur.hostname || '').toLowerCase();
-      const verdict = await resolveHostGuarded(ch, { allowPrivate, lookup: lookupImpl });
-      if (verdict.blocked) return { error: verdict.reason };
+      const verdict = await resolveHostGuarded(ch, { allowPrivate: privateAllowed, lookup: lookupImpl });
+      if (verdict.blocked) {
+        if (hop > 0) return { error: `重定向目标被拒绝：${verdict.reason}` };
+        return { error: verdict.reason };
+      }
       // 出网闸门：本模块不经 globalThis.fetch，必须在这里显式过闸并记账（见顶部注释）
       const gate = guardEgress(cur.href);
       if (gate.blocked) return { error: gate.message };
-      res = await httpRequestOnce(cur, { signal: ctrl.signal, headers, pinnedAddrs: verdict.pinned });
+      res = await httpRequestOnce(cur, { signal: ctrl.signal, headers: outboundHeaders, pinnedAddrs: verdict.pinned });
       if (res.status >= 300 && res.status < 400) {
         if (hop >= maxHops) return { error: `重定向次数超过上限（${maxHops} 跳）。` };
         const loc = res.headers['location'];
         if (!loc) break;
+        let next;
         try {
-          cur = new URL(loc, cur);
+          next = new URL(loc, cur);
         } catch {
           return { error: `非法重定向地址：${loc}` };
         }
-        if (cur.protocol !== 'http:' && cur.protocol !== 'https:') {
+        if (next.protocol !== 'http:' && next.protocol !== 'https:') {
           return { error: '重定向到非 http(s) 地址，已拒绝。' };
         }
+        redirects += 1;
+        if (cur.protocol === 'https:' && next.protocol === 'http:') {
+          // 降级本身就要可见：即使源头/目标同主机，这也是从加密到明文的切换。
+          logRedirect(`⚠ 协议降级 https→http（第 ${redirects} 跳）：${cur.href} → ${next.href}`);
+        }
+        // 跨源/降级/端口变化一律剥凭据头——判定与裁剪只此一份（net-guard.prepareRedirectHeaders），
+        // safe-fetch 不再自己写第二套。同源保留（登录跳转、补斜杠不该丢 Authorization）。
+        const prep = prepareRedirectHeaders(outboundHeaders, cur.href, next.href);
+        if (prep.strip) {
+          /** @type {Record<string,string>} */
+          const kept = {};
+          new Headers(prep.headers || {}).forEach((/** @type {string} */ v, /** @type {string} */ k) => {
+            kept[k] = v;
+          });
+          outboundHeaders = kept;
+          logRedirect(`跨源重定向（${prep.reason}，第 ${redirects} 跳）：已剥离凭据头 ${cur.origin} → ${next.origin}`);
+        }
+        logRedirect(`重定向 ${redirects}/${maxHops}：${cur.href} → ${next.href}`);
+        cur = next;
         continue;
       }
       break;
     }
+    if (redirects > 0) logRedirect(`重定向链结束：共 ${redirects} 跳`);
     if (!res) return { error: '下载失败：无响应' };
     if (res.status < 200 || res.status >= 300) return { error: `下载失败：HTTP ${res.status}` };
     // Content-Length 预检：超限直接拒绝，不再全量下载进内存

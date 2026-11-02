@@ -22,10 +22,12 @@ M.mutate({
 });
 
 M.mutate({
-  name: '③ M-3：bash env 段词表退回手写版（漏 key 段）',
-  file: 'src/tools/bash.js',
-  from: "const SENSITIVE_ENV_SEGMENT = new RegExp(`(^|_)(${[...ENV_SECRET_SEGMENTS].join('|')})(_|$)`, 'i');",
-  to: "const SENSITIVE_ENV_SEGMENT = /(^|_)(token|secret|password|passwd|credential|authorization|auth)(_|$)/i;",
+  name: '③ M-3：共用段词表删掉 key 段（退回手写版的漏判）',
+  // v0.6.29 安全批 B2：段词表从 bash.js 迁到 redact.js 的**唯一来源**，变异锚点随之迁移；
+  // 语义不变——删掉 `key` 段后 OPENAI_KEY/ANTHROPIC_KEY/GITHUB_KEY 必须重新透传子进程。
+  file: 'src/redact.js',
+  from: "  'key', 'keys', 'apikey', 'token', 'secret', 'password', 'passwd', 'pwd', 'pass',",
+  to: "  'keys', 'apikey', 'token', 'secret', 'password', 'passwd', 'pwd', 'pass',",
   expect: ['必须被判为敏感变量'],
   run: SEC,
 });
