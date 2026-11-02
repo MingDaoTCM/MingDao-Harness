@@ -1,3 +1,4 @@
+
 # v0.6.1 第三方审计报告登记表
 
 ## 索引与编号约定（v0.6.8 补）
@@ -6041,3 +6042,67 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   自定义包装器仍判不出来；真正硬边界需要 `denyStrict` + 沙箱/OS 级管控。
 - C2 白名单会拒绝未登记的**新** git 只读选项（fail-closed，方向是有意为之）；遇到常用选项
   缺失时按 `ALLOWED_LONG`/`ALLOWED_SHORT` 增补，而不是回退黑名单。
+
+## 5.4 v0.6.29 报告三 §5.1/5.2/5.6/5.7：Agent 与上下文正确性（D1/D2/D3/D4/D5）
+
+> 范围：只改 `src/agent.js`、`src/context.js`、`src/providers/openai-compatible.js`；
+> 新增 `test/agent-context-hardening.js`、`test/mutate/batch64-agent-context.mjs`。
+> 未改 `test/smoke.js` / `test/mutate/README.md` / `test/run-all.mjs` / `.github/workflows/ci.yml`，
+> 也未触碰 `src/web/**`、`safe-fetch.js`、`redact.js`、`ledger.js`、`permissions.js`、`src/tools/**`、
+> `regex-safety.js`、`pricing.js`、`session-index.js`（并行道在改）。未 tag / 未改版本号 / 未 publish。
+
+### 5.4.1 修复
+
+| 编号（报告三） | 缺陷 | 修法 |
+| --- | --- | --- |
+| D1 严重 C-01 | 中断只清**最后一条**消息的 `tool_calls`；末条是 `tool` 时清理静默失效，留下孤儿调用 → 会话从此每轮 400 | 抽 `finishTurn()`：按最后一条带 `tool_calls` 的 assistant 的 id 集合**补齐** `{role:'tool', tool_call_id, content:'（已中断，未执行）'}`；插入点紧跟其后的连续 tool 块；**保留** assistant.tool_calls（删掉会让已执行结果失去配对）。中断/费用护栏/步数上限/异常/正常所有出口统一调用，`finally` 再兜底一次。 |
+| D2 严重 C-02 | 多模态 `content` 数组被 `String()` → `[object Object]`，204KB 图文消息只计 13 token | `contentTokens()` 按 parts 计数：text 走统一计数器；image 固定 2048/个；audio 固定 1024/个；未知 part 取 `max(2048, JSON 序列化长度/4)`；对象形态 content 走 JSON 计数。 |
+| D3 高 H-01 | 尾部贪心遇单条超预算即 `break` → 最新用户消息被整条丢弃，只剩 system | 加"最后一条必留"不变量；单条超预算按字符二分截断并追加可见 `…（已截断）`；parts 数组同样截断并补 text 标注。 |
+| D4 严重 C-04 | SSE 兜底 `tool_call_id` 只用工具名，同名并行调用重复 → 下一轮 400 | 兜底 id 改为 `call_<name>_<排序后序号>_<本次解析随机/时间戳>`，并用 `usedIds` 防撞；网关下发的显式 id 原样保留。 |
+| D5 高 H-02 | 拒绝/解析失败项在 `prepTool` 就地 push、成功项执行完才 push → tool 消息顺序与 `tool_calls` 不一致 | 拒绝项改为返回 `{denied}`；成功/拒绝结果统一按 `res.toolCalls` 的 idx 入队，整批结束后按原序回填；中断/异常出口先 flush 已执行结果，再由 `finishTurn` 补齐未执行项。 |
+
+### 5.4.2 复现（改前，`ba4452eb`）
+
+- **D1**：桩模型返回 2 个 tool_calls，在首个工具的权限检查期间触发 SIGINT → 历史为
+  `assistant(2 calls) + tool(仅 call_a)`（末条是 tool）；报告三 §5.1 的 3 调用形态同理。
+- **D2**：`messageTokens({content:[text(4000 字), 200KB base64 图片]})` = **13**，
+  该消息 JSON 长度 208,919。
+- **D3**：`trimMessages([system, user(8000 字)], 500)` → `['system']`，用户消息整条消失。
+- **D4**：一个响应含 2 个同名、无 id 的 tool_call → 两个 id 都是 `call_read`。
+- **D5**：批次 `[read A 成功, read B 被拒]` 的 tool 消息顺序为 `B → A`。
+
+### 5.4.3 验证
+
+- `node test/agent-context-hardening.js`：**20 组断言全过**（D1×3 / D2×5 / D3×5 / D4×4 / D5×3）。
+  D1 用"模拟严格网关"逐条校验 `assistant.tool_calls` 与 tool 消息**等量、同序、一一对应**，
+  并验证补齐后的历史能继续下一轮（第二轮的请求入口再次过同一校验），且补齐幂等。
+- `node test/mutate/batch64-agent-context.mjs`：**16/16 全中**（每条把修复改回缺陷后套件当场红，
+  `expect` 关键词逐条命中）。
+- 为避开同树并行道的未提交改动，上述全量验证在
+  `git worktree add --detach /tmp/mdh-b64-verify ba4452eb` + 仅复制本轮 5 个文件的隔离树上执行：
+  - `npm run typecheck`：**通过**（主树的两处 TS 报错来自并行道正在改的 `session*.js`，不在本轮改动面）；
+  - `node test/smoke.js`：**exit 0**（全绿；单跑约 4 分钟，期间一次外网 `installFromUrl` 超时不影响判定）；
+  - `node test/e2e-local.js`：17 项全过；
+  - `node test/api-contracts.js`：8 项全过；
+  - `node test/mutate/run.mjs --allow-dirty`：**批次 50/50 全中，557/557 条变异全被抓到**；
+  - `node scripts/doc-lint.mjs`：仅 ⑥ 计数红（README 写 541、实际 557 = 541 + 本轮新增 16 条；
+    按任务书禁止改 `test/mutate/README.md`），其余 8 项绿。
+- 边界说明：全量门禁在隔离树上跑，是因为共享工作树同时有 5 条并行道在改其它文件
+  （`git status` 可见 `src/tools/git.js`、`src/session*.js` 等未提交改动）；主树上直接跑
+  smoke / typecheck 会被这些在飞改动干扰，无法归因到本轮。
+
+### 5.4.4 未做 / 边界（必须说明）
+
+- **D5 已做**（未按"改动面过大"止损）：只改 tool 消息的回填时机（统一排队 → 按原序回填），
+  权限询问、钩子、工具执行本身的先后顺序不变。
+- **D2 的 2048/1024 是保守估值，不是厂商计费公式**：视觉 token 取决于解码后的像素与分块，
+  无法从 base64 长度反推（同图不同分辨率可差数倍）；未知 part 用 `max(2048, JSON 长度/4)`
+  防"未知大对象免费"。口径写在 `src/context.js` 的注释里，便于日后按真实账单校准。
+- **D3 只保证"最后一条必留"**：若最后一条是 `tool` 消息、其 assistant 又被同次裁剪丢掉，
+  `cleanToolPairing` 仍会按配对正确性优先移除它（不能为了留一条消息产生非法请求）。
+  本轮测试覆盖的是最常见的"最新用户消息"形态。
+- **D4 兜底 id 不保证同一响应重复解析的幂等**：每次解析带随机/时间戳后缀（任务书标注"可选，
+  不要求"）；显式 id 仍原样保留，兜底 id 只用于网关没给 id 的降级路径。
+- **`finishTurn` 只补齐最后一条带 `tool_calls` 的 assistant**（当前回合/最近损坏点）；
+  更早的历史损坏不在本轮回填范围内，避免把占位插到无关历史位置造成新的顺序问题。
+- 未提高任何上下文预算/窗口常量；D2 只改计数口径，未改 `signal`/超时/端点学习/压缩触发线。

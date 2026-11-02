@@ -24,8 +24,65 @@ export function approxTokens(/** @type {any} */ text) {
   return heuristicTokens(text);
 }
 
+// —— 多模态 content parts 的 token 估值口径（审计 v0.6.29 C-02 / 严重-2）——
+// 旧实现在 content 为数组时走 `count(String(array))` → 只数到 "[object Object]"（13 token），
+// 一条 200KB 的图文消息在预算/压缩/费用护栏里几乎是免费的，真实请求却可能直接超窗。
+// 现在的口径（**宁可高估、不可漏计**）：
+//   · text / input_text：交给现有计数器 count()——有词表走 BPE，无词表走启发式
+//     （英文≈4 字符/token、CJK≈1 字符/token），与纯文本字符串消息**同一口径**；
+//   · image_url / image / input_image：固定 2048 token/个。视觉开销取决于解码后的像素与
+//     分块，无法从 base64 长度反推（同一张图 base64 可差数倍），故取保守占位：
+//     OpenAI high detail（85 + 170×tiles）常见 ≈1,105、Anthropic（(w×h)/750）≈1,365，
+//     2048 覆盖 2K 级截图；也远大于旧实现的 13；
+//   · input_audio / audio：固定 1024 token/个（1 分钟 16kHz 语音的常见计费量级）；
+//   · 未知 part：取 max(2048, 序列化长度/4)——既覆盖未知媒体，也避免把未知大对象当免费；
+//   · 非数组对象（部分网关把 content 包成对象）：按 JSON 序列化后计数，绝不 String() 成
+//     "[object Object]"。
+const IMAGE_PART_TOKENS = 2048;
+const AUDIO_PART_TOKENS = 1024;
+
+function contentTokens(/** @type {any} */ content, /** @type {any} */ count) {
+  if (typeof content === 'string') return count(content);
+  if (Array.isArray(content)) {
+    let total = 0;
+    for (const part of content) {
+      if (part == null) continue;
+      if (typeof part === 'string') {
+        total += count(part);
+        continue;
+      }
+      const type = String(part.type || '');
+      if (type === 'text' || type === 'input_text' || (!type && typeof part.text === 'string')) {
+        total += count(String(part.text ?? ''));
+      } else if (type === 'image_url' || type === 'image' || type === 'input_image') {
+        total += IMAGE_PART_TOKENS;
+      } else if (type === 'input_audio' || type === 'audio') {
+        total += AUDIO_PART_TOKENS;
+      } else {
+        let serialized = '';
+        try {
+          serialized = JSON.stringify(part) ?? '';
+        } catch {
+          serialized = '';
+        }
+        total += Math.max(IMAGE_PART_TOKENS, Math.ceil(serialized.length / 4));
+      }
+    }
+    return total;
+  }
+  if (content == null) return 0;
+  if (typeof content === 'object') {
+    try {
+      return count(JSON.stringify(content) ?? '');
+    } catch {
+      return 0;
+    }
+  }
+  return count(String(content));
+}
+
 function partTokens(/** @type {any} */ msg, /** @type {any} */ count) {
-  let total = count(msg.content || '');
+  let total = contentTokens(msg.content, count);
   for (const tc of msg.tool_calls || []) {
     total += count(JSON.stringify(tc));
   }
@@ -82,6 +139,65 @@ export function cleanToolPairing(/** @type {any} */ kept) {
   });
 }
 
+// —— 单条超预算消息的就地截断（审计 v0.6.29 H-01 / 高-1）——
+// 尾部贪心遇到"单条即超预算"时不能直接 break：那样最新一条用户消息会被整条丢弃，
+// 只剩 system，模型对着空气作答，而界面上看不出任何异常。这里的约定是**消息必留**，
+// 放不下就按字符二分截断，并追加可见标注——"被截断"必须让模型和用户都看得见。
+const TRUNCATED_MARK = '…（已截断）';
+
+/** 取不超过 allowedTokens 的最长字符前缀（码点安全；兼容 BPE 与启发式计数器）。 */
+function prefixWithin(/** @type {string} */ text, /** @type {number} */ allowedTokens, /** @type {any} */ count) {
+  if (count(text) <= allowedTokens) return text;
+  let lo = 0;
+  let hi = text.length;
+  let best = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (count(safeHead(text, mid)) <= allowedTokens) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return safeHead(text, best);
+}
+
+/** 把任意 content 截到 allowedTokens 内，返回新 content（字符串或 parts 数组），绝不返回空。 */
+function truncateContent(/** @type {any} */ content, /** @type {number} */ allowedTokens, /** @type {any} */ count) {
+  const markTokens = count(TRUNCATED_MARK);
+  if (typeof content === 'string') {
+    if (count(content) <= allowedTokens) return content;
+    if (allowedTokens <= markTokens) return TRUNCATED_MARK;
+    return prefixWithin(content, allowedTokens - markTokens, count) + TRUNCATED_MARK;
+  }
+  if (Array.isArray(content)) {
+    // parts 数组：按原序保留能放下的 part；第一个放不下的 text part 就地截断，
+    // 媒体 part 放不下则丢弃；末尾统一补一个可见的 text 标注（不破坏 parts 结构）。
+    let remaining = Math.max(0, allowedTokens - markTokens);
+    const out = [];
+    for (const part of content) {
+      if (part == null) continue;
+      const t = contentTokens([part], count);
+      if (t <= remaining) {
+        out.push(part);
+        remaining -= t;
+        continue;
+      }
+      if (typeof part === 'object' && typeof part.text === 'string') {
+        out.push({ ...part, text: prefixWithin(part.text, remaining, count) });
+        remaining = 0;
+      }
+      break;
+    }
+    out.push({ type: 'text', text: TRUNCATED_MARK });
+    return out;
+  }
+  // 其他形态（对象/number 等）：转成 JSON 文本再走字符串截断
+  const text = content == null ? '' : JSON.stringify(content) ?? String(content);
+  return truncateContent(text, allowedTokens, count);
+}
+
 export function trimMessages(/** @type {any} */ messages, /** @type {any} */ budget, count = approxTokens) {
   if (!messages.length) return [];
   const hasSystem = messages[0]?.role === 'system';
@@ -131,7 +247,28 @@ export function trimMessages(/** @type {any} */ messages, /** @type {any} */ bud
     // 回收后仍超预算 → 从尾部保留（必要时继续丢弃最老，清洗 tool 配对）
     total = sysTokens;
     const tail = [];
-    for (let i = out.length - 1; i >= 0; i--) {
+    // 不变量（审计 H-01）：**最后一条消息必留**。它通常是本轮最新的用户输入；
+    // 旧实现从尾往前贪心、首条放不下就 break，单条超预算时结果只剩 system——
+    // 模型看不到问题却照常作答，这是"静默失忆"里最危险的一种。
+    const lastIndex = out.length - 1;
+    if (lastIndex >= 0) {
+      const last = out[lastIndex];
+      const t = messageTokens(last, count);
+      if (total + t <= budget) {
+        tail.unshift(last);
+        total += t;
+      } else {
+        // 单条即超预算：就地截断 + 可见标注（不丢消息）。扣掉该消息 4 token 的协议开销。
+        const allowed = Math.max(0, budget - total - 4);
+        const canTruncate = typeof last.content === 'string' || Array.isArray(last.content);
+        const fitted = canTruncate ? { ...last, content: truncateContent(last.content, allowed, count) } : last;
+        tail.unshift(fitted);
+        total += messageTokens(fitted, count);
+        // 截断后仍可能略超预算（标注本身需要 token，且 content 之外还有 tool_calls）——
+        // 这里**宁可超一点也保留**，绝不因为放不下而整条丢弃。
+      }
+    }
+    for (let i = out.length - 2; i >= 0; i--) {
       const t = messageTokens(out[i], count);
       if (total + t > budget) break;
       total += t;

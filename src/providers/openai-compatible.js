@@ -340,6 +340,13 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
   if (buf.trim()) consumeLine(buf); // [DONE] 后残留 usage 尾帧仍吸收（正文/推理已被 doneFlag 拦截）
   dispatchEvent(); // 末尾事件缺少空行分隔时也必须派发（不能静默丢最后一帧）
 
+  // D4（审计 v0.6.29 C-04）：无 id 的兜底 id 必须**同一次响应内唯一**。
+  // 旧实现 `call_${name}` 按工具名派生，同一响应里两个同名并行调用（read a / read b）
+  // 会得到同一个 id；下一轮请求体里两个 tool_call 共用一个 tool 响应 → 严格网关直接 400，
+  // 且该会话会带着损坏历史永久 400。这里用「name + 排序后的序号 + 本次解析的随机/时间戳后缀」
+  // 生成，并用 usedIds 兜底防撞（显式 id 与另一条兜底 id 恰好同名的情况）。
+  const fallbackIdNonce = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+  const usedIds = new Set();
   const toolCalls = [...calls.entries()]
     .sort((a, b) => {
       const na = Number(String(a[0]).replace(/^idx-/, ''));
@@ -348,11 +355,21 @@ export async function parseStream(/** @type {any} */ body, /** @type {any} */ on
       if (Number.isFinite(na) && Number.isFinite(nb)) return na - nb;
       return String(a[0]).localeCompare(String(b[0]));
     })
-    .map(([, c]) => ({
-      id: c.id || `call_${c.name || 'x'}`,
-      type: 'function',
-      function: { name: c.name, arguments: c.args || '{}' },
-    }))
+    .map(([, c], idx) => {
+      let id = c.id;
+      if (!id) {
+        const base = `call_${c.name || 'x'}_${idx}_${fallbackIdNonce}`;
+        id = base;
+        let n = 1;
+        while (usedIds.has(id)) id = `${base}_${n++}`;
+      }
+      usedIds.add(id);
+      return {
+        id,
+        type: 'function',
+        function: { name: c.name, arguments: c.args || '{}' },
+      };
+    })
     .filter((c) => c.function.name);
 
   // v0.6.3（M-16）：网关**提前关流**（既没 [DONE] 也没 finish_reason）此前被当成正常完成，

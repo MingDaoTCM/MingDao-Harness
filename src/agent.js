@@ -1269,12 +1269,60 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       return null;
     }
   };
-  const stripOrphanCalls = () => {
-      const last = messages[messages.length - 1];
-      if (last?.role === 'assistant' && Array.isArray(last.tool_calls) && last.tool_calls.length) {
-        messages[messages.length - 1] = { ...last, tool_calls: undefined };
+  // 回合收尾的唯一配对补齐点（审计 v0.6.29 C-01 / 严重-1）。
+  //
+  // 旧实现 `stripOrphanCalls()` 只会把**最后一条** assistant 的 tool_calls 清空：
+  // 中断发生在工具执行期间时，末条往往是 `tool` 消息，清理静默失效，留下
+  // assistant(2 个 tool_calls) + tool(仅第 1 个) 的残缺历史。OpenAI 兼容端点要求
+  // tool_calls 与 tool 消息严格一一对应，这份历史会让会话**从此每一轮都 400**
+  //（WebUI 还会把它 appendMessages 落盘成永久坏会话）。
+  //
+  // 正确做法是**补齐**而不是删除：按最后一条带 tool_calls 的 assistant 的 id 集合，
+  // 给没有对应 tool 响应的调用插入 `{role:'tool', tool_call_id, content:'（已中断，未执行）'}`。
+  // 保留 assistant.tool_calls 是必须的——删掉它会让同批次**已经执行**的工具结果与历史错位。
+  // 插入点紧跟该 assistant 之后**连续**的 tool 消息块（历史修复时也不会被后续消息隔开）。
+  const INTERRUPTED_TOOL_CONTENT = '（已中断，未执行）';
+  const finishTurn = () => {
+    let idx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m?.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+        idx = i;
+        break;
       }
-    };
+    }
+    if (idx < 0) return;
+    const answered = new Set();
+    for (let i = idx + 1; i < messages.length; i++) {
+      const m = messages[i];
+      if (m?.role === 'tool' && m.tool_call_id != null) answered.add(String(m.tool_call_id));
+    }
+    const missing = [];
+    const seen = new Set();
+    for (const tc of messages[idx].tool_calls) {
+      if (!tc || tc.id == null) continue; // 无 id 无法配对（SSE 兜底 id 已保证有 id）
+      const key = String(tc.id);
+      if (answered.has(key) || seen.has(key)) continue;
+      seen.add(key);
+      missing.push(tc.id);
+    }
+    if (!missing.length) return;
+    let insertAt = idx + 1;
+    while (insertAt < messages.length && messages[insertAt]?.role === 'tool') insertAt += 1;
+    messages.splice(insertAt, 0, ...missing.map((id) => ({ role: 'tool', tool_call_id: id, content: INTERRUPTED_TOOL_CONTENT })));
+  };
+  // D5（审计 v0.6.29 H-02 / 高-2）：本批工具结果先在内存里按 `tool_calls` 原序排队，
+  // 整批结束后统一回填。旧实现里「拒绝/参数解析失败」在 prepTool 就地 push、成功项在
+  // finishTool 才 push，批次 [A 成功, B 被拒] 的历史顺序会变成 B → A，与 assistant.tool_calls
+  // 错位（严格网关按顺序校验时同样 400）。队列记录 idx（在 res.toolCalls 里的原始序号），
+  // 回填前排序；中断/异常出口也会先 flush 已执行的结果，再由 finishTurn 补齐其余占位。
+  const pendingToolMessages = /** @type {{idx: number, msg: any}[]} */ ([]);
+  const flushToolMessages = () => {
+    if (!pendingToolMessages.length) return;
+    pendingToolMessages.sort((a, b) => a.idx - b.idx);
+    for (const p of pendingToolMessages) messages.push(p.msg);
+    pendingToolMessages.length = 0;
+  };
     try {
     // 同回合只读工具去重（Hermes C4）：相同 name+args 的只读调用只执行一次，结果复用回填。
     // v0.4.1 P1 修复：turnToolCache 必须声明在 while 之外、for 轮内——此前在 while 体内每步重建，
@@ -1305,7 +1353,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       // 置真、却没有任何收敛点——工具跑完仍会走回这里发出**下一次请求**（实测：SIGINT 之后
       // chat 仍被调用 2 次）。这里与工具循环里的检查一起把它收口成「立刻停止、如实回报 aborted」。
       if (aborted || noProgressFired) {
-        stripOrphanCalls();
+        finishTurn();
         // v0.6.13（A）：无进展看门狗触发——如实报告，而不是当作"正常结束"或"用户中断"。
         if (noProgressFired) {
           markOutcome('stalled');
@@ -1415,7 +1463,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           // 统计不可读 / 无价格数据时判据返回 null（不误拦、也不静默放行——主检查会告警）。
           const msg = preflightBlockMessage(g.dailyLimitYuan, usedTodayWithInflight(), worst);
           if (msg) {
-            stripOrphanCalls();
+            finishTurn();
             return {
               text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
               note: msg,
@@ -1441,14 +1489,14 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           DEFAULT_MODEL
         );
         if (d.action === 'block') {
-          stripOrphanCalls();
+          finishTurn();
           return {
             text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
             note: d.message, durationMs: Date.now() - startedAt, perf: perf(),
           };
         }
         if (d.action === 'already-cheapest') {
-          stripOrphanCalls();
+          finishTurn();
           return {
             text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
             note: `今日费用已达上限（实际 ¥${String((todayCost() ?? 0).toFixed(4))}），且已在最便宜模型上执行，已暂停——调整 config.costGuard 或明天自动恢复。`,
@@ -1467,7 +1515,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             downgraded = true;
             io.print(style(d.message, C.yellow));
           } else {
-            stripOrphanCalls();
+            finishTurn();
             return {
               text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false,
               note: `费用护栏想降级到 ${target}，但它与当前服务商不一致或缺少 API Key——已暂停执行。请把 config.costGuard.downgradeModel 改为与当前模型同服务商（当前：${curPc.name}）的模型名，或调高 dailyLimitYuan。`,
@@ -1611,7 +1659,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         io.endTurn();
         // v0.6.13（A）：看门狗触发的中止——如实报告"连续 N 分钟无进展"，不冒充 Ctrl+C/正常结束
         if (noProgressFired) {
-          stripOrphanCalls();
+          finishTurn();
           markOutcome('stalled');
           return {
             text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: false, stalled: true,
@@ -1620,7 +1668,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           };
         }
         if (aborted) {
-          stripOrphanCalls();
+          finishTurn();
           markOutcome('aborted', { aborted: true });
           return { text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: outcome.aborted, upstreamTruncated, durationMs: Date.now() - startedAt, perf: perf() };
         }
@@ -1740,7 +1788,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 对活着但内存吃紧的引擎是错误处置）；交给下面 describeUpstreamError 的独立分型。
         const engineShedCaches = /engine shed its caches and stays up|allocator wall/i.test(String(e?.message || ''));
         if (!engineShedCaches && (e?.status === 507 || /memory_refusal|内存不足|内存拒绝/i.test(String(e?.message || '')))) {
-          stripOrphanCalls();
+          finishTurn();
           markOutcome('done');
           return {
             text: null,
@@ -1880,7 +1928,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 串行化只读子代理避免并发峰值（只读 read/ls/glob/grep 仍并行，它们不额外触发大 prefill）。
         const subagentIsLocal = resolveModelCaps(cfg, subagentModel(cfg, modelName)).isLocal;
 
-        // 预检：解析参数 → PreToolUse 钩子 → 权限检查；拒绝/失败只回填不执行（返回 null）
+        // 预检：解析参数 → PreToolUse 钩子 → 权限检查；拒绝/失败只回填不执行。
+        // v0.6.29（H-02）：拒绝项不再就地 push（那会与成功项的执行顺序错位），而是返回
+        // `{denied}`，由批次循环按 `tool_calls` 原序排入回填队列。
         // task 工具标记 readOnly 时也可并行（评估 A4：只读子代理 Promise.all）
         async function prepTool(/** @type {any} */ tc) {
           const name = tc.function?.name || '';
@@ -1905,8 +1955,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             io.renderToolDenied(name, {}, parsedArgs.deniedReason);
             if (auditOn) auditEntry({ denied: true, reason: parsedArgs.auditReason });
             // 审计（长生成截断循环）：给出明确分块指引，避免模型反复用单个超大 write 撞输出上限
-            messages.push({ role: 'tool', tool_call_id: tc.id, content: parsedArgs.message });
-            return null;
+            return { tc, name, denied: parsedArgs.message };
           }
           args = parsedArgs.args;
 
@@ -1915,8 +1964,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (hook.decision === 'block') {
             io.renderToolDenied(name, args, '被钩子阻止');
             if (auditOn) auditEntry({ denied: true, reason: `PreToolUse 钩子阻止：${String(hook.reason || '').slice(0, 200)}` });
-            messages.push({ role: 'tool', tool_call_id: tc.id, content: `工具被 PreToolUse 钩子阻止：${hook.reason}` });
-            return null;
+            return { tc, name, denied: `工具被 PreToolUse 钩子阻止：${hook.reason}` };
           }
 
           const isMcp = name.startsWith('mcp__');
@@ -1924,8 +1972,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (presetToolSet && !presetToolSet.has(isMcp ? name.slice(5) : name)) {
             io.renderToolDenied(name, args, `不在预设工具白名单内（${activePresetName || 'preset'}）`);
             if (auditOn) auditEntry({ denied: true, reason: '预设工具白名单拦截' });
-            messages.push({ role: 'tool', tool_call_id: tc.id, content: `工具 ${name} 不在当前预设的工具白名单内，已拒绝执行。` });
-            return null;
+            return { tc, name, denied: `工具 ${name} 不在当前预设的工具白名单内，已拒绝执行。` };
           }
           let allowed = false;
           if (isMcp && mcp?.isReadonly(name)) {
@@ -1947,8 +1994,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             turnLedger.permission({ name, mode: permission?.mode ?? cfg.permission ?? null, decision: 'deny', source: 'permission.check' });
             turnLedger.toolCall({ callId: tc.id, name, rawArgs: args, args, permission: { decision: 'deny' } });
             turnLedger.toolResult({ callId: tc.id, name, ok: false, blocked: true, ms: 0, error: '权限拒绝' });
-            messages.push({ role: 'tool', tool_call_id: tc.id, content: '用户拒绝了该工具的执行权限。' });
-            return null;
+            return { tc, name, denied: '用户拒绝了该工具的执行权限。' };
           }
           // v0.5.0 A3 ①：领域约束（PreToolUse）——权限放行之后、执行之前强制。
           // 与权限引擎的分工：权限回答「用户是否允许」，约束回答「领域是否允许」；两者都通过才执行。
@@ -1990,8 +2036,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             if (cv?.event) auditConstraint(cv.event);
             // 被约束拦下的调用不会有 tool.result，这里补一条终态，避免账本出现「只有调用没有结果」的悬空步
             turnLedger.toolResult({ callId: tc.id, name, ok: false, blocked: true, ms: 0, error: '领域约束拦截' });
-            messages.push({ role: 'tool', tool_call_id: tc.id, content: `【领域约束】${reason}` });
-            return null;
+            return { tc, name, denied: `【领域约束】${reason}` };
           }
           return { tc, name, args, isMcp };
         }
@@ -2125,10 +2170,23 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           const pv = checkPostTool(constraints, prep.name, typeof result === 'string' ? safeParse(result) : result);
           if (pv?.rejected) auditConstraint(pv.event);
           // 回填正文（复用前缀 / 约束拒绝文案 / 按窗口截断）单源在 tools-flow.js 的 toolResultMessage()
-          messages.push({
-            role: 'tool',
-            tool_call_id: prep.tc.id,
-            content: toolResultMessage(text, { cached: prep.cached, cap: toolResultCap, post: pv }),
+          // v0.6.29（H-02）：不在这里直接 push——先按 `tool_calls` 原序入队，整批结束后统一回填。
+          pendingToolMessages.push({
+            idx: prep.idx,
+            msg: {
+              role: 'tool',
+              tool_call_id: prep.tc.id,
+              content: toolResultMessage(text, { cached: prep.cached, cap: toolResultCap, post: pv }),
+            },
+          });
+        }
+
+        // 拒绝项（参数解析失败/钩子阻止/预设白名单/权限拒绝/领域约束）同样按原序入队。
+        // 它们没有执行、没有耗时/账本结果，只回填一条 tool 消息——顺序必须与成功项一致。
+        function finishDenied(/** @type {any} */ prep) {
+          pendingToolMessages.push({
+            idx: prep.idx,
+            msg: { role: 'tool', tool_call_id: prep.tc.id, content: prep.denied },
           });
         }
 
@@ -2137,7 +2195,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           // v0.6.5（审计 BUG-025）：工具执行期间用户按了 Ctrl+C → 立刻停止，不再执行后续批次
           // （此前没有任何检查点，长工具序列会把中断信号拖到整串跑完）
           if (aborted) {
-            stripOrphanCalls();
+            // v0.6.29（H-02）：已执行批次的结果先按原序落盘，再由 finishTurn 补齐未执行项；
+            // 否则中断会把"已经跑完的工具"变成"未执行"占位，账实不符。
+            flushToolMessages();
+            finishTurn();
             return {
               text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: true,
               note: '已按 Ctrl+C 中断（工具执行期间收到中断信号），本回合未再发出请求。',
@@ -2149,9 +2210,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           while (i < res.toolCalls.length) {
             const tc = res.toolCalls[i];
             const prep = /** @type {any} */ (await prepTool(tc));
+            prep.idx = i; // v0.6.29（H-02）：记录在 res.toolCalls 中的原始序号，回填时按它排序
             const name = tc.function?.name || '';
-            let batchable = canBatch && Boolean(prep) && !prep.isMcp && READONLY_BATCH.has(name);
-            if (!batchable && canBatch && Boolean(prep) && name === 'task' && prep.args?.readOnly === true && !subagentIsLocal) batchable = true;
+            let batchable = canBatch && !prep.denied && !prep.isMcp && READONLY_BATCH.has(name);
+            if (!batchable && canBatch && !prep.denied && name === 'task' && prep.args?.readOnly === true && !subagentIsLocal) batchable = true;
             batch.push({ prep, batchable });
             i += 1;
             if (!batchable) break;
@@ -2178,18 +2240,27 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             );
             prefix.forEach((b, idx) => finishTool(b.prep, results[idx].r, results[idx].t0));
             for (const b of batch.slice(prefix.length)) {
-              if (!b.prep) continue;
+              if (b.prep.denied != null) {
+                finishDenied(b.prep);
+                continue;
+              }
               const t0 = Date.now();
               finishTool(b.prep, await runTool(b.prep), t0);
             }
           } else {
             for (const b of batch) {
-              if (!b.prep) continue; // 拒绝/失败成员已在 prepTool 回填
+              if (b.prep.denied != null) { // 拒绝/失败成员：只入队，不执行
+                finishDenied(b.prep);
+                continue;
+              }
               const t0 = Date.now();
               finishTool(b.prep, await runTool(b.prep), t0);
             }
           }
         }
+        // v0.6.29（H-02）：整批结束后按 `tool_calls` 原序一次性回填，保证
+        // assistant.tool_calls 与 tool 消息逐项对齐（拒绝项不再抢在成功项前面）。
+        flushToolMessages();
         // v0.2.8 步数预留收尾（对齐 DSH）：仅「最后一轮」的末步追加收尾指令，
         // 让模型在末轮输出总结；中间轮不注入（交给自动续跑继续干活，而非提前收尾中断）。
         if (steps === stepLimit - 1 && round === maxRounds - 1) {
@@ -2221,7 +2292,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         if (res.finish === 'length') {
           emptyRounds += 1;
           if (emptyRounds >= maxEmptyRounds) {
-            stripOrphanCalls();
+            finishTurn();
             return {
               text: res.text || null,
               reasoning: res.reasoning || '',
@@ -2329,7 +2400,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     }
     io.endTurn();
     // 步数上限：清掉未执行的 tool_calls，避免下一轮/恢复后 API 400
-    stripOrphanCalls();
+    finishTurn();
     // v0.6.2（用户实测：「步数受限未能产出交付物，需要继续追问方能继续下一步」）：
     // 预算用尽必须**明确告诉用户**发生了什么、以及怎么继续。此前这里一行都不打印，
     // 用户只看到一段总结，很容易误判为「任务已完成」，只能自己追问。
@@ -2425,10 +2496,16 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     } catch (/** @type {any} */ err) {
       // 审计 P2-6（v0.4.2）：工具管线异常（hooks.pre / permission.check / prepTool 等）沿大 try 上抛时，
       // assistant tool_calls 已 push 进 messages 却无对应 tool 回填——会话恢复后 API 因孤儿 tool_call_id 400。
-      // 清理孤儿调用后再抛（stripOrphanCalls 此前只在中断/收尾路径调用）。
-      stripOrphanCalls();
+      // v0.6.29（C-01）：先落盘已执行批次的结果（H-02 队列），再把缺失项补齐成"未执行"占位再抛；
+      // 只删 assistant.tool_calls 会让**已经执行**的 tool 结果失去配对，同样 400。
+      flushToolMessages();
+      finishTurn();
       throw err;
     } finally {
+      // v0.6.29（C-01）：最后一道保险——所有出口（正常/中断/预算/异常）都做一次配对补齐。
+      // 显式调用点仍保留：它们让"返回前历史已经完整"，这里兜住任何新增的 early return。
+      flushToolMessages();
+      finishTurn();
       currentAc = null;
       currentUsage = null; // 回合结束：避免 runTurn 之外调用的 spawnTask 写入陈旧累加器
       // v0.6.13（A）：看门狗计时器必须随回合结束清掉（每回合一个，长驻 WebUI 里不能泄漏）；
