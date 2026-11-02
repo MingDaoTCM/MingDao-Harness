@@ -134,7 +134,9 @@ M.mutate({
     "  atomicWriteFileSync(file, JSON.stringify(mergeTaskState(loadTaskState(sessionName), ts)) + '\\n', { mode: 0o600 });",
     '  return { ok: true, error: null }; // 变异：无锁读-改-写',
   ].join('\n'),
-  expect: ['并发合并不得丢更新'],
+  // v0.6.30：13d247e 新增了 M-17c「持锁期间 merge 必须等待」的确定性断言，它会在 8 路并发
+  // 断言之前先红（撤销锁后 7ms 就返回）。期望词必须同时认这一条，否则变异明明被抓到却被判"逃逸"。
+  expect: ['并发合并不得丢更新', 'saveTaskStateMerge 必须等过持锁者'],
   run: SUITE,
 });
 
