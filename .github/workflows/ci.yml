@@ -243,6 +243,90 @@ jobs:
             echo "::error title=state-integrity 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
           fi
           exit $code
+      - name: 事件循环冻结（ReDoS / Intl，v0.6.30 审计收口）
+        # 只挂 Linux 腿：纯函数 + 本机临时目录。
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          node test/freeze-hardening.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=freeze-hardening 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
+      - name: 授权边界（deny / git 只读 / fetch 出网，v0.6.30 审计收口）
+        # 只挂 Linux 腿：纯函数 + 桩。
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          node test/permission-hardening.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=permission-hardening 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
+      - name: 凭据（重定向剥头 / 单一脱敏表 / 账本键名，v0.6.30 审计收口）
+        # 只挂 Linux 腿：本机桩端点 + 纯函数。
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          node test/credential-hardening.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=credential-hardening 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
+      - name: Agent/上下文（孤儿 tool_calls / 多模态 / 末条必留，v0.6.30 审计收口）
+        # 只挂 Linux 腿：桩模型 + 纯函数。
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          node test/agent-context-hardening.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=agent-context-hardening 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
+      - name: 文件锁与写完整性（fsync / 尾链 / 迁移副本，v0.6.30 审计收口）
+        # 只挂 Linux 腿：文件锁语义与 Windows 不同，避免假红。
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          node test/fs-integrity-hardening.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=fs-integrity-hardening 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
+      - name: 同步注册边界（默认 closed / XFF / 配额，v0.6.30 审计收口）
+        # 只挂 Linux 腿：本机回环服务。
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          node test/sync-registration-hardening.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=sync-registration-hardening 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
       - name: 文档守卫（链接 / 命令表 / kind / 模型 id / 架构覆盖 / API 表 / 变异总数）
         # v0.6.8（文档审计 §7.7）：把"文档与代码不一致"变成 CI 红——此前全靠人肉复查，
         # 结果 ARCHITECTURE 停在 v0.1.x、PACK-API 列了未实现的 kind、README 的 CI 矩阵与模型 id 过时。

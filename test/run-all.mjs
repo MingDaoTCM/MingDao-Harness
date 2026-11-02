@@ -33,6 +33,18 @@ const SUITES = [
   ['provider-hardening', 'node', ['test/provider-hardening.js']],
   // v0.6.29 审计收口：轮次状态复位与并发写加锁（minimax M-10, L-13, M-17, M-11, M-12）
   ['state-integrity', 'node', ['test/state-integrity.js']],
+  // v0.6.30 审计收口：事件循环冻结（ReDoS 判据 + 行级预算 + Intl 缓存/预分桶）
+  ['freeze-hardening', 'node', ['test/freeze-hardening.js']],
+  // v0.6.30 审计收口：授权边界（deny 归一化 / git 只读白名单 / fetch 出网默认拒绝）
+  ['permission-hardening', 'node', ['test/permission-hardening.js']],
+  // v0.6.30 审计收口：凭据（跨源重定向剥头 / 单一脱敏表 / 账本键名脱敏）
+  ['credential-hardening', 'node', ['test/credential-hardening.js']],
+  // v0.6.30 审计收口：Agent/上下文（孤儿 tool_calls / 多模态计数 / 末条必留 / 兜底 id / 回填顺序）
+  ['agent-context-hardening', 'node', ['test/agent-context-hardening.js']],
+  // v0.6.30 审计收口：文件锁与写完整性（会话锁尾链 / 迁移副本 / 异步锁 / fsync / 列表容错）
+  ['fs-integrity-hardening', 'node', ['test/fs-integrity-hardening.js']],
+  // v0.6.30 审计收口：同步注册边界（默认 closed 不推断回环 / XFF 右起 / 单锁 / 配额 / 无令牌禁 auto）
+  ['sync-registration-hardening', 'node', ['test/sync-registration-hardening.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];
