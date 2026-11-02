@@ -5866,3 +5866,100 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
 - 未引入 worker/vm 隔离或线性时间引擎（审计建议的彻底方案）——本轮按任务边界只做判据收口 + 预算下推
   + formatter 缓存；`beijingParts` 的 formatter 缓存按 tz 键长期驻留，配置切换时区会新增键（不回收）。
 - `costMonthlyReport` 仍按条 `beijingParts`（缓存后已快），未改为预分桶——不在本条范围。
+
+## 5.3 已做（v0.6.30 授权边界：C1 deny 归一化 / C2 git 白名单化 / C3 fetch 与外网默认拒绝）
+
+来源：报告四（`MingDao-Harness-v0.6.29-审计报告.md`）S1/H2、报告三 C-06/H-12。三条都是
+「控制存在、边界被高估」：`deny` 是 auto 档唯一防线，`git` 与 `fetch` 在只读集合里免询问，
+而未配置 `config.net` 时出网闸门根本不安装——合在一起就是「读本地 → 发外网」的零确认链路。
+
+### 5.3.1 复现（改前，逐条实测）
+
+- **C1（S1）**：`evaluatePermission({mode:'auto',deny:['bash:rm *'],denyStrict:true},'bash',{command})`
+  实测 `rm -rf /` / `sh -c "rm -rf /"` / `$(rm -rf /)` 被拒，而 `/bin/rm -rf /`、`env rm -rf /`、
+  `sudo rm -rf /`、`xargs rm -rf /`、`command rm -rf /`、`nice -n 5 rm -rf /`、`FOO=1 rm -rf /`、
+  `bash -lc 'rm -rf /'`、`rm|cat`、`a && rm`、`\rm -rf /` 全部 `allow`——`denyStrict` 的"硬拦截"
+  只对**段首字面文本**成立。
+- **C2（C-06）**：真实仓库实测 `runGit('blame --contents /tmp/secret-outside.txt -- a.txt')`
+  返回 `ok:true`，输出里带出仓库外文件内容 `TOP-SECRET-LINE`；`branch pwned-by-model`、
+  `tag v-evil` 均返回 `ok:true` 并真的创建了 ref（`git branch --list` / `git tag --list` 可见）。
+- **C3（H2/H-12）**：`READONLY_TOOLS.has('fetch') === true` → `ask` / `readonly` 两档
+  `evaluatePermission` 均为 `allow`；未配置 `config.net` 时 `installEgressGate(undefined) === false`、
+  `guardEgress('https://attacker/?d=x')` 返回 `{blocked:false}`；`read` 之后的 `fetch` 确认
+  根本不存在（自动放行），更没有任何"可能外传"的提示文案。
+
+### 5.3.2 修法
+
+- **C1（`src/permissions.js`）**：新增 `basenameOfCommand` / `tokenizeCommandSegment` /
+  `canonicalizeCommand`。deny 判定 = 原有字面段匹配 **OR** 归一化匹配（只加严）：
+  拆段（复用 `splitShellSegments`）→ 去引号/反斜杠转义 → 取 argv[0] basename →
+  剥包装前缀（`env`/`sudo`/`doas`/`command`/`builtin`/`exec`/`nohup`/`time`/`nice`/`ionice`/
+  `timeout`/`stdbuf`/`setsid`/`xargs`/`watch`/`busybox`，含其取值选项与 `A=1` 赋值）→
+  `sh -c`/`bash -lc`/`eval` 递归（深度 5）→ 同时按「全名」与「basename」匹配 deny。
+  边界如实登记：`find -delete`、脚本文件、`$VAR`、自定义包装器仍不可静态判定。
+- **C2（`src/tools/git.js`）**：子命令 + 参数**双白名单**（`GIT_READONLY` / `ALLOWED_LONG` /
+  `ALLOWED_SHORT`）；黑名单只作兜底（`contents`/`output`/`no-index`/`ext-diff`/`textconv`/
+  `ignore-revs-file`）。`blame --contents` 单独特判并说明"读仓库外文件"；
+  `branch`/`tag` 只允许**列出现有 ref**（无操作数 / `--list` / `--contains` 等查询），
+  `branch <名>` / `tag <名>` 按写操作拒绝；stash/remote/push 等写类子命令不在白名单。
+  所有拒绝都返回**可见原因**（哪个子命令/参数、为什么、改用 bash 并显式授权）。
+- **C3（`src/tools/index.js` + `src/net-guard.js` + `src/permissions.js`）**：
+  `fetch` 移出 `READONLY_TOOLS`、归入 `NET_TOOLS`；`dispatch('fetch')` 先过
+  `unconfiguredEgressVerdict()`——未配置 `config.net` 时**默认拒绝出网**并给出可操作提示
+  （回环/私网交给 SSRF，保留"内网/元数据"专门措辞）；`createPermission` 记录本次会话的
+  `read` 窗口（10 分钟近似"同回合"），随后 `fetch` 的确认文案标出「该请求可能携带刚读取的
+  本地内容（文件列表）」+ 目标 URL。
+
+### 5.3.3 断言（新建 `test/permission-hardening.js`，54 条）
+
+- **C1 31 条**：22 条表驱动必拒（任务书列出的 `/bin/rm`、`env rm`、`sudo rm`、`sudo -u root rm`、
+  `xargs rm`、`command rm`、`nice -n 5 rm`、`timeout 5 rm`、`nohup rm`、`builtin rm`、`exec rm`、
+  `env A=1 rm`、`FOO=1 rm`、`sh -c "rm"`、`bash -lc 'rm'`、`rm|cat`、`a && rm`、`$(rm)`、
+  `\rm`、`r''m`、`/usr/local/bin/rm`、裸 `rm` 全部覆盖）+ 6 条不误伤
+  （`rmdir`/`format`/`echo "rm -rf /"`/`ls`/`git status`/`/bin/rmdir`）+ basename 归一 +
+  非 denyStrict 同样归一 + allow 前缀语义不变。
+- **C2 13 条**：`blame --contents`（含缩写）拒绝且说明仓库外文件；`branch <名>`/`tag <名>`
+  拒绝并验证**没有真的创建 ref**；`branch -D`/`tag -d` 拒绝；stash/remote/push 非只读；
+  未登记参数按白名单拒绝；`--no-index`/`--output`/`--ext-diff` 仍被点名拒绝；
+  `log/show/diff/status/rev-parse` 与 `branch -a`/`tag -l` 仍放行。
+- **C3 10 条**：fetch 不在只读集合且归 `NET_TOOLS`；ask/readonly 均需确认；未配置 net 时
+  `dispatch('fetch')` 拒绝且原因含"未配置/默认禁止出网/config.net.allow"；公网拒、回环/元数据/
+  非 http(s) 交给 SSRF；配置后不再默认拒绝；本机地址仍报"内网"；`read`→`fetch` 确认文案含
+  "可能携带刚读取的本地内容"+文件名+URL，未 read 时**不得**出现该提示（负面对照）。
+
+### 5.3.4 变异（新建 `test/mutate/batch63-permission-hardening.mjs`，14 条）
+
+逐条把修复改回缺陷：去 basename 归一 / 不剥包装前缀 / 不剥前缀赋值 / 不递归 `-c` /
+引号当普通字符 / 归一化不参与 deny / 去 `--contents` 特判 / 不判 branch·tag 写形态 /
+参数白名单失效 / 子命令白名单失效 / fetch 回只读集合 / 去 net 默认拒绝 /
+默认拒绝文案缺出路 / 去 read→fetch 提示。**实测 14/14 全中**（首轮 ⑫ 因关键词不在断言
+原文而逃逸，改断言文案后复跑全中——按批次约定如实记录）。
+
+### 5.3.5 验证
+
+- 隔离树（`git archive HEAD` + 本批 4 个源文件 + 2 个测试文件，避开并行轨道的在飞改动）：
+  `node test/permission-hardening.js` **54/54 通过**；`node test/smoke.js` **EXIT 0**；
+  `node test/e2e-local.js` **17 项全过**；`npx tsc -p tsconfig.full.json` **EXIT 0**；
+  `node test/mutate/batch63-permission-hardening.mjs` **14/14**。
+- `scripts/doc-lint.mjs`：仅 ⑥ 红（变异总数计数：README 仍写 541，实际条数随并行批次增长；
+  `test/mutate/README.md` 按任务书禁止改动），其余全绿——含 ⑧「只读工具：
+  read/glob/grep/ls/skill/git」（fetch 已移出只读集合）。
+- 共享工作树上 `src/regex-safety.js` 等其它轨道的在飞改动会让 `npm run typecheck` 报
+  他们文件的错（`TS2769`），与本批无关；隔离树按 HEAD 跑 tsc 为 EXIT 0。
+
+### 5.3.6 未做 / 边界（必须说明）
+
+- 未改 `test/smoke.js`、`test/mutate/README.md`、`test/run-all.mjs`、`.github/workflows/ci.yml`；
+  未改 `src/safe-fetch.js`、`src/redact.js`、`src/ledger.js`、`src/agent.js`、`src/web/**`、
+  `src/regex-safety.js`、`src/pricing.js`；未 tag / 改版本 / publish。
+- **C3 的默认拒绝只覆盖模型的 `fetch` 工具**（模型驱动的那条外传通道）。内核自己的自动出网
+  路径（技能库下载、模型发现、同步）仍保持"未配置 = 零影响"——那是用户主动触发的功能，
+  且 `test/smoke.js` §126③ 的钉扎端到端用例要求未配置时 `safe-fetch` 不被默认拒绝打断。
+  这个边界写在 `docs/CONFIG.md` 的出网白名单一节，没有扩大承诺。
+- `READONLY_TIER_SET` 仍含 `fetch`（smoke §94b 把它钉成行为不变量，`agent.js` 属禁改文件）：
+  于是**只读子代理**的权限闸仍会自动放行 `fetch`，但出口处被 C3 的 net 默认拒绝兜住
+  （未配置即拒）。要让只读子代理直接看不到 fetch，需要改 agent.js 与其不变量，超出本批边界。
+- C1 是**字符串归一**不是语义沙箱：`find / -delete`、`bash evil.sh`、`$VAR` 展开、
+  自定义包装器仍判不出来；真正硬边界需要 `denyStrict` + 沙箱/OS 级管控。
+- C2 白名单会拒绝未登记的**新** git 只读选项（fail-closed，方向是有意为之）；遇到常用选项
+  缺失时按 `ALLOWED_LONG`/`ALLOWED_SHORT` 增补，而不是回退黑名单。

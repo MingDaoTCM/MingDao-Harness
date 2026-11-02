@@ -16,7 +16,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
-import { parseNetPolicy, checkEgress } from './net-policy.js';
+import { parseNetPolicy, checkEgress, isLoopback } from './net-policy.js';
+import { isPrivateHost } from './ssrf-guard.js';
 import { redactSecrets } from './redact.js';
 import { atomicWriteFileSync } from './atomic-write.js';
 
@@ -145,6 +146,48 @@ export function guardEgress(/** @type {any} */ url) {
     } catch {}
   }
   return { blocked: false, message: '', decision: d };
+}
+
+/**
+ * **未配置 `config.net` 时的默认出网判定**（v0.6.30 C3 / 报告四 H2 / 报告三 H-12）。
+ *
+ * 缺陷：未配置白名单时闸门不安装、一切放行且不记账——模型面向的 `fetch` 工具于是可以在
+ * 默认 ask 档下把刚 read 到的本地内容直接发出去，全程零确认。审计把这条与 `fetch` 归入
+ * 只读工具一起列为 H-12。
+ *
+ * 现在的语义：**未配置 = 默认禁止**（fail-closed），并给出可操作的提示；已配置 `config.net`
+ * （哪怕 `allow: []` + `mode: 'warn'`）则交给既有策略判定，不在这里二次猜测。
+ *
+ * 只判「模型的 fetch 工具」这一条模型驱动的出口：内核自己的自动路径（技能库 / 模型发现 /
+ * 同步）仍按既有「未配置零影响」不变量走——那是用户主动触发的功能，且改动它们会与
+ * `test/smoke.js` §126③ 的既有行为断言冲突（safe-fetch 的钉扎端到端用例）。边界写在
+ * docs/CONFIG.md 的「出网白名单」一节，不扩大承诺。
+ *
+ * 返回 `null` = 「不在这里判」（已配置 / 非 http(s) / 回环与私网）：
+ * 回环不出本机；私网/元数据交给 SSRF 判定给出更准确的拒绝理由（smoke §5g 明确断言
+ * 「内网」「元数据」措辞，不能被默认出网提示抢先）。
+ * @param {any} url
+ * @returns {{ blocked: boolean, message: string }|null}
+ */
+export function unconfiguredEgressVerdict(/** @type {any} */ url) {
+  if (activePolicy?.enabled) return null;
+  /** @type {URL} */
+  let u;
+  try {
+    u = url instanceof URL ? url : new URL(String(url));
+  } catch {
+    return null; // 非 URL（scp 形式 git 远端等）不在这里判：工具面只接受 http(s)
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  const host = u.hostname;
+  if (isLoopback(host) || isPrivateHost(host)) return null;
+  return {
+    blocked: true,
+    message:
+      `出网被拒绝（fail-closed）：未配置 config.net 出网白名单，默认禁止出网。` +
+      `若确需访问 ${host}，请在设置里把该域名加入 config.net.allow` +
+      `（config.json 例：{"net":{"allow":["${host}"],"mode":"warn"}}）；不需要出网时保持默认即可。`,
+  };
 }
 
 /** 跨 origin 跳转时**允许保留**的请求头（反向白名单）。
