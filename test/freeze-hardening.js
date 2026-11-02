@@ -49,6 +49,7 @@ const MALICIOUS = [
   '^(\\d|[\\d])+$', // 交替型 + 语义等价写法（审计 H-13，改前 29 字符 9.6~19s）
   '(a|aa)+', // 交替型：分支前缀退化
   '(x|xx)+', // 交替型：分支前缀退化（x 是 xx 的前缀）
+  '(x|xx)*', // 交替型：同上，量词为 *
   '(a|a?)+', // 交替型：分支可空
   '(a|)+', // 交替型：空分支（只有「可空分支」判据能抓住）
   '((a|ab)x)+', // 交替型：嵌套组内的歧义分支
@@ -60,6 +61,12 @@ const SAFE = [
   'a{1,3}a{1,3}', // 有界量词相邻：不构成组合爆炸
   '(abc)+', // 单分支重复
   '(a|b)+', // 无重叠分支
+  '(abc|abd)+', // 定长互斥分支：既非前缀也不共串 → 回溯线性（v0.6.31 收紧假阳性）
+  '(?:ab|ac)+', // 同上：第二个字符互斥
+  '(ab|b)+', // b 是 ab 的后缀但非前缀：重复边界唯一 → 放行
+  '.*\\d+', // 单侧通配相邻：实测 20KB 约 160ms，线性可接受；靠行级预算兜底
+  '\\w+\\s+\\d+', // 字符集互斥的相邻无界量词
+  '[a-z]+@[a-z]+', // 字面量 @ 隔开
   '\\d{3}-\\d{4}',
   '^[a-z]+$',
   'a*b*', // 相邻无界但字符集互斥
@@ -88,14 +95,17 @@ async function suiteA1(/** @type {any} */ R, /** @type {any} */ C) {
   for (const p of ['a*a*', '\\d+\\d*', '.*.*', 'a*a*a*a*a*a*a*a*b', '(?:ab|aa)+b*']) {
     assert.equal(R.hasAdjacentUnboundedQuantifiers(p), true, `必须判为相邻无界量词：${p}`);
   }
-  for (const p of ['a*b*', '\\s*\\w+', 'a{1,3}a{1,3}']) {
-    assert.equal(R.hasAdjacentUnboundedQuantifiers(p), false, `不得把字符集互斥/有界的相邻量词判成危险：${p}`);
+  for (const p of ['a*b*', '\\s*\\w+', 'a{1,3}a{1,3}', '.*\\d+', '\\w+.*', 'a+.*', '\\w+\\s+\\d+']) {
+    assert.equal(R.hasAdjacentUnboundedQuantifiers(p), false, `不得把字符集互斥/有界/单侧通配的相邻量词判成危险：${p}`);
   }
   // ④ 交替型：分支前缀/后缀退化与语义等价写法都必须被归一化判定抓住
   for (const p of ['(x|xx)+', '(a|aa)+', '^(\\d|[\\d])+$', '((a|ab)x)+', '(a|a?)+']) {
     assert.equal(R.hasAmbiguousAlternation(p), true, `必须判为交替重复歧义：${p}`);
   }
   assert.equal(R.hasAmbiguousAlternation('(a|b)+'), false, '(a|b)+ 分支首字符互斥，不得误伤');
+  assert.equal(R.hasAmbiguousAlternation('(abc|abd)+'), false, '(abc|abd)+ 定长互斥，不得误伤');
+  assert.equal(R.hasAmbiguousAlternation('(?:ab|ac)+'), false, '(?:ab|ac)+ 第二字符互斥，不得误伤');
+  assert.equal(R.hasAmbiguousAlternation('(ab|b)+'), false, '(ab|b)+ 只有后缀关系、重复边界唯一，不得误伤');
   ok('A1 交替型（x|xx、a|aa、\\d|[\\d]）与相邻无界量词判定均命中，互斥分支不误伤');
 
   // ⑤ 端到端：12 个恶意 pattern 走 grep 工具，必须 <1s 被拒且原因可见。
@@ -180,6 +190,21 @@ async function suiteA1(/** @type {any} */ R, /** @type {any} */ C) {
   fs.rmSync(okDir, { recursive: true, force: true });
   ok(`A1 20KB 单行正常 grep ${normalMs}ms（≤2s），多行匹配正常`);
 
+  // ⑦b 曾经被旧「首字符重叠」判据误伤的四个真实 pattern：必须放行，且 20KB 单行 grep 在预算内
+  const fpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mdh-freeze-fp-'));
+  fs.writeFileSync(path.join(fpDir, 'a.txt'), 'a'.repeat(20000) + '\n');
+  fs.writeFileSync(path.join(fpDir, 'abc.txt'), 'abcabd'.repeat(3300) + 'x\n');
+  for (const p of ['(abc|abd)+', '.*\\d+', '\\w+\\s+\\d+', '[a-z]+@[a-z]+']) {
+    assert.equal(R.patternRejectionReason(p), null, `用户真会用的 pattern 不得误拒：${p}`);
+    const t = Date.now();
+    const r = grep({ pattern: p, path: fpDir }, { cwd: fpDir, cfg: {} });
+    const ms = Date.now() - t;
+    assert.equal(r.ok, true, `放行的 pattern 必须能真正执行：${p}（${r.error || ''}）`);
+    assert.ok(ms < 2000, `20KB 单行 grep 必须在预算内返回：${p} 用了 ${ms}ms`);
+  }
+  fs.rmSync(fpDir, { recursive: true, force: true });
+  ok('A1 收紧假阳性：(abc|abd)+、.*\\d+、\\w+\\s+\\d+、[a-z]+@[a-z]+ 均放行且 20KB 单行 ≤2s');
+
   // ⑧ 单一来源：grep 只复用 patternRejectionReason，不再维护第二份判据
   const ftSrc = fs.readFileSync(path.join(srcDir, 'tools', 'fs-tools.js'), 'utf8');
   assert.match(ftSrc, /import \{ patternRejectionReason \} from '\.\.\/regex-safety\.js'/, 'grep 必须复用 regex-safety.patternRejectionReason');
@@ -190,8 +215,11 @@ async function suiteA1(/** @type {any} */ R, /** @type {any} */ C) {
   ok('A1 grep 判据单一来源（patternRejectionReason），拒绝原因可见');
 
   // ⑨ Pack / 约束引擎同口径（output-forbid、result-forbid 不得再被语义等价写法绕过）
-  for (const p of ['a*a*a*a*a*a*a*a*b', '^(\\d|[\\d])+$', '(x|xx)+']) {
+  for (const p of ['a*a*a*a*a*a*a*a*b', '^(\\d|[\\d])+$', '(x|xx)+', '(x|xx)*']) {
     assert.equal(C.isValidPattern(p), false, `约束引擎也必须拒：${p}`);
+  }
+  for (const p of ['(abc|abd)+', '.*\\d+', '\\w+\\s+\\d+', '[a-z]+@[a-z]+']) {
+    assert.equal(C.isValidPattern(p), true, `约束引擎也不得误拒：${p}`);
   }
   const compiled = C.compileConstraints([
     { id: 'redos-out', kind: 'output-forbid', pattern: 'a*a*a*a*a*a*a*a*b', action: 'block' },

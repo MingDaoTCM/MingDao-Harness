@@ -359,6 +359,9 @@ function parseGroup(src, i, ctx) {
     nullable: q ? q.min === 0 || branches.some((/** @type {any} */ b) => b.nullable) : branches.some((/** @type {any} */ b) => b.nullable),
     zeroWidth: lookaround,
     quant: rec.quant,
+    // 组的内部结构（分支原子序列）保留下来：交替退化判定需要判断「两个分支的语言是否有
+    // 前缀关系/能匹配同一串」，只看首字符会把 `(abc|abd)+` 这类定长互斥分支误伤。
+    groupBranches: lookaround ? null : branches,
   };
   return { atom, next };
 }
@@ -399,8 +402,202 @@ function isRepeatedGroup(group) {
   return false;
 }
 
-/** 交替分支歧义：被重复的组里，有分支可空，或两个分支的**归一化首字符集**相交。
- *  `(a|b)+` 不相交 → 放行；`(a|aa)+`、`(x|xx)+`、`(\d|[\d])+` 相交 → 拒绝。
+// —— 交替分支的「语言级」比较（v0.6.31 收紧假阳性）——
+// 旧判据只要两个分支首字符集相交就拒，于是 `(abc|abd)+` 这类**定长互斥**分支被误伤
+// （用户真会用；为了安全把 grep 废掉一半，是可用性回归）。现在把每个分支编译成 NFA
+// （原子级：字符集 + 量词；组按分支展开），只判两件事：
+//   · 语言有交集（能匹配同一串）——如 `(a|aa)` 的 "a"、`(\d|[\d])` 的任意数字；
+//   · 一个分支的语言里有串是另一个分支语言的**前缀**——如 "a" 是 "aa"/"abc" 的前缀。
+// 两者任一成立，重复时切分就不唯一（指数回溯）；`(abc|abd)`、`(foo|bar)`、`(a|b)` 都不成立 → 放行。
+// 规模上限：超过即**保守拒绝**（fail-closed）——只可能发生在被重复的交替组内、且分支巨大到
+// 无法在预算内判定；正常 pattern 远达不到。
+const NFA_STATE_LIMIT = 1024;
+const NFA_PRODUCT_LIMIT = 200000;
+
+/** 把一个分支的原子序列编译成 NFA（Thompson 构造；组按 groupBranches 展开，量词按计数展开）。
+ * @param {any[]} atoms
+ * @returns {{ states: { eps: number[], chars: { set: CharRanges|null, to: number }[] }[], start: number, accept: number }}
+ */
+function buildNfa(atoms) {
+  /** @type {{ eps: number[], chars: { set: CharRanges|null, to: number }[] }[]} */
+  const states = [];
+  const add = () => {
+    if (states.length >= NFA_STATE_LIMIT) throw new Error('nfa-too-large');
+    states.push({ eps: [], chars: [] });
+    return states.length - 1;
+  };
+  const eps = (/** @type {number} */ a, /** @type {number} */ b) => states[a].eps.push(b);
+  const edge = (/** @type {number} */ a, /** @type {number} */ b, /** @type {CharRanges|null} */ set) => {
+    if (set !== ANY && set.length === 0) return; // 空字符集：该路径永不匹配
+    states[a].chars.push({ set, to: b });
+  };
+  /** 恰好匹配一次该原子（组按其分支展开）。 */
+  const once = (/** @type {any} */ atom, /** @type {number} */ from, /** @type {number} */ to) => {
+    if (atom.zeroWidth) { eps(from, to); return; } // 零宽断言按 ε 处理（只做保守近似）
+    if (atom.groupBranches) {
+      for (const br of atom.groupBranches) eps(seq(br.atoms, from), to);
+      return;
+    }
+    edge(from, to, atom.first);
+  };
+  /** 按量词展开：min 次必选 + 无界循环 / 有界可选副本。 */
+  const timed = (/** @type {any} */ atom, /** @type {number} */ from) => {
+    const q = atom.quant || { min: 1, max: 1 };
+    if (q.min > 256 || (q.max !== Infinity && q.max > 256)) throw new Error('nfa-too-large');
+    let cur = from;
+    for (let i = 0; i < q.min; i += 1) {
+      const s = add();
+      const e = add();
+      once(atom, s, e);
+      eps(cur, s);
+      cur = e;
+    }
+    if (q.max === Infinity) {
+      const head = add();
+      const end = add();
+      eps(cur, head);
+      const s = add();
+      const e = add();
+      once(atom, s, e);
+      eps(head, s);
+      eps(e, head);
+      eps(head, end);
+      return end;
+    }
+    for (let i = q.min; i < q.max; i += 1) {
+      const s = add();
+      const e = add();
+      once(atom, s, e);
+      const next = add();
+      eps(cur, s); // 吃一次
+      eps(cur, next); // 或跳过
+      eps(e, next);
+      cur = next;
+    }
+    return cur;
+  };
+  const seq = (/** @type {any[]} */ list, /** @type {number} */ start) => {
+    let cur = start;
+    for (const a of list) cur = timed(a, cur);
+    return cur;
+  };
+  const start = add();
+  const accept = seq(atoms, start);
+  return { states, start, accept };
+}
+
+/** ε-闭包（带 memo）。 @param {any} nfa */
+function makeClosure(/** @type {any} */ nfa) {
+  /** @type {number[][]} */
+  const memo = new Array(nfa.states.length);
+  /** @param {number} s */
+  return (s) => {
+    if (memo[s]) return memo[s];
+    const seen = new Set([s]);
+    const stack = [s];
+    while (stack.length) {
+      const x = /** @type {number} */ (stack.pop());
+      for (const y of nfa.states[x].eps) {
+        if (!seen.has(y)) {
+          seen.add(y);
+          stack.push(y);
+        }
+      }
+    }
+    const arr = [...seen];
+    memo[s] = arr;
+    return arr;
+  };
+}
+
+/** 从每个状态出发能否（经 ε/字符边）到达接受态。 @param {any} nfa */
+function canReachAccept(/** @type {any} */ nfa) {
+  const n = nfa.states.length;
+  /** @type {number[][]} */
+  const rev = Array.from({ length: n }, () => []);
+  for (let i = 0; i < n; i += 1) {
+    for (const y of nfa.states[i].eps) rev[y].push(i);
+    for (const c of nfa.states[i].chars) rev[c.to].push(i);
+  }
+  /** @type {boolean[]} */
+  const can = new Array(n).fill(false);
+  can[nfa.accept] = true;
+  const stack = [nfa.accept];
+  while (stack.length) {
+    const x = /** @type {number} */ (stack.pop());
+    for (const p of rev[x]) {
+      if (!can[p]) {
+        can[p] = true;
+        stack.push(p);
+      }
+    }
+  }
+  return can;
+}
+
+/** ∃w：w∈L(A) 且 w 是某个 L(B) 串的前缀。
+ *  积自动机上 BFS：A 到达接受态时，只要 B 还能到达接受态即成立。
+ * @param {any} a @param {any} b
+ */
+function prefixComparable(/** @type {any} */ a, /** @type {any} */ b) {
+  const coreachB = canReachAccept(b);
+  if (!coreachB[b.start]) return false; // B 的语言为空
+  const closeA = makeClosure(a);
+  const closeB = makeClosure(b);
+  const visited = new Set();
+  /** @type {Array<[number, number]>} */
+  const queue = [[a.start, b.start]];
+  let head = 0;
+  while (head < queue.length) {
+    const [x, y] = queue[head];
+    head += 1;
+    const key = `${x},${y}`;
+    if (visited.has(key)) continue;
+    visited.add(key);
+    if (visited.size > NFA_PRODUCT_LIMIT) return true; // 无法在预算内判定 → 保守拒绝
+    const ca = closeA(x);
+    const cb = closeB(y);
+    if (coreachB[y]) {
+      for (const xa of ca) if (xa === a.accept) return true;
+    }
+    for (const xa of ca) {
+      for (const ea of a.states[xa].chars) {
+        for (const yb of cb) {
+          for (const eb of b.states[yb].chars) {
+            if (overlap(ea.set, eb.set)) queue.push([ea.to, eb.to]);
+          }
+        }
+      }
+    }
+  }
+  return false;
+}
+
+/** 被重复的交替组里，是否存在「可互相退化」的分支对（交集或前缀关系）。 @param {any[]} branches */
+function branchesDegenerate(branches) {
+  for (let i = 0; i < branches.length; i += 1) {
+    for (let j = i + 1; j < branches.length; j += 1) {
+      const A = branches[i];
+      const B = branches[j];
+      if (A.nullable || B.nullable) return true; // 空分支/可空分支：重复边界必不唯一
+      if (!overlap(A.first, B.first)) continue; // 首字符互斥 → 不可能有公共前缀（快速排除）
+      let nfaA;
+      let nfaB;
+      try {
+        nfaA = buildNfa(A.atoms);
+        nfaB = buildNfa(B.atoms);
+      } catch {
+        return true; // 分支过大无法判定 → fail-closed
+      }
+      if (prefixComparable(nfaA, nfaB) || prefixComparable(nfaB, nfaA)) return true;
+    }
+  }
+  return false;
+}
+
+/** 交替重复歧义：被重复的组里，分支存在**前缀关系或可匹配同一串**。
+ *  `(a|aa)+`、`(x|xx)*`、`(\d|[\d])+`、`(a|a?)+`、`(?:ab|abc)+` → 拒绝；
+ *  `(a|b)+`、`(abc|abd)+`、`(foo|bar)+`、`(?:ab|ac)+` → 放行（定长互斥，回溯线性）。
  * @param {any[]} groups
  */
 function alternationAmbiguous(groups) {
@@ -409,23 +606,25 @@ function alternationAmbiguous(groups) {
     if (!isRepeatedGroup(g)) continue;
     const branches = g.branches.filter((/** @type {any} */ b) => b.atoms.length > 0 || b.nullable);
     if (branches.length < 2) continue;
-    for (let a = 0; a < branches.length; a += 1) {
-      for (let b = a + 1; b < branches.length; b += 1) {
-        const A = branches[a];
-        const B = branches[b];
-        if (A.nullable || B.nullable) return true;
-        if (overlap(A.first, B.first)) return true;
-      }
-    }
+    if (branchesDegenerate(branches)) return true;
   }
   return false;
 }
 
-/** 相邻无界量词：两条相邻原子的量词都无上界，且**前者的末字符集与后者的首字符集相交**。
- *  `a*a*`、`\d+\d*`、`.*.*`、`(?:ab)+b*` 命中；`a*b*`、`\s*\w+`、`\d+\.\d+` 不命中。
+/** 相邻无界量词的危险形态：**两个**无界量词相邻，且边界字符集重叠（切分不唯一）。
+ *  命中：`a*a*`、`\d+\d*`、`.*.*`、`(ab)+b*`；
+ *  放行：`a*b*`、`\s*\w+`、`\d+\.\d+`（字符集互斥/被字面量隔开）、
+ *        `.*\d+`、`\w+.*`（**单侧通配**：实测 20KB 单行约 160ms，线性可接受；
+ *        用户明确要求放行，靠行级预算兜底）。
  * @param {any[][]} sequences
  */
 function adjacentUnbounded(sequences) {
+  /** 边界是否重叠：两个「任意字符」相邻（`.*.*`）危险；单侧任意字符（`.*\d+`）放行。 */
+  const boundaryOverlap = (/** @type {CharRanges|null} */ a, /** @type {CharRanges|null} */ b) => {
+    if (a === ANY && b === ANY) return true;
+    if (a === ANY || b === ANY) return false;
+    return overlap(a, b);
+  };
   for (const atoms of sequences) {
     const seq = atoms.filter((/** @type {any} */ a) => !a.zeroWidth);
     for (let i = 0; i + 1 < seq.length; i += 1) {
@@ -433,7 +632,7 @@ function adjacentUnbounded(sequences) {
       const b = seq[i + 1];
       if (!a.quant || a.quant.max !== Infinity) continue;
       if (!b.quant || b.quant.max !== Infinity) continue;
-      if (overlap(a.last, b.first)) return true;
+      if (boundaryOverlap(a.last, b.first)) return true;
     }
   }
   return false;
@@ -518,7 +717,7 @@ export function patternRejectionReason(/** @type {any} */ pattern) {
   }
   const ctx = analyze(pattern);
   if (alternationAmbiguous(ctx.groups)) {
-    return 'pattern 含歧义分支 + 量词（如 (a|aa)+、(a|a?)+、((a|ab)x)+、(\\d|[\\d])+），重复时指数级回溯——实测 29 字符可耗时数十秒；请改写为无歧义的分支（如 (?:aa|a) 且调换顺序仍不行，请改用字符类或分段匹配）';
+    return 'pattern 含歧义分支（分支可互相退化：存在前缀关系或可匹配同一串，如 (a|aa)+、(x|xx)*、(a|a?)+、(?:ab|abc)+、((a|ab)x)+、(\\d|[\\d])+），重复时指数级回溯——实测 29 字符可耗时数十秒；请改写为无歧义的分支（定长互斥如 (abc|abd) 是安全的；否则改用字符类或分段匹配）';
   }
   if (adjacentUnbounded(ctx.sequences)) {
     return 'pattern 含相邻无界量词（如 a*a*、\\d+\\d*、.*.*）——相邻量词可匹配同一字符时，切分方式组合爆炸，单行 20KB 即可回溯数十秒并冻结事件循环；请合并为一个量词（如 a*）或改用互不重叠的字符类';

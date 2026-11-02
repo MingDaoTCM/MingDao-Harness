@@ -5820,20 +5820,25 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   kill，退出码 **124**（进程同步阻塞，连 `setTimeout` watchdog 都不触发）；
   `^(\d|[\d])+$` 对 29 字符输入同步阻塞 **9652ms**（审计报告 H-13 记 19028ms / 19.0s）。
 - **修法**：
-  1. `src/regex-safety.js` 补「顶层相邻无界量词」判据：相邻两条原子量词都无上界且**前者的末字符集
-     与后者的首字符集相交**即拒绝（`a*a*`、`\d+\d*`、`.*.*`、`(ab)+b*`）；`a*b*`、`\s*\w+`、
+  1. `src/regex-safety.js` 补「相邻无界量词」判据：相邻两条原子量词都无上界且**前者的末字符集
+     与后者的首字符集相交**即拒绝（`a*a*`、`\d+\d*`、`.*.*`、`(ab)+b*`）。单侧通配刻意放行：
+     `.*\d+` 实测 20KB 单行约 160ms（线性可接受），由行级预算兜底；`a*b*`、`\s*\w+`、
      `\d+\.\d+`、`a{1,3}a{1,3}` 不误伤。
-  2. 交替分支判据从「源码首字符」改为**归一化字符集**比较：`\d` 与 `[\d]` 都归一为数字区间，
-     `^(\d|[\d])+$` 与 `(a|aa)+` 同判；空分支（`(a|)+`）与嵌套组（`((a|ab)x)+`）同判。
-     `hasAmbiguousAlternation` 同时并入相邻无界量词，**不改 `constraints.js`** 即让 Pack 的
-     `output-forbid` / `result-forbid` 走同一口径。
+  2. 交替分支判据从「源码首字符」改为**语言级**比较：每个分支编译成原子级 NFA，只拒
+     「两分支语言有交集」或「一个分支的某串是另一个分支某串的前缀」——`(a|aa)+`、`(x|xx)*`、
+     `(a|a?)+`、`(?:ab|abc)+`、`(\d|[\d])+`、`((a|ab)x)+` 拒绝；`(abc|abd)+`、`(?:ab|ac)+`、
+     `(ab|b)+`、`(foo|bar)+` 这类**定长互斥/仅后缀**的分支放行（回溯线性）。空分支
+     （`(a|)+`）仍拒。`hasAmbiguousAlternation` 同时并入相邻无界量词，**不改 `constraints.js`**
+     即让 Pack 的 `output-forbid` / `result-forbid` 走同一口径。
   3. `src/tools/fs-tools.js` 删除自维护的两份弱判据，**只复用 `patternRejectionReason`**；
      5s 预算**下推到行级**：`testLine` 前后各查一次预算，行循环在 `budgetHit` 后立即停扫。
   4. 拒绝原因带「正则被拒：」前缀原样透给模型（不再静默放行/静默拒绝）。
-- **改后实测**：12 个恶意 pattern（含交替型 `(x|xx)+`、`(a|aa)+`、`^(\d|[\d])+$`、嵌套组、
-  相邻无界量词）全部 **0–1ms 被拒**，PoC 退出码 0；20KB 单行正常 grep（`a+b`）**145ms**（≤2s）。
-- **断言**：`test/freeze-hardening.js` 35 条（12+1 恶意 pattern 逐条 + 9 个正常 pattern +
-  grep 子进程硬超时 + 行级预算假时钟 + Pack/约束引擎 + 单一来源结构守卫）。
+- **改后实测**：14 个恶意 pattern（含交替型 `(x|xx)+`、`(x|xx)*`、`(a|aa)+`、`^(\d|[\d])+$`、
+  空分支、嵌套组、相邻无界量词）全部 **0–1ms 被拒**，PoC 退出码 0；4 个曾被误伤的
+  `(abc|abd)+`、`.*\d+`、`\w+\s+\d+`、`[a-z]+@[a-z]+` 全部放行，20KB 单行 grep 各 ≤2s
+  （实测 0–276ms）；正常单行 grep（`a+b`）**139–145ms**。
+- **断言**：`test/freeze-hardening.js` 43 条（14 个恶意 pattern 逐条 + 正常 pattern 逐条 +
+  假阳性收紧四例的 20KB grep + 行级预算假时钟 + Pack/约束引擎 + 单一来源结构守卫）。
 
 ### 5.1.2 A2：`beijingParts` 每次新建 2 个 `Intl.DateTimeFormat`
 
@@ -5849,7 +5854,7 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
 
 ### 5.1.3 验证与变异
 
-- `test/freeze-hardening.js`：35 条断言全过（约 0.7s）；在 HEAD 干净 worktree 上复跑通过。
+- `test/freeze-hardening.js`：43 条断言全过（约 0.7s）；在 HEAD 干净 worktree 上复跑通过。
 - `test/mutate/batch61-freeze-hardening.mjs`：**14/14 全中**（判据换回旧的、去掉 formatter 缓存、
   只在文件间检查预算、预算改 Infinity、分桶改回逐条格式化、未来日边界等）。
 - `npm run typecheck` / `node test/e2e-local.js` 通过；`test/smoke.js` 在干净 worktree 单跑通过
@@ -5859,8 +5864,9 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
 
 ### 5.1.4 未做 / 边界（必须说明）
 
-- 静态判据是**保守**的：`(abc|abd)+`、`.*\d+` 这类「首字符重叠/任意字符后接量词」也会被拒
-  （宁可让作者改写，也不在主线程上赌 V8 的优化）。这是刻意 fail-closed，不是遗漏。
+- 静态判据仍有**保守面**：被重复的交替组若分支大到 NFA 超限（>1024 状态/单量词 >256 次），
+  会 fail-closed 拒绝；正常情况下远达不到。`(abc|abd)+`、`.*\d+` 这类常见写法已按语言级判据
+  精确放行，不再「为首字符重叠陪绑」。
 - 行级预算只能在**两次 `re.test` 之间**检查；单次 `re.test` 内部仍无法中断（JS 正则没有超时 API）。
   真正兜底是装载时判据；预算只是「静态判据漏了某种形态」时的最后一道止损，且对大目录/多文件有效。
 - 未引入 worker/vm 隔离或线性时间引擎（审计建议的彻底方案）——本轮按任务边界只做判据收口 + 预算下推

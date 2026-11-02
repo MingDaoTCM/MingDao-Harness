@@ -7,7 +7,7 @@
 //
 // 本批把每处修复逐个改回缺陷，`test/freeze-hardening.js` 必须当场红（14 条，要求 ≥10）。
 // 覆盖：
-//   相邻无界量词判据（①⑨）、交替分支归一化/可空分支（②⑩）、Pack 同口径（③）、嵌套量词（④）；
+//   相邻无界量词判据（①⑨）、嵌套组重复（②）、交替退化/首字符回退（⑩）、Pack 同口径（③）、嵌套量词（④）；
 //   grep 单一口径 / 可见原因 / 行级预算 / 预算本身失效（⑤⑥⑦⑧）；
 //   formatter 缓存 / beijingParts 绕过缓存（⑪⑫）；日界预分桶 / 未来日边界（⑬⑭）。
 import { makeMutator } from './lib.mjs';
@@ -25,12 +25,15 @@ M.mutate({
   run: SUITE,
 });
 
-// ② 分支可空不再算歧义 → `(a|a?)+` 重新放行
+// ② 嵌套组内的歧义分支不再检查（只看组自身量词，不看祖先是否被重复）→ `((a|ab)x)+` 重新放行
 M.mutate({
-  name: '② 交替分支可空不再算歧义（(a|a?)+ 重新放行）',
+  name: '② 嵌套组重复不再上溯祖先（((a|ab)x)+ 重新放行）',
   file: 'src/regex-safety.js',
-  from: '        if (A.nullable || B.nullable) return true;',
-  to: '        // 变异：分支可空不再算歧义',
+  from: [
+    '  if (repeats(group.quant)) return true;',
+    '  for (let p = group.parent; p; p = p.parent) if (repeats(p.quant)) return true;',
+  ].join('\n'),
+  to: ['  if (repeats(group.quant)) return true;', '  // 变异：不再检查祖先组是否被重复'].join('\n'),
   expect: ['恶意 pattern 必须被拒'],
   run: SUITE,
 });
@@ -123,13 +126,13 @@ M.mutate({
   run: SUITE,
 });
 
-// ⑩ 交替分支的字符集重叠判据失效 → `(\d|[\d])+`、`(a|aa)+` 重新放行
+// ⑩ 交替判据退回「首字符重叠就去重」→ `(abc|abd)+` 这类定长互斥分支被误拒（可用性回归）
 M.mutate({
-  name: '⑩ 交替分支字符集重叠判据失效（(a|aa)+ 重新放行）',
+  name: '⑩ 交替判据退回首字符重叠（(abc|abd)+ 被误拒）',
   file: 'src/regex-safety.js',
-  from: '        if (overlap(A.first, B.first)) return true;',
-  to: '        if (false) return true; // 变异：分支字符集重叠不再判定',
-  expect: ['恶意 pattern 必须被拒'],
+  from: '      if (prefixComparable(nfaA, nfaB) || prefixComparable(nfaB, nfaA)) return true;',
+  to: '      if (overlap(A.first, B.first)) return true; // 变异：退回按首字符判',
+  expect: ['正常 pattern 不得被误拒'],
   run: SUITE,
 });
 
