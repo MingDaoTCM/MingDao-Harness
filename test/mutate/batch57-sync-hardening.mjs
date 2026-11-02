@@ -6,6 +6,9 @@
 //   M-01 URL 解析移出 try / 畸形目标不写响应；
 //   M-02 账号桶退回 IP+账号 / 账号预检被短路 / 成功认证不清零；
 //   M-14 默认监听退回 0.0.0.0 / 注册默认退回 open / 回环首启引导被删。
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { makeMutator } from './lib.mjs';
 const M = makeMutator();
 const RUN = () => M.suite('test/sync-hardening.js');
@@ -29,15 +32,42 @@ M.mutate({
 // Windows 上**不可验证**：套件构造「非 ENOENT 读失败」的夹具是 000 权限，而 Windows 的 chmod
 // 只切换只读属性、不阻止读取（套件 §H-02 权限用例本身已按平台能力跳过）。没有观测面就不该
 // 让这条变异在 Windows 上"逃逸"、把整条腿染红——如实跳过并打印原因。
-const mutateUnlessWindows = (m) => {
-  if (process.platform === 'win32') {
-    console.log(`⚠ 跳过：${m.name}（Windows 无 000 权限语义，构造不出非 ENOENT 读失败；套件同一用例亦跳过）`);
+/**
+ * 「000 权限 ⇒ 读失败」这个夹具是**平台与身份相关**的：
+ *  - Windows：chmod 只切只读属性，不阻止读取；
+ *  - root（容器/CI 常见）：chmod 000 对 root 无效，照样能读。
+ * 旧版只按 `process.platform === 'win32'` 跳过 → 在 root 容器里会**静默地把这条变异算成
+ * "没被抓到"**（第三方核验报告 N-18：root 逃逸）。
+ * 现在改为**能力探测**：真的造一个 000 目录试读，读得到就显式跳过并打印原因（不是静默通过）。
+ */
+function canConstructPermissionFailure() {
+  if (process.platform === 'win32') return { ok: false, why: 'Windows 无 000 权限语义' };
+  let dir = null;
+  try {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'perm-probe-'));
+    const f = path.join(dir, 'x.json');
+    fs.writeFileSync(f, '{"a":1}');
+    fs.chmodSync(dir, 0o000);
+    let readable = false;
+    try { fs.readFileSync(path.join(dir, 'x.json'), 'utf8'); readable = true; } catch { readable = false; }
+    return readable ? { ok: false, why: '当前身份（root？）下 chmod 000 不阻止读取' } : { ok: true, why: '' };
+  } catch (e) {
+    return { ok: false, why: `探测失败：${String(e?.message || e)}` };
+  } finally {
+    if (dir) { try { fs.chmodSync(dir, 0o700); } catch {} try { fs.rmSync(dir, { recursive: true, force: true }); } catch {} }
+  }
+}
+
+const mutateUnlessUnconstructible = (m) => {
+  const probe = canConstructPermissionFailure();
+  if (!probe.ok) {
+    console.log(`⚠ 跳过：${m.name}（${probe.why}；构造不出"非 ENOENT 读失败"，套件同一用例亦跳过）`);
     return;
   }
   M.mutate(m);
 };
 
-mutateUnlessWindows({
+mutateUnlessUnconstructible({
   name: '② 只有 ENOENT 可初始化的约束被放宽（任何读失败 return {}）',
   file: 'src/sync-server.js',
   from: `    if (err && err.code === 'ENOENT') return {};`,

@@ -441,10 +441,14 @@ const budget = (/** @type {number} */ factor = 10) => Math.min(Math.max(baseMs *
   const selfExited = await waitFor(() => (aliveCheck(pidLine.pid) ? null : true), 20000);
   const leaseExitMs = Date.now() - tLease;
   assert.ok(selfExited, '租约被改写后 daemon 应自退（防双 daemon 重复执行）');
+  // v0.6.30（审计：测试假红）：软阈值 12s 只告警、硬上限 30s 才失败——旧版写死 12000ms，
+  // 在重负载 runner 上会假红（第三方核验报告实测 2 次）。60s 长 sleep 的回归特征仍会被硬上限抓住。
+  if (leaseExitMs > 12000) {
+    console.log(`  ⚠ 接管延迟 ${leaseExitMs}ms（软阈值 12000ms，硬上限 30000ms）——负载偏高，非失败`);
+  }
   assert.ok(
-    leaseExitMs <= 12000,
-    `接管延迟必须被切片等待限制在 ~5s 量级（监督轮询 2s + 等待片 3s），实际 ${leaseExitMs}ms——` +
-      '若接近 60s，说明 every/once 的等待又变回不可中断的长 sleep'
+    leaseExitMs < 30000,
+    `接管延迟必须被切片等待限制在秒级，实际 ${leaseExitMs}ms——若接近 60s，说明 every/once 的等待又变回不可中断的长 sleep`
   );
   // 3a) 归属匹配：受害进程 cmdline 带上 nonce（模拟真 daemon）→ stopDaemon 应真正终止它
   //     （v0.4.7 起 stopDaemon 会先校验 PID 归属；node 的 argv 尾部带上 nonce 即视为「是我们的人」）

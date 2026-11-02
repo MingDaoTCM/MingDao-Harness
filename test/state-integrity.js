@@ -274,6 +274,34 @@ AW.withFileLockSync(${JSON.stringify(lock)}, () => {
   ok('M-17a：裸写 saveTaskState 与 merge 共用锁（持锁期间必须等待，实测 ' + waited + 'ms）');
 }
 {
+  // 3a'. v0.6.30（审计：变异 ⑧ 时序逃逸）：**确定性**证明 merge 也走同一把锁——
+  //      别进程持锁 500ms，期间 saveTaskStateMerge 必须等到锁释放才完成（≥300ms）。
+  //      8 路并发（3b）依赖真实交错，某些机器上会自然串行 → 变异偶发逃逸；
+  //      这条不依赖交错，撤销锁（变异 ⑧）必然立刻返回 → 确定性红。
+  const session = 'm17c';
+  const file = TS.taskStateFile(session);
+  const lock = file + '.lock';
+  const holder = startChild(`
+import fs from 'node:fs';
+const AW = await import(${atomicUrl});
+AW.withFileLockSync(${JSON.stringify(lock)}, () => {
+  fs.writeSync(1, 'READY\\n');
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 500);
+  fs.writeSync(1, 'DONE\\n');
+});
+`);
+  await withDeadline(holder.ready, 'M-17c 持锁子进程就绪');
+  const t0 = Date.now();
+  const rMerge = TS.saveTaskStateMerge(session, { artifacts: ['merged-under-lock'], status: 'interrupted', updatedAt: 2 });
+  const waited = Date.now() - t0;
+  await withDeadline(holder.done, 'M-17c 持锁子进程退出');
+  assert.deepEqual(rMerge, { ok: true, error: null }, `merge 应成功：${JSON.stringify(rMerge)}`);
+  assert.ok(waited >= 300, `saveTaskStateMerge 必须等过持锁者（否则它绕过了锁），实际 ${waited}ms`);
+  const arts = TS.loadTaskState(session)?.artifacts || [];
+  assert.ok(arts.includes('merged-under-lock'), `merge 结果必须落盘：${JSON.stringify(arts)}`);
+  ok('M-17c：merge 遇外部持锁必须串行（确定性，实测 ' + waited + 'ms）');
+}
+{
   // 3b. 并发合并：8 个子进程各 merge 一条 artifact，终态必须是 8+seed 的并集（不丢更新）
   const session = 'm17b';
   TS.saveTaskState(session, { goal: 'g17b', progress: 'p', artifacts: ['seed'], status: 'interrupted', updatedAt: 1 });
