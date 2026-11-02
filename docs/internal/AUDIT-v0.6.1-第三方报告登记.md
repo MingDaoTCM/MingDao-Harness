@@ -5975,6 +5975,10 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   剥包装前缀（`env`/`sudo`/`doas`/`command`/`builtin`/`exec`/`nohup`/`time`/`nice`/`ionice`/
   `timeout`/`stdbuf`/`setsid`/`xargs`/`watch`/`busybox`，含其取值选项与 `A=1` 赋值）→
   `sh -c`/`bash -lc`/`eval` 递归（深度 5）→ 同时按「全名」与「basename」匹配 deny。
+  与既有 `denyStrict` 包装分支的分工：**denyStrict 下不解释脚本**（`sh -c '<任意内容>'` 的内容
+  同样不可静态判定），仍由 `denyStrict:shell-wrapper` 整体拒绝——因此既有 batch14 ⑤
+  （去掉该分支必须红）继续可观测；非严格档才走递归归一。`SHELL_WRAPPER` 同时补上
+  `-lc`/`-xc` 这类捆绑 `-c`（原正则只认 `-c`，`bash -lc 'rm'` 在严格档算不出包装形态）。
   边界如实登记：`find -delete`、脚本文件、`$VAR`、自定义包装器仍不可静态判定。
 - **C2（`src/tools/git.js`）**：子命令 + 参数**双白名单**（`GIT_READONLY` / `ALLOWED_LONG` /
   `ALLOWED_SHORT`）；黑名单只作兜底（`contents`/`output`/`no-index`/`ext-diff`/`textconv`/
@@ -5989,14 +5993,14 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   `read` 窗口（10 分钟近似"同回合"），随后 `fetch` 的确认文案标出「该请求可能携带刚读取的
   本地内容（文件列表）」+ 目标 URL。
 
-### 5.3.3 断言（新建 `test/permission-hardening.js`，54 条）
+### 5.3.3 断言（新建 `test/permission-hardening.js`，55 条）
 
-- **C1 31 条**：22 条表驱动必拒（任务书列出的 `/bin/rm`、`env rm`、`sudo rm`、`sudo -u root rm`、
+- **C1 32 条**：22 条表驱动必拒（任务书列出的 `/bin/rm`、`env rm`、`sudo rm`、`sudo -u root rm`、
   `xargs rm`、`command rm`、`nice -n 5 rm`、`timeout 5 rm`、`nohup rm`、`builtin rm`、`exec rm`、
   `env A=1 rm`、`FOO=1 rm`、`sh -c "rm"`、`bash -lc 'rm'`、`rm|cat`、`a && rm`、`$(rm)`、
   `\rm`、`r''m`、`/usr/local/bin/rm`、裸 `rm` 全部覆盖）+ 6 条不误伤
   （`rmdir`/`format`/`echo "rm -rf /"`/`ls`/`git status`/`/bin/rmdir`）+ basename 归一 +
-  非 denyStrict 同样归一 + allow 前缀语义不变。
+  非 denyStrict 同样归一（含 `sh -c`/`bash -lc`/`eval` 的递归判定）+ allow 前缀语义不变。
 - **C2 13 条**：`blame --contents`（含缩写）拒绝且说明仓库外文件；`branch <名>`/`tag <名>`
   拒绝并验证**没有真的创建 ref**；`branch -D`/`tag -d` 拒绝；stash/remote/push 非只读；
   未登记参数按白名单拒绝；`--no-index`/`--output`/`--ext-diff` 仍被点名拒绝；
@@ -6011,15 +6015,19 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
 逐条把修复改回缺陷：去 basename 归一 / 不剥包装前缀 / 不剥前缀赋值 / 不递归 `-c` /
 引号当普通字符 / 归一化不参与 deny / 去 `--contents` 特判 / 不判 branch·tag 写形态 /
 参数白名单失效 / 子命令白名单失效 / fetch 回只读集合 / 去 net 默认拒绝 /
-默认拒绝文案缺出路 / 去 read→fetch 提示。**实测 14/14 全中**（首轮 ⑫ 因关键词不在断言
-原文而逃逸，改断言文案后复跑全中——按批次约定如实记录）。
+默认拒绝文案缺出路 / 去 read→fetch 提示。**实测 14/14 全中**。首轮两处折返如实记录：
+⑫ 因关键词不在断言原文而逃逸（改断言文案后复跑全中）；全批首跑时既有 batch14 ⑤
+（去掉 `denyStrict` 包装分支）**逃逸**——因为归一化把 `sh -c 'rm'` 也拒了，那条分支变成
+冗余、删掉也不再改变结果。这属于"防御重叠把旧变异变成不可观测"，按 5.3.2 的分工
+（严格档不解释脚本）修回后，batch14 恢复 **10/10**、全批 **51/51**。
 
 ### 5.3.5 验证
 
-- 隔离树（`git archive HEAD` + 本批 4 个源文件 + 2 个测试文件，避开并行轨道的在飞改动）：
-  `node test/permission-hardening.js` **54/54 通过**；`node test/smoke.js` **EXIT 0**；
+- 提交树（`git archive HEAD` 的精确内容，避开并行轨道的在飞改动）：
+  `node test/permission-hardening.js` **55/55 通过**；`node test/smoke.js` **EXIT 0**；
   `node test/e2e-local.js` **17 项全过**；`npx tsc -p tsconfig.full.json` **EXIT 0**；
-  `node test/mutate/batch63-permission-hardening.mjs` **14/14**。
+  `node test/mutate/batch63-permission-hardening.mjs` **14/14**；
+  `node test/mutate/run.mjs --allow-dirty` **51/51 批全中**（见 5.3.4 的折返）。
 - `scripts/doc-lint.mjs`：仅 ⑥ 红（变异总数计数：README 仍写 541，实际条数随并行批次增长；
   `test/mutate/README.md` 按任务书禁止改动），其余全绿——含 ⑧「只读工具：
   read/glob/grep/ls/skill/git」（fetch 已移出只读集合）。
@@ -6042,7 +6050,6 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   自定义包装器仍判不出来；真正硬边界需要 `denyStrict` + 沙箱/OS 级管控。
 - C2 白名单会拒绝未登记的**新** git 只读选项（fail-closed，方向是有意为之）；遇到常用选项
   缺失时按 `ALLOWED_LONG`/`ALLOWED_SHORT` 增补，而不是回退黑名单。
-
 ## 5.4 v0.6.29 报告三 §5.1/5.2/5.6/5.7：Agent 与上下文正确性（D1/D2/D3/D4/D5）
 
 > 范围：只改 `src/agent.js`、`src/context.js`、`src/providers/openai-compatible.js`；

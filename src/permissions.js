@@ -183,9 +183,12 @@ export function tokenizeCommandSegment(/** @type {any} */ text) {
  * 返回的是**候选集合**（而不是唯一解）：包装器/`-c` 嵌套让「哪一段才是真命令」无法唯一确定。
  * deny 判定只要任一候选命中就拒（fail-closed），所以多给候选是安全的。
  * @param {any} cmd
+ * @param {{ shellScripts?: boolean }} [opts] shellScripts=false：不递归解释 `sh -c`/`eval` 的脚本参数
+ *   （denyStrict 下改用「包装形态整体拒绝」这条更保守的判据，见 ruleMatches）
  * @returns {{ argv: string[], text: string }[]}
  */
-export function canonicalizeCommand(/** @type {any} */ cmd) {
+export function canonicalizeCommand(/** @type {any} */ cmd, /** @type {any} */ opts = {}) {
+  const shellScripts = opts?.shellScripts !== false;
   /** @type {{ argv: string[], text: string }[]} */
   const out = [];
   const seen = new Set();
@@ -210,6 +213,10 @@ export function canonicalizeCommand(/** @type {any} */ cmd) {
     const base = basenameOfCommand(toks[0]);
     // ② shell 的 -c（含 -lc / -xc 等捆绑形态）与 eval：真命令在参数里，递归拆
     if (SHELL_NAMES.has(base)) {
+      if (!shellScripts) {
+        add(toks);
+        return;
+      }
       const ci = toks.findIndex((t, i) => i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(t));
       if (ci > 0 && toks[ci + 1] !== undefined) {
         visitText(toks.slice(ci + 1).join(' '), depth + 1);
@@ -219,6 +226,10 @@ export function canonicalizeCommand(/** @type {any} */ cmd) {
       return;
     }
     if (base === 'eval') {
+      if (!shellScripts) {
+        add(toks);
+        return;
+      }
       const rest = toks.slice(1).join(' ').trim();
       if (rest) visitText(rest, depth + 1);
       return;
@@ -319,7 +330,7 @@ function denyCanonicalMatch(/** @type {any} */ want, /** @type {any} */ cand) {
 }
 
 /** @param {any} rule @param {any} name @param {any} args @param {boolean} [forDeny] */
-function ruleMatches(rule, name, args, forDeny = false) {
+function ruleMatches(rule, name, args, forDeny = false, denyStrict = false) {
   const idx = rule.indexOf(':');
   if (idx > 0) {
     const ruleName = rule.slice(0, idx);
@@ -352,7 +363,13 @@ function ruleMatches(rule, name, args, forDeny = false) {
       // v0.6.30（C1）：字面匹配之后**必须**再跑一遍归一化匹配——
       // 绝对路径 / 包装前缀 / 前缀赋值 / 引号转义 / `sh -c` 的绕过都在这一步被堵住。
       // 两者是 OR：字面规则保持向后兼容，归一规则只加严（fail-closed）。
-      return canonicalizeCommand(args?.command).some((cand) => denyCanonicalMatch(want, cand));
+      //
+      // denyStrict + 包装执行形态：**不尝试解释脚本**（`sh -c '<任意内容>'` 的内容与被包装的
+      // 命令同样不可静态判定），交给 evaluatePermission 的 `denyStrict:shell-wrapper` 分支
+      // 整体拒绝。这样既保住了"硬拦截"的可观测性（去掉那条分支就真的会放行 → 变异必红），
+      // 也避免在严格模式下对脚本内容做半懂不懂的解析。
+      const wrapperForm = denyStrict && SHELL_WRAPPER.test(String(args?.command ?? ''));
+      return canonicalizeCommand(args?.command, { shellScripts: !wrapperForm }).some((cand) => denyCanonicalMatch(want, cand));
     }
     if (want.endsWith('*')) return have.startsWith(want.slice(0, -1));
     return have === want;
@@ -407,14 +424,16 @@ export function normalizePermission(/** @type {any} */ rawMode) {
 // 不匹配任何以真实命令开头的 deny 规则。普通 deny 档可以接受这一点（它是"防手滑"，
 // 被绕过还有权限模式兜底）；但 `denyStrict: true` 是用户显式要求的**硬拦截**，
 // 语义上不该存在"换个写法就直达"的通道 —— 于是这里对包装形态直接拒绝。
-const SHELL_WRAPPER = /(^|\s|;|&&|\|\||\|)(sh|bash|zsh|dash|ksh|cmd|powershell|pwsh)\s+-c\b|(^|\s|;|&&|\|\||\|)eval\b|(^|\s|;|&&|\|\||\|)command\s+-v\b/i;
+// v0.6.30（C1）：`-c` 的判定补上**捆绑形态**（`-lc` / `-xc` / `-ec`；Windows 的 `cmd /c`）——
+// 原正则只认 `-c`，`bash -lc 'rm -rf /x'` 因此在 denyStrict 下也不算"包装执行"（实测放行）。
+const SHELL_WRAPPER = /(^|\s|;|&&|\|\||\|)(sh|bash|zsh|dash|ksh|cmd|powershell|pwsh)\s+(-[A-Za-z]*c[A-Za-z]*|\/c)\b|(^|\s|;|&&|\|\||\|)eval\b|(^|\s|;|&&|\|\||\|)command\s+-v\b/i;
 
 /**
  * @param {any} rawMode @param {any} name @param {any} args
  */
 export function evaluatePermission(/** @type {any} */ rawMode, /** @type {any} */ name, /** @type {any} */ args = {}) {
   const { mode, allow, deny, denyStrict } = normalizePermission(rawMode);
-  const hitDeny = deny.find((/** @type {any} */ r) => ruleMatches(r, name, args, true));
+  const hitDeny = deny.find((/** @type {any} */ r) => ruleMatches(r, name, args, true, denyStrict));
   if (hitDeny) return { decision: 'deny', reason: 'rule-deny', rule: hitDeny, denyStrict };
   // denyStrict + 包装执行：deny 规则看不穿参数里的命令，只能整体拒绝（给出可操作的指引）
   if (denyStrict && deny.length > 0 && name === 'bash' && SHELL_WRAPPER.test(String(args?.command ?? ''))) {

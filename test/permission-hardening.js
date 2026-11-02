@@ -130,7 +130,19 @@ async function testC1DenyCanonicalization() {
     });
   }
 
-  // ④ 非 denyStrict 的普通 deny 同样要走归一化（deny 是"防手滑"档的唯一硬判据）
+  // ④ 非 denyStrict：普通 deny 也要归一化；包装执行（sh -c / bash -lc）必须**递归**判定
+  //    （denyStrict 下这条由"包装形态整体拒绝"兜底，见 §128 的既有断言；非严格档只能靠递归）
+  await check('C1 非 denyStrict 下 sh -c / bash -lc 也必须递归判定', () => {
+    const softShell = { mode: 'auto', deny: ['bash:rm *'] };
+    for (const cmd of ['sh -c "rm -rf /x"', "bash -lc 'rm -rf /x'", 'eval "rm -rf /x"']) {
+      assert.equal(
+        PERM.evaluatePermission(softShell, 'bash', { command: cmd }).decision,
+        'deny',
+        `sh -c / bash -lc 里的真命令必须递归判定（非 denyStrict 档）：${cmd}`
+      );
+    }
+  });
+
   await check('C1 普通 deny（非 denyStrict）也要归一化后匹配', () => {
     const soft = { mode: 'auto', deny: ['bash:rm *'] };
     assert.equal(PERM.evaluatePermission(soft, 'bash', { command: '/bin/rm -rf /x' }).decision, 'deny', '普通 deny 也必须拦住 /bin/rm');

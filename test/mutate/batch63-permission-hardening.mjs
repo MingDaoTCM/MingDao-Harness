@@ -71,7 +71,7 @@ M.mutate({
 M.mutate({
   name: '⑥ C1 只按字面段匹配（归一化不参与 deny）',
   file: 'src/permissions.js',
-  from: '      return canonicalizeCommand(args?.command).some((cand) => denyCanonicalMatch(want, cand));',
+  from: '      return canonicalizeCommand(args?.command, { shellScripts: !wrapperForm }).some((cand) => denyCanonicalMatch(want, cand));',
   to: '      return false; // mutated: 只看字面段',
   expect: ['绝对路径必须归一为 basename', '包装前缀必须剥离'],
   run: SUITE,
