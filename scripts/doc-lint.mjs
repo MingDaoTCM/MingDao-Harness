@@ -12,6 +12,8 @@
 //   ⑤ ARCHITECTURE.md 必须提到**每一个** src 模块（F-H1，防再次滞后）
 //   ⑥ 变异总数（文档 vs 脚本里的 name: 条数）（F-M1）
 //   ⑦ 开发者指南的 API 表必须等于从 src/index.js 生成的表（F-M4）
+//   ⑨ 测试不得写死监听端口（固定端口在 CI 并发时 EADDRINUSE）
+//   ⑩ src/** 不得残留变异补丁标记（`// 变异：`）——v0.6.30 实测有一处被提交进主线
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -182,6 +184,37 @@ const tracked = (() => {
   console.log(`⑨ 测试端口：扫描 ${files.length} 个测试文件，固定四位 listen 端口 ${hits.length} 处`);
 }
 
+
+// ⑩ 变异残留：src/** 不得出现变异补丁标记
+// 事故（v0.6.30）：变异框架会把文件改写成补丁、跑完在 finally 里还原；若在**变异在飞**时提交
+// （或强杀 mutator），`// 变异：…` 的补丁就会进主线——实测 `74ec0a1` 把 `pendingTool: null
+// // 变异：等待中的工具不可见` 提交了，等于把"等待中的工具在界面上不可见"这个缺陷随版本发布。
+// 这里扫源码文本：出现标记即 CI 红（fail-closed）。变异脚本本身在 test/mutate/ 下，不受此限。
+{
+  const files = [];
+  const walk = (dir) => {
+    for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
+      const f = path.join(dir, e.name);
+      if (e.isDirectory()) walk(f);
+      else if (e.name.endsWith('.js')) files.push(f);
+    }
+  };
+  walk(path.join(root, 'src'));
+  const hits = [];
+  for (const f of files) {
+    const lines = fs.readFileSync(f, 'utf8').split('\n');
+    lines.forEach((line, i) => {
+      if (/\/\/\s*变异[：:]/.test(line)) hits.push(`${rel(f)}:${i + 1} → ${line.trim().slice(0, 90)}`);
+    });
+  }
+  if (hits.length) {
+    problems.push(
+      `src/** 残留变异补丁标记 ${hits.length} 处：${hits.slice(0, 5).join('；')}` +
+        '。变异必须由 mutator 在 finally 还原；带着残留提交等于把缺陷随版本发布'
+    );
+  }
+  console.log(`⑩ 变异残留：扫描 ${files.length} 个源码文件，残留标记 ${hits.length} 处`);
+}
 
 if (problems.length) {
   console.error(`\n✗ 文档守卫发现 ${problems.length} 个问题：`);

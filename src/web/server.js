@@ -862,7 +862,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
           lastTtftMs: tp?.lastTtftMs ?? null,
           contentChars: tp?.contentChars ?? 0,
           tokensPerSec: decodeS && tp?.contentTokens ? Number((tp.contentTokens / decodeS).toFixed(1)) : null,
-          pendingTool: null, // 变异：等待中的工具不可见
+          pendingTool: tp?.pendingTool ? { name: tp.pendingTool.name, ms: Date.now() - tp.pendingTool.startedAt } : null,
           // v0.6.13（问题 3）：正在跑的子代理快照——界面状态条据此显示"子 Agent 已跑 N 轮 / M 次工具调用"
           subagent: tp?.subagent
             ? { label: tp.subagent.label ?? '', modelRounds: tp.subagent.modelRounds ?? 0, toolCalls: tp.subagent.toolCalls ?? 0, ms: tp.subagent.at ? Date.now() - tp.subagent.at : null }
