@@ -423,7 +423,16 @@ function overlaps(/** @type {[string, number, number][]} */ spans) {
   }
   assert.equal(winRes.chmod, 'applied', 'E4：Windows 模拟必须走 chmod 兜底（返回值标记 applied）');
   assert.equal(winRes.dirFsync, 'skipped', 'E4：Windows 不支持目录 fsync → 标记 skipped');
-  assert.equal(fs.statSync(path.join(dir, 'win.txt')).mode & 0o777, 0o600, 'E4：Windows 模拟下目标权限应为 0600');
+  // v0.6.30（Windows 腿）：这条断言只在 POSIX 宿主上有观测面——它验证的是「被模拟成 win32 时
+  // 代码真的调了 chmod」，而 chmod 只有在 POSIX 文件系统上才会体现在 mode 位。
+  // 真 Windows 上 chmod 不影响 stat 的 mode（仍旧 0666/0444，实测 438），断言必然假红；
+  // 因此真 Windows 只断言**可观测的返回值**（chmod='applied'，已在上一行），
+  // 并显式跳过 mode 位（打印可见提示，不静默）。
+  if (process.platform === 'win32') {
+    console.log('   ⚠ 跳过：E4 的 mode 位断言（真 Windows 上 chmod 不改变 stat.mode；返回值 chmod=applied 已断言）');
+  } else {
+    assert.equal(fs.statSync(path.join(dir, 'win.txt')).mode & 0o777, 0o600, 'E4：Windows 模拟下目标权限应为 0600');
+  }
   ok('E4：platform=win32 模拟 → chmod 兜底执行、目录 fsync 标记 skipped（可见标记）');
 
   // 6. Windows 上 chmod 失败：不阻断写入，但返回值/警告必须可见

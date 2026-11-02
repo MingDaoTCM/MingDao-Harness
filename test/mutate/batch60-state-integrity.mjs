@@ -156,7 +156,10 @@ M.mutate({
   file: 'src/memory.js',
   from: ['  return lockFileSync(memoryLockFile(), () => {', '    const raw = loadMemory();'].join('\n'),
   to: ['  return ((/** @type {any} */ fn) => fn())(() => { // 变异：无锁去重', '    const raw = loadMemory();'].join('\n'),
-  expect: ['并发追加 + 去重不得丢条目'],
+  // Windows 腿（v0.6.30，与同批 ⑪ 同一处理）：去掉锁后，去重的原子替换会和并发的追加撞在
+  // 同一个文件上，先以 EBUSY 暴露——那同样是「未加锁」的后果，只是失败形态不同
+  // （v0.6.29 发布说明里把它登记为「留待下一版一并修」）。POSIX 上仍是数据丢失断言。
+  expect: ['并发追加 + 去重不得丢条目', 'EBUSY'],
   run: SUITE,
 });
 

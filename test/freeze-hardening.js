@@ -1,4 +1,4 @@
-// 事件循环冻结加固回归（v0.6.31，第三方代码审计 C-1 / H-13 + 核验报告 C-1 / H-1）。
+// 事件循环冻结加固回归（v0.6.30，第三方代码审计 C-1 / H-13 + 核验报告 C-1 / H-1）。
 //
 // 两条缺陷的共性：**同步** 工作落在事件循环主线程上，而输入来自不可信文本（模型给的 grep
 // pattern / 20KB 单行文件 / 2 万条费用记录）——一旦触发，HTTP、SSE 心跳、权限弹窗、watchdog
@@ -113,7 +113,12 @@ async function suiteA1(/** @type {any} */ R, /** @type {any} */ C) {
   // 由父进程 kill 并让本断言当场变红——测试自己绝不会被 ReDoS 拖住。
   const probe = /* js */ `
     import path from 'node:path';
-    const { dispatch } = await import(path.join(process.env.PROBE_SRC, 'tools', 'index.js'));
+    import { pathToFileURL } from 'node:url';
+    // Windows 腿（v0.6.30）：动态 import 的 specifier **必须是 URL**。裸绝对路径在 POSIX 上
+    // 恰好被当成文件路径接受，但在 Windows 上 'D:\\...' 会被解析成 scheme 'd:' →
+    // ERR_UNSUPPORTED_ESM_URL_SCHEME，子进程直接崩，整批变异被误判成「逃逸」。
+    // 父进程与子进程都在这里统一走 pathToFileURL。
+    const { dispatch } = await import(pathToFileURL(path.join(process.env.PROBE_SRC, 'tools', 'index.js')).href);
     const patterns = JSON.parse(process.env.PROBE_PATTERNS);
     for (const pattern of patterns) {
       const t0 = Date.now();
