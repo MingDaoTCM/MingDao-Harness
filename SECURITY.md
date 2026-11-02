@@ -11,7 +11,7 @@ Security fixes are provided for the **latest minor release only**.
 
 | Version | Supported |
 | --- | --- |
-| **0.6.x** (current: **0.6.14**) | Yes |
+| **0.6.x** (current: **0.6.30**) | Yes |
 | 0.5.x and older | No |
 
 Upgrade with `npm i -g mingdao-harness@latest` (npm installs), or `mingdao update` / `mingdao rollback`

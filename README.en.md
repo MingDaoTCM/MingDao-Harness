@@ -19,7 +19,7 @@ does not cover (this file is written so a reviewer can decide that, not to make 
 than it is).
 
 - Node.js **>= 18.17** (`package.json` `engines`), no build step, no npm runtime dependencies.
-- Current version: **0.6.14** · License: **MIT**.
+- Current version: **0.6.30** · License: **MIT**.
 - Repo: <https://github.com/MingDaoTCM/MingDao-Harness> · Package: `mingdao-harness` on npm.
 
 ## Quickstart (3 steps)
