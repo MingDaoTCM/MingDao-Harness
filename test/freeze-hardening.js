@@ -298,14 +298,22 @@ async function suiteA2(/** @type {any} */ P, /** @type {any} */ C) {
   const base = Date.UTC(2026, 9, 20, 4, 0, 0); // 2026-10-20 12:00 北京
   const stamps = Array.from({ length: N }, (_, i) => new Date(base + i * 60000));
 
-  // ① 2 万次 beijingParts <500ms（改前 0.042~0.408 ms/op → 0.85~8.16s）
+  // ① 2 万次 beijingParts：**软阈值告警 + 硬上限**（v0.6.30 CI 收口）。
+  // 改前 0.042~0.408 ms/op → 0.85~8.16s；改后本机 72ms。但真实 runner 的 ICU 差异很大：
+  // ubuntu-18 上未变异也要 1.25s（>500ms），旧的单一 500ms 硬阈值于是变成**假红源头**——
+  // 它会先于本批变异点自己的断言炸掉，把 ⑬⑭ 顶成「逃逸」。
+  // 所以：>500ms 只告警（软阈值，机器慢不是缺陷）；>20s 才失败（硬上限，真冻结）。
+  // 「没有逐条新建 formatter」这件事改由下面 ② 的**构造次数**确定性判定，不靠计时运气。
   const t0 = Date.now();
   let acc = 0;
   for (const d of stamps) acc += P.beijingParts(d).day;
   const bpMs = Date.now() - t0;
-  assert.ok(bpMs < 500, `2 万次 beijingParts 必须 <500ms（实际 ${bpMs}ms）`);
   assert.ok(acc > 0);
-  ok(`A2 2 万次 beijingParts ${bpMs}ms（<500ms）`);
+  if (bpMs >= 500) {
+    console.log(`   ⚠ 软阈值：2 万次 beijingParts ${bpMs}ms（≥500ms；慢 runner/Windows ICU 属预期，仅告警）`);
+  }
+  assert.ok(bpMs < 20000, `2 万次 beijingParts 超过硬上限 20000ms（实际 ${bpMs}ms；改前逐条新建 formatter 为 0.85~8.16s）`);
+  ok(`A2 2 万次 beijingParts ${bpMs}ms（软阈值 500ms / 硬上限 20000ms）`);
 
   // ② formatter 缓存：再跑 2 万次，构造次数不得随调用次数增长
   const warm = withPatchedIntl(() => {
@@ -379,14 +387,20 @@ async function suiteA2(/** @type {any} */ P, /** @type {any} */ C) {
   assert.ok(Math.abs(bd.today - refToday) < 1e-9, `today 汇总必须一致（实际 ${bd.today} vs ${refToday}）`);
   ok(`A2 byDay 对拍 2 万条逐条一致（14 天窗口 + 未来日 + 00:00:01/23:59:59 边界）`);
 
-  // ⑥ 2 万条 costBreakdown <500ms，且格式化次数与记录条数**无关**（预计算日界，不是逐条格式化）
+  // ⑥ 2 万条 costBreakdown：**先判「格式化次数与记录数无关」**（确定性），再看计时（软阈值+硬上限）。
+  // v0.6.30 CI 收口：旧顺序把 500ms 计时放在前面，慢 runner 上（ub18 未变异也可能 >500ms）
+  // 计时先炸，batch61 ⑬（把分桶退回逐条 beijingParts）就被顶成「逃逸」——它明明已被抓住，
+  // 只是失败信息不是期望的那一条。把次数断言提前后，⑬ 在任何平台上都按「次数 2 万」当场红。
+  const counted = countFormatCalls(() => C.costBreakdown());
+  assert.ok(counted.calls < 200, `costBreakdown 的 ICU 格式化次数必须与记录数无关（2 万条实际 ${counted.calls} 次）`);
   const t1 = Date.now();
   C.costBreakdown(); // 已解析过文件，避开 JSON 解析噪声
   const bdMs = Date.now() - t1;
-  assert.ok(bdMs < 500, `2 万条 costBreakdown 必须 <500ms（实际 ${bdMs}ms）`);
-  const counted = countFormatCalls(() => C.costBreakdown());
-  assert.ok(counted.calls < 200, `costBreakdown 的 ICU 格式化次数必须与记录数无关（2 万条实际 ${counted.calls} 次）`);
-  ok(`A2 2 万条 costBreakdown ${bdMs}ms（<500ms），格式化 ${counted.calls} 次（与条数无关）`);
+  if (bdMs >= 500) {
+    console.log(`   ⚠ 软阈值：2 万条 costBreakdown ${bdMs}ms（≥500ms；仅告警，硬上限 20000ms）`);
+  }
+  assert.ok(bdMs < 20000, `2 万条 costBreakdown 超过硬上限 20000ms（实际 ${bdMs}ms）`);
+  ok(`A2 2 万条 costBreakdown ${bdMs}ms（软阈值 500ms / 硬上限 20000ms），格式化 ${counted.calls} 次（与条数无关）`);
 
   // ⑦ 分桶边界：00:00:01 属于当天、23:59:59 属于当天（不是相邻日）
   const last = bd.byDay[bd.byDay.length - 1];

@@ -142,7 +142,9 @@ M.mutate({
   file: 'src/pricing.js',
   from: ['  let f = formatterCache.get(key);', '  if (f) return f;'].join('\n'),
   to: '  let f; // 变异：formatter 不再缓存',
-  expect: ['2 万次 beijingParts 必须 <500ms', '不得每次新建 Intl.DateTimeFormat'],
+  // v0.6.30 CI 收口：计时改为「软阈值告警 + 硬上限」，不再产出旧的 500ms 断言文案；
+  // 判定改由「Intl 构造次数」确定性承担（与机器快慢无关）。
+  expect: ['不得每次新建 Intl.DateTimeFormat'],
   run: SUITE,
 });
 
@@ -162,7 +164,9 @@ M.mutate({
     '  // 变异：绕过缓存直接 new',
     '  const parts = partsObject(new Intl.DateTimeFormat(\'en-US\', { timeZone: tz, year: \'numeric\', month: \'2-digit\', day: \'2-digit\', hour: \'2-digit\', minute: \'2-digit\', second: \'2-digit\', hourCycle: \'h23\' }).formatToParts(date));',
   ].join('\n'),
-  expect: ['2 万次 beijingParts 必须 <500ms', '不得每次新建 Intl.DateTimeFormat'],
+  // v0.6.30 CI 收口：计时改为「软阈值告警 + 硬上限」，不再产出旧的 500ms 断言文案；
+  // 判定改由「Intl 构造次数」确定性承担（与机器快慢无关）。
+  expect: ['不得每次新建 Intl.DateTimeFormat'],
   run: SUITE,
 });
 
