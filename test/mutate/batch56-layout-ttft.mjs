@@ -74,10 +74,13 @@ M.mutate({
 M.mutate({
   name: '⑦ TTFT 恢复每轮都打印',
   file: 'src/agent.js',
-  from: 'if (turnProgress.llmCalls === 1) {',
-  to: 'if (turnProgress.llmCalls >= 1) {',
-  expect: ['3 次模型请求只允许打印 1 次 ⏱ 首帧'],
-  run: SEC,
+  // v0.6.31：判定抽到纯函数 `shouldPrintTtftNotice` 后，等价缺陷 = 去掉「非第 1 次请求就短路」。
+  // 注意：单回合内的重复已被"会话节流"兜住，所以这条改由 `test/ttft-notice.js` 的判定表来抓
+  // （smoke §163 的 3 请求桩在节流生效时仍是 1 行，抓不到这个变异）。
+  from: '  if (Number(llmCalls) !== 1) return { print: false, slowdown: false };',
+  to: '  if (false) return { print: false, slowdown: false };',
+  expect: ['期望 print'],
+  run: () => M.suite('test/ttft-notice.js'),
 });
 
 // ⑧ 又把 48px 空窄条补偿加回来：<900 正文左缘重新变成 48
