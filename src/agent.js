@@ -119,7 +119,11 @@ export function ttftNoticeStateFor(key) {
   let v = ttftNoticeState.get(k);
   if (!v) {
     v = { ms: null, at: 0 };
-    if (ttftNoticeState.size >= 200) ttftNoticeState.delete(ttftNoticeState.keys().next().value);
+    if (ttftNoticeState.size >= 200) {
+      // TS7 下 `MapIterator#value` 是 `string | undefined`：先收窄再删（与原来等价，size>=200 时必有键）。
+      const oldest = ttftNoticeState.keys().next().value;
+      if (oldest !== undefined) ttftNoticeState.delete(oldest);
+    }
     ttftNoticeState.set(k, v);
   }
   return v;
