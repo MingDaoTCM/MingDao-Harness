@@ -45,6 +45,8 @@ const SUITES = [
   ['fs-integrity-hardening', 'node', ['test/fs-integrity-hardening.js']],
   // v0.6.30 审计收口：同步注册边界（默认 closed 不推断回环 / XFF 右起 / 单锁 / 配额 / 无令牌禁 auto）
   ['sync-registration-hardening', 'node', ['test/sync-registration-hardening.js']],
+  // v0.6.31：TTFT 提示节流（长审计里每个「继续」= 新回合，绝不能每个回合各打一次）
+  ['ttft-notice', 'node', ['test/ttft-notice.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];

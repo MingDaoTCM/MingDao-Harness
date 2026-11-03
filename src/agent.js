@@ -79,6 +79,52 @@ const SUBAGENT_MAX_STEPS = 24;
  *   · 真干活的回合每隔几秒就有工具结果或正文增量，60 分钟零增量在任何正常回合都不可能。
  *
  *  可配置：config.noProgressTimeoutMs（0/负数/NaN/Infinity 一律回落默认——**不能**用它关掉看门狗）。 */
+// v0.6.31（负责人实测）：TTFT 提示"每个回合各打一次"在长审计里刷屏。
+//
+// 现象：本地模型跑长审计时，聊天区反复出现「⏱ 首帧 10.9s（第 1 次模型请求…）」十几次，
+// 而且**每次都写"第 1 次"**——因为每个「回合」都是新 turnProgress（用户点「继续」/自动续跑
+// 都算新回合），`llmCalls===1` 这个条件对每个回合都成立。
+//
+// 判定抽成**纯函数**（可单测、可变异），状态放**进程级**（WebUI 每请求新建 agent，只有进程级
+// 才能跨回合节流；键用会话名/工作目录）。
+const TTFT_NOTICE_DEFAULT_QUIET_MS = 10 * 60 * 1000;
+/** @type {Map<string, {ms: number|null, at: number}>} */
+const ttftNoticeState = new Map();
+
+/**
+ * 本次是否该打印 TTFT 提示。
+ * 规则：① 每回合只在第 1 次请求时考虑；② 同一会话 quietMs 内不重复；
+ *      ③ 首帧比上次打印时**明显变慢**（≥ slowdownRatio 倍）则例外——劣化信号不能被节流吃掉。
+ * @param {{llmCalls:number, ttftMs:number, lastMs?:number|null, lastAt?:number, now:number,
+ *          quietMs?:number, slowdownRatio?:number}} a
+ * @returns {{print: boolean, slowdown: boolean}}
+ */
+export function shouldPrintTtftNotice({ llmCalls, ttftMs, lastMs = null, lastAt = 0, now, quietMs = TTFT_NOTICE_DEFAULT_QUIET_MS, slowdownRatio = 2 }) {
+  if (Number(llmCalls) !== 1) return { print: false, slowdown: false };
+  const ms = Number(ttftMs);
+  if (!Number.isFinite(ms)) return { print: false, slowdown: false };
+  const slowdown = Number(lastMs) > 0 && ms >= Number(lastMs) * Number(slowdownRatio);
+  if (slowdown) return { print: true, slowdown: true };
+  if (!Number(lastAt)) return { print: true, slowdown: false };
+  return { print: now - Number(lastAt) >= Number(quietMs), slowdown: false };
+}
+
+/**
+ * 读/写某会话的 TTFT 提示节流状态（进程级，上限 200 个键防泄漏）。
+ * @param {string} key
+ * @returns {{ms: number|null, at: number}}
+ */
+export function ttftNoticeStateFor(key) {
+  const k = String(key || 'default');
+  let v = ttftNoticeState.get(k);
+  if (!v) {
+    v = { ms: null, at: 0 };
+    if (ttftNoticeState.size >= 200) ttftNoticeState.delete(ttftNoticeState.keys().next().value);
+    ttftNoticeState.set(k, v);
+  }
+  return v;
+}
+
 export const DEFAULT_NO_PROGRESS_TIMEOUT_MS = 3600000;
 
 /** 父回合在等待 `task` 子代理时额外给的一点点宽限（ms）。
@@ -1634,10 +1680,31 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             // （状态条/右栏已有首帧值）。长审计里本地模型会有十几次请求，重复打印只会刷屏。
             // 可选的"后续明显劣化警告"本轮未实现：现有 firstTokenAt 是回合级的，
             // 不能用来量后续请求的 TTFT（否则会得到负值），不为一条提示去改测量口径。
-            if (turnProgress.llmCalls === 1) {
-              try {
-                io.print(style(`⏱ 首帧 ${(ttft / 1000).toFixed(1)}s（第 ${turnProgress.llmCalls} 次模型请求；本地模型这一项直接反映 prefill 快慢）`, C.dim));
-              } catch {}
+            // v0.6.31：会话级节流（见文件顶部 shouldPrintTtftNotice）——长审计里「继续」会产生
+            // 很多新回合，每回合都打一次会把聊天区刷满；但首帧**明显变慢**时必须照常报（劣化信号）。
+            {
+              const nk = String(cfg?.sessionRef?.name || cfg?.sessionKey || workingDir || 'default');
+              const st = ttftNoticeStateFor(nk);
+              const verdict = shouldPrintTtftNotice({
+                llmCalls: turnProgress.llmCalls,
+                ttftMs: ttft,
+                lastMs: st.ms,
+                lastAt: st.at,
+                now: Date.now(),
+                quietMs: Number(cfg?.ttftNoticeQuietMs) > 0 ? Number(cfg.ttftNoticeQuietMs) : TTFT_NOTICE_DEFAULT_QUIET_MS,
+              });
+              if (verdict.print) {
+                st.ms = ttft;
+                st.at = Date.now();
+                try {
+                  io.print(style(
+                    verdict.slowdown
+                      ? `⏱ 首帧 ${(ttft / 1000).toFixed(1)}s（比上次明显变慢，本地模型这一项直接反映 prefill 快慢）`
+                      : `⏱ 首帧 ${(ttft / 1000).toFixed(1)}s（第 ${turnProgress.llmCalls} 次模型请求；本地模型这一项直接反映 prefill 快慢）`,
+                    verdict.slowdown ? C.yellow : C.dim
+                  ));
+                } catch {}
+              }
             }
             markProgress('模型增量');
             if (d.text) io.writeText(d.text);
