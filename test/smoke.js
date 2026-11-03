@@ -18774,8 +18774,14 @@ return { fmtTraceDur, subagentRowView, traceRoundView, traceSummaryText, traceRo
       assert.ok(ttftLines163[0].includes('第 1 次模型请求'), '唯一那行必须属于第 1 次模型请求');
       assert.ok(!prints163.some((t) => t.includes('第 2 次模型请求') && t.includes('⏱ 首帧')),
         '第 2/3 次请求必须静默（状态条已有首帧值）');
-      assert.ok(/if \(turnProgress\.llmCalls === 1\) \{/.test(agentSrc163),
-        'TTFT 打印条件必须是「本回合第 1 次模型请求」，不得恢复每轮都打');
+      // v0.6.31：判定从"行内 if"抽成纯函数 `shouldPrintTtftNotice`（会话级节流 + 劣化例外）。
+      // 这里钉**不变量**而不是具体写法：必须走该函数、必须传 llmCalls、必须有静默期参数，
+      // 且该函数的短路规则（llmCalls!==1 → 不打印）仍存在。行为细节由 test/ttft-notice.js 覆盖。
+      assert.ok(/shouldPrintTtftNotice\(/.test(agentSrc163), 'TTFT 打印必须经 shouldPrintTtftNotice 判定（不得恢复行内每轮都打）');
+      assert.ok(/llmCalls:\s*turnProgress\.llmCalls/.test(agentSrc163), '判定必须传入本回合的 llmCalls');
+      assert.ok(/quietMs:\s*Number\(cfg\?\.ttftNoticeQuietMs\)/.test(agentSrc163), '必须带会话级静默期参数');
+      assert.ok(/if \(Number\(llmCalls\) !== 1\) return \{ print: false, slowdown: false \};/.test(agentSrc163),
+        '纯函数必须保留「非本回合第 1 次请求 → 不打印」的短路规则');
     } finally {
       safeRmSync(tmp163, { recursive: true, force: true });
     }
