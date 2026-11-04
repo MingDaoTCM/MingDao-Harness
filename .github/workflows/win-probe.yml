@@ -10,14 +10,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: workspace-fence + batch74
+      - name: changed batches on Windows
         shell: bash
         run: |
           set +e
-          node test/workspace-fence.js > /tmp/ws.log 2>&1; echo "workspace-fence exit=$?"; tail -6 /tmp/ws.log
-          printf '::error title=workspace-fence::exit=%s :: %s\n' "$?" "$(tail -6 /tmp/ws.log | tr '\n' ' ' | tr -d '\r')"
-          node test/mutate/run.mjs batch74 > /tmp/b74.log 2>&1; c=$?
-          echo "batch74 exit=$c"
-          grep -E "^✗|批次：|变异验证" /tmp/b74.log | tail -20
-          printf '::error title=batch74::exit=%s :: %s\n' "$c" "$(grep -E '^✗' /tmp/b74.log | head -5 | tr '\n' ' ' | tr -d '\r')"
+          for b in batch36 batch38 batch41 batch49 batch72 batch73 batch74; do
+            node test/mutate/run.mjs $b > /tmp/$b.log 2>&1; c=$?
+            echo "== $b exit=$c =="
+            grep -E "^✗|批次：|变异验证" /tmp/$b.log | tail -8
+            printf '::error title=%s::exit=%s :: %s\n' "$b" "$c" "$(grep -E '^✗' /tmp/$b.log | head -4 | tr '\n' ' ' | tr -d '\r')"
+          done
           exit 0
