@@ -1,0 +1,34 @@
+name: WinProbe
+on:
+  pull_request:
+    branches: [main]
+jobs:
+  probe:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: suites
+        shell: bash
+        run: |
+          echo "## suites" >> "$GITHUB_STEP_SUMMARY"
+          for s in sync-state packs-capabilities workspace-fence viewmodel; do
+            node test/$s.js > /tmp/$s.log 2>&1; code=$?
+            echo "- $s exit=$code" >> "$GITHUB_STEP_SUMMARY"
+            tail -14 /tmp/$s.log >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            printf '::error title=suite-%s::exit=%s :: %s\n' "$s" "$code" "$(tail -4 /tmp/$s.log | tr '\n' ' ' | tr -d '\r')"
+          done
+      - name: batches
+        shell: bash
+        run: |
+          echo "## batches" >> "$GITHUB_STEP_SUMMARY"
+          for b in batch72 batch73 batch74 batch36 batch38 batch41 batch49; do
+            node test/mutate/run.mjs $b > /tmp/$b.log 2>&1; code=$?
+            echo "- $b exit=$code" >> "$GITHUB_STEP_SUMMARY"
+            grep -E "^✗|批次：|变异验证|未命中" /tmp/$b.log | tail -20 >> "$GITHUB_STEP_SUMMARY"
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            printf '::error title=%s::exit=%s :: %s\n' "$b" "$code" "$(grep -E '^✗' /tmp/$b.log | head -4 | tr '\n' ' ' | tr -d '\r')"
+          done
