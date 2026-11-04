@@ -137,6 +137,9 @@
   2 锚点漂移（`spawnDaemon` 缩进 6→4；endpoint-limits 加锁后形态变化）。
   补 `state-locks ②b`（损坏必须拒写 + 原文件字节不变）；顺带发现旧锚点 2 空格命中的是
   **另一处**调用（打错靶），现锚定 `setStoredKey` 内 6 空格形态 + 唯一性判据。
+- **Windows 腿修复（首次推送后 CI 暴露，本版内修掉）**：§109 的清单键取自 `path.relative`，
+  Windows 上返回 `providers\index.js`，而清单用 `/` 写 → windows 腿 smoke 红
+  （文案是"新增 2 处同步锁"，实际两处早已在清单内，属**假红**）。已把键归一化为 `/`。
 
 ---
 

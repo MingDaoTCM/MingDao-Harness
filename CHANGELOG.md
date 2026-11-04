@@ -52,6 +52,9 @@
 - 全量变异 **57/60** 暴露 3 处：**1 真逃逸**（`setStoredKey` 损坏时宽松读，此前无断言）→ 补
   `state-locks ②b`（必须拒写 + 原文件字节不变）；2 锚点漂移（`spawnDaemon` 缩进 6→4、endpoint-limits
   加锁后形态变化）。顺带发现旧锚点 2 空格命中的是**另一处**调用（打错靶），已锚定 6 空格 + 唯一性判据。
+- **Windows 腿修复**（首次推送后 CI 暴露）：§109 清单键取自 `path.relative`，Windows 上返回
+  `providers\index.js`，与用 `/` 写的清单对不上 → windows 腿 smoke 红（报"新增 2 处同步锁"，
+  实际两处早已在清单内）。已把键归一化为 `/`；本地三平台同源、CI windows 腿复核。
 - `docs/ROADMAP-v0.7.md` 落盘（DSH/Octop 对照 + 本轮实测数字）。
 
 ### 六、未做

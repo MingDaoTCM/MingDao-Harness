@@ -7831,7 +7831,11 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
         const code = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
         let n = (code.match(/\bwithFileLockSync\s*\(/g) || []).length;
         for (const a of aliases) n += (code.match(new RegExp(`\\b${a}\\s*\\(`, 'g')) || []).length;
-        if (n) found[path.relative(srcDir, f)] = n;
+        // 键必须归一化成 `/`：清单（ALLOWED_SYNC_LOCKS）是用 `/` 写的，而 Windows 上
+        // `path.relative` 返回 `providers\index.js`——v0.6.32 首次推送时 windows 腿因此红
+        // （报「providers\index.js：新增 2 处同步锁」，实际 2 处早已在清单内）。
+        // 与 docs 里「路径比较一律归一化分隔符」同口径。
+        if (n) found[path.relative(srcDir, f).split(path.sep).join('/')] = n;
       }
       const problems = [];
       for (const [f, n] of Object.entries(found)) {
