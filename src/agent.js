@@ -15,7 +15,7 @@ import { makeTokenCounter } from './tokenizer.js';
 import { createHooks } from './hooks.js';
 import { createIO, style, C } from './ui.js';
 import { subagentModel } from './routing.js';
-import { writeAudit } from './audit.js';
+import { writeAuditAsync } from './audit.js';
 import { redactSecrets } from './redact.js';
 import { checkCostGuard, costGuardConfig, todayCost, preflightBlockMessage, roundGuardAction } from './cost-guard.js';
 import { recordCacheStats, packDailyCost } from './cachestats.js';
@@ -642,7 +642,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     Array.isArray(rawConstraints) ? rawConstraints : cfg?.constraints ?? getActivePackContext()?.constraints
   );
   /** 约束事件写审计（pack/constraint/kind/stage/action）——受监管场景要能回答「红线何时被触发」 */
-  const auditConstraint = (/** @type {any} */ ev) => {
+  // v0.7.0 §1.4：约束事件也在 Web 请求路径上（工具执行/输出前检查），审计写必须异步，
+  // 否则外部进程持 audit.jsonl.lock 时会冻住整个事件循环。同步版 writeAudit 保留给 CLI 调用链。
+  const auditConstraint = async (/** @type {any} */ ev) => {
     // v0.6.0 C1：账本与 audit 在此**同一处**记录——三个时机（pre/post/output）都汇聚到这里，
     // 新增时机时不需要记得再补一处账本埋点。
     // 只记「哪条约束、什么时机、如何处理」，**不记命中的原文**（否则账本自身成为泄露渠道）。
@@ -651,7 +653,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     }
     if (cfg.audit === false || !ev) return;
     try {
-      writeAudit({ at: Date.now(), session: sessionRef?.name ?? null, model: modelName, tool: null, constraint: ev });
+      await writeAuditAsync({ at: Date.now(), session: sessionRef?.name ?? null, model: modelName, tool: null, constraint: ev });
     } catch {}
   };
   const todos = /** @type {any[]} */ ([]);
@@ -1267,7 +1269,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     if (!constraints.active || !text) return { text, note: null };
     const hit = checkOutput(constraints, text);
     if (!hit) return { text, note: null };
-    auditConstraint(hit.event);
+    await auditConstraint(hit.event);
     const cid = hit.constraint?.id || '领域红线';
     if (hit.action === 'warn') {
       try { io.print(style(`⚠ 领域约束「${cid}」提示：${hit.reason}`, C.yellow)); } catch {}
@@ -1299,7 +1301,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         if (fixed) {
           const re = checkOutput(constraints, fixed);
           if (!re) return { text: fixed, note: `⛔ 领域约束「${cid}」命中，已自动改写` };
-          auditConstraint(re.event);
+          await auditConstraint(re.event);
           return { text: blockedOutputText(re), note: `⛔ 领域约束「${re.constraint?.id || cid}」改写后仍命中，已拦截` };
         }
       } catch {
@@ -2008,8 +2010,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           // 审计（P3-5）：参数与拒绝原因都记录（配置 audit:false 可关）
           const auditOn = cfg.audit !== false;
           const auditArgs = () => redactSecrets(JSON.stringify(args ?? {})).slice(0, 2000);
-          const auditEntry = (extra = {}) =>
-            writeAudit({
+          // v0.7.0 §1.4：工具执行路径上的审计（每次工具调用一条）改异步写，锁等待让出事件循环。
+          const auditEntry = async (extra = {}) =>
+            writeAuditAsync({
               at: Date.now(),
               session: sessionRef?.name ?? null,
               model: modelName,
@@ -2024,7 +2027,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (!parsedArgs.ok) {
             // 参数 JSON 解析失败：回填错误给模型，不拿空参数去执行工具
             io.renderToolDenied(name, {}, parsedArgs.deniedReason);
-            if (auditOn) auditEntry({ denied: true, reason: parsedArgs.auditReason });
+            if (auditOn) await auditEntry({ denied: true, reason: parsedArgs.auditReason });
             // 审计（长生成截断循环）：给出明确分块指引，避免模型反复用单个超大 write 撞输出上限
             return { tc, name, denied: parsedArgs.message };
           }
@@ -2034,7 +2037,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           const hook = await hooks.pre(name, args);
           if (hook.decision === 'block') {
             io.renderToolDenied(name, args, '被钩子阻止');
-            if (auditOn) auditEntry({ denied: true, reason: `PreToolUse 钩子阻止：${String(hook.reason || '').slice(0, 200)}` });
+            if (auditOn) await auditEntry({ denied: true, reason: `PreToolUse 钩子阻止：${String(hook.reason || '').slice(0, 200)}` });
             return { tc, name, denied: `工具被 PreToolUse 钩子阻止：${hook.reason}` };
           }
 
@@ -2042,7 +2045,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           // v0.4.0 Agent Preset：白名单强制（模型可能调用白名单外工具——schema 已不发，此处兜底硬拦）
           if (presetToolSet && !presetToolSet.has(isMcp ? name.slice(5) : name)) {
             io.renderToolDenied(name, args, `不在预设工具白名单内（${activePresetName || 'preset'}）`);
-            if (auditOn) auditEntry({ denied: true, reason: '预设工具白名单拦截' });
+            if (auditOn) await auditEntry({ denied: true, reason: '预设工具白名单拦截' });
             return { tc, name, denied: `工具 ${name} 不在当前预设的工具白名单内，已拒绝执行。` };
           }
           let allowed = false;
@@ -2060,7 +2063,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           }
           if (!allowed) {
             io.renderToolDenied(name, args, '未授权');
-            if (auditOn) auditEntry({ denied: true, reason: '未授权' });
+            if (auditOn) await auditEntry({ denied: true, reason: '未授权' });
             // v0.6.0 C1：权限拒绝是「为什么没执行」的头号答案，必须入账
             turnLedger.permission({ name, mode: permission?.mode ?? cfg.permission ?? null, decision: 'deny', source: 'permission.check' });
             turnLedger.toolCall({ callId: tc.id, name, rawArgs: args, args, permission: { decision: 'deny' } });
@@ -2083,7 +2086,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
               granted = false;
             }
             if (granted) {
-              if (auditOn) auditEntry({ confirmRequired: true, granted: true, reason: cv.reason });
+              if (auditOn) await auditEntry({ confirmRequired: true, granted: true, reason: cv.reason });
               turnLedger.permission({ name, mode: permission?.mode ?? cfg.permission ?? null, decision: 'confirm-granted', source: 'constraint.confirm', rule: cv.event?.id ?? null });
             } else {
               confirmFailure = `领域约束「${cv.event?.id ?? ''}」要求人工确认，未获确认（拒绝或当前环境无法交互）——已按 fail-closed 阻止执行`;
@@ -2103,8 +2106,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (cv?.blocked || confirmFailure) {
             const reason = confirmFailure ?? cv?.reason ?? '领域约束拦截';
             io.renderToolDenied(name, args, reason);
-            if (auditOn) auditEntry({ denied: true, reason });
-            if (cv?.event) auditConstraint(cv.event);
+            if (auditOn) await auditEntry({ denied: true, reason });
+            if (cv?.event) await auditConstraint(cv.event);
             // 被约束拦下的调用不会有 tool.result，这里补一条终态，避免账本出现「只有调用没有结果」的悬空步
             turnLedger.toolResult({ callId: tc.id, name, ok: false, blocked: true, ms: 0, error: '领域约束拦截' });
             return { tc, name, denied: `【领域约束】${reason}` };
@@ -2158,7 +2161,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         }
 
         // 收尾：渲染结果 → todo 更新 → PostToolUse 钩子 → 回填消息（顺序与串行一致）
-        function finishTool(/** @type {any} */ prep, /** @type {any} */ result, /** @type {any} */ t0) {
+        // v0.7.0 §1.4：审计写改为异步（工具执行路径），收尾顺序用 await 保持原序。
+        async function finishTool(/** @type {any} */ prep, /** @type {any} */ result, /** @type {any} */ t0) {
           const ms = Date.now() - t0;
           toolMsTotal += ms;
           // v0.6.13（A）：**只有"成功且不重复"的工具结果才算进展**。
@@ -2203,7 +2207,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
                 rObj = null;
               }
             }
-            writeAudit({
+            await writeAuditAsync({
               at: Date.now(),
               session: sessionRef?.name ?? null,
               model: modelName,
@@ -2239,7 +2243,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           // v0.5.0 A3 ②：领域约束（PostToolUse）——completeness 缺项时**拒绝该工具结果**，
           // 让模型必须继续采集而不是把「未提及」当作已完成（「缺项绝不编造」从提示词升级为内核强制）。
           const pv = checkPostTool(constraints, prep.name, typeof result === 'string' ? safeParse(result) : result);
-          if (pv?.rejected) auditConstraint(pv.event);
+          if (pv?.rejected) await auditConstraint(pv.event);
           // 回填正文（复用前缀 / 约束拒绝文案 / 按窗口截断）单源在 tools-flow.js 的 toolResultMessage()
           // v0.6.29（H-02）：不在这里直接 push——先按 `tool_calls` 原序入队，整批结束后统一回填。
           pendingToolMessages.push({
@@ -2300,7 +2304,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
                 return runTool(b.prep).then((r) => ({ r, t0 }));
               })
             );
-            batch.forEach((b, idx) => finishTool(b.prep, results[idx].r, results[idx].t0));
+            for (let idx = 0; idx < batch.length; idx += 1) await finishTool(batch[idx].prep, results[idx].r, results[idx].t0);
           } else if (allBatchable && prefix.length > 1) {
             // 前导只读子批并行 + 其余串行
             const results = await Promise.all(
@@ -2309,14 +2313,14 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
                 return runTool(b.prep).then((r) => ({ r, t0 }));
               })
             );
-            prefix.forEach((b, idx) => finishTool(b.prep, results[idx].r, results[idx].t0));
+            for (let idx = 0; idx < prefix.length; idx += 1) await finishTool(prefix[idx].prep, results[idx].r, results[idx].t0);
             for (const b of batch.slice(prefix.length)) {
               if (b.prep.denied != null) {
                 finishDenied(b.prep);
                 continue;
               }
               const t0 = Date.now();
-              finishTool(b.prep, await runTool(b.prep), t0);
+              await finishTool(b.prep, await runTool(b.prep), t0);
             }
           } else {
             for (const b of batch) {
@@ -2325,7 +2329,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
                 continue;
               }
               const t0 = Date.now();
-              finishTool(b.prep, await runTool(b.prep), t0);
+              await finishTool(b.prep, await runTool(b.prep), t0);
             }
           }
         }

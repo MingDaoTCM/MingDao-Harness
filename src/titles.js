@@ -2,7 +2,7 @@
 // 成本约几十 token；可配置 "autoTitle": false 关闭。
 
 import { modelPreset } from './models.js';
-import { recordAuxUsage } from './cachestats.js';
+import { recordAuxUsageAsync } from './cachestats.js';
 import { routingConfig } from './routing.js';
 
 export function titleModel(/** @type {any} */ cfg, /** @type {any} */ currentModel) {
@@ -44,7 +44,7 @@ export async function generateTitle(/** @type {any} */ provider, /** @type {any}
         responseFormat: { type: 'json_object' },
         signal: ctrl.signal,
       });
-      recordAuxUsage(model, res?.usage, 'auto-title', { requestStartAt: titleStartAt }); // v0.4.7：标题生成消耗入账
+      await recordAuxUsageAsync(model, res?.usage, 'auto-title', { requestStartAt: titleStartAt }); // v0.4.7：标题生成消耗入账
       const j = JSON.parse(String(res.text || '').trim());
       const t = cleanTitle(j?.title);
       if (t) return t;
@@ -59,7 +59,7 @@ export async function generateTitle(/** @type {any} */ provider, /** @type {any}
         reasoningEffort: 'low',
         signal: ctrl.signal,
       });
-      recordAuxUsage(model, res?.usage, 'auto-title-fallback', { requestStartAt: titleStartAt }); // v0.4.7
+      await recordAuxUsageAsync(model, res?.usage, 'auto-title-fallback', { requestStartAt: titleStartAt }); // v0.4.7
       const t = cleanTitle(res.text);
       return t || null;
     } catch {

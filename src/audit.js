@@ -8,7 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { redactSecrets } from './redact.js';
-import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
+import { atomicWriteFileSync, withFileLockSync, withFileLock } from './atomic-write.js';
 
 // v0.6.2（第三方代码审计 P2-2）：截断触发改为看**文件大小**。
 // 原判据 `auditCount > 20000` 是**进程内**计数：CLI 每次会话只 append 几次、进程结束即归零，
@@ -36,47 +36,70 @@ export function auditWriteError() {
   return auditError;
 }
 
+/** 锁内临界区：追加 + 低频轮转（**追加与轮转必须同一把锁**，v0.6.3 M-20）。
+ * 原实现锁外追加 + 锁外读改写轮转：A 追加 → B 追加 → A 读到含 A 的快照 → A 原子写回 → B 那一行消失。
+ * 审计是合规证据，"少一行"等于证据链有洞，而且不报错。锁的范围含 append：代价是每次
+ * 工具调用多一次毫秒级文件锁（审计本就每工具调用一条）。
+ * @param {any} entry */
+function appendAuditUnderLock(/** @type {any} */ entry) {
+  const file = auditFile();
+  fs.appendFileSync(file, JSON.stringify(entry) + '\n');
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {}
+  // 低频截断：statSync 廉价，只有真的超过阈值才整文件读一次并重写
+  if (fs.statSync(file).size > MAX_BYTES) {
+    const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+    if (lines.length > KEEP_LINES) {
+      // v0.6.2（P2-3）：**原子写**——原先直接 writeFileSync，截断过程中崩溃会留下半截
+      // audit.jsonl（审计证据丢事件）。atomicWriteFileSync 的 tmp 名含 pid+随机后缀，
+      // 写完 rename 原子替换，读者永远看到完整文件；mode 保持 0600。
+      atomicWriteFileSync(file, lines.slice(-KEEP_LINES).join('\n') + '\n', { mode: 0o600 });
+    }
+  }
+}
+
+/** 写失败的统一可见化：审计不能反过来打断用户干活，但**不再无声**。
+ * @param {any} err */
+function auditFailure(/** @type {any} */ err) {
+  auditFailures += 1;
+  auditError = String(/** @type {any} */ (err)?.message ?? err);
+  if (!auditWarned) {
+    auditWarned = true;
+    console.warn(
+      `[MingDao] ⚠ 审计记录写入失败：${auditError}\n` +
+        `  该次运行的 audit.jsonl 会缺事件（执行账本 ledger/ 不受影响）；请检查 ${auditFile()} 的磁盘空间与权限。`
+    );
+  }
+}
+
+/**
+ * 写一条工具调用审计（**同步版**：CLI/REPL 与任何纯同步调用链；语义不变、失败不阻断主流程）。
+ * @param {any} entry
+ */
 export function writeAudit(/** @type {any} */ entry) {
   try {
     ensureHome();
-    const file = auditFile();
-    // v0.6.3（M-20）：**追加与轮转必须在同一把锁里**。原实现是「锁外追加 + 锁外读改写轮转」，
-    // 丢失窗口很实在：A 追加 → B 追加 → A 读到含 A 的快照 → A 原子写回 → B 那一行消失。
-    // 审计是合规证据，"少一行"等于证据链有洞，而且不报错。锁的范围含 append：代价是每次
-    // 工具调用多一次毫秒级文件锁（审计本就每工具调用一条，不在热路径上）。
-    let appended = false;
-    withFileLockSync(file + '.lock', () => {
-      fs.appendFileSync(file, JSON.stringify(entry) + '\n');
-      appended = true;
-      try {
-        fs.chmodSync(file, 0o600);
-      } catch {}
-      // 低频截断：statSync 廉价，只有真的超过阈值才整文件读一次并重写
-      if (fs.statSync(file).size > MAX_BYTES) {
-        const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
-        if (lines.length > KEEP_LINES) {
-          // v0.6.2（P2-3）：**原子写**——原先直接 writeFileSync，截断过程中崩溃会留下半截
-          // audit.jsonl（审计证据丢事件）。atomicWriteFileSync 的 tmp 名含 pid+随机后缀，
-          // 写完 rename 原子替换，读者永远看到完整文件；mode 保持 0600。
-          atomicWriteFileSync(file, lines.slice(-KEEP_LINES).join('\n') + '\n', { mode: 0o600 });
-        }
-      }
-    });
-
+    withFileLockSync(auditFile() + '.lock', () => appendAuditUnderLock(entry));
   } catch (err) {
-    // v0.6.2（B-WS-1/2 第八处）：仍然「不影响会话」（审计不能反过来打断用户干活），
-    // 但**不再无声**——此前连"这次运行的审计记录是空的"都无从得知。
-    // 保留计数与原因供诊断/测试；一次性 console.warn 避免每步刷屏。
-    auditFailures += 1;
-    auditError = String(/** @type {any} */ (err)?.message ?? err);
-    if (!auditWarned) {
-      auditWarned = true;
-      console.warn(
-        `[MingDao] ⚠ 审计记录写入失败：${auditError}\n` +
-          `  该次运行的 audit.jsonl 会缺事件（执行账本 ledger/ 不受影响）；请检查 ${auditFile()} 的磁盘空间与权限。`
-      );
-    }
-    return;
+    auditFailure(err);
+  }
+}
+
+/**
+ * 写一条工具调用审计 —— **WebUI 工具执行路径用它（v0.7.0 §1.4）**。
+ * 每次工具调用都会走到这里；同步版在锁争用时用 `Atomics.wait` 睡眠，会把整个 WebUI
+ * （所有会话 / 权限确认 / SSE 流）冻住。`await withFileLock` 等待时让出事件循环。
+ * 失败语义与同步版一致：只记计数/告警，绝不抛给主流程。
+ * @param {any} entry
+ * @returns {Promise<void>}
+ */
+export async function writeAuditAsync(/** @type {any} */ entry) {
+  try {
+    ensureHome();
+    await withFileLock(auditFile() + '.lock', () => appendAuditUnderLock(entry));
+  } catch (err) {
+    auditFailure(err);
   }
 }
 

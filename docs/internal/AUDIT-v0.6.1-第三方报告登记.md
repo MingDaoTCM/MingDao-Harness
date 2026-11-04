@@ -6345,3 +6345,25 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
 - **边界**：`cachestats.recordUsage`（聊天收尾，每回合一条）与 `audit.writeAudit`（工具执行，
   每工具调用一条）经复核也属请求路径同步锁，**单独一个提交**处理（便于单独回滚），见 §6.3.1；
   本轮未改 `src/agent.js` / `src/web/server.js` 的其它逻辑。
+
+### 6.3.1 第二提交：聊天收尾与工具执行路径（cachestats / audit）
+
+- **cachestats**：`recordUsage`（每回合至少一条）与 `recordAuxUsage`（自动标题 / 记忆提炼 / 路由分类）
+  经 `/api/chat` 的 `onUsage`、回合末补记、`titles/memory/routing` 的 await 点直达请求路径。
+  抽出 `buildCacheStatsLine` / `appendCacheStatsUnderLock` / `cacheStatsFailure` / `buildUsageEntry` /
+  `buildAuxEntry` 单点实现（追加+轮转仍同一把锁），新增 `recordCacheStatsAsync` / `recordUsageAsync` /
+  `recordAuxUsageAsync`；`server.js` 的 `onUsage` 用**串行 Promise 链**保序（agent 在流式循环里同步调用、
+  无法 await），回合末 `await usageWriteChain` 后再补记剩余用量。同步版保留给 CLI/REPL/tasks worker。
+- **audit**：`writeAudit`（每工具调用一条）由 agent 的 pre/post 审计与约束事件直达请求路径。
+  抽出 `appendAuditUnderLock` / `auditFailure`，新增 `writeAuditAsync`；`agent.js` 的 `auditConstraint`
+  与 `auditEntry` 改 async 并在**所有**调用点 await；`finishTool` 随之 async 化，批次收尾从
+  `forEach` 改为 await 循环以保持原顺序。同步 `writeAudit` 保留给 CLI 与 `src/index.js` 的同步 API。
+- **断言**：`node test/request-path-locks.js` 从 7 项增至 **9 项**——新增两条行为：
+  外部持 `audit.jsonl.lock` 2.2s 时 `writeAuditAsync` 等待 2287ms、100ms 心跳 **22 次**，锁后审计真的落盘；
+  外部持 `cache-stats.jsonl.lock` 2.2s 时 `recordUsageAsync` 等待 2285ms、心跳 **22 次**，锁后写出正确一条；
+  同步 `writeAudit` / `recordUsage` 仍返回非 Promise（CLI 回归）。
+- **变异**：`node test/mutate/batch71-request-path-locks-aux.mjs` **9/9** 全中
+  （审计/计费各自"改回同步锁 / 去掉锁 / 只等锁不写"、agent 与 server 退回同步入口、CLI 同步版被改 async）。
+- **边界**：`titles.js` / `memory.js` / `routing.js` 的辅助用量入账改 `await recordAuxUsageAsync`；
+  `src/tasks/worker.js`、`src/cli.js`、`src/commands/repl.js` 仍用同步 `recordUsage`
+  （独立 worker 进程 / 一次性命令，不在 Web 请求路径）。

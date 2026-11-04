@@ -30,6 +30,8 @@ process.env.MINGDAO_HOME = baseHome;
 const S = await import(pathToFileURL(path.join(srcDir, 'schedule.js')).href);
 const T = await import(pathToFileURL(path.join(srcDir, 'tasks.js')).href);
 const TS = await import(pathToFileURL(path.join(srcDir, 'task-state.js')).href);
+const AUDIT = await import(pathToFileURL(path.join(srcDir, 'audit.js')).href);
+const CACHE = await import(pathToFileURL(path.join(srcDir, 'cachestats.js')).href);
 
 const HOLDER_SRC = `
 import fs from 'node:fs';
@@ -126,6 +128,23 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)
     '⑤ sync.js 的三个业务入口（push/pull/accept）都必须 await commitStateAsync'
   );
 
+  // ⑥⑦ 的第二提交（聊天收尾 / 工具执行）：结构绊线
+  const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+  assert.ok(!/\bwriteAudit\s*\(/.test(agentSrc), '⑤ agent.js 不得再调用同步 writeAudit( ——工具执行路径已改 writeAuditAsync');
+  assert.ok(/await\s+writeAuditAsync\s*\(/.test(agentSrc), '⑤ agent.js 工具执行/约束事件必须 await writeAuditAsync');
+  const serverSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
+  assert.ok(!/\brecordUsage\s*\(/.test(serverSrc), '⑤ web/server.js 不得再调用同步 recordUsage( ——聊天收尾已改 recordUsageAsync');
+  assert.ok(/recordUsageAsync\s*\(modelName/.test(serverSrc), '⑤ web/server.js 聊天的 onUsage 必须走 recordUsageAsync');
+  assert.ok(/await\s+recordUsageAsync\s*\(/.test(serverSrc), '⑤ web/server.js 回合收尾必须 await recordUsageAsync');
+  const cacheSrc = fs.readFileSync(path.join(srcDir, 'cachestats.js'), 'utf8');
+  assert.match(cacheSrc, /export\s+async\s+function\s+recordUsageAsync/, '⑤ cachestats.js 必须提供 recordUsageAsync');
+  assert.match(cacheSrc, /export\s+async\s+function\s+recordAuxUsageAsync/, '⑤ cachestats.js 必须提供 recordAuxUsageAsync');
+  const auditSrc = fs.readFileSync(path.join(srcDir, 'audit.js'), 'utf8');
+  assert.match(auditSrc, /export\s+async\s+function\s+writeAuditAsync/, '⑤ audit.js 必须提供 writeAuditAsync');
+  for (const f of ['titles.js', 'memory.js', 'routing.js']) {
+    const src = fs.readFileSync(path.join(srcDir, f), 'utf8');
+    assert.ok(/await\s+recordAuxUsageAsync\s*\(/.test(src), `⑤ ${f} 的辅助用量入账必须 await recordAuxUsageAsync（请求路径禁同步锁）`);
+  }
   const routeNoSyncGuard = routeFiles.join(',');
   ok(`⑤ 结构绊线通过：${routeFiles.length} 个域路由（${routeNoSyncGuard}）均无 withFileLockSync(`);
 }
@@ -292,6 +311,70 @@ function seedSchedule(/** @type {string} */ home, /** @type {any} */ extra = {})
   assert.ok(saved && !(saved instanceof Promise), '④ CLI：saveTaskStateMerge 必须同步返回结果对象');
   assert.equal(saved.ok, true, '④ CLI：saveTaskStateMerge 必须写成功');
   ok('④ CLI 同步版行为不变：saveTaskStateMerge 同步返回 {ok:true}');
+}
+
+// ===========================================================================
+// ⑥ 工具执行路径（audit）：持 audit.jsonl.lock 时 writeAuditAsync 不冻结、锁后写入正确
+// ===========================================================================
+{
+  const home = freshHome('async-audit');
+  process.env.MINGDAO_HOME = home;
+  const lockPath = AUDIT.auditFile() + '.lock';
+  const holder = await startLockHolder(lockPath, 2200);
+  const hb = startHeartbeat();
+  const t0 = Date.now();
+  try {
+    await AUDIT.writeAuditAsync({ at: Date.now(), session: 's', model: 'm', tool: 'read', ok: true });
+  } finally {
+    hb.stop();
+  }
+  const waited = Date.now() - t0;
+  assert.ok(waited >= 1500, `⑥ 前提：writeAuditAsync 必须真的等到审计锁释放（实际 ${waited}ms）`);
+  assert.ok(hb.ticks >= 15, `⑥ 工具执行路径的审计等待期间事件循环不得冻结（实际 ${hb.ticks} 次 / ${waited}ms）`);
+  const entries = AUDIT.listAudit(10);
+  assert.equal(entries.length, 1, `⑥ 锁释放后审计必须真的落盘（实际 ${entries.length} 条）`);
+  assert.equal(entries[0].tool, 'read', '⑥ 落盘内容必须与调用一致');
+  // CLI 同步版回归：writeAudit 仍同步写、不返 Promise
+  const syncRet = AUDIT.writeAudit({ at: Date.now(), session: 's', model: 'm', tool: 'ls', ok: true });
+  assert.ok(!(syncRet instanceof Promise), '⑥ CLI：writeAudit 不得变成 async（同步调用方不 await）');
+  assert.equal(AUDIT.listAudit(10).length, 2, '⑥ CLI：writeAudit 必须同步落盘');
+  ok(`⑥ writeAuditAsync 等审计锁 ${waited}ms，期间心跳 ${hb.ticks} 次；CLI 同步版仍可用`);
+  holder.kill('SIGKILL');
+  process.env.MINGDAO_HOME = baseHome;
+  await sleep(50);
+}
+
+// ===========================================================================
+// ⑦ 聊天收尾路径（cachestats）：持锁时 recordUsageAsync 不冻结、锁后计费落盘正确
+// ===========================================================================
+{
+  const home = freshHome('async-cachestats');
+  process.env.MINGDAO_HOME = home;
+  const lockPath = CACHE.cacheStatsFile() + '.lock';
+  const holder = await startLockHolder(lockPath, 2200);
+  const hb = startHeartbeat();
+  const t0 = Date.now();
+  try {
+    await CACHE.recordUsageAsync('deepseek-chat', { prompt_tokens: 100, completion_tokens: 50, prompt_cache_hit_tokens: 10, prompt_cache_miss_tokens: 90 });
+  } finally {
+    hb.stop();
+  }
+  const waited = Date.now() - t0;
+  assert.ok(waited >= 1500, `⑦ 前提：recordUsageAsync 必须真的等到费用锁释放（实际 ${waited}ms）`);
+  assert.ok(hb.ticks >= 15, `⑦ 聊天收尾路径的计费等待期间事件循环不得冻结（实际 ${hb.ticks} 次 / ${waited}ms）`);
+  const rows = CACHE.listCacheStats(10);
+  assert.equal(rows.length, 1, `⑦ 锁释放后必须真的写出 1 条用量（实际 ${rows.length} 条）`);
+  assert.equal(rows[0].model, 'deepseek-chat', '⑦ 落盘 model 必须正确');
+  assert.equal(rows[0].prompt, 100, '⑦ 落盘 prompt 必须正确（不是空账）');
+  // CLI/worker 同步版回归
+  const syncRet = CACHE.recordUsage('deepseek-chat', { prompt_tokens: 1, completion_tokens: 1 });
+  assert.ok(syncRet && typeof syncRet === 'object' && !(syncRet instanceof Promise), '⑦ CLI：recordUsage 必须同步返回结果对象');
+  assert.equal(syncRet.ok, true, '⑦ CLI：recordUsage 必须写成功');
+  assert.equal(CACHE.listCacheStats(10).length, 2, '⑦ CLI：recordUsage 必须同步落盘');
+  ok(`⑦ recordUsageAsync 等费用锁 ${waited}ms，期间心跳 ${hb.ticks} 次；CLI 同步版仍可用`);
+  holder.kill('SIGKILL');
+  process.env.MINGDAO_HOME = baseHome;
+  await sleep(50);
 }
 
 console.log(`\n请求路径锁回归：${passed} 项全部通过`);

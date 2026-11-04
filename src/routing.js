@@ -8,7 +8,7 @@
 
 import crypto from 'node:crypto';
 import { DEFAULT_PLANNER_MODEL, DEFAULT_EXECUTOR_MODEL } from './models.js';
-import { recordAuxUsage } from './cachestats.js';
+import { recordAuxUsageAsync } from './cachestats.js';
 import { modelPreset, canonicalModel } from './models.js';
 
 export function routingConfig(/** @type {any} */ cfg) {
@@ -131,7 +131,7 @@ export async function routeTask(/** @type {any} */ { cfg, provider, currentModel
       reasoningEffort: 'low',
       responseFormat: { type: 'json_object' },
     });
-    recordAuxUsage(rc.executor, res?.usage, 'route-classify', { requestStartAt: classifyStartAt }); // v0.4.7：分类器消耗入账
+    await recordAuxUsageAsync(rc.executor, res?.usage, 'route-classify', { requestStartAt: classifyStartAt }); // v0.4.7：分类器消耗入账
     let verdict = null;
     try {
       const j = JSON.parse(String(res.text || '').trim());

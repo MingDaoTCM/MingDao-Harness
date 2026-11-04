@@ -14,7 +14,7 @@ import { tokenize } from './session-index.js';
 // 仍是 withFileLockSync 本身（同一把 `<AGENTS.md>.lock`、同样的超时/陈旧回收/可重入）。
 // 复核建议：后续把本文件的同步临界区正式登记进清单，或把 /memory 路径迁到异步版。
 import { atomicWriteFileSync, appendFilePrivateSync, atomicWritePrivateSync, withFileLockSync as lockFileSync, withFileLock } from './atomic-write.js';
-import { recordAuxUsage } from './cachestats.js';
+import { recordAuxUsageAsync } from './cachestats.js';
 
 export function memoryFile() {
   return path.join(mingdaoHome(), 'AGENTS.md');
@@ -281,7 +281,7 @@ export async function extractMemory(/** @type {any} */ provider, /** @type {any}
     const memStartAt = Date.now(); // 审计 BUG-048：峰谷价锚点 = 请求发起时刻（不是落账时刻）
     try {
       const res = await provider.chat({ model, messages: msgs, tools: [], temperature: 0.2, maxTokens: 200, reasoningEffort: 'low', responseFormat: { type: 'json_object' } });
-      recordAuxUsage(model, res?.usage, 'memory-extract', { requestStartAt: memStartAt }); // v0.4.7：记忆提炼消耗入账
+      await recordAuxUsageAsync(model, res?.usage, 'memory-extract', { requestStartAt: memStartAt }); // v0.4.7：记忆提炼消耗入账
       const j = JSON.parse(String(res.text || '').trim());
       const items = Array.isArray(j?.items) ? j.items : [];
       const clean = items
@@ -451,7 +451,7 @@ export async function extractProjectMemory(/** @type {any} */ provider, /** @typ
     const projMemStartAt = Date.now(); // 审计 BUG-048：峰谷价锚点 = 请求发起时刻
     try {
       const res = await provider.chat({ model, messages: msgs, tools: [], temperature: 0.2, maxTokens: 250, reasoningEffort: 'low', responseFormat: { type: 'json_object' } });
-      recordAuxUsage(model, res?.usage, 'project-memory-extract', { requestStartAt: projMemStartAt }); // v0.4.7
+      await recordAuxUsageAsync(model, res?.usage, 'project-memory-extract', { requestStartAt: projMemStartAt }); // v0.4.7
       const j = JSON.parse(String(res.text || '').trim());
       const items = Array.isArray(j?.items) ? j.items : [];
       const clean = items

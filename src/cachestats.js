@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { mingdaoHome, ensureHome } from './config.js';
 import { estimateCost, cacheSplit, beijingDayStart, beijingParts } from './pricing.js';
-import { withFileLockSync, atomicWriteFileSync, appendFilePrivateSync } from './atomic-write.js';
+import { withFileLockSync, withFileLock, atomicWriteFileSync, appendFilePrivateSync } from './atomic-write.js';
 
 export function cacheStatsFile() {
   return path.join(mingdaoHome(), 'cache-stats.jsonl');
@@ -40,107 +40,154 @@ export function cacheStatsWriteError() {
  * @param {any} entry
  * @returns {{ok: boolean, error: string|null, phase: 'append'|'rotate'|null}}
  */
-export function recordCacheStats(/** @type {any} */ entry) {
-  try {
-    ensureHome(); // 审计 B10：与 audit/journal 一致，目录缺失不静默丢统计
-    const line = JSON.stringify({
-      at: Date.now(),
-      model: entry.model || '',
-      prompt: entry.prompt || 0,
-      completion: entry.completion || 0,
-      hit: entry.hit ?? null,
-      miss: entry.miss ?? null,
-      cost: entry.cost ?? null,
-      saved: entry.saved ?? null,
-      batch: entry.batch === true ? true : undefined, // Batch API 半价任务标记（/cost 分账展示）
-      steps: entry.steps ?? undefined, // 本回合步数（状态栏 步数统计）
-      llmMs: entry.llmMs ?? undefined, // 模型调用总耗时（状态栏 LLM 时长/tok-s）
-      toolMs: entry.toolMs ?? undefined, // 工具执行总耗时（状态栏 工具调用时长）
-      firstTokenMs: entry.firstTokenMs ?? undefined, // 首 token 延迟（状态栏平均首 token）
-      reasoning: entry.reasoning ?? undefined, // 省钱 B3：推理 token 估算（费用二级分账维度）
-      byTool: Array.isArray(entry.byTool) ? entry.byTool : undefined, // 省钱 B3：逐工具 {tool,calls,ms}
-      // v0.5.0 A4：垂域 Pack 归因（**标记记录**：cost 记 null 不计入 todayCost，
-      // 真实费用仍在回合级记录里 —— 两者相加不会重复计费；packCost 仅供 --by pack 展示）
-      pack: entry.pack ? String(entry.pack) : undefined,
-      purpose: entry.purpose ? String(entry.purpose) : undefined,
-      packCost: Number.isFinite(Number(entry.packCost)) ? Number(entry.packCost) : undefined,
-      // v0.4.7（T17）：辅助模型调用（路由分类器 / 自动标题 / 记忆提炼）标记——
-      // 这些调用不在 agent 回合 usage 里，单独入账，不与回合级重复计费。
-      aux: entry.aux === true ? true : undefined,
-      auxReason: entry.auxReason ? String(entry.auxReason) : undefined,
-      // v0.6.7（报告一 H-4 / M-10）：这笔消费**用量未知**（服务端没回 usage、或批次在拿不到
-      // token 数的情况下失败/被取消）。金额按 null 记，但 todayCost 会把条数汇总成可见信号，
-      // 免得"没记账"被读成"没花钱"。
-      usageUnknown: entry.usageUnknown === true ? true : undefined,
-      note: entry.note ? String(entry.note).slice(0, 200) : undefined,
-    });
-    // v0.6.3（BUG-009）：**追加与轮转共用同一把锁**。
-    // 原实现是「锁外追加 + 锁内轮转」，仍留有丢失窗口：A 追加 → B 追加 → A 进锁读整文件、
-    // 算出瘦身结果、原子替换 —— B 那一行若落在 A 的「读」与「写」之间，就被整文件替换覆盖掉。
-    // 丢的是费用明细，而费用明细正是日费用护栏的依据（少计 → 超支而不自知）。
-    let appended = false;
-    try {
-      withFileLockSync(cacheStatsFile() + '.lock', () => {
-        appendFilePrivateSync(cacheStatsFile(), line + '\n');
-        appended = true;
-        if (fs.statSync(cacheStatsFile()).size > MAX_BYTES) {
-          // 审计 P2-3（v0.4.2）：轮转的 read-modify-write 同样有并发窗口，现在它与追加在同一锁内。
-          // v0.4.6 P2：轮转必须保留**当天全部**记录。此前只保留最后 KEEP_LINES 行——
-          // 单进程写满 2 万条后，当天早先的费用会被裁掉，todayCost() 随之变小，
-          // 日费用护栏被静默重置（用户可再次超支而不自知）。当天行（最多 MAX_LINES 条）
-          // 与最近 KEEP_LINES 行取并集，去重且保持原顺序。
-          const raw = fs.readFileSync(cacheStatsFile(), 'utf8');
-          const rows = raw.split('\n').filter(Boolean);
-          if (rows.length > MAX_LINES) {
-            const dayStart = beijingDayStart().getTime();
-            const todayLines = rows.filter((/** @type {string} */ l) => {
-              try {
-                return (JSON.parse(l).at || 0) >= dayStart;
-              } catch {
-                return false;
-              }
-            });
-            const tail = rows.slice(-KEEP_LINES);
-            const tailSet = new Set(tail);
-            const todayCapped = todayLines.length > MAX_LINES ? todayLines.slice(-MAX_LINES) : todayLines;
-            const todaySet = new Set(todayCapped);
-            const merged = [...todayCapped, ...tail.filter((l) => !todaySet.has(l))];
-            // 顺序按原文件恢复（避免打乱 byDay 折线的时间序）
-            const order = new Map(rows.map((l, k) => [l, k]));
-            merged.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
-            atomicWriteFileSync(cacheStatsFile(), merged.join('\n') + '\n');
-          }
+/**
+ * 构造要落盘的那一行（含 ensureHome）；同步/异步写入口共用，防止两份 JSON 字段漂移。
+ * @param {any} entry @returns {string}
+ */
+function buildCacheStatsLine(/** @type {any} */ entry) {
+  ensureHome(); // 审计 B10：与 audit/journal 一致，目录缺失不静默丢统计
+  return JSON.stringify({
+    at: Date.now(),
+    model: entry.model || '',
+    prompt: entry.prompt || 0,
+    completion: entry.completion || 0,
+    hit: entry.hit ?? null,
+    miss: entry.miss ?? null,
+    cost: entry.cost ?? null,
+    saved: entry.saved ?? null,
+    batch: entry.batch === true ? true : undefined, // Batch API 半价任务标记（/cost 分账展示）
+    steps: entry.steps ?? undefined, // 本回合步数（状态栏 步数统计）
+    llmMs: entry.llmMs ?? undefined, // 模型调用总耗时（状态栏 LLM 时长/tok-s）
+    toolMs: entry.toolMs ?? undefined, // 工具执行总耗时（状态栏 工具调用时长）
+    firstTokenMs: entry.firstTokenMs ?? undefined, // 首 token 延迟（状态栏平均首 token）
+    reasoning: entry.reasoning ?? undefined, // 省钱 B3：推理 token 估算（费用二级分账维度）
+    byTool: Array.isArray(entry.byTool) ? entry.byTool : undefined, // 省钱 B3：逐工具 {tool,calls,ms}
+    // v0.5.0 A4：垂域 Pack 归因（**标记记录**：cost 记 null 不计入 todayCost，
+    // 真实费用仍在回合级记录里 —— 两者相加不会重复计费；packCost 仅供 --by pack 展示）
+    pack: entry.pack ? String(entry.pack) : undefined,
+    purpose: entry.purpose ? String(entry.purpose) : undefined,
+    packCost: Number.isFinite(Number(entry.packCost)) ? Number(entry.packCost) : undefined,
+    // v0.4.7（T17）：辅助模型调用（路由分类器 / 自动标题 / 记忆提炼）标记——
+    // 这些调用不在 agent 回合 usage 里，单独入账，不与回合级重复计费。
+    aux: entry.aux === true ? true : undefined,
+    auxReason: entry.auxReason ? String(entry.auxReason) : undefined,
+    // v0.6.7（报告一 H-4 / M-10）：这笔消费**用量未知**（服务端没回 usage、或批次在拿不到
+    // token 数的情况下失败/被取消）。金额按 null 记，但 todayCost 会把条数汇总成可见信号，
+    // 免得"没记账"被读成"没花钱"。
+    usageUnknown: entry.usageUnknown === true ? true : undefined,
+    note: entry.note ? String(entry.note).slice(0, 200) : undefined,
+  });
+}
+
+/**
+ * 锁内临界区：追加 + 低频轮转。**追加与轮转必须同一把锁**（v0.6.3 BUG-009）：
+ * 原实现「锁外追加 + 锁内轮转」时，B 的行落在 A 的读/写之间会被整文件替换覆盖；
+ * 丢的是费用明细，而它是日费用护栏的依据（少计 → 超支而不自知）。
+ * `markAppended` 在追加成功、**轮转之前**调用：轮转失败要如实报成 rotate，不能报成 append。
+ * @param {string} line @param {() => void} markAppended
+ */
+function appendCacheStatsUnderLock(/** @type {string} */ line, /** @type {() => void} */ markAppended) {
+  appendFilePrivateSync(cacheStatsFile(), line + '\n');
+  markAppended();
+  if (fs.statSync(cacheStatsFile()).size > MAX_BYTES) {
+    // 审计 P2-3（v0.4.2）：轮转的 read-modify-write 同样有并发窗口，现在它与追加在同一锁内。
+    // v0.4.6 P2：轮转必须保留**当天全部**记录。此前只保留最后 KEEP_LINES 行——
+    // 单进程写满 2 万条后，当天早先的费用会被裁掉，todayCost() 随之变小，
+    // 日费用护栏被静默重置（用户可再次超支而不自知）。当天行（最多 MAX_LINES 条）
+    // 与最近 KEEP_LINES 行取并集，去重且保持原顺序。
+    const raw = fs.readFileSync(cacheStatsFile(), 'utf8');
+    const rows = raw.split('\n').filter(Boolean);
+    if (rows.length > MAX_LINES) {
+      const dayStart = beijingDayStart().getTime();
+      const todayLines = rows.filter((/** @type {string} */ l) => {
+        try {
+          return (JSON.parse(l).at || 0) >= dayStart;
+        } catch {
+          return false;
         }
       });
-    } catch (err) {
-      const msg = String(/** @type {any} */ (err)?.message ?? err);
-      lastWriteError = msg;
-      if (!appended) {
-        // 只提示一次：写不进去通常是持续性问题（磁盘满/权限），每回合刷屏反而让人忽略它
-        if (!writeWarned) {
-          writeWarned = true;
-          console.warn(
-            `[MingDao] ⚠ 费用明细写入失败：${msg}\n` +
-              `  今日费用护栏会**少计**这部分消费（可能超支而不知）；请检查 ${cacheStatsFile()} 的磁盘空间与权限。`
-          );
-        }
-        return { ok: false, error: msg, phase: 'append' };
-      }
-      // 追加已成功、只有轮转失败：丢的不是账，而是文件会持续增长
-      if (!rotateWarned) {
-        rotateWarned = true;
-        console.warn(`[MingDao] ⚠ 费用明细轮转失败：${msg}\n  ${cacheStatsFile()} 会持续增长（不影响计费，但请检查磁盘空间/权限）。`);
-      }
-      return { ok: false, error: msg, phase: 'rotate' };
+      const tail = rows.slice(-KEEP_LINES);
+      const tailSet = new Set(tail);
+      const todayCapped = todayLines.length > MAX_LINES ? todayLines.slice(-MAX_LINES) : todayLines;
+      const todaySet = new Set(todayCapped);
+      const merged = [...todayCapped, ...tail.filter((l) => !todaySet.has(l))];
+      // 顺序按原文件恢复（避免打乱 byDay 折线的时间序）
+      const order = new Map(rows.map((l, k) => [l, k]));
+      merged.sort((a, b) => (order.get(a) ?? 0) - (order.get(b) ?? 0));
+      atomicWriteFileSync(cacheStatsFile(), merged.join('\n') + '\n');
     }
-  } catch (err) {
-    const msg = String(/** @type {any} */ (err)?.message ?? err);
-    lastWriteError = msg;
+  }
+}
+
+/** 写失败的统一收口：区分「追加失败（真的丢账）」与「轮转失败（文件会变大，不丢账）」。
+ * @param {any} err @param {boolean} appended
+ * @returns {{ok: false, error: string, phase: 'append'|'rotate'}} */
+function cacheStatsFailure(/** @type {any} */ err, /** @type {boolean} */ appended) {
+  const msg = String(/** @type {any} */ (err)?.message ?? err);
+  lastWriteError = msg;
+  if (!appended) {
+    // 只提示一次：写不进去通常是持续性问题（磁盘满/权限），每回合刷屏反而让人忽略它
     if (!writeWarned) {
       writeWarned = true;
-      console.warn(`[MingDao] ⚠ 费用明细写入失败：${msg}\n  今日费用护栏会**少计**这部分消费（可能超支而不知）；请检查 ${cacheStatsFile()} 的磁盘空间与权限。`);
+      console.warn(
+        `[MingDao] ⚠ 费用明细写入失败：${msg}\n` +
+          `  今日费用护栏会**少计**这部分消费（可能超支而不知）；请检查 ${cacheStatsFile()} 的磁盘空间与权限。`
+      );
     }
     return { ok: false, error: msg, phase: 'append' };
+  }
+  // 追加已成功、只有轮转失败：丢的不是账，而是文件会持续增长
+  if (!rotateWarned) {
+    rotateWarned = true;
+    console.warn(`[MingDao] ⚠ 费用明细轮转失败：${msg}\n  ${cacheStatsFile()} 会持续增长（不影响计费，但请检查磁盘空间/权限）。`);
+  }
+  return { ok: false, error: msg, phase: 'rotate' };
+}
+
+/**
+ * 记录一条缓存/用量明细（**同步版**：CLI/REPL 与 tasks worker 进程用）。
+ * @param {any} entry
+ * @returns {{ok: boolean, error: string|null, phase: 'append'|'rotate'|null}}
+ */
+export function recordCacheStats(/** @type {any} */ entry) {
+  let line;
+  try {
+    line = buildCacheStatsLine(entry);
+  } catch (err) {
+    return cacheStatsFailure(err, false);
+  }
+  let appended = false;
+  try {
+    withFileLockSync(cacheStatsFile() + '.lock', () => appendCacheStatsUnderLock(line, () => {
+      appended = true;
+    }));
+  } catch (err) {
+    return cacheStatsFailure(err, appended);
+  }
+  return { ok: true, error: null, phase: null };
+}
+
+/**
+ * 记录一条缓存/用量明细 —— **WebUI 请求路径用它**（v0.7.0 §1.4）。
+ * 本函数在聊天收尾路径上、每回合至少一条；同步版在锁争用时用 `Atomics.wait` 睡眠，
+ * 会把整个 WebUI 事件循环（含其它会话的 SSE）冻住。这里 `await withFileLock` 让出事件循环。
+ * @param {any} entry
+ * @returns {Promise<{ok: boolean, error: string|null, phase: 'append'|'rotate'|null}>}
+ */
+export async function recordCacheStatsAsync(/** @type {any} */ entry) {
+  let line;
+  try {
+    line = buildCacheStatsLine(entry);
+  } catch (err) {
+    return cacheStatsFailure(err, false);
+  }
+  let appended = false;
+  try {
+    await withFileLock(cacheStatsFile() + '.lock', () => appendCacheStatsUnderLock(line, () => {
+      appended = true;
+    }));
+  } catch (err) {
+    return cacheStatsFailure(err, appended);
   }
   return { ok: true, error: null, phase: null };
 }
@@ -211,9 +258,10 @@ export function summarizeCacheStats(/** @type {any} */ entries) {
   return sum;
 }
 
-// 记录一次用量（agent 侧调用）：自动计算命中拆分与节省额
 // 记录一次用量（agent 侧调用）：自动计算命中拆分与节省额；perf 为回合性能指标（状态栏）
-export function recordUsage(/** @type {any} */ modelName, /** @type {any} */ usage, /** @type {any} */ perf = null) {
+/** 计算并组装一条用量记录（纯计算，不落盘）；同步/异步入口共用，防口径漂移。
+ * @param {any} modelName @param {any} usage @param {any} perf */
+function buildUsageEntry(/** @type {any} */ modelName, /** @type {any} */ usage, /** @type {any} */ perf) {
   const split = cacheSplit(usage);
   // v0.4.6：峰谷单价按「请求发起时刻」判定。响应落地与发起可能跨 12:00/18:00 边界，
   // 用 new Date()（落账时刻）会把高峰调用记成闲时价（或少记一半），日累计与护栏随之偏移。
@@ -239,7 +287,7 @@ export function recordUsage(/** @type {any} */ modelName, /** @type {any} */ usa
     // 覆盖内置定价 + 外部定价 + config.pricing.overrides 三条来源，不再依赖 modelPreset 单一判断。
     cost = estimateCost(modelName, prompt, completion, null, priceAt);
   }
-  return recordCacheStats({
+  return {
     model: modelName,
     prompt,
     completion,
@@ -255,7 +303,22 @@ export function recordUsage(/** @type {any} */ modelName, /** @type {any} */ usa
     firstTokenMs: perf?.firstTokenMs ?? undefined,
     reasoning: perf?.reasoningTokens ?? undefined, // 省钱 B3
     byTool: perf?.toolStats ?? undefined, // 省钱 B3
-  });
+  };
+}
+
+/** 同步记录一次用量（CLI/REPL/worker 进程）。
+ * @param {any} modelName @param {any} usage @param {any} perf */
+export function recordUsage(/** @type {any} */ modelName, /** @type {any} */ usage, /** @type {any} */ perf = null) {
+  return recordCacheStats(buildUsageEntry(modelName, usage, perf));
+}
+
+/**
+ * 异步记录一次用量 —— **WebUI 聊天收尾路径用它**（每回合至少一条，v0.7.0 §1.4）。
+ * @param {any} modelName @param {any} usage @param {any} perf
+ * @returns {Promise<{ok: boolean, error: string|null, phase: 'append'|'rotate'|null}>}
+ */
+export async function recordUsageAsync(/** @type {any} */ modelName, /** @type {any} */ usage, /** @type {any} */ perf = null) {
+  return recordCacheStatsAsync(buildUsageEntry(modelName, usage, perf));
 }
 
 export function formatCacheSummary(/** @type {any} */ sum) {
@@ -276,33 +339,41 @@ export function formatCacheSummary(/** @type {any} */ sum) {
  * @param {any} modelName @param {any} usage @param {string} [reason]
  * @param {{requestStartAt?: number}|null} [perf] 峰谷价锚点（请求发起时刻）；缺省时退回落账时刻
  */
-export function recordAuxUsage(modelName, usage, reason = 'aux', /** @type {{requestStartAt?: number}|null} */ perf = null) {
+/** 组装一条辅助调用记录；返回 null 表示"没有可记的 token"（不算错误）。
+ * @param {any} modelName @param {any} usage @param {string} reason @param {any} perf */
+function buildAuxEntry(/** @type {any} */ modelName, /** @type {any} */ usage, /** @type {string} */ reason, /** @type {any} */ perf) {
+  const prompt = usage.prompt_tokens || 0;
+  const completion = usage.completion_tokens || 0;
+  if (!prompt && !completion) return null;
+  const split = cacheSplit(usage);
+  // 审计 BUG-048（实测复现）：辅助调用（路由分类/标题/记忆抽取）此前**漏传 priceAt**，
+  // 于是 estimateCost 的第 5 参走默认 `new Date()` —— 按**落账时刻**选峰谷价，
+  // 与 recordUsage 的「按请求发起时刻」两套口径（实测同一笔调用 0.48 元 vs 0.24 元，
+  // 在 09:00/12:00/14:00/18:00 边界上正好差一倍）。这里与 recordUsage 对齐。
+  const startAt = Number(perf?.requestStartAt) || 0;
+  const priceAt = startAt > 0 ? new Date(startAt) : undefined;
+  const cost = split
+    ? estimateCost(modelName, prompt, completion, split, priceAt)
+    : estimateCost(modelName, prompt, completion, null, priceAt);
+  return {
+    model: modelName,
+    prompt,
+    completion,
+    hit: split?.hit ?? null,
+    miss: split?.miss ?? null,
+    cost,
+    saved: null,
+    aux: true,
+    auxReason: reason,
+  };
+}
+
+export function recordAuxUsage(/** @type {any} */ modelName, /** @type {any} */ usage, /** @type {string} */ reason = 'aux', /** @type {{requestStartAt?: number}|null} */ perf = null) {
   if (!usage) return { ok: true, error: null, phase: null };
   try {
-    const prompt = usage.prompt_tokens || 0;
-    const completion = usage.completion_tokens || 0;
-    if (!prompt && !completion) return { ok: true, error: null, phase: null };
-    const split = cacheSplit(usage);
-    // 审计 BUG-048（实测复现）：辅助调用（路由分类/标题/记忆抽取）此前**漏传 priceAt**，
-    // 于是 estimateCost 的第 5 参走默认 `new Date()` —— 按**落账时刻**选峰谷价，
-    // 与 recordUsage 的「按请求发起时刻」两套口径（实测同一笔调用 0.48 元 vs 0.24 元，
-    // 在 09:00/12:00/14:00/18:00 边界上正好差一倍）。这里与 recordUsage 对齐。
-    const startAt = Number(perf?.requestStartAt) || 0;
-    const priceAt = startAt > 0 ? new Date(startAt) : undefined;
-    const cost = split
-      ? estimateCost(modelName, prompt, completion, split, priceAt)
-      : estimateCost(modelName, prompt, completion, null, priceAt);
-    return recordCacheStats({
-      model: modelName,
-      prompt,
-      completion,
-      hit: split?.hit ?? null,
-      miss: split?.miss ?? null,
-      cost,
-      saved: null,
-      aux: true,
-      auxReason: reason,
-    });
+    const entry = buildAuxEntry(modelName, usage, reason, perf);
+    if (!entry) return { ok: true, error: null, phase: null };
+    return recordCacheStats(entry);
   } catch (err) {
     // 辅助调用的计费同样不能静默丢（自动路由/标题/记忆提炼的费用也是钱）。
     // 注意不在这里写 lastWriteError：本 try 也覆盖计价计算，真正的**写**失败已由
@@ -310,7 +381,25 @@ export function recordAuxUsage(modelName, usage, reason = 'aux', /** @type {{req
     const msg = String(/** @type {any} */ (err)?.message ?? err);
     return { ok: false, error: msg, phase: null };
   }
-  return { ok: true, error: null, phase: null };
+}
+
+/**
+ * 异步记录一次辅助模型调用（v0.7.0 §1.4）——**WebUI 的自动标题 / 记忆提炼 / 路由分类**用它。
+ * 这些调用都在请求路径上（常在回合收尾 await），同步锁争用会冻结其它会话。
+ * @param {any} modelName @param {any} usage @param {string} [reason]
+ * @param {{requestStartAt?: number}|null} [perf]
+ * @returns {Promise<{ok: boolean, error: string|null, phase: 'append'|'rotate'|null}>}
+ */
+export async function recordAuxUsageAsync(/** @type {any} */ modelName, /** @type {any} */ usage, /** @type {string} */ reason = 'aux', /** @type {{requestStartAt?: number}|null} */ perf = null) {
+  if (!usage) return { ok: true, error: null, phase: null };
+  try {
+    const entry = buildAuxEntry(modelName, usage, reason, perf);
+    if (!entry) return { ok: true, error: null, phase: null };
+    return await recordCacheStatsAsync(entry);
+  } catch (err) {
+    const msg = String(/** @type {any} */ (err)?.message ?? err);
+    return { ok: false, error: msg, phase: null };
+  }
 }
 
 /**

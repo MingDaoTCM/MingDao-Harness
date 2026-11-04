@@ -66,7 +66,7 @@ import {
 import { enableAutostart, disableAutostart, autostartStatus } from '../autostart.js';
 import { currentWorkspace, workspaceForDir, listWorkspaces, addWorkspace, removeWorkspace, renameWorkspace, setWorkspaceDir, workspacePath, touchWorkspace, getSessionWorkspace, setSessionWorkspace, removeSessionWorkspace, moveSessionWorkspace } from '../workspace.js';
 import { loadMemory, writeMemory, dedupeMemory } from '../memory.js';
-import { recordUsage, listCacheStats, summarizeCacheStats, costBreakdown } from '../cachestats.js';
+import { recordUsageAsync, listCacheStats, summarizeCacheStats, costBreakdown } from '../cachestats.js';
 import { PRICE_DATA_AS_OF } from '../pricing.js';
 import { costGuardStatus } from '../cost-guard.js';
 import { presetList, buildPreset } from '../mcp-presets.js';
@@ -1179,14 +1179,15 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     // v0.4.4：长任务费用逐轮入账——记录已按轮入账的累计 usage，最终补记最后一轮 + 兜底总结的剩余。
     // v0.4.5：onUsage 收 (modelName, delta)——主/子代理各自按实际模型归属（子代理经 spawnTask 透传，费用不漏计）。
     const recorded = { prompt_tokens: 0, completion_tokens: 0, prompt_cache_hit_tokens: 0, prompt_cache_miss_tokens: 0 };
+    // v0.7.0 §1.4：聊天收尾的用量落盘改**异步**。onUsage 由 agent 在流式循环里同步调用（不能 await），
+    // 因此用一条串行链保证"落盘顺序 = 调用顺序"，同时不阻塞事件循环——同步锁争用会冻结所有会话的 SSE。
+    let usageWriteChain = /** @type {Promise<any>} */ (Promise.resolve());
     const onUsage = (/** @type {string} */ modelName, /** @type {any} */ delta) => {
       recorded.prompt_tokens += delta?.prompt_tokens || 0;
       recorded.completion_tokens += delta?.completion_tokens || 0;
       recorded.prompt_cache_hit_tokens += delta?.prompt_cache_hit_tokens || 0;
       recorded.prompt_cache_miss_tokens += delta?.prompt_cache_miss_tokens || 0;
-      try {
-        recordUsage(modelName, delta, null);
-      } catch {}
+      usageWriteChain = usageWriteChain.then(() => recordUsageAsync(modelName, delta, null)).catch(() => {});
     };
     const agent = createAgent({
       provider: providerNow,
@@ -1255,7 +1256,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         prompt_cache_hit_tokens: Math.max(0, (r.usage?.prompt_cache_hit_tokens || 0) - recorded.prompt_cache_hit_tokens),
         prompt_cache_miss_tokens: Math.max(0, (r.usage?.prompt_cache_miss_tokens || 0) - recorded.prompt_cache_miss_tokens),
       };
-      recordUsage(r.perf?.usedModel || runModel, remaining, /** @type {any} */ (r.perf));
+      await usageWriteChain; // 先让逐轮入账落完，顺序不颠倒
+      await recordUsageAsync(r.perf?.usedModel || runModel, remaining, /** @type {any} */ (r.perf));
       // v0.3.0 P0-3：轮末提取项目记忆（有工具工作才提，fire-and-forget）。写文件供「未来会话」用，
       // 当前会话用快照（上文已注入），故不会中途改系统提示、不破坏前缀缓存。
       if (io.stats().toolCount > 0) {
