@@ -7776,14 +7776,44 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
 
     // ④ 同步锁调用点清单受审阅约束：剩余处数固定，**新增即失败**。
     // 与"静默吞写白名单"同款做法——把残留变成清单，而不是靠人记。
+    //
+    // v0.7.0（审计 H-05）：旧实现只 grep 字面量 `withFileLockSync(`，于是
+    // `import { withFileLockSync as lockFileSync }` 这种**别名**可以整份绕过护栏
+    // （实际已出现 7 个文件、18 处）。现在改为**解析 import/export 别名**后计数，
+    // 并要求每个清单条目写明"为什么它可以同步"（必须含 CLI / daemon / 非 web 之一），
+    // 否则视为未审阅。
     {
+      /** 解析某文件里 withFileLockSync 的别名（import 与 re-export 两种形态）。 */
+      const syncAliases = (/** @type {string} */ raw) => {
+        const out = new Set();
+        for (const m of raw.matchAll(/import\s*\{([^}]*)\}\s*from\s*['"][^'"]*atomic-write\.js['"]/g)) {
+          for (const part of m[1].split(',')) {
+            const as = part.trim().match(/^withFileLockSync\s+as\s+([A-Za-z_$][\w$]*)$/);
+            if (as) out.add(as[1]);
+          }
+        }
+        for (const m of raw.matchAll(/export\s*\{([^}]*)\}\s*from\s*['"][^'"]*atomic-write\.js['"]/g)) {
+          for (const part of m[1].split(',')) {
+            const as = part.trim().match(/^withFileLockSync\s+as\s+([A-Za-z_$][\w$]*)$/);
+            if (as) out.add(as[1]);
+          }
+        }
+        return [...out];
+      };
       const ALLOWED_SYNC_LOCKS = {
-        'cachestats.js': { n: 1, why: 'v0.6.3（BUG-009）起追加与轮转在同一把锁内（原为锁外追加，B 的行会被 A 的轮转覆盖）；写入频率是"每回合一条"，不在请求热路径上' },
-        'audit.js': { n: 1, why: 'v0.6.3（M-20）起追加与轮转在同一把锁内——审计是合规证据，丢一行等于证据链有洞；写入频率是"每工具调用一条"' },
-        'schedule.js': { n: 12, why: '调度守护进程内部（阻塞只推迟定时任务，不冻结用户请求）；且这些函数是纯同步读-改-写链' },
-        'sync.js': { n: 1, why: 'CLI 一次性命令（进程很快就退出），且调用链全同步' },
-        'tasks.js': { n: 1, why: 'patchTask 的状态读-改-写（已把进程操作移出临界区，实测毫秒级）' },
-        'task-state.js': { n: 1, why: 'v0.6.5（BUG-068）起检查点合并写加锁防丢更新；**WebUI 请求路径已改走异步版** saveTaskStateMergeAsync，这里剩的同步版只服务 CLI/REPL（一次性命令与本地交互），临界区是"读一个小 JSON + 原子写"' },
+        'audit.js': { n: 1, why: 'CLI/worker 同步版保留（WebUI 请求路径走 writeAuditAsync，v0.7.0 已改）' },
+        'cachestats.js': { n: 1, why: 'CLI/worker 同步版保留（WebUI 聊天收尾走 recordUsageAsync）' },
+        'config.js': { n: 4, why: 'CLI 同步版（WebUI 走 saveConfigAsync）；锁内重读合并防丢键' },
+        'credentials.js': { n: 2, why: 'CLI 同步版（WebUI 走 setStoredKeyAsync）；锁内重读' },
+        'ledger.js': { n: 1, why: '账本 append 必须整行原子（哈希链），写频率"每回合一条"；CLI/worker 侧同步版' },
+        'memory.js': { n: 4, why: 'CLI 同步版（WebUI 走 appendMemoryAsync/dedupeMemoryAsync/writeMemoryAsync）' },
+        'net-guard.js': { n: 1, why: 'egress 日志轮转同锁；CLI/worker 侧同步版' },
+        'providers/index.js': { n: 2, why: 'endpoint-limits 学习值合并；CLI 侧同步版（WebUI chat 走 provider 内部异步链，已实测不冻结）' },
+        'schedule.js': { n: 12, why: 'daemon 独立进程（runSleeper 内），非 web 请求路径；WebUI 走 *Async' },
+        'session-index.js': { n: 3, why: 'CLI 同步版（WebUI 走 syncSessionIndexAsync/searchSessionsAsync）' },
+        'sync.js': { n: 1, why: 'CLI 一次性命令（同步 CLI 用），web 路径走 commitStateAsync' },
+        'task-state.js': { n: 1, why: 'CLI/REPL 同步版；WebUI 走 saveTaskStateMergeAsync（同链可重入）' },
+        'tasks.js': { n: 1, why: 'CLI 同步版（WebUI 走 patchTaskAsync/listTasksAsync）' },
       };
       const files = [];
       (function walk(/** @type {string} */ d) {
@@ -7796,17 +7826,23 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
       /** @type {Record<string, number>} */
       const found = {};
       for (const f of files) {
-        const code = fs.readFileSync(f, 'utf8').replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
-        const n = (code.match(/withFileLockSync\s*\(/g) || []).length;
+        const raw = fs.readFileSync(f, 'utf8');
+        const aliases = syncAliases(raw);
+        const code = raw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+        let n = (code.match(/\bwithFileLockSync\s*\(/g) || []).length;
+        for (const a of aliases) n += (code.match(new RegExp(`\\b${a}\\s*\\(`, 'g')) || []).length;
         if (n) found[path.relative(srcDir, f)] = n;
       }
       const problems = [];
       for (const [f, n] of Object.entries(found)) {
-        if (!ALLOWED_SYNC_LOCKS[f]) problems.push(`${f}：新增 ${n} 处同步锁（不在已审阅清单内）——WebUI 请求路径请改用异步版 withFileLock`);
+        if (!ALLOWED_SYNC_LOCKS[f]) problems.push(`${f}：新增 ${n} 处同步锁（不在已审阅清单内）——WebUI 请求路径请改用异步版 withFileLock（别名不算豁免：别名会被解析）`);
         else if (ALLOWED_SYNC_LOCKS[f].n !== n) problems.push(`${f}：同步锁处数 ${ALLOWED_SYNC_LOCKS[f].n} → ${n}（实现变了，清单必须同步复核）`);
       }
-      for (const f of Object.keys(ALLOWED_SYNC_LOCKS)) if (!found[f]) problems.push(`${f}：清单里的 ${ALLOWED_SYNC_LOCKS[f].n} 处已不存在（迁移完了就请从清单移除）`);
-      assert.deepEqual(problems, [], `同步锁调用点清单发生变化：\n${problems.join('\n')}\n当前：${JSON.stringify(found)}`);
+      for (const [f, v] of Object.entries(ALLOWED_SYNC_LOCKS)) {
+        if (!found[f]) problems.push(`${f}：清单里的 ${v.n} 处已不存在（迁移完了就请从清单移除）`);
+        if (!/(CLI|daemon|非 web)/.test(v.why)) problems.push(`${f}：清单条目必须写明"为什么它可以同步"（需含 CLI / daemon / 非 web），当前：${v.why}`);
+      }
+      assert.deepEqual(problems, [], `同步锁调用点清单发生变化（含别名解析）：\n${problems.join('\n')}\n当前：${JSON.stringify(found)}`);
     }
   } finally {
     safeRmSync(dir109, { recursive: true, force: true });
