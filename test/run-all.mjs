@@ -51,6 +51,8 @@ const SUITES = [
   ['state-locks', 'node', ['test/state-locks.js']],
   // v0.7.0 §1.4：请求路径同步锁改异步（持锁 5s 不再冻结事件循环）
   ['request-path-locks', 'node', ['test/request-path-locks.js']],
+  // v0.7.0 §1.2：覆盖率口径（最内层区间计数；三口径 + ratchet）
+  ['coverage-metric', 'node', ['test/coverage-metric.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];
