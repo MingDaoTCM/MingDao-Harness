@@ -31,6 +31,15 @@ const tmp = (/** @type {string} */ tag) => {
   cleanups.push(d);
   return d;
 };
+/** 建在 cwd 下的临时目录：`path.relative(cwd, dir)` 在 Windows 跨盘时返回**绝对路径**，
+ * 会让 W3/W8 的"相对路径归一"断言在 Windows 上失去判别力（v0.6.33 Windows 变异腿：
+ * batch74 ②④⑦ 逃逸就是因为 rel 变成了绝对路径）。放在 cwd 下保证 rel 恒为相对。
+ */
+function tmpUnderCwd(/** @type {string} */ tag) {
+  const d = fs.mkdtempSync(path.join(process.cwd(), `.mingdao-ws-${tag}-`));
+  cleanups.push(d);
+  return d;
+}
 /** 切到一个隔离的 MINGDAO_HOME（注册表/会话映射都写在这里）。 */
 function setHome(/** @type {string} */ tag) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), `mingdao-ws-home-${tag}-`));
@@ -89,7 +98,7 @@ try {
   // -------------------------------------------------------------------------
   {
     setHome('normalize');
-    const dir = tmp('normalize-dir');
+    const dir = tmpUnderCwd('normalize-dir');
     const rel = path.relative(process.cwd(), dir);
     const r = await ws.addWorkspace('rel-proj', rel);
     check(r.ok === true, 'W3：相对路径登记必须成功', JSON.stringify(r));
@@ -175,7 +184,7 @@ try {
   // -------------------------------------------------------------------------
   {
     setHome('session');
-    const dir = tmp('session-dir');
+    const dir = tmpUnderCwd('session-dir');
     const rel = path.relative(process.cwd(), dir);
     await ws.setSessionWorkspace('sess-1', rel);
     check(ws.getSessionWorkspace('sess-1') === path.resolve(rel), 'W8：会话目录必须归一为绝对路径', String(ws.getSessionWorkspace('sess-1')));
