@@ -6505,3 +6505,105 @@ v0.6.32 自审实测：633→669 条变异里 4 个文件占 285 条（`agent.js
   `test/mutate/README.md`、`scripts/coverage-baseline.json`；三个新套件**未**接进
   `run-all`/CI（不在允许范围，接入方法见 `docs/DEVELOPER.md` §8.4）；
   `scripts/mutation-coverage.mjs` 也**未**接进 CI（同上，直接 `--fail-over 0` 会先被存量 13 个盲区卡红）。
+
+## 6.4 v0.7.0 §1.2：前端可测化——4 个纯函数搬家 + 逐字节对拍 + 40 条源码正则守卫行为化
+
+### 6.4.1 缺陷（自审实测，HEAD=b5cd199）
+
+`src/web/app.js` 3252 行 / 2876 代码行，`npm run coverage` 里**可执行覆盖 0%**（未加载文件，
+按 0 计入分母）；全仓 369 条源码正则守卫中 176 条打在 `app.js` / `index.html` 上。UI 改动的
+"绿"只证明文本没变，不证明行为正确——v0.6.19 的翻车正是这个盲区的代价。
+
+### 6.4.2 搬家（只搬纯计算，不改逻辑）
+
+新建 `src/web/viewmodel.js`（248 代码行，零 DOM / 零全局可变状态 / 不 import util.js）：
+
+| 函数 | 行数 | 签名 | 依赖（一并搬走） |
+| --- | --- | --- | --- |
+| `sideNavLayout` | 6 | `(width, pref) -> {mode, collapsed, width, drawer}` | `sideNavBreakpoint` |
+| `errCardParts` | 13 | `(text) -> {head, hint, raw, tag}` | 无 |
+| `runStripView` | 9 | `(st, isGenerating) -> {phase, ttft, tps, ctx, tools, cost}` | `normalizeRunPhase`、6 个 `fmtRun*`、`applyRunProgress`、`permissionSourceLabel`、本地 `fmtTok` |
+| `traceRoundView` | 22 | `(round) -> {round, tools[], subs[], toolCount, subCount, failed, durationMs, durationText, summary}` | `toolStepView` → `toolOutputStats/Text`、`toolArgsSummary`、`toolResultSummary`、`fmtToolDur`、`toolTimelineSummary/Visibility`、`subagentRowView`、`fmtTraceDur` |
+
+每个导出都有 JSDoc（输入/输出字段）；`app.js` 改为 `import` 并只保留 DOM 接线。
+`viewmodel.js` 不 import `util.js`（`util.js` 依赖 `document`，会破坏 node 直测与
+`tsconfig.full` 的 exclude 边界），改为复制 5 行 `fmtTok` 并在测试里对数。
+
+### 6.4.3 对拍（搬家没改行为的证据）
+
+新建 `test/viewmodel.js`（node 直跑，不依赖浏览器）：
+
+- 4 个函数各 **6+ 组输入**（空数组 / 单条 / 超长文本 / 缺字段 / 非法值 / 边界宽度）；
+- 把搬家前 `app.js` 的原实现逐字复制为 `REF_*` 参照实现（含依赖树），同一批输入两边跑，
+  `assert.deepEqual` 断言输出一致；共 **110 条断言**全过；
+- 输出形状断言：`{head,hint,raw,tag}`、状态条六字段、轮视图九字段、工具步十三字段等
+  字段名逐个钉死（前端渲染依赖的字段名不许变）。
+
+### 6.4.4 40 条源码正则守卫 → 行为断言（节选 5 条，完整清单见提交信息）
+
+| 原文正则 | 新断言 |
+| --- | --- |
+| `/data-k="phase"/ && /data-k="cost"/` | `Object.keys(runStripView({},true)).sort() === ['cost','ctx','phase','tools','tps','ttft']` |
+| `/s\.roundText/.test(subSrc) && …` | `deepEqual([s.roundText,s.toolText,s.progress,s.statusText], ['第 2 轮','3 次工具','最后进展 2s 前','完成'])` |
+| `/body\.side-wide #sideNav\{width:240px\}/` | `sideNavLayout(1440,false).width === 240` |
+| `/const base = runStripView\(st, isGenerating\);/` | 注入 spy：`runPanelView` 恰好调用 `runStripView` 一次且六项原样采用 |
+| `/id="paletteMask"/ && /id="paletteBtn"/` | 调用 `paletteFilter([...],'模型')`，断言过滤结果 |
+
+替换集中在 §148/§149/§151/§158/§159/§163 的纯逻辑与重复结构守卫；DOM/HTML 的视觉事实
+改由 `scripts/ui-shot.mjs` 的像素证据兜底（见 6.4.5）。
+
+### 6.4.5 UI 不许变（逐字节）
+
+改动前后各跑一次 `node scripts/ui-shot.mjs --out …`，5 张同名 PNG 的 sha256 **完全一致**：
+
+```
+home      00a68c13…fed1b5e
+settings  1c27e001…dac414
+palette   f9369ef1…018dcb
+session   f285c440…ede11
+sheet     cdc5ea7c…dcb6ca
+```
+
+### 6.4.6 覆盖率与 baseline
+
+| 口径 | 改前基线 | 改后实测 |
+| --- | --- | --- |
+| code-lines | 68.3% | **73.9%**（+5.6pp） |
+| all-lines | 49.7% | **53.5%**（+3.8pp） |
+| functions | 87.8% | 81.6% |
+
+`src/web/viewmodel.js` **92.3%** code-lines（目标 ≥40%）；`src/web/app.js` 从 **0% → 46.9%**
+（新增 §164：用最小 DOM 桩真实 `import` app.js，触发顶层接线，V8 覆盖不再是 0%）。
+
+**functions 口径说明（不是回退）**：app.js 以前从未被加载，它那 400+ 个函数不在分母里；
+现在真实 import 后分母从 1828 → 2294。分子同时增加（app 229 个 + viewmodel 31 个），
+但分母扩张更大，故百分比下降。baseline 已在同一次提交里按实测重写，note 写明原因；
+不接受"不加载 app.js"来保住旧百分比——那正是本次要修的盲区。
+
+### 6.4.7 变异
+
+`node test/mutate/run.mjs --allow-dirty` **全量 63/63 批全中**。app.js 搬家导致的锚点漂移
+按"同步锚点而不是删变异"处理，共 4 批 12 条（不改 `from` 的缺陷语义，只把文件指向
+`src/web/viewmodel.js`）：
+
+- batch36 ②⑪⑫：`fmtRunTools` / `normalizeRunPhase` / `fmtRunCtx`
+- batch38 ⑧⑬：`toolStepView` / `toolTimelineVisibility`
+- batch41 ③④：`subagentRowView`
+- batch49 ⑨⑩：`sideNavBreakpoint` / `sideNavLayout`
+
+另保留 4 条**精确接线守卫**（不行为化，因为它们正是变异靶点）：`renderErrCard` 的
+`d.innerHTML=errCardHtml(text)`、`progress.subagent` 的 `mergeSubagentProgress` 调用、
+`.rpModel` 的 `v.modelLabel || v.model`、以及 `body.side-wide main{margin-left:240px}`。
+
+### 6.4.8 发现与边界
+
+- **必须改的超出允许清单的一行**：`src/web/routes/api.js` 的静态资源白名单原本只有
+  `app.js/util.js/constants.js`。浏览器 ESM `import './viewmodel.js'` 会请求 `/viewmodel.js`
+  且**不带 page URL 的 ?token=**，不改白名单会 401/404 → 整个 app.js 加载失败（实测
+  `#cfgBtn.onclick` 为 null、ui-shot 设置面板点不开）。已同时加入 `WEB_JS_FILES` 与
+  `isStaticAsset`（与 app.js/util.js 同策略：公开静态壳、无数据、无新接口）。
+  这是任务书"允许改动"清单之外的最小必要改动，特此登记。
+- 未改 `src/web/index.html`、`src/agent.js`、`src/web/server.js`、`test/run-all.mjs`、
+  `.github/workflows/ci.yml`、`test/mutate/README.md`。
+- 边界：`test/viewmodel.js` 未接进 `test/run-all.mjs`（不在允许改动范围），通过
+  `test/smoke.js` import viewmodel 进入覆盖率；单独运行仍可用 `node test/viewmodel.js`。

@@ -32,7 +32,7 @@ export function createApiDispatch(deps) {
     // 访问控制（P1-3/P1-4）：token 校验覆盖数据与操作接口；壳页面与 PWA 静态资源公开
     // （壳不含任何数据，SPA 需要先加载才能读取 ?token=）；Host 白名单覆盖一切请求
     const isStaticAsset =
-      p === '/' || p === '/index.html' || p === '/app.js' || p === '/util.js' || p === '/constants.js' || p === '/favicon.ico' || p === '/icon.svg' || p === '/icon-192.png' || p === '/icon-512.png' || p === '/manifest.webmanifest' || p === '/sw.js';
+      p === '/' || p === '/index.html' || p === '/app.js' || p === '/util.js' || p === '/constants.js' || p === '/viewmodel.js' || p === '/favicon.ico' || p === '/icon.svg' || p === '/icon-192.png' || p === '/icon-512.png' || p === '/manifest.webmanifest' || p === '/sw.js';
     if (authEnabled && !isStaticAsset && !tokenMatches(requestToken(req, url))) {
       return json(res, 401, { error: '未授权：缺少或无效的访问令牌（地址需带 ?token=…，或请求头携带 X-MingDao-Token）' });
     }
@@ -90,7 +90,8 @@ export function createApiDispatch(deps) {
     // —— 静态壳资源（公开；不经过域分发） ——
     // 质检 Q2/S5：SPA 外部 JS——从磁盘读取（与 index.html 同目录）。
     // v0.2.8 C2：app.js 拆分为 ES Modules（app.js / util.js / constants.js），统一从此处伺服。
-    const WEB_JS_FILES = new Set(['app.js', 'util.js', 'constants.js']);
+    // v0.7.0 §1.2：viewmodel.js（纯视图模型）与 app.js 同目录、同源伺服（不新增接口，只加白名单）。
+    const WEB_JS_FILES = new Set(['app.js', 'util.js', 'constants.js', 'viewmodel.js']);
     if (method === 'GET' && WEB_JS_FILES.has(p.slice(1))) {
       try {
         const js = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..', p.slice(1)), 'utf8');

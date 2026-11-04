@@ -92,7 +92,8 @@ M.mutate({
 // ⑨ 断点不生效：把 mid 档下探到 800，880 被误判成折叠栏而不是抽屉
 M.mutate({
   name: '⑨ 900px 断点被改到 800px（880 不再落抽屉）',
-  file: 'src/web/app.js',
+  // v0.7.0 §1.2：sideNavBreakpoint 已搬到 viewmodel.js，锚点同步（不删变异）。
+  file: 'src/web/viewmodel.js',
   from: "  if (w >= 900) return 'mid';",
   to: "  if (w >= 800) return 'mid';",
   expect: ['880 必须落抽屉档'],
@@ -102,7 +103,8 @@ M.mutate({
 // ⑩ 折叠宽度不对：48px 变成 64px（主区推开量/图标列对不上）
 M.mutate({
   name: '⑩ 折叠宽度 48px 变 64px',
-  file: 'src/web/app.js',
+  // v0.7.0 §1.2：sideNavLayout 已搬到 viewmodel.js，锚点同步（不删变异）。
+  file: 'src/web/viewmodel.js',
   from: 'return { mode, collapsed, width: mode === \'drawer\' ? 0 : (collapsed ? 48 : 240), drawer: mode === \'drawer\' };',
   to: 'return { mode, collapsed, width: mode === \'drawer\' ? 0 : (collapsed ? 64 : 240), drawer: mode === \'drawer\' };',
   expect: ['1440 用户折叠后必须是 48px'],

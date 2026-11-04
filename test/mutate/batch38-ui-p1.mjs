@@ -82,7 +82,8 @@ M.mutate({
 // ⑧ 失败高亮类名丢失（失败步与成功步长得一样——免展开可见的判据没了）
 M.mutate({
   name: '⑧ 失败步不再带 fail 高亮类',
-  file: 'src/web/app.js',
+  // v0.7.0 §1.2：toolStepView 已搬到 viewmodel.js，锚点同步（不删变异）。
+  file: 'src/web/viewmodel.js',
   from: "    liClass: 'tl-step' + (failed ? ' fail' : ''),",
   to: "    liClass: 'tl-step',",
   expect: ['失败步必须带 fail 高亮'],
@@ -132,7 +133,8 @@ M.mutate({
 // ⑬ 失败步默认被折叠（20 步回合里失败藏在"展开其余 N 步"后面）
 M.mutate({
   name: '⑬ 失败步默认被折叠（不再免展开可见）',
-  file: 'src/web/app.js',
+  // v0.7.0 §1.2：toolTimelineVisibility 已搬到 viewmodel.js，锚点同步（不删变异）。
+  file: 'src/web/viewmodel.js',
   from: '  list.forEach((s, i) => { if (s.failed) keep.add(i); });',
   to: '  list.forEach((s, i) => { if (false && s.failed) keep.add(i); });',
   expect: ['失败步免展开即可见'],

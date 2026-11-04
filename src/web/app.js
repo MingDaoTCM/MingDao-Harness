@@ -1,5 +1,6 @@
 import { $, esc, highlight, renderMarkdown, scrollBottom, expandableBody, resultText, truncText, textBody, fmtDur, fmtTok, fmtT } from './util.js';
 import { MAX_ATTACHMENTS, MAX_IMAGE_BYTES, MAX_TEXT_BYTES } from './constants.js';
+import { sideNavBreakpoint, sideNavLayout, errCardParts, runStripView, permissionSourceLabel, toolStepView, toolTimelineSummary, toolTimelineVisibility, traceRoundView } from './viewmodel.js';
 
 // 访问令牌（P1-3）：地址带 ?token= 时记入 sessionStorage 并从地址栏移除（防截图/历史外泄），
 // 之后所有同源请求统一附加 X-MingDao-Token 头；无令牌时行为与旧版一致。
@@ -349,18 +350,8 @@ function toggleRecentSessions() {
   writeRecentCollapsed(storage, recentCollapsed);
   syncRecentCollapsed(recentCollapsed);
 }
-/** 左栏三档断点：≥1180 展开(240) / 900–1180 自动折叠(48) / <900 抽屉。右栏收起点见 layoutClassesFor（<1100）。 */
-function sideNavBreakpoint(width) {
-  const w = Number(width) || 0;
-  if (w >= 1180) return 'wide';
-  if (w >= 900) return 'mid';
-  return 'drawer';
-}
-function sideNavLayout(width, pref) {
-  const mode = sideNavBreakpoint(width);
-  const collapsed = mode === 'mid' || (mode === 'wide' && !!pref);
-  return { mode, collapsed, width: mode === 'drawer' ? 0 : (collapsed ? 48 : 240), drawer: mode === 'drawer' };
-}
+// 左栏三档断点/布局是纯计算，已搬到 viewmodel.js（sideNavBreakpoint / sideNavLayout）；
+// 这里只消费结果，类名映射（sideNavClassNames）仍留在 DOM 层。
 function sideNavClassNames(layout) {
   const out = [];
   if (layout.mode === 'wide') out.push('side-wide');
@@ -555,17 +546,7 @@ function renderTodos(todos,msg){
 // —— 错误卡：三段式（纯函数；smoke §148 直接 eval 这段做行为断言） ——
 // 上游原文保留换行（<pre> + white-space:pre-wrap），默认折叠只显示首行摘要；
 // 处置建议独立成一行（.err-hint，white-space:pre-line），与原文明分；长错误可一键复制。
-function errCardParts(text){
-  const rawText=String(text||'').replace(/\r\n?/g,'\n');
-  const lines=rawText.split('\n');
-  let hintIdx=-1;
-  for(let i=0;i<lines.length;i++){ if(/^\s*(?:💡|提示[:：]|处置建议[:：])/.test(lines[i])){ hintIdx=i; break; } }
-  const hint=hintIdx>=0?lines[hintIdx].trim():'';
-  const raw=(hintIdx>=0?lines.slice(0,hintIdx):lines).join('\n').trim()||rawText.trim();
-  const head=(lines[0]||'').trim();
-  const tag=/上游|upstream/i.test(rawText)?'上游':/超时|timeout/i.test(rawText)?'内核':'错误';
-  return {head,hint,raw,tag};
-}
+// 三段式的纯计算已搬到 viewmodel.js（errCardParts）；errCardHtml 只做字符串拼装。
 function errCardHtml(text){
   const p=errCardParts(text);
   const summary=p.head.length>120?p.head.slice(0,120)+'…':p.head;
@@ -984,56 +965,10 @@ async function stopTurnFromButton(){
 }
 
 // —— 输入框上方工作状态条（P0-1 起由下面的 #runStrip 常驻状态条取代；保留本行作为既有守卫的定位锚点）
-// —— 运行状态条：字段口径（纯函数；smoke §148 直接 eval 这段做行为断言） ——
+// —— 运行状态条：字段口径（纯函数；已搬到 viewmodel.js，smoke 直测 runStripView） ——
 // 阶段只有五档（等首帧 / 解码中 / 执行工具 / 已中止 / 空闲）——服务端的 phase 文案更细
 // （发请求（等首帧）/ 解码中（收到增量）/ 执行工具 bash / 排队等待本地端点…），这里收敛成用户能一眼读懂的五档。
-function normalizeRunPhase(rawPhase, isGenerating, aborted){
-  if(aborted) return '已中止';
-  if(!isGenerating) return '空闲';
-  const p=String(rawPhase||'');
-  if(/已中止|已停止|aborted|stalled/.test(p)) return '已中止';
-  if(/解码/.test(p)) return '解码中';
-  if(/执行工具|等待权限确认|待发请求|子\s?Agent|工具/.test(p)) return '执行工具';
-  return '等首帧';
-}
-function fmtRunTtft(ms){ return ms==null || !Number.isFinite(Number(ms)) ? '—' : (Number(ms)/1000).toFixed(1)+'s'; }
-function fmtRunTps(v){ return v==null || !Number.isFinite(Number(v)) ? '—' : Number(v).toFixed(1); }
-function fmtRunTools(n){ const k=Math.max(0,Math.round(Number(n)||0)); return k===0 ? '0 次工具调用' : k+' 次工具调用'; }
-function fmtRunCost(cost){ const m=String(cost||'').match(/≈¥[0-9.]+/); return m ? m[0] : ''; }
-function fmtRunCtx(st){
-  const total=Number(st.contextTotal)||0;
-  const used=Math.max(0,Math.round(Number(st.contextUsed)||0));
-  if(!total && !used) return '—';
-  // 生成中没有实时 used tokens（内核 budget 只在 done 算）：用「上一轮 used + 本轮字符估算」，
-  // 必须标 ≈；done 带回 budget 后才是精确值（去掉 ≈）。
-  const approx=st.contextApprox !== false;
-  return (approx?'≈ ':'')+fmtTok(used)+' / '+(total?fmtTok(total):'?')+' tokens';
-}
-function runStripView(st, isGenerating){
-  return {
-    phase: normalizeRunPhase(st.rawPhase, isGenerating !== false, st.aborted),
-    ttft: fmtRunTtft(st.ttftMs),
-    tps: fmtRunTps(st.tokensPerSec),
-    ctx: fmtRunCtx(st),
-    tools: fmtRunTools(st.toolCalls),
-    cost: fmtRunCost(st.cost) || '—',
-  };
-}
-/** 把一条 progress 事件并进运行状态（桩 SSE 与真实 SSE 走同一条路径）。 */
-function applyRunProgress(st, ev, baseUsed){
-  st.rawPhase=String(ev.phase||'');
-  st.phase=normalizeRunPhase(st.rawPhase, true, false);
-  if(ev.ttftMs!=null) st.ttftMs=Number(ev.ttftMs)||0;
-  st.tokensPerSec=ev.tokensPerSec!=null ? Number(ev.tokensPerSec) : null;
-  st.toolCalls=Number(ev.toolCalls)||0;
-  st.contentChars=Number(ev.contentChars)||0;
-  st.contextApprox=true;
-  st.contextUsed=Math.max(0, Number(baseUsed)||0) + Math.round(st.contentChars/1.5);
-  return st;
-}
-function permissionSourceLabel(source){
-  return ({explicit:'显式选择',preset:'预设',config:'config 默认',cli:'命令行',default:'内置默认'})[String(source||'')] || '未知';
-}
+// runStripView / applyRunProgress / permissionSourceLabel 及六个 fmtRun* 全部在 viewmodel.js。
 
 // —— 状态条渲染（**唯一**刷新出口；合并原 #workStatus / 顶部活动条 / 消息内气泡三处） ——
 function renderWorkStatus(){
@@ -1075,116 +1010,7 @@ function renderWorkStatus(){
 // 会话设置文案。DOM 渲染在下面各自的小节里，只消费这些结果。
 // ============================================================================
 
-// —— 工具时间线：同一轮多个调用聚合成一张卡（默认前 3 步 + 失败步，整卡可折叠） ——
-const TOOL_TL_DEFAULT_VISIBLE = 3;
-const TOOL_OUTPUT_PREVIEW = 900;
-/** 工具参数的**一行**摘要（完整参数在展开区里用 JSON 显示）。 */
-function toolArgsSummary(name, args) {
-  const a = args || {};
-  if (name === 'bash') return String(a.command || '');
-  if (name === 'task') return String(a.question || a.prompt || a.description || '');
-  return String(a.path || a.pattern || a.name || a.query || a.url || a.file || '');
-}
-/** 工具结果的一行摘要（不是正文；正文在展开区）。 */
-function toolResultSummary(ev) {
-  if (!ev || ev.result === undefined) return '执行中…';
-  const r = ev.result || {};
-  if (r.ok === false) return r.error ? String(r.error).split('\n')[0] : '失败';
-  if (ev.name === 'bash') return r.timedOut ? '超时' : 'exit ' + (r.exitCode != null ? r.exitCode : 0);
-  if (ev.name === 'skill') {
-    const m = String(r.output || '').match(/^description:\s*(.+)$/m);
-    return m ? m[1].slice(0, 100) : '已加载技能';
-  }
-  if (ev.name === 'write') return r.bytes != null ? r.bytes + ' 字节' : '已写入';
-  if (ev.name === 'edit') return '已修改';
-  if (ev.name === 'read') return r.lines != null ? r.lines + ' 行' : '读取完成';
-  if (ev.name === 'todo') return '更新任务清单';
-  const out = String(r.output || r.stdout || r.stderr || '');
-  return out.split('\n')[0].slice(0, 120);
-}
-/** 工具输出的完整文本（展开区用）。 */
-function toolOutputText(ev) {
-  const r = (ev && ev.result) || {};
-  if (ev && ev.name === 'skill') return String(r.output || '');
-  if (r.diff) {
-    const before = String(r.diff.before || '').split('\n');
-    const after = String(r.diff.after || '').split('\n');
-    const n = Math.max(before.length, after.length);
-    const out = [];
-    for (let i = 0; i < n; i++) {
-      if (before[i] === after[i]) out.push(' ' + (before[i] || ''));
-      else {
-        if (before[i] !== undefined) out.push('- ' + before[i]);
-        if (after[i] !== undefined) out.push('+ ' + after[i]);
-      }
-    }
-    return out.join('\n');
-  }
-  if (ev && ev.name === 'bash') return [r.stdout, r.stderr].filter(Boolean).join('\n') || ('exit ' + (r.exitCode != null ? r.exitCode : 0));
-  if (r.output != null) return String(r.output);
-  if (r.error != null) return String(r.error);
-  return ev && ev.result !== undefined ? JSON.stringify(r, null, 2) : '';
-}
-/** 长输出折叠判据：给出完整文本、预览、行数与字节数（用户要知道被折了多少）。 */
-function toolOutputStats(text, limit) {
-  const full = String(text == null ? '' : text);
-  const max = Number(limit) || TOOL_OUTPUT_PREVIEW;
-  const lines = full === '' ? 0 : full.split('\n').length;
-  let bytes = full.length;
-  try { bytes = new TextEncoder().encode(full).length; } catch { bytes = full.length; }
-  const truncated = full.length > max || lines > 40;
-  const preview = !truncated ? full : (full.length > max ? full.slice(0, max) : full.split('\n').slice(0, 40).join('\n'));
-  return { full, preview, lines, bytes, truncated };
-}
-/** 单步视图（失败高亮类名 / 状态图标 / 一行摘要 / 完整参数与输出）。 */
-function toolStepView(ev, done) {
-  const isDone = done !== undefined ? Boolean(done) : ev.result !== undefined || ev.denied;
-  const failed = Boolean(ev.denied) || (ev.result !== undefined && ev.result && ev.result.ok === false);
-  const out = toolOutputStats(toolOutputText(ev));
-  return {
-    seq: ev.seq,
-    name: String(ev.name || 'tool'),
-    args: toolArgsSummary(ev.name, ev.args),
-    argsJson: JSON.stringify(ev.args || {}, null, 2),
-    durationMs: ev.durationMs != null ? Number(ev.durationMs) : null,
-    dur: ev.durationMs != null ? fmtToolDur(ev.durationMs) : (isDone ? '—' : '执行中…'),
-    done: isDone,
-    failed,
-    stIcon: !isDone ? '…' : failed ? '✖' : '✓',
-    stCls: !isDone ? '' : failed ? 'bad' : 'ok',
-    result: ev.denied ? String(ev.denied || '未授权') : toolResultSummary(ev),
-    output: out,
-    liClass: 'tl-step' + (failed ? ' fail' : ''),
-  };
-}
-function fmtToolDur(ms) {
-  const n = Number(ms) || 0;
-  return n < 1000 ? n + 'ms' : (n / 1000).toFixed(1) + 's';
-}
-/** 时间线汇总：步数 / 失败数 / 总耗时 / 头行文案。 */
-function toolTimelineSummary(items) {
-  const list = items || [];
-  const failed = list.filter((s) => s.failed).length;
-  const totalMs = list.reduce((a, s) => a + (Number(s.durationMs) || 0), 0);
-  const detail = list.length + ' 步' + (failed ? ' · ' + failed + ' 个失败' : '');
-  return {
-    count: list.length,
-    failed,
-    totalMs,
-    countText: detail,
-    sumText: totalMs ? fmtToolDur(totalMs) : '',
-  };
-}
-/** 默认可见步：前 3 步 + 所有失败步（失败步免展开可见）。 */
-function toolTimelineVisibility(items, expanded) {
-  const list = items || [];
-  if (expanded) return list.map((_, i) => i);
-  const keep = new Set();
-  for (let i = 0; i < Math.min(TOOL_TL_DEFAULT_VISIBLE, list.length); i++) keep.add(i);
-  list.forEach((s, i) => { if (s.failed) keep.add(i); });
-  return [...keep].sort((a, b) => a - b);
-}
-
+// —— 工具时间线 / 轨迹视图（纯函数；已搬到 viewmodel.js，smoke 直测 toolStepView / traceRoundView） ——
 // —— 右侧「本轮运行」：六项字段与状态条同源（都从 runStripView 派生） ——
 function runPanelView(st, isGenerating) {
   const base = runStripView(st, isGenerating);
@@ -1350,71 +1176,7 @@ function applyThemePreference(pref, deps) {
 // —— 轨迹 / 子 Agent 视图（v0.6.21 §3.73；smoke §151 直接 eval 这段做行为断言） ——
 // 唯一统计口径：对话流每轮那一行摘要与右栏「轨迹」都走 traceRoundView / traceSummaryText，
 // 由 traceRoundForMsg 统一装配。**不允许**两处各算一套（§151 断言两处都调用同一函数）。
-function fmtTraceDur(ms) {
-  const total = Math.max(0, Math.round((Number(ms) || 0) / 1000));
-  if (total < 60) return total + 's';
-  const m = Math.floor(total / 60);
-  const s = total % 60;
-  if (m < 60) return m + 'm' + (s ? s + 's' : '');
-  const h = Math.floor(m / 60);
-  const rm = m % 60;
-  return h + 'h' + (rm ? rm + 'm' : '');
-}
-/** 子代理一行的视图：名称 · 轮次 · 工具次数 · 最后进展 · 状态（缺失字段如实显示 —，不编造）。 */
-function subagentRowView(sub) {
-  const s = sub || {};
-  const toolCalls = s.toolCalls == null || !Number.isFinite(Number(s.toolCalls)) ? null : Math.max(0, Math.round(Number(s.toolCalls)));
-  const modelRounds = s.modelRounds == null || !Number.isFinite(Number(s.modelRounds)) ? null : Math.max(0, Math.round(Number(s.modelRounds)));
-  const ago = s.lastProgressAgoMs == null || !Number.isFinite(Number(s.lastProgressAgoMs)) ? null : Math.max(0, Math.round(Number(s.lastProgressAgoMs)));
-  const running = Boolean(s.running);
-  const failed = !running && (s.status === 'failed' || Boolean(s.result && s.result.ok === false));
-  const status = running ? 'running' : failed ? 'failed' : 'done';
-  const round = Math.max(0, Math.round(Number(s.round) || 0));
-  return {
-    key: 'sub:' + String(s.seq == null ? '?' : s.seq),
-    seq: s.seq,
-    round,
-    roundText: round ? '第 ' + round + ' 轮' : '—',
-    name: String(s.label || s.description || s.question || '子代理').slice(0, 80),
-    question: String(s.question || ''),
-    toolCalls,
-    toolText: toolCalls == null ? '工具次数 —' : toolCalls + ' 次工具',
-    modelRounds,
-    roundsText: modelRounds == null ? '自身轮次 —' : modelRounds + ' 轮',
-    progress: ago == null ? '最后进展 —' : '最后进展 ' + (ago < 1000 ? '<1s' : Math.round(ago / 1000) + 's') + ' 前',
-    status,
-    statusText: running ? '运行中' : failed ? '失败' : '完成',
-    statusCls: running ? 'run' : failed ? 'bad' : 'ok',
-    running,
-    durationMs: s.durationMs == null ? null : Number(s.durationMs),
-    result: s.result,
-  };
-}
-/** 一轮的完整视图（工具步 + 子代理 + 摘要文案）；对话流与右栏消费同一个对象。 */
-function traceRoundView(round) {
-  const r = round || {};
-  const now = Number(r.now) || Date.now();
-  const tools = (r.tools || []).map((t) => toolStepView(t, t.done));
-  const subs = (r.subs || []).map(subagentRowView);
-  const started = Number(r.startedAt) || 0;
-  const ended = r.endedAt != null ? Number(r.endedAt) : now;
-  const durationMs = started ? Math.max(0, ended - started) : 0;
-  const durationText = started ? fmtTraceDur(durationMs) : '';
-  const parts = ['本轮 ' + tools.length + ' 次工具调用'];
-  if (subs.length) parts.push(subs.length + ' 个子代理');
-  if (durationText) parts.push(durationText);
-  return {
-    round: Math.max(0, Math.round(Number(r.round) || 0)),
-    tools,
-    subs,
-    toolCount: tools.length,
-    subCount: subs.length,
-    failed: tools.filter((t) => t.failed).length,
-    durationMs,
-    durationText,
-    summary: parts.join(' · '),
-  };
-}
+// fmtTraceDur / subagentRowView / traceRoundView 已搬到 viewmodel.js；下面只保留数据装配与文案读取。
 function traceSummaryText(view) { return String((view && view.summary) || ''); }
 /** 每轮的数据装配：只读 msg._traj 与传入的 sessionSubs/pending，不读 runState、不另算。 */
 function traceRoundData(msg, subs, pending, now) {

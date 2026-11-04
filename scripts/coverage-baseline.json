@@ -1,26 +1,26 @@
 {
   "version": 1,
-  "generatedAt": "2026-11-04T07:46:19.662Z",
+  "generatedAt": "2026-11-04T14:12:07.955Z",
   "node": "v24.20.0",
   "platform": "darwin arm64",
-  "srcFiles": 90,
-  "note": "v0.7.0 过渡基线（HEAD=0dec8aa 实测）；发布前重生成",
+  "srcFiles": 91,
+  "note": "v0.7.0 §1.2：app.js 首次真实 import 进入 V8 分母（functions 分母 1828→2294，非回退）；code-lines 68.3→73.9 / all-lines 49.7→53.5；viewmodel 92.3% / app.js 46.9%",
   "command": "NODE_V8_COVERAGE=<tmp> node test/run-all.mjs && node scripts/coverage-report.mjs",
   "metrics": {
     "code-lines": {
-      "covered": 18354,
-      "total": 26854,
-      "pct": 68.3
+      "covered": 19860,
+      "total": 26873,
+      "pct": 73.9
     },
     "all-lines": {
-      "covered": 18354,
-      "total": 36918,
-      "pct": 49.7
+      "covered": 19860,
+      "total": 37129,
+      "pct": 53.5
     },
     "functions": {
-      "covered": 1605,
-      "total": 1828,
-      "pct": 87.8
+      "covered": 1873,
+      "total": 2294,
+      "pct": 81.6
     }
   }
 }

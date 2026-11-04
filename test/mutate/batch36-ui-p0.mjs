@@ -21,9 +21,10 @@ M.mutate({
 // ② 0 次工具调用被省略（"没显示" ≠ "0 次"，用户会以为工具计数坏了）
 M.mutate({
   name: '② 状态条把 0 次工具调用显示成空白',
-  file: 'src/web/app.js',
-  from: "function fmtRunTools(n){ const k=Math.max(0,Math.round(Number(n)||0)); return k===0 ? '0 次工具调用' : k+' 次工具调用'; }",
-  to: "function fmtRunTools(n){ const k=Math.max(0,Math.round(Number(n)||0)); return k ? k+' 次工具调用' : ''; }",
+  // v0.7.0 §1.2：fmtRunTools 已搬到 viewmodel.js，锚点同步（不删变异）。
+  file: 'src/web/viewmodel.js',
+  from: "export function fmtRunTools(n) {\n  const k = Math.max(0, Math.round(Number(n) || 0));\n  return k === 0 ? '0 次工具调用' : k + ' 次工具调用';\n}",
+  to: "export function fmtRunTools(n) {\n  const k = Math.max(0, Math.round(Number(n) || 0));\n  return k ? k + ' 次工具调用' : '';\n}",
   expect: ['0 次工具调用必须显式写出来'],
   run: SEC,
 });
@@ -111,9 +112,10 @@ M.mutate({
 // ⑪ 阶段口径丢掉「执行工具」（工具跑起来时状态条又显示"等首帧"）
 M.mutate({
   name: '⑪ 阶段收敛把「执行工具」错归成「等首帧」',
-  file: 'src/web/app.js',
-  from: "  if(/执行工具|等待权限确认|待发请求|子\\s?Agent|工具/.test(p)) return '执行工具';",
-  to: "  if(/执行工具|等待权限确认|待发请求|子\\s?Agent|工具/.test(p)) return '等首帧';",
+  // v0.7.0 §1.2：normalizeRunPhase 已搬到 viewmodel.js，锚点同步（不删变异）。
+  file: 'src/web/viewmodel.js',
+  from: "  if (/执行工具|等待权限确认|待发请求|子\\s?Agent|工具/.test(p)) return '执行工具';",
+  to: "  if (/执行工具|等待权限确认|待发请求|子\\s?Agent|工具/.test(p)) return '等首帧';",
   expect: ['「执行工具 bash」必须收敛成「执行工具」'],
   run: SEC,
 });
@@ -121,9 +123,10 @@ M.mutate({
 // ⑫ 上下文估算去掉 ≈（把估算值伪装成精确值）
 M.mutate({
   name: '⑫ 上下文占用去掉 ≈（估算冒充精确）',
-  file: 'src/web/app.js',
-  from: "  return (approx?'≈ ':'')+fmtTok(used)+' / '+(total?fmtTok(total):'?')+' tokens';",
-  to: "  return fmtTok(used)+' / '+(total?fmtTok(total):'?')+' tokens';",
+  // v0.7.0 §1.2：fmtRunCtx 已搬到 viewmodel.js，锚点同步（不删变异）。
+  file: 'src/web/viewmodel.js',
+  from: "  return (approx ? '≈ ' : '') + fmtTok(used) + ' / ' + (total ? fmtTok(total) : '?') + ' tokens';",
+  to: "  return fmtTok(used) + ' / ' + (total ? fmtTok(total) : '?') + ' tokens';",
   expect: ['生成中的上下文占用必须标 ≈'],
   run: SEC,
 });

@@ -30,7 +30,8 @@ M.mutate({
 // ③ 子代理行丢状态字段（运行中/失败/完成在界面上不可见）
 M.mutate({
   name: '③ 子代理行丢状态字段（statusText 恒空）',
-  file: 'src/web/app.js',
+  // v0.7.0 §1.2：subagentRowView 已搬到 viewmodel.js，锚点同步（不删变异）。
+  file: 'src/web/viewmodel.js',
   from: "    statusText: running ? '运行中' : failed ? '失败' : '完成',",
   to: "    statusText: '',",
   expect: ['运行中的子代理状态必须是「运行中」'],
@@ -40,7 +41,8 @@ M.mutate({
 // ④ 子代理行丢工具次数（只剩名称/轮次，看不出子代理干了多少活）
 M.mutate({
   name: '④ 子代理行丢工具次数（toolText 恒空）',
-  file: 'src/web/app.js',
+  // v0.7.0 §1.2：subagentRowView 已搬到 viewmodel.js，锚点同步（不删变异）。
+  file: 'src/web/viewmodel.js',
   from: "    toolText: toolCalls == null ? '工具次数 —' : toolCalls + ' 次工具',",
   to: "    toolText: '',",
   expect: ['子代理行必须含工具次数'],
