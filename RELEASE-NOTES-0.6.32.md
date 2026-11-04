@@ -140,6 +140,12 @@
 - **Windows 腿修复（首次推送后 CI 暴露，本版内修掉）**：§109 的清单键取自 `path.relative`，
   Windows 上返回 `providers\index.js`，而清单用 `/` 写 → windows 腿 smoke 红
   （文案是"新增 2 处同步锁"，实际两处早已在清单内，属**假红**）。已把键归一化为 `/`。
+- **Windows 腿第二处修复（同一轮 CI 暴露）**：`state-locks ③` 用子进程**自我 SIGKILL** 模拟
+  "写中崩溃"，但 Windows 没有 POSIX 信号（`TerminateProcess` → `code=1 / signal=null`），
+  断言写死 `signal === 'SIGKILL'` → 套件在 Windows 上先红，`batch69 ④–⑩` 被连带判成
+  **7 条"逃逸"**（日志里 7 条同样的 `model-cache 子进程必须真的被 SIGKILL 于写中（code=1 signal=null）`）。
+  判据已分平台：Windows 要求"非 0 退出 + 未打印 SHOULD-NOT-REACH + stderr 无第一版写失败"，
+  Linux/macOS 仍要求 `signal === 'SIGKILL'`；**原子性断言本身一条未放宽**。
 
 ---
 

@@ -55,6 +55,10 @@
 - **Windows 腿修复**（首次推送后 CI 暴露）：§109 清单键取自 `path.relative`，Windows 上返回
   `providers\index.js`，与用 `/` 写的清单对不上 → windows 腿 smoke 红（报"新增 2 处同步锁"，
   实际两处早已在清单内）。已把键归一化为 `/`；本地三平台同源、CI windows 腿复核。
+  同一次 CI 还暴露第二处：`state-locks` 用子进程**自我 SIGKILL** 模拟"写中崩溃"，而 Windows
+  没有 POSIX 信号（TerminateProcess → `code=1 / signal=null`），断言写死 `signal==='SIGKILL'`
+  → 套件在 Windows 上先红，`batch69 ④–⑩` 被连带判成 7 条"逃逸"。判据已分平台（两边都要求
+  "确实死在写中"：非 0 退出 + 未打印 SHOULD-NOT-REACH + stderr 无第一版写失败）。
 - `docs/ROADMAP-v0.7.md` 落盘（DSH/Octop 对照 + 本轮实测数字）。
 
 ### 六、未做

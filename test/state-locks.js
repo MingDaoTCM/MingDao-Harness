@@ -284,7 +284,16 @@ writeModelCache({ marker: 'v2', deepseek: { models: ['deepseek-v9-experimental']
 process.stdout.write('SHOULD-NOT-REACH\\n');
 `;
   const r = await withDeadline(runChild(body), 'model-cache 崩溃子进程');
-  assert.equal(r.signal, 'SIGKILL', `model-cache 子进程必须真的被 SIGKILL 于写中（实际 code=${r.code} signal=${r.signal}）：${r.stderr}`);
+  // Windows 没有 POSIX 信号：进程对自己发 SIGKILL 会被 TerminateProcess 终结，Node 侧看到的是
+  // **code=1 / signal=null**（Linux/macOS 才是 signal=SIGKILL）。v0.6.32 首次推送时 windows 腿的
+  // 变异验证因此把 batch69 ④–⑩ 全判成"逃逸"——实际是这条断言在 Windows 上先红，后面的用例根本没跑到。
+  // 判据分平台，但两边都要求"确实死在写中"：非 0 退出、没执行到末尾的 SHOULD-NOT-REACH、
+  // 且 stderr 里没有第一版写失败的记录（否则说明子进程是写失败退出的，不是被强杀）。
+  const killedMidWrite =
+    process.platform === 'win32'
+      ? r.code !== 0 && r.signal === null && !/SHOULD-NOT-REACH/.test(r.out) && !/first write failed/.test(r.err)
+      : r.signal === 'SIGKILL';
+  assert.ok(killedMidWrite, `model-cache 子进程必须真的被强杀于写中（实际 code=${r.code} signal=${r.signal}）：${r.stderr}`);
   assert.ok(fs.existsSync(target), 'E3：写中 kill -9 后 model-cache.json 必须仍存在且可解析（或不存在）——这里连文件都没了');
   const disk = readJsonOrNull(target);
   assert.ok(
