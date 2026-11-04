@@ -47,6 +47,10 @@ const SUITES = [
   ['sync-registration-hardening', 'node', ['test/sync-registration-hardening.js']],
   // v0.6.31：TTFT 提示节流（长审计里每个「继续」= 新回合，绝不能每个回合各打一次）
   ['ttft-notice', 'node', ['test/ttft-notice.js']],
+  // v0.7.0 §1.3：六类持久状态写入加锁 + 原子化（config/credentials/model-cache/endpoint-limits/ledger/egress）
+  ['state-locks', 'node', ['test/state-locks.js']],
+  // v0.7.0 §1.4：请求路径同步锁改异步（持锁 5s 不再冻结事件循环）
+  ['request-path-locks', 'node', ['test/request-path-locks.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];
