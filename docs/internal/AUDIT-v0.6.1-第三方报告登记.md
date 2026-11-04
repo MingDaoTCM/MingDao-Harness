@@ -6369,7 +6369,7 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   每工具调用一条）经复核也属请求路径同步锁，**单独一个提交**处理（便于单独回滚），见 §6.3.1；
   本轮未改 `src/agent.js` / `src/web/server.js` 的其它逻辑。
 
-## 6.1 v0.7.0 任务 1：覆盖率口径改为「最内层区间」（自报 88.7% → 真实 68.4% / 50.1% / 87.8%）+ 三口径 + ratchet
+## 6.1 v0.7.0 任务 1：覆盖率口径改为「最内层区间」（自报 88.7% → 真实 68.3% / 49.7% / 87.8%）+ 三口径 + ratchet
 
 - **缺陷**（`scripts/coverage-report.mjs:76-83`，v0.6.31 及以前）：把每个文件所有 `count>0` 的 V8 区间
   **取并集**判"这一行覆盖了没有"。V8 区间是嵌套的，模块外壳（顶层函数体）区间横跨全文——文件只要被
@@ -6388,8 +6388,10 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   `ranges[0].count > 0` 即被调用）。纯注释/空行判定是简单词法启发式（跳过 `//`、`/* */`、字符串/
   模板字面量；**不解析正则字面量**，已知边界写进 DEVELOPER §7.1）。输出保持兼容：首行旧格式、
   未加载文件清单、"覆盖率最低的 8 个文件"标题都保留，只新增三口径明细与基线行。
-- **基线 / ratchet**：新增 `scripts/coverage-baseline.json`（code-lines 68.4% / all-lines 50.1% /
-  functions 87.8%，生成于 2026-11-04T07:35Z，node v24.20.0，`note` 标明"过渡基线，0.7.0 发布前重生成"）。
+- **基线 / ratchet**：新增 `scripts/coverage-baseline.json`（最终提交的基线按 **HEAD=0dec8aa** 实测：
+  code-lines 68.3% / all-lines 49.7% / functions 87.8%，生成于 2026-11-04T07:46Z，node v24.20.0，
+  `note` 标明"过渡基线，0.7.0 发布前重生成"；同一套算法在 25de7e0 上实测为 68.4% / 50.1% / 87.8%，
+  两版差 <1pp——§1.3/§1.4 新增的 src 行基本被既有 e2e/smoke 覆盖）。
   `npm run coverage` 逐项比较，任一指标低于基线即 exit 1，容差 **-0.2pp**（只吸收四舍五入噪声）；
   抬升基线必须显式 `node scripts/coverage-report.mjs --update-baseline`（`npm run coverage:baseline`），
   且必须与"让覆盖率变好/口径变化"的改动同一次提交。
@@ -6408,10 +6410,15 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
 - **验证**：`npm run typecheck` 0 错误、`npm run typecheck:strict` 0 条（基线 0）、`node test/smoke.js`
   单独通过（worktree）、`node test/run-all.mjs` **23/23 套通过**（带 NODE_V8_COVERAGE 全量采集，
   基线数据即来自这次）、`node scripts/doc-lint.mjs` 只剩"变异总数"计数红（新增 7 条，README 由统一收口更新）。
+- **补记（同日）**：HEAD 前进到 `0dec8aa`（§1.3/§1.4 落地）后，在同一 HEAD 的干净 worktree 重测
+  **23/23 套全绿**，得 code-lines **68.3%**（18354/26854）/ all-lines **49.7%**（18354/36918）/
+  functions **87.8%**（1605/1828），最终提交的基线用这组。`b9a5b9e` 把 §1.3/§1.4 的两个新套件接进
+  `run-all`/CI 后，覆盖率只会更高（新套件覆盖新代码），ratchet 不会因此变红；发布前按
+  `node scripts/coverage-report.mjs --update-baseline --note "..."` 重生成即可。
 - **边界**：未改 `src/**`、`test/smoke.js`、`test/run-all.mjs`、`.github/workflows/ci.yml`、
-  `test/mutate/README.md`；基线在 HEAD=25de7e0 的独立 worktree 里实测（当时主工作树的 src 正被并行
-  任务的变异改写，V8 偏移会错位，主树实测会得到错数）。`app.js` 的 0% 覆盖要靠后续"抽 viewmodel"
-  任务解决，本任务只保证尺子不再把它报成 95%。
+  `test/mutate/README.md`；两轮基线都在**独立 worktree** 里实测（25de7e0 那轮是因为主工作树的 src 正被
+  并行任务的变异改写，V8 偏移会错位；0dec8aa 那轮是为了贴近提交树）。`app.js` 的 0% 覆盖要靠后续
+  "抽 viewmodel"任务解决，本任务只保证尺子不再把它报成 95%。
 
 ### 6.3.1 第二提交：聊天收尾与工具执行路径（cachestats / audit）
 

@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-04T07:46:19.662Z",
+  "node": "v24.20.0",
+  "platform": "darwin arm64",
+  "srcFiles": 90,
+  "note": "v0.7.0 过渡基线（HEAD=0dec8aa 实测）；发布前重生成",
+  "command": "NODE_V8_COVERAGE=<tmp> node test/run-all.mjs && node scripts/coverage-report.mjs",
+  "metrics": {
+    "code-lines": {
+      "covered": 18354,
+      "total": 26854,
+      "pct": 68.3
+    },
+    "all-lines": {
+      "covered": 18354,
+      "total": 36918,
+      "pct": 49.7
+    },
+    "functions": {
+      "covered": 1605,
+      "total": 1828,
+      "pct": 87.8
+    }
+  }
+}

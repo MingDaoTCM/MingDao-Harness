@@ -68,6 +68,8 @@
     "desktop:sync": "node scripts/sync-versions.mjs",
     "bench": "node test/bench/bench-tokenizer.mjs && node test/bench/bench-routing.mjs && node test/bench/bench-compaction.mjs && node test/bench/bench-cost.mjs && node test/bench/bench-savings.mjs",
     "coverage": "node test/run-all.mjs --coverage && node scripts/coverage-report.mjs",
+    "coverage:report": "node scripts/coverage-report.mjs",
+    "coverage:baseline": "node scripts/coverage-report.mjs --update-baseline",
     "typecheck:strict": "node scripts/strict-ratchet.mjs",
     "preversion": "node test/smoke.js && node test/e2e-local.js && npm run bench",
     "version": "node scripts/bump-changelog.mjs",
