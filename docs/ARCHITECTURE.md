@@ -1,6 +1,6 @@
 # MingDao-Harness 架构设计
 
-> 版本口径：v0.6.30。本文档覆盖 `src/` 全部 **90** 个模块（`find src -name '*.js' | wc -l` = 90），
+> 版本口径：v0.6.30。本文档覆盖 `src/` 全部 **91** 个模块（`find src -name '*.js' | wc -l` = 91），
 > 按层给出每个模块的职责与它守住的那条不变量；判定以文件头注释与实际实现为准，不做推断性描述。
 >
 > 阅读顺序建议：§2 模块索引（查「某件事归谁管」）→ §3 数据流（看一次回合怎么走）→ §4 已知边界（看它**保证不了**什么）。
@@ -54,7 +54,7 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 
 ## 2. 模块索引
 
-以下逐文件列出 `src/` 全部 90 个模块。每条格式为「职责 —— 关键不变量/边界」。
+以下逐文件列出 `src/` 全部 91 个模块。每条格式为「职责 —— 关键不变量/边界」。
 
 ### 2.1 内核循环与上下文（6）
 
@@ -131,6 +131,8 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `web/constants.js` —— 前端与服务端共享常量：并发上限 8（`MAX_CONCURRENT`）、附件数与体积上限、单文件读取上限 —— 数值只在此定义，防客户端预检/服务端校验/工具读取三处漂移。
 - `web/attachments.js` —— 聊天附件构造（纯函数）：图片转 `data:` URL（仅视觉模型，单张 ≤5MB、最多 4 个），文本文件拼接进消息（≤200KB）—— 服务端按同一组常量校验。
 - `web/web-io.js` —— WebUI 的 io 适配器：把 Agent 的 io 事件翻译为 SSE 事件，权限确认/选择类交互经 `askHandler` 转发到浏览器模态框并等待 `POST /api/permission` 应答。
+- `web/viewmodel.js`（v0.7.0 §1.2）—— 前端的**纯计算层**：`sideNavLayout`（三档断点下的左栏形态）、`errCardParts`（错误卡文案分解）、`runStripView`（状态条六字段）、`traceRoundView`（轨迹一轮的视图模型）以及它们依赖的格式化助手。**不读 DOM、不读全局**，因此可以被 node 直测；`app.js` 只负责把结果渲染到 DOM。
+  为什么抽出来：此前 `app.js` 3252 行、可执行覆盖 0%，只靠源码正则守卫——UI 改动的"绿"等于"文本没变"。
 - `web/util.js` / `web/app.js` / `web/i18n.js` —— 前端：`util.js` 是零状态工具（选择器/转义/Markdown/格式化），`app.js` 是页面主脚本（消息渲染与轨迹、设置面板、自绘气泡与模态框），`i18n.js` 是零依赖 UI 文案表（zh/en 同键、默认跟随 `navigator.language`、`localStorage` 覆盖）—— 地址带 `?token=` 时记入 `sessionStorage` 并从地址栏移除，此后请求统一附加 `X-MingDao-Token`。
 
 ### 2.8 CLI 层（13）
@@ -172,7 +174,7 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `index.js` —— 库公共 API：导出 `@stable`（minor 内向后兼容）与 `@experimental` 两组能力，契约与示例见 DEVELOPER.md。
 
 模块计数核对：6 + 8 + 12 + 10 + 3 + 2 + 13 + 13 + 19 = **86** 个条目（含合并条目；`find src -name '*.js' | wc -l` = **90**），其中 §2.7 的
-`web/util.js` / `web/app.js` 一条覆盖 2 个文件，故条目覆盖 **90** 个 `src/**/*.js`（每版本以 `find` 实测为准），
+`web/util.js` / `web/app.js` 一条覆盖 2 个文件、`web/viewmodel.js` 单列，故条目覆盖 **91** 个 `src/**/*.js`（每版本以 `find` 实测为准），
 与 `find src -name '*.js' | wc -l` 的结果一致。
 
 ## 3. 数据流：一次 `runTurn` 的关键路径
