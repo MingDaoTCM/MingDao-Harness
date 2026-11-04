@@ -3,6 +3,61 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.32（2026-11-04）— v0.7.0 地基第一批：覆盖率口径修正 + 六类状态写入加固 + 请求路径去同步锁
+
+> **无新功能。** 只修两件地基：**门禁不可信**（覆盖率虚高 88.7%、同步锁守卫可被别名绕过）与
+> **状态会丢**（六类持久状态无锁/非原子、请求路径同步锁冻结事件循环）。完整说明见
+> `RELEASE-NOTES-0.6.32.md`；路线图见 `docs/ROADMAP-v0.7.md`。
+
+### 一、§1.2 覆盖率改按最内层区间判定（`8406f73`）
+
+- 旧实现把文件里**所有 `count>0` 的区间取并集**，而模块外壳区间横跨全文——文件只要被 import 过就
+  几乎整份算已覆盖。现改为**最内层（叶子）区间**：行锚点 = 该行首个非空白**代码字符**的偏移，
+  父区间不再代表子行覆盖；跨进程同一区间计数取 **max**。
+- **旧算法 88.7% 已逐位复现**（同一份数据：all-lines 88.7% / code-lines 86.9%），新算法
+  **code-lines 68.3%（18354/26854）、all-lines 49.7%（18354/36918）、functions 87.8%（1605/1828）**。
+- 审计报告 63.9 / 70.5 属"行尾锚点 + 注释计覆盖"口径，同数据实测 64.3 / 71.1——**不是数字错，
+  是锚点约定不同**（已写进 `AUDIT §6.1` 与 `DEVELOPER §7.1`）。
+- 新增 `scripts/coverage-baseline.json`（过渡基线）与 ratchet：任一指标低于基线即 exit 1，
+  容差 **-0.2pp**；抬升只能显式 `npm run coverage:baseline`。新增 `npm run coverage`。
+- "覆盖率最低的 8 个文件"名单改按 code-lines 升序（旧实现按行数降序取末 8 个 = **最小**的 8 个文件，
+  标题从未与内容对应）。
+
+### 二、§1.3 六类持久状态加锁 / 原子化（`0dec8aa`）
+
+- config/credentials：**锁内重读 + 按字段增量合并**（`saveConfig` 签名不变，新增异步版供 WebUI）；
+  `setStoredKey` 遇到损坏的凭证库**拒绝写入**（原文件字节不变），不再静默清空其余凭据。
+- model-cache：**单一读写入口 + 原子替换**（崩溃不再半截）；endpoint-limits：锁内**按 baseUrl 合并**；
+  ledger `append` 持锁；egress 追加与轮转**同一把锁**，禁止无锁整文件重写。
+- 六条写失败路径均打 **可见 warn** + 返回 `{ok:false}`。
+
+### 三、§1.4 请求路径同步锁改异步（`7715907` + `6624de8`）
+
+- 18 条文本命中实为 **14 个真实调用点**（另 3 行 import、1 行注释）；schedule / tasks / task-state /
+  sync 全部改 `*Async`（Web 路由 await）；第二提交补齐 cachestats（`recordUsage`/`recordAuxUsage`）与
+  audit（`writeAudit`），由 `/api/chat` 的 onUsage、回合末补记、titles/memory/routing 直达请求路径。
+- **持锁 5s 不再冻结事件循环**：基线 `pauseSchedule` 心跳 **0 次/2334ms**；改后
+  `listSchedulesAsync` 等 4548ms 心跳 **44 次**、`pauseScheduleAsync` **24 次**、`listTasksAsync` **22 次**。
+- 同步版保留给 CLI / REPL / worker / daemon，并**逐处注释**说明为什么可以同步。
+
+### 四、§109 守卫别名感知（`6b25fe5`，审计 H-05）
+
+- 旧守卫只 grep 字面量，`import { withFileLockSync as X }` 可整份绕过"新增即失败"（实测 **7 文件 18 处**）。
+  现解析别名后计数，且清单每条必须写明"为什么它可以同步"（CLI / daemon / 非 web 之一），否则 CI 红。
+
+### 五、门禁接线与逃逸收口（`b9a5b9e` / `8a3e41c` / `292872d`）
+
+- `state-locks`（10 项）、`request-path-locks`（9 项）、`coverage-metric`（8 项）进 run-all（**26 套**）与
+  CI（**Linux 腿**）；变异总数 **633 → 669**（batch68/69/70/71 共 36 条）。
+- 全量变异 **57/60** 暴露 3 处：**1 真逃逸**（`setStoredKey` 损坏时宽松读，此前无断言）→ 补
+  `state-locks ②b`（必须拒写 + 原文件字节不变）；2 锚点漂移（`spawnDaemon` 缩进 6→4、endpoint-limits
+  加锁后形态变化）。顺带发现旧锚点 2 空格命中的是**另一处**调用（打错靶），已锚定 6 空格 + 唯一性判据。
+- `docs/ROADMAP-v0.7.md` 落盘（DSH/Octop 对照 + 本轮实测数字）。
+
+### 六、未做
+
+`src/web/app.js` 仍 **0% 覆盖**（viewmodel 抽取是下一批）；事件溯源未开始；0.7.1–0.7.3 未动。
+
 ## v0.6.31（2026-11-03）— TTFT 提示改为会话级节流（长审计不再刷屏）
 
 > 本版只做一件事：修掉**负责人实测**的一条体验缺陷——本地模型跑长审计时，聊天区被
