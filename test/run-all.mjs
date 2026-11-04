@@ -53,6 +53,10 @@ const SUITES = [
   ['request-path-locks', 'node', ['test/request-path-locks.js']],
   // v0.7.0 §1.2：覆盖率口径（最内层区间计数；三口径 + ratchet）
   ['coverage-metric', 'node', ['test/coverage-metric.js']],
+  // v0.7.0 §1.2：补盲——sync 状态增量 / Pack 能力与版本 / 路径围栏（此前 0 条变异）
+  ['sync-state', 'node', ['test/sync-state.js']],
+  ['packs-capabilities', 'node', ['test/packs-capabilities.js']],
+  ['workspace-fence', 'node', ['test/workspace-fence.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];
