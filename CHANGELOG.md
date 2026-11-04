@@ -3,6 +3,41 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.33（2026-11-05）— v0.7.0 地基第二批：前端可测化（viewmodel）+ 变异补盲
+
+> **无新功能、界面零变化。** 只做一件事：**让测试开始能证明前端行为**。
+> 搬家前后的 5 张真实界面截图 **sha256 完全一致**；本版不提功能、只提"以后 UI 改错能被测出来"。
+> 完整说明见 `RELEASE-NOTES-0.6.33.md`；路线图见 `docs/ROADMAP-v0.7.md`。
+
+### 一、§1.2 前端可测化（`ce2a2a7`）
+
+- 新增 `src/web/viewmodel.js`（447 行，**纯计算层：不读 DOM / 不读全局**）：
+  `sideNavLayout` / `errCardParts` / `runStripView` / `traceRoundView` 及其依赖
+  （`fmtRun*` / `toolStepView` / `subagentRowView` 等）；`src/web/app.js` 减去约 254 行，只负责渲染。
+- **对拍**：`test/viewmodel.js`（425 行、**110 条断言**）。`REF_*` 是搬家前 `app.js` 的原实现
+  （逐字复制），与 `viewmodel.js` 导出用**同一批输入**跑 `deepEqual` 全过；输出字段名逐个钉死
+  （`data-k` 六项 → `Object.keys(runStripView)`；`width240` → `sideNavLayout(1440,false).width`；
+  `rpModel` → `runPanelView.modelLabel`）。
+- **40 条源码正则守卫 → 行为断言**：`test/smoke.js` 里 40 条 `grep 源码` 改成直接调用函数断言输出。
+- **UI 零变化**：改动前后 5 张截图 sha256 完全一致（本版最关键的验收）。
+- **必要越界**：`src/web/routes/api.js` 的静态白名单加 `viewmodel.js`——否则浏览器 ESM `import`
+  无 `?token=` 会 401（实测：设置面板打不开）。
+- 覆盖率：`viewmodel` **92.3%**、`src/web/app.js` **0 → 46.9%**、全局 code-lines **68.4 → 73.9%**
+  （19869/26873）。functions 从 87.8% 降到 **81.7%** 是**分母变大**（`app.js` 首次进入统计，
+  1828 → 2294 条函数），不是退步——基线 note 已写明。
+
+### 二、§1.2 变异补盲（`27fcf51` / `48bc098`）
+
+- 三个**行为套件**：`sync-state`（16）/ `packs-capabilities`（16）/ `workspace-fence`（15）。
+- 三批变异：`batch72`（10）/ `batch73`（10）/ `batch74`（11），全中、0 逃逸。
+- 新增 `scripts/mutation-coverage.mjs`：列出"代码行 > 150 且 0 条变异"的模块，
+  盲区 **15 → 13**，并进 CI 做 ratchet（`--fail-over 13`，不允许新增盲区）。
+
+### 三、接线与文档（`48bc098` / `eab78e8`）
+
+- 4 个新套件进 `run-all`（**30 套**）与 CI（Linux 腿，**4 个步骤**）；盲区 ratchet 同挂 Linux 腿。
+- `docs/ARCHITECTURE.md` 补 `web/viewmodel.js`（模块 90 → **91**）；变异总数 669 → **700**。
+
 ## v0.6.32（2026-11-04）— v0.7.0 地基第一批：覆盖率口径修正 + 六类状态写入加固 + 请求路径去同步锁
 
 > **无新功能。** 只修两件地基：**门禁不可信**（覆盖率虚高 88.7%、同步锁守卫可被别名绕过）与
