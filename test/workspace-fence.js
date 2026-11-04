@@ -38,6 +38,10 @@ function setHome(/** @type {string} */ tag) {
   process.env.MINGDAO_HOME = home;
   return home;
 }
+// 真实存在、且不在允许根（家目录 / os.tmpdir()）内的目录：W14/W15 的软链越界目标。
+// 不能用 `/etc`（Windows 上不存在），也不能用 os.tmpdir() 子目录（tmpdir 是允许根）。
+const OUTSIDE_REAL_DIR = () =>
+  process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\\Windows', 'Temp') : '/var/tmp';
 const ok = (/** @type {string} */ n) => console.log(`  ✓ ${n}`);
 const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
 /** @param {any} cond @param {string} tag @param {string} detail */
@@ -284,8 +288,14 @@ try {
   {
     const home = setHome('web-add');
     const workRoot = tmp('web-root');
-    const link = path.join(workRoot, 'link-to-etc');
-    fs.symlinkSync('/etc', link, 'dir');
+    // 软链目标必须**真实存在**且**不在允许根**（家目录 / os.tmpdir()）里：
+    //   · 不用 `/etc`：Windows 上它解析成当前盘根的 `\\etc`（不存在），`statSync` 先报
+    //     「目录不存在」，走不到「不在允许范围」那条判据（v0.6.33 Windows 变异腿暴露）；
+    //   · 也不用另一个 os.tmpdir() 子目录：tmpdir 本身是允许根，会被正常放行（本机复现 200）。
+    // `/var/tmp` 与 `%SystemRoot%\\Temp` 都真实存在且在允许根之外，语义不变：软链指向根外。
+    const outside = OUTSIDE_REAL_DIR();
+    const link = path.join(workRoot, 'link-to-outside');
+    fs.symlinkSync(outside, link, 'dir');
     const deps = { cfg: {}, state: { workingDir: workRoot }, startupCwd: workRoot };
     const shared = {
       MAX_API_BODY: 1024 * 1024,
@@ -322,8 +332,9 @@ try {
     const workRoot = tmp('browse-root');
     const inside = path.join(workRoot, 'visible');
     fs.mkdirSync(inside);
-    const link = path.join(workRoot, 'link-to-etc');
-    fs.symlinkSync('/etc', link, 'dir');
+    const outside = OUTSIDE_REAL_DIR();
+    const link = path.join(workRoot, 'link-to-outside');
+    fs.symlinkSync(outside, link, 'dir');
     const deps = { cfg: {}, state: { workingDir: workRoot }, startupCwd: workRoot };
     const shared = {
       MAX_API_BODY: 1024 * 1024,

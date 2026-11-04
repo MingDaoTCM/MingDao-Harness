@@ -10,15 +10,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: workspace-fence
+      - name: workspace-fence + batch74
         shell: bash
         run: |
           set +e
-          node test/workspace-fence.js > /tmp/ws.log 2>&1
-          code=$?
-          echo "exit=$code"
-          cat /tmp/ws.log
-          tail -40 /tmp/ws.log | tr '\n' ' ' | tr -d '\r' > /tmp/ws.tail
-          printf '::error title=workspace-fence::exit=%s :: ' "$code"
-          cat /tmp/ws.tail
-          echo
+          node test/workspace-fence.js > /tmp/ws.log 2>&1; echo "workspace-fence exit=$?"; tail -6 /tmp/ws.log
+          printf '::error title=workspace-fence::exit=%s :: %s\n' "$?" "$(tail -6 /tmp/ws.log | tr '\n' ' ' | tr -d '\r')"
+          node test/mutate/run.mjs batch74 > /tmp/b74.log 2>&1; c=$?
+          echo "batch74 exit=$c"
+          grep -E "^✗|批次：|变异验证" /tmp/b74.log | tail -20
+          printf '::error title=batch74::exit=%s :: %s\n' "$c" "$(grep -E '^✗' /tmp/b74.log | head -5 | tr '\n' ' ' | tr -d '\r')"
+          exit 0
