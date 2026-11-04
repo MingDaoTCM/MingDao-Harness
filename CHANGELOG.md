@@ -38,6 +38,13 @@
 - 4 个新套件进 `run-all`（**30 套**）与 CI（Linux 腿，**4 个步骤**）；盲区 ratchet 同挂 Linux 腿。
 - `docs/ARCHITECTURE.md` 补 `web/viewmodel.js`（模块 90 → **91**）；变异总数 669 → **700**。
 
+### 四、发布前 CI 首轮暴露的测试夹具修复
+
+- `sync-state` 的桩服务端沿用默认 5s keep-alive：E8 写 19MB 会话耗时数秒，客户端连接池里的空闲
+  socket 正好被服务端按 `keepAliveTimeout` 关闭，下一次 pull 复用它 → `read ECONNRESET`
+  （Node 18.20.8 本机必现，ubuntu-18 CI 腿必红）。桩服务端改为 `Connection: close`，
+  **16 项断言一条未放宽**（Node 18 与 Node 24 均全过）。
+
 ## v0.6.32（2026-11-04）— v0.7.0 地基第一批：覆盖率口径修正 + 六类状态写入加固 + 请求路径去同步锁
 
 > **无新功能。** 只修两件地基：**门禁不可信**（覆盖率虚高 88.7%、同步锁守卫可被别名绕过）与

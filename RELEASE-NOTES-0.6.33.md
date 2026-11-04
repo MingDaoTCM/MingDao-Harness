@@ -138,6 +138,10 @@ CLI 输出、账本、Pack、网络策略均未改动。
 
 三平台代码、npm 包、官网下载页与 GitHub Release 为同一 tag 产物。
 
+> **发布前 CI 首轮暴露并已修**：ubuntu-18 腿的 `sync-state` 因**桩服务端 keep-alive** 复用了一条
+> 已被服务端关闭的 socket，报 `read ECONNRESET`（Node 18.20.8 本机必现 3/3；Node 24 不触发）。
+> 桩服务端改为 `Connection: close`，**16 项断言一条未放宽**。这不是产品缺陷，是测试夹具缺陷。
+
 ---
 
 ## 六、已知边界

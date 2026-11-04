@@ -64,7 +64,12 @@ const server = http.createServer((req, res) => {
     const route = String(req.url || '').replace(/^\/+/, '');
     requests.push({ path: route, name: String(body.name || '') });
     const send = (/** @type {number} */ status, /** @type {any} */ obj) => {
-      res.writeHead(status, { 'Content-Type': 'application/json' });
+      // v0.6.33（Node 18 腿假红）：桩服务端**禁用 keep-alive**。
+      // 若沿用默认的 5s keep-alive，E8 写 19MB 会话会耗掉数秒，客户端连接池里的空闲 socket
+      // 正好被服务端按 keepAliveTimeout 关掉，下一次 pull 复用这条已关闭的 socket →
+      // `read ECONNRESET`（实测 Node 18.20.8 本机必现、ubuntu-18 CI 腿必红）。
+      // 这里不是放宽断言：被测的是 sync.js 的同步语义，不是 HTTP 连接复用策略。
+      res.writeHead(status, { 'Content-Type': 'application/json', Connection: 'close' });
       res.end(JSON.stringify(obj));
     };
     try {
