@@ -19,7 +19,7 @@ import { mingdaoHome, ensureHome } from './config.js';
 import { parseNetPolicy, checkEgress, isLoopback } from './net-policy.js';
 import { isPrivateHost } from './ssrf-guard.js';
 import { redactSecrets } from './redact.js';
-import { atomicWriteFileSync } from './atomic-write.js';
+import { atomicWriteFileSync, appendFilePrivateSync, withFileLockSync as withStateFileLockSync } from './atomic-write.js';
 
 const MAX_LINES = 20000;
 const KEEP_LINES = 10000;
@@ -40,6 +40,16 @@ export function egressLogFile() {
   return path.join(mingdaoHome(), 'net.jsonl');
 }
 
+/**
+ * 出网日志的追加锁（v0.7.0 §1.3）。追加与轮转（整文件重写）必须在**同一把锁**内完成：
+ *   · 无锁追加：多进程同时写，行可能交错（审计证据不可逐行解析）；
+ *   · 无锁轮转：读到别人刚追加前的旧内容再原子覆盖，会把刚写进去的行静默吞掉。
+ * 轮转仍是原子替换（tmp+fsync+rename），但只在持锁时发生。
+ */
+export function egressLogLockFile() {
+  return egressLogFile() + '.lock';
+}
+
 export function currentPolicy() {
   return activePolicy;
 }
@@ -52,6 +62,15 @@ export function isInstalled() {
 export function registerEgressSink(/** @type {(info: any) => void} */ fn) {
   sinks.add(fn);
   return () => sinks.delete(fn);
+}
+
+/**
+ * 出网日志写失败的**可见报告**（独立函数，失败处理只有一个出口）。
+ * 记账失败不影响请求，但也绝不静默：用户/日志必须能查到「这次出网判定没落盘」。
+ * @param {any} err
+ */
+function reportEgressLogFailure(err) {
+  console.warn(`[MingDao] ⚠ 出网日志写入失败（${egressLogFile()}）：${String(/** @type {any} */ (err)?.message ?? err)}——本次出网判定未落盘（请求本身不受影响）。`);
 }
 
 /**
@@ -79,22 +98,23 @@ export function recordEgress(/** @type {any} */ info) {
   try {
     ensureHome();
     const file = egressLogFile();
-    fs.appendFileSync(file, JSON.stringify(entry) + '\n');
-    try {
-      fs.chmodSync(file, 0o600);
-    } catch {}
-  } catch {
-    return entry;
-  }
-  // 低频轮转（与 audit.jsonl 同款策略：按大小触发 + 原子写）：只保留最近 KEEP_LINES 行
-  try {
-    if (fs.statSync(egressLogFile()).size > MAX_BYTES) {
-      const lines = fs.readFileSync(egressLogFile(), 'utf8').split('\n').filter(Boolean);
-      if (lines.length > MAX_LINES) {
-        atomicWriteFileSync(egressLogFile(), lines.slice(-KEEP_LINES).join('\n') + '\n', { mode: 0o600 });
+    // 追加与轮转在同一临界区：任何时刻都只有一个写方在动这个文件。
+    withStateFileLockSync(egressLogLockFile(), () => {
+      appendFilePrivateSync(file, JSON.stringify(entry) + '\n');
+      // 低频轮转（与 audit.jsonl 同款策略：按大小触发 + 持锁原子替换）：只保留最近 KEEP_LINES 行。
+      // **禁止**无锁「读全文 → 覆盖写」——那不是追加，而是把并发写进去的行静默丢掉。
+      if (fs.statSync(file).size > MAX_BYTES) {
+        const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+        if (lines.length > MAX_LINES) {
+          atomicWriteFileSync(file, lines.slice(-KEEP_LINES).join('\n') + '\n', { mode: 0o600 });
+        }
       }
-    }
-  } catch {}
+    });
+  } catch (err) {
+    // 记账失败不能影响请求本身，但也不能静默：reportEgressLogFailure() 打可见 warn，
+    // 然后照常返回判定结果（不把日志写失败伪装成出网失败）。
+    reportEgressLogFailure(err);
+  }
   return entry;
 }
 

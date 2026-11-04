@@ -18,7 +18,7 @@ import { modelPreset, providerPreset } from '../models.js';
 import { mingdaoHome } from '../config.js';
 import { resolveApiKey, getStoredKey } from '../credentials.js';
 import { isLocalBaseUrl } from '../model-caps.js';
-import { atomicWriteJsonSync } from '../atomic-write.js';
+import { atomicWriteJsonSync, withFileLockSync as withStateFileLockSync } from '../atomic-write.js';
 
 // ---------------------------------------------------------------------------
 // 本地端点并发闸门（v0.6.15，登记 §3.59 四条待办之首）
@@ -291,6 +291,14 @@ export function endpointLimitsFile() {
   return path.join(mingdaoHome(), ENDPOINT_LIMITS_FILE);
 }
 
+/**
+ * 学习文件的跨进程锁（v0.7.0 §1.3）。两个会话同时「学习」不同端点时，必须在锁内重读整张表
+ * 再合并自己那一条；否则后写者用旧快照整表覆盖，v0.6.26 学到的安全预算会凭空丢失。
+ */
+export function endpointLimitsLockFile() {
+  return endpointLimitsFile() + '.lock';
+}
+
 /** 端点键：归一化 baseUrl（去尾部斜杠），与本地并发闸门同一口径。 */
 export function endpointKeyOf(/** @type {any} */ baseUrl) {
   return normalizeLocalBaseUrl(baseUrl);
@@ -361,11 +369,10 @@ function writeEndpointLimits(/** @type {Record<string, any>} */ endpoints) {
     atomicWriteJsonSync(file, { version: ENDPOINT_LIMITS_VERSION, endpoints });
     return { ok: true, error: null, file };
   } catch (err) {
-    return {
-      ok: false,
-      error: `端点学习文件写入失败（${file}）：${(/** @type {any} */ (err))?.message || err}——本轮按无学习值继续`,
-      file,
-    };
+    const error = `端点学习文件写入失败（${file}）：${(/** @type {any} */ (err))?.message || err}——本轮按无学习值继续`;
+    // v0.7.0 §1.3：写失败必须可见（此前只把 error 塞进返回值，调用方不一定展示）
+    console.warn(`[MingDao] ⚠ ${error}`);
+    return { ok: false, error, file };
   }
 }
 
@@ -405,25 +412,35 @@ export function learnEndpointMemoryFailure(/** @type {any} */ baseUrl, { budget,
   if (!(rawBudget > 0)) {
     return { ...empty, error: `端点学习值未写入：预算无效（${String(budget)}）——本轮按无学习值继续` };
   }
-  const r = readEndpointLimits();
-  if (!r.ok) {
-    // 文件坏了/读不出：**不覆盖**（可能还能人工救回来），只降级为无学习值。
-    return { ...empty, error: `${r.error}；本次不写入，避免覆盖可能需要人工修复的文件` };
+  // v0.7.0 §1.3：整段「重读整表 → 只改本端点 → 原子写」持有学习文件锁。
+  // 两个会话并发学习不同 baseUrl 时，各写各的；绝不用启动时的旧快照整表覆盖。
+  try {
+    return withStateFileLockSync(endpointLimitsLockFile(), () => {
+      const r = readEndpointLimits();
+      if (!r.ok) {
+        // 文件坏了/读不出：**不覆盖**（可能还能人工救回来），只降级为无学习值。
+        return { ...empty, error: `${r.error}；本次不写入，避免覆盖可能需要人工修复的文件` };
+      }
+      const previous = r.endpoints[key] || null;
+      const nowIso = new Date(Number(at) || Date.now()).toISOString();
+      const record = {
+        safeContextBudget: Math.max(ENDPOINT_MIN_SAFE_BUDGET, Math.floor(rawBudget)),
+        learnedAt: nowIso,
+        source,
+        attempts: Math.max(1, Math.floor(Number(attempts) || 1)),
+        ...(Number(maxOutput) > 0 ? { maxOutputTokens: Math.floor(Number(maxOutput)) } : {}),
+        failures: (Number(previous?.failures) || 0) + 1,
+        successStreak: 0,
+        lastFailedAt: nowIso,
+      };
+      const w = writeEndpointLimits({ ...r.endpoints, [key]: record });
+      return { ok: w.ok, key, record: w.ok ? record : null, previous, error: w.error, file };
+    });
+  } catch (err) {
+    const error = `端点学习值未写入（获取学习文件锁失败）：${String(/** @type {any} */ (err)?.message ?? err)}——本轮按无学习值继续`;
+    console.warn(`[MingDao] ⚠ ${error}`);
+    return { ...empty, error };
   }
-  const previous = r.endpoints[key] || null;
-  const nowIso = new Date(Number(at) || Date.now()).toISOString();
-  const record = {
-    safeContextBudget: Math.max(ENDPOINT_MIN_SAFE_BUDGET, Math.floor(rawBudget)),
-    learnedAt: nowIso,
-    source,
-    attempts: Math.max(1, Math.floor(Number(attempts) || 1)),
-    ...(Number(maxOutput) > 0 ? { maxOutputTokens: Math.floor(Number(maxOutput)) } : {}),
-    failures: (Number(previous?.failures) || 0) + 1,
-    successStreak: 0,
-    lastFailedAt: nowIso,
-  };
-  const w = writeEndpointLimits({ ...r.endpoints, [key]: record });
-  return { ok: w.ok, key, record: w.ok ? record : null, previous, error: w.error, file };
 }
 
 /**
@@ -445,28 +462,37 @@ export function noteEndpointSuccess(/** @type {any} */ baseUrl, { budget, ceilin
   const file = endpointLimitsFile();
   const empty = { ok: true, key, record: null, previous: null, raised: false, streak: 0, error: null, file };
   if (!key) return empty;
-  const r = readEndpointLimits();
-  if (!r.ok) return { ...empty, ok: false, error: r.error };
-  const previous = r.endpoints[key] || null;
-  if (!previous) return empty; // 没学过就没有可上调的值（不为"成功"凭空造学习值）
-  const used = Math.floor(Number(budget) || 0);
-  const cap = Math.max(Math.floor(Number(ceiling) || 0), used, Number(previous.safeContextBudget) || 0);
-  const nowIso = new Date(Number(at) || Date.now()).toISOString();
-  const streak = (Number(previous.successStreak) || 0) + 1;
-  /** @type {any} */
-  let next = { ...previous, successStreak: streak, lastSuccessAt: nowIso, lastSuccessBudget: used };
-  let raised = false;
-  if (streak >= ENDPOINT_UPGRADE_SUCCESS_STREAK) {
-    const target = Math.min(Math.floor(Number(previous.safeContextBudget) * ENDPOINT_UPGRADE_RATIO), cap);
-    if (target > Number(previous.safeContextBudget)) {
-      next = { ...next, safeContextBudget: target, learnedAt: nowIso, source: 'success-upgrade', successStreak: 0 };
-      raised = true;
-    } else {
-      next = { ...next, successStreak: 0 };
-    }
+  // 与 learnEndpointMemoryFailure 同一把锁、同一套锁内重读合并语义。
+  try {
+    return withStateFileLockSync(endpointLimitsLockFile(), () => {
+      const r = readEndpointLimits();
+      if (!r.ok) return { ...empty, ok: false, error: r.error };
+      const previous = r.endpoints[key] || null;
+      if (!previous) return empty; // 没学过就没有可上调的值（不为"成功"凭空造学习值）
+      const used = Math.floor(Number(budget) || 0);
+      const cap = Math.max(Math.floor(Number(ceiling) || 0), used, Number(previous.safeContextBudget) || 0);
+      const nowIso = new Date(Number(at) || Date.now()).toISOString();
+      const streak = (Number(previous.successStreak) || 0) + 1;
+      /** @type {any} */
+      let next = { ...previous, successStreak: streak, lastSuccessAt: nowIso, lastSuccessBudget: used };
+      let raised = false;
+      if (streak >= ENDPOINT_UPGRADE_SUCCESS_STREAK) {
+        const target = Math.min(Math.floor(Number(previous.safeContextBudget) * ENDPOINT_UPGRADE_RATIO), cap);
+        if (target > Number(previous.safeContextBudget)) {
+          next = { ...next, safeContextBudget: target, learnedAt: nowIso, source: 'success-upgrade', successStreak: 0 };
+          raised = true;
+        } else {
+          next = { ...next, successStreak: 0 };
+        }
+      }
+      const w = writeEndpointLimits({ ...r.endpoints, [key]: next });
+      return { ok: w.ok, key, record: w.ok ? next : null, previous, raised: w.ok && raised, streak, error: w.error, file };
+    });
+  } catch (err) {
+    const error = `端点成功记录未写入（获取学习文件锁失败）：${String(/** @type {any} */ (err)?.message ?? err)}——本轮按无学习值继续`;
+    console.warn(`[MingDao] ⚠ ${error}`);
+    return { ...empty, ok: false, error };
   }
-  const w = writeEndpointLimits({ ...r.endpoints, [key]: next });
-  return { ok: w.ok, key, record: w.ok ? next : null, previous, raised: w.ok && raised, streak, error: w.error, file };
 }
 
 // v0.6.3（下游 Dify 工作流反馈）：`customModels` 的条目其实是**两种东西**，此前混为一谈——

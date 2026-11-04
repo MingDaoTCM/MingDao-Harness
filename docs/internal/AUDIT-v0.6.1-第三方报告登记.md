@@ -6299,6 +6299,29 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   被静默改写，避免替用户改配置。前端静态 `<select>` 的选项未改（`src/web/app.js`/`index.html` 不在
   允许改动面），限制通过 403 文案与 `/api/state.permissionAutoAllowed` 表达。
 
+
+## 6.2 v0.7.0 §1.3：六类持久状态的无锁/非原子写入收口
+
+- **缺陷**：`config.json` / `credentials.json` 的「load → 改 → save」无锁，WebUI / CLI / 同步命令
+  并发时后写者用陈旧快照整份覆盖；`model-cache.json` 是截断式直写（崩溃即半截，消费端静默回退
+  旧模型名）；`endpoint-limits.json` 无锁整表 RMW（并发「学习」互相覆盖，v0.6.26 的安全预算会丢）；
+  ledger append 与 `net.jsonl` 出网日志无锁追加/整文件重写。
+- **修法**：统一复用 `src/atomic-write.js` 的 `withFileLock(Sync)` + `atomicWriteFileSync`，不新增第三套锁。
+  `saveConfig` 保持 `saveConfig(cfg)` 签名（新增返回 `{ok,error}`），锁内重读磁盘、按字段增量合并；
+  新增异步版 `saveConfigAsync` / `updateConfig` / `setStoredKeyAsync` 供 WebUI 请求路径使用；
+  model-cache 收敛为 `readModelCache()` / `writeModelCache()` 单一入口（锁 + 原子替换 + 失败 warn）；
+  endpoint-limits 在锁内重读整表后只更新本 `baseUrl`；ledger append 与 egress 追加/轮转持锁，
+  egress 不再有无锁「读全文 → 覆盖写」。六条写失败路径均 warn + 返回 `{ok:false}`，不静默、不崩。
+- **断言**：`node test/state-locks.js` **9/9**（16 路真子进程并发 saveConfig / 并发 setKey 两 provider /
+  写中 `SIGKILL` 后 model-cache 仍可解析 / 并发学习不同端点 / ledger 100 条并发 + 外部持锁互斥 /
+  egress 50 条并发 + 外部持锁互斥 / 六条路径注入 `EACCES` 的可见 warn）。
+  变异：`node test/mutate/batch69-state-locks.mjs` **10/10** 全中（无锁、锁内不重读、截断直写、
+  整表覆盖、egress 整文件重写、锁删除、失败 warn 被吞）。
+- **边界**：`test/smoke.js` / `test/run-all.mjs` / `ci.yml` / `test/mutate/README.md` 未改；
+  `src/web/app.js`、`src/agent.js`、`src/schedule.js`、`src/tasks.js`、`src/task-state.js` 未改。
+  同步锁仍用于 CLI/纯同步链；WebUI 的设置与同步登录路径已切到异步版。`skills.js` 的 `saveConfig`
+  调用点不在本任务允许改动面内，仍走同步锁，但语义已被 `saveConfig` 内部收口。
+
 ## 6.3 v0.7.0 §1.4：请求路径去同步锁（"18 处"= 18 条文本命中 → 14 个真实调用点）
 
 - **先更正数字（报告数字必须对得上代码）**：路线图写的「18 处 `withFileLockSync`」是
@@ -6345,6 +6368,50 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
 - **边界**：`cachestats.recordUsage`（聊天收尾，每回合一条）与 `audit.writeAudit`（工具执行，
   每工具调用一条）经复核也属请求路径同步锁，**单独一个提交**处理（便于单独回滚），见 §6.3.1；
   本轮未改 `src/agent.js` / `src/web/server.js` 的其它逻辑。
+
+## 6.1 v0.7.0 任务 1：覆盖率口径改为「最内层区间」（自报 88.7% → 真实 68.4% / 50.1% / 87.8%）+ 三口径 + ratchet
+
+- **缺陷**（`scripts/coverage-report.mjs:76-83`，v0.6.31 及以前）：把每个文件所有 `count>0` 的 V8 区间
+  **取并集**判"这一行覆盖了没有"。V8 区间是嵌套的，模块外壳（顶层函数体）区间横跨全文——文件只要被
+  import 过就几乎整份算已覆盖。实测（HEAD=25de7e0，全量 23 套，Node v24.20.0）：
+  旧口径 all-lines **88.7%**（31794/35846，与自报数字逐位一致），按最内层叶子区间只有 **50.1%**；
+  code-lines 旧 **86.9%** → 新 **68.4%**（17963/26278）；functions 旧报告没有此口径，新 **87.8%**
+  （1522/1734）。"覆盖率最低的 8 个文件"此前全部 95–99%；现在最低 5 个是 `src/web/app.js`
+  （0/2876，与审计文"2876 行 0% 覆盖"一致）、`src/web/i18n.js`（0/225）、`src/commands/update.js`
+  （0/187）、`src/commands/workspace.js`（0/110）、`src/commands/desktop.js`（0/40）——它们从未被加载，
+  旧算法也显示 95%+。另修一个附带 bug：该名单旧实现按行数降序取末 8 个（= 最小的 8 个文件），
+  标题"最低的 8 个"从来没和内容对应过；现在按 code-lines 升序。
+- **修法**：按嵌套关系取**最内层（叶子）区间**（外层先入栈的单遍栈扫描），行锚点 = 该行**首个非空白
+  代码字符**；同一 `[start,end)` 跨多个进程时计数取 max（否则后到的子进程 0 会覆盖父进程的 3）。
+  三口径同时输出：`code-lines`（主指标 / 门禁，排除空行与纯注释行）、`all-lines`（分母 = 全部行，
+  分子只算有执行的代码行 → 恒为 code-lines 的下界）、`functions`（V8 `functions`，排除模块外壳，
+  `ranges[0].count > 0` 即被调用）。纯注释/空行判定是简单词法启发式（跳过 `//`、`/* */`、字符串/
+  模板字面量；**不解析正则字面量**，已知边界写进 DEVELOPER §7.1）。输出保持兼容：首行旧格式、
+  未加载文件清单、"覆盖率最低的 8 个文件"标题都保留，只新增三口径明细与基线行。
+- **基线 / ratchet**：新增 `scripts/coverage-baseline.json`（code-lines 68.4% / all-lines 50.1% /
+  functions 87.8%，生成于 2026-11-04T07:35Z，node v24.20.0，`note` 标明"过渡基线，0.7.0 发布前重生成"）。
+  `npm run coverage` 逐项比较，任一指标低于基线即 exit 1，容差 **-0.2pp**（只吸收四舍五入噪声）；
+  抬升基线必须显式 `node scripts/coverage-report.mjs --update-baseline`（`npm run coverage:baseline`），
+  且必须与"让覆盖率变好/口径变化"的改动同一次提交。
+- **口径对照（诚实说明）**：审计文引用的 70.5%（全行）/ 63.9%（仅代码行）是**另一套行锚点与分母**
+  （注释行按外层区间算覆盖、分母不含空行；行尾锚点），同一份数据按那套口径实测为 71.1% / 64.3%；
+  本实现选"行首代码字符 + 空行/注释恒未覆盖"，所以 all-lines 更低（50.1%）、code-lines 略高（68.4%）。
+  旧并集 88.7% 可逐位复现，证明数据集与分母一致，差异只在"同一行的哪个偏移代表这一行"的定义，
+  不是"叶子区间"原则本身。
+- **套件**：`test/coverage-metric.js` **8 组**（嵌套父/子、兄弟区间、整文件函数与未加载文件、
+  未执行函数、纯注释与空文件、三口径关系、多进程合并取 max、ratchet）——手写 V8 片段把算法本身钉住，
+  不拿真实仓库当唯一证据；`test/mutate/batch68-coverage-metric.mjs` **7/7** 全中（退回父区间并集、
+  code-lines 当 all-lines、函数级忽略未执行、ratchet 失效、空文件崩、分母 0 变 NaN、多进程不取 max）。
+  兼容性回归：smoke §129 的 K-5/K-6 源码守卫与行为守卫、batch15 ④⑤⑥、batch23 的覆盖率变异，
+  在本实现上重跑 **4/4** 仍命中（真实路径解析改为 realpath 比较——os.tmpdir() 的 `/var` 软链曾让脚本
+  在临时目录里静默不执行）。
+- **验证**：`npm run typecheck` 0 错误、`npm run typecheck:strict` 0 条（基线 0）、`node test/smoke.js`
+  单独通过（worktree）、`node test/run-all.mjs` **23/23 套通过**（带 NODE_V8_COVERAGE 全量采集，
+  基线数据即来自这次）、`node scripts/doc-lint.mjs` 只剩"变异总数"计数红（新增 7 条，README 由统一收口更新）。
+- **边界**：未改 `src/**`、`test/smoke.js`、`test/run-all.mjs`、`.github/workflows/ci.yml`、
+  `test/mutate/README.md`；基线在 HEAD=25de7e0 的独立 worktree 里实测（当时主工作树的 src 正被并行
+  任务的变异改写，V8 偏移会错位，主树实测会得到错数）。`app.js` 的 0% 覆盖要靠后续"抽 viewmodel"
+  任务解决，本任务只保证尺子不再把它报成 95%。
 
 ### 6.3.1 第二提交：聊天收尾与工具执行路径（cachestats / audit）
 

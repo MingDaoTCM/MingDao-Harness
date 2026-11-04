@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import { safeFetchText } from './safe-fetch.js';
 import path from 'node:path';
-import { mingdaoHome, ensureHome } from './config.js';
+import { mingdaoHome, ensureHome, readModelCache, updateModelCacheSync } from './config.js';
 import { PROVIDERS, modelPreset, familyRepresentative, pickFamilyModel, modelCapabilityUnknown, normalizeModelLabels, modelDisplayLabel } from './models.js';
 import { getStoredKey } from './credentials.js';
 import { isLocalBaseUrl, resolveModelCaps } from './model-caps.js';
@@ -733,16 +733,18 @@ function median(/** @type {number[]} */ arr) {
 
 /** 本机历史基线：用于识别"同端点突然变慢 = 可能被旧请求占着"（负责人实测 2.7s → 23.9s）。
  *  存放位置复用既有的 <home>/model-cache.json 里的**保留键** `__probeBaseline`
- *  ——不新开文件、不新增加一处"静默吞写"（写路径复用已审阅的 saveCache）。 */
+ *  ——不新开文件、不新增加一处"静默吞写"（写路径走 updateModelCacheSync 单一入口）。 */
 export const PROBE_BASELINE_KEY = '__probeBaseline';
 function loadProbeBaseline() {
   const b = loadCache()?.[PROBE_BASELINE_KEY];
   return b && typeof b === 'object' ? b : {};
 }
 function saveProbeBaseline(/** @type {any} */ data) {
-  const cache = loadCache();
-  cache[PROBE_BASELINE_KEY] = data;
-  saveCache(cache);
+  // 锁内重读再改：预检基线与服务商名单共用同一个文件，不能拿旧快照互相覆盖
+  saveCache((cache) => {
+    cache[PROBE_BASELINE_KEY] = data;
+    return cache;
+  });
 }
 
 function fetchImplOr(/** @type {any} */ f, /** @type {any} */ url, /** @type {any} */ init) {
@@ -909,19 +911,40 @@ export function modelCacheFile() {
   return path.join(mingdaoHome(), 'model-cache.json');
 }
 
-function loadCache() {
-  try {
-    return JSON.parse(fs.readFileSync(modelCacheFile(), 'utf8'));
-  } catch {
-    return {};
-  }
+/**
+ * v0.7.0 §1.3：model-cache.json 只有两个入口——`readModelCache()` / `writeModelCache()`（见 config.js）。
+ * loadCache 保留为内部只读别名；所有写都必须走 updateModelCacheSync()（锁内重读再改），
+ * 写失败由它在 config.js 里打可见 warn 并返回 {ok:false}，不再静默吞掉。
+ */
+const loadCache = () => readModelCache();
+
+/**
+ * 模型缓存写失败的可见报告（独立函数，失败处理只有一个出口）。
+ * 缓存不是权威数据（可按需重建），但写失败仍必须能在日志里查到。
+ * @param {any} err
+ */
+function reportCacheWriteFailure(err) {
+  console.warn(`[MingDao] ⚠ model-cache.json 写入失败：${String(/** @type {any} */ (err)?.message ?? err)}——本次模型名单缓存未更新（不影响本次对话）。`);
 }
 
-function saveCache(/** @type {any} */ data) {
+/**
+ * 模型缓存的**唯一写入口**：锁内重读再改（config.js 的 updateModelCacheSync），
+ * 并兜住「写入口意外抛错」。正常写失败由 updateModelCacheSync 内部 warn + `{ok:false}` 返回；
+ * 这里只防未来实现改动把异常漏到调用方——绝不中断对话。
+ * @param {(cache: Record<string, any>) => any} mutate
+ * @returns {{ok: boolean, error: string|null, cache: Record<string, any>|null}}
+ */
+function saveCache(/** @type {(cache: Record<string, any>) => any} */ mutate) {
+  /** @type {any} */
+  let result;
   try {
     ensureHome();
-    fs.writeFileSync(modelCacheFile(), JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
-  } catch {}
+    fs.mkdirSync(mingdaoHome(), { recursive: true, mode: 0o700 });
+    result = updateModelCacheSync(mutate);
+  } catch (err) {
+    reportCacheWriteFailure(err);
+  }
+  return result || { ok: false, error: 'model-cache.json 写入失败', cache: null };
 }
 
 export function providerHasKey(/** @type {any} */ providerName) {
@@ -992,9 +1015,12 @@ export async function fetchProviderModels(/** @type {any} */ cfg, /** @type {any
         .filter((/** @type {any} */ id) => id && isChatModel(id))
         .slice(0, 200);
       if (!list.length) return { error: '接口未返回可用模型' };
-      const cache2 = loadCache(); // 重新读取：避免与并发写入互相覆盖
-      cache2[providerName] = { models: list, fetchedAt: Date.now() };
-      saveCache(cache2);
+      // 锁内重读再改（v0.7.0 §1.3）：两个进程同时刷新不同服务商时，各自的名单都要在。
+      const written = saveCache((cache2) => {
+        cache2[providerName] = { models: list, fetchedAt: Date.now() };
+        return cache2;
+      });
+      void written; // 失败已在 saveCache 内 warn 并返回 {ok:false}
       return { models: list, fromCache: false, fetchedAt: Date.now() };
     } catch (e) {
       const ee = /** @type {any} */ (e);

@@ -21,7 +21,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
-import { atomicWriteFileSync, atomicWritePrivateSync, appendFilePrivateSync } from './atomic-write.js';
+import { atomicWriteFileSync, atomicWritePrivateSync, appendFilePrivateSync, withFileLockSync as withStateFileLockSync } from './atomic-write.js';
 import { mingdaoHome, ensureHome } from './config.js';
 import { redactSecrets, redactSensitive, isSecretObjectKey } from './redact.js';
 
@@ -142,6 +142,18 @@ export function redactDeep(value, depth = 0, fn = redactSecrets) {
 
 function runFile(/** @type {any} */ runId) {
   return path.join(ledgerDir(), String(runId) + '.jsonl');
+}
+
+/**
+ * 单次运行的账本追加锁（v0.7.0 §1.3）。
+ * appendFileSync 单次写虽然多数文件系统上不会交错，但「不会交错」不是 POSIX 对普通文件的承诺；
+ * 同 run 的两个写者（例如守护进程与前台 CLI 同时续写/多进程测试）必须显式串行——否则两条
+ * JSON 行可能拼在一起，逐行解析失败会让整份合规账本变成不可校验。
+ * 持锁只包住「追加一行」这一小段，哈希链（prev=digestOf(本行)）的顺序语义完全不变。
+ * @param {any} runId
+ */
+export function ledgerLockFile(/** @type {any} */ runId) {
+  return runFile(runId) + '.lock';
 }
 
 /** 封条侧车文件：与账本同目录、同名不同后缀（轮转时随之删除） */
@@ -534,10 +546,8 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
       fs.mkdirSync(ledgerDir(), { recursive: true, mode: 0o700 });
       const event = { v: LEDGER_VERSION, runId, seq: seq + 1, at: now(), type, prev, ...redactDeep(payload) };
       const line = JSON.stringify(event);
-      appendFilePrivateSync(runFile(runId), line + '\n');
-      try {
-        fs.chmodSync(runFile(runId), 0o600);
-      } catch {}
+      // appendFilePrivateSync 自带「追加 + 0600 自愈」，锁只包住这一次写入。
+      withStateFileLockSync(ledgerLockFile(runId), () => appendFilePrivateSync(runFile(runId), line + '\n'));
       // 哈希链：下一行的 prev = 本行内容的 hash（校验时逐行重算即可发现篡改/删行）
       prev = digestOf(line);
       seq += 1;
@@ -546,6 +556,9 @@ export function createLedger(runId, { enabled = true, maxRuns = DEFAULT_MAX_RUNS
       alive = false; // 写失败即整体停用，避免每步都抛一次
       failures += 1;
       failure = String(/** @type {any} */ (err)?.message ?? err);
+      // v0.7.0 §1.3：写失败必须**可见**（此前只记录在 getter 里，没人主动读就相当于静默）。
+      // 账本降级不影响执行，但用户/日志必须能查到「这一份账本从这里开始缺了」。
+      console.warn(`[MingDao] ⚠ 账本写入失败（run ${String(runId)}）：${failure}——本回合后续事件不再记账（执行不受影响，可用 mingdao ledger verify 复核已写入部分）。`);
       return null;
     }
   }

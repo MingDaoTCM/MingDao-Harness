@@ -995,6 +995,30 @@ export async function createProvider(cfg) {
 - 调度器为**单守护进程**：`mingdao schedule daemon [status|stop]` 查看/停止；有任务时任意
   schedule 命令自动拉起，无任务自动退出（每任务一个 sleeper 进程的旧方案仅作兜底）。
 
+## 持久状态文件的锁与原子写（v0.7.0 §1.3）
+
+`~/.mingdao` 下的六类状态文件会被**多个进程同时写**（WebUI 服务、CLI、同步命令、守护进程、
+并发会话）。单进程顺序调用看不出问题，但两个进程各拿一份旧快照做「读 → 改 → 写」时，后写者会
+把前者刚写的字段整份覆盖——用户看到的是「我明明填了 Key/改了模型/学到的预算，过一会自己变回去了」。
+v0.7.0 起这六处统一走 `src/atomic-write.js` 的既有原语：`withFileLock`（异步，请求路径）/
+`withFileLockSync`（CLI）/ `atomicWriteFileSync`（tmp + fsync + rename + 目录 fsync）。
+
+| 文件 | 锁 | 写入语义 |
+| --- | --- | --- |
+| `config.json` | `config.json.lock` | 锁内**重读磁盘**，只合并本次相对读入快照真正改变的字段；删除字段仍生效。`saveConfig(cfg)` 签名不变，返回 `{ok,error}`；WebUI 用 `saveConfigAsync` |
+| `credentials.json` | `credentials.json.lock` | 锁内重读；`setStoredKey` 只改一把 Key。并发设两把不同 provider 的 Key 都会保留 |
+| `model-cache.json` | `model-cache.json.lock` | 唯一读写入口 `readModelCache()` / `writeModelCache()`（`src/config.js`）；锁内重读再改，原子替换。写中崩溃只会留下旧版本或临时文件，**不会**留下半截 JSON |
+| `endpoint-limits.json` | `endpoint-limits.json.lock` | 锁内重读整表、只更新本 `baseUrl` 那一条，再原子写；并发学习不同端点不会整表覆盖 |
+| `ledger/<run>.jsonl` | `<run>.jsonl.lock` | 追加一行在锁内完成；哈希链 `prev = digestOf(本行)` 语义不变 |
+| `net.jsonl`（出网日志） | `net.jsonl.lock` | 追加与轮转（按大小、原子替换）在**同一把锁**内完成；不再有无锁整文件重写 |
+
+**写失败必须可见**：以上写路径失败时都会 `console.warn` 一条 `[MingDao] ⚠ …失败…`，并返回
+`{ok:false,error}`（账本/出网日志降级不中断执行）。不存在「静默成功」或「静默吞掉」。
+
+**并发证据**：`node test/state-locks.js`（16 路真子进程写 config、并发设 Key、写中 `kill -9`、
+并发学习端点、并发账本/出网日志、注入 `EACCES` 的告警断言）；变异验证：
+`node test/mutate/batch69-state-locks.mjs`。
+
 ## 账本来源签名（v0.6.11：`mingdao ledger --sign-key`）
 
 哈希链 + 封条证明的是「这份账本自写入后没被改动、尾部没被截断」，但它们的全部输入都来自

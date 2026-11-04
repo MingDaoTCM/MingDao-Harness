@@ -4,8 +4,8 @@ import fs from 'node:fs';
 import crypto from 'node:crypto';
 import { DEFAULT_MODEL } from '../../../models.js';
 import path from 'node:path';
-import { loadConfig, saveConfig } from '../../../config.js';
-import { setStoredKey, removeStoredKey, getStoredKey, maskKeyTail } from '../../../credentials.js';
+import { loadConfig, saveConfigAsync } from '../../../config.js';
+import { setStoredKeyAsync, removeStoredKeyAsync, getStoredKey, maskKeyTail } from '../../../credentials.js';
 import { availableModels, fetchProviderModels, providerHasKey, isDiscoveredModel, resolveDefaultModel, resolveRoutingDefaults, modelsCatalogNote } from '../../../model-discovery.js';
 import { createProvider, resolveProviderConfig } from '../../../providers/index.js';
 import { MODELS, PROVIDERS, modelPreset } from '../../../models.js';
@@ -274,7 +274,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     state.modelName = next.model;
     cfg.model = next.model;
     cfg.permission = next.permission;
-    saveConfig(cfg);
+    await saveConfigAsync(cfg);
     json(res, 200, { ok: true, model: state.modelName, permission: cfg.permission, sandbox: cfg.sandbox, routing: cfg.routing?.enabled, contextBudget: cfg.contextBudget, reasoningEffort: cfg.reasoningByModel?.[state.modelName] ?? cfg.reasoningEffort, autostart: autostartChanged ? autostartStatus() : undefined, notify: cfg.notify !== false });
     return true;
   }
@@ -327,7 +327,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (!/** @type {Record<string, any>} */ (PROVIDERS)[provider]) return json(res, 400, { error: `未知服务商 ${provider}` });
       const key = String(body.key || '').trim();
       if (!key) return json(res, 400, { error: 'Key 不能为空（删除请用 removeProviderKey）' });
-      const sk = setStoredKey(provider, key);
+      const sk = await setStoredKeyAsync(provider, key);
       if (sk && sk.ok === false) return json(res, 400, { error: sk.error }); // v0.6.7（M-1）：凭证库损坏时拒绝写并如实报错
       dropProviderCache('setProviderKey'); // 质检：Key 立即生效（缓存持有旧无 Key 实例 → 此前需重启）
       // 设置 Key 后立即拉取线上真实模型名单（失败不影响 Key 保存，回退预设）
@@ -351,7 +351,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     if (action === 'removeProviderKey') {
       const provider = String(body.provider || '').trim();
       if (!/** @type {Record<string, any>} */ (PROVIDERS)[provider]) return json(res, 400, { error: `未知服务商 ${provider}` });
-      removeStoredKey(provider);
+      await removeStoredKeyAsync(provider);
       dropProviderCache('removeProviderKey'); // 质检：Key 删除立即生效
       return json(res, 200, { ok: true, provider });
     }
@@ -400,10 +400,10 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         ...(Number(body.maxOutputTokens) > 0 ? { maxOutputTokens: Math.round(Number(body.maxOutputTokens)) } : (prev.maxOutputTokens ? { maxOutputTokens: prev.maxOutputTokens } : {})),
       };
       if (String(body.key || '').trim()) {
-        const sk3 = setStoredKey(`custom:${name}`, String(body.key).trim());
+        const sk3 = await setStoredKeyAsync(`custom:${name}`, String(body.key).trim());
         if (sk3 && sk3.ok === false) return json(res, 400, { error: sk3.error }); // v0.6.7（M-1）
       }
-      saveConfig(cfg);
+      await saveConfigAsync(cfg);
       // baseUrl 改动影响 isLocal 判定 → 超时档位变化；清缓存让新超时/新端点即时生效
       dropProviderCache('customModel');
       return json(res, 200, { ok: true, name });
@@ -412,13 +412,13 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       const name = String(body.name || '').trim();
       if (!(cfg.customModels || {})[name]) return json(res, 400, { error: `自定义模型 ${name} 不存在` });
       delete cfg.customModels[name];
-      removeStoredKey(`custom:${name}`);
+      await removeStoredKeyAsync(`custom:${name}`);
       if (state.modelName === name) {
         // §3.67：回退到 API 名单里的 flash 官方名；拿不到才用家族代表名（兜底会告警）。
         state.modelName = (await resolveDefaultModel(cfg, 'executor')).model;
         cfg.model = state.modelName;
       }
-      saveConfig(cfg);
+      await saveConfigAsync(cfg);
       dropProviderCache('removeCustom');
       return json(res, 200, { ok: true, name, model: state.modelName });
     }
@@ -443,7 +443,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (!(cfg.customModels || {})[name]) return json(res, 400, { error: `自定义模型 ${name} 不存在` });
       const key = String(body.key || '').trim();
       if (!key) return json(res, 400, { error: 'Key 不能为空' });
-      const sk2 = setStoredKey(`custom:${name}`, key);
+      const sk2 = await setStoredKeyAsync(`custom:${name}`, key);
       if (sk2 && sk2.ok === false) return json(res, 400, { error: sk2.error }); // v0.6.7（M-1）
       dropProviderCache('setCustomKey'); // 质检：Key 立即生效
       return json(res, 200, { ok: true, name, keyMasked: maskKeyTail(key) });
@@ -472,7 +472,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (denied) return json(res, 400, { needKey: true, error: denied });
       cfg.baseUrl = baseUrl || undefined;
       if (cfg.baseUrl === undefined) delete cfg.baseUrl;
-      saveConfig(cfg);
+      await saveConfigAsync(cfg);
       // H-04 的**根因**：此前保存后直接 200，缓存里仍是旧 baseUrl 的实例。
       // 清空 baseUrl 同样要失效（否则新任务继续用旧端点，而不是按「缺少 baseUrl」显式失败）。
       dropProviderCache(baseUrl ? 'setBaseUrl' : 'clearBaseUrl');

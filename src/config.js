@@ -6,7 +6,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { PROVIDERS, modelPreset, providerPreset, pickFamilyModel, normalizeModelLabels, DEFAULT_MODEL, DEFAULT_PLANNER_MODEL, DEFAULT_EXECUTOR_MODEL } from './models.js';
 import { setStoredKey, resolveApiKey, maskKey } from './credentials.js';
-import { atomicWriteFileSync } from './atomic-write.js';
+import { atomicWriteFileSync, withFileLock, withFileLockSync as withStateFileLockSync } from './atomic-write.js';
 
 export function mingdaoHome() {
   return process.env.MINGDAO_HOME || path.join(os.homedir(), '.mingdao');
@@ -22,6 +22,83 @@ export function ensureHome() {
 
 export function configPath() {
   return path.join(mingdaoHome(), 'config.json');
+}
+
+/**
+ * config.json 的跨进程锁（v0.7.0 §1.3）。
+ * 锁文件与目标同目录：所有写方（WebUI 请求、CLI、守护进程）都用同一把锁，
+ * 锁内做「重读磁盘 → 合并本次改动 → 原子写」，而不是拿一份可能已经陈旧的快照整文件覆盖。
+ */
+export function configLockFile() {
+  return configPath() + '.lock';
+}
+
+/** model-cache.json 的跨进程锁（与配置文件同款：写前拿锁、锁内原子替换）。 */
+export function modelCacheLockFile() {
+  return path.join(mingdaoHome(), 'model-cache.json.lock');
+}
+
+/**
+ * 读取 model-cache.json 的**唯一入口**（v0.7.0 §1.3）。
+ * 缺失 / 损坏 / 顶层不是对象一律返回空对象：缓存是纯优化，坏掉只应降级，不能阻断启动。
+ * @returns {Record<string, any>}
+ */
+export function readModelCache() {
+  try {
+    const j = JSON.parse(fs.readFileSync(path.join(mingdaoHome(), 'model-cache.json'), 'utf8'));
+    return j && typeof j === 'object' && !Array.isArray(j) ? j : {};
+  } catch {
+    return {};
+  }
+}
+
+/** 原子写入 model-cache.json（调用方必须已持锁）。 */
+function writeModelCacheUnlocked(/** @type {any} */ data) {
+  ensureHome();
+  atomicWriteFileSync(path.join(mingdaoHome(), 'model-cache.json'), JSON.stringify(data, null, 2) + '\n', { mode: 0o600 });
+}
+
+/**
+ * 写入 model-cache.json 的**唯一入口**：跨进程锁 + 原子替换（tmp/fsync/rename）。
+ *
+ * v0.7.0 §1.3：此前这里是 `fs.writeFileSync(target)` 的**截断式直写**——进程在写一半时崩溃，
+ * 下次启动就读到半截 JSON，`cachedModelNames()` 静默回退旧模型名，用户看到的是「模型名自己变回去了」。
+ * 写失败**必须可见**：返回 `{ok:false,error}` 并打一条 warn，绝不静默吞掉。
+ * @param {any} data
+ * @returns {{ok: boolean, error: string|null}}
+ */
+export function writeModelCache(/** @type {any} */ data) {
+  try {
+    withStateFileLockSync(modelCacheLockFile(), () => writeModelCacheUnlocked(data));
+    return { ok: true, error: null };
+  } catch (err) {
+    const msg = String(/** @type {any} */ (err)?.message ?? err);
+    console.warn(`[MingDao] ⚠ model-cache.json 写入失败（${path.join(mingdaoHome(), 'model-cache.json')}）：${msg}——本次模型名单缓存未更新（不影响本次对话，下次拉取会重试）。`);
+    return { ok: false, error: msg };
+  }
+}
+
+/**
+ * 锁内「重读 → 修改 → 写回」model-cache.json。
+ * 名单缓存与预检基线共用同一文件，两个写方并发时不能拿旧快照互相覆盖。
+ * @param {(cache: Record<string, any>) => any} mutate
+ * @returns {{ok: boolean, error: string|null, cache: Record<string, any>|null}}
+ */
+export function updateModelCacheSync(/** @type {(cache: Record<string, any>) => any} */ mutate) {
+  try {
+    ensureHome();
+    return withStateFileLockSync(modelCacheLockFile(), () => {
+      const current = readModelCache();
+      const next = typeof mutate === 'function' ? mutate(current) : current;
+      const out = next && typeof next === 'object' && !Array.isArray(next) ? next : current;
+      writeModelCacheUnlocked(out);
+      return { ok: true, error: null, cache: out };
+    });
+  } catch (err) {
+    const msg = String(/** @type {any} */ (err)?.message ?? err);
+    console.warn(`[MingDao] ⚠ model-cache.json 更新失败（${path.join(mingdaoHome(), 'model-cache.json')}）：${msg}——本次模型名单缓存未更新。`);
+    return { ok: false, error: msg, cache: null };
+  }
 }
 
 /**
@@ -95,13 +172,10 @@ export function quarantineCorruptConfig(reason) {
  * @returns {string[]}
  */
 function cachedModelNames(provider) {
-  try {
-    const j = JSON.parse(fs.readFileSync(path.join(mingdaoHome(), 'model-cache.json'), 'utf8'));
-    const list = j?.[provider]?.models;
-    return Array.isArray(list) ? list.map(String) : [];
-  } catch {
-    return [];
-  }
+  // v0.7.0 §1.3：消费端也走 readModelCache() 单一入口——两处各读一遍、各判一次损坏，
+  // 迟早会漂移成两套口径（本项缺陷正是「写半截 + 读静默回退」组合出来的）。
+  const list = readModelCache()?.[provider]?.models;
+  return Array.isArray(list) ? list.map(String) : [];
 }
 
 let warnedCachedFallback = false;
@@ -152,6 +226,137 @@ function applyModelLabels(/** @type {any} */ cfg) {
   return cfg;
 }
 
+// ---------------------------------------------------------------------------
+// v0.7.0 §1.3：配置写入的「基线 + 增量」。
+//
+// 缺陷形态：调用方 `loadConfig() → 改一个字段 → saveConfig(cfg)`，而 saveConfig 把**整份
+// 快照**写回。两个进程（WebUI 设置页 + CLI / 同步命令）先后写时，后写者会用自己启动时读到的
+// 旧快照覆盖前者刚写的字段——用户看到的就是「我明明填了 Key/改过模型，过一会自己变回去了」。
+//
+// 修法：load 时记下该对象的快照；save 时在锁内**重读磁盘**，只把「相对快照真正改变/删除的
+// 字段」合并进去。这样：
+//   · 并发写不同字段 → 各写各的，互不覆盖；
+//   · 并发写同一字段 → 后保存者赢（这是用户此刻的明确意图，不是陈旧快照）；
+//   · 删除字段（delete cfg.x / 设为 undefined）依旧生效，不会被"合并"回来。
+// 无法识别基线（向导新建的完整配置、测试直接传字面量）时保持原语义：整份写入。
+// ---------------------------------------------------------------------------
+/** @type {WeakMap<object, any>} */
+const configSnapshots = new WeakMap();
+
+/** @param {any} v @returns {any} */
+function cloneConfigValue(v) {
+  return v === undefined ? undefined : JSON.parse(JSON.stringify(v));
+}
+
+/** @param {any} v @returns {boolean} */
+function isConfigObject(v) {
+  return Boolean(v) && typeof v === 'object' && !Array.isArray(v);
+}
+
+/** @param {any} a @param {any} b @returns {boolean} */
+function configValuesEqual(a, b) {
+  if (a === b) return true;
+  if (!isConfigObject(a) || !isConfigObject(b)) return false;
+  const ka = Object.keys(a);
+  const kb = Object.keys(b);
+  if (ka.length !== kb.length) return false;
+  for (const k of ka) {
+    if (!Object.prototype.hasOwnProperty.call(b, k) || !configValuesEqual(a[k], b[k])) return false;
+  }
+  return true;
+}
+
+/**
+ * 计算 before→after 的增量（对象递归，数组/标量整体替换；缺失键记为删除）。
+ * @param {any} before @param {any} after @param {string[]} prefix
+ * @param {{set: [string[], any][], del: string[][]}} patch
+ */
+function collectConfigPatch(before, after, prefix, patch) {
+  if (isConfigObject(before) && isConfigObject(after)) {
+    for (const k of Object.keys(after)) {
+      if (Object.prototype.hasOwnProperty.call(before, k)) collectConfigPatch(before[k], after[k], [...prefix, k], patch);
+      else patch.set.push([[...prefix, k], cloneConfigValue(after[k])]);
+    }
+    for (const k of Object.keys(before)) {
+      if (!Object.prototype.hasOwnProperty.call(after, k)) patch.del.push([...prefix, k]);
+    }
+    return;
+  }
+  if (!configValuesEqual(before, after)) patch.set.push([prefix, cloneConfigValue(after)]);
+}
+
+/** @param {any} base @param {string[]} keys @param {any} value */
+function configSetAt(base, keys, value) {
+  let cur = base;
+  for (let i = 0; i < keys.length - 1; i += 1) {
+    const k = keys[i];
+    if (!isConfigObject(cur[k])) cur[k] = {};
+    cur = cur[k];
+  }
+  cur[keys[keys.length - 1]] = value;
+}
+
+/** @param {any} base @param {string[]} keys */
+function configDeleteAt(base, keys) {
+  let cur = base;
+  for (let i = 0; i < keys.length - 1; i += 1) {
+    const k = keys[i];
+    if (!isConfigObject(cur[k])) return;
+    cur = cur[k];
+  }
+  if (isConfigObject(cur)) delete cur[keys[keys.length - 1]];
+}
+
+/** @param {any} base @param {{set: [string[], any][], del: string[][]}} patch */
+function applyConfigPatch(base, patch) {
+  for (const keys of patch.del) configDeleteAt(base, keys);
+  for (const [keys, value] of patch.set) configSetAt(base, keys, value);
+}
+
+/**
+ * 记下「这份对象被读出来时是什么样」。
+ * @param {any} cfg
+ */
+function rememberConfig(cfg) {
+  // 记 home：测试/桌面版会切 MINGDAO_HOME，不同 home 的字段没有可比性（必须退回整份写入）
+  if (isConfigObject(cfg)) configSnapshots.set(cfg, { home: mingdaoHome(), data: cloneConfigValue(cfg) });
+}
+
+/** 写 config.json（调用方必须已持锁）：原子写 + 0600。 */
+function writeConfigUnlocked(/** @type {any} */ cfg) {
+  ensureHome();
+  const p = configPath();
+  atomicWriteFileSync(p, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+  try {
+    fs.chmodSync(p, 0o600);
+  } catch {}
+}
+
+/**
+ * 锁内准备最终要落盘的配置：重读磁盘 + 合并本次增量。
+ * 读不出来时先改名备份（与 loadConfigForWrite 同一纪律），绝不静默覆盖用户原文。
+ * @param {any} cfg @returns {any}
+ */
+function prepareConfigForWrite(cfg) {
+  const snapshot = configSnapshots.get(cfg);
+  const sameHome = Boolean(snapshot) && snapshot.home === mingdaoHome();
+  const strict = readConfigStrict();
+  /** @type {any} */
+  let base;
+  if (strict.ok) {
+    base = isConfigObject(strict.data) ? strict.data : {};
+  } else {
+    quarantineCorruptConfig(`保存配置时读不出来：${strict.error}`);
+    base = {};
+  }
+  if (!sameHome) return cfg; // 无基线（新配置/字面量）或换了 home → 保持原语义：整份写入
+  /** @type {{set: [string[], any][], del: string[][]}} */
+  const patch = { set: [], del: [] };
+  collectConfigPatch(snapshot.data, cfg, [], patch);
+  applyConfigPatch(base, patch);
+  return base;
+}
+
 /** 读取配置对象（不存在/损坏返回 null）；返回值为用户可编辑的任意 JSON 配置，类型不定
  *
  * 注意（v0.6.3 / H-7）：null **同时**表示「不存在」与「读不出来」。凡是要**写**配置的调用点，
@@ -159,7 +364,10 @@ function applyModelLabels(/** @type {any} */ cfg) {
  * @returns {any} */
 export function loadConfig() {
   const r = readConfigStrict();
-  return r.ok ? applyModelLabels(applyCachedModelDefaults(r.data)) : null;
+  if (!r.ok) return null;
+  const cfg = applyModelLabels(applyCachedModelDefaults(r.data));
+  rememberConfig(cfg); // v0.7.0 §1.3：记下基线，saveConfig 只合并增量
+  return cfg;
 }
 
 /**
@@ -177,16 +385,26 @@ export function loadConfig() {
  */
 export function loadConfigForWrite(why = '某个写配置的命令') {
   const r = readConfigStrict();
-  if (r.ok) return r.data || {};
+  if (r.ok) {
+    const cfg = r.data || {};
+    rememberConfig(cfg);
+    return cfg;
+  }
   quarantineCorruptConfig(`${why} 需要写回配置，但读不出来：${r.error}`);
-  return {};
+  const empty = {};
+  rememberConfig(empty);
+  return empty;
 }
 
 /** 桌面版首次运行：无配置时自动创建最小可用配置（引导在 WebUI 内完成，
  * 不再要求先去终端跑 mingdao init）。CLI 的 mingdao init 向导不受影响。 */
 export function ensureMinimalConfig() {
   const strict = readConfigStrict();
-  if (strict.ok && strict.data) return applyModelLabels(strict.data);
+  if (strict.ok && strict.data) {
+    const cfg = applyModelLabels(strict.data);
+    rememberConfig(cfg);
+    return cfg;
+  }
   // v0.6.3（H-7）：存在但读不出来 → 先备份再写，绝不让"首启自动建配置"吃掉用户配置
   if (strict.exists && !strict.ok) quarantineCorruptConfig(strict.error || '未知原因');
   ensureHome();
@@ -208,14 +426,115 @@ export function ensureMinimalConfig() {
   return cfg;
 }
 
-/** @param {any} cfg */
+/**
+ * 保存配置（**公开签名不变**：`saveConfig(cfg)`；返回 `{ok, error}`，旧调用方忽略返回值也不受影响）。
+ *
+ * v0.7.0 §1.3：整段「重读 → 合并增量 → 原子写」都在 `config.json.lock` 里完成。
+ * 这是同步版，给 CLI / 纯同步调用链用；WebUI 请求路径请用 `saveConfigAsync()`（等待时让出事件循环）。
+ *
+ * 写失败**不再抛**（旧实现会抛给调用方，WebUI 设置页因此 500 或静默回滚）：
+ * 返回 `{ok:false,error}` 并打一条可见 warn，调用方可展示原因，进程不崩。
+ * @param {any} cfg
+ * @returns {{ok: boolean, error: string|null}}
+ */
 export function saveConfig(cfg) {
-  ensureHome();
-  const p = configPath();
-  atomicWriteFileSync(p, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 }); // 质检 H4：原子写（tmp+rename）
   try {
-    fs.chmodSync(p, 0o600);
-  } catch {}
+    ensureHome();
+    withStateFileLockSync(configLockFile(), () => {
+      writeConfigUnlocked(prepareConfigForWrite(cfg));
+      rememberConfig(cfg); // 成功后把这版对象当作下次增量比较的基线
+    });
+    return { ok: true, error: null };
+  } catch (err) {
+    const msg = String(/** @type {any} */ (err)?.message ?? err);
+    console.warn(`[MingDao] ⚠ 配置写入失败（${configPath()}）：${msg}——本次修改未保存，请检查磁盘空间/目录权限后重试。`);
+    return { ok: false, error: msg };
+  }
+}
+
+/**
+ * 异步版 saveConfig（同一把 `config.json.lock`、同一套增量合并语义）：
+ * 请求路径上等待锁时 `await` 让出事件循环，不冻结 WebUI 的其他会话/SSE。
+ * @param {any} cfg
+ * @returns {Promise<{ok: boolean, error: string|null}>}
+ */
+export async function saveConfigAsync(cfg) {
+  try {
+    ensureHome();
+    await withFileLock(configLockFile(), () => {
+      writeConfigUnlocked(prepareConfigForWrite(cfg));
+      rememberConfig(cfg);
+    });
+    return { ok: true, error: null };
+  } catch (err) {
+    const msg = String(/** @type {any} */ (err)?.message ?? err);
+    console.warn(`[MingDao] ⚠ 配置写入失败（${configPath()}）：${msg}——本次修改未保存，请检查磁盘空间/目录权限后重试。`);
+    return { ok: false, error: msg };
+  }
+}
+
+/**
+ * 锁内「读 → 改 → 写」配置（同步版，CLI/纯同步链用）。
+ *
+ * 与 `loadConfig()+saveConfig()` 的区别：基线在**锁内**重读，因此不存在「读与写之间被别人插了一手」
+ * 的窗口；适合必须基于最新磁盘状态做判断的写路径（例如合并数组/清理字段）。
+ * 回调收到的是磁盘上的最新对象，返回值即最终写盘的配置（返回非对象时沿用原对象）。
+ * @param {(cfg: any) => any} mutate
+ * @returns {{ok: boolean, error: string|null, config: any}}
+ */
+export function updateConfigSync(/** @type {(cfg: any) => any} */ mutate) {
+  try {
+    ensureHome();
+    return withStateFileLockSync(configLockFile(), () => {
+      const strict = readConfigStrict();
+      /** @type {any} */
+      let cfg;
+      if (strict.ok) cfg = isConfigObject(strict.data) ? strict.data : {};
+      else {
+        quarantineCorruptConfig(`更新配置时读不出来：${strict.error}`);
+        cfg = {};
+      }
+      const next = typeof mutate === 'function' ? mutate(cfg) : cfg;
+      const out = isConfigObject(next) ? next : cfg;
+      writeConfigUnlocked(out);
+      rememberConfig(out);
+      return { ok: true, error: null, config: out };
+    });
+  } catch (err) {
+    const msg = String(/** @type {any} */ (err)?.message ?? err);
+    console.warn(`[MingDao] ⚠ 配置更新失败（${configPath()}）：${msg}——本次修改未保存，请检查磁盘空间/目录权限后重试。`);
+    return { ok: false, error: msg, config: null };
+  }
+}
+
+/**
+ * 异步版 `updateConfigSync`（WebUI 请求路径）：锁内重读 + 修改 + 原子写，等待期间让出事件循环。
+ * @param {(cfg: any) => any} mutate
+ * @returns {Promise<{ok: boolean, error: string|null, config: any}>}
+ */
+export async function updateConfig(/** @type {(cfg: any) => any} */ mutate) {
+  try {
+    ensureHome();
+    return await withFileLock(configLockFile(), () => {
+      const strict = readConfigStrict();
+      /** @type {any} */
+      let cfg;
+      if (strict.ok) cfg = isConfigObject(strict.data) ? strict.data : {};
+      else {
+        quarantineCorruptConfig(`更新配置时读不出来：${strict.error}`);
+        cfg = {};
+      }
+      const next = typeof mutate === 'function' ? mutate(cfg) : cfg;
+      const out = isConfigObject(next) ? next : cfg;
+      writeConfigUnlocked(out);
+      rememberConfig(out);
+      return { ok: true, error: null, config: out };
+    });
+  } catch (err) {
+    const msg = String(/** @type {any} */ (err)?.message ?? err);
+    console.warn(`[MingDao] ⚠ 配置更新失败（${configPath()}）：${msg}——本次修改未保存，请检查磁盘空间/目录权限后重试。`);
+    return { ok: false, error: msg, config: null };
+  }
 }
 
 /** @param {any} cfg @param {any} providerName */
