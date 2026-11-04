@@ -6299,3 +6299,49 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
   被静默改写，避免替用户改配置。前端静态 `<select>` 的选项未改（`src/web/app.js`/`index.html` 不在
   允许改动面），限制通过 403 文案与 `/api/state.permissionAutoAllowed` 表达。
 
+## 6.3 v0.7.0 §1.4：请求路径去同步锁（"18 处"= 18 条文本命中 → 14 个真实调用点）
+
+- **先更正数字（报告数字必须对得上代码）**：路线图写的「18 处 `withFileLockSync`」是
+  `grep -c withFileLockSync` 的**文本命中数**，不是调用点数。三个文件相加恰好 18：
+  `schedule.js` 13（12 调用 + 1 行 import）、`tasks.js` 2（1 调用 + 1 行 import）、
+  `task-state.js` 3（1 调用 + 1 行 import + 1 行注释）。去掉 import/注释后**真实调用点 14 个**，
+  本批逐处判定，不再沿用"18 处"这个会误导人的总数。
+- **基线（改前，实测）**：另起子进程持 `schedule/.lock` 2.5s，调 `pauseSchedule`（Web 路由直达）
+  → 100ms 心跳 **0 次**、阻塞 **2334ms**；持 `tasks/.lock` 2.5s 时 `listTasks`（默认 reap →
+  `reapTasks` → `patchTask`）→ 心跳 **0 次**、阻塞 **2242ms**。即"任一进程持锁 5s = 整个事件循环
+  停摆"，与 `atomic-write.js` 文件头写明的纪律一致。
+- **改后（实测）**：外部持 `schedule/.lock` 4.5s 时 `listSchedulesAsync` 等待 **4548ms**、期间
+  100ms 心跳 **44 次**；`pauseScheduleAsync` 2.5s 下心跳 24 次；`listTasksAsync`（回收路径）
+  2.3s 下心跳 22 次。**同步对照组**（同一场景调 `pauseSchedule`）心跳仍为 **0 次**——证明
+  "不冻结"不是断言恒真，而是异步版真的让出了事件循环。
+- **14 个调用点逐处归属**：
+
+  | # | 位置 | 归属 | 理由 |
+  | --- | --- | --- | --- |
+  | 1 | `schedule.js#removeSchedule` | 新增 `removeScheduleAsync`，Web 路由改异步 | `POST /api/schedule action=remove` 直达 |
+  | 2 | `schedule.js#pauseSchedule` | 新增 `pauseScheduleAsync`，Web 路由改异步 | `action=pause` 直达 |
+  | 3 | `schedule.js#resumeSchedule` | 新增 `resumeScheduleAsync`，Web 路由改异步 | `action=resume` 直达 |
+  | 4 | `schedule.js#spawnDaemon` | 新增 `spawnDaemonAsync`，add/chain/reconcile 改异步 | Web 的 add 与 `GET /api/schedule` 的 reconcile 会拉起 daemon |
+  | 5–12 | `schedule.js#runSleeper` 内 8 处（markRunning / 避峰 note / lastTaskId / 收尾 history / every nextState / once 终态 / after skipped / after 终态） | **保留同步** | 只跑在 `schedule-daemon` / `schedule-worker` 独立进程，不在 Web 请求路径；阻塞最多推迟这一条定时任务，不冻结用户请求。异步化会把 async 传染给整个状态机 |
+  | 13 | `tasks.js#patchTask` | 新增 `patchTaskAsync` / `listTasksAsync` / `reapTasksAsync` / `killTaskAsync`，Web 路由改异步 | `GET /api/tasks` 的回收分支会走到 `patchTask`；remove/pause 的 `killTask` 也取 tasks 锁 |
+  | 14 | `task-state.js#writeTaskStateFileLocked` | **保留同步** | Web 路径走 `saveTaskStateMergeAsync`：外层异步锁已持有同一把锁，内层同步锁因 AsyncLocalStorage 同链可重入**直接执行、不会 Atomics.wait**；同步版只服务 CLI/REPL |
+
+- **新增 Async API（本批）**：`schedule.listSchedulesAsync / addScheduleAsync / chainSchedulesAsync /
+  removeScheduleAsync / pauseScheduleAsync / resumeScheduleAsync / spawnDaemonAsync /
+  reconcileSchedulesAsync`；`tasks.listTasksAsync / patchTaskAsync / reapTasksAsync / killTaskAsync`；
+  `sync.commitStateAsync`（见下）。同步版全部保留（CLI 行为不变）。
+- **额外发现并一并修（题面未列）**：`src/sync.js:298 commitState` 被 `/api/sync` 的
+  `syncPush/syncPull/syncShareAccept` 直达——外部持 `.sync-state.lock` 时同样冻结整站。
+  抽出 `mergeStateDelta` 单点合并语义，三个业务入口改 `await commitStateAsync`，同步版保留。
+- **Web 路由结构守卫**：`test/request-path-locks.js` ⑤ 扫描 `src/web/routes/domains/*.js`，
+  断言**不得出现** `withFileLockSync(`，且不得调用 22 个"锁承载函数"的同步入口
+  （`listSchedules(` / `patchTask(` / `writeMemory(` / `recordUsage(` / `writeAudit(` / `commitState(` …）。
+  新增一处同步调用即红，不靠人记。
+- **测试**：`node test/request-path-locks.js` **7 项**（异步列表不冻结 + 真等待 + 结果正确、
+  同步对照冻结、tasks 回收路径不冻结、CLI 同步版回归、结构绊线）。
+  变异：`node test/mutate/batch70-request-path-locks.mjs` **10/10** 全中（异步改回同步、去锁、
+  超时/错误返回空、对照去锁、路由退回同步入口、tasks 退回同步回收、`patchTaskAsync` 同步化、
+  sync.js 退回同步提交、CLI list 被改 async、异步入口不再导出）。
+- **边界**：`cachestats.recordUsage`（聊天收尾，每回合一条）与 `audit.writeAudit`（工具执行，
+  每工具调用一条）经复核也属请求路径同步锁，**单独一个提交**处理（便于单独回滚），见 §6.3.1；
+  本轮未改 `src/agent.js` / `src/web/server.js` 的其它逻辑。

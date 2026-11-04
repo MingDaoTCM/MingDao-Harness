@@ -12,10 +12,10 @@ import path from 'node:path';
 import os from 'node:os';
 import http from 'node:http';
 import https from 'node:https';
-import { loadConfig, loadConfigForWrite, saveConfig, mingdaoHome, ensureHome } from './config.js';
-import { loadCredentials, saveCredentials } from './credentials.js';
+import { loadConfig, loadConfigForWrite, saveConfig, saveConfigAsync, mingdaoHome, ensureHome } from './config.js';
+import { loadCredentials, saveCredentials, saveCredentialsAsync } from './credentials.js';
 import { listSessions, CONFLICT_BACKUP_RE } from './session.js';
-import { atomicWriteFileSync, withFileLockSync } from './atomic-write.js';
+import { atomicWriteFileSync, withFileLockSync, withFileLock } from './atomic-write.js';
 import { decideEgress, currentPolicy } from './net-guard.js';
 import { redactSecrets } from './redact.js';
 
@@ -196,10 +196,10 @@ export async function syncLogin({ url, username, password, deviceName, insecure 
     // 会把损坏的 config.json 当成首次运行，用全新对象整份覆盖且不留备份（实测复现）。
     const cfg = loadConfigForWrite('mingdao sync login');
     cfg.sync = { url: base, username: name, deviceName: dev, auto: cfg.sync?.auto !== false, insecure: loginInsecure };
-    saveConfig(cfg);
+    await saveConfigAsync(cfg);
     const creds = loadCredentials();
     creds.sync = { token: pair.token, deviceId: pair.deviceId };
-    saveCredentials(creds);
+    await saveCredentialsAsync(creds);
     return { ok: true, username: name, deviceName: dev, url: base };
   } catch (e) {
     if (/** @type {any} */ (e).status === 401) return { error: '用户名或密码错误' };
@@ -289,17 +289,39 @@ function writeState(state) {
  *
  * 合并式：临界区里只做「重读磁盘 → 并入本次改动的那几个键 → 写回」，临界区只有文件 I/O，
  * 毫秒级完成，且并发双方各自贡献的键都不会丢（本模块只增不删，故无需处理删除语义）。
+ *
+ * v0.7.0 §1.4（逐处判定）：本文件被 `/api/sync` 路由直达。
+ *   · 同步版 `commitState` 保留给纯同步调用链（当前无业务调用点，留作 CLI 直接复用）；
+ *   · **三个业务入口（syncPush/syncPull/syncShareAccept）全部 await `commitStateAsync`**——
+ *     同步版在锁争用时用 `Atomics.wait` 睡眠，会冻结整个 WebUI 事件循环。
+ * 合并语义单点在 `mergeStateDelta`，两条路径不会漂移。
  * @param {any} delta 本次要落盘的状态增量（键 = 会话名）
  */
 function commitState(delta) {
   const keys = Object.keys(delta || {});
   if (!keys.length) return;
   ensureHome();
-  withFileLockSync(path.join(mingdaoHome(), '.sync-state.lock'), () => {
-    const cur = readState();
-    for (const k of keys) cur[k] = delta[k];
-    writeState(cur);
-  });
+  withFileLockSync(path.join(mingdaoHome(), '.sync-state.lock'), () => mergeStateDelta(keys, delta));
+}
+
+/**
+ * 异步版状态增量提交 —— **WebUI `/api/sync` 的 push/pull/accept 与 CLI `mingdao sync` 都走它**。
+ * v0.7.0 §1.4：本函数在 HTTP 请求路径上，锁等待必须 await（同步版 Atomics.wait 会冻结整站）。
+ * @param {any} delta
+ */
+async function commitStateAsync(delta) {
+  const keys = Object.keys(delta || {});
+  if (!keys.length) return;
+  ensureHome();
+  await withFileLock(path.join(mingdaoHome(), '.sync-state.lock'), () => mergeStateDelta(keys, delta));
+}
+
+/** 锁内合并（同步/异步共用；调用方必须已持 `.sync-state.lock`）。
+ * @param {string[]} keys @param {any} delta */
+function mergeStateDelta(keys, delta) {
+  const cur = readState();
+  for (const k of keys) cur[k] = delta[k];
+  writeState(cur);
 }
 
 // 推送单个/全部会话。仅当远端被其他设备改过（mtime 与本地记录不一致且内容不同）才视为冲突并备份远端。
@@ -376,7 +398,7 @@ export async function syncPush(name) {
       return { error: `推送 ${s.name} 失败：${/** @type {any} */ (e).message}` };
     }
   }
-  commitState(delta);
+  await commitStateAsync(delta);
   return { ok: true, pushed, conflicts, skipped, redacted: redactedSessions };
 }
 
@@ -426,7 +448,7 @@ export async function syncPull(name) {
     pulled.push(s.name);
     delta[s.name] = { remoteMtime: r.mtime };
   }
-  commitState(delta);
+  await commitStateAsync(delta);
   return { ok: true, pulled, conflicts };
 }
 
@@ -484,7 +506,7 @@ export async function syncShareAccept(shareId) {
     fs.mkdirSync(path.join(home, 'sessions'), { recursive: true });
     atomicWriteFileSync(path.join(home, 'sessions', r.savedAs), r.content, { mode: 0o600 }); // 质检 H4
     // T19：单键同样走末尾合并（与 syncPush/syncPull 抢同一把锁），避免覆盖并发同步的记账
-    commitState({ [r.savedAs]: { remoteMtime: r.mtime } });
+    await commitStateAsync({ [r.savedAs]: { remoteMtime: r.mtime } });
     return { ok: true, shareId, savedAs: r.savedAs, conflict: r.conflict || false };
   } catch (e) {
     return { error: `接受分享失败：${/** @type {any} */ (e).status === 404 ? '分享不存在（可能已撤销）' : /** @type {any} */ (e).message}` };

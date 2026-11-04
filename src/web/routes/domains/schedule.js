@@ -1,16 +1,20 @@
 // 调度域（Phase C C1）：/api/schedule /api/tasks
 // 定时任务增删暂停恢复/链式编排；聊天 SSE 任务 + 后台 worker + 调度任务合并面板。
+//
+// v0.7.0 §1.4（请求路径去同步锁）：本文件是 **Web 路由**，所有会取文件锁的调用**必须**用
+// `*Async` 入口并 await —— 同步版用 `Atomics.wait` 睡眠，外部进程持锁 5s 时整个事件循环
+// （所有会话 / 权限确认 / SSE 流）都会冻结。结构守卫见 test/request-path-locks.js。
 import path from 'node:path';
 import {
-  addSchedule,
-  listSchedules,
-  removeSchedule,
-  pauseSchedule,
-  resumeSchedule,
-  chainSchedules,
-  reconcileSchedules,
+  addScheduleAsync,
+  listSchedulesAsync,
+  removeScheduleAsync,
+  pauseScheduleAsync,
+  resumeScheduleAsync,
+  chainSchedulesAsync,
+  reconcileSchedulesAsync,
 } from '../../../schedule.js';
-import { listTasks } from '../../../tasks.js';
+import { listTasksAsync } from '../../../tasks.js';
 
 /**
  * 调度域路由。命中返回 true，未命中返回 false。
@@ -37,7 +41,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     let bgRunning = 0;
     const background = [];
     try {
-      for (const t of listTasks(home)) {
+      for (const t of await listTasksAsync(home)) {
         if (t.status === 'running') bgRunning += 1;
         background.push({
           id: t.id,
@@ -49,7 +53,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
           error: t.error || '',
         });
       }
-      for (const sch of listSchedules(home)) {
+      for (const sch of await listSchedulesAsync(home)) {
         if (sch.status === 'running') bgRunning += 1;
         background.push({
           id: sch.id,
@@ -66,8 +70,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
   }
 
   if (method === 'GET' && p === '/api/schedule') {
-    reconcileSchedules(home);
-    const jobs = listSchedules(home).map((j) => ({
+    await reconcileSchedulesAsync(home);
+    const jobs = (await listSchedulesAsync(home)).map((j) => ({
       id: j.id,
       status: j.status,
       kind: j.kind,
@@ -92,7 +96,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     try {
       if (action === 'add') {
         if (!body.question || !String(body.question).trim()) return json(res, 400, { error: '任务内容不能为空' });
-        const r = addSchedule(home, String(body.question).trim(), {
+        const r = await addScheduleAsync(home, String(body.question).trim(), {
           at: body.at || null,
           every: body.every || null,
           anchor: body.anchor || null,
@@ -108,15 +112,15 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (action === 'chain') {
         const qs = Array.isArray(body.questions) ? body.questions.map(String).filter((/** @type {any} */ q) => q.trim()) : [];
         if (qs.length < 2) return json(res, 400, { error: '链式需要至少两个任务' });
-        const r = /** @type {any} */ (chainSchedules(home, qs, { permission: body.permission || null, model: body.model || null }));
+        const r = /** @type {any} */ (await chainSchedulesAsync(home, qs, { permission: body.permission || null, model: body.model || null }));
         if (r.error) return json(res, 400, { error: r.error });
         return json(res, 200, { ok: true, ids: r.ids });
       }
       const id = String(body.id || '');
       if (!id) return json(res, 400, { error: '缺少 id' });
-      if (action === 'remove') return json(res, 200, { ok: removeSchedule(home, id) });
-      if (action === 'pause') return json(res, 200, { ok: pauseSchedule(home, id) });
-      if (action === 'resume') return json(res, 200, { ok: resumeSchedule(home, id) });
+      if (action === 'remove') return json(res, 200, { ok: await removeScheduleAsync(home, id) });
+      if (action === 'pause') return json(res, 200, { ok: await pauseScheduleAsync(home, id) });
+      if (action === 'resume') return json(res, 200, { ok: await resumeScheduleAsync(home, id) });
       return json(res, 400, { error: '未知操作：add|chain|remove|pause|resume' });
     } catch (/** @type {any} */ err) {
       return json(res, 500, { error: String(err?.message || err) });

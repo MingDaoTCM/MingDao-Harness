@@ -42,6 +42,13 @@ export function loadTaskState(sessionName) {
  * @param {string} file @param {any} sessionName @param {any} ts @param {boolean} merge
  * @returns {{ok: boolean, error: string|null}} */
 function writeTaskStateFileLocked(file, sessionName, ts, merge) {
+  // v0.7.0 §1.4（请求路径去同步锁，逐处判定）：这处**保留同步版**是有意的，不是漏改——
+  //   · WebUI 请求路径走 `saveTaskStateMergeAsync`：它先 `await withFileLock(...)` 拿到异步锁，
+  //     再调 `saveTaskStateMerge` → 本函数。AsyncLocalStorage 的 held 集合在同一条调用链里
+  //     已含这把锁，因此这里**直接执行 fn、不会二次抢锁、不会 Atomics.wait**（不是"异步换皮"）。
+  //   · 同步版只服务 CLI/REPL（`mingdao run` 收尾、REPL 轮末）。
+  // 结论：Web 路径的等锁发生在异步入口，本函数只在该入口已持锁时被调用——改成 async 会迫使
+  // 整条同步 CLI 链异步化，收益为零。若将来新增 Web 调用点，必须走 `saveTaskStateMergeAsync`。
   return withFileLockSync(file + '.lock', () => {
     // 合并版在**锁内**读旧值（锁外读就是 BUG-068 的陈旧快照覆盖）；ts 在这里被替换成要落盘的值。
     if (merge) ts = mergeTaskState(loadTaskState(sessionName), ts);

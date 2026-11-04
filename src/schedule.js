@@ -10,7 +10,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { startTask, readTask, killTask, patchTask, taskWorkerAlive } from './tasks.js';
+import { startTask, readTask, killTask, killTaskAsync, patchTask, taskWorkerAlive } from './tasks.js';
 import { procAlive, pidOwnedBy, spawnOpts } from './proc.js';
 
 function isRunningTask(/** @type {any} */ home, /** @type {any} */ taskId) {
@@ -21,7 +21,11 @@ function isRunningTask(/** @type {any} */ home, /** @type {any} */ taskId) {
 const CLI_PATH = fileURLToPath(new URL('./cli.js', import.meta.url));
 
 import { isPeakHour, deferToOffpeak } from './pricing.js';
-import { atomicWriteFileSync, atomicWritePrivateSync, withFileLockSync } from './atomic-write.js';
+// v0.7.0（1.4 请求路径去同步锁）：WebUI 路由直达的入口一律用异步 withFileLock——
+// 同步版用 `Atomics.wait` 睡眠，等待期间整个事件循环停摆（持锁方 5s = 整站冻结）。
+// 同步版只留给 CLI/REPL 与 schedule-daemon/schedule-worker 独立进程；每个调用点都注明归属，
+// 防止后人"统一风格"改回同步版。
+import { atomicWriteFileSync, atomicWritePrivateSync, withFileLockSync, withFileLock } from './atomic-write.js';
 
 export function scheduleDir(/** @type {any} */ home) {
   return path.join(home, 'schedule');
@@ -58,7 +62,14 @@ export function parseAt(/** @type {any} */ s) {
   return null;
 }
 
-export function listSchedules(/** @type {any} */ home) {
+/** 调度状态的唯一锁路径：所有读-改-写与一致快照读共用（与 daemon.pid 的锁分开）。 */
+function scheduleLockFile(/** @type {any} */ home) {
+  return path.join(scheduleDir(home), '.lock');
+}
+
+/** 锁内/锁外共用的裸读；**调用方负责保证锁语义**。
+ * @param {any} home @returns {any[]} */
+function readSchedulesUnlocked(/** @type {any} */ home) {
   const dir = scheduleDir(home);
   let files;
   try {
@@ -74,6 +85,31 @@ export function listSchedules(/** @type {any} */ home) {
     } catch {}
   }
   return out.sort((a, b) => (a.nextRunAt || 0) - (b.nextRunAt || 0));
+}
+
+/**
+ * 列出调度任务（**一致快照**：读也进同一把锁，避免与 remove/pause 的半途状态交错）。
+ *
+ * 同步版保留给 CLI/REPL；**WebUI 请求路径必须用 listSchedulesAsync**——同步版在锁争用时
+ * 用 `Atomics.wait` 睡眠，会冻结整个事件循环（v0.7.0 §1.4）。
+ * @param {any} home @returns {any[]}
+ */
+export function listSchedules(/** @type {any} */ home) {
+  // 同步版**不取锁**（保持 CLI `mingdao schedule list` 的既有语义：读一份即时快照）。
+  // 每个任务文件都由 atomicWritePrivateSync 原子替换，单文件不会读到半截；WebUI 需要
+  // 「与写者互斥的一致快照」时走 listSchedulesAsync（它持锁，且等待时让出事件循环）。
+  return readSchedulesUnlocked(home);
+}
+
+/**
+ * 异步版列表：**WebUI 的 `GET /api/schedule` 与 `/api/tasks` 用它**。
+ * 锁等待走 `await`（让出事件循环），因此外部进程持锁 5s 时页面仍能响应其它请求。
+ * @param {any} home
+ * @returns {Promise<any[]>}
+ */
+export async function listSchedulesAsync(/** @type {any} */ home) {
+  if (!fs.existsSync(scheduleDir(home))) return [];
+  return withFileLock(scheduleLockFile(home), () => readSchedulesUnlocked(home));
 }
 
 function isValidScheduleId(/** @type {any} */ id) {
@@ -97,8 +133,11 @@ export function writeSchedule(/** @type {any} */ home, /** @type {any} */ job) {
   return job;
 }
 
-/** 新建调度任务；after: 依赖的任务 ID（全部成功后才启动，任一失败则跳过） */
-export function addSchedule(/** @type {any} */ home, /** @type {any} */ question, /** @type {any} */ { at, every, after, permission, model, cwd, anchor, offpeak }) {
+/** 组装校验一个调度任务（不落盘、不取锁）；同步/异步入口共用，避免两套校验语义漂移。
+ * @param {any} home @param {any} question
+ * @param {{at?: any, every?: any, after?: any, permission?: any, model?: any, cwd?: any, anchor?: any, offpeak?: any}} opts
+ * @returns {any} */
+function prepareSchedule(/** @type {any} */ home, /** @type {any} */ question, /** @type {any} */ { at, every, after, permission, model, cwd, anchor, offpeak }) {
   // 审计 BUG-061（实测复现）：原实现用 `Date.now() + Math.random().slice(2,5)` ——
   // ① `Math.random()` 不是密码学安全的；② 3 位 base36 只有约 4.7 万空间，同一毫秒内可碰撞；
   // 而 `writeSchedule` 直接写 `<id>.json`，碰撞即**静默覆盖**前一个任务（实测固定 Date.now 与
@@ -156,9 +195,34 @@ export function addSchedule(/** @type {any} */ home, /** @type {any} */ question
     note: offpeak ? '避峰：高峰时段自动顺延到最近闲时（12:00 / 18:00）执行' : '',
     offpeak: Boolean(offpeak),
   };
-  writeSchedule(home, job);
+  return { job };
+}
+
+/**
+ * 同步新建调度任务（CLI/REPL）：保留原返回值 `{id, job}` / `{error}`。
+ * @param {any} home @param {any} question @param {any} opts
+ * @returns {any}
+ */
+export function addSchedule(/** @type {any} */ home, /** @type {any} */ question, /** @type {any} */ opts) {
+  const r = prepareSchedule(home, question, opts);
+  if (r.error) return r;
+  writeSchedule(home, r.job);
   if (!daemonAlive(home)) spawnDaemon(home); // 单守护进程监督（评估 P3-5）
-  return { id, job };
+  return { id: r.job.id, job: r.job };
+}
+
+/**
+ * 异步新建调度任务（**WebUI `POST /api/schedule action=add` 用它**）。
+ * 唯一会等锁的一步是 spawnDaemonAsync（daemon.pid 锁）；await 让出事件循环。
+ * @param {any} home @param {any} question @param {any} opts
+ * @returns {Promise<any>}
+ */
+export async function addScheduleAsync(/** @type {any} */ home, /** @type {any} */ question, /** @type {any} */ opts) {
+  const r = prepareSchedule(home, question, opts);
+  if (r.error) return r;
+  writeSchedule(home, r.job);
+  if (!daemonAlive(home)) await spawnDaemonAsync(home); // 单守护进程监督（评估 P3-5）
+  return { id: r.job.id, job: r.job };
 }
 
 // 质检 H2（pause 失效确定性回归）：runOnce 返回后的状态决策抽为纯函数——
@@ -180,10 +244,12 @@ export function removeSchedule(/** @type {any} */ home, /** @type {any} */ id) {
   // 都在 schedule 锁内执行 → 持锁数秒 → 等锁方 5s 锁超时 → sleeper 协程退出、job 卡在 running。
   // 这正是 v0.6.2 §3.27 在 tasks.js 修掉、却在 schedule 复发的同一反模式。
   // 现在：先在锁内读快照，出锁再做进程操作，最后进锁改状态。
+  //
+  // 同步版保留给 CLI/REPL（`mingdao schedule remove`）；**WebUI 必须用 removeScheduleAsync**。
   const job0 = readSchedule(home, id);
   if (!job0) return false;
   stopJobProcesses(home, job0);
-  return withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+  return withFileLockSync(scheduleLockFile(home), () => {
     const job = readSchedule(home, id);
     if (!job) return false; // 期间已被别的线程删掉：幂等返回
     try {
@@ -193,7 +259,26 @@ export function removeSchedule(/** @type {any} */ home, /** @type {any} */ id) {
   });
 }
 
-/** 停止一个调度任务持有的进程（**必须在锁外调用**，见 M-6 注释）。
+/**
+ * 异步删除调度任务 —— **WebUI `POST /api/schedule action=remove` 用它**。
+ * 锁等待（含 killTaskAsync 内部的 tasks 锁）全部 await，不会冻结事件循环。
+ * @param {any} home @param {any} id @returns {Promise<boolean>}
+ */
+export async function removeScheduleAsync(/** @type {any} */ home, /** @type {any} */ id) {
+  const job0 = readSchedule(home, id);
+  if (!job0) return false;
+  await stopJobProcessesAsync(home, job0);
+  return withFileLock(scheduleLockFile(home), () => {
+    const job = readSchedule(home, id);
+    if (!job) return false; // 期间已被别的线程删掉：幂等返回
+    try {
+      fs.unlinkSync(path.join(scheduleDir(home), id + '.json'));
+    } catch {}
+    return true;
+  });
+}
+
+/** 停止一个调度任务持有的进程（**必须在锁外调用**，见 M-6 注释；CLI/REPL 用）。
  * @param {any} home @param {any} job */
 function stopJobProcesses(/** @type {any} */ home, /** @type {any} */ job) {
   if (job?.pid) {
@@ -211,12 +296,45 @@ function stopJobProcesses(/** @type {any} */ home, /** @type {any} */ job) {
   } catch {}
 }
 
+/** 异步版 stopJobProcesses（**WebUI 请求路径**）：沿用同一判据，只把会等锁的 killTaskAsync 换成 await。
+ * @param {any} home @param {any} job */
+async function stopJobProcessesAsync(/** @type {any} */ home, /** @type {any} */ job) {
+  if (job?.pid) {
+    const owned = pidOwnedBy(job.pid, job.id); // 质检 M11：cmdline 含调度 id 才 kill
+    if (owned === true) {
+      try {
+        process.kill(job.pid, 'SIGTERM');
+      } catch {}
+    }
+  }
+  try {
+    if (job?.lastTaskId && isRunningTask(home, job.lastTaskId)) await killTaskAsync(home, job.lastTaskId);
+  } catch {}
+}
+
 export function pauseSchedule(/** @type {any} */ home, /** @type {any} */ id) {
-  // 同 removeSchedule：进程操作在锁外（v0.6.7 / M-6）
+  // 同 removeSchedule：进程操作在锁外（v0.6.7 / M-6）。
+  // 同步版保留给 CLI/REPL；**WebUI 必须用 pauseScheduleAsync**。
   const job0 = readSchedule(home, id);
   if (!job0) return false;
   stopJobProcesses(home, job0);
-  return withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+  return withFileLockSync(scheduleLockFile(home), () => {
+    const job = readSchedule(home, id);
+    if (!job) return false;
+    writeSchedule(home, { ...job, status: 'paused', pid: null, lastTaskId: null });
+    return true;
+  });
+}
+
+/**
+ * 异步暂停调度任务 —— **WebUI `POST /api/schedule action=pause` 用它**。
+ * @param {any} home @param {any} id @returns {Promise<boolean>}
+ */
+export async function pauseScheduleAsync(/** @type {any} */ home, /** @type {any} */ id) {
+  const job0 = readSchedule(home, id);
+  if (!job0) return false;
+  await stopJobProcessesAsync(home, job0);
+  return withFileLock(scheduleLockFile(home), () => {
     const job = readSchedule(home, id);
     if (!job) return false;
     writeSchedule(home, { ...job, status: 'paused', pid: null, lastTaskId: null });
@@ -225,22 +343,35 @@ export function pauseSchedule(/** @type {any} */ home, /** @type {any} */ id) {
 }
 
 export function resumeSchedule(/** @type {any} */ home, /** @type {any} */ id) {
-  // 评估 6.3（v0.4.3）：读-改-写序列加锁，与 remove/pause 及 sleeper 状态写互斥（防丢更新）
-  return withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
-    const job = readSchedule(home, id);
-    if (!job || job.status !== 'paused') return false;
-    let next = job.nextRunAt;
-    if (job.kind === 'every') {
-      next = job.anchor ? nextAnchorAfter(job.anchor, job.interval) || Date.now() + job.interval : Date.now() + job.interval;
-    } else if (job.kind === 'once') {
-      if (next && next <= Date.now()) next = Date.now() + 30000; // 已过期的一次性任务恢复后 30s 执行
-    } else next = Date.now();
-    const nextJob = { ...job, status: 'pending', nextRunAt: next };
-    writeSchedule(home, nextJob);
-    // 审计修复：守护进程在时只更新状态交给 daemon 接管；否则旧式 sleeper 兜底（避免双跑）
-    if (process.env.MINGDAO_NO_DAEMON === '1' || !daemonAlive(home)) spawnSleeper(home, nextJob);
-    return true;
-  });
+  // 评估 6.3（v0.4.3）：读-改-写序列加锁，与 remove/pause 及 sleeper 状态写互斥（防丢更新）。
+  // 同步版保留给 CLI/REPL；**WebUI 必须用 resumeScheduleAsync**。
+  return withFileLockSync(scheduleLockFile(home), () => resumeScheduleLocked(home, id));
+}
+
+/**
+ * 异步恢复调度任务 —— **WebUI `POST /api/schedule action=resume` 用它**。
+ * @param {any} home @param {any} id @returns {Promise<boolean>}
+ */
+export async function resumeScheduleAsync(/** @type {any} */ home, /** @type {any} */ id) {
+  return withFileLock(scheduleLockFile(home), () => resumeScheduleLocked(home, id));
+}
+
+/** 恢复状态的唯一读-改-写实现（调用方必须已持 schedule 锁；同步/异步共用，避免语义漂移）。
+ * @param {any} home @param {any} id */
+function resumeScheduleLocked(/** @type {any} */ home, /** @type {any} */ id) {
+  const job = readSchedule(home, id);
+  if (!job || job.status !== 'paused') return false;
+  let next = job.nextRunAt;
+  if (job.kind === 'every') {
+    next = job.anchor ? nextAnchorAfter(job.anchor, job.interval) || Date.now() + job.interval : Date.now() + job.interval;
+  } else if (job.kind === 'once') {
+    if (next && next <= Date.now()) next = Date.now() + 30000; // 已过期的一次性任务恢复后 30s 执行
+  } else next = Date.now();
+  const nextJob = { ...job, status: 'pending', nextRunAt: next };
+  writeSchedule(home, nextJob);
+  // 审计修复：守护进程在时只更新状态交给 daemon 接管；否则旧式 sleeper 兜底（避免双跑）
+  if (process.env.MINGDAO_NO_DAEMON === '1' || !daemonAlive(home)) spawnSleeper(home, nextJob);
+  return true;
 }
 
 // 每日锚点：锚点时刻（HH:MM）对齐到 now 之后的最近一次
@@ -252,13 +383,31 @@ function nextAnchorAfter(/** @type {any} */ anchor, /** @type {any} */ interval)
   return n;
 }
 
-// 链式编排：A→B→C，后者依赖前者成功
+// 链式编排：A→B→C，后者依赖前者成功（同步版，CLI/REPL）。
+/** @param {any} home @param {any} questions @param {any} opts
+ * @returns {any} */
 export function chainSchedules(/** @type {any} */ home, /** @type {any} */ questions, opts = {}) {
   const ids = [];
   let prev = null;
   for (const q of questions) {
     const after = prev ? [prev] : [];
     const r = addSchedule(home, q, { ...opts, after });
+    if (r.error) return r;
+    ids.push(r.id);
+    prev = r.id;
+  }
+  return { ids };
+}
+
+/** 异步链式编排（**WebUI `POST /api/schedule action=chain` 用它**）：每个环节都走 addScheduleAsync。
+ * @param {any} home @param {any} questions @param {any} opts
+ * @returns {Promise<any>} */
+export async function chainSchedulesAsync(/** @type {any} */ home, /** @type {any} */ questions, opts = {}) {
+  const ids = [];
+  let prev = null;
+  for (const q of questions) {
+    const after = prev ? [prev] : [];
+    const r = await addScheduleAsync(home, q, { ...opts, after });
     if (r.error) return r;
     ids.push(r.id);
     prev = r.id;
@@ -355,50 +504,76 @@ export function daemonPidfileError() {
   return pidfileError;
 }
 
-export function spawnDaemon(/** @type {any} */ home) {
-  // 返回值语义收紧（v0.6.2）：只有「本次调用后确实存在可用 daemon」才为 true。
-  // pidfile 写失败时 daemon 已被撤回 → 必须如实返回 false，不能沿用旧版「调用即 true」。
+/**
+ * 必须在 **daemon.pid 锁内**调用：查活 → spawn → 写 pidfile（v0.4.7 P2 T15）。
+ *
+ * 此前是「先 daemonAlive 判断、再 spawn、最后写 pidfile」，两个并发调用方都会看到「没有 daemon」
+ * 而各自 spawn 一个：pidfile 被后者覆盖，前者成为无主的第二个 daemon，两者同时监督同一批任务
+ * → 同一个定时任务被**并发执行两次**（有副作用的定时任务尤其危险）。
+ * 返回值语义（v0.6.2）：只有「本次调用后确实存在可用 daemon」才为 true。
+ * @param {any} home
+ */
+function spawnDaemonLocked(/** @type {any} */ home) {
   let spawned = true;
-  // v0.4.7（P2 T15）：必须在**跨进程锁内**完成「查活 → spawn → 写 pidfile」这一步。
-  // 此前是「先 daemonAlive 判断、再 spawn、最后写 pidfile」，两个并发调用方都会看到「没有 daemon」
-  // 而各自 spawn 一个：pidfile 被后者覆盖，前者成为无主的第二个 daemon，两者同时监督同一批任务
-  // → 同一个定时任务被**并发执行两次**（有副作用的定时任务尤其危险）。
-  withFileLockSync(daemonPidFile(home) + '.lock', () => {
-    // 锁内复查：已有 daemon 就不再 spawn。返回值语义保持与旧版一致——
-    // 「调用后存在可用 daemon」为 true（无论本次是否真的 spawn），调用方据此判断可用性。
-    if (daemonAlive(home)) return;
-    const nonce = Math.random().toString(36).slice(2, 10);
-    const child = spawn(process.execPath, [CLI_PATH, 'schedule-daemon', nonce], {
-      detached: true,
-      stdio: 'ignore',
-      env: { ...process.env, MINGDAO_HOME: home },
-      ...spawnOpts({ detached: true }),
-    });
-    child.on('error', () => {}); // 质检 M12：error 事件必须有监听（ENOENT 等）
-    // v0.6.2（B-WS-1/2 第六处）：pidfile 写失败**必须**把刚拉起的 daemon 收回去。
-    // 危害不是「少一个文件」：上面那段锁注释要防的正是「无主的第二个 daemon 同时监督同一批任务」，
-    // 而 pidfile 写失败会让 daemonAlive() 永远为 false → 之后每次调用都再拉起一个，
-    // 同一个定时任务被并发执行两次、三次……**静默吞掉这一处等于把那个 P0 重新引进门**。
+  // 锁内复查：已有 daemon 就不再 spawn。返回值语义保持与旧版一致——
+  // 「调用后存在可用 daemon」为 true（无论本次是否真的 spawn），调用方据此判断可用性。
+  if (daemonAlive(home)) return spawned;
+  const nonce = Math.random().toString(36).slice(2, 10);
+  const child = spawn(process.execPath, [CLI_PATH, 'schedule-daemon', nonce], {
+    detached: true,
+    stdio: 'ignore',
+    env: { ...process.env, MINGDAO_HOME: home },
+    ...spawnOpts({ detached: true }),
+  });
+  child.on('error', () => {}); // 质检 M12：error 事件必须有监听（ENOENT 等）
+  // v0.6.2（B-WS-1/2 第六处）：pidfile 写失败**必须**把刚拉起的 daemon 收回去。
+  // 危害不是「少一个文件」：上面那段锁注释要防的正是「无主的第二个 daemon 同时监督同一批任务」，
+  // 而 pidfile 写失败会让 daemonAlive() 永远为 false → 之后每次调用都再拉起一个，
+  // 同一个定时任务被并发执行两次、三次……**静默吞掉这一处等于把那个 P0 重新引进门**。
+  try {
+    // 原子写（审计 workbuddy P3-4）：tmp+rename 与 writeSchedule 同款——崩溃不留半截 pid 文件
+    const target = daemonPidFile(home);
+    atomicWriteFileSync(target, `${child.pid} ${nonce}`);
+  } catch (err) {
+    pidfileError = String(/** @type {any} */ (err)?.message ?? err);
     try {
-      // 原子写（审计 workbuddy P3-4）：tmp+rename 与 writeSchedule 同款——崩溃不留半截 pid 文件
-      const target = daemonPidFile(home);
-      atomicWriteFileSync(target, `${child.pid} ${nonce}`);
-    } catch (err) {
-      pidfileError = String(/** @type {any} */ (err)?.message ?? err);
-      try {
-        child.kill('SIGKILL');
-      } catch {}
-      if (!pidfileWarned) {
-        pidfileWarned = true;
-        console.warn(
-          `[MingDao] ⚠ 守护进程 pidfile 写入失败：${pidfileError}\n` +
-            `  已撤回本次拉起的守护进程（否则会留下无人跟踪的第二个 daemon，同一批定时任务被重复执行）。\n` +
-            `  请检查 ${daemonPidFile(home)} 的磁盘空间与权限；本次 spawnDaemon 返回 false。`
-        );
-      }
-      spawned = false;
+      child.kill('SIGKILL');
+    } catch {}
+    if (!pidfileWarned) {
+      pidfileWarned = true;
+      console.warn(
+        `[MingDao] ⚠ 守护进程 pidfile 写入失败：${pidfileError}\n` +
+          `  已撤回本次拉起的守护进程（否则会留下无人跟踪的第二个 daemon，同一批定时任务被重复执行）。\n` +
+          `  请检查 ${daemonPidFile(home)} 的磁盘空间与权限；本次 spawnDaemon 返回 false。`
+      );
     }
-    child.unref();
+    spawned = false;
+  }
+  child.unref();
+  return spawned;
+}
+
+/**
+ * 同步拉起守护进程：CLI/REPL 与 schedule-daemon 内部用（不在 Web 请求路径上）。
+ * @param {any} home @returns {boolean}
+ */
+export function spawnDaemon(/** @type {any} */ home) {
+  let spawned = false;
+  withFileLockSync(daemonPidFile(home) + '.lock', () => {
+    spawned = spawnDaemonLocked(home);
+  });
+  return spawned;
+}
+
+/**
+ * 异步拉起守护进程 —— **WebUI 的 add/chain/resume 与 `GET /api/schedule` 的 reconcile 用它**。
+ * daemon.pid 锁争用时 await 让出事件循环（外部持锁 5s 也不会冻结整站）。
+ * @param {any} home @returns {Promise<boolean>}
+ */
+export async function spawnDaemonAsync(/** @type {any} */ home) {
+  let spawned = false;
+  await withFileLock(daemonPidFile(home) + '.lock', () => {
+    spawned = spawnDaemonLocked(home);
   });
   return spawned;
 }
@@ -410,18 +585,37 @@ export function reconcileSchedules(/** @type {any} */ home) {
   const hasPending = jobs.some((j) => j.status === 'pending' || j.status === 'running');
   if (!hasPending) return;
   if (daemonAlive(home) || process.env.MINGDAO_NO_DAEMON === '1') {
-    if (process.env.MINGDAO_NO_DAEMON === '1') {
-      // 兜底路径（旧式）
-      for (const job of jobs) {
-        if (job.status !== 'pending' && job.status !== 'running') continue;
-        if (sleeperAlive(job.pid, job.id)) continue;
-        if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) continue;
-        if (job.kind === 'after' || (job.nextRunAt && job.nextRunAt <= Date.now() + 5000)) spawnSleeper(home, job);
-      }
-    }
+    if (process.env.MINGDAO_NO_DAEMON === '1') spawnFallbackSleepers(home, jobs);
     return;
   }
   spawnDaemon(home);
+}
+
+/**
+ * 异步版重启自愈 —— **WebUI `GET /api/schedule` 用它**（每次打开调度页都会调）。
+ * 同步版会在 daemon.pid / schedule 锁争用时冻结事件循环；这里全部 await。
+ * @param {any} home @returns {Promise<void>}
+ */
+export async function reconcileSchedulesAsync(/** @type {any} */ home) {
+  const jobs = await listSchedulesAsync(home);
+  const hasPending = jobs.some((j) => j.status === 'pending' || j.status === 'running');
+  if (!hasPending) return;
+  if (daemonAlive(home) || process.env.MINGDAO_NO_DAEMON === '1') {
+    if (process.env.MINGDAO_NO_DAEMON === '1') spawnFallbackSleepers(home, jobs);
+    return;
+  }
+  await spawnDaemonAsync(home);
+}
+
+/** 旧式逐任务 sleeper 兜底（MINGDAO_NO_DAEMON=1；纯 spawn + 无锁写，同步/异步自愈共用）。
+ * @param {any} home @param {any[]} jobs */
+function spawnFallbackSleepers(/** @type {any} */ home, /** @type {any[]} */ jobs) {
+  for (const job of jobs) {
+    if (job.status !== 'pending' && job.status !== 'running') continue;
+    if (sleeperAlive(job.pid, job.id)) continue;
+    if (job.lastTaskId && isRunningTask(home, job.lastTaskId)) continue;
+    if (job.kind === 'after' || (job.nextRunAt && job.nextRunAt <= Date.now() + 5000)) spawnSleeper(home, job);
+  }
 }
 /**
  * 轮询 worker 是否该继续等下去。
@@ -446,6 +640,13 @@ export function shouldKeepPolling(/** @type {any} */ task, /** @type {number} */
 // —— sleeper 主循环（schedule-worker 进程内运行）——
 /**
  * 任务监督循环（每个调度任务一个协程）。
+ *
+ * **为什么本函数内 8 处 `withFileLockSync` 保留同步版（v0.7.0 §1.4 逐处判定）**：
+ * 本函数只在 `mingdao schedule-daemon` / `schedule-worker` 独立进程里运行，**不在 Web 请求路径上**。
+ * 那里的阻塞最多推迟这一条定时任务的推进，不会冻结任何用户请求/SSE；反过来把它异步化会把
+ * async 传染给整个状态机（每处读-改-写都要重新判定顺序），回归风险大于收益。
+ * WebUI 路径上的 add/list/remove/pause/resume/reconcile 已各有 *Async 入口（见上方函数）。
+ *
  * opts.shouldStop：可选回调——返回 true 时本协程立即退出（v0.4.7 用于「daemon 租约丢失」：
  * every 型任务是 `for(;;)` 常驻循环，不主动通知就会一直跑下去，旧 daemon 因此无法退出，
  * 与新 daemon 并跑同一批任务 = 重复执行）。
@@ -479,7 +680,7 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
 
   // P1-15（v0.4.5）：标记 running 前加锁并复查 paused——此前锁外 writeSchedule({...cur,'running'})
   // 与 pauseSchedule 锁内写 paused 交错时，running 会覆盖 pause（任务继续触发，pause 语义失效）。
-  const markRunning = () => withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+  const markRunning = () => withFileLockSync(scheduleLockFile(home), () => { // [daemon/worker 进程] 同步锁保留：见 runSleeper 头注释
     const c = readSchedule(home, id);
     if (!c || c.status === 'paused') return false; // 已删除或已暂停：不覆盖、不再触发
     // v0.4.7（T15）：进入 running 的同时就写上宿主 pid。`status=running` 与「lastTaskId 落盘」
@@ -512,7 +713,7 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
     if (job.offpeak && isPeakHour(new Date())) {
       const defer = deferToOffpeak(new Date());
       // P2-4（v0.4.5）：note 更新同样加锁 + 复查 paused（避免「读 curN 到写回之间 pause」被覆盖）
-      withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+      withFileLockSync(scheduleLockFile(home), () => { // [daemon/worker 进程] 同步锁保留：见 runSleeper 头注释
         const curN = readSchedule(home, id);
         if (curN && curN.status !== 'paused') writeSchedule(home, { ...curN, note: `避峰等待至北京时间 ${defer.toISOString().slice(11, 16)}（闲时起执行）` });
       });
@@ -547,7 +748,7 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
     // lastTaskId=null，会误判为「崩溃残留」→ 重置为 pending → 并发重跑同一任务；
     // 同时 pause/remove 也因为没有任务 id 可杀而无法停止在途运行。
     try {
-      withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+      withFileLockSync(scheduleLockFile(home), () => { // [daemon/worker 进程] 同步锁保留：见 runSleeper 头注释
         const curS = readSchedule(home, id);
         if (curS) writeSchedule(home, { ...curS, lastTaskId: task.id, runnerPid: process.pid });
       });
@@ -584,7 +785,7 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
     const result = t?.status === 'done' ? 'done' : t?.status === 'timedout' ? 'timedout' : 'failed';
     // 审计（H3 + 自检 P2）：runOnce 收尾元数据读-改-写加锁——与 pause/remove（锁内写）跨进程互斥，
     // 杜绝「读 cur0 到写回之间用户 pause」被覆盖（毫秒级窗口，彻底起见与终态写同锁、同复查）。
-    const wrote = withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+    const wrote = withFileLockSync(scheduleLockFile(home), () => { // [daemon/worker 进程] 同步锁保留：见 runSleeper 头注释
       const curL = readSchedule(home, id);
       if (!curL) return false; // 已删除：停止后续写入
       const historyL = [...(curL?.history || [])];
@@ -630,7 +831,7 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
       if (!markRunning()) return; // P1-15：标记 running 前复查 paused（被暂停则直接退出）
       const result = await runOnce();
       // 质检 H3：状态读-改-写加锁（与 pause/remove 互斥，防丢更新）
-      const nextState = withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+      const nextState = withFileLockSync(scheduleLockFile(home), () => { // [daemon/worker 进程] 同步锁保留：见 runSleeper 头注释
         const cur2 = readSchedule(home, id);
         if (!cur2) return null;
         const ns = postRunStatus(cur2, result);
@@ -650,7 +851,7 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
       const result = await runOnce();
       // 评估 6.4（v0.4.3）+ P2-4（v0.4.5）：once 最终状态读-改-写加锁，且 paused 不覆盖——
       // 用户执行期间 pause（cur2.status==='paused'）绝不被 done/failed 覆盖（every 经 postRunStatus 有防护，此处补齐）
-      withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+      withFileLockSync(scheduleLockFile(home), () => { // [daemon/worker 进程] 同步锁保留：见 runSleeper 头注释
         const cur2 = readSchedule(home, id);
         if (!cur2 || cur2.status === 'paused') return;
         writeSchedule(home, { ...cur2, status: result });
@@ -665,7 +866,7 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
       }
       if (st === 'failed') {
         // P2-4（v0.4.5）：终态写加锁 + 复查 paused（依赖失败判 skipped 也不得覆盖 pause）
-        withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+        withFileLockSync(scheduleLockFile(home), () => { // [daemon/worker 进程] 同步锁保留：见 runSleeper 头注释
           const c2 = readSchedule(home, id);
           if (!c2 || c2.status === 'paused') return;
           writeSchedule(home, { ...c2, status: 'skipped' });
@@ -675,7 +876,7 @@ export async function runSleeper(/** @type {any} */ home, /** @type {any} */ id,
       if (!markRunning()) return; // P1-15：标记 running 前复查 paused
       const result = await runOnce();
       // 评估 6.4（v0.4.3）+ P2-4（v0.4.5）：after 最终状态读-改-写加锁，且 paused 不覆盖
-      withFileLockSync(path.join(scheduleDir(home), '.lock'), () => {
+      withFileLockSync(scheduleLockFile(home), () => { // [daemon/worker 进程] 同步锁保留：见 runSleeper 头注释
         const cur2 = readSchedule(home, id);
         if (!cur2 || cur2.status === 'paused') return;
         writeSchedule(home, { ...cur2, status: result });
