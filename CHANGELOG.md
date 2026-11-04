@@ -44,6 +44,12 @@
   socket 正好被服务端按 `keepAliveTimeout` 关闭，下一次 pull 复用它 → `read ECONNRESET`
   （Node 18.20.8 本机必现，ubuntu-18 CI 腿必红）。桩服务端改为 `Connection: close`，
   **16 项断言一条未放宽**（Node 18 与 Node 24 均全过）。
+- `workspace-fence` 有两处**只在 POSIX 成立**的夹具假设，Windows 变异腿暴露：
+  ① W14/W15 的软链目标写死 `/etc`——Windows 上解析为不存在的 `\etc`，先报「目录不存在」，
+  走不到「不在允许范围」；改用真实存在且在允许根之外的 `/var/tmp` / `%SystemRoot%\Temp`。
+  ② W3/W8 用 `path.relative(os.tmpdir(), 仓库 cwd)` 造相对路径——Windows 跨盘时返回**绝对路径**，
+  「相对路径归一」失去判别力（`batch74 ②④⑦` 因此逃逸）；改在 cwd 下建临时目录。
+  **断言一条未放宽**；本机 macOS 与 Windows（探针 PR #18）均 15/15、batch74 11/11。
 
 ## v0.6.32（2026-11-04）— v0.7.0 地基第一批：覆盖率口径修正 + 六类状态写入加固 + 请求路径去同步锁
 

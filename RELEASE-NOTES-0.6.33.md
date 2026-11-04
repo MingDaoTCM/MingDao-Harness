@@ -142,6 +142,13 @@ CLI 输出、账本、Pack、网络策略均未改动。
 > 已被服务端关闭的 socket，报 `read ECONNRESET`（Node 18.20.8 本机必现 3/3；Node 24 不触发）。
 > 桩服务端改为 `Connection: close`，**16 项断言一条未放宽**。这不是产品缺陷，是测试夹具缺陷。
 
+> **同轮 Windows 变异腿又暴露两处夹具的 POSIX 假设**（均已修，断言未放宽）：
+> ① W14/W15 软链目标写死 `/etc`，Windows 上该路径不存在，先报「目录不存在」而走不到围栏判据 →
+> 改用真实存在且在允许根外的 `/var/tmp` / `%SystemRoot%\Temp`；
+> ② W3/W8 的"相对路径"取自 `path.relative(os.tmpdir(), cwd)`，Windows 跨盘时它是**绝对路径**，
+> 归一断言失去判别力（`batch74 ②④⑦` 逃逸）→ 改在 cwd 下建临时目录。
+> 已在 Windows 探针 PR #18 上实测：`workspace-fence` 15/15、`batch74` 11/11。
+
 ---
 
 ## 六、已知边界

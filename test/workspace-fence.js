@@ -31,6 +31,15 @@ const tmp = (/** @type {string} */ tag) => {
   cleanups.push(d);
   return d;
 };
+/** 建在 cwd 下的临时目录：`path.relative(cwd, dir)` 在 Windows 跨盘时返回**绝对路径**，
+ * 会让 W3/W8 的"相对路径归一"断言在 Windows 上失去判别力（v0.6.33 Windows 变异腿：
+ * batch74 ②④⑦ 逃逸就是因为 rel 变成了绝对路径）。放在 cwd 下保证 rel 恒为相对。
+ */
+function tmpUnderCwd(/** @type {string} */ tag) {
+  const d = fs.mkdtempSync(path.join(process.cwd(), `.mingdao-ws-${tag}-`));
+  cleanups.push(d);
+  return d;
+}
 /** 切到一个隔离的 MINGDAO_HOME（注册表/会话映射都写在这里）。 */
 function setHome(/** @type {string} */ tag) {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), `mingdao-ws-home-${tag}-`));
@@ -38,6 +47,10 @@ function setHome(/** @type {string} */ tag) {
   process.env.MINGDAO_HOME = home;
   return home;
 }
+// 真实存在、且不在允许根（家目录 / os.tmpdir()）内的目录：W14/W15 的软链越界目标。
+// 不能用 `/etc`（Windows 上不存在），也不能用 os.tmpdir() 子目录（tmpdir 是允许根）。
+const OUTSIDE_REAL_DIR = () =>
+  process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\\Windows', 'Temp') : '/var/tmp';
 const ok = (/** @type {string} */ n) => console.log(`  ✓ ${n}`);
 const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
 /** @param {any} cond @param {string} tag @param {string} detail */
@@ -85,7 +98,7 @@ try {
   // -------------------------------------------------------------------------
   {
     setHome('normalize');
-    const dir = tmp('normalize-dir');
+    const dir = tmpUnderCwd('normalize-dir');
     const rel = path.relative(process.cwd(), dir);
     const r = await ws.addWorkspace('rel-proj', rel);
     check(r.ok === true, 'W3：相对路径登记必须成功', JSON.stringify(r));
@@ -171,7 +184,7 @@ try {
   // -------------------------------------------------------------------------
   {
     setHome('session');
-    const dir = tmp('session-dir');
+    const dir = tmpUnderCwd('session-dir');
     const rel = path.relative(process.cwd(), dir);
     await ws.setSessionWorkspace('sess-1', rel);
     check(ws.getSessionWorkspace('sess-1') === path.resolve(rel), 'W8：会话目录必须归一为绝对路径', String(ws.getSessionWorkspace('sess-1')));
@@ -284,8 +297,14 @@ try {
   {
     const home = setHome('web-add');
     const workRoot = tmp('web-root');
-    const link = path.join(workRoot, 'link-to-etc');
-    fs.symlinkSync('/etc', link, 'dir');
+    // 软链目标必须**真实存在**且**不在允许根**（家目录 / os.tmpdir()）里：
+    //   · 不用 `/etc`：Windows 上它解析成当前盘根的 `\\etc`（不存在），`statSync` 先报
+    //     「目录不存在」，走不到「不在允许范围」那条判据（v0.6.33 Windows 变异腿暴露）；
+    //   · 也不用另一个 os.tmpdir() 子目录：tmpdir 本身是允许根，会被正常放行（本机复现 200）。
+    // `/var/tmp` 与 `%SystemRoot%\\Temp` 都真实存在且在允许根之外，语义不变：软链指向根外。
+    const outside = OUTSIDE_REAL_DIR();
+    const link = path.join(workRoot, 'link-to-outside');
+    fs.symlinkSync(outside, link, 'dir');
     const deps = { cfg: {}, state: { workingDir: workRoot }, startupCwd: workRoot };
     const shared = {
       MAX_API_BODY: 1024 * 1024,
@@ -315,15 +334,16 @@ try {
   }
 
   // -------------------------------------------------------------------------
-  // W15 Web 目录浏览围栏：软链指向 /etc 必须 403；允许根内必须 200
+  // W15 Web 目录浏览围栏：软链指向允许根之外必须 403；允许根内必须 200
   // -------------------------------------------------------------------------
   {
     const home = setHome('web-browse');
     const workRoot = tmp('browse-root');
     const inside = path.join(workRoot, 'visible');
     fs.mkdirSync(inside);
-    const link = path.join(workRoot, 'link-to-etc');
-    fs.symlinkSync('/etc', link, 'dir');
+    const outside = OUTSIDE_REAL_DIR();
+    const link = path.join(workRoot, 'link-to-outside');
+    fs.symlinkSync(outside, link, 'dir');
     const deps = { cfg: {}, state: { workingDir: workRoot }, startupCwd: workRoot };
     const shared = {
       MAX_API_BODY: 1024 * 1024,
