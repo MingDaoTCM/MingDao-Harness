@@ -6441,3 +6441,67 @@ H-01：原始 TCP 发 `GET http://[::1 HTTP/1.1`，`new URL` 在 `dispatch(...).
 - **边界**：`titles.js` / `memory.js` / `routing.js` 的辅助用量入账改 `await recordAuxUsageAsync`；
   `src/tasks/worker.js`、`src/cli.js`、`src/commands/repl.js` 仍用同步 `recordUsage`
   （独立 worker 进程 / 一次性命令，不在 Web 请求路径）。
+
+## 6.5 v0.7.0 §1.2：变异补盲（sync / packs / workspace + 结构性门禁）
+
+### 6.5.1 问题
+
+v0.6.32 自审实测：633→669 条变异里 4 个文件占 285 条（`agent.js` 82 / `app.js` 81 /
+`server.js` 63 / `index.html` 59），而 90 个模块里 43 个**0 条变异**。变异分数的口径是
+「改过的都被测了」，它对「从没被改过的模块」完全沉默——多模态分数高不等于没改过的代码安全。
+
+### 6.5.2 做了什么
+
+**行为套件（三个新建，全部真实函数 + 本机临时目录 + 桩服务端，不连网）**
+
+| 套件 | 项数 | 覆盖 |
+| --- | --- | --- |
+| `test/sync-state.js` | **16** | 推送记账（remoteMtime + localMtime）、增量跳过/重推、冲突备份与首次推送不造虚假备份、状态增量合并（同键整键替换、其它键保留）、并发 push/pull 两侧记账、拉取增量/更新/冲突、空会话、>20MB、非法远端名、上传前脱敏 |
+| `test/packs-capabilities.js` | **16** | manifest 字段/apiVersion/保留名/engines 窗口/permissions/budget、semver（^ ~ 区间 精确）与坏 range fail-closed、静态校验（缺 pack.mjs / 声明路径）、运行时契约（apiVersion 不一致 / createPack）、约束 kind/pattern、能力声明与实际使用不一致告警、三级遮蔽、未信任项目不挂载（= 禁用开关）、幂等挂载与非法工具名 |
+| `test/workspace-fence.js` | **15** | 注册表 add/list/rename/remove/排序、路径归一（相对目录 / 会话目录）、跨进程锁（外部持锁会等待）、写失败可见、`withinRoot` 的 `..`/绝对路径/软链/悬空软链/成环、read/write 越界拒绝且错误可见、Web 登记闸门与目录浏览的 realpath 围栏 |
+
+**变异批次（新建三批，逐条先看它红再留）**
+
+- `test/mutate/batch72-sync-state.mjs`：**10 条，10/10 全中**
+  （状态整份覆盖 / 字段合并、localMtime 丢失、跳过条件缺一层、拉取取消增量、拉取不判冲突、
+  去掉 20MB 上限、空会话照推、不校验远端名、首次推送也判冲突）。
+- `test/mutate/batch73-packs.mjs`：**10 条，10/10 全中**
+  （保留名、engines 窗口、caret 0.x 语义、未声明能力告警、缺 pack.mjs、apiVersion 一致性、
+  未信任版本参与遮蔽、装载期约束校验、信任门、工具名校验）。
+- `test/mutate/batch74-workspace.mjs`：**11 条，11/11 全中**
+  （无锁读-改-写、路径归一、写失败被吞、会话目录归一、改名不删旧键、排序口径、currentWorkspace
+  不归一、withinRoot 少 realpath、悬空软链不判、Web 允许根不校验、Web 不消解软链）。
+
+**结构性门禁（`run.mjs` 之外，未改 run.mjs）**
+
+新建 `scripts/mutation-coverage.mjs`：扫描 `src/**` 的代码行（去空行/纯注释行）与全部
+`test/mutate/batch*.mjs` 的 `file:` 计数，列出「代码行 > 150 且 0 条变异」的模块；
+支持 `--fail-over N`（盲区数 > N 时非零退出；不带该参数只报告）、`--min-lines`、`--json`。
+`docs/DEVELOPER.md` 新增 §八：怎么加批次、怎么跑检查、当前盲区清单（如实抄录脚本输出）。
+
+### 6.5.3 结果
+
+- 三个套件各自通过（16 / 16 / 15 项），三批变异全中（10 / 10 / 11）。
+- 盲区模块：**15 → 13**（`src/packs.js` 470 行、`src/workspace.js` 157 行离开清单；
+  `src/sync.js` 在本任务前已有 `batch70` ⑦ 1 条，并非严格 0 条）。`src/**` 变异条目 599 → 630。
+- `node test/mutate/run.mjs` 全量全中（见提交说明）；`npm run typecheck` / `typecheck:strict`
+  与改动前一致（本任务未改 `src/**`）；`node scripts/doc-lint.mjs` 只剩"变异总数"计数红
+  （README 的计数由统一收口更新，不在本任务允许改动范围）。
+
+### 6.5.4 发现与边界（如实）
+
+- **模块边界与任务书不一致（不是产品缺陷，是描述偏差）**：`src/workspace.js`（225 行）
+  只做工作空间注册表 / 会话→目录映射 / 路径归一，**没有围栏逻辑**；真实的路径围栏在
+  `src/tools/fs-tools.js`（`withinRoot`/`boundedPath`）与
+  `src/web/routes/domains/workspace.js`（登记闸门 + 目录浏览，realpath 两层）。batch74 因此
+  覆盖三处：7 条打在 `src/workspace.js`，2 条打在 `src/tools/fs-tools.js`，2 条打在
+  `src/web/routes/domains/workspace.js`，合计 11 条。
+- **观察到但未修复（不在允许改动 `src/**` 的范围）**：`syncPush` / `syncPull` 在循环中途
+  `return { error }`（如某个会话超 20MB、远端读取失败）时，会跳过末尾的 `commitStateAsync`，
+  于是**同一轮里已经成功推送/拉取的会话，其 remoteMtime 记账被丢弃**——下一轮会重复传输
+  （内容不丢，只是重传与可能的重复冲突备份）。属效率/可观测性问题，未验证为数据丢失，
+  故只登记、未改代码。修法方向：把 `delta` 提交放进 `finally`，或在错误返回前先合并已完成的键。
+- 边界：未改 `src/**`、`test/smoke.js`、`test/run-all.mjs`、`.github/workflows/ci.yml`、
+  `test/mutate/README.md`、`scripts/coverage-baseline.json`；三个新套件**未**接进
+  `run-all`/CI（不在允许范围，接入方法见 `docs/DEVELOPER.md` §8.4）；
+  `scripts/mutation-coverage.mjs` 也**未**接进 CI（同上，直接 `--fail-over 0` 会先被存量 13 个盲区卡红）。

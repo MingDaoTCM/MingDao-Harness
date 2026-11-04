@@ -318,3 +318,96 @@ V8 块覆盖率（`isBlockCoverage`）的语义是：一条区间的计数只作
   降序取末 8 个 = 最小的 8 个文件，所以那行标题下的名单从来没和"最低覆盖"对应过）。
 - 基线是在本机 Node v24 / macOS 上实测生成的；CI 覆盖率腿跑 Linux + Node 20。V8 对同一份源码
   的块区间理论上一致，若 CI 实测略有出入，应按 CI 的实测值重建基线并在提交说明里写明原因。
+
+## 八、变异覆盖盲区检查（v0.7.0 §1.2）
+
+> 变异验证回答的是「**改坏了的代码会不会被抓到**」；它不回答「从没被改过的模块安不安全」。
+> 2026-11 的自审实测：633→669 条变异里 4 个文件占了 285 条，而 90 个模块里 43 个**一条变异都没有**。
+> 分数高只说明「改过的都测了」，盲区模块在报告里是**沉默**的——这一节把沉默变成可复跑的清单。
+
+### 8.1 三件套：行为套件 → 变异批次 → 盲区检查
+
+给一个「有真实逻辑但 0 条变异」的模块补覆盖，顺序不能颠倒：
+
+1. **先建行为套件**（`test/<模块>-<主题>.js`）。没有套件就没有可抓的变异。
+   - 调**真实函数**看结果，不做源码文本匹配；
+   - 用本机临时目录（`fs.mkdtempSync(path.join(os.tmpdir(), ...))`）+ 桩服务端，不连网；
+   - 每条断言带稳定前缀（如 `E1：`、`P7：`、`W13：`），后面写变异批次要用它当关键词。
+2. **再写变异批次**（`test/mutate/batchNN-<主题>.mjs`，参照 `batch72`/`73`/`74`）。
+   - 只改 `src/**` 里**最容易写错**的那一行：整键替换 vs 合并、mtime 丢失、围栏少一层 realpath、
+     软链不判、能力声明不校验、错误被吞……；
+   - 每条都在套件上**真跑一遍**，必须红；
+   - `expect` 填**失败输出里真实出现的关键词**（断言原文的一部分）。
+     本仓在这上面踩过两次：一次是 `expect` 写了同一断言组里另一条分支的文案；一次是
+     `'工具名非法'` 同时出现在 `registerTool` 的兜底报错里，变异把 Pack 层主动告警删掉后
+     **仍然命中**、看起来"抓到了"。所以 `expect` 要尽量长、尽量是**你删掉的那条路径**独有的话。
+3. **跑一遍盲区检查**（下节），确认这个模块从清单里消失。
+
+### 8.2 盲区检查：`scripts/mutation-coverage.mjs`
+
+```bash
+node scripts/mutation-coverage.mjs                 # 只报告（退出 0）
+node scripts/mutation-coverage.mjs --fail-over 0   # 盲区数 > 0 即失败（CI 卡新增盲区）
+node scripts/mutation-coverage.mjs --fail-over 13  # 只允许存量 13 个（存量基线，逐步下调）
+node scripts/mutation-coverage.mjs --min-lines 150  # 调整"有真实逻辑"的代码行门槛
+node scripts/mutation-coverage.mjs --json          # 机器可读
+```
+
+口径（简单、可解释）：
+
+- **代码行** = 去掉空行与纯注释行后的行数（逐字符识别 `//`、`/* */`；字符串里的 `//` 不算注释）。
+- **变异条数** = 该文件在全部 `test/mutate/batch*.mjs` 的 `file:` 字段里出现的次数（只统计 `src/**`）。
+- **盲区** = 代码行 > `--min-lines`（默认 150）且变异条数 = 0。
+
+`--fail-over N` 的语义：**盲区模块数 > N 时非零退出**；不带该参数绝不失败（只报告）。
+CI 想"只卡新增盲区"就用当前存量数当基线（例如 `--fail-over 13`），想"一个都不能有"就用 0。
+本任务**未**把它接进 `.github/workflows/ci.yml`（不在允许改动范围）——接线时注意：直接上
+`--fail-over 0` 会让今天的存量盲区全部变红，应先按存量收敛。
+
+### 8.3 当前盲区清单（2026-11-04，v0.6.32 / HEAD b5cd199 + 本任务三批变异）
+
+`node scripts/mutation-coverage.mjs` 的实跑输出（如实抄录；数字随后续批次变化，**以脚本输出为准**）：
+
+```text
+变异覆盖盲区检查（阈值：代码行 > 150 且 0 条变异）
+  src 模块：91 个；src/** 变异条目：630 条；盲区模块：13 个
+
+  模块（按代码行降序）：
+  模块                        代码行  变异
+  src/ui.js                    600     0
+  src/mcp.js                   303     0
+  src/tokenizer.js             302     0
+  src/commands/sync.js         288     0
+  src/update.js                244     0
+  src/web/viewmodel.js         243     0
+  src/web/i18n.js              225     0
+  src/commands/skill.js        218     0
+  src/web/util.js              198     0
+  src/commands/update.js       187     0
+  src/commands/schedule.js     181     0
+  src/skill-registry.js        171     0
+  src/compact.js               154     0
+
+  合计：13 个模块、3314 行代码没有可抓的变异。
+```
+
+本任务补掉的三处（此前均 0 条）：
+
+| 模块 | 行为套件 | 变异批次 | 条数 |
+| --- | --- | --- | --- |
+| `src/sync.js` 状态增量 / 冲突 / 边界 | `test/sync-state.js`（16 项） | `test/mutate/batch72-sync-state.mjs` | 10 |
+| `src/packs.js` manifest / 版本 / 能力声明 / 信任门 | `test/packs-capabilities.js`（16 项） | `test/mutate/batch73-packs.mjs` | 10 |
+| `src/workspace.js` 注册表 / 归一 / 跨进程锁 | `test/workspace-fence.js`（15 项） | `test/mutate/batch74-workspace.mjs` | 11 |
+
+> 模块边界如实说明：`src/workspace.js` 本身**不含**路径围栏（`withinRoot`），围栏真实实现于
+> `src/tools/fs-tools.js` 与 `src/web/routes/domains/workspace.js`。`batch74` 的 11 条里有 8 条打在
+> `src/workspace.js`，2 条打在前者的 `withinRoot`，2 条打在后者（允许根 / realpath 两层围栏）。
+> 另外 `src/sync.js` 在本任务前已有 1 条（`batch70` ⑦），并非严格 0 条。
+
+### 8.4 边界
+
+- 本任务的三个新套件**没有**接进 `test/run-all.mjs` 与 CI（不在允许改动范围）。要接的话，
+  在 `SUITES` 里加 `['sync-state', 'node', ['test/sync-state.js']]` 等三行即可；
+  三个套件都是零外部依赖、只用本机临时目录。
+- 盲区检查只回答"有没有变异"，不回答"变异质量"——`--fail-over` 只能挡住新增盲区，
+  挡不住"给一个 600 行模块写 1 条无关变异"这种凑数。质量仍靠 review 与 `expect` 关键词约束。
