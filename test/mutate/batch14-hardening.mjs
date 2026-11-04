@@ -68,10 +68,15 @@ M.mutate({
 M.mutate({
   name: '⑦ M-1：setStoredKey 退回宽松读（损坏时静默清空其余凭据）',
   file: 'src/credentials.js',
-  from: '  const r = readCredentialsStrict();\n  if (!r.ok) {',
-  to: '  const r = { ok: true, data: loadCredentials(), error: null };\n  if (!r.ok) {',
+  // 注意：`readCredentialsStrict()` 在 credentials.js 里有两处调用（:178 与 setStoredKey 内 :265）。
+  // 旧 `from` 只有 2 空格缩进 → 命中的是**另一处**，变异打错靶（v0.7.0 全量里表现为"逃逸"）。
+  // 这里锚定 setStoredKey 的 6 空格形态，并用后一行 `已拒绝写入以免清空其余凭据` 作为唯一性判据。
+  from: '      const r = readCredentialsStrict();\n      if (!r.ok) {\n        const error = `凭证库读不出来，已拒绝写入以免清空其余凭据：',
+  to: '      const r = { ok: true, data: loadCredentials(), error: null };\n      if (!r.ok) {\n        const error = `凭证库读不出来，已拒绝写入以免清空其余凭据：',
   expect: ['必须拒绝写'],
-  run: SEC,
+  // v0.7.0：这条缺陷（损坏时宽松读 → 写回清空其余凭据）此前**没有断言**，全量里逃逸（实测）。
+  // 断言补在 `test/state-locks.js` 的 ②b；这里改挂过去，smoke 里没有对应用例。
+  run: () => M.suite('test/state-locks.js'),
 });
 
 M.mutate({

@@ -25,7 +25,7 @@ M.mutate({
 M.mutate({
   name: '② §103 pidfile 写失败后不杀刚拉起的 daemon（删掉 child.kill(SIGKILL)）',
   file: 'src/schedule.js',
-  from: "      try {\n        child.kill('SIGKILL');\n      } catch {}\n",
+  from: "    try {\n      child.kill('SIGKILL');\n    } catch {}\n",
   to: '',
   expect: ['无条件**杀掉刚拉起的守护进程'],
   run: SEC('103'),
@@ -35,8 +35,8 @@ M.mutate({
 M.mutate({
   name: '③ §103 pidfile 写失败却仍报成功（spawned 不置 false）',
   file: 'src/schedule.js',
-  from: '      spawned = false;\n    }\n    child.unref();',
-  to: '      spawned = true;\n    }\n    child.unref();',
+  from: '    spawned = false;\n  }\n  child.unref();',
+  to: '    spawned = true;\n  }\n  child.unref();',
   // 这一条被**同一处的行为断言**接住（spawnDaemon 真的返回了 true），文本绊线只是冗余的第二道；
   expect: ['pidfile 写不进去时必须返回 false'],
   run: SEC('103'),

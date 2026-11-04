@@ -38,7 +38,7 @@ const ledgerUrl = pathToFileURL(path.join(srcDir, 'ledger.js')).href;
 const netGuardUrl = pathToFileURL(path.join(srcDir, 'net-guard.js')).href;
 
 const { configPath, loadConfig, saveConfig, readModelCache, writeModelCache, updateModelCacheSync } = await import(configUrl);
-const { credentialsPath, readCredentialsStrict } = await import(credentialsUrl);
+const { credentialsPath, readCredentialsStrict, setStoredKey } = await import(credentialsUrl);
 const { readEndpointLimits, endpointLimitsFile } = await import(providersUrl);
 const { createLedger, ledgerDir } = await import(ledgerUrl);
 const { recordEgress, egressLogFile } = await import(netGuardUrl);
@@ -235,6 +235,28 @@ process.stdout.write('RESULT ' + JSON.stringify(r) + '\\n');
   assert.equal(creds.data.alpha, 'sk-alpha-0123456789', 'E2：并发 setKey 两个 provider 后两把 Key 都必须在（锁内重读）——alpha 丢了');
   assert.equal(creds.data.beta, 'sk-beta-0123456789', 'E2：并发 setKey 两个 provider 后两把 Key 都必须在（锁内重读）——beta 丢了');
   ok('credentials：并发 setKey 两个 provider 都保留');
+}
+
+// ===========================================================================
+// ②b credentials：**损坏时必须拒绝写**（否则会静默清空其余凭据）
+// ===========================================================================
+// 缺陷形态（batch14 ⑦ 变异）：把 `readCredentialsStrict()` 换成宽松读，损坏时 return {}
+// → `setStoredKey` 以为库是空的，写回时把用户其余 Key 全部清掉。旧断言只覆盖"并发不丢"，
+// 没覆盖"损坏时停止写入"，因此该变异在 v0.7.0 全量里**逃逸**（实测）。
+{
+  const home = freshHome('credentials-corrupt');
+  const file = path.join(home, 'credentials.json');
+  const corrupt = '{"alpha": "sk-alpha-secret"'; // 截断的 JSON：解析必失败
+  fs.writeFileSync(file, corrupt, { mode: 0o600 });
+  const before = fs.readFileSync(file);
+  const r = setStoredKey('beta', 'sk-beta-should-not-land');
+  assert.equal(r.ok, false, `损坏的凭证库必须拒绝写入（必须拒绝写）：实际 ${JSON.stringify(r)}`);
+  assert.match(String(r.error || ''), /已拒绝写/, `拒绝的原因必须说清"以免清空其余凭据"：${r.error}`);
+  const after = fs.readFileSync(file);
+  assert.deepEqual(after, before, '损坏时**原文件字节必须保持不变**（连备份/覆盖都不许做）');
+  const strict = readCredentialsStrict();
+  assert.equal(strict.ok, false, '损坏的凭证库严格读必须判失败（不能当空库）');
+  ok('credentials：损坏时拒绝写入 + 原文件字节不变（不清空其余凭据）');
 }
 
 // ===========================================================================

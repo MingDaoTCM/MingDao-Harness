@@ -98,11 +98,11 @@ M.mutate({
 M.mutate({
   name: '⑧ 学习文件损坏也照写（覆盖可能需要人工修复的原文）',
   file: 'src/providers/index.js',
-  from: `  if (!r.ok) {
-    // 文件坏了/读不出：**不覆盖**（可能还能人工救回来），只降级为无学习值。
-    return { ...empty, error: \`\${r.error}；本次不写入，避免覆盖可能需要人工修复的文件\` };
-  }`,
-  to: `  /* 变异：损坏也照写，覆盖原文件 */`,
+  from: `      if (!r.ok) {
+        // 文件坏了/读不出：**不覆盖**（可能还能人工救回来），只降级为无学习值。
+        return { ...empty, error: \`\${r.error}；本次不写入，避免覆盖可能需要人工修复的文件\` };
+      }`,
+  to: `      /* 变异：损坏也照写，覆盖原文件 */`,
   expect: ['保持原样'],
   run: SUITE,
 });
@@ -111,14 +111,10 @@ M.mutate({
   name: '⑨ 学习文件写失败直接抛（不再降级为"无学习值"）',
   file: 'src/providers/index.js',
   from: `  } catch (err) {
-    return {
-      ok: false,
-      error: \`端点学习文件写入失败（\${file}）：\${(/** @type {any} */ (err))?.message || err}——本轮按无学习值继续\`,`,
+    const error = \`端点学习文件写入失败（\${file}）：\${(/** @type {any} */ (err))?.message || err}——本轮按无学习值继续\`;`,
   to: `  } catch (err) {
     throw err; /* 变异：写失败直接抛，不再降级 */
-    return {
-      ok: false,
-      error: \`端点学习文件写入失败（\${file}）：\${(/** @type {any} */ (err))?.message || err}——本轮按无学习值继续\`,`,
+    const error = \`端点学习文件写入失败（\${file}）：\${(/** @type {any} */ (err))?.message || err}——本轮按无学习值继续\`;`,
   expect: ['写入失败'],
   run: SUITE,
 });
