@@ -32,6 +32,13 @@ const LIMIT = 500;
 const ALLOWED_LONG_FUNCTIONS = {
   // v0.7.0 §1.1 切片 A：事件双写（turn/step/tool/usage/compact/interrupt）在 createAgent /
   // runTurnInner 内新增了边界写入；行数按实测同步，之后仍只许降不许升。
+  //
+  // v0.6.35 明确记录一次**基线被抬高**（这是本守卫唯一一次允许上调，原因与回收期限）：
+  //   createAgent   2177 → 2265（+88）
+  //   runTurnInner  1718 → 1743（+25）
+  // 原因：切片 A 要求把 turn/step/tool 边界事件写在循环内；切片 B（SSE seq + UI 投影）
+  // 会把这三处写事件搬进 `finishTurn`/事件中间件，届时**必须回到 ≤2177 / ≤1718**。
+  // 若切片 B 之后仍高于原值，说明"搬出去"没做完——请把它当成未完成项，而不是再调基线。
   'src/agent.js::createAgent': 2265,
   'src/agent.js::runTurnInner': 1743,
   'src/web/server.js::runWebServer': 1007,
