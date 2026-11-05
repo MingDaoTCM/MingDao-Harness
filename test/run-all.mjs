@@ -59,6 +59,8 @@ const SUITES = [
   ['workspace-fence', 'node', ['test/workspace-fence.js']],
   // v0.7.0 §1.2：前端纯函数 viewmodel（搬家后与原实现 deepEqual 对拍；app.js 从此可测）
   ['viewmodel', 'node', ['test/viewmodel.js']],
+  // v0.7.0 §1.5：文案/预测层（从 agent.js 切出到 messages.js，行为逐字不变）
+  ['messages', 'node', ['test/messages.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];
