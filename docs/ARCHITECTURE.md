@@ -136,7 +136,7 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `web/web-io.js` —— WebUI 的 io 适配器：把 Agent 的 io 事件翻译为 SSE 事件，权限确认/选择类交互经 `askHandler` 转发到浏览器模态框并等待 `POST /api/permission` 应答。
 - `web/viewmodel.js`（v0.7.0 §1.2）—— 前端的**纯计算层**：`sideNavLayout`（三档断点下的左栏形态）、`errCardParts`（错误卡文案分解）、`runStripView`（状态条六字段）、`traceRoundView`（轨迹一轮的视图模型）以及它们依赖的格式化助手。**不读 DOM、不读全局**，因此可以被 node 直测；`app.js` 只负责把结果渲染到 DOM。
   为什么抽出来：此前 `app.js` 3252 行、可执行覆盖 0%，只靠源码正则守卫——UI 改动的"绿"等于"文本没变"。
-- `web/util.js` / `web/app.js` / `web/i18n.js` —— 前端：`util.js` 是零状态工具（选择器/转义/Markdown/格式化），`app.js` 是页面主脚本（消息渲染与轨迹、设置面板、自绘气泡与模态框），`i18n.js` 是零依赖 UI 文案表（zh/en 同键、默认跟随 `navigator.language`、`localStorage` 覆盖）—— 地址带 `?token=` 时记入 `sessionStorage` 并从地址栏移除，此后请求统一附加 `X-MingDao-Token`。
+- `web/util.js` / `web/app.js` —— 前端：`util.js` 是零状态工具（选择器/转义/Markdown/格式化），`app.js` 是页面主脚本（消息渲染与轨迹、设置面板、自绘气泡与模态框）—— 地址带 `?token=` 时记入 `sessionStorage` 并从地址栏移除，此后请求统一附加 `X-MingDao-Token`。
 
 ### 2.8 CLI 层（13）
 

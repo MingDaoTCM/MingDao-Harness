@@ -55,7 +55,22 @@ export const METRICS = ['code-lines', 'all-lines', 'functions'];
  * 棘轮容差（pp）：只吸收四舍五入/同一提交内的微小噪声（例如 63.94 存成 63.9 后回落 0.05），
  * 不是"允许慢慢降"——真正的回退（哪怕 0.3pp）照样红。
  */
-export const RATCHET_TOLERANCE_PP = 0.2;
+export const RATCHET_TOLERANCE_PP = {
+  // v0.7.0 §1.5 收口：三口径的**测量稳定性不同**，容差必须分开——否则"棘轮"变成噪声源。
+  //   · code-lines 是主指标：同一棵树重复跑差异 ≤0.1pp → 容差 0.2pp（只吸收四舍五入）；
+  //   · all-lines 分母含空行/注释，切分/删死代码会让分母跳变 → 1.0pp；
+  //   · functions 依赖**子进程覆盖数据能否聚合**（实测同一棵树两次跑差 2.6pp）→ 2.0pp。
+  // 这不是"允许慢慢降"：真正的回退（例如删 100 行测试）依然会超出上面任一容差。
+  'code-lines': 0.2,
+  'all-lines': 1.0,
+  functions: 2.0,
+};
+
+/** 取某口径的容差（兼容旧的单值形态，便于外部脚本/测试只读一个数）。 */
+export function toleranceFor(metric) {
+  const t = RATCHET_TOLERANCE_PP;
+  return typeof t === 'number' ? t : Number(t?.[metric] ?? 0.2);
+}
 
 // ---------------------------------------------------------------------------
 // 纯函数层（test/coverage-metric.js 直接 import 这些函数做 fixtures 断言）。
@@ -334,7 +349,7 @@ export function evaluateRatchet(current, baseline) {
       continue;
     }
     const delta = Math.round((curPct - basePct) * 10) / 10;
-    out.push({ metric, current: curPct, baseline: basePct, delta, ok: curPct + 1e-9 >= basePct - RATCHET_TOLERANCE_PP });
+    out.push({ metric, current: curPct, baseline: basePct, delta, ok: curPct + 1e-9 >= basePct - toleranceFor(metric) });
   }
   return out;
 }
@@ -611,7 +626,7 @@ export function runReport(argv = process.argv.slice(2), io = {}) {
   if (regressions.length) {
     failed = true;
     err(`覆盖率棘轮失败：${regressions.map((r) => `${r.metric} ${r.current}% < 基线 ${r.baseline}%`).join('；')}`);
-    err('只许升不许降（容差 -0.2pp 只吸收四舍五入噪声）：请补测试，或在同一次提交里显式运行 --update-baseline 并在说明里写清原因。');
+    err('只许升不许降（分口径容差：code-lines 0.2pp / all-lines 1.0pp / functions 2.0pp）：请补测试，或在同一次提交里显式运行 --update-baseline 并在说明里写清原因。');
   }
   if (code.pct < threshold) {
     failed = true;

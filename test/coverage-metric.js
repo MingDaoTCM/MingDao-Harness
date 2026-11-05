@@ -245,7 +245,9 @@ const at = (src, needle) => {
     'all-lines': metricOf(all, 100),
     functions: metricOf(fn, 100),
   });
-  const lower = evaluateRatchet(cur(62, 70, 49), baseline);
+  // v0.6.34：容差改为**分口径**（code 0.2 / all 1.0 / functions 2.0，理由见 coverage-report.mjs）。
+  // 这里用"明显超出各自容差"的降幅来断言棘轮仍然生效；原来统一 -0.2 的写法已不成立。
+  const lower = evaluateRatchet(cur(62, 69, 47), baseline);
   const codeRow = lower.find((r) => r.metric === 'code-lines');
   assert.equal(codeRow.ok, false, '低于基线必须判失败（ratchet 生效）');
   assert.equal(codeRow.delta, -1.9, '棘轮：回归幅度 = 当前 - 基线（1 位小数）');
@@ -255,10 +257,14 @@ const at = (src, needle) => {
   const equal = evaluateRatchet(cur(63.9, 70.5, 50), baseline);
   assert.ok(equal.every((r) => r.ok), '棘轮：等于基线必须通过（只许升不许降）');
 
-  const withinTolerance = evaluateRatchet(cur(63.8, 70.4, 49.9), baseline);
-  assert.ok(withinTolerance.every((r) => r.ok), '棘轮：-0.2pp 容差内通过（只吸收四舍五入/同提交噪声）');
+  const withinTolerance = evaluateRatchet(cur(63.8, 69.7, 48.5), baseline);
+  assert.ok(withinTolerance.every((r) => r.ok), '棘轮：各自容差内通过（code 0.2 / all 1.0 / functions 2.0）');
   const beyondTolerance = evaluateRatchet(cur(63.6, 70.5, 50), baseline);
-  assert.equal(beyondTolerance.find((r) => r.metric === 'code-lines').ok, false, '棘轮：超出 -0.2pp 容差必须判失败（容差不是"允许慢慢降"）');
+  assert.equal(beyondTolerance.find((r) => r.metric === 'code-lines').ok, false, '棘轮：code-lines 超出 0.2pp 容差必须失败');
+  const beyondAll = evaluateRatchet(cur(63.9, 69.0, 50), baseline);
+  assert.equal(beyondAll.find((r) => r.metric === 'all-lines').ok, false, '棘轮：all-lines 超出 1.0pp 容差必须失败');
+  const beyondFn = evaluateRatchet(cur(63.9, 70.5, 47.5), baseline);
+  assert.equal(beyondFn.find((r) => r.metric === 'functions').ok, false, '棘轮：functions 超出 2.0pp 容差必须失败');
 
   const better = evaluateRatchet(cur(64.9, 70.5, 50), baseline);
   const betterRow = better.find((r) => r.metric === 'code-lines');
