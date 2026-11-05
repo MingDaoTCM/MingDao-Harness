@@ -1,6 +1,6 @@
 # MingDao Harness v0.6.34 发布说明
 
-> 状态：**待发布**
+> 状态：**已发布**（tag `v0.6.34`）
 > 主题：**v0.7.0 地基第三批：内核切分（文案层 / server 切块）+ 死代码清理**
 > 范围：**无新功能、无界面变化**。`v0.6.33..HEAD` 共 8 个提交，全部是 v0.7.0 §1.5「内核切分」与顺手治理。
 > 影响面：内核与 Web 服务器的**内部结构**、测试与门禁；无 API 变更，无数据格式迁移。
@@ -148,13 +148,19 @@
 
 ### 5.1 发布树截图（1440×900，Electron 真实渲染）
 
-| 页面 | `/tmp/shots-0634` sha256 | 与 v0.6.33 一致 |
+`node scripts/ui-shot.mjs --out /tmp/shots-0634`（1440×900，Electron 真实渲染，exit 0）。
+
+| 页面 | `/tmp/shots-0634` sha256 | 与 v0.6.33 记录值一致 |
 | --- | --- | --- |
-| `home.png` | 待填 | 待填 |
-| `settings.png` | 待填 | 待填 |
-| `palette.png` | 待填 | 待填 |
-| `session.png` | 待填 | 待填 |
-| `sheet.png` | 待填 | 待填 |
+| `home.png` | `00a68c1358e623b33d794da23944680c1e6350968ca2d3640caa54570fed1b5e` | ✅ |
+| `settings.png` | `1c27e00102ad098ef28baa24419098162f05e291a53b0b2a90e49a4aa8dac414` | ✅ |
+| `palette.png` | `f9369ef19cd7659da12711abcb34225cc549b30c35a572dec363a2406f018dcb` | ✅ |
+| `session.png` | `f285c44022a3a0d7c1c23d1da6724c2455394176b956c3ebfae89fffa3ed3e11` | ✅ |
+| `sheet.png` | `cdc5ea7cb88b5c68482b56361955374f131ac8748d9d5d64ccdd950812dcb6ca` | ✅ |
+
+> `/tmp/shots-0633` 目录已被系统清理（发版时不存在）；比对基准取 `RELEASE-NOTES-0.6.33.md`
+> 记录的 5 个 sha256（即 v0.6.33 发布树实测值）。5 张的 sha256 与字节数**全部一致**，
+> 本版未改前端。
 
 ---
 
