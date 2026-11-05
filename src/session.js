@@ -45,7 +45,7 @@ export function listSessionsDetailed(home) {
   }
   for (const f of entries) {
     // 冲突备份不是会话：排除后不再出现在会话列表/最近会话/搜索/云同步推送集合中
-    // v0.7.0 §1.1：事件侧车 `<session>.events.jsonl` 不是会话——必须排除，否则它会变成
+    // v0.7.0 §1.1：事件侧车 `<session>.events.ndjson` 不是会话——必须排除，否则它会变成
     // 「没有消息的幽灵会话」，甚至因 mtime 更新而抢走 latestSession()。旧会话行为不变。
     if (!f.endsWith('.jsonl') || isEventLogName(f) || isConflictBackupName(f)) continue;
     const file = path.join(dir, f);

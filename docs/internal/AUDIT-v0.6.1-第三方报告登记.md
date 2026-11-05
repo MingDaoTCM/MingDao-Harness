@@ -6801,7 +6801,7 @@ requestToken / trustedHost`），`createProviderCache({...})` 实例化并 `awai
 新增 `src/session-events.js`（纯逻辑 + 少量 I/O），把会话状态从「只有消息数组」扩成
 「消息数组 + 一条 append-only 事件流」：
 
-- 事件文件：`<session>.events.jsonl`，与 `<session>.jsonl` 同级，**不改旧文件**；
+- 事件文件：`<session>.events.ndjson`，与 `<session>.jsonl` 同级，**不改旧文件**；
 - 事件形状：`{seq,time,type,data}`，12 类：`session.start` / `turn.start` / `turn.end` /
   `step.start` / `step.end` / `tool.start` / `tool.end` / `message.append` / `usage` / `compact` /
   `interrupt` / `checkpoint`；seq 单调、是唯一关联键；
@@ -6835,7 +6835,7 @@ requestToken / trustedHost`），`createProviderCache({...})` 实例化并 `awai
   `toolCallIds` 交给 replay 延迟补占位）。
 - 开关：`cfg.eventLog === false`（`createAgent` 同时关掉进程级双写）或 `MINGDAO_EVENT_LOG=0`；
   默认开。
-- 会话列表：`listSessionsDetailed` **排除** `.events.jsonl` 侧车——否则事件文件会变成
+- 会话列表：`listSessionsDetailed` **排除** `.events.ndjson` 侧车——否则事件文件会变成
   「没有消息的幽灵会话」并因 mtime 更新抢走 `latestSession()`。这是让「旧会话列表行为不变」
   必须做的一处过滤，旧会话文件本身与读取返回形状均未改。
 - 未改 `src/web/**`、`src/sync-server.js`、`src/ledger.js`、SSE 帧、UI、会话文件格式；

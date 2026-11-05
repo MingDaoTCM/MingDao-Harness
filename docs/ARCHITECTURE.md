@@ -96,7 +96,7 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 ### 2.4 会话 / 记忆 / 任务（11）
 
 - `session.js` —— 会话持久化：`<home>/sessions/<时间戳>-<随机>.jsonl` 每轮追加，`--continue` 载入最近一次，`--resume` 打开选择器 —— 会话文件是消息结构的唯一权威，检查点等旁挂状态另存侧车文件。
-- `session-events.js` —— 会话事件日志（v0.7.0 §1.1 切片 A）：`<session>.events.jsonl` 追加 12 类事件 `{seq,time,type,data}`（session/turn/step/tool/message/usage/compact/interrupt/checkpoint）—— **seq 是唯一关联键**：跨进程短临界区锁内「读尾行 last+1」、单次 append 后回读校验；读侧跳过 torn 行/未知 type 并返回 `skipped`；`replayToMessages()` 是纯函数（`message.append` 提供消息本体、`compact` 重置基线、`interrupt` 延迟补 tool 占位），由事件流重放的消息数组必须与原消息数组逐字节等价；事件文件是**旁路**，`loadSession`/`rewriteSession`/SSE/UI 都不读它，`cfg.eventLog=false` 或 `MINGDAO_EVENT_LOG=0` 可整体回滚。
+- `session-events.js` —— 会话事件日志（v0.7.0 §1.1 切片 A）：`<session>.events.ndjson` 追加 12 类事件 `{seq,time,type,data}`（session/turn/step/tool/message/usage/compact/interrupt/checkpoint）—— **seq 是唯一关联键**：跨进程短临界区锁内「读尾行 last+1」、单次 append 后回读校验；读侧跳过 torn 行/未知 type 并返回 `skipped`；`replayToMessages()` 是纯函数（`message.append` 提供消息本体、`compact` 重置基线、`interrupt` 延迟补 tool 占位），由事件流重放的消息数组必须与原消息数组逐字节等价；事件文件是**旁路**，`loadSession`/`rewriteSession`/SSE/UI 都不读它，`cfg.eventLog=false` 或 `MINGDAO_EVENT_LOG=0` 可整体回滚。
 - `session-index.js` —— 会话检索索引：词表倒排 + 按 mtime/size 的增量同步，分片存 `<home>/sessions-index/<2位sha1前缀>.json`（256 片）—— 未变化直接用缓存词表，>8MB 文件跳过并移除条目；中文按 bigram + 单字、查询串同口径分词后 AND 匹配。
 - `memory.js` —— 长记忆与自主进化：用户记忆 `~/.mingdao/AGENTS.md`（手动 + 会话结束自动提取用户偏好并去重追加）、会话日志 `journal.jsonl`（默认不注入系统提示，`--journal` / WebUI 勾选才取最近 3 条）—— 自动提取用 executor 模型（约几十 token），`autoMemory: false` 可关。
 - `tasks.js` —— 多会话后台任务面板：`mingdao run` 拉起独立 worker 子进程，状态落 `<home>/tasks/<id>.json`，命令族 `run` / `tasks` / `tasks watch` / `tasks kill` —— taskId 用不可枚举随机值；kill 前必须过 PID 归属校验（见 `proc.js`）。

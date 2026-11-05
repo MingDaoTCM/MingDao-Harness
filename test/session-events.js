@@ -60,16 +60,16 @@ const ok = (name) => {
 }
 
 {
-  assert.equal(E.eventFileFor('/x/sessions/a.jsonl'), '/x/sessions/a.events.jsonl', '会话文件的事件侧车必须同名同目录');
-  assert.equal(E.eventFileFor('/x/sessions/a.events.jsonl'), '/x/sessions/a.events.jsonl', '已经是事件文件时不得二次拼接');
-  assert.equal(E.eventFileFor('/x/sessions/a'), '/x/sessions/a.events.jsonl', '无扩展名时补 .events.jsonl');
-  assert.equal(E.isEventLogName('a.events.jsonl'), true, '事件侧车判定');
+  assert.equal(E.eventFileFor('/x/sessions/a.jsonl'), '/x/sessions/a.events.ndjson', '会话文件的事件侧车必须同名同目录');
+  assert.equal(E.eventFileFor('/x/sessions/a.events.ndjson'), '/x/sessions/a.events.ndjson', '已经是事件文件时不得二次拼接');
+  assert.equal(E.eventFileFor('/x/sessions/a'), '/x/sessions/a.events.ndjson', '无扩展名时补 .events.ndjson');
+  assert.equal(E.isEventLogName('a.events.ndjson'), true, '事件侧车判定');
   assert.equal(E.isEventLogName('a.jsonl'), false, '普通会话不得被误判为事件侧车');
-  ok('② 事件文件命名 <session>.events.jsonl（与 .jsonl 同级）');
+  ok('② 事件文件命名 <session>.events.ndjson（与 .jsonl 同级）');
 }
 
 // ---------- 2. seq 单调且无洞（连续 20 条） ----------
-const seqFile = path.join(base, 'seq.events.jsonl');
+const seqFile = path.join(base, 'seq.events.ndjson');
 {
   for (let i = 0; i < 20; i += 1) {
     const r = E.appendEvent(seqFile, { type: 'step.start', data: { i }, at: 1700000000000 + i });
@@ -90,7 +90,7 @@ const seqFile = path.join(base, 'seq.events.jsonl');
 
 {
   // 删除后重建：seq 必须重新从 1 开始（缓存不得凭空跳号）
-  const f = path.join(base, 'recreate.events.jsonl');
+  const f = path.join(base, 'recreate.events.ndjson');
   E.appendEvent(f, { type: 'turn.start', data: { n: 1 } });
   E.appendEvent(f, { type: 'turn.start', data: { n: 2 } });
   fs.unlinkSync(f);
@@ -103,7 +103,7 @@ const seqFile = path.join(base, 'seq.events.jsonl');
 
 // ---------- 3. 并发 append：8 子进程 × 10 条 ----------
 {
-  const concFile = path.join(base, 'concurrent.events.jsonl');
+  const concFile = path.join(base, 'concurrent.events.ndjson');
   const childScript = path.join(base, 'append-child.mjs');
   const moduleUrl = pathToFileURL(path.join(srcDir, 'session-events.js')).href;
   fs.writeFileSync(
@@ -163,7 +163,7 @@ for (let i = 0; i < 10; i += 1) {
 
 // ---------- 4. torn 行：跳过并计数，其余可读 ----------
 {
-  const torn = path.join(base, 'torn.events.jsonl');
+  const torn = path.join(base, 'torn.events.ndjson');
   E.appendEvent(torn, { type: 'turn.start', data: { n: 1 } });
   E.appendEvent(torn, { type: 'message.append', data: { message: { role: 'user', content: 'hi' } } });
   // 手工写半行（模拟写一半崩溃）：没有换行、JSON 不完整
@@ -188,7 +188,7 @@ for (let i = 0; i < 10; i += 1) {
 
 // ---------- 5. 未知 type：跳过并计数（不崩） ----------
 {
-  const unknown = path.join(base, 'unknown.events.jsonl');
+  const unknown = path.join(base, 'unknown.events.ndjson');
   E.appendEvent(unknown, { type: 'turn.start', data: {} });
   fs.appendFileSync(unknown, JSON.stringify({ seq: 2, time: Date.now(), type: 'future.event', data: { x: 1 } }) + '\n');
   E.appendEvent(unknown, { type: 'turn.end', data: {} });
@@ -205,7 +205,7 @@ for (let i = 0; i < 10; i += 1) {
 
 // ---------- 6. 旧会话：没有事件文件 → 空流；空事件流 → 空消息 ----------
 {
-  const missing = path.join(base, 'no-such.events.jsonl');
+  const missing = path.join(base, 'no-such.events.ndjson');
   const r = E.readEvents(missing);
   assert.equal(r.ok, true, '事件文件不存在不是错误（旧会话的正常形态）');
   assert.deepEqual(r.events, [], '没有事件文件时必须返回空事件数组');
@@ -322,7 +322,7 @@ for (let i = 0; i < 10; i += 1) {
 {
   let r;
   assert.doesNotThrow(() => {
-    r = E.appendEvent(path.join(base, 'bad-type.events.jsonl'), { type: 'not.a.type', data: {} });
+    r = E.appendEvent(path.join(base, 'bad-type.events.ndjson'), { type: 'not.a.type', data: {} });
   }, 'appendEvent 未知 type 不得抛异常');
   assert.equal(r.ok, false, 'appendEvent 未知 type 必须返回 ok:false');
   assert.ok(String(r.error).includes('未知事件类型'), 'appendEvent 未知 type 必须说明原因');
@@ -330,10 +330,10 @@ for (let i = 0; i < 10; i += 1) {
 }
 
 {
-  const failFile = path.join(base, 'write-fail.events.jsonl');
+  const failFile = path.join(base, 'write-fail.events.ndjson');
   const realAppend = fs.appendFileSync;
   fs.appendFileSync = function (/** @type {any} */ p, /** @type {any} */ ...args) {
-    if (String(p).includes('.events.jsonl')) {
+    if (String(p).includes('.events.ndjson')) {
       const err = new Error('injected EACCES for ' + String(p));
       /** @type {any} */ (err).code = 'EACCES';
       throw err;
@@ -384,7 +384,7 @@ for (let i = 0; i < 10; i += 1) {
   ];
   S.appendMessages(file, msgs);
   const eventFile = E.eventFileFor(file);
-  assert.equal(fs.existsSync(eventFile), true, 'appendMessages 必须创建事件侧车 <session>.events.jsonl');
+  assert.equal(fs.existsSync(eventFile), true, 'appendMessages 必须创建事件侧车 <session>.events.ndjson');
   const read = E.readEvents(eventFile);
   assert.equal(read.ok, true, '双写后事件文件必须可读');
   assert.equal(read.skipped, 0, '双写的事件文件不得有坏行');
@@ -427,9 +427,9 @@ for (let i = 0; i < 10; i += 1) {
   S.appendMessages(path.join(process.env.MINGDAO_HOME || '', 'sessions', 'listed.jsonl'), [{ role: 'user', content: '列表测试' }]);
   const listed = S.listSessions(process.env.MINGDAO_HOME || '').map((s) => s.name);
   assert.equal(listed.includes(name), false, '事件侧车不得出现在会话列表（它不是会话）');
-  assert.equal(listed.some((n) => n.endsWith('.events.jsonl')), false, '任何 .events.jsonl 都不得被当成会话');
+  assert.equal(listed.some((n) => n.endsWith('.events.ndjson')), false, '任何 .events.ndjson 都不得被当成会话');
   const latest = S.latestSession(process.env.MINGDAO_HOME || '');
-  assert.ok(!String(latest?.name || '').endsWith('.events.jsonl'), '事件侧车不得抢占 latestSession（mtime 更新也不行）');
+  assert.ok(!String(latest?.name || '').endsWith('.events.ndjson'), '事件侧车不得抢占 latestSession（mtime 更新也不行）');
   ok('⑳ 事件侧车被会话列表/最近会话排除（旧会话列表行为不变）');
 }
 
@@ -487,7 +487,7 @@ for (let i = 0; i < 10; i += 1) {
 {
   const work = path.join(base, 'agent-work');
   fs.mkdirSync(work, { recursive: true });
-  const eventFile = path.join(base, 'agent-boundaries.events.jsonl');
+  const eventFile = path.join(base, 'agent-boundaries.events.ndjson');
   let call = 0;
   const provider = {
     async chat() {
@@ -542,7 +542,7 @@ for (let i = 0; i < 10; i += 1) {
   const realWarn = console.warn;
   console.warn = (...a) => warns.push(a.join(' '));
   fs.appendFileSync = function (/** @type {any} */ p, /** @type {any} */ ...args) {
-    if (String(p).includes('.events.jsonl')) {
+    if (String(p).includes('.events.ndjson')) {
       const err = new Error('injected EACCES for ' + String(p));
       /** @type {any} */ (err).code = 'EACCES';
       throw err;

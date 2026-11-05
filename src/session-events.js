@@ -6,7 +6,10 @@
 //
 // 本切片**不改既有读取路径**：
 //   · `loadSession` / `rewriteSession` 的返回值与 `.jsonl` 格式一字未动；
-//   · 事件文件是**并列的新侧车** `<session>.events.jsonl`，旧会话没有它照样可读；
+//   · 事件文件是**并列的新侧车** `<session>.events.ndjson`，旧会话没有它照样可读；
+//     **为什么不是 .jsonl**：全仓（以及用户脚本/测试）有大量 `readdirSync(sessions).filter(f => f.endsWith('.jsonl'))`
+//     的写法，侧车若也叫 `.jsonl` 就会被当成会话——本版实测已挂掉 2 个 e2e（分享时把侧车当会话推给服务端，
+//     服务端回「你还没有这个会话」）。改成 `.ndjson`（同格式、不同扩展名）让这类碰撞在命名层就不存在。
 //   · SSE 帧、UI、账本、同步都不读事件文件。
 // 因此事件日志坏掉/写不进去，最多是「这条时间线不完整」，绝不影响会话本身。
 //
@@ -165,17 +168,17 @@ export function setEventLogEnabled(enabled) {
 }
 
 /**
- * 会话文件 → 事件文件：`<session>.jsonl` → `<session>.events.jsonl`。
- * 已经是 `.events.jsonl` 的原样返回（方便调用方只写一个入口）。
+ * 会话文件 → 事件文件：`<session>.jsonl` → `<session>.events.ndjson`。
+ * 已经是 `.events.ndjson` 的原样返回（方便调用方只写一个入口）。
  * @param {string} sessionFile
  * @returns {string}
  */
 export function eventFileFor(sessionFile) {
   const s = String(sessionFile || '');
   if (!s) return '';
-  if (s.endsWith('.events.jsonl')) return s;
-  if (s.endsWith('.jsonl')) return `${s.slice(0, -'.jsonl'.length)}.events.jsonl`;
-  return `${s}.events.jsonl`;
+  if (s.endsWith('.events.ndjson')) return s;
+  if (s.endsWith('.jsonl')) return `${s.slice(0, -'.jsonl'.length)}.events.ndjson`;
+  return `${s}.events.ndjson`;
 }
 
 /**
@@ -185,7 +188,7 @@ export function eventFileFor(sessionFile) {
  * @returns {boolean}
  */
 export function isEventLogName(name) {
-  return String(name || '').endsWith('.events.jsonl');
+  return String(name || '').endsWith('.events.ndjson');
 }
 
 /**

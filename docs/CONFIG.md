@@ -88,7 +88,7 @@ MingDao 先用 executor 模型（路由关闭时为当前模型）把被裁段�
 
 ## 会话事件日志（v0.7.0 §1.1）
 
-每个会话在消息文件旁多一条 append-only 的事件流 `<session>.events.jsonl`（0600，与
+每个会话在消息文件旁多一条 append-only 的事件流 `<session>.events.ndjson`（0600，与
 `<session>.jsonl` 同级）：每条 `{seq,time,type,data}`，seq 单调、是 turn/step/tool/message
 之间的唯一关联键。当前 12 类事件：`session.start` / `turn.start` / `turn.end` / `step.start` /
 `step.end` / `tool.start` / `tool.end` / `message.append` / `usage` / `compact` / `interrupt` /
