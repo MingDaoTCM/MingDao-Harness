@@ -28,7 +28,12 @@ const baseHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-state-locks-'));
 process.env.MINGDAO_HOME = baseHome;
 // 锁等待上限调小：本套件会故意制造「外部持锁」场景，等到默认 5s 只会拖慢失败反馈。
 // 仍远大于并发写本身的临界区（单次写实测 < 5ms）。
-process.env.MINGDAO_LOCK_TIMEOUT_MS = '3000';
+// v0.6.34（macOS CI 假红）：这里把产品锁超时压到 3s 是为了**测试跑得快**，但本套件会同时起 16 个
+// 子进程争同一把锁——慢 runner（macOS / 共享 CI）上「排队时间」很容易超过 3s，于是假报
+// 「获取文件锁超时」而不是断言失败（batch69 ⑤⑦ 因此在 macOS 腿 62/63）。
+// 放宽到 15s：断言本身不变（被测的是「并发不丢」，不是「多久超时」）；
+// 需要**故意验超时**的用例请显式传 `{ timeoutMs: … }`，不要依赖这个环境变量。
+process.env.MINGDAO_LOCK_TIMEOUT_MS = '15000';
 process.env.MINGDAO_LOCK_STALE_MS = '2000';
 
 const configUrl = pathToFileURL(path.join(srcDir, 'config.js')).href;
