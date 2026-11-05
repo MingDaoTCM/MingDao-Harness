@@ -43,7 +43,7 @@ M.mutate({
 
 M.mutate({
   name: '③ 重试时输出上限不减半（所有级别 maxOutputRatio 改成 1）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: `  Object.freeze({ budgetRatio: 0.6, maxOutputRatio: 0.5, minBudget: 4096, minMaxOutput: 512 }),`,
   to: `  Object.freeze({ budgetRatio: 0.6, maxOutputRatio: 1, minBudget: 4096, minMaxOutput: 512 }), /* 变异：输出不减半 */`,
   expect: ['×0.5'],
@@ -61,7 +61,7 @@ M.mutate({
 
 M.mutate({
   name: '⑤ 硬性上限放宽到 3 次（多压一级，不再是最多 2 次）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: `export const MAX_MEMORY_RETRIES = MEMORY_RECOVERY_LEVELS.length;`,
   to: `export const MAX_MEMORY_RETRIES = MEMORY_RECOVERY_LEVELS.length + 1; /* 变异：允许 3 次 */`,
   expect: ['硬性上限必须是 2'],
@@ -84,7 +84,7 @@ M.mutate({
 
 M.mutate({
   name: '⑦ 云端 507 也走压缩重试（recoverableByShrinking 不看 isLocal）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: `  const recoverableByShrinking = Boolean(memoryPressure && opts?.isLocal === true);`,
   to: `  const recoverableByShrinking = Boolean(memoryPressure); /* 变异：云端也算可恢复 */`,
   expect: ['云端端点遇到 507 不得重试'],

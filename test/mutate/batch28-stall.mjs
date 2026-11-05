@@ -44,7 +44,7 @@ M.mutate({
 
 M.mutate({
   name: '② 阈值默认值改成 0（配置里不写就等于关掉看门狗）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: 'export const DEFAULT_NO_PROGRESS_TIMEOUT_MS = 3600000;',
   to: 'export const DEFAULT_NO_PROGRESS_TIMEOUT_MS = 0;',
   expect: ['默认阈值'],
@@ -53,7 +53,7 @@ M.mutate({
 
 M.mutate({
   name: '③ 阈值可以配成无穷（= 永远不响，退化回"零信号"）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: '  const v = Number(cfg?.noProgressTimeoutMs);\n  return Number.isFinite(v) && v > 0 ? v : DEFAULT_NO_PROGRESS_TIMEOUT_MS;',
   to: '  const v = Number(cfg?.noProgressTimeoutMs);\n  return v > 0 ? v : DEFAULT_NO_PROGRESS_TIMEOUT_MS;',
   expect: ['noProgressTimeoutMs=Infinity 必须回落默认'],
@@ -99,7 +99,7 @@ M.mutate({
 
 M.mutate({
   name: '⑧ 模板类错误不再给出"该端点不做工具调用/模板不匹配"的判断',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: '  if (/jinja|template|no user query|parser for this template/.test(t)) {',
   to: '  if (false) {',
   expect: ['模板类错误必须给出可操作判断'],
@@ -108,7 +108,7 @@ M.mutate({
 
 M.mutate({
   name: '⑨ 回合收尾不再说"0 次工具调用"（端点不返回 tool_calls 时又变成"看起来一切正常"）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: "  if (!(Number(modelRounds) > 1) && !taskLike) return '';",
   to: "  return '';",
   expect: ['0 次工具调用'],

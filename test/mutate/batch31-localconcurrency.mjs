@@ -58,7 +58,7 @@ M.mutate({
 
 M.mutate({
   name: '④ 把 "engine shed its caches and stays up" 并入"重启引擎"那一支',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: `  } else if (/engine shed its caches and stays up|allocator wall/.test(t)) {`,
   to: `  } else if (false && /engine shed its caches and stays up|allocator wall/.test(t)) {`,
   expect: ['必须明确"该引擎未崩溃"', '不得建议重启'],
@@ -67,7 +67,7 @@ M.mutate({
 
 M.mutate({
   name: '⑤ 删掉"本地端点已有在途请求"时的预告强警告',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: `  const concurrencyNote = Boolean(isLocal) && Boolean(localBusy)`,
   to: `  const concurrencyNote = false && Boolean(isLocal) && Boolean(localBusy)`,
   expect: ['预告必须给强警告', '并发会加剧内存压力'],
@@ -99,7 +99,7 @@ M.mutate({
 
 M.mutate({
   name: '⑧ 进度行不再显示"本地端点已串行化"（排队与卡死在日志里同形）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: `  if (localQueue) {
     parts.push(
       \`本地端点已串行化（防内存压力）：等待 \${Math.max(0, Number(localQueue.active) || 0)} 个在途请求\` +`,

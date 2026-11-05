@@ -38,7 +38,7 @@ const SEC = () => M.section('140');
 // —— 问题 1：预告必须由预检实测推导 ——
 M.mutate({
   name: '① 有预检实测也不用它（退回"可能需数分钟至数十分钟"的保守文案）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: '  const est = prefillEstimateMs({ promptTokens: p, probe });',
   to: '  const est = null;',
   expect: ['必须注明这是外推', '有预检实测时必须报出参考值本身', '没有预检数据时必须退回既有保守文案'],
@@ -47,7 +47,7 @@ M.mutate({
 
 M.mutate({
   name: '② 外推不乘本轮 tokens（只把参考 prefill 的耗时当成本轮耗时）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: '  return { ms: Math.round((refMs * p) / refTokens), refTokens, refMs, tokens: p };',
   to: '  return { ms: Math.round(refMs), refTokens, refMs, tokens: p };',
   expect: ['外推值必须是 预检ms × 本轮tokens/参考tokens'],
@@ -56,7 +56,7 @@ M.mutate({
 
 M.mutate({
   name: '③ 删掉"这是线性外推 + 长上下文下会低估"的如实说明（只报乐观值）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: '      `（**线性外推**，只作量级参考——长上下文下引擎可能显著变慢：${PREFILL_LONGCTX_EVIDENCE}；` +\n      `外推低估时以首帧等待为准）；首帧等待上限 ${secs}s（config.timeout.firstTokenMs）`',
   to: '      `；首帧等待上限 ${secs}s（config.timeout.firstTokenMs）`',
   expect: ['必须如实给出"线性外推会低估"的实测证据', '必须注明这是外推'],
@@ -65,7 +65,7 @@ M.mutate({
 
 M.mutate({
   name: '④ 没有参考 prefill 实测也硬编一个外推值（应当退回保守文案）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: '  if (!(refMs > 0) || p <= 0) return null;',
   to: '  if (p <= 0) return null;',
   expect: ['没有参考 prefill 实测时必须返回 null'],
@@ -74,7 +74,7 @@ M.mutate({
 
 M.mutate({
   name: '⑤ 外推明明很慢却不告警（"端点明显慢"这条线被拿掉）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: '  const hitSlow = est != null && est.ms >= PREFILL_SLOW_WARN_MS;',
   to: '  const hitSlow = false;',
   expect: ['必须告警', '慢端点告警必须写出依据'],
@@ -220,7 +220,7 @@ M.mutate({
 
 M.mutate({
   name: '⑲ 进度行不再显示子代理跑到哪一步（"等子代理 620s"与"卡死 620s"又同形）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: "      `子代理${label ? `「${label}」` : ''}已跑 ${Number(subagent.modelRounds) || 0} 轮 / ${Number(subagent.toolCalls) || 0} 次工具调用` +",
   to: "      `` +",
   expect: ['必须能看出子任务进行到哪一步'],
@@ -239,7 +239,7 @@ M.mutate({
 
 M.mutate({
   name: '㉑ 收尾文案不再说"在等哪个工具/等了多久"（用户无从判断该调什么）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: '  const waiting = pendingTool\n    ? `\\n   ⏳ 中止时**正在等待工具 ${pendingTool.name}**',
   to: '  const waiting = false\n    ? `\\n   ⏳ 中止时**正在等待工具 ${pendingTool.name}**',
   expect: ['必须写清"在等哪个工具、等了多久"'],
@@ -248,7 +248,7 @@ M.mutate({
 
 M.mutate({
   name: '㉒ 不足 1 分钟又谎报"1 分钟"（真机：刚有进展的子代理被写成"连续 1 分钟没有进展"）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: "  const howLong = Number(waitedMs) >= 60000 ? `${min} 分钟` : `${Math.max(1, Math.round(Number(waitedMs) / 1000))} 秒`;",
   to: '  const howLong = `${min} 分钟`;',
   expect: ['不足 1 分钟必须按秒说'],
@@ -257,7 +257,7 @@ M.mutate({
 
 M.mutate({
   name: '㉓ 不再与 capped/aborted 区分（用户仍然分不清"还能续跑"和"再等也没用"）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: '    `   ⓘ 这是**整轮零进展**（不是步数上限 capped、也不是你点的停止 aborted）：capped 的回合可以接着续跑，本条是"再等下去也不会产出新东西"。` +',
   to: '    `` +',
   expect: ['必须与 capped/aborted 显式区分'],

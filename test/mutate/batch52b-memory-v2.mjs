@@ -26,7 +26,7 @@ const SUITE = () => M.suite('test/memory-recovery.js');
 
 M.mutate({
   name: '① 第 2 级压缩不降预算（×0.35 改成 ×0.6，等于没有第 2 级）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: `  Object.freeze({ budgetRatio: 0.35, maxOutputRatio: 0.25, minBudget: 4096, minMaxOutput: 512 }),`,
   to: `  Object.freeze({ budgetRatio: 0.6, maxOutputRatio: 0.25, minBudget: 4096, minMaxOutput: 512 }), /* 变异：第 2 级不降预算 */`,
   expect: ['×0.35'],
@@ -35,7 +35,7 @@ M.mutate({
 
 M.mutate({
   name: '② 第 2 级压缩不降输出上限（×0.25 改成 ×0.5）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: `  Object.freeze({ budgetRatio: 0.35, maxOutputRatio: 0.25, minBudget: 4096, minMaxOutput: 512 }),`,
   to: `  Object.freeze({ budgetRatio: 0.35, maxOutputRatio: 0.5, minBudget: 4096, minMaxOutput: 512 }), /* 变异：第 2 级输出不减半 */`,
   expect: ['×0.25'],
@@ -82,7 +82,7 @@ M.mutate({
 
 M.mutate({
   name: '⑦ 建议文案与学习值脱节（hint 里不再给学习值）',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   from: `  const learnedHint =
     learnedSafe > 0
       ? \`该端点的内存安全预算已记为 \${fmtTok(learnedSafe)}（来自 \${fmtLearnedDate(opts?.learned?.learnedAt)} 的失败学习），下轮起手自动使用。\`

@@ -18724,7 +18724,10 @@ return { traceRoundView, toolStepView, traceSummaryText, traceRoundData, mergeSu
 {
   const html163 = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
   const app163 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
-  const agentSrc163 = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
+  // v0.6.34 §1.5：文案 / 预测层（含 shouldPrintTtftNotice 的短路规则）已迁至 messages.js，
+  // 源码绊线跨两文件拼接——钉的是不变量（短路规则存在于实现源码），不是"它必须写在 agent.js"。
+  const agentSrc163 = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8') + '\n' +
+    fs.readFileSync(path.join(srcDir, 'messages.js'), 'utf8');
   // v0.7.0 §1.2：错误卡/命令面板的纯计算已搬到 viewmodel.js；行为断言直接调用函数而不是 grep 源码。
   const { esc: esc163 } = await import(pathToFileURL(path.join(srcDir, 'web', 'util.js')).href);
   const vm163 = await import(pathToFileURL(path.join(srcDir, 'web', 'viewmodel.js')).href);

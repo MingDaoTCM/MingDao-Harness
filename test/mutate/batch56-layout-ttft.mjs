@@ -73,7 +73,7 @@ M.mutate({
 // ⑦ TTFT 恢复每轮都打：3 次模型请求 → 3 行 ⏱ 首帧（负责人实测的刷屏形态）
 M.mutate({
   name: '⑦ TTFT 恢复每轮都打印',
-  file: 'src/agent.js',
+  file: 'src/messages.js',
   // v0.6.31：判定抽到纯函数 `shouldPrintTtftNotice` 后，等价缺陷 = 去掉「非第 1 次请求就短路」。
   // 注意：单回合内的重复已被"会话节流"兜住，所以这条改由 `test/ttft-notice.js` 的判定表来抓
   // （smoke §163 的 3 请求桩在节流生效时仍是 1 行，抓不到这个变异）。

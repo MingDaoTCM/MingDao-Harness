@@ -1,6 +1,6 @@
 # MingDao-Harness 架构设计
 
-> 版本口径：v0.6.30。本文档覆盖 `src/` 全部 **91** 个模块（`find src -name '*.js' | wc -l` = 91），
+> 版本口径：v0.6.30。本文档覆盖 `src/` 全部 **92** 个模块（`find src -name '*.js' | wc -l` = 92），
 > 按层给出每个模块的职责与它守住的那条不变量；判定以文件头注释与实际实现为准，不做推断性描述。
 >
 > 阅读顺序建议：§2 模块索引（查「某件事归谁管」）→ §3 数据流（看一次回合怎么走）→ §4 已知边界（看它**保证不了**什么）。
@@ -54,11 +54,12 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 
 ## 2. 模块索引
 
-以下逐文件列出 `src/` 全部 91 个模块。每条格式为「职责 —— 关键不变量/边界」。
+以下逐文件列出 `src/` 全部 92 个模块。每条格式为「职责 —— 关键不变量/边界」。
 
-### 2.1 内核循环与上下文（6）
+### 2.1 内核循环与上下文（7）
 
 - `agent.js` —— Agent 核心循环：消息 → 模型（流式）→ 钩子 → 约束 → 权限 → 工具执行 → 回填 → 循环，直至模型给出纯文本；附带子代理（task 工具）、todo 状态、undo 备份仓、Ctrl+C 中断 —— 每回合结局由 `outcome` 单一来源收敛，返回值与账本 `runEnd` 必须同源。
+- `messages.js` —— 文案 / 预测层（v0.7.0 §1.5 第一步，从 `agent.js` **逐字**切出，零 I/O、无状态）：TTFT 提示判定与进程级节流状态、无进展看门狗阈值与中止文案、内存降级的两级压缩（`memoryRecoveryTarget`）、端点学习值预告、prefill 外推与发送前规模预告（`prefillEstimateMs` / `prefillForecast`）、上游错误解读（`describeUpstreamError`）、回合进度行（`formatTurnProgress`）、只读档判定（`startsInReadOnlyPhase`）—— 21 个导出由 `agent.js` 用显式列名再导出（`export { … } from './messages.js'`），导入面与迁移前逐字一致；`messages.js` **不 import agent.js**（依赖方向单向、无环），唯一的模块外依赖是协议层的内存压力判据 `isMemoryPressureError`。
 - `context.js` —— token 计数与预算裁剪：恒保留首条 system，从尾部向前取到预算，被裁剪时插入说明消息；工具结果上限 20000 字符（`TOOL_RESULT_LIMIT`）—— 计数优先走 `tokenizer.js` 精确计数，只在无词表模型上回退启发式；截断按码点安全切分，不留孤立代理项。
 - `tokenizer.js` —— 精确 tokenizer：内置 DeepSeek 官方词表（`assets/tokenizer-data.json.gz`）做字节级 BPE 计数，内容级缓存使同一文本重复计数为 O(1)；非 DeepSeek 模型回退启发式估算（英文≈4 字符/token、CJK≈0.75 token/字）—— 只用于上下文预算计数，不输出 token id；词表加载失败会重试而非终生锁死。
 - `routing.js` —— 自动模型路由：长文本 + 规划关键词 → planner，极短指令 → executor，其余用 executor 模型做一次约几十 token 的分类（结果按文本哈希 LRU 缓存）；执行类会话粘滞，避免 pro⇄flash 抖动破坏缓存前缀 —— 子代理固定走 executor。
@@ -173,8 +174,8 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `help.js` —— 帮助文本的唯一来源：CLI 与 REPL 各用 `variant` 声明自己多出来的那几行 —— 两个入口的差异必须是显式的，不允许各存一份正文。
 - `index.js` —— 库公共 API：导出 `@stable`（minor 内向后兼容）与 `@experimental` 两组能力，契约与示例见 DEVELOPER.md。
 
-模块计数核对：6 + 8 + 12 + 10 + 3 + 2 + 13 + 13 + 19 = **86** 个条目（含合并条目；`find src -name '*.js' | wc -l` = **90**），其中 §2.7 的
-`web/util.js` / `web/app.js` 一条覆盖 2 个文件、`web/viewmodel.js` 单列，故条目覆盖 **91** 个 `src/**/*.js`（每版本以 `find` 实测为准），
+模块计数核对：7 + 8 + 12 + 10 + 3 + 2 + 13 + 13 + 19 = **87** 个条目（含合并条目；`find src -name '*.js' | wc -l` = **92**），其中 §2.7 的
+`web/util.js` / `web/app.js` 一条覆盖 2 个文件、`web/viewmodel.js` 单列，故条目覆盖 **92** 个 `src/**/*.js`（每版本以 `find` 实测为准），
 与 `find src -name '*.js' | wc -l` 的结果一致。
 
 ## 3. 数据流：一次 `runTurn` 的关键路径

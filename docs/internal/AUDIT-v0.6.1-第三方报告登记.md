@@ -6607,3 +6607,98 @@ sheet     cdc5ea7c…dcb6ca
   `.github/workflows/ci.yml`、`test/mutate/README.md`。
 - 边界：`test/viewmodel.js` 未接进 `test/run-all.mjs`（不在允许改动范围），通过
   `test/smoke.js` import viewmodel 进入覆盖率；单独运行仍可用 `node test/viewmodel.js`。
+
+## 7.1 v0.7.0 §1.5 第一步：把 `agent.js` 的零依赖文案 / 预测层切到 `messages.js`
+
+### 7.1.1 问题（拆分的必要性）
+
+`src/agent.js` 在 v0.6.33 时是 **2762 行**，其中前 500 多行是一整层**零 I/O、无状态**的纯函数与常量：
+TTFT 提示判定、无进展看门狗阈值与三条收尾文案、内存降级的两级压缩、端点学习值预告、prefill 外推与
+发送前规模预告、上游错误解读、回合进度行、只读档判定。它们只被 `createAgent`/`runTurn` 调用一次，
+却必须**整份 agent.js 才能被 import**——于是 `test/ttft-notice.js`、`test/memory-recovery.js` 等套件
+为了测一个纯函数要加载整个循环（连带 providers / 账本 / 钩子）。这也是 §1.5 要拆的第一层。
+
+### 7.1.2 做了什么（逐字搬家，不改逻辑）
+
+新建 **`src/messages.js`**（531 行），把 `agent.js` 的两段**逐字节**搬过去：
+
+- 前半段：`v0.6.13` 那段 `// ---` 说明 + `DEFAULT_NO_PROGRESS_TIMEOUT_MS` 起到 `formatTurnProgress`
+  （含私有格式化 `fmtDur` / `fmtRefDur` / `fmtLearnedDate`、`TTFT_NOTICE_DEFAULT_QUIET_MS`、
+  进程级节流 Map `ttftNoticeState`）；
+- 后半段：写意图 / 疑问句 / 未达成意图三个词表判据到 `startsInReadOnlyPhase`。
+
+`agent.js` 保留**导出面**：用 `export { … } from './messages.js'` **显式列名**再导出 21 个名字
+（不用 `export *`，便于 grep）。因此 `test/smoke.js`、`test/memory-recovery.js`、`test/ttft-notice.js`、
+`src/web/server.js` 里的 `import { X } from './agent.js'` **一行都没改**；`agent.js` 自身仍需要的 5 个
+名字（`fmtTok`、`hasWriteIntent`、`looksLikeUnmetIntent`、`TTFT_NOTICE_DEFAULT_QUIET_MS` 与其余导出）
+改为从 `messages.js` 单向 import。
+
+依赖方向：只允许 `agent.js → messages.js`；**`messages.js` 不 import agent.js**（无环）。它唯一一条
+模块外 import 是协议层的内存压力判据 `isMemoryPressureError`（`providers/openai-compatible.js` 的实现
+模块，`agent.js` 原本经 `providers/index.js` 转出用它）——取实现模块而不是注册表，是为了不把整张
+provider 注册表拉进纯函数层。
+
+### 7.1.3 变异锚点跟随（29 条，一条未删）
+
+`grep -rn "src/agent.js" test/mutate/*.mjs` 后按"`from` 文本现在只存在于 `messages.js`"逐条核对，
+把 **7 个批次、29 条**变异的 `file` 字段改为 `src/messages.js`（`from` 文本一字未改，因为逐字搬家）：
+
+- batch28-stall ④ 条：②③（阈值默认值/可配成无穷）、⑧（模板类错误）、⑨（0 次工具调用）
+- batch29-localmodel ⑨ 条：①②③④⑤（prefill 外推与三条告警线）、⑤（在途请求强警告）、⑲㉑㉒㉓（进度/收尾文案）
+- batch31-localconcurrency ③ 条：⑧（本地串行化进度行）等
+- batch40-memory-recovery ③ 条：③（输出不减半）、⑤（硬性上限 3 次）、⑦（云端 507 也重试）
+- batch52b-memory-v2 ③ 条：①②（第 2 级压缩的两个比例）、⑦（建议文案与学习值脱节）
+- batch56-layout-ttft ① 条：⑦（TTFT 每轮都打印）
+- batch67-ttft-notice ⑥ 条：①②③④⑤⑥（同回合/静默期/劣化例外/阈值/状态表/NaN）
+
+校验方式：静态收集全部 700 条变异（stub `makeMutator` 求值出真实 `from` 字符串），逐条断言
+"`from` 在其声明的文件里可命中"——630 条 `src/**` 锚点全部命中、0 条缺失。
+
+### 7.1.4 新增套件 `test/messages.js`（66 项）
+
+对 21 个导出逐个给 ≥3 组断言（含边界）：TTFT 判定表 8 组 + 阈值边界、状态表 200 键上限、
+两级压缩的预算/输出/下限（含 NaN/undefined）、`prefillEstimateMs` 无实测必返回 null、
+`prefillForecast` 的本地/云端/无预检/超窗口/学到的预算/在途并发六种形态、
+`describeUpstreamError` 的内存/超时/401/403/429/5xx/Jinja/网络/未知九类（分类与建议关键词都要在）、
+`formatTurnProgress` 七字段与缺值（阶段→"未知"、ttft/速率整段省略）、`startsInReadOnlyPhase` 的反向判定。
+**文案类只断关键词**（"显存不足"/"外推"/"秒"/"分钟"…），不断整句，避免以后改文案就红一片。
+
+### 7.1.5 结果与门禁（分工后的口径）
+
+本节记录的是**这条道**实测过的证据；**全量变异**按负责人分工由其在合并后的 `main` 上跑一次
+（权威门禁，含 §1.5 两条道与 §1.2 的全部改动），本提交不重复声称全量结果。
+
+- `node test/messages.js`：**66 项**通过（本提交新增套件）
+- `node test/smoke.js`：**156 组**全绿（在隔离 worktree 上跑，基线与本提交树逐字节一致）
+- `node test/e2e-local.js`：**17 项**通过
+- `node test/mutate/batch56-layout-ttft.mjs`：**8/8 全中**（⑦ 的锚点已指向 `src/messages.js`）
+- `npm run typecheck` / `npm run typecheck:strict`：通过（strict 棘轮 0 → 0）
+- 全量变异（早期信号，**未跑完**）：本地跑到第 **17/63 批、0 逃逸**时按分工叫停；这 17 批已覆盖
+  batch12–batch30（含本提交改锚点的 batch28/batch29），足以证明"锚点搬家后仍能被抓住"。
+- 反向验证（证明 §163 的跨文件绊线**不是恒真**）：临时删掉 `messages.js` 里的
+  `if (Number(llmCalls) !== 1) return { print: false, slowdown: false };` → `node test/smoke.js`
+  **红**在 §163（`AssertionError: 纯函数必须保留…短路规则`，`EXIT=1`）；还原后文件 sha256 与
+  绿跑逐字节相同（`4e28a1c5…`）。
+- `agent.js` 行数 **2762 → 2303**（搬走 512 行、新增 import/再导出等 53 行）；导出面 21 个名字逐字不变。
+
+### 7.1.6 发现与边界（如实）
+
+- **不是 100% 逐字**：为了让 `agent.js` 还能用那 4 个原本私有的名字，`messages.js` 里 4 行各加了
+  `export` 前缀（`TTFT_NOTICE_DEFAULT_QUIET_MS`、`fmtTok`、`hasWriteIntent`、`looksLikeUnmetIntent`），
+  其中后两个还各多一行说明注释。其余 508 行与搬运前逐字节相同（行级比对验证）。
+  这 4 个名字**没有**加进 `agent.js` 的再导出清单（导出面不变）。
+- 任务书说 `formatTurnProgress` "缺值显示 `—`"，**实测不是**：`phase` 缺失渲染为「阶段=未知」，
+  `ttftMs`/`tokensPerSec` 缺失是**整段省略**。按"行为零变化"要求，本套件断言的是**实际行为**，
+  没有为了对齐这句话去改文案（改文案会同时改动界面状态条）。
+- `test/messages.js` 未接进 `test/run-all.mjs` / `npm test`——不在允许改动清单内，单独运行即可
+  （`node test/messages.js`）；需要时由后续提交接线。
+- **允许清单之外唯一改的一处**：`test/smoke.js` §163 的源码绊线（+3/−1 行）——`agentSrc163`
+  改为 `agent.js + '\n' + messages.js` 拼接。理由：这条断言读的是 agent.js 源码，而它钉的
+  `shouldPrintTtftNotice` 短路规则已按本任务搬进 messages.js；不改则 smoke 必红、batch56 也
+  跑不了。**只此一处**（经负责人批准），处置口径与 §6.4.4「源码正则守卫 → 跨文件/行为断言」一致，
+  并做了反向验证（见 §7.1.5）。
+- 未改 `src/web/**`、`src/sync-server.js`、`test/run-all.mjs`、`.github/workflows/ci.yml`、
+  `test/mutate/README.md`；未 tag、未改版本、未 publish。
+- `node scripts/doc-lint.mjs`：本提交树上 ⑤ 架构文档 0 个未提及模块、⑥ 变异总数与
+  `test/mutate/README.md` 一致（700 / 700）。（§1.5 第二步的 batch75 会再加 15 条变异，那 15 条的
+  计数与 README 由该条道统一收，不在本提交。）
