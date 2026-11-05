@@ -6702,3 +6702,93 @@ provider 注册表拉进纯函数层。
 - `node scripts/doc-lint.mjs`：本提交树上 ⑤ 架构文档 0 个未提及模块、⑥ 变异总数与
   `test/mutate/README.md` 一致（700 / 700）。（§1.5 第二步的 batch75 会再加 15 条变异，那 15 条的
   计数与 README 由该条道统一收，不在本提交。）
+
+## 7.2 v0.7.0 §1.5 第二步：把 `server.js` 的 auth / provider-cache 两块切出去
+
+### 7.2.1 问题（拆分前）
+
+`src/web/server.js` **1509 行**，`runWebServer` 单函数 **1211 行**（任务书口径 1208；本仓库 HEAD 用
+`function` 边界实测 299–1509）。两块边界最清晰，却都埋在同一个闭包里：
+
+- **auth**（旧 321–364）：令牌解析/比对、`?token=` 交换、`X-MingDao-Token`、回环与 `authEnabled` 判定、
+  Host 白名单。改一行就要动千行文件，且离开 `runWebServer` 无法单测；
+- **provider-cache**（旧 390–527）：缓存键/出网指纹/代际、`invalidateProviderCache`、`ensureProbe`、
+  `getProviderFor`。H-04 的修复点（缓存键含 baseUrl + 凭证摘要 + timeout）与建 provider 前的预检、
+  自适应超时、缺 Key 告警、本地端点观察者缠在同一个函数里。
+
+### 7.2.2 做了什么（逐字搬家，行为不变）
+
+新建 **`src/web/auth.js`**（纯函数层，不读全局、不写 `res`）：
+
+- `isLoopbackHost` / `resolveWebToken`（参数 > config > 非回环随机生成）；
+- `extractRequestToken`（`?token=` > `X-MingDao-Token` > `Authorization: Bearer`，空 `?token=` 回退头）；
+- `tokenEquals`（`crypto.timingSafeEqual`，长度不等直接 false；未配置令牌时一律放行 = 旧 `tokenMatches`）；
+- `resolveAuthDecision({ authToken, url, headers, isLoopback, isExempt })` → `{ decision, via, reason }`，
+  `via` 取 `exchange|token|bearer|loopback|none`；未配置令牌 + 非回环按 fail-closed 拒绝（真实启动路径不可达，
+  因为 `resolveWebToken` 会先随机生成）；
+- `isTrustedHost`（Host 白名单 / 0.0.0.0 + 令牌放行任意 Host）与 `authStartupNotice`（启动文案，与判定同源）。
+
+新建 **`src/web/provider-cache.js`**（依赖注入工厂）：
+
+```js
+createProviderCache({
+  cfg, log, warn,
+  resolveProviderConfig, createProvider,
+  probeEndpoint, probeMemoUsable, adaptiveTimeouts,
+  isLocalBaseUrl, setLocalQueueObserver,
+}) → { providerCache, getProviderFor, ensureProbe, invalidateProviderCache,
+        providerFingerprint, stats, start(initialModel) }
+```
+
+`server.js` 只保留接线：`resolveWebToken(...)` 的结果接成既有 deps（`authEnabled / tokenMatches /
+requestToken / trustedHost`），`createProviderCache({...})` 实例化并 `await start(modelName)`。
+**401/403 的响应写入仍由 `routes/api.js` 唯一负责**——不在 server.js 复制第二道闸门（那需要复制静态资源
+白名单，且会让"谁在拦"出现两个来源）。
+
+### 7.2.3 行数（切前 → 切后）
+
+- `runWebServer`：**1211 → 1007 行**（任务书口径 1208 → 1007），文件 1509 → **1308 行**。
+- 结构守卫 `test/structure-limits.js` 的 `ALLOWED_LONG_FUNCTIONS` 已登记 `web/server.js::runWebServer = 1007`
+  （注释里写明"切前 1208"）；**行数只许降不许升**，新增 >500 行函数即红。基线还登记了
+  `agent.js::createAgent` / `agent.js::runTurnInner` / `server.js::handleChat` / `commands/repl.js::runRepl` /
+  `cli.js::main`（均为 v0.7.0 后续拆分目标；`sync-server.js` 本轮实测已无 >500 行函数，故不在基线内）。
+
+### 7.2.4 测试
+
+| 套件 | 项数 | 覆盖 |
+| --- | --- | --- |
+| `test/web-auth.js` | **20** | 三通道与优先级、空令牌、回环/非回环、`authEnabled=false`、大小写、空白、拒绝无副作用、`via`、Host 白名单、启动文案 |
+| `test/provider-cache.js` | **19** | 复用、同模型不同 baseUrl、指纹含 baseUrl/apiKey 摘要/timeout、代际、invalidate 双清、并发创建期间变更不写回、备忘命中/跨代际/TTL、预检失败降级、远程不探测、自适应合入、容量、start |
+| `test/structure-limits.js` | **4** | 扫描器自检、`runWebServer ≤1010`、基线只降不升、新增超限即红 |
+| `test/mutate/batch75-server-split.mjs` | **15/15** | auth 7 条 + provider-cache 8 条，全部当场红 |
+
+`node test/smoke.js`（单独）通过；`node test/e2e-web.js` **24 项**通过；
+全量 `node test/mutate/run.mjs` **64 批全中**（在由本次提交检出的**隔离干净 worktree** 上跑，
+共享工作树里另有并行轨道的未提交改动，按 `--allow-dirty` 之外的方式隔离）。
+
+### 7.2.5 变异锚点 / 文本绊线跟随（一条未删）
+
+- `test/mutate/batch59-provider-hardening.mjs` ①：H-04 锚点从 `server.js` 改指 `provider-cache.js`
+  （缺陷语义与 expect 关键词不变）；`batch30-preflight.mjs` ③（ensureProbe 吞异常）同样跟随。
+- `test/smoke.js` 6 条**文本绊线**改为"`server.js` 或 `provider-cache.js` 任一命中"：
+  §139 预检调用、§140 引擎自述上下文日志与 `tools=` 否定判据、§141 `probeMemoUsable`/吞异常/
+  "失败只降级、不阻断"/`prefill2000`、§142 `setLocalQueueObserver`。**断言文案与保护面一字未删**，
+  只把"实现必须在 server.js"放宽为"实现必须在这两个文件之一"。
+
+### 7.2.6 超出允许清单的最小改动（登记）
+
+1. `test/smoke.js`：上述 6 条跨文件判定（不改断言语义、不删断言）。原因：两块已不在 `server.js`，
+   旧绊线必然红；行为化需要可控的本地引擎桩 + TTL 窗口，超出本轮范围。
+2. `test/mutate/batch59-provider-hardening.mjs`、`test/mutate/batch30-preflight.mjs`：仅锚点跟随
+   （不跟着改会让全量变异从 12/12、10/10 退化成逃逸，等于把守卫变成假绿）。
+
+未改 `src/agent.js`、`src/messages.js`（另一条并行轨道）、`test/run-all.mjs`、`.github/workflows/ci.yml`。
+`test/mutate/README.md` 的变异总数仍写 700（实际 715，本轮 +15），按任务书"计数红可忽略"未动，
+留给 README 维护者与并行轨道一并校正。
+
+### 7.2.7 边界
+
+- `routes/api.js` 仍是 401/403 的唯一写入点；`server.js` 只把纯判定接成 deps。
+- 三个新套件未接进 `test/run-all.mjs`（不在允许改动范围），需单独运行。
+- 结构守卫的基线是**当前实测值**；并行轨道 `agent.js` 落地后 `createAgent`/`runTurnInner` 会变小，
+  只需按实测下调基线（本守卫对"变小"不红，对"变大"红）。

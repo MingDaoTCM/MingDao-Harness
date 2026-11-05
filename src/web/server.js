@@ -26,6 +26,9 @@ import { setStoredKey, removeStoredKey, getStoredKey, maskKey } from '../credent
 import { availableModels, fetchProviderModels, providerHasKey, probeEndpoint, adaptiveTimeouts, probeMemoUsable } from '../model-discovery.js';
 import { isLocalBaseUrl, resolveModelCaps } from '../model-caps.js';
 import { createProvider, resolveProviderConfig, helperProvider, resolveVisionSupport, setLocalQueueObserver } from '../providers/index.js';
+// v0.7.0 §1.5：访问控制判定与 Provider 缓存从本文件切出（行为不变）。
+import { isLoopbackHost, resolveWebToken, extractRequestToken, resolveAuthDecision, isTrustedHost, authStartupNotice } from './auth.js';
+import { createProviderCache } from './provider-cache.js';
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { routeTask, routingConfig } from '../routing.js';
 import { buildUserContent } from './attachments.js';
@@ -318,213 +321,28 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     lastTurnPermissionSource ??
     LEDGER_PERMISSION_SOURCE[resolveTurnPermission({ configPermission: cfg.permission ?? 'ask' }).source] ??
     'config';
-  // 访问令牌（P1-3）：非回环绑定时强制——配置的 token / 启动参数 / 环境变量优先，
-  // 都没有则本次随机生成并打印带 token 的访问地址。回环绑定且未配置时保持无认证（本机信任）。
-  /** @param {any} h */
-  const isLoopbackHost = (h) => h === '127.0.0.1' || h === 'localhost' || h === '::1';
-  let webToken = String(authToken || cfg?.web?.token || '').trim() || null;
-  let tokenGenerated = false;
-  if (!isLoopbackHost(host) && !webToken) {
-    webToken = crypto.randomBytes(16).toString('hex');
-    tokenGenerated = true;
-  }
-  const authEnabled = Boolean(webToken);
-  /** @param {any} got */
-  const tokenMatches = (got) => {
-    if (!webToken) return true;
-    if (!got) return false;
-    const a = Buffer.from(String(got));
-    const b = Buffer.from(webToken);
-    return a.length === b.length && crypto.timingSafeEqual(a, b);
-  };
-  /** @param {any} req @param {any} url */
-  const requestToken = (req, url) => {
-    const q = url.searchParams.get('token');
-    if (q) return q;
-    const h = String(req.headers['x-mingdao-token'] || '');
-    if (h) return h;
-    const m = String(req.headers.authorization || '').match(/^Bearer\s+(.+)$/i);
-    return m ? m[1] : null;
-  };
-  // Host 白名单（P1-4，防 DNS rebinding）：只接受回环名 + 绑定地址；
-  // 绑定 0.0.0.0 且启用 token 时放行任意 Host（此时 token 才是访问边界，攻击者页面拿不到）。
+  // v0.7.0 §1.5：从 server.js 切出，行为不变——令牌/Host 判定见 web/auth.js（含非回环强制生成令牌的口径）；
+  // 401/403 的响应仍由 routes/api.js 唯一写入，这里只把判定接成既有的 deps 形状。
+  const { token: webToken, generated: tokenGenerated, authEnabled } = resolveWebToken({ authToken, configToken: cfg?.web?.token, host });
+  const tokenMatches = (/** @type {any} */ got) => resolveAuthDecision({ authToken: webToken, headers: got ? { 'x-mingdao-token': String(got) } : {}, isLoopback: isLoopbackHost(host) }).decision === 'ok';
+  const requestToken = (/** @type {any} */ req, /** @type {any} */ url) => extractRequestToken({ url, headers: req.headers }).token;
+  // Host 白名单（P1-4，防 DNS rebinding）：回环名 + 绑定地址；0.0.0.0 + 令牌时放行任意 Host。
   let boundPort = port;
-  /** @param {any} reqHost */
-  const trustedHost = (reqHost) => {
-    const h = String(reqHost || '').toLowerCase();
-    const names = new Set(['127.0.0.1', 'localhost', '::1']);
-    if (host !== '0.0.0.0') names.add(host.toLowerCase());
-    const candidates = new Set();
-    for (const n of names) {
-      candidates.add(`${n.includes(':') && !n.startsWith('[') ? `[${n}]` : n}:${boundPort}`);
-      if (boundPort === 80) candidates.add(n);
-    }
-    if (candidates.has(h)) return true;
-    return host === '0.0.0.0' && authEnabled;
-  };
+  const trustedHost = (/** @type {any} */ reqHost) => isTrustedHost({ hostHeader: reqHost, bindHost: host, boundPort, authEnabled });
   let modelName = cfg.model || DEFAULT_MODEL;
-  const pc = resolveProviderConfig(cfg, modelName);
-  if (!pc.apiKey) {
-    // 首次运行/未配置密钥：界面照常启动（黑屏根因修复——此前这里直接 return，桌面版窗口
-    // 加载不到任何服务 → 整窗黑屏且无提示）。⚙ 设置里填入 Key 后即可对话。
-    console.error(`[MingDao] ⚠ 未配置 ${modelName} 的 API Key：界面可正常使用，对话前请在 ⚙ 设置 →「模型与 API Key」填入密钥。`);
-  }
 
   let workingDir = process.cwd(); // 工作空间切换时随之更新（后续会话/工具都跟随新目录）
   const startupCwd = workingDir; // 质检 A3：启动工作目录恒为合法浏览根（工作空间切换后仍可浏览原位）
-  // Provider 按模型懒加载缓存：界面切换模型后即时生效
-  // —— 服务端诊断日志（第二问无反应排查 + 长期运维）：<mingdao-home>/logs/web-server.log ——
-  // 记录每次对话的关键阶段与耗时；2MB 滚动。桌面版与 WebUI 共用同一日志。
-  // 质检 A6：统一日志写入器（append + 按行截断 + 原子替换），与桌面 appLog 同款实现。
-  // v0.6.13（A）：定义提前到 provider 创建之前——本地端点的**预检**在 getProviderFor 里就要落日志，
-  // 而启动期 `await getProviderFor(cfg.model)` 早于原先的定义位置（TDZ：会直接 ReferenceError）。
+  // 服务端诊断日志：<mingdao-home>/logs/web-server.log（2MB 滚动，桌面版与 WebUI 共用；
+  // append + 按行截断 + 原子替换，与桌面 appLog 同款）。必须定义在 provider 预热之前——
+  // 本地端点预检在 getProviderFor 里就要落日志（TDZ：定义在后会 ReferenceError）。
   const srvlog = createLogWriter(path.join(mingdaoHome(), 'logs', 'web-server.log'));
-  // v0.6.15（§3.59）：本地端点串行化的日志必须落进 web-server.log（真机取证靠它），
-  // 而不是只打到 stderr。事件由 providers/index.js 的本地端点闸门在**入队时**发出（含在途数/并发上限）。
-  setLocalQueueObserver((/** @type {any} */ ev) => {
-    try {
-      srvlog(`${String(ev?.text || '本地端点串行化')}${ev?.label ? `（模型 ${ev.label}）` : ''}`);
-    } catch {}
+  // v0.7.0 §1.5：从 server.js 切出，行为不变（缓存/指纹/代际/探测备忘见 web/provider-cache.js）。
+  const providerRuntime = createProviderCache({
+    cfg, log: srvlog, warn: (/** @type {string} */ line) => console.error(line), resolveProviderConfig, createProvider,
+    probeEndpoint, probeMemoUsable, adaptiveTimeouts, isLocalBaseUrl, setLocalQueueObserver,
   });
-
-  const providerCache = new Map();
-  // v0.6.13（A 追加）：本地端点的**能力/延迟预检**结果（每次建 provider / 每轮对话开头的提示都读它）。
-  // 只对"本地端点"做：远程服务商不需要（也不该）每次开聊都多打一次请求。
-  //
-  // v0.6.13（探针误报修复）——这里的备忘**必须有 TTL，且失败结论只保鲜 60s**：
-  //   真机误报的根因就是它此前**没有任何 TTL**：进程启动时引擎没起来 → 备忘里留下
-  //   「❌ 不可达：fetch failed（本地引擎没起来？先确认端口/进程）」→ 之后每个新回合原样重放
-  //   （web-server.log:413 07:03:02 那次真实探测 → :416 07:08:13 / :799 10:13:58 两次重放，
-  //   相隔 **7h10m**；10:13:58.877 `chat 开始` → .900 `chat 预检`只差 **23ms**、且没有 `预检 <模型>` 行，
-  //   正是"没重测、直接念旧结论"），而同一回合其实完全可用（:803 首帧 8.7s、:844 已跑 21m）。
-  //   结论：`probeMemoUsable()` 判保鲜期（成功 10 分钟 / 失败 60s），过期就重测。
-  const probeByModel = new Map();
-  // v0.6.29（审计报告 H-04）：**Provider 缓存必须按"出网配置指纹"分代**。
-  //
-  // 原实现 `providerCache` 只按模型名缓存，切换 baseUrl 时若某条路径忘了 `clear()`（setBaseUrl 就是），
-  // 旧实例的 chat 闭包会继续用**创建时固化**的 baseUrl/apiKey 出网——界面显示已切到 B，
-  // 实际主回答、自动标题、记忆提取仍把正文和 `Authorization: Bearer …` 发给 A（报告实测 A 收到 10 次）。
-  //
-  // 这里把「代际号 + baseUrl + 凭证摘要 + 超时配置」纳入缓存键，并让 `invalidateProviderCache()`
-  // 同时清 provider 与预检备忘：**新任务永远拿不到旧代际实例**；已经开始的旧任务仍持旧实例自然结束
-  // （不强行中断，避免打断用户正在看的回答）。
-  let providerGeneration = 0;
-  /** 出网配置指纹：apiKey 只取 sha256 摘要（不进 Map 键、不落日志）。 */
-  const providerFingerprint = (/** @type {any} */ m) => {
-    const pc = resolveProviderConfig(cfg, m) || {};
-    const keyDigest = crypto.createHash('sha256').update(String(pc.apiKey || '')).digest('hex').slice(0, 16);
-    let timeout = '';
-    try {
-      timeout = JSON.stringify(cfg?.timeout ?? null);
-    } catch {
-      timeout = '';
-    }
-    return `${providerGeneration}\u0000${String(pc.baseUrl || '')}\u0000${keyDigest}\u0000${timeout}`;
-  };
-  const providerCacheKey = (/** @type {any} */ m) => `${m}\u0000${providerFingerprint(m)}`;
-  const probeCacheKey = (/** @type {any} */ m) => `${m}\u0000${providerFingerprint(m)}`;
-  /**
-   * 配置代际失效：provider 实例 + 本地端点预检备忘一起清。
-   * 预检结果含 endpoint/TTFT，旧端点的结论绝不能套到新端点上（否则自适应超时也会跟着错代际）。
-   * @param {string} [reason]
-   */
-  const invalidateProviderCache = (reason = '配置变更') => {
-    providerGeneration += 1;
-    const instances = providerCache.size;
-    const probes = probeByModel.size;
-    providerCache.clear();
-    probeByModel.clear();
-    try {
-      srvlog(`provider 代际 ${providerGeneration}：${reason}（清实例 ${instances} / 预检备忘 ${probes}）`);
-    } catch {}
-  };
-  /** 该模型是否属于"本地端点"（baseUrl 是回环/内网，或 customModels 显式声明 local:true）。 */
-  const isLocalModel = (/** @type {any} */ m) => {
-    try {
-      const pc = resolveProviderConfig(cfg, m) || {};
-      return isLocalBaseUrl(pc.baseUrl) || cfg?.customModels?.[m]?.local === true || cfg?.customModels?.[m]?.isLocal === true;
-    } catch {
-      return false;
-    }
-  };
-  /**
-   * 取（或首次执行）预检。
-   *
-   * **探针是尽力而为：失败只降级、不阻断**（本函数自己吞掉异常 → 返回 null → 调用方按既有默认继续；
-   * 回合发起绝不受预检影响）。这里的"降级"有三层：
-   *   ① 探针抛错 → 吞掉（下面 try/catch），只是"没有预检数据"；
-   *   ② 探针判"不可达/超时" → 仍然照常开工（状态只用于 banner/日志/自适应超时）；
-   *   ③ 探针慢 → 单次尝试 1.5s + 退避 + 总预算 15s 封顶（见 probeEndpoint），不会把回合发起拖成几十秒。
-   */
-  async function ensureProbe(/** @type {any} */ m) {
-    const pk = probeCacheKey(m); // 与 provider 同代际：切端点后旧预检结论立即失效
-    const memo = probeByModel.get(pk);
-    if (probeMemoUsable(memo)) return memo.value;
-    if (!isLocalModel(m)) return null;
-    let probe = null;
-    try {
-      probe = await probeEndpoint(cfg, m, { timeoutMs: 15000 });
-      // v0.6.13（问题 2）：这行日志此前用 `probe.toolCalls` 判工具支持——该字段**从来不存在**
-      // （真机日志里恒为 `tools=未知`，见 web-server.log:48/169/303），预检结论等于没落日志。
-      // 现在取真实的四态 toolState，并把**引擎自述上下文 vs 配置**也写进来。
-      const toolText =
-        probe.toolState === 'stable-tools'
-          ? `支持（${probe.toolCallHits}/${probe.toolCallRuns}）`
-          : probe.toolState === 'unstable-tools'
-            ? `不稳定（${probe.toolCallHits}/${probe.toolCallRuns}）`
-            : probe.toolState === 'no-tools'
-              ? `不返回 tool_calls（${probe.toolCallHits}/${probe.toolCallRuns}）`
-              : '未知/不可判定';
-      srvlog(
-        `预检 ${m} ${probe.state}${probe.reason ? ` reason=${probe.reason}` : ''} ttft=${probe.ttftMs == null ? 'n/a' : Math.round(probe.ttftMs) + 'ms'} ` +
-          `prefill2000=${probe.prefillMs == null ? 'n/a' : Math.round(probe.prefillMs) + 'ms'} ` +
-          `tools=${toolText} endpoint=${probe.endpoint || '（无）'} ` +
-          `引擎自述上下文=${probe.engineCtx == null ? '未读到' : probe.engineCtx} 配置=${probe.configuredWindow ?? '？'}`
-      );
-    } catch (/** @type {any} */ e) {
-      srvlog(`预检 ${m} 失败（忽略，按默认超时继续）：${String(e?.message || e)}`);
-    }
-    probeByModel.set(pk, { at: Date.now(), value: probe });
-    if (probeByModel.size > 50) probeByModel.delete(probeByModel.keys().next().value);
-    return probe;
-  }
-  /** @param {any} m */
-  async function getProviderFor(m) {
-    // H-04：缓存键 = 模型 + 出网配置指纹 + 代际号。配置一变，新任务自然落到新键；
-    // 即便某个调用方忘了 clear，也不会复用旧实例（两层保险，clear/代际另有一层）。
-    const cacheKey = providerCacheKey(m);
-    if (!providerCache.has(cacheKey)) {
-      // 建 provider 之前先预检：本地端点按实测 TTFT 自适应 config.timeout.firstTokenMs
-      // （providers/index.js 只认 cfg.timeout，因此这里把自适应值**合进 cfg**再建实例）。
-      // 取舍：用户显式配的 firstTokenMs 优先；没配时"地板"仍是既有默认（本地 600s），
-      // 只有实测很慢才会放宽（×20，封顶 1800s）——绝不比现状更激进。
-      let cfgForProvider = cfg;
-      try {
-        const probe = await ensureProbe(m);
-        if (probe) {
-          const adapt = adaptiveTimeouts({
-            probeTtftMs: probe.ttftMs,
-            probePrefillMs: probe.prefillMs,
-            isLocal: true,
-            timeoutCfg: cfg.timeout,
-            noProgressCfg: cfg.noProgressTimeoutMs,
-          });
-          cfgForProvider = { ...cfg, timeout: { ...(cfg.timeout || {}), firstTokenMs: adapt.firstTokenMs } };
-          srvlog(`预检自适应 ${m} firstTokenMs=${adapt.firstTokenMs}（${adapt.basis}）`);
-        }
-      } catch {}
-      const created = await createProvider(cfgForProvider, m);
-      // 创建期间配置又变了：这个实例属于旧代际，**不写回缓存**（否则新任务可能拿到它）。
-      // 发起它的旧任务照常拿到 `created` 并自然结束——不强杀在途回合。
-      if (providerCacheKey(m) === cacheKey) {
-        providerCache.set(cacheKey, created);
-        if (providerCache.size > 32) providerCache.delete(providerCache.keys().next().value);
-      }
-      return created;
-    }
-    return providerCache.get(cacheKey);
-  }
-  const provider = await getProviderFor(modelName);
+  const { providerCache, invalidateProviderCache, getProviderFor, ensureProbe, provider } = await providerRuntime.start(modelName);
   const undoStore = { backups: new Map() };
 
   // v0.4.0 契约化：挂载 config.tools 声明式第三方工具（幂等，重启生效）
@@ -1470,27 +1288,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     console.log('');
     console.log(`  MingDao WebUI 已启动`);
     console.log(`  地址: http://${displayHost}:${actual}`);
-    if (authEnabled) {
-      console.log(`  访问令牌: http://${displayHost}:${actual}/?token=${webToken}`);
-      if (tokenGenerated) {
-        console.log('  ⚠ 非回环绑定且未配置令牌：本次已随机生成（重启后更换）。');
-        console.log('    固定令牌：mingdao web --auth-token <令牌>，或 config.json 的 web.token / 环境变量 MINGDAO_WEB_TOKEN。');
-      } else if (isLoopbackHost(host)) {
-        console.log('  ℹ 已启用访问令牌：地址需带 ?token=… 才能访问。');
-      }
-    } else if (!isLoopbackHost(host)) {
-      // 质检 L6：实际 trustedHost 白名单只放行回环 Host（远程浏览器带 LAN IP 的 Host 会 403），
-      // 文案按真实行为修正——非浏览器客户端/伪造 Host 仍可达，务必启用令牌
-      console.warn('  ⚠ 警告：当前监听 ' + host + '（非本机回环）且未启用令牌，浏览器直接访问会被拒绝（Host 白名单），但非浏览器客户端仍可直连。强烈建议：mingdao web --auth-token <令牌>。');
-    } else {
-      // v0.6.3（H-5）：回环 + 未配置令牌时**把"本机信任"这个决定说出来**。
-      // 静默无认证的危险不在于它一定被利用，而在于用户不知道自己处在这个模式里：
-      //   · 跨站浏览器请求（含 <img>/no-cors 盲打）已在 api.js 用 Sec-Fetch-Site 一律拒绝；
-      //   · 但**同机的其它进程/其它用户**仍可直连 API（多用户机器、共享 CI runner 上尤其要注意）。
-      // 一句话给出两个可选动作，而不是替用户决定（改默认会打断"浏览器直接打开 127.0.0.1"的日常用法）。
-      console.log('  ℹ 本机信任模式：未配置访问令牌，本机其它进程可直接访问 /api/*。');
-      console.log('    多用户机器 / 共享 CI 上建议启用令牌：mingdao web --auth-token <令牌>，或 config.json 的 web.token。');
-    }
+    // v0.7.0 §1.5：令牌相关的启动文案随判定一起切出（web/auth.js），这里只负责打印。
+    for (const n of authStartupNotice({ authEnabled, token: webToken, generated: tokenGenerated, host, displayHost, port: actual })) (n.warn ? console.warn : console.log)(n.text);
     console.log(`  模型: ${modelName} · 权限: ${cfg.permission ?? 'ask'} · 工作目录: ${workingDir}`);
     if (cfg.mcpServers && Object.keys(cfg.mcpServers).length) console.log('  MCP:  后台连接中，/api/state 可查看状态');
     console.log(`  退出: Ctrl+C`);

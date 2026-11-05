@@ -47,9 +47,10 @@ M.mutate({
 
 M.mutate({
   name: '③ ensureProbe 不再吞异常（探针失败直接抛给回合 = 阻断回合发起）',
-  file: 'src/web/server.js',
+  // v0.7.0 §1.5：ensureProbe 已从 server.js 逐字切到 web/provider-cache.js（srvlog 以 log 依赖注入）。
+  file: 'src/web/provider-cache.js',
   from: `    } catch (/** @type {any} */ e) {
-      srvlog(\`预检 \${m} 失败（忽略，按默认超时继续）：\${String(e?.message || e)}\`);
+      log(\`预检 \${m} 失败（忽略，按默认超时继续）：\${String(e?.message || e)}\`);
     }`,
   to: `    } catch (/** @type {any} */ e) {
       throw e;

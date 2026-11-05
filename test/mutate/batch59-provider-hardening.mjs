@@ -11,12 +11,15 @@ const SUITE = () => M.suite('test/provider-hardening.js');
 // 这是 H-04 的完整缺陷形态：缓存键不含 baseUrl/凭证/超时，切换后仍取到旧实例。
 M.mutate({
   name: '① H-04 恢复按模型名缓存且不回退旧实例',
-  file: 'src/web/server.js',
+  // v0.7.0 §1.5：Provider 缓存已从 server.js 逐字切到 web/provider-cache.js，锚点跟随文件（缺陷语义不变）。
+  file: 'src/web/provider-cache.js',
   from: [
     '    return `${providerGeneration}\\u0000${String(pc.baseUrl || \'\')}\\u0000${keyDigest}\\u0000${timeout}`;',
     '  };',
-    '  const providerCacheKey = (/** @type {any} */ m) => `${m}\\u0000${providerFingerprint(m)}`;',
-    '  const probeCacheKey = (/** @type {any} */ m) => `${m}\\u0000${providerFingerprint(m)}`;',
+    '  /** @param {string} m */',
+    '  const providerCacheKey = (m) => `${m}\\u0000${providerFingerprint(m)}`;',
+    '  /** @param {string} m */',
+    '  const probeCacheKey = (m) => `${m}\\u0000${providerFingerprint(m)}`;',
     '  /**',
     '   * 配置代际失效：provider 实例 + 本地端点预检备忘一起清。',
     '   * 预检结果含 endpoint/TTFT，旧端点的结论绝不能套到新端点上（否则自适应超时也会跟着错代际）。',
@@ -31,8 +34,10 @@ M.mutate({
   to: [
     '    return `${providerGeneration}\\u0000${keyDigest}\\u0000${timeout}`;',
     '  };',
-    '  const providerCacheKey = (/** @type {any} */ m) => m;',
-    '  const probeCacheKey = (/** @type {any} */ m) => m;',
+    '  /** @param {string} m */',
+    '  const providerCacheKey = (m) => m;',
+    '  /** @param {string} m */',
+    '  const probeCacheKey = (m) => m;',
     '  /**',
     '   * 配置代际失效（mutated：不再清 provider 实例）',
     '   * @param {string} [reason]',

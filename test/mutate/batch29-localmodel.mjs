@@ -147,7 +147,8 @@ M.mutate({
 
 M.mutate({
   name: '⑪ 预检日志行不再带引擎自述上下文（事后取证又只剩"tools=未知"）',
-  file: 'src/web/server.js',
+  // v0.7.0 §1.5：ensureProbe 的日志行已从 server.js 逐字切到 web/provider-cache.js，锚点跟随（缺陷语义不变）。
+  file: 'src/web/provider-cache.js',
   from: "          `引擎自述上下文=${probe.engineCtx == null ? '未读到' : probe.engineCtx} 配置=${probe.configuredWindow ?? '？'}`",
   to: "          ``",
   expect: ['日志行必须带上引擎自述上下文'],

@@ -13811,6 +13811,9 @@ process.exit(0);
   // 预检调用是否真的交给 provider 与本回合）。它们只做归一化：行尾归一化 + 剥注释。
   // 其余 server.js 单行守卫已行为化到 §144/§145，见各处指针。
   const serverSrc = stripSource(fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8'));
+  // v0.7.0 §1.5：Provider 缓存/预检已从 server.js 切到 web/provider-cache.js——「建 provider 前先预检」
+  // 的调用现在落在该模块。下面的文本绊线改为**跨文件**（两个文件任一命中即算），断言与保护面不删。
+  const providerCacheSrc = stripSource(fs.readFileSync(path.join(srcDir, 'web', 'provider-cache.js'), 'utf8'));
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-smoke139-'));
   // 本小节需要 <home>（预检基线 / 模型缓存 / 预设发现都落在 MINGDAO_HOME）：前面的小节可能已把它
   // 清成 undefined，这里显式指向**本小节自己的临时 home**（不复用 smokeHome：变异脚手架会把本节
@@ -14255,7 +14258,7 @@ process.exit(0);
       // 评估后不作为行为证明，只做 stripSource 归一化并如实标注。
       assert.ok(/firstTokenMs: adapt\.firstTokenMs/.test(serverSrc) || /adapt\.firstTokenMs/.test(serverSrc), '服务端必须把自适应首帧上限真的交给 provider（不能只打印不生效）——文本绊线，不是行为证明');
       assert.ok(/chatCfg\.noProgressTimeoutMs = adapt\.noProgressTimeoutMs/.test(serverSrc), '服务端必须把自适应看门狗阈值交给本回合（否则快端点仍会拖到 60 分钟）——文本绊线，不是行为证明');
-      assert.ok(/probeEndpoint\(cfg, m, \{ timeoutMs: 15000 \}\)/.test(serverSrc), '建 provider 前必须做一次预检（缓存 10 分钟）——文本绊线，不是行为证明');
+      assert.ok(/probeEndpoint\(cfg, m, \{ timeoutMs: 15000 \}\)/.test(serverSrc) || /probeEndpoint\(cfg, m, \{ timeoutMs: 15000 \}\)/.test(providerCacheSrc), '建 provider 前必须做一次预检（缓存 10 分钟）——文本绊线，不是行为证明（v0.7.0 §1.5 起该调用在 web/provider-cache.js，故跨文件判定）');
       // 另外两条已**行为化**（§145）：「chat 预检」日志行必须真的出现；「端点预检：」必须真的
       // 进入发送前的规模预告（= endpointProbe 真的交给了本回合，而不是算了不用）。
       // 同样保留原文作第二道（batch28 ⑫⑮ 的 expect 关键词锚在这里；删掉会让它们逃逸）：
@@ -14420,6 +14423,9 @@ process.exit(0);
   // 反而让"把旧写法藏进注释"不再顶替真实代码。被行为化接管的那三条（stalled 文案/原因/字段）
   // 已移到 §145，见下方指针。
   const serverSrc = stripSource(fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8'));
+  // v0.7.0 §1.5：Provider 缓存/预检已从 server.js 切到 web/provider-cache.js——预检日志与
+  // 预检调用的文本绊线改为**跨文件**判定（两个文件任一命中即算），断言与保护面不删。
+  const providerCacheSrc = stripSource(fs.readFileSync(path.join(srcDir, 'web', 'provider-cache.js'), 'utf8'));
   const appSrc = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
   const sleep140 = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
   const tmp140 = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-smoke140-'));
@@ -14587,8 +14593,8 @@ process.exit(0);
     // 行为化需要一台能自报模型名与 n_ctx 的本地引擎桩，并让 probe 真的走到"配置超出引擎能力"
     // 分支——本轮评估后认为收益不抵成本（真正会被用户看到的那条 banner 已有 §140 内部的行为断言
     // 覆盖 note 内容），所以只做加固：stripSource + 如实标注证明边界。
-    assert.ok(/引擎自述上下文=\$\{probe\.engineCtx == null \? '未读到' : probe\.engineCtx\}/.test(serverSrc), '`预检 <模型> …` 日志行必须带上引擎自述上下文——文本绊线，不是行为证明');
-    assert.ok(!/tools=\$\{probe\.toolCalls === true/.test(serverSrc), '预检日志不得再用不存在的 probe.toolCalls（真机日志里恒为 tools=未知，结论等于没落盘）——文本绊线');
+    assert.ok(/引擎自述上下文=\$\{probe\.engineCtx == null \? '未读到' : probe\.engineCtx\}/.test(serverSrc) || /引擎自述上下文=\$\{probe\.engineCtx == null \? '未读到' : probe\.engineCtx\}/.test(providerCacheSrc), '`预检 <模型> …` 日志行必须带上引擎自述上下文——文本绊线，不是行为证明（v0.7.0 §1.5 起在 web/provider-cache.js）');
+    assert.ok(!/tools=\$\{probe\.toolCalls === true/.test(serverSrc) && !/tools=\$\{probe\.toolCalls === true/.test(providerCacheSrc), '预检日志不得再用不存在的 probe.toolCalls（真机日志里恒为 tools=未知，结论等于没落盘）——文本绊线');
     assert.ok(/type: 'banner',\s*warn: true,[\s\S]{0,700}配置超出引擎能力/.test(serverSrc), '配置超出引擎能力必须是一条**告警 banner**（用户一眼看到），不是只在日志里');
     assert.ok(/probe\.engineProbed && !\(Number\(probe\.engineCtx\) > 0\)/.test(serverSrc), '真读了却没读到时要说明；压根没读（非本地/未自报模型名）时不刷噪音——文本绊线，不是行为证明');
     assert.ok(/insufficient memory/.test(String(fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8'))), '（前置）内存拒绝的可操作解读仍在 agent.js（真机原文 insufficient memory）');
@@ -14792,6 +14798,10 @@ process.exit(0);
   // HTTP 桩），这里只加固并如实标注证明边界。
   const serverSrc141 = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8').replace(/\r\n?/g, '\n');
   const serverCode141 = stripSource(serverSrc141);
+  // v0.7.0 §1.5：Provider 缓存/预检已从 server.js 切到 web/provider-cache.js——本节 4 条预检文本绊线
+  // 改为**跨文件**判定（两个文件任一命中即算），断言与保护面不删。
+  const providerCacheSrc141 = fs.readFileSync(path.join(srcDir, 'web', 'provider-cache.js'), 'utf8').replace(/\r\n?/g, '\n');
+  const providerCacheCode141 = stripSource(providerCacheSrc141);
   const discoverySrc141 = fs.readFileSync(path.join(srcDir, 'model-discovery.js'), 'utf8');
   const openaiSrc141 = fs.readFileSync(path.join(srcDir, 'providers', 'openai-compatible.js'), 'utf8');
 
@@ -14982,10 +14992,11 @@ process.exit(0);
 
   // —— ⑩ 结构守卫：降级语义 + 复核日志 + 探针 URL 与主请求同构 ——
   {
-    assert.ok(/probeMemoUsable\(memo\)/.test(serverCode141), '服务端必须按保鲜期判"这条预检结论还能不能用"（否则真机那条 7h10m 前的结论会被原样重放）——文本绊线，不是行为证明');
+    assert.ok(/probeMemoUsable\(memo\)/.test(serverCode141) || /probeMemoUsable\(memo\)/.test(providerCacheCode141), '服务端必须按保鲜期判"这条预检结论还能不能用"（否则真机那条 7h10m 前的结论会被原样重放）——文本绊线，不是行为证明');
     // 降级纪律：探针异常必须被**吞掉**（只留一行"失败（忽略…）"），不许抛给回合
     assert.ok(
-      /catch \([\s\S]{0,120}预检 \$\{m\} 失败（忽略，按默认超时继续）/.test(serverSrc141),
+      /catch \([\s\S]{0,120}预检 \$\{m\} 失败（忽略，按默认超时继续）/.test(serverSrc141) ||
+        /catch \([\s\S]{0,120}预检 \$\{m\} 失败（忽略，按默认超时继续）/.test(providerCacheSrc141),
       'ensureProbe 必须**吞掉**探针异常（只留一行"失败（忽略，按默认超时继续）"），失败不得抛给回合发起'
     );
     assert.ok(
@@ -14997,7 +15008,7 @@ process.exit(0);
       '回合结束后必须留一行"预检曾判不可达，但本回合实际可用（首帧 Xs）——预检判据需复核"'
     );
     // 这一条匹配的**就是注释文案**（降级语义声明），只做行尾归一化，不能剥注释。
-    assert.ok(/失败只降级、不阻断/.test(serverSrc141), '服务端必须写明"预检是尽力而为：失败只降级、不阻断"（降级语义要能被读到，不是只靠行为）——文本绊线，不是行为证明');
+    assert.ok(/失败只降级、不阻断/.test(serverSrc141) || /失败只降级、不阻断/.test(providerCacheSrc141), '服务端必须写明"预检是尽力而为：失败只降级、不阻断"（降级语义要能被读到，不是只靠行为）——文本绊线，不是行为证明');
     // 加固（v0.6.18）：原写法是"全文任意一处 reason="——同文件的**引擎探针日志**（预检 <模型> 行）
     // 也含同样的字面量，于是 chat 预检行丢掉 reason 时旧守卫照样绿（本轮实测的假绿）。这里收紧为
     // "chat 预检 行里必须有 reason="，保护面只增不减；代价是会跨行匹配（200 字窗口）。
@@ -15005,7 +15016,7 @@ process.exit(0);
       /chat 预检 \$\{taskId\}[\s\S]{0,200}reason=\$\{probe\.reason\}/.test(serverSrc141),
       '失败原因（reason）必须落进 web-server.log 的 chat 预检行（否则事后分不清是哪一种失败）——文本绊线'
     );
-    assert.ok(/prefill2000=/.test(serverCode141), '（既有口径）预检日志行仍要带参考 prefill 实测值——文本绊线');
+    assert.ok(/prefill2000=/.test(serverCode141) || /prefill2000=/.test(providerCacheCode141), '（既有口径）预检日志行仍要带参考 prefill 实测值——文本绊线');
     assert.ok(/String\(baseUrl\)\.replace/.test(openaiSrc141) && /'\/chat\/completions'/.test(openaiSrc141), '主请求 URL = 剥尾斜杠的 baseUrl + /chat/completions');
     assert.ok(/`\$\{base\}\/chat\/completions`/.test(discoverySrc141), '探针 URL 必须与主请求**同构**（否则"探针说不可达、主请求却成功"就是必然）');
     assert.ok(/if \(info\.isLocal && info\.loadedModel\)/.test(discoverySrc141), '（既有口径）GET /props 只在引擎自报模型名后才打——不认识它的端点一个字节都不该多发');
@@ -15242,12 +15253,14 @@ process.exit(0);
       // 行为化需要两个并发的本地回合（第二个回合的 5s 进度心跳里才会出现 localQueue），
       // 本轮评估后保留加固；§142 自身的串行化行为（桩实测最大并发=1）才是主判据。
       const serverSrc142 = stripSource(fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8'));
+      // v0.7.0 §1.5：本地端点观察者已随 provider-cache 切出——文本绊线跨文件判定。
+      const providerCacheSrc142 = stripSource(fs.readFileSync(path.join(srcDir, 'web', 'provider-cache.js'), 'utf8'));
       const appSrc142 = fs.readFileSync(path.join(srcDir, 'web', 'app.js'), 'utf8');
       const agentSrc142 = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
       assert.ok(/localQueue: tp\.localQueue \?\? null/.test(serverSrc142), '服务端 progress 事件必须带上 localQueue（界面状态条数据源）——文本绊线，不是行为证明');
       assert.ok(/本地端点已串行化/.test(appSrc142), '前端状态条必须渲染"本地端点已串行化（防内存压力）"');
       assert.ok(/onQueueWait/.test(agentSrc142) && /排队等待本地端点（已串行化防内存压力/.test(agentSrc142), 'agent 必须把排队状态写进 turnProgress.phase（进度行/界面共用）');
-      assert.ok(/setLocalQueueObserver/.test(serverSrc142), '服务端必须把串行化事件接进 web-server.log（日志留痕）——文本绊线，不是行为证明');
+      assert.ok(/setLocalQueueObserver/.test(serverSrc142) || /setLocalQueueObserver/.test(providerCacheSrc142), '服务端必须把串行化事件接进 web-server.log（日志留痕）——文本绊线，不是行为证明');
     }
 
     ok('v0.6.15 §3.59：同一本地 baseUrl 串行化（默认 1 并发，桩实测最大并发=1，排队留痕）+ 云端端点不排队（实测并发=2）+ 排队超时可见错误（LOCAL_QUEUE_TIMEOUT，不重试）+ 预检也过同一闸门（实测最大并发=1）+ "engine shed its caches and stays up/allocator wall" 独立分型（引擎未崩溃、不要重启）+ 并发时预告强警告（并发会加剧内存压力/已串行化/减少子代理）');
