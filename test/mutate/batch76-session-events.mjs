@@ -151,11 +151,14 @@ M.mutate({
 
 // ⑩ 事件侧车被当成会话：列表/最近会话被幽灵会话污染
 M.mutate({
-  name: '⑩ 会话列表不排除事件侧车（幽灵会话抢 latestSession）',
-  file: 'src/session.js',
-  from: "    if (!f.endsWith('.jsonl') || isEventLogName(f) || isConflictBackupName(f)) continue;",
-  to: "    if (!f.endsWith('.jsonl') || isConflictBackupName(f)) continue; // 变异：不排除事件侧车",
-  expect: ['事件侧车不得出现在会话列表（它不是会话）'],
+  name: '⑩ isEventLogName 恒真（正常会话被当成事件侧车 → 会话列表空）',
+  file: 'src/session-events.js',
+  // v0.6.35：侧车改 `.ndjson` 后，"不排除侧车"这条变异已**没有判别力**（`!f.endsWith('.jsonl')`
+  // 本来就把它挡掉了）。改成等价且仍可判的方向：让 `isEventLogName` 恒真 →
+  // 正常会话全部被当成侧车排除 → 会话列表为空（`test/session-events.js` 里有对应断言）。
+  from: "  return String(name || '').endsWith('.events.ndjson');",
+  to: "  return true; // 变异：把一切都当成事件侧车",
+  expect: ['侧车'],
   run: EVENTS,
 });
 

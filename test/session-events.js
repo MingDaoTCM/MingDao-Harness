@@ -427,6 +427,13 @@ for (let i = 0; i < 10; i += 1) {
   S.appendMessages(path.join(process.env.MINGDAO_HOME || '', 'sessions', 'listed.jsonl'), [{ role: 'user', content: '列表测试' }]);
   const listed = S.listSessions(process.env.MINGDAO_HOME || '').map((s) => s.name);
   assert.equal(listed.includes(name), false, '事件侧车不得出现在会话列表（它不是会话）');
+  // v0.6.35 补：**正常会话必须仍在列表里**——否则"把一切都当侧车"的变异会让列表变空，
+  // 而"侧车不在列表里"这条断言反而照样通过（这就是 batch76 ⑩ 一开始逃逸的原因）。
+  assert.equal(
+    listed.some((n) => n.startsWith('listed') && n.endsWith('.jsonl')),
+    true,
+    '正常会话必须仍在会话列表里（isEventLogName 不得误伤真实会话）'
+  );
   assert.equal(listed.some((n) => n.endsWith('.events.ndjson')), false, '任何 .events.ndjson 都不得被当成会话');
   const latest = S.latestSession(process.env.MINGDAO_HOME || '');
   assert.ok(!String(latest?.name || '').endsWith('.events.ndjson'), '事件侧车不得抢占 latestSession（mtime 更新也不行）');

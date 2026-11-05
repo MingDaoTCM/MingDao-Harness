@@ -38,7 +38,7 @@ M.mutate({
   name: '④ ratchet 不生效：低于基线也判 ok',
   file: 'scripts/coverage-report.mjs',
   // v0.6.34：容差改为分口径（`toleranceFor(metric)`），锚点跟随；缺陷语义不变（低于基线也判 ok）。
-  from: '    out.push({ metric, current: curPct, baseline: basePct, delta, ok: curPct + 1e-9 >= basePct - toleranceFor(metric) });',
+  from: '    out.push({ metric, current: curPct, baseline: basePct, delta, ok: !gatesOn(metric) || curPct + 1e-9 >= basePct - toleranceFor(metric) });',
   to: '    out.push({ metric, current: curPct, baseline: basePct, delta, ok: true });',
   expect: ['低于基线必须判失败'],
   run: RUN,

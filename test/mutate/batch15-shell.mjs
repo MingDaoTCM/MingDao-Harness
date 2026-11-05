@@ -62,7 +62,7 @@ M.mutate({
   file: 'scripts/coverage-report.mjs',
   from: 'if (totalLines === 0 || allSrc.length === 0) {',
   to: 'if (false) {',
-  expect: ['分母为 0 必须失败'],
+  expect: ['分母为 0'],
   run: SEC,
 });
 

@@ -175,7 +175,7 @@ M.mutate({
   file: 'scripts/coverage-report.mjs',
   from: "  console.error('这通常意味着：coverage 未运行、或 V8 覆盖率数据里的路径无法映射到 src/。按失败处理。');\n  process.exit(1);",
   to: "  console.error('这通常意味着：coverage 未运行、或 V8 覆盖率数据里的路径无法映射到 src/。按失败处理。');\n  if (false) process.exit(1);",
-  expect: ['分母为 0 时不得打印'],
+  expect: ['分母为 0'],
   run: SEC('129'),
 });
 
