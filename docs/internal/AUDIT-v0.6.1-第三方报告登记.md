@@ -6769,7 +6769,8 @@ requestToken / trustedHost`），`createProviderCache({...})` 实例化并 `awai
 ### 7.2.5 变异锚点 / 文本绊线跟随（一条未删）
 
 - `test/mutate/batch59-provider-hardening.mjs` ①：H-04 锚点从 `server.js` 改指 `provider-cache.js`
-  （缺陷语义与 expect 关键词不变）；`batch30-preflight.mjs` ③（ensureProbe 吞异常）同样跟随。
+  （缺陷语义与 expect 关键词不变）；`batch30-preflight.mjs` ③（ensureProbe 吞异常）与
+  `batch29-localmodel.mjs` ⑪（预检日志行带引擎自述上下文）同样只跟随实现文件，`from`/`to`/`expect` 未改。
 - `test/smoke.js` 6 条**文本绊线**改为"`server.js` 或 `provider-cache.js` 任一命中"：
   §139 预检调用、§140 引擎自述上下文日志与 `tools=` 否定判据、§141 `probeMemoUsable`/吞异常/
   "失败只降级、不阻断"/`prefill2000`、§142 `setLocalQueueObserver`。**断言文案与保护面一字未删**，
@@ -6779,7 +6780,7 @@ requestToken / trustedHost`），`createProviderCache({...})` 实例化并 `awai
 
 1. `test/smoke.js`：上述 6 条跨文件判定（不改断言语义、不删断言）。原因：两块已不在 `server.js`，
    旧绊线必然红；行为化需要可控的本地引擎桩 + TTL 窗口，超出本轮范围。
-2. `test/mutate/batch59-provider-hardening.mjs`、`test/mutate/batch30-preflight.mjs`：仅锚点跟随
+2. `test/mutate/batch59-provider-hardening.mjs`、`test/mutate/batch30-preflight.mjs`、`test/mutate/batch29-localmodel.mjs`：仅锚点跟随
    （不跟着改会让全量变异从 12/12、10/10 退化成逃逸，等于把守卫变成假绿）。
 
 未改 `src/agent.js`、`src/messages.js`（另一条并行轨道）、`test/run-all.mjs`、`.github/workflows/ci.yml`。
