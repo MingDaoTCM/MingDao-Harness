@@ -565,3 +565,100 @@ for (let i = 0; i < 10; i += 1) {
 }
 
 console.log(`\nsession-events：${passed} 项全部通过`);
+
+// ===========================================================================
+// ㉖–㉞ v0.6.35 补齐：派生摘要 / 缺占位 id / 失败告警去重（此前 0 覆盖）
+// ===========================================================================
+{
+  const base = fs.mkdtempSync(path.join(os.tmpdir(), 'sess-events-extra-'));
+  try {
+    // ㉖ deriveTurnSummaries：两轮、工具计数、usage 归属、status 变化
+    const ev = path.join(base, 'two-turns.events.ndjson');
+    const t0 = 1_700_000_000_000;
+    const push = (type, data, at) => {
+      const r = E.appendEvent(ev, { type, data, at });
+      assert.equal(r.ok, true, `appendEvent(${type}) 应成功：${JSON.stringify(r)}`);
+      return r;
+    };
+    push('turn.start', {}, t0);
+    push('step.start', {}, t0 + 10);
+    push('tool.start', { name: 'read' }, t0 + 20);
+    push('tool.end', { name: 'read', ok: true }, t0 + 30);
+    push('usage', { usage: { prompt_tokens: 100, completion_tokens: 20 } }, t0 + 40);
+    push('turn.end', { status: 'done' }, t0 + 50);
+    push('turn.start', {}, t0 + 60);
+    push('turn.end', { status: 'capped' }, t0 + 70);
+    const sums = E.deriveTurnSummaries(E.readEvents(ev).events);
+    assert.equal(sums.length, 2, '两轮必须有两条摘要');
+    assert.equal(sums[0].turn, 1, '轮号从 1 开始');
+    assert.equal(sums[0].status, 'done', '第 1 轮状态取 turn.end');
+    assert.equal(sums[0].toolCalls, 1, '第 1 轮工具计数');
+    assert.equal(sums[0].steps, 1, '第 1 轮 step 计数');
+    assert.equal(sums[0].endedAt, t0 + 50, '第 1 轮结束时刻');
+    assert.ok(sums[0].usage && sums[0].usage.prompt_tokens === 100, 'usage 必须归到第 1 轮（取 data.usage）');
+    assert.equal(sums[1].status, 'capped', '第 2 轮状态');
+    assert.equal(sums[1].toolCalls, 0, '第 2 轮没有工具');
+    ok('㉖ deriveTurnSummaries：轮号/状态/步数/工具数/usage 归属');
+
+    // ㉗ 没有 turn.start 的事件（孤儿 step）不得崩，也不得凭空造轮
+    const orphan = E.deriveTurnSummaries([{ seq: 1, time: 1, type: 'step.start', data: {} }]);
+    assert.deepEqual(orphan, [], '孤儿事件不得造出摘要轮');
+    ok('㉗ deriveTurnSummaries：孤儿 step 事件被忽略（不造轮）');
+
+    // ㉘ missingToolCallIds：assistant 有 2 个 tool_calls，只回了 1 个 → 返回差集
+    const msgs = [
+      { role: 'user', content: 'hi' },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'a' }, { id: 'b' }] },
+      { role: 'tool', tool_call_id: 'a', content: 'ok' },
+    ];
+    assert.deepEqual(E.missingToolCallIds(msgs), ['b'], '必须返回还没有 tool 响应的 id');
+    assert.deepEqual(E.missingToolCallIds([]), [], '空数组返回空');
+    assert.deepEqual(E.missingToolCallIds(null), [], '非数组输入不崩');
+    assert.deepEqual(E.missingToolCallIds([{ role: 'assistant', tool_calls: [{ id: 'x' }] }, { role: 'tool', tool_call_id: 'x', content: '' }]), [], '全部回应过则为空');
+    ok('㉘ missingToolCallIds：差集/空输入/全回应三种情形');
+
+    // ㉙ warnEventFailure：同一文件只告警一次（避免刷屏）
+    const warned = [];
+    const origWarn = console.warn;
+    console.warn = (...a) => warned.push(a.join(' '));
+    try {
+      E.warnEventFailure('/tmp/x.events.ndjson', 'EACCES');
+      E.warnEventFailure('/tmp/x.events.ndjson', 'EACCES');
+      E.warnEventFailure('/tmp/y.events.ndjson', 'EROFS');
+    } finally {
+      console.warn = origWarn;
+    }
+    assert.equal(warned.length, 2, '同一文件只告警一次、不同文件各一次');
+    assert.match(warned[0], /EACCES/, '告警必须带原始原因');
+    assert.match(warned[0], /config\.eventLog=false/, '告警必须给出关闭开关');
+    ok('㉙ warnEventFailure：按文件去重且带原因与开关');
+
+    // ㉚ eventLogEnabled / setEventLogEnabled：开关可读可写且可回滚
+    const before = E.eventLogEnabled();
+    E.setEventLogEnabled(false);
+    assert.equal(E.eventLogEnabled(), false, '关闭后必须读到 false');
+    E.setEventLogEnabled(true);
+    assert.equal(E.eventLogEnabled(), true, '打开后必须读到 true');
+    E.setEventLogEnabled(before);
+    ok('㉚ eventLogEnabled/setEventLogEnabled：可关可开可回滚');
+
+    // ㉛ readEvents：目录不存在 → 空结果且不抛
+    const missing = E.readEvents(path.join(base, 'nope', 'x.events.ndjson'));
+    assert.equal(missing.ok, true, '不存在不应报错');
+    assert.deepEqual(missing.events, [], '不存在返回空事件流');
+    ok('㉛ readEvents：文件不存在返回空（不抛）');
+
+    // ㉜ appendEvent：seq 连续性（同一文件连续 5 条）
+    const seqFile = path.join(base, 'seq-check.events.ndjson');
+    for (let i = 0; i < 5; i++) E.appendEvent(seqFile, { type: 'message.append', data: { i } });
+    const seqs = E.readEvents(seqFile).events.map((e) => e.seq);
+    assert.deepEqual(seqs, [1, 2, 3, 4, 5], 'seq 必须 1..5 连续');
+    ok('㉜ appendEvent：seq 连续递增');
+
+    // ㉝ replayToMessages：空事件流 → 空数组（旧会话路径）
+    assert.deepEqual(E.replayToMessages([]), [], '空事件流重放为空数组');
+    ok('㉝ replayToMessages：空事件流返回空数组（旧会话兼容）');
+  } finally {
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+}

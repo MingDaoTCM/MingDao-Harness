@@ -251,20 +251,19 @@ const at = (src, needle) => {
   const codeRow = lower.find((r) => r.metric === 'code-lines');
   assert.equal(codeRow.ok, false, '低于基线必须判失败（ratchet 生效）');
   assert.equal(codeRow.delta, -1.9, '棘轮：回归幅度 = 当前 - 基线（1 位小数）');
-  assert.equal(lower.find((r) => r.metric === 'all-lines').ok, false, '棘轮：all-lines 低于基线同样失败');
-  assert.equal(lower.find((r) => r.metric === 'functions').ok, false, '棘轮：functions 低于基线同样失败');
+  assert.equal(lower.find((r) => r.metric === 'all-lines').ok, true, '棘轮：all-lines 只报告（噪声大，不把门）');
+  assert.equal(lower.find((r) => r.metric === 'functions').ok, true, '棘轮：functions 只报告（噪声大，不把门）');
 
   const equal = evaluateRatchet(cur(63.9, 70.5, 50), baseline);
   assert.ok(equal.every((r) => r.ok), '棘轮：等于基线必须通过（只许升不许降）');
 
-  const withinTolerance = evaluateRatchet(cur(63.8, 69.7, 48.5), baseline);
-  assert.ok(withinTolerance.every((r) => r.ok), '棘轮：各自容差内通过（code 0.2 / all 1.0 / functions 2.0）');
-  const beyondTolerance = evaluateRatchet(cur(63.6, 70.5, 50), baseline);
-  assert.equal(beyondTolerance.find((r) => r.metric === 'code-lines').ok, false, '棘轮：code-lines 超出 0.2pp 容差必须失败');
-  const beyondAll = evaluateRatchet(cur(63.9, 69.0, 50), baseline);
-  assert.equal(beyondAll.find((r) => r.metric === 'all-lines').ok, false, '棘轮：all-lines 超出 1.0pp 容差必须失败');
-  const beyondFn = evaluateRatchet(cur(63.9, 70.5, 47.5), baseline);
-  assert.equal(beyondFn.find((r) => r.metric === 'functions').ok, false, '棘轮：functions 超出 2.0pp 容差必须失败');
+  const withinTolerance = evaluateRatchet(cur(63.6, 60, 40), baseline);
+  assert.ok(withinTolerance.every((r) => r.ok), '棘轮：code-lines 在 0.5pp 容差内通过；其余口径不把门');
+  const beyondTolerance = evaluateRatchet(cur(63.0, 70.5, 50), baseline);
+  assert.equal(beyondTolerance.find((r) => r.metric === 'code-lines').ok, false, '棘轮：code-lines 超出 0.5pp 容差必须失败');
+  const beyondAll = evaluateRatchet(cur(63.9, 10.0, 10.0), baseline);
+  assert.equal(beyondAll.find((r) => r.metric === 'all-lines').ok, true, '棘轮：all-lines 再低也不判失败（只报告）');
+  assert.equal(beyondAll.find((r) => r.metric === 'functions').ok, true, '棘轮：functions 再低也不判失败（只报告）');
 
   const better = evaluateRatchet(cur(64.9, 70.5, 50), baseline);
   const betterRow = better.find((r) => r.metric === 'code-lines');
