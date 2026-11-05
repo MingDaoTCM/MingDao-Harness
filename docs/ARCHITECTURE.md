@@ -1,6 +1,6 @@
 # MingDao-Harness 架构设计
 
-> 版本口径：v0.6.30。本文档覆盖 `src/` 全部 **94** 个模块（`find src -name '*.js' | wc -l` = 94），
+> 版本口径：v0.6.30。本文档覆盖 `src/` 全部 **93** 个模块（`find src -name '*.js' | wc -l` = 93），
 > 按层给出每个模块的职责与它守住的那条不变量；判定以文件头注释与实际实现为准，不做推断性描述。
 >
 > 阅读顺序建议：§2 模块索引（查「某件事归谁管」）→ §3 数据流（看一次回合怎么走）→ §4 已知边界（看它**保证不了**什么）。
@@ -54,7 +54,7 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 
 ## 2. 模块索引
 
-以下逐文件列出 `src/` 全部 94 个模块。每条格式为「职责 —— 关键不变量/边界」。
+以下逐文件列出 `src/` 全部 93 个模块。每条格式为「职责 —— 关键不变量/边界」。
 
 ### 2.1 内核循环与上下文（7）
 
@@ -106,7 +106,7 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `prompts.js` —— 系统提示词构建：基础角色 + 用户记忆 + 技能清单 + 项目 AGENTS.md + Pack 提示段（`packPromptBlock`）—— 记忆类内容必须「关不住围栏」，零宽/双向控制字符需剥离；断行/围栏闭合由 `fencedBlock` 统一处理。
 - `workspace.js` —— 会话级工作空间：登记/切换/重命名/删除，每个会话记住自己的项目目录，多任务并行不串目录 —— 本模块加锁函数**全部**使用异步版 `withFileLock`，因为它正好在 WebUI 请求路径上（同步版会冻结整个事件循环）。
 
-### 2.5 合规与账本（3）
+### 2.5 合规与账本（4）
 
 - `ledger.js` —— 执行账本：一次回合 = 一个文件，事件流（`runStart` / `toolCall` / `constraint` / `permission` / `usage` / `netEgress` / `runEnd`）可导出、可校验、可回放 —— 三条不可让步的纪律：写入即脱敏、摘要替代原文（`*Digest`）、降级必须可见；`runEnd` 额外写封条侧车文件，使「尾部截断但链内自洽」可检出。
 - `audit.js` —— 工具调用审计日志：每次调用（含被拒/被钩子阻止/参数解析失败）落 `~/.mingdao/audit.jsonl`（600），纯追加 + >20000 行保留最近 10000 行 —— 记录做轻量脱敏，`config.audit: false` 可关（默认开）。
@@ -118,7 +118,7 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `sync.js` —— 云同步客户端：会话 JSONL 跨设备同步，配置在 `config.json` 的 `sync`（无秘密），凭证在 `credentials.json` 的 `sync`（600）—— 冲突规则绝不丢数据：push 前先把远端备份为 `.server-<时间戳>.jsonl`，pull 时本地不动、远端写 `.remote-<时间戳>.jsonl`；`auto` 静默推送失败不影响对话。
 - `sync-server.js` —— 云同步服务端（零依赖 `node:http/https`）：账号 + 设备 token + 会话存储，数据布局 `<DATA_DIR>/users.json`、`devices.json`、`data/<用户名>/sessions/` —— 密码存 `sha256(salt:password)`，设备 token 只存哈希；注册开关 `open` / `invite` / `closed`。
 
-### 2.7 Web 层（15）
+### 2.7 Web 层（16）
 
 - `web/server.js` —— WebUI 服务器：零依赖 `node:http` + SSE，复用 `createAgent` + `createPermission` + `createWebIO` —— 非回环绑定强制访问令牌（参数/配置/本次随机生成，`timingSafeEqual` 比对）；Host 白名单防 DNS rebinding；同一会话并发回合由进程级 `busySessions` 串行化。
 - `web/auth.js`（v0.7.0 §1.5）—— WebUI 访问控制的**纯函数层**（从 `server.js` 逐字切出）：`resolveWebToken`（参数 > 配置 > 非回环随机生成）、`extractRequestToken`（`?token=` > `X-MingDao-Token` > `Authorization: Bearer`）、`resolveAuthDecision`（放行/拒绝 + `via` 通道）、`tokenEquals`（`timingSafeEqual`，长度不等直接 false）、`isTrustedHost`（Host 白名单防 DNS rebinding）、`authStartupNotice`（启动文案）—— **不读全局、不写 `res`**；401/403 仍由 `routes/api.js` 唯一写入。
@@ -176,8 +176,8 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `help.js` —— 帮助文本的唯一来源：CLI 与 REPL 各用 `variant` 声明自己多出来的那几行 —— 两个入口的差异必须是显式的，不允许各存一份正文。
 - `index.js` —— 库公共 API：导出 `@stable`（minor 内向后兼容）与 `@experimental` 两组能力，契约与示例见 DEVELOPER.md。
 
-模块计数核对：7 + 8 + 12 + 10 + 3 + 2 + 15 + 13 + 19 = **89** 个条目（含合并条目；`find src -name '*.js' | wc -l` = **94**），其中 §2.7 的
-`web/util.js` / `web/app.js` 一条覆盖 2 个文件、`web/viewmodel.js` 单列，故条目覆盖 **94** 个 `src/**/*.js`（每版本以 `find` 实测为准），
+模块计数核对：7 + 8 + 12 + 10 + 4 + 2 + 16 + 13 + 19 = **92** 个条目（含合并条目；`find src -name '*.js' | wc -l` = **93**），其中 §2.7 的
+`web/util.js` / `web/app.js` 一条覆盖 2 个文件、`web/viewmodel.js` 单列，故条目覆盖 **93** 个 `src/**/*.js`（每版本以 `find` 实测为准），
 与 `find src -name '*.js' | wc -l` 的结果一致。
 
 ## 3. 数据流：一次 `runTurn` 的关键路径

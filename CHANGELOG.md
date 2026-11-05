@@ -3,6 +3,63 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.34（2026-11-05）— v0.7.0 地基第三批：内核切分（文案层/server 切块）+ 死代码清理
+
+> **无新功能、无界面变化。** 本版只做 v0.7.0 §1.5「内核切分」与顺手治理：
+> 把 `agent.js` 的文案/预测层、`server.js` 的鉴权与 provider 缓存切出去，删掉零引用的 `i18n.js`，
+> 并把「单函数 ≤500 行」变成 CI 守卫。5 张真实界面截图 sha256 与 v0.6.33 **逐字节一致**。
+> 完整说明见 `RELEASE-NOTES-0.6.34.md`；路线图见 `docs/ROADMAP-v0.7.md`。
+
+### 一、§1.5 文案/预测层切出（`0be8fa8`）
+
+- 新增 `src/messages.js`（534 行，**零 I/O、无状态**）：把 `agent.js` 的 **21 个零依赖导出**
+  逐字搬出（TTFT 提示判定与进程级节流、无进展看门狗阈值与中止文案、内存降级两级压缩、
+  端点学习值预告、prefill 外推与发送前规模预告、上游错误解读、回合进度行、只读档判定）。
+  `agent.js` **2762 → 2303 行**，只保留循环与编排。
+- 导出面用**显式列名** `export { … } from './messages.js'`（不用 `export *`，便于 grep）；
+  既有 `import { X } from './agent.js'` 的测试与 `src/web/server.js` **一行未改**。
+- 依赖单向 `agent.js → messages.js`（无环）；**29 条变异锚点**跟随到 `messages.js`，一条未删。
+- 新增 `test/messages.js` **66 项**（21 个导出逐个 ≥3 组断言，含边界）。
+
+### 二、§1.5 server.js 切块（`277ff83` / `4900a7e`）
+
+- 新增 `src/web/auth.js`（199 行）：`resolveWebToken` / `extractRequestToken` / `resolveAuthDecision` /
+  `tokenEquals` / `isTrustedHost` / `authStartupNotice` 六个**纯函数**（不读全局、不写 `res`），
+  401/403 仍由 `routes/api.js` 唯一写入。
+- 新增 `src/web/provider-cache.js`（208 行）：`createProviderCache(deps)` 依赖注入工厂，
+  缓存键含代际 + baseUrl + apiKey 摘要 + timeout 指纹；`invalidateProviderCache` 实例与探测备忘双清。
+- `runWebServer` **1211 → 1007 行**、`server.js` **1509 → 1308 行**；逻辑逐字搬运，行为不变。
+- 6 条预检**文本绊线改成跨文件判定**（一条未删）；`batch59` / `batch30` / `batch29` 仅锚点跟随；
+  新增 `test/web-auth.js`（20 项）/ `test/provider-cache.js`（19 项）。
+
+### 三、结构守卫（`4900a7e`）
+
+- 新增 `test/structure-limits.js`（4 项）：**单函数 ≤500 行**。超限函数必须进基线名单，
+  且基线**只降不升**（新增长函数直接失败）。当前基线：`runWebServer = 1007`。
+  `runTurnInner`（约 1725 行）是明确的下一步，不在本版范围内。
+
+### 四、删死代码 + 覆盖率容差分口径（`b16568b`）
+
+- 删除 `src/web/i18n.js`（349 行 / 225 行代码）：全仓**零引用**（无 import、不在静态白名单、无测试），
+  但 `ARCHITECTURE.md` 宣称在用（审计 M-4 / L-11）→ 删除并修正文档（`src/` 模块 91 → **93**）。
+- `RATCHET_TOLERANCE_PP` 从统一 0.2pp 改为**分口径**：code-lines 0.2 / all-lines 1.0 / functions 2.0。
+  实测同树重复跑，functions 可差 2.6pp（子进程覆盖聚合），统一 0.2pp 只会变成噪声。
+  `test/coverage-metric.js` 同步改为「各口径超出各自容差必须失败」。
+- 重生成基线：**code-lines 73.7% / all-lines 53.2% / functions 79%**。
+
+### 五、接线与测试夹具（`11446fc` / `bf16b72` / `403d056` / `ab33708`）
+
+- 4 个新套件（`messages` / `web-auth` / `provider-cache` / `structure-limits`）进 `run-all`（**34 套**）
+  与 CI（**4 个步骤，挂 Linux 腿**）。
+- 变异总数 700 → **715**：`batch75`（15 条）随 server 切块新增，`batch68 ④` 锚点自修。
+- `test/state-locks.js` 锁等待 3s → 15s（修 macOS CI 假红，**断言未放宽**）。
+
+### 六、未做
+
+- **`runTurnInner` 仍约 1725 行**，未降到 §1.5 验收的 ≤900 行——需先做 §1.1 事件溯源。
+- **§1.1 事件溯源未开始**；0.7.1–0.7.3（工具契约 / 人机协作 / 多 agent）未动。
+- 4 个新套件只挂 Linux 腿，**未在 Windows 实机点验**。
+
 ## v0.6.33（2026-11-05）— v0.7.0 地基第二批：前端可测化（viewmodel）+ 变异补盲
 
 > **无新功能、界面零变化。** 只做一件事：**让测试开始能证明前端行为**。
