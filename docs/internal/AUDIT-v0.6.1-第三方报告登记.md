@@ -6793,3 +6793,72 @@ requestToken / trustedHost`），`createProviderCache({...})` 实例化并 `awai
 - 三个新套件未接进 `test/run-all.mjs`（不在允许改动范围），需单独运行。
 - 结构守卫的基线是**当前实测值**；并行轨道 `agent.js` 落地后 `createAgent`/`runTurnInner` 会变小，
   只需按实测下调基线（本守卫对"变小"不红，对"变大"红）。
+
+## 8.1 v0.7.0 §1.1 切片 A：会话事件日志双写与确定性重放
+
+### 8.1.1 做了什么
+
+新增 `src/session-events.js`（纯逻辑 + 少量 I/O），把会话状态从「只有消息数组」扩成
+「消息数组 + 一条 append-only 事件流」：
+
+- 事件文件：`<session>.events.jsonl`，与 `<session>.jsonl` 同级，**不改旧文件**；
+- 事件形状：`{seq,time,type,data}`，12 类：`session.start` / `turn.start` / `turn.end` /
+  `step.start` / `step.end` / `tool.start` / `tool.end` / `message.append` / `usage` / `compact` /
+  `interrupt` / `checkpoint`；seq 单调、是唯一关联键；
+- API（全部 `{ok,error}` 形态，任何失败都不抛给调用方）：
+  - `appendEvent(eventFile,{type,data,at})` → `{ok,error,seq}`；
+  - `readEvents(eventFile)` → `{events,skipped}`；
+  - `replayToMessages(events)` → 纯函数，由事件派生消息数组；
+  - `deriveTurnSummaries(events)`（可选）→ 每回合步数/工具数/用量；
+  - 辅助：`eventFileFor` / `isEventLogName` / `eventLogEnabled` / `setEventLogEnabled` /
+    `missingToolCallIds` / `warnEventFailure`。
+
+### 8.1.2 seq 并发与 torn 行
+
+- **seq 分配**：在 `<eventFile>.lock`（O_EXCL 创建）内「读尾行 last seq → last+1 → 单次
+  `appendFileSync` → 回读校验最后一行 seq/type」。锁的临界区只有一次 append（毫秒级），
+  10s 未释放视为崩溃残留并回收；同进程再用模块级 `Map<file,{seq,size}>` 缓存上一条，
+  文件被删除/重建（size 变小或为 0）时以文件尾为准，不凭空跳号。
+- **并发验证**：8 个真子进程 × 10 条 → 80 条、读出的 seq 集合必须恰好 1..80（无洞/无重号）。
+- **torn 行**：读取逐行 `JSON.parse`，失败的半截行计入 `skipped` 并继续；追加时若文件尾
+  没有换行，先补 `\n`，保证新事件独占一行。未知 type、缺 seq 同样跳过并计数。
+- **写失败**：`appendEvent` 的 catch 一律折成 `{ok:false,error}`；会话双写失败只 warn，
+  `appendMessages` 仍以「消息文件已写入」返回。
+
+### 8.1.3 双写接线（既有读取路径未改）
+
+- `src/session.js#appendMessages`：消息文件写完**之后**追加 `message.append`（首写补一条
+  `session.start`）；失败只 warn，不改变返回值。`loadSession` / `rewriteSession` 一行未动。
+- `src/agent.js`：`turn.start/end`（`runTurn` 包装层）、`step.start/end`（步循环 + 回合收尾
+  补最后一个 step.end）、`tool.start/end`（执行/拒绝两条路径）、`usage`（每步真实用量）、
+  `compact`（携带压缩后的完整基线，重放据此整体替换）、`interrupt`（SIGINT，写一次，
+  `toolCallIds` 交给 replay 延迟补占位）。
+- 开关：`cfg.eventLog === false`（`createAgent` 同时关掉进程级双写）或 `MINGDAO_EVENT_LOG=0`；
+  默认开。
+- 会话列表：`listSessionsDetailed` **排除** `.events.jsonl` 侧车——否则事件文件会变成
+  「没有消息的幽灵会话」并因 mtime 更新抢走 `latestSession()`。这是让「旧会话列表行为不变」
+  必须做的一处过滤，旧会话文件本身与读取返回形状均未改。
+- 未改 `src/web/**`、`src/sync-server.js`、`src/ledger.js`、SSE 帧、UI、会话文件格式；
+  `test/smoke.js` / `test/run-all.mjs` / `.github/workflows/ci.yml` / `test/mutate/README.md` 未动。
+
+### 8.1.4 测试与变异
+
+| 项 | 结果 |
+| --- | --- |
+| `test/session-events.js` | **25 项**：12 类清单、命名、20 条 seq 无洞、删除重建、8 子进程并发 80、torn 行、torn 后追加、未知 type、旧会话空流、4 个重放场景 deepEqual（单轮/工具/compact/interrupt）+ interrupt 早于 message.append、未知 type 返回失败、EACCES 写失败、deriveTurnSummaries、双写对拍（replay 与 loadSession deepEqual）、旧会话读取不受影响、侧车排除、cfg/进程/环境变量/loadConfig 四种开关、agent 边界事件顺序、双写失败不影响会话 |
+| `test/mutate/batch76-session-events.mjs` | **12/12 全中**：seq 重号 / torn 不跳过 / 未知 type 崩 / 丢掉 compact / interrupt 不补占位 / 写失败抛异常 / 双写失败打断会话写入 / 进程开关失效 / cfg.eventLog 失效 / 侧车污染列表 / turn.start 不写 / loadConfig 不同步 eventLog |
+| `npm run typecheck` / `typecheck:strict` | 通过（strict 0/0） |
+| `node test/smoke.js` | 通过 |
+| `node test/structure-limits.js` | 4/4；`createAgent` 2177→2265、`runTurnInner` 1718→1743 已按实测同步基线（事件边界写入） |
+| 全量 `node test/mutate/run.mjs` | 65 批全中（64 旧批 + batch76） |
+
+### 8.1.5 边界（本切片明确不做）
+
+- SSE 帧没有 `seq`、不支持 `Last-Event-ID` 补尾；UI/账本仍读消息数组（路线图后续切片）。
+- 事件文件**不参与云同步**；会话删除/自动标题重命名不会搬迁或删除事件侧车。
+- 手动 `/compact`（直接 `rewriteSession`，无 agent compact 事件）不会在事件流里留下基线；
+  自动压缩才会写 `compact`。
+- `checkpoint` 类型已定义但尚无写入点（供后续检查点投影使用）。
+- `replayToMessages` 在 `interrupt` 找不到对应 assistant 时不凭空造占位（避免与 compact
+  后的真实消息数组分叉）；真实双写顺序下占位已由 `message.append` 提供，不会重复。
+- 事件日志写失败只影响该事件流完整性，不影响会话、账本、SSE 或回合结果。

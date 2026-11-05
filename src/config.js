@@ -7,6 +7,7 @@ import os from 'node:os';
 import { PROVIDERS, modelPreset, providerPreset, pickFamilyModel, normalizeModelLabels, DEFAULT_MODEL, DEFAULT_PLANNER_MODEL, DEFAULT_EXECUTOR_MODEL } from './models.js';
 import { setStoredKey, resolveApiKey, maskKey } from './credentials.js';
 import { atomicWriteFileSync, withFileLock, withFileLockSync as withStateFileLockSync } from './atomic-write.js';
+import { setEventLogEnabled } from './session-events.js';
 
 export function mingdaoHome() {
   return process.env.MINGDAO_HOME || path.join(os.homedir(), '.mingdao');
@@ -357,6 +358,19 @@ function prepareConfigForWrite(cfg) {
   return base;
 }
 
+/**
+ * v0.7.0 §1.1：把 `config.eventLog` 同步到事件日志的进程级开关。
+ *
+ * 为什么必须在 config 层做一次：WebUI 的 /api/chat 会**先**把用户消息 appendMessages 落盘、
+ * **后**才 createAgent；只靠 createAgent 设置开关会让 config 里的 eventLog=false 漏掉这条
+ * 用户消息（半份事件流）。loadConfig/saveConfig 是配置进入进程的两个入口，在这里设一次，
+ * 任何「先写会话、后建 agent」的顺序都不会漏。缺省（字段不存在）按开启处理。
+ * @param {any} cfg
+ */
+function applyEventLogGate(cfg) {
+  setEventLogEnabled(!(cfg && cfg.eventLog === false));
+}
+
 /** 读取配置对象（不存在/损坏返回 null）；返回值为用户可编辑的任意 JSON 配置，类型不定
  *
  * 注意（v0.6.3 / H-7）：null **同时**表示「不存在」与「读不出来」。凡是要**写**配置的调用点，
@@ -367,6 +381,7 @@ export function loadConfig() {
   if (!r.ok) return null;
   const cfg = applyModelLabels(applyCachedModelDefaults(r.data));
   rememberConfig(cfg); // v0.7.0 §1.3：记下基线，saveConfig 只合并增量
+  applyEventLogGate(cfg); // v0.7.0 §1.1：config.eventLog=false 在「先落盘、后建 agent」路径也生效
   return cfg;
 }
 
@@ -388,11 +403,13 @@ export function loadConfigForWrite(why = '某个写配置的命令') {
   if (r.ok) {
     const cfg = r.data || {};
     rememberConfig(cfg);
+    applyEventLogGate(cfg);
     return cfg;
   }
   quarantineCorruptConfig(`${why} 需要写回配置，但读不出来：${r.error}`);
   const empty = {};
   rememberConfig(empty);
+  applyEventLogGate(empty);
   return empty;
 }
 
@@ -444,6 +461,7 @@ export function saveConfig(cfg) {
       writeConfigUnlocked(prepareConfigForWrite(cfg));
       rememberConfig(cfg); // 成功后把这版对象当作下次增量比较的基线
     });
+    applyEventLogGate(cfg);
     return { ok: true, error: null };
   } catch (err) {
     const msg = String(/** @type {any} */ (err)?.message ?? err);

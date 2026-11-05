@@ -101,5 +101,84 @@ M.mutate({
   run: EVENTS,
 });
 
+
+// ⑦ 双写失败反过来打断会话写入：事件日志是旁路，却让 appendMessages 抛异常
+M.mutate({
+  name: '⑦ 双写失败抛异常（旁路失败反过来打断会话写入）',
+  file: 'src/session.js',
+  from: [
+    '      if (!r.ok) {',
+    '        warnEventFailure(eventFile, r.error ?? null);',
+    '        return; // 写不进去就停：后面的每一条都只会重复同一条告警',
+    '      }',
+    '    }',
+    '  } catch (err) {',
+    '    warnEventFailure(eventFile, String(/** @type {any} */ (err)?.message ?? err));',
+    '  }',
+  ].join('\n'),
+  to: [
+    '      if (!r.ok) {',
+    '        throw new Error(String(r.error));',
+    '      }',
+    '    }',
+    '  } catch (err) {',
+    '    throw err;',
+    '  }',
+  ].join('\n'),
+  expect: ['双写失败绝不能影响会话写入'],
+  run: EVENTS,
+});
+
+// ⑧ 进程开关失效：setEventLogEnabled(false) 之后仍然写事件
+M.mutate({
+  name: '⑧ 进程开关失效（setEventLogEnabled(false) 仍写事件）',
+  file: 'src/session-events.js',
+  from: '  return processEnabled;',
+  to: '  return true; // 变异：进程开关失效',
+  expect: ['开关关闭时必须完全停止事件写入'],
+  run: EVENTS,
+});
+
+// ⑨ cfg.eventLog=false 被忽略：配置回滚开关失效
+M.mutate({
+  name: '⑨ cfg.eventLog=false 被忽略（配置回滚开关失效）',
+  file: 'src/session-events.js',
+  from: '  if (cfg && cfg.eventLog === false) return false;',
+  to: '  // 变异：忽略 cfg.eventLog',
+  expect: ['cfg.eventLog=false 必须关闭事件日志'],
+  run: EVENTS,
+});
+
+// ⑩ 事件侧车被当成会话：列表/最近会话被幽灵会话污染
+M.mutate({
+  name: '⑩ 会话列表不排除事件侧车（幽灵会话抢 latestSession）',
+  file: 'src/session.js',
+  from: "    if (!f.endsWith('.jsonl') || isEventLogName(f) || isConflictBackupName(f)) continue;",
+  to: "    if (!f.endsWith('.jsonl') || isConflictBackupName(f)) continue; // 变异：不排除事件侧车",
+  expect: ['事件侧车不得出现在会话列表（它不是会话）'],
+  run: EVENTS,
+});
+
+// ⑪ turn.start 不写：agent 的回合边界事件缺失
+M.mutate({
+  name: '⑪ turn.start 不写（agent 回合边界缺失）',
+  file: 'src/agent.js',
+  from: "    emitEvent('turn.start', { model: modelName, session: sessionRef?.name ?? null, messages: Array.isArray(messages) ? messages.length : 0 });",
+  to: '    // 变异：不写 turn.start',
+  expect: ['agent 事件边界必须写入 turn.start'],
+  run: EVENTS,
+});
+
+
+// ⑫ loadConfig 不同步 eventLog：Web「先落盘、后建 agent」的顺序会漏掉配置回滚
+M.mutate({
+  name: '⑫ loadConfig 不同步 eventLog（先落盘后建 agent 时回滚失效）',
+  file: 'src/config.js',
+  from: '  applyEventLogGate(cfg); // v0.7.0 §1.1：config.eventLog=false 在「先落盘、后建 agent」路径也生效',
+  to: '  // 变异：loadConfig 不再同步 eventLog 开关',
+  expect: ['loadConfig 必须把 config.eventLog=false 同步到事件日志进程开关'],
+  run: EVENTS,
+});
+
 const ok = M.report();
 process.exit(ok ? 0 : 1);

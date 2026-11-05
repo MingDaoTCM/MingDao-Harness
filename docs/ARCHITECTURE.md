@@ -1,6 +1,6 @@
 # MingDao-Harness 架构设计
 
-> 版本口径：v0.6.30。本文档覆盖 `src/` 全部 **93** 个模块（`find src -name '*.js' | wc -l` = 93），
+> 版本口径：v0.6.30（v0.7.0 §1.1 增量见下）。本文档覆盖 `src/` 全部 **94** 个模块（`find src -name '*.js' | wc -l` = 94），
 > 按层给出每个模块的职责与它守住的那条不变量；判定以文件头注释与实际实现为准，不做推断性描述。
 >
 > 阅读顺序建议：§2 模块索引（查「某件事归谁管」）→ §3 数据流（看一次回合怎么走）→ §4 已知边界（看它**保证不了**什么）。
@@ -93,9 +93,10 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `net-policy.js` —— 出网白名单策略：纯函数，不碰 IO、不改全局状态，便于单测与文档化 —— 命中哪条规则、拦还是放，判定只此一份。
 - `net-guard.js` —— 出网闸门：在 `globalThis.fetch` 收口做出口判定 + 记账，`guardEgress()` 供 `node:http(s)` 路径（safe-fetch、sync 的 rawRequest）复用 —— **默认不安装**（未配置 `config.net` 时完全不介入）；只覆盖内核自己发起的请求，不代表整机不出网。
 
-### 2.4 会话 / 记忆 / 任务（10）
+### 2.4 会话 / 记忆 / 任务（11）
 
 - `session.js` —— 会话持久化：`<home>/sessions/<时间戳>-<随机>.jsonl` 每轮追加，`--continue` 载入最近一次，`--resume` 打开选择器 —— 会话文件是消息结构的唯一权威，检查点等旁挂状态另存侧车文件。
+- `session-events.js` —— 会话事件日志（v0.7.0 §1.1 切片 A）：`<session>.events.jsonl` 追加 12 类事件 `{seq,time,type,data}`（session/turn/step/tool/message/usage/compact/interrupt/checkpoint）—— **seq 是唯一关联键**：跨进程短临界区锁内「读尾行 last+1」、单次 append 后回读校验；读侧跳过 torn 行/未知 type 并返回 `skipped`；`replayToMessages()` 是纯函数（`message.append` 提供消息本体、`compact` 重置基线、`interrupt` 延迟补 tool 占位），由事件流重放的消息数组必须与原消息数组逐字节等价；事件文件是**旁路**，`loadSession`/`rewriteSession`/SSE/UI 都不读它，`cfg.eventLog=false` 或 `MINGDAO_EVENT_LOG=0` 可整体回滚。
 - `session-index.js` —— 会话检索索引：词表倒排 + 按 mtime/size 的增量同步，分片存 `<home>/sessions-index/<2位sha1前缀>.json`（256 片）—— 未变化直接用缓存词表，>8MB 文件跳过并移除条目；中文按 bigram + 单字、查询串同口径分词后 AND 匹配。
 - `memory.js` —— 长记忆与自主进化：用户记忆 `~/.mingdao/AGENTS.md`（手动 + 会话结束自动提取用户偏好并去重追加）、会话日志 `journal.jsonl`（默认不注入系统提示，`--journal` / WebUI 勾选才取最近 3 条）—— 自动提取用 executor 模型（约几十 token），`autoMemory: false` 可关。
 - `tasks.js` —— 多会话后台任务面板：`mingdao run` 拉起独立 worker 子进程，状态落 `<home>/tasks/<id>.json`，命令族 `run` / `tasks` / `tasks watch` / `tasks kill` —— taskId 用不可枚举随机值；kill 前必须过 PID 归属校验（见 `proc.js`）。
@@ -176,8 +177,8 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `help.js` —— 帮助文本的唯一来源：CLI 与 REPL 各用 `variant` 声明自己多出来的那几行 —— 两个入口的差异必须是显式的，不允许各存一份正文。
 - `index.js` —— 库公共 API：导出 `@stable`（minor 内向后兼容）与 `@experimental` 两组能力，契约与示例见 DEVELOPER.md。
 
-模块计数核对：7 + 8 + 12 + 10 + 4 + 2 + 16 + 13 + 19 = **92** 个条目（含合并条目；`find src -name '*.js' | wc -l` = **93**），其中 §2.7 的
-`web/util.js` / `web/app.js` 一条覆盖 2 个文件、`web/viewmodel.js` 单列，故条目覆盖 **93** 个 `src/**/*.js`（每版本以 `find` 实测为准），
+模块计数核对：7 + 8 + 13 + 11 + 4 + 2 + 16 + 13 + 19 = **93** 个条目（含合并条目；`find src -name '*.js' | wc -l` = **94**），其中 §2.7 的
+`web/util.js` / `web/app.js` 一条覆盖 2 个文件、`web/viewmodel.js` 单列，故条目覆盖 **94** 个 `src/**/*.js`（每版本以 `find` 实测为准），
 与 `find src -name '*.js' | wc -l` 的结果一致。
 
 ## 3. 数据流：一次 `runTurn` 的关键路径

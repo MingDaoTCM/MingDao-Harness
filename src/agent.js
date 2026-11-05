@@ -5,6 +5,7 @@
 // v0.7.0 §1.5：**文案 / 预测层已迁至 ./messages.js**（逐字搬运、逻辑零变化）——
 // 本文件只保留循环与编排；导出面由下方 `export { … } from './messages.js'` 逐字保留。
 
+import path from 'node:path';
 import { trimMessages, messageTokens, approxTokens } from './context.js';
 import { compactConversation } from './compact.js';
 // 审计 M-1 §2.1 第 4 条（Pack 反向提权）：`makeToolCtx` 把内核 ctx 剪成"工具面向的 ctx"并冻结。
@@ -38,6 +39,8 @@ import { compileConstraints, checkPreTool, checkPostTool, checkOutput, blockedOu
 import { createLedger, newRunId } from './ledger.js';
 import { registerEgressSink } from './net-guard.js';
 import { getActivePackContext } from './packs.js';
+import { mingdaoHome } from './config.js';
+import { appendEvent, eventFileFor, eventLogEnabled, missingToolCallIds, setEventLogEnabled } from './session-events.js';
 // v0.6.11（审计 P1-1 拆分第三刀）：工具编排两端的判据单源在 tools-flow.js——
 // ① 本轮可见哪些工具（只读档 × 预设白名单 × 已用工具快照 × MCP 只读标注）；
 // ② 工具结果怎么回填（序列化 / 复用前缀 / 约束拒绝文案 / 按窗口截断）；
@@ -118,6 +121,24 @@ function resolveEndpointBaseUrl(/** @type {any} */ cfg, /** @type {any} */ model
 }
 
 /**
+ * v0.7.0 §1.1：解析本会话的事件侧车。优先级：`cfg.eventFile`（测试/嵌入方显式指定）>
+ * `sessionRef.file` > `<MINGDAO_HOME>/sessions/<sessionRef.name>`。
+ * 任何异常都返回 null——事件日志是旁路，路径解析失败不得影响回合。
+ * @param {any} sessionRef
+ * @param {any} cfg
+ * @returns {string|null}
+ */
+function resolveAgentEventFile(sessionRef, cfg) {
+  try {
+    if (cfg?.eventFile) return eventFileFor(String(cfg.eventFile));
+    const ref = sessionRef || {};
+    if (ref.file) return eventFileFor(String(ref.file));
+    if (ref.name) return eventFileFor(path.join(mingdaoHome(), 'sessions', String(ref.name)));
+  } catch {}
+  return null;
+}
+
+/**
  * 创建 Agent 循环（调用方只需传 provider/permission/io/modelName/workingDir，其余可选）
  * @param {{ provider: any, permission: any, io: any, modelName: any, workingDir: any,
  *   cfg?: any, undoStore?: any, maxSteps?: number, mcp?: any, onCompact?: any, sessionRef?: any,
@@ -132,6 +153,53 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // v0.6.26 §3.91：子代理实例（spawnTask 传入 parentProgress / 子任务标记）。子代理的成功**不**计入
   // 端点"连续干净成功"——一个父回合里可能跑多个子代理，否则一次回合就能把 +25% 的上调门槛凑满。
   const isSubagent = Boolean(cfg?.parentProgress || cfg?.subagentLabel);
+  // v0.7.0 §1.1：事件双写的开关与出口（旁路：任何失败只 warn，绝不影响回合结果）。
+  // `cfg.eventLog === false` 时**同时**停掉 session.appendMessages 的 message.append 双写，
+  // 否则只会关掉 agent 事件、留下半份事件流。子代理不重复设置进程开关（父代理已设）。
+  const eventsOn = eventLogEnabled(cfg);
+  if (!isSubagent) setEventLogEnabled(eventsOn);
+  let eventFileKey = '';
+  let eventFileCache = /** @type {string|null} */ (null);
+  let eventWarned = false;
+  const sessionEventFile = () => {
+    const ref = /** @type {any} */ (sessionRef || {});
+    const key = `${String(cfg?.eventFile || '')}|${String(ref.file || '')}|${String(ref.name || '')}`;
+    if (key !== eventFileKey) {
+      eventFileKey = key;
+      eventFileCache = resolveAgentEventFile(sessionRef, cfg);
+    }
+    return eventFileCache;
+  };
+  /** @param {string} type @param {any} data */
+  const emitEvent = (type, data) => {
+    try {
+      if (!eventLogEnabled(cfg)) return;
+      const file = sessionEventFile();
+      if (!file) return;
+      const r = appendEvent(file, { type, data });
+      if (!r.ok && !eventWarned) {
+        eventWarned = true;
+        console.warn(`[MingDao] ⚠ 会话事件日志写入失败（${file}）：${r.error}——事件日志本次不完整，不影响会话与回合结果。`);
+      }
+    } catch {}
+  };
+  // step 边界：step.start 在本步开始时写；step.end 在**下一步开始前 / 回合收尾**补写，
+  // 因此即使某个出口提前 return，事件流里也不会留下永远不结束的 step。
+  /** @type {{step:number,round:number}|null} */
+  let openStep = null;
+  /** @param {string} status */
+  const closeStep = (status) => {
+    if (!openStep) return;
+    const s = openStep;
+    openStep = null;
+    emitEvent('step.end', { step: s.step, round: s.round, status });
+  };
+  /** @param {number} step @param {number} round */
+  const beginStep = (step, round) => {
+    closeStep('next');
+    openStep = { step, round };
+    emitEvent('step.start', { step, round });
+  };
   // safeBudget 恒用：即使用户显式 contextBudget 也套「窗口−输出−余量」上限与 75% 舒适区，
   // 防显式值撑爆窗口（本地模型窗口可能只有 32k/131k，用户却留了默认 128000）。
   const safeB = safeBudget(cfg, caps);
@@ -595,6 +663,14 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       zeroToolCalls: ensureZeroToolCallNotice(),
     });
     let aborted = false;
+    // v0.7.0 §1.1：中断事件只写一次（SIGINT 可能在思考/工具/权限询问期间到达）。
+    // toolCallIds 交给 replay 延迟补占位：随后 message.append 若已含占位，不会重复。
+    let interruptEmitted = false;
+    const emitInterruptOnce = (/** @type {string} */ reason) => {
+      if (interruptEmitted) return;
+      interruptEmitted = true;
+      emitEvent('interrupt', { reason, toolCallIds: missingToolCallIds(messages) });
+    };
     // 连续空/截断输出计数（防止无限续写）。v0.6.28（M-10）：**必须真的复位**——
     // 有进展的工具轮（成功且不重复，与看门狗同判据）与有内容的模型轮都会清零，
     // 否则「3 次非连续空轮」会被误判成「连续 3 轮」而中止（文案与实现的判据必须一致）。
@@ -634,7 +710,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
     // A1：本回合的剥描述冻结快照（会话级 usedToolNames 的副本）——回合内 schema 字节不变
     const turnStrippedSet = new Set(usedToolNames);
     // 整个回合注册一次 SIGINT：思考、工具执行、权限询问期间都能中断
-    const offSigint = io.onSigint ? io.onSigint(() => { aborted = true; currentAc?.abort(); }) : () => {};
+    const offSigint = io.onSigint ? io.onSigint(() => { aborted = true; emitInterruptOnce('sigint'); currentAc?.abort(); }) : () => {};
     // ---- v0.6.13（A）：回合级进度快照 + 无进展看门狗 ----
     // 快照挂在 io 上：WebUI 服务端（src/web/server.js）每 5s 读它下发状态条、每 30s 落一行日志。
     // 这里不改 web-io.js 的接口（它不在本次改动面内），字段是"只读约定"。
@@ -937,6 +1013,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       // recordUsage，长任务期间「今日费用」恒为 0 被误读为「无统计」；中断时已完成轮次费用也保留）。
       const roundUsageStart = { prompt_tokens: usage.prompt_tokens, completion_tokens: usage.completion_tokens, prompt_cache_hit_tokens: usage.prompt_cache_hit_tokens || 0, prompt_cache_miss_tokens: usage.prompt_cache_miss_tokens || 0 };
       while (steps < stepLimit) {
+      beginStep(steps + 1, round + 1);
       steps += 1;
       // v0.6.28（L-13）：`finish` 是**本次模型请求**的 finish_reason，不是回合级状态。
       // 每步开始重置，且只由本步的 res.finish 写入（见下方赋值）——否则上一轮 length/capped
@@ -1011,6 +1088,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             try {
               onCompact?.(messages);
             } catch {}
+            // v0.7.0 §1.1：compact 事件携带压缩后的**完整基线**——重放据此整体替换，
+            // 与 onCompact 把同一份 messages 重写进 .jsonl 是同一事实。
+            emitEvent('compact', { droppedCount: compacted.droppedCount, droppedTokens: compacted.droppedTokens, messages });
           }
         } catch {}
       }
@@ -1505,6 +1585,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           }
         }
       }
+      // v0.7.0 §1.1：本步模型用量（逐轮，便于与 message/tool 事件对齐）
+      if (res.usage) emitEvent('usage', { model: activeModel, round, step: steps, usage: res.usage, total: { ...usage } });
 
       if (res.toolCalls?.length) {
         // v0.6.13（A）：本回合 tool_call 计数（界面/日志/收尾提示的单一来源）
@@ -1661,6 +1743,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 后续相同调用直接复用结果（仍逐个回填 tool 消息以保持 tool_call_id 配对）
         async function runTool(/** @type {any} */ prep) {
           io.renderToolStart?.(prep.name, prep.args);
+          // v0.7.0 §1.1：工具边界事件（只记 id/名字/是否命中缓存，不记参数正文）
+          emitEvent('tool.start', { callId: prep.tc?.id ?? null, name: String(prep.name || ''), cached: Boolean(prep.cached) });
           // v0.6.13（A）：登记"正在等待哪个工具"——`task` 子代理/长命令动辄几十分钟，
           // 界面与日志必须能显示"在等谁、等了多久"，否则与卡死无法区分。
           const prevPending = turnProgress.pendingTool;
@@ -1725,6 +1809,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           else turnProgress.unproductive += 1;
           // v0.6.28（M-10）：有进展的工具轮复位空轮计数（失败/重复调用不算进展，与看门狗同判据）。
           if (toolOk && repeatedBefore === 0) emptyRounds = 0;
+          emitEvent('tool.end', { callId: prep.tc?.id ?? null, name: String(prep.name || ''), ok: toolOk, ms, cached: Boolean(prep.cached) });
           // 省钱 B3：逐工具调用/耗时累加（费用二级分账的 byTool 维度）
           const ts = toolStats.get(prep.name) || { calls: 0, ms: 0 };
           ts.calls += 1;
@@ -1799,6 +1884,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
 
         // 拒绝项（参数解析失败/钩子阻止/预设白名单/权限拒绝/领域约束）同样按原序入队。
         // 它们没有执行、没有耗时/账本结果，只回填一条 tool 消息——顺序必须与成功项一致。
+        function emitDeniedToolEvents(/** @type {any} */ prep) {
+          // 拒绝项没有执行/耗时，但同样是「一次工具调用」：补 start/end 让时间线成对。
+          emitEvent('tool.start', { callId: prep.tc?.id ?? null, name: String(prep.name || ''), denied: true });
+          emitEvent('tool.end', { callId: prep.tc?.id ?? null, name: String(prep.name || ''), ok: false, denied: true, ms: 0 });
+        }
+
         function finishDenied(/** @type {any} */ prep) {
           pendingToolMessages.push({
             idx: prep.idx,
@@ -1857,6 +1948,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             for (let idx = 0; idx < prefix.length; idx += 1) await finishTool(prefix[idx].prep, results[idx].r, results[idx].t0);
             for (const b of batch.slice(prefix.length)) {
               if (b.prep.denied != null) {
+                emitDeniedToolEvents(b.prep);
                 finishDenied(b.prep);
                 continue;
               }
@@ -1866,6 +1958,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           } else {
             for (const b of batch) {
               if (b.prep.denied != null) { // 拒绝/失败成员：只入队，不执行
+                emitDeniedToolEvents(b.prep);
                 finishDenied(b.prep);
                 continue;
               }
@@ -2239,13 +2332,29 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       turnLearned = { ...freshLearned.record, appliedBudget: freshSafe };
     }
     let r = /** @type {any} */ (null);
+    // v0.7.0 §1.1：turn 边界（双写旁路；cfg.eventLog=false 时 emitEvent 内部直接 no-op）
+    emitEvent('turn.start', { model: modelName, session: sessionRef?.name ?? null, messages: Array.isArray(messages) ? messages.length : 0 });
     try {
       r = await runTurnInner(messages, startBudget);
+    } catch (err) {
+      closeStep('error');
+      emitEvent('turn.end', { status: 'error', error: String(/** @type {any} */ (err)?.message ?? err) });
+      throw err;
     } finally {
       turnLearned = null;
       currentTurnBudget = null;
       currentTurnMaxOutput = null;
     }
+    // 收尾：最后一个 step 也要有 step.end（事件流里不留下永远不结束的 step），再写 turn.end。
+    closeStep(r?.aborted ? 'aborted' : r?.stalled ? 'stalled' : 'completed');
+    emitEvent('turn.end', {
+      status: r?.stalled ? 'stalled' : r?.aborted ? 'aborted' : r?.capHit ? 'capped' : 'done',
+      steps: Number(r?.perf?.steps) || 0,
+      usage: r?.usage ?? null,
+      aborted: Boolean(r?.aborted),
+      capHit: Boolean(r?.capHit),
+      truncated: Boolean(r?.truncated),
+    });
     // v0.6.26 §3.91（端点级学习·上调）：**干净成功**（无内存压缩、无中断/无进展/截断）才计数，
     // 连续 3 次把学习值 +25%（上限 = 用户配置的预算）。上调后若再撞内存墙，
     // 两级压缩仍失败会把它重新学下来——降级与恢复都基于真实结果。

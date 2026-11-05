@@ -30,8 +30,10 @@ const LIMIT = 500;
  * 以后谁把它改回去（或让任何函数变长）都会被行数 ratchet 抓住。
  */
 const ALLOWED_LONG_FUNCTIONS = {
-  'src/agent.js::createAgent': 2177,
-  'src/agent.js::runTurnInner': 1718,
+  // v0.7.0 §1.1 切片 A：事件双写（turn/step/tool/usage/compact/interrupt）在 createAgent /
+  // runTurnInner 内新增了边界写入；行数按实测同步，之后仍只许降不许升。
+  'src/agent.js::createAgent': 2265,
+  'src/agent.js::runTurnInner': 1743,
   'src/web/server.js::runWebServer': 1007,
   'src/web/server.js::handleChat': 695,
   'src/commands/repl.js::runRepl': 687,

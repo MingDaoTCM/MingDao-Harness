@@ -3,6 +3,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { appendEvent, eventFileFor, eventLogEnabled, isEventLogName, warnEventFailure } from './session-events.js';
 
 // —— 冲突备份名（单一事实来源，v0.4.6）——
 // 同步冲突时写入的备份：<会话名>.server-<时间戳>[-<随机后缀>].jsonl（远端版本）与 .remote-（远端拉取版本）。
@@ -44,7 +45,9 @@ export function listSessionsDetailed(home) {
   }
   for (const f of entries) {
     // 冲突备份不是会话：排除后不再出现在会话列表/最近会话/搜索/云同步推送集合中
-    if (!f.endsWith('.jsonl') || isConflictBackupName(f)) continue;
+    // v0.7.0 §1.1：事件侧车 `<session>.events.jsonl` 不是会话——必须排除，否则它会变成
+    // 「没有消息的幽灵会话」，甚至因 mtime 更新而抢走 latestSession()。旧会话行为不变。
+    if (!f.endsWith('.jsonl') || isEventLogName(f) || isConflictBackupName(f)) continue;
     const file = path.join(dir, f);
     try {
       list.push({ file, name: f, mtime: fs.statSync(file).mtimeMs });
@@ -116,12 +119,46 @@ export function stampMessageTs(messages, now = new Date()) {
   return messages;
 }
 
+/**
+ * v0.7.0 §1.1：会话消息的**双写**（消息文件写完之后的旁路）。
+ *
+ * 纪律：会话文件已经落盘，这里任何失败都只 warn 并返回；**绝不改变 appendMessages 的结果**，
+ * 也绝不把异常抛给调用方。`cfg.eventLog=false` 由 agent 侧把进程开关关掉，这里自然一并停止。
+ * @param {any} file
+ * @param {any[]} messages
+ */
+function doubleWriteSessionEvents(file, messages) {
+  if (!eventLogEnabled()) return;
+  const eventFile = eventFileFor(file);
+  if (!eventFile) return;
+  try {
+    // 事件流的第一条：只在文件尚不存在时写一次（并发下最多重复一条 session.start，无害）。
+    if (!fs.existsSync(eventFile)) {
+      const start = appendEvent(eventFile, { type: 'session.start', data: { session: path.basename(String(file)) } });
+      if (!start.ok) {
+        warnEventFailure(eventFile, start.error ?? null);
+        return;
+      }
+    }
+    for (const m of messages) {
+      const r = appendEvent(eventFile, { type: 'message.append', data: { message: m } });
+      if (!r.ok) {
+        warnEventFailure(eventFile, r.error ?? null);
+        return; // 写不进去就停：后面的每一条都只会重复同一条告警
+      }
+    }
+  } catch (err) {
+    warnEventFailure(eventFile, String(/** @type {any} */ (err)?.message ?? err));
+  }
+}
+
 /** @param {any} file @param {any} messages */
 export function appendMessages(file, messages) {
   if (!messages?.length) return;
   stampMessageTs(messages); // 单一来源：所有写入路径在这里补 ts（已有 ts 不覆盖）
   const lines = messages.map((/** @type {any} */ m) => JSON.stringify(m)).join('\n') + '\n';
   appendFilePrivateSync(file, lines);
+  doubleWriteSessionEvents(file, messages); // 旁路：失败只 warn，不影响上面的会话写入
 }
 
 // 整文件原子重写：自动压缩后把会话文件同步为压缩形态（否则每次加载历史都会重新触发压缩）

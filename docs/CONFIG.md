@@ -27,7 +27,8 @@
 
 可选字段：`temperature`、`maxOutputTokens`、`includeUsage`（流式请求 usage 统计，个别网关不支持
 `stream_options` 时设 `false`）、`autoTitle`（自动生成会话标题，默认开）、`notify`（任务桌面通知，默认开）、
-`autoCompact`（上下文自动压缩，默认开，见下）、`audit`（工具调用审计，默认开，见下）。
+`autoCompact`（上下文自动压缩，默认开，见下）、`audit`（工具调用审计，默认开，见下）、
+`eventLog`（会话事件日志双写，默认开，见下）。
 
 ### WebUI 设置项的「默认值」列（只读，不落盘）
 
@@ -84,6 +85,26 @@ MingDao 先用 executor 模型（路由关闭时为当前模型）把被裁段�
 （`~/.mingdao/sessions-index/` 分片目录，v0.2.8 起按会话名 sha1 前 2 位分 256 片）：
 中文按 bigram+单字、英文按词，多词 AND 匹配；只有内容变化（mtime/size）的会话才重新
 分词，删除的会话自动清出索引。索引目录可随时删除（下次搜索自动重建）。
+
+## 会话事件日志（v0.7.0 §1.1）
+
+每个会话在消息文件旁多一条 append-only 的事件流 `<session>.events.jsonl`（0600，与
+`<session>.jsonl` 同级）：每条 `{seq,time,type,data}`，seq 单调、是 turn/step/tool/message
+之间的唯一关联键。当前 12 类事件：`session.start` / `turn.start` / `turn.end` / `step.start` /
+`step.end` / `tool.start` / `tool.end` / `message.append` / `usage` / `compact` / `interrupt` /
+`checkpoint`。
+
+- **双写、旁路**：`appendMessages()` 在会话消息落盘**之后**追加 `message.append`；agent 在
+  turn/step/工具/用量/压缩/中断边界追加结构事件。事件日志写失败只 warn，**不影响会话写入**，
+  也不改变 `loadSession()` / `rewriteSession()` 的返回值。
+- **确定性重放**：`replayToMessages(events)` 由事件流派生消息数组（`compact` 重置基线、
+  `interrupt` 补 tool 占位），已对拍单轮 / 工具调用 / 压缩 / 中断四个场景与消息数组 deepEqual。
+- **回滚开关**：`"eventLog": false`（默认开）或环境变量 `MINGDAO_EVENT_LOG=0`。关闭后**完全**
+  停止事件写入（含 `message.append` 双写），会话文件照常写入。
+- **兼容**：旧会话没有 events 文件时读取返回空流；事件侧车不会出现在会话列表/最近会话中；
+  事件文件不参与云同步。SSE 帧与 UI 在本切片**未改**。
+- **已知边界**：手动 `/compact` 走 `rewriteSession` 时没有对应 `compact` 事件；自动标题重命名
+  会话文件不会搬迁事件侧车；这两类留待后续切片（事件日志目前是旁路，不参与既有读取）。
 
 ## 会话级工作空间（P3-4）
 

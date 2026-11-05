@@ -19,6 +19,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const srcDir = path.join(root, 'src');
 const E = await import(pathToFileURL(path.join(srcDir, 'session-events.js')).href);
+const S = await import(pathToFileURL(path.join(srcDir, 'session.js')).href);
+const A = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
+const C = await import(pathToFileURL(path.join(srcDir, 'config.js')).href);
+const { createIO } = await import(pathToFileURL(path.join(srcDir, 'ui.js')).href);
 
 const base = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-session-events-'));
 process.env.MINGDAO_HOME = path.join(base, 'home');
@@ -368,6 +372,196 @@ for (let i = 0; i < 10; i += 1) {
   );
   assert.deepEqual(E.deriveTurnSummaries([]), [], '空事件流派生空摘要');
   ok('⑰ deriveTurnSummaries：步数/工具数/用量/turn 边界全部从事件推导');
+}
+
+
+// ---------- 10. 双写接线：会话消息落盘后追加 message.append（重放对拍） ----------
+{
+  const file = path.join(process.env.MINGDAO_HOME || '', 'sessions', 'wired.jsonl');
+  const msgs = [
+    { role: 'user', content: '双写测试：你好' },
+    { role: 'assistant', content: '双写测试：你好！' },
+  ];
+  S.appendMessages(file, msgs);
+  const eventFile = E.eventFileFor(file);
+  assert.equal(fs.existsSync(eventFile), true, 'appendMessages 必须创建事件侧车 <session>.events.jsonl');
+  const read = E.readEvents(eventFile);
+  assert.equal(read.ok, true, '双写后事件文件必须可读');
+  assert.equal(read.skipped, 0, '双写的事件文件不得有坏行');
+  assert.equal(read.events[0].type, 'session.start', '事件流第一条必须是 session.start');
+  assert.deepEqual(
+    read.events.filter((e) => e.type === 'message.append').map((e) => e.data.message.role),
+    ['user', 'assistant'],
+    'appendMessages 必须为每条消息追加一条 message.append（顺序不变）'
+  );
+  const loaded = S.loadSession(file).messages;
+  assert.deepEqual(
+    E.replayToMessages(read.events),
+    loaded,
+    '双写对拍：replayToMessages(事件流) 必须与 loadSession(会话文件) 的消息数组 deepEqual'
+  );
+  ok('⑱ 双写：appendMessages 追加 message.append，重放结果与 loadSession 逐字节 deepEqual');
+}
+
+// ---------- 11. 旧会话（没有 events 文件）与既有读取路径完全不受影响 ----------
+{
+  const oldFile = path.join(process.env.MINGDAO_HOME || '', 'sessions', 'legacy.jsonl');
+  const legacy = [{ role: 'system', content: '旧 system' }, { role: 'user', content: '旧问题' }, { role: 'assistant', content: '旧回答' }];
+  fs.writeFileSync(oldFile, legacy.map((m) => JSON.stringify(m)).join('\n') + '\n');
+  const missingName = E.eventFileFor(oldFile);
+  assert.equal(fs.existsSync(missingName), false, '夹具前提：旧会话没有事件侧车');
+  const read = E.readEvents(missingName);
+  assert.equal(read.ok, true, '旧会话没有 events 文件时 readEvents 必须成功返回空流');
+  assert.deepEqual(read.events, [], '旧会话没有 events 文件时必须返回空事件数组');
+  assert.equal(read.skipped, 0, '旧会话没有 events 文件时 skipped=0');
+  assert.deepEqual(E.replayToMessages([]), [], '旧会话空事件流重放必须为空数组');
+  const loaded = S.loadSession(oldFile);
+  assert.deepEqual(loaded.messages, legacy, '旧会话读取路径必须完全不受事件日志影响（内容/顺序/无 ts 回填）');
+  assert.equal(loaded.file, oldFile, 'loadSession 返回值形状不变');
+  ok('⑲ 旧会话（无 events 文件）：readEvents 为空、replay 为空、loadSession 原样返回');
+}
+
+// ---------- 12. 事件侧车不得污染会话列表 / 最近会话 ----------
+{
+  const name = path.basename(E.eventFileFor(path.join(process.env.MINGDAO_HOME || '', 'sessions', 'listed.jsonl')));
+  S.appendMessages(path.join(process.env.MINGDAO_HOME || '', 'sessions', 'listed.jsonl'), [{ role: 'user', content: '列表测试' }]);
+  const listed = S.listSessions(process.env.MINGDAO_HOME || '').map((s) => s.name);
+  assert.equal(listed.includes(name), false, '事件侧车不得出现在会话列表（它不是会话）');
+  assert.equal(listed.some((n) => n.endsWith('.events.jsonl')), false, '任何 .events.jsonl 都不得被当成会话');
+  const latest = S.latestSession(process.env.MINGDAO_HOME || '');
+  assert.ok(!String(latest?.name || '').endsWith('.events.jsonl'), '事件侧车不得抢占 latestSession（mtime 更新也不行）');
+  ok('⑳ 事件侧车被会话列表/最近会话排除（旧会话列表行为不变）');
+}
+
+// ---------- 13. 开关：cfg.eventLog=false / 进程开关 / 环境变量 ----------
+{
+  assert.equal(E.eventLogEnabled({ eventLog: false }), false, 'cfg.eventLog=false 必须关闭事件日志');
+  assert.equal(E.eventLogEnabled({ eventLog: true }), true, 'cfg.eventLog=true 必须开启（默认开）');
+  assert.equal(E.eventLogEnabled({}), true, '未配置 eventLog 时默认开');
+  E.setEventLogEnabled(false);
+  const offFile = path.join(base, 'switch-off.jsonl');
+  S.appendMessages(offFile, [{ role: 'user', content: '开关关闭' }]);
+  assert.equal(fs.existsSync(E.eventFileFor(offFile)), false, '开关关闭时必须完全停止事件写入（不得留下半份事件流）');
+  assert.equal(S.loadSession(offFile).messages.length, 1, '开关关闭不影响会话消息写入');
+  E.setEventLogEnabled(true);
+  const onFile = path.join(base, 'switch-on.jsonl');
+  S.appendMessages(onFile, [{ role: 'user', content: '开关打开' }]);
+  assert.equal(fs.existsSync(E.eventFileFor(onFile)), true, '开关恢复后必须重新双写');
+  ok('㉑ 开关：cfg.eventLog=false / setEventLogEnabled(false) 完全停止双写，会话写入不受影响');
+}
+
+{
+  const envFile = path.join(base, 'switch-env.jsonl');
+  const prev = process.env.MINGDAO_EVENT_LOG;
+  process.env.MINGDAO_EVENT_LOG = '0';
+  try {
+    assert.equal(E.eventLogEnabled({}), false, 'MINGDAO_EVENT_LOG=0 必须关闭事件日志');
+    S.appendMessages(envFile, [{ role: 'user', content: '环境变量关闭' }]);
+    assert.equal(fs.existsSync(E.eventFileFor(envFile)), false, 'MINGDAO_EVENT_LOG=0 时必须完全停止事件写入');
+  } finally {
+    if (prev === undefined) delete process.env.MINGDAO_EVENT_LOG;
+    else process.env.MINGDAO_EVENT_LOG = prev;
+  }
+  assert.equal(E.eventLogEnabled({}), true, '恢复环境变量后事件日志重新启用');
+  ok('㉒ 环境变量 MINGDAO_EVENT_LOG=0 是独立回滚开关（不依赖改 config）');
+}
+
+// ---------- 12b. config.eventLog=false 经 loadConfig 生效（Web 先落盘、后建 agent 的顺序也不漏） ----------
+{
+  const home = process.env.MINGDAO_HOME || '';
+  const cfgFile = path.join(home, 'config.json');
+  fs.writeFileSync(cfgFile, JSON.stringify({ provider: 'deepseek', eventLog: false }) + '\n');
+  const cfg = C.loadConfig();
+  assert.equal(cfg.eventLog, false, '夹具：loadConfig 必须读回 eventLog=false');
+  assert.equal(E.eventLogEnabled(), false, 'loadConfig 必须把 config.eventLog=false 同步到事件日志进程开关');
+  const offFile = path.join(base, 'config-off.jsonl');
+  S.appendMessages(offFile, [{ role: 'user', content: '配置关闭' }]);
+  assert.equal(fs.existsSync(E.eventFileFor(offFile)), false, 'config.eventLog=false 时 appendMessages 必须完全停止事件写入');
+  fs.writeFileSync(cfgFile, JSON.stringify({ provider: 'deepseek', eventLog: true }) + '\n');
+  C.loadConfig();
+  assert.equal(E.eventLogEnabled(), true, 'config.eventLog=true 必须重新开启事件日志');
+  ok('㉓ config.eventLog=false 经 loadConfig 生效（先落盘、后建 agent 的路径不漏）');
+}
+
+// ---------- 13b. agent 事件边界：turn/step/tool/usage 都写进同一条事件流 ----------
+{
+  const work = path.join(base, 'agent-work');
+  fs.mkdirSync(work, { recursive: true });
+  const eventFile = path.join(base, 'agent-boundaries.events.jsonl');
+  let call = 0;
+  const provider = {
+    async chat() {
+      call += 1;
+      if (call === 1) {
+        return {
+          text: '',
+          toolCalls: [{ id: 'call_evt_1', type: 'function', function: { name: 'write', arguments: JSON.stringify({ path: 'event-proof.txt', content: 'ok' }) } }],
+          usage: { prompt_tokens: 7, completion_tokens: 3 },
+          finish: 'tool_calls',
+        };
+      }
+      return { text: '完成', toolCalls: null, usage: { prompt_tokens: 8, completion_tokens: 4 }, finish: 'stop' };
+    },
+  };
+  const agent = A.createAgent({
+    provider,
+    permission: { async check() { return true; } },
+    io: createIO({ quiet: true }),
+    modelName: 'deepseek-v4-flash',
+    workingDir: work,
+    cfg: { permission: 'auto', eventFile, eventLog: true },
+    sessionRef: { name: 'agent-boundaries.jsonl' },
+    maxSteps: 5,
+  });
+  const messages = [
+    { role: 'system', content: '系统' },
+    { role: 'user', content: '写一个文件' },
+  ];
+  await agent.runTurn(messages);
+  const read = E.readEvents(eventFile);
+  assert.equal(read.ok, true, 'agent 事件流必须可读');
+  const types = read.events.map((e) => e.type);
+  for (const t of ['turn.start', 'step.start', 'tool.start', 'tool.end', 'usage', 'step.end', 'turn.end']) {
+    assert.ok(types.includes(t), `agent 事件边界必须写入 ${t}（实际：${types.join(',')}）`);
+  }
+  assert.ok(types.indexOf('turn.start') < types.indexOf('step.start'), 'turn.start 必须早于 step.start');
+  assert.ok(types.indexOf('tool.start') < types.indexOf('tool.end'), 'tool.start 必须早于 tool.end');
+  assert.ok(types.indexOf('step.end') < types.indexOf('turn.end'), 'step.end 必须早于 turn.end');
+  const usage = read.events.find((e) => e.type === 'usage');
+  assert.equal(usage.data.usage.prompt_tokens, 7, 'usage 事件必须携带本步真实用量');
+  ok('㉔ agent 事件边界：turn/step/tool/usage 成对写入且顺序正确');
+}
+
+// ---------- 14. 双写失败不得影响会话写入（注入 EACCES） ----------
+{
+  const file = path.join(base, 'doublewrite-fail.jsonl');
+  // 预置空事件文件：跳过 session.start 分支，确保失败发生在 message.append 双写路径上。
+  fs.writeFileSync(E.eventFileFor(file), '');
+  const realAppend = fs.appendFileSync;
+  const warns = [];
+  const realWarn = console.warn;
+  console.warn = (...a) => warns.push(a.join(' '));
+  fs.appendFileSync = function (/** @type {any} */ p, /** @type {any} */ ...args) {
+    if (String(p).includes('.events.jsonl')) {
+      const err = new Error('injected EACCES for ' + String(p));
+      /** @type {any} */ (err).code = 'EACCES';
+      throw err;
+    }
+    return /** @type {any} */ (realAppend).call(fs, p, ...args);
+  };
+  try {
+    assert.doesNotThrow(() => {
+      S.appendMessages(file, [{ role: 'user', content: '事件写失败但会话必须成功' }]);
+    }, '双写失败绝不能影响会话写入');
+  } finally {
+    fs.appendFileSync = realAppend;
+    console.warn = realWarn;
+  }
+  const lines = fs.readFileSync(file, 'utf8').trim().split('\n');
+  assert.equal(lines.length, 1, '双写失败时会话文件仍必须写成功（1 条消息）');
+  assert.equal(JSON.parse(lines[0]).content, '事件写失败但会话必须成功', '会话写入内容必须完整');
+  assert.ok(warns.some((w) => w.includes('⚠') && w.includes('事件日志写入失败')), '双写失败必须有可见 warn（不能静默）');
+  ok('㉕ 双写失败注入（EACCES）：不抛、会话写入成功、warn 可见');
 }
 
 console.log(`\nsession-events：${passed} 项全部通过`);
