@@ -61,6 +61,10 @@ const SUITES = [
   ['viewmodel', 'node', ['test/viewmodel.js']],
   // v0.7.0 §1.5：文案/预测层（从 agent.js 切出到 messages.js，行为逐字不变）
   ['messages', 'node', ['test/messages.js']],
+  // v0.7.0 §1.5：server.js 切块后的两块（auth / provider-cache）+ 结构上限守卫
+  ['web-auth', 'node', ['test/web-auth.js']],
+  ['provider-cache', 'node', ['test/provider-cache.js']],
+  ['structure-limits', 'node', ['test/structure-limits.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];
