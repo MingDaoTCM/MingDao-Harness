@@ -3,13 +3,75 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.37（2026-11-06）— v0.6.36 内容首发；修复 macOS runner 退役、Windows CLI 守卫与事件锁 EPERM
+
+> **v0.6.36 未发布。** tag `v0.6.36`（提交 `9afae53`）已推三平台，但 GitHub 于 **2026-11-02 退役 macOS 14
+> runner 镜像**，两个 mac 构建 job 在 1 秒内 cancelled（`The configuration 'macos-14-arm64-us-default'
+> is not supported`），`publish` 因此 skipped——**没有 GitHub Release、没有 npm 包、官网未改、无任何下载**。
+> 按「tag 打过不再移动」的纪律，本版从 `929409b` 以 **0.6.37** 发布，内容 = v0.6.36 全部 + 三处修复 + 国内镜像。
+> 完整说明见 `RELEASE-NOTES-0.6.37.md`。
+
+### 一、v0.6.36 内容（本版首次实际发布）
+
+- **更新来源签名密钥环**（`70613cd`）：`UPDATE_PUBLIC_KEYS` 内置旧钥 `legacy-2025` + 新钥 `2026-11`，
+  `verifyArtifactSignatureWithKeyring()` 任一验过即通过并返回 `keyId`；本版仍**不发布** `.sig`（下一版签发）。
+- **签名脚本**（`70613cd`）：`scripts/sign-release-assets.mjs` 只签安装包与 `latest*.yml`，产物
+  `ed25519:<base64>`，缺私钥 CLI 非零退出；规程见 `docs/CODE-SIGNING.md §六`。
+- **弹窗文案分层**（`70613cd`、`3406ae6`）：两行内写明「Apple 公证不受影响；未接入的是更新来源签名」，
+  防再被读成「没签名/没公证」。
+- **测试基础设施修复**（`c9b86d8`）：补齐 `batch47/54/67/77` 缺失的 `M.report()` 收尾（此前这 4 批
+  「永远不会红」）+ `batch77 ⑧` 锚点跟随 + `run.mjs` 开跑前结构预检；全量变异 **66/66 批、735 条**为有效判定。
+- **官网 404 与收割**（站点仓 `7ad37a9`、`b704ed6`）：`/downloads/` 与 `/updates/` 缺失文件由
+  「200 + HTML」改为**真 404**；harvest 新增 `HARVEST_PROXY` 与断点续传，633MB 由 1.5–6 小时降到 **<3 分钟**。
+- **深圳拨测 / 备份节点**（`6891756`）：`deploy/nodes/mdh-probe.py` 大陆视角拨测 + `mdh-backup.sh`
+  异地备份，说明见 `docs/DEPLOY-NODES.md`。
+
+### 二、v0.6.37 修复（v0.6.36 卡住的根因）
+
+1. **macOS runner 退役（外部）**：`desktop.yml` 两个 mac job `macos-14` → **`macos-15`**（同为 arm64 公共池，
+   Intel 仍 Rosetta 交叉构建 x64）。见 GitHub Actions macOS 14 runner image retirement（2026-10-01 公告，
+   2026-11-02 退役）。
+2. **Windows CLI 守卫 bug**：`scripts/sign-release-assets.mjs` 用 `file://${process.argv[1]}` 判断
+   「是否被当脚本执行」，Windows 上 `D:\…` 拼出的 URL 与 `file:///D:/…` **永不相等** → CLI 整段不执行、
+   静默 exit 0。改用 `pathToFileURL(process.argv[1]).href`；这正是 Windows 腿 `update-signing ⑦b` 红、
+   `batch77 ⑦` 逃逸的根因。
+3. **事件日志锁的 Windows 语义**：`openSync(lock,'wx')` 在「锁已被别人创建」时 Windows 可能报 **EPERM**
+   而非 EEXIST；`src/session-events.js` 现把 EEXIST/EPERM/EACCES/EBUSY 统一按竞争处理（仍有超时兜底），
+   修掉 Windows 腿 `batch76` 的 5 条逃逸。
+4. **CI 覆盖**：`update-signing` 步骤从「只 Linux」改为 **Linux + Windows**——它正是靠 Windows 路径才抓出
+   上述 CLI bug，只在 Linux 跑等于永不发现。
+
+### 三、国内镜像上线（`929409b`）
+
+- **`https://harness.southdns.com`**（深圳节点 + 已备案域名）：`/downloads/` 反代香港源站 +
+  **nginx 本地缓存**（8G / 30 天淘汰，`proxy_force_ranges on` 支持续传）；`/updates/` 直通、`no-store`；
+  缺文件 **404 透传**；Let's Encrypt 证书 + `certbot.timer` 自动续期（`renew --dry-run` 已过）。
+- 实测：首页 151ms、feed 324ms、首次拉 97.5MB **6.9 秒**（~14MB/s）、二次 `X-MDH-Cache: HIT`、
+  `/downloads/nope.dmg` → **404**；拨测新增 `mirror_home` / `mirror_feed` / `mirror_range`。
+
+### 四、门禁（`929409b`）
+
+- typecheck **0** / typecheck:strict **0**（基线 0）；smoke **156 组**通过；run-all **35/35**；doc-lint 全绿；
+  全量变异 **66/66 批、735 条全中（有效判定，0 逃逸）**；`npm run coverage` exit 0（只报告，code-lines 69.4%）；
+  `diagnose` exit 0（已脱敏）。发布树 5 张截图 sha256 与 v0.6.35 逐字节一致（前端零改动）。
+
+### 五、未做
+
+- **本版不发布 `.sig`**：`UPDATE_SIGNING_ENABLED` 保持关闭，`/updates/*.sig` 不应存在（下一版才签发）。
+- **Windows 代码签名仍未接入**（Authenticode），与更新来源签名是两件事。
+- v0.6.36 的 tag 保留（公开事实），但**无 Release / 无 npm / 无下载**；其内容随本版首发。
+
+
 ## v0.6.36（2026-11-06）— 更新来源签名密钥环与文案分层（仍不发布 `.sig`）；官网 404 修复
+
+> **⚠ 未发布（2026-11-06）。** tag `v0.6.36`（`9afae53`）已推三平台，但 GitHub 退役 macOS 14 runner，
+> mac 构建 job 全部 cancelled、Release 未创建；npm/官网/镜像均未发布。内容随 **v0.6.37** 首发。
 
 > **无产品行为变化。** 核心是给下一版签发更新来源签名铺路：本版先让客户端内置**新旧两把公钥**
 > （密钥环），仍**不发布**任何 `.sig`；弹窗只改文案，把「Apple 公证」与「更新来源签名」分开。
 > 另含站点仓的 nginx 404 修复与收割脚本代理/续传、深圳拨测/备份节点文档，以及一处**测试基础设施修复**
 > （4 个"永远不会红"的变异批次 + 结构性预检）。除测试外均不改产品代码。
-> 完整说明见 `RELEASE-NOTES-0.6.36.md`。
+> 完整说明见 `RELEASE-NOTES-0.6.37.md`（v0.6.36 说明已并入本版）。
 
 ### 一、更新来源签名密钥环（`70613cd`）
 
