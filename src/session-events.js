@@ -126,7 +126,14 @@ function withAppendLock(file, fn) {
         } catch {}
       }
       const code = String(/** @type {any} */ (err)?.code || '');
-      if (code !== 'EEXIST') throw err;
+      // v0.6.37：Windows 上 `openSync(lock,'wx')` 在"锁已被别人创建"时**不一定**报 EEXIST——
+      // 实测 8 进程并发会得到 `EPERM: operation not permitted, open '…concurrent.events.ndjson.lock'`
+      // （NTFS/FAT 的 O_EXCL 语义差异）。此前只把 EEXIST 当"有人持锁"→ EPERM 直接上抛，
+      // Windows 腿的 `batch76`（session-events 并发用例）因此 7/12、5 条逃逸。
+      // 处理：把 EPERM/EACCES/EBUSY 一并视为"有竞争"，走同一套超时/陈旧回收/退避逻辑；
+      // 真正的权限错误仍会在超时后以明确的超时信息暴露（不会永远静默重试）。
+      const RETRYABLE = new Set(['EEXIST', 'EPERM', 'EACCES', 'EBUSY']);
+      if (!RETRYABLE.has(code)) throw err;
       // 崩溃残留：临界区毫秒级，超过 10s 的锁不可能是活写方；二次 stat 防误删刚建的新锁。
       if (reclaimStaleAppendLock(lock)) continue;
       if (Date.now() > deadline) throw new Error(`获取事件追加锁超时：${lock}`);

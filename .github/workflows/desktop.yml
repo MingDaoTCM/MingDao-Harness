@@ -28,12 +28,16 @@ jobs:
           - os: windows-latest
             args: --win nsis
             name: win-x64
-          # macos-13 公共池已基本退役（排队数小时），Intel 版改用 macos-14(arm64) + Rosetta 交叉构建 x64
+          # v0.6.37：GitHub 已于 2026-11-02 退役 macOS 14 runner 镜像
+          # （公告：https://github.blog/changelog/2026-10-01-github-actions-macos-14-runner-image-retirement/），
+          # 用 macos-14 的 job 会在 1 秒内被 cancelled（`The configuration 'macos-14-arm64-us-default' is not supported`），
+          # 且**不报"配置错误"以外任何信息**——0.6.36 因此卡在构建阶段（Windows/Linux 成功、mac 无产物、publish skipped）。
+          # 改用 macos-15（同为 arm64 公共池），Intel 版仍用 Rosetta 交叉构建 x64。
           # zip 供自动更新（MacUpdater 全量/差分下载），dmg 供手动安装
-          - os: macos-14
+          - os: macos-15
             args: --mac dmg zip --x64
             name: mac-x64
-          - os: macos-14
+          - os: macos-15
             args: --mac dmg zip
             name: mac-arm64
     runs-on: ${{ matrix.os }}

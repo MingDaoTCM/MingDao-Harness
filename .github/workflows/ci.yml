@@ -502,8 +502,10 @@ jobs:
           fi
           exit $code
       - name: 更新来源签名（v0.6.36：密钥环 / 签名脚本 / 文案分层）
-        # 只挂 Linux 腿：纯函数 + 临时目录（自生成测试密钥，不接触发布私钥）。
-        if: runner.os == 'Linux'
+        # v0.6.37：**必须也挂 Windows**——本套件里有一条跑 CLI 的断言，正是它在 Windows 上
+        # 抓出了 `file://${argv[1]}` 的路径拼接 bug（Linux 上恰好成立，所以只在 Linux 跑等于永不发现）。
+        # 纯函数 + 临时目录（自生成测试密钥，不接触发布私钥），mac 腿跳过以省额度。
+        if: runner.os != 'macOS'
         shell: bash
         run: |
           set +e

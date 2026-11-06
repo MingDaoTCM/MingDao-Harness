@@ -13,6 +13,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 /** 需要签名的产物扩展名（安装包本体）。更新清单 latest*.yml 也签。 */
 const ARTIFACT_EXT = /\.(exe|dmg|zip|AppImage|deb)$/i;
@@ -84,7 +85,12 @@ export function loadSigningKey({ keyFile, keyPem } = /** @type {any} */ ({})) {
 }
 
 // CLI
-if (import.meta.url === `file://${process.argv[1]}`) {
+// v0.6.37：**不要**用 `file://${process.argv[1]}` 判"是不是被当脚本执行"——
+// Windows 上 argv[1] 是 `D:\a\repo\...`，拼出来是 `file://D:\a\...`，而 import.meta.url 是
+// `file:///D:/a/...`（多一个斜杠、反斜杠归一化）→ 永不相等 → CLI 整段不执行、静默 exit 0。
+// 后果：Windows CI 上 `test/update-signing.js ⑦b`（CLI 无密钥必须非零退出）红、`batch77 ⑦` 逃逸。
+// 正确做法是用 pathToFileURL() 做同一套归一化。
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
   const args = process.argv.slice(2);
   const dir = args.find((a) => !a.startsWith('--')) || 'dist';
   const outIdx = args.indexOf('--out');
