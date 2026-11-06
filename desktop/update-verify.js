@@ -326,7 +326,7 @@ export function buildUpdateNotice({ decision, version, keyId, reason }) {
     message: `MingDao Harness v${v} 下载完成，重启应用即可完成更新`,
     detail:
       '本次更新未验证来源签名（发布链路下一版接入）——已按默认策略安装；' + platformHint + '。\n' +
-      '它防的是"更新源被投毒"；高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝无签名更新。',
+      '它防的是"更新源被投毒"；高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝；详情见日志与官网。',
     buttons: ['立即重启安装', '稍后'],
     defaultId: 0,
     cancelId: 1,
