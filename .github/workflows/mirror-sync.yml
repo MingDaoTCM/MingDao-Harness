@@ -25,6 +25,8 @@ jobs:
     permissions:
       contents: read
     steps:
+      - uses: actions/checkout@v4
+
       - name: 下载 Release 资产
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -33,46 +35,25 @@ jobs:
           TAG="${{ inputs.tag }}"
           mkdir -p dist
           gh release download "$TAG" -R "${{ github.repository }}" -D dist --clobber
-          echo "资产数：$(ls dist | wc -l)"
-          du -sh dist
+          echo "资产数：$(ls dist | wc -l)"; du -sh dist
 
-      - name: 推送到源站
+      - name: 上传到 OSS（香港）
         env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
+          OSS_BUCKET: ${{ secrets.OSS_BUCKET }}
+          OSS_ENDPOINT: ${{ secrets.OSS_ENDPOINT }}
+          OSS_AK: ${{ secrets.OSS_AK }}
+          OSS_SK: ${{ secrets.OSS_SK }}
         run: |
           set -euo pipefail
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
-          SSH="ssh -i ~/.ssh/deploy -o StrictHostKeyChecking=no -o ConnectTimeout=20"
-          $SSH "$DEPLOY_USER@$DEPLOY_HOST" 'echo connected; df -h / | tail -1'
-          # 只同步安装包与 blockmap 到 downloads/；清单由服务器侧 feed 生成器重建，不从 CI 拷
-          set +e
-          scp -i ~/.ssh/deploy -o StrictHostKeyChecking=no -C \
-            dist/*.exe dist/*.dmg dist/*.zip dist/*.AppImage dist/*.deb dist/*.blockmap \
-            "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/downloads/" 2>/tmp/scp.err
-          rc=$?
-          set -e
-          if [ $rc -ne 0 ]; then echo "::warning title=scp::$(tail -c 800 /tmp/scp.err)"; fi
+          node scripts/oss-sync.mjs put dist downloads
+          echo "== 回读校验 =="
+          node scripts/oss-sync.mjs ls downloads | tail -5
 
-      - name: 逐文件校验（可选）
-        if: ${{ inputs.verify }}
-        env:
-          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
-          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
-          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
-          DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
+      - name: 冒烟：匿名可下载
         run: |
           set -euo pipefail
-          install -m 700 -d ~/.ssh
-          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
-          SSH="ssh -i ~/.ssh/deploy -o StrictHostKeyChecking=no"
-          ( cd dist && sha256sum *.exe *.dmg *.zip *.AppImage *.deb *.blockmap 2>/dev/null | sort -k2 ) > /tmp/local.sha
-          $SSH "$DEPLOY_USER@$DEPLOY_HOST" "cd $DEPLOY_DIR/downloads && sha256sum *.exe *.dmg *.zip *.AppImage *.deb *.blockmap 2>/dev/null | sort -k2" > /tmp/remote.sha
-          # 远端目录里还留着历史版本，只比对本次上传的文件名
-          cut -d' ' -f2- /tmp/local.sha | while read -r f; do
-            grep -F "  $f" /tmp/remote.sha || { echo "::error title=verify::远端缺少 $f"; exit 1; }
-          done
-          echo "✓ 校验通过（$(wc -l < /tmp/local.sha | tr -d ' ') 个文件）"
+          # 取一个 .dmg 做 1KB Range，确认 bucket 公共读与对象键都正确
+          f=$(ls dist/*.dmg | head -1 | xargs basename)
+          code=$(curl -s -o /dev/null -w '%{http_code}' -r 0-1023 "https://${{ secrets.OSS_BUCKET }}.oss-cn-hongkong.aliyuncs.com/downloads/$f")
+          echo "$f → HTTP $code"
+          [ "$code" = "206" ] || { echo "::error title=oss-smoke::匿名下载失败（HTTP $code）"; exit 1; }
