@@ -27,7 +27,9 @@ M.mutate({
   file: 'src/web/viewmodel.js',
   from: '  const idx = list.findIndex((q) => String(q?.id) === String(id));',
   to: '  const idx = 0;',
-  expect: ['按 id 移除'],
+  // expect 要写**会最先失败的那条**断言：idx=0 时「移除 a」仍恰好得到 [b]（先过的断言抓不住），
+  // 真正暴露的是「移除不存在的 id 不应改变队列」。
+  expect: ['移除不存在的 id'],
   run: RUN,
 });
 
@@ -75,3 +77,6 @@ M.mutate({
   expect: ['chip 序号从 1 开始'],
   run: RUN,
 });
+
+const ok = M.report();
+process.exit(ok ? 0 : 1);
