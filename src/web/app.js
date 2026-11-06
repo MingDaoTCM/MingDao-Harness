@@ -1,6 +1,7 @@
 import { $, esc, highlight, renderMarkdown, scrollBottom, expandableBody, resultText, truncText, textBody, fmtDur, fmtTok, fmtT } from './util.js';
 import { MAX_ATTACHMENTS, MAX_IMAGE_BYTES, MAX_TEXT_BYTES } from './constants.js';
 import { sideNavBreakpoint, sideNavLayout, errCardParts, runStripView, permissionSourceLabel, toolStepView, toolTimelineSummary, toolTimelineVisibility, traceRoundView } from './viewmodel.js';
+import { enqueueMessage, dequeueMessage, shouldDrainQueue, queueView, QUEUE_MAX } from './viewmodel.js';
 
 // 访问令牌（P1-3）：地址带 ?token= 时记入 sessionStorage 并从地址栏移除（防截图/历史外泄），
 // 之后所有同源请求统一附加 X-MingDao-Token 头；无令牌时行为与旧版一致。
@@ -718,16 +719,72 @@ function renderAttachments(){
   }
 }
 
+// —— 输入队列（v0.6.39）——
+// 语义：生成中按 Enter 不再"被吞掉/只弹一句提示"，而是**排队**；本轮结束后自动依次发出。
+// 用户中止（■ 停止）时**不排空**——中止的意思是"停下"，此时接着发下一条会违背用户意图。
+// 队列本身只有一份（内存），页面刷新即丢：它是"这一刻的输入意图"，不是持久任务。
+let queued=[];        // [{id,text}]
+let queueSeq=0;
+
+function renderQueue(){
+  const strip=$('#queueStrip'); if(!strip) return;
+  const items=queueView(queued);
+  if(!items.length){ strip.style.display='none'; strip.innerHTML=''; return; }
+  strip.style.display='flex';
+  strip.innerHTML='';
+  const cap=document.createElement('span'); cap.className='qcap';
+  cap.textContent='排队中 '+items.length+' 条（本轮结束后自动发送）';
+  strip.appendChild(cap);
+  for(const it of items){
+    const chip=document.createElement('span'); chip.className='qchip';
+    const idx=document.createElement('span'); idx.className='qi'; idx.textContent=it.index+'.';
+    const txt=document.createElement('span'); txt.className='qt'; txt.textContent=it.label; txt.title=it.text;
+    // 点文本 → 放回输入框编辑（从队列移除，避免"编辑完发两次"）
+    txt.onclick=()=>{ const r=dequeueMessage(queued,it.id); queued=r.queue; renderQueue(); input.value=r.removed?r.removed.text:input.value; input.focus(); autosize(); };
+    const x=document.createElement('span'); x.className='qx'; x.textContent='✕'; x.title='从队列移除';
+    x.onclick=()=>{ queued=dequeueMessage(queued,it.id).queue; renderQueue(); };
+    chip.appendChild(idx); chip.appendChild(txt); chip.appendChild(x);
+    strip.appendChild(chip);
+  }
+}
+
+/** 生成中把输入放进队列；返回是否入队成功（空文本/满员时给可读提示）。 */
+function enqueueInput(text){
+  queueSeq+=1;
+  const r=enqueueMessage(queued,text,'q'+queueSeq);
+  queued=r.queue;
+  if(r.ok){ renderQueue(); return true; }
+  if(r.reason==='full'){
+    const d=document.createElement('div'); d.className='msg-sys';
+    d.innerHTML='⚠ 队列已满（'+QUEUE_MAX+' 条），先发送或删掉几条再添加。';
+    chatEl.appendChild(d); scroll();
+  }
+  return false;
+}
+
+/** 本轮结束后排空队列（用 override 文本直接发下一条）。 */
+function drainQueue(){
+  if(!shouldDrainQueue({queue:queued,generating,aborted:runState.aborted})) return;
+  const next=queued[0];
+  queued=queued.slice(1);
+  renderQueue();
+  input.value=next.text; autosize();
+  // 让 finally 里的收尾（按钮/状态栏/渲染）先跑完，再开下一轮
+  setTimeout(()=>{ try{ send(); }catch(e){ console.error('[MingDao] 队列续发失败',e); } },120);
+}
+
 async function send(){
   const text=input.value.trim();
   console.log('[MingDao] send 点击：generating=' + generating + ' text=' + text.length + ' attachments=' + attachments.length);
   if(generating){
-    // 审计（长任务静默硬伤）：任务执行中追问「是否完成」→ 界面立即如实应答当前进度，
-    // 不再静默吞掉输入；停止职责由「■ 停止」按钮承担（输入框内容保留不丢）。
-    const secs=curWorkT0?Math.round((Date.now()-curWorkT0)/1000):0;
-    const d=document.createElement('div'); d.className='msg-sys';
-    d.innerHTML='⏳ 上一个任务仍在执行（第 '+curSteps+' 步 · 已 '+Math.floor(secs/60)+' 分 '+Math.round(secs%60)+' 秒），<b>尚未完成</b>。完成后总结与交付物会自动出现在本轮消息底部；如需立即中断请点「■ 停止」。';
-    chatEl.appendChild(d); scroll();
+    // v0.6.39：生成中继续输入 → **入队**（本轮结束后自动发送），不再只弹一句"仍在执行"。
+    // 队列条在输入框上方：点文本回填编辑、点 ✕ 删除；用户中止时不排空（见 drainQueue/aborted）。
+    if(enqueueInput(text)){
+      input.value=''; input.style.height='44px';
+      const secs=curWorkT0?Math.round((Date.now()-curWorkT0)/1000):0;
+      const ht=$('#hintText');
+      if(ht) ht.textContent='已加入队列（共 '+queued.length+' 条），本轮结束后自动发送 · 当前第 '+curSteps+' 步 · 已 '+Math.floor(secs/60)+' 分 '+Math.round(secs%60)+' 秒 · 要立即中断请点「■ 停止」';
+    }
     return;
   }
   if(!text && !attachments.length) return;
@@ -905,7 +962,7 @@ async function send(){
     // 具体错误形态已进日志（fetch failed 等不再绕开续跑提示）。
     d.textContent=(e&&e.name==='AbortError')?(killedByWatchdog?'响应超时已中断（120 秒无任何响应），请重试':'已中断'):('连接中断，本轮未完成。已执行的工作已保存检查点——直接发送「继续」即可从断点续跑（' + Math.round((Date.now() - workT0) / 1000) + 's · ' + stepsCount + ' 步）。');
     msg.appendChild(d); scroll(); }
-  finally{ clearInterval(hintTimer); disarm(); clearTimeout(stopFallbackTimer); stopFallbackTimer=null; stopping=false; turnAbortCtrl=null; generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; msg._endedAt=Date.now(); finalizePendingSubagent(msg); content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); renderTracePanels(); activeAiMsg=null; curWorkT0=0; if(!runState.aborted){ runState.rawPhase='空闲'; runState.phase='空闲'; } else { runState.rawPhase='已中止'; runState.phase='已中止'; } renderWorkStatus(); scroll(); updateTasksPanel(); }
+  finally{ clearInterval(hintTimer); disarm(); clearTimeout(stopFallbackTimer); stopFallbackTimer=null; stopping=false; turnAbortCtrl=null; generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; msg._endedAt=Date.now(); finalizePendingSubagent(msg); content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); renderTracePanels(); activeAiMsg=null; curWorkT0=0; if(!runState.aborted){ runState.rawPhase='空闲'; runState.phase='空闲'; } else { runState.rawPhase='已中止'; runState.phase='已中止'; } renderWorkStatus(); scroll(); updateTasksPanel(); drainQueue(); }
 }
 
 let curTaskId=null; // 本轮 SSE 任务 id（质检 L1：主停止按钮只断本任务，不再误伤其他 tab）

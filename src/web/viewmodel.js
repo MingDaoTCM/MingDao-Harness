@@ -445,3 +445,77 @@ export function traceRoundView(round) {
     summary: parts.join(' · '),
   };
 }
+
+// ---------------------------------------------------------------------------
+// 输入队列（v0.6.39）：生成中继续输入 → 排队，本轮结束后自动发出
+//
+// 为什么放在这里而不是直接写在 app.js：队列的**语义**（去重、上限、截断、何时排空）是纯逻辑，
+// 必须能被单测钉住；DOM 渲染只是把它画出来。DSH 等 harness 的做法也是"输入先入队、在回合边界消费"。
+// ---------------------------------------------------------------------------
+
+/** 队列上限：防止用户连点把内存撑爆（也避免"一次发 50 条"把模型打爆）。 */
+export const QUEUE_MAX = 20;
+/** chip 上显示的最大字符数。 */
+export const QUEUE_LABEL_MAX = 42;
+
+/**
+ * 把一条输入加入队列。
+ * 空文本直接拒绝（不要让空 chip 出现在界面上）；满员拒绝并给出可读原因。
+ * @param {Array<{id:string,text:string}>} queue
+ * @param {string} text
+ * @param {string} id
+ * @returns {{ok:boolean, queue:Array<{id:string,text:string}>, reason?:string}}
+ */
+export function enqueueMessage(queue, text, id) {
+  const list = Array.isArray(queue) ? queue : [];
+  const t = String(text == null ? '' : text);
+  if (!t.trim()) return { ok: false, queue: list, reason: 'empty' };
+  if (list.length >= QUEUE_MAX) return { ok: false, queue: list, reason: 'full' };
+  return { ok: true, queue: [...list, { id: String(id || ''), text: t }] };
+}
+
+/**
+ * 从队列里移除指定 id。
+ * @param {Array<{id:string,text:string}>} queue
+ * @param {string} id
+ * @returns {{queue:Array<{id:string,text:string}>, removed:({id:string,text:string}|null)}}
+ */
+export function dequeueMessage(queue, id) {
+  const list = Array.isArray(queue) ? queue : [];
+  const idx = list.findIndex((q) => String(q?.id) === String(id));
+  if (idx < 0) return { queue: list, removed: null };
+  return { queue: [...list.slice(0, idx), ...list.slice(idx + 1)], removed: list[idx] };
+}
+
+/**
+ * chip 上的单行显示文本（换行压成空格，超长截断加省略号）。
+ * @param {{text?:string}} item
+ * @returns {string}
+ */
+export function queueLabel(item) {
+  const t = String(item?.text ?? '').replace(/\s+/g, ' ').trim();
+  if (!t) return '';
+  return t.length > QUEUE_LABEL_MAX ? t.slice(0, QUEUE_LABEL_MAX - 1) + '…' : t;
+}
+
+/**
+ * 本轮是否可以排空队列。
+ * 关键：**用户主动中止（aborted）时不排空**——中止的语义是"停下"，此时接着发下一条会违背用户意图；
+ * 而"任务完成""出错"都应当继续把用户已经写好的下一条发出去（用户已经表达了意图）。
+ * @param {{queue?:Array<any>, generating?:boolean, aborted?:boolean}} st
+ * @returns {boolean}
+ */
+export function shouldDrainQueue(st) {
+  const q = Array.isArray(st?.queue) ? st.queue : [];
+  return q.length > 0 && !st?.generating && !st?.aborted;
+}
+
+/**
+ * 队列的渲染模型（含序号、截断文本）。
+ * @param {Array<{id:string,text:string}>} queue
+ * @returns {Array<{id:string,index:number,label:string,text:string}>}
+ */
+export function queueView(queue) {
+  const list = Array.isArray(queue) ? queue : [];
+  return list.map((q, i) => ({ id: String(q?.id || ''), index: i + 1, label: queueLabel(q), text: String(q?.text ?? '') }));
+}

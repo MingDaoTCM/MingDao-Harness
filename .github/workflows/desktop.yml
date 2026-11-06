@@ -182,6 +182,51 @@ jobs:
           # 官网 https://harness.mingdao.ai/#downloads 与 gitee/gitcode 的 Release 同步提供同一批包。
           gh release edit "$TAG" -R "$REPO" --title "$TITLE" --notes '桌面版安装包（Windows / macOS / Linux）直接在本页下方附件下载；国内直连极速镜像与校验值见官网：https://harness.mingdao.ai/#downloads —— 本 Release 附件长期保留，不再清理。' >/dev/null 2>&1 || true
 
+      # ────────────────────────────────────────────────────────────────────
+      # v0.6.39：签名**阶段一** + 产物**直推源站**
+      #
+      # 为什么分批：`decideUpdatePolicy` 对"有签名但验不过"是 reject。存量客户端（≤0.6.35）
+      # 内置旧公钥，若现在把 `.sig` 放到站点 `/updates/`，它们会永久拒绝更新。
+      # 所以阶段一**只把 .sig 传到 GitHub Release**（可审计、客户端不读），
+      # 等 0.6.36+（含密钥环）覆盖了绝大多数活跃用户，再把它复制到 `/updates/`（阶段二）。
+      #
+      # 直推源站：过去官网靠"从 GitHub 收割"，那条链路实测低到 0.7KB/s（瞬时拥塞），
+      # 633MB 要几小时；Actions 出网到香港通常 5–20MB/s，直接推可把这一跳从小时级降到分钟级。
+      # 失败不判红：收割路径仍在（HARVEST_PROXY + 续传），直推只是加速与兜底。
+      - name: 为产物签「更新来源签名」（阶段一：只进 Release）
+        if: ${{ secrets.UPDATE_SIGNING_KEY != '' }}
+        env:
+          UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          TAG="${{ github.ref_name }}"; REPO="${{ github.repository }}"
+          node scripts/sign-release-assets.mjs artifacts --out artifacts
+          mapfile -t SIGS < <(find artifacts -type f -name '*.sig' | sort)
+          echo "待上传 .sig：${#SIGS[@]} 个"
+          gh release upload "$TAG" "${SIGS[@]}" -R "$REPO" --clobber
+          echo "已上传（只到 Release；站点 /updates/ 仍不放 .sig，见阶段二）"
+
+      - name: 直推产物到源站（可选，失败不判红）
+        if: ${{ secrets.DEPLOY_SSH_KEY != '' }}
+        continue-on-error: true
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_DIR: ${{ secrets.DEPLOY_DIR }}
+        run: |
+          set -uo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy && chmod 600 ~/.ssh/deploy
+          ssh -i ~/.ssh/deploy -o StrictHostKeyChecking=no -o ConnectTimeout=20 "$DEPLOY_USER@$DEPLOY_HOST" 'echo connected; df -h / | tail -1'
+          # 安装包 → downloads/；更新清单 → updates/（清单必须由服务器侧 gen-update-feeds 生成
+          # 双架构合并版，这里只同步单平台 yml 供比对，最终以官网发布流程为准）
+          scp -i ~/.ssh/deploy -o StrictHostKeyChecking=no -C \
+            artifacts/*.exe artifacts/*.dmg artifacts/*.zip artifacts/*.AppImage artifacts/*.deb \
+            artifacts/*.blockmap "$DEPLOY_USER@$DEPLOY_HOST:$DEPLOY_DIR/downloads/" || true
+          echo "直推完成（若失败，官网收割仍是兜底路径）"
+
   # Release 正文规范化（2026-09-11 发行政策修订的配套）
   #
   # 背景：政策从「附件只作构建转运、同步后自动移除」改为「安装包长期保留」后，**历史 Release**

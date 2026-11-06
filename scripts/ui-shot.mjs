@@ -216,6 +216,19 @@ async function run() {
 
   // 1) 首屏
   await waitFor("!!document.querySelector('#sessions')", 10000, '#sessions');
+  // --eval：**第一次截图之前**就在页面里执行一段 JS（v0.6.39）。
+  // 为什么需要：有些界面状态只能由交互产生（"输入队列"要先生成中再输入一条），
+  // --open 只能点选择器构造不出来；注入同一套 DOM 结构才能做视觉验收。
+  // 放在 home 之前，所以 --eval 会影响全部 5 张图（基线与"有队列"是两次独立运行，不会互相污染）。
+  if (cfg.evalJs) {
+    try {
+      await wc.executeJavaScript(String(cfg.evalJs));
+      await sleep(150);
+    } catch (e) {
+      warnings.push('--eval 执行失败：' + ((e && e.message) || e));
+    }
+  }
+
   await capture('home');
 
   // 2) 设置（真实点击 #cfgBtn）
@@ -377,6 +390,7 @@ function parseArgs(argv) {
     '--wait',
     '--electron',
     '--open',
+    '--eval',
   ]);
   for (let i = 0; i < argv.length; i += 1) {
     let arg = argv[i];
@@ -421,6 +435,8 @@ function parseArgs(argv) {
       opts.electron = val;
     } else if (arg === '--open') {
       opts.open = val;
+    } else if (arg === '--eval') {
+      opts.evalJs = val;
     }
   }
   if (opts.width === null) opts.width = opts.mobile ? 390 : VIEWPORTS[opts.viewport];
@@ -934,6 +950,7 @@ async function main() {
           allowConsoleErrors: opts.allowConsoleErrors,
           viewport: opts.viewport,
           open: opts.open,
+          evalJs: opts.evalJs || null,
         },
         null,
         2

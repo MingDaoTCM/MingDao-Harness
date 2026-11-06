@@ -23,6 +23,12 @@ import {
   fmtRunCost,
   fmtRunCtx,
   runStripView,
+  enqueueMessage,
+  dequeueMessage,
+  shouldDrainQueue,
+  queueView,
+  queueLabel,
+  QUEUE_MAX,
   applyRunProgress,
   permissionSourceLabel,
   toolArgsSummary,
@@ -420,6 +426,48 @@ function REF_traceRoundView(round) {
   eq(toolTimelineVisibility([], true), [], '空时间线');
   eq(toolStepView({ seq: 1, name: 'read', args: { path: 'a' }, result: { ok: true, lines: 1 }, durationMs: 10 }, true).stIcon, '✓', '工具步成功图标');
   eq(toolStepView({ seq: 2, name: 'bash', args: {}, result: { ok: false, error: 'x' }, durationMs: 10 }, true).stCls, 'bad', '工具步失败类');
+}
+
+// ---------------------------------------------------------------------------
+// 输入队列（v0.6.39）：生成中继续输入 → 排队，本轮结束后自动发出
+// ---------------------------------------------------------------------------
+{
+  let q = [];
+  eq(enqueueMessage(q, '   ', 'a'), { ok: false, queue: [], reason: 'empty' }, '空/空白文本不入队');
+  const e1 = enqueueMessage(q, '第二个问题', 'a');
+  eq(e1.ok, true, '非空文本入队成功');
+  eq(e1.queue.length, 1, '入队后长度 +1');
+  eq(e1.queue[0].text, '第二个问题', '原文保留（不 trim，避免吃掉用户的前导空格/代码缩进）');
+  const e2 = enqueueMessage(e1.queue, '第三个', 'b');
+  eq(e2.queue.map((x) => x.id), ['a', 'b'], '先进先出，id 顺序稳定');
+  eq(enqueueMessage([], 'x', 'c').queue[0].id, 'c', 'id 原样保存');
+
+  const full = Array.from({ length: QUEUE_MAX }, (_, i) => ({ id: String(i), text: 'x' }));
+  eq(enqueueMessage(full, 'y', 'z').reason, 'full', '满员拒绝（上限 ' + QUEUE_MAX + '）');
+  eq(enqueueMessage(full, 'y', 'z').queue.length, QUEUE_MAX, '满员时队列不变');
+
+  const d = dequeueMessage(e2.queue, 'a');
+  eq(d.queue.map((x) => x.id), ['b'], '按 id 移除');
+  eq(d.removed.text, '第二个问题', '返回被移除项（供"回填输入框"用）');
+  eq(dequeueMessage(d.queue, '不存在').queue.map((x) => x.id), ['b'], '移除不存在的 id 不改变队列');
+  eq(dequeueMessage(null, 'a').removed, null, '非数组输入不崩');
+
+  // 排空判据：**中止时不排空**（中止的语义是"停下"，接着发下一条会违背意图）
+  eq(shouldDrainQueue({ queue: [{ id: '1', text: 'a' }], generating: false, aborted: false }), true, '本轮正常结束 → 排空');
+  eq(shouldDrainQueue({ queue: [{ id: '1', text: 'a' }], generating: true, aborted: false }), false, '生成中不排空');
+  eq(shouldDrainQueue({ queue: [{ id: '1', text: 'a' }], generating: false, aborted: true }), false, '用户中止 → 不排空（保留队列）');
+  eq(shouldDrainQueue({ queue: [], generating: false, aborted: false }), false, '空队列不排空');
+  eq(shouldDrainQueue({}), false, '入参缺失不崩');
+
+  // 渲染模型：序号从 1 开始、换行压平、超长截断
+  const v = queueView([{ id: 'a', text: '第一行\n第二行' }, { id: 'b', text: 'x'.repeat(100) }]);
+  eq(v[0].index, 1, 'chip 序号从 1 开始');
+  eq(v[0].label.includes('\n'), false, '换行压成空格（chip 单行显示）');
+  eq(v[0].text.includes('\n'), true, '原文（title/回填用）不被改写');
+  eq(v[1].label.length <= 42, true, '超长文本截断到上限内');
+  eq(v[1].label.endsWith('…'), true, '截断用省略号标示');
+  eq(queueLabel({ text: '' }), '', '空文本 label 为空串');
+  eq(queueView(null), [], '非数组返回空数组');
 }
 
 console.log(`✅ test/viewmodel.js：${passed} 条断言通过（4 个搬家函数 × 6+ 组输入 × 与搬家前参照实现 deepEqual 对拍 + 输出形状）`);

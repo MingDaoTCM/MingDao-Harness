@@ -218,6 +218,13 @@ main{flex:1;overflow-y:auto;padding:18px 0 12px;min-width:0}
 #composer{display:flex;gap:8px;align-items:flex-end}
 #attachBtn{padding:10px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;cursor:pointer;font-size:15px}
 #attachList{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
+#queueStrip{max-width:860px;margin:0 auto 6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+#queueStrip .qcap{font-size:12px;color:var(--dim)}
+#queueStrip .qchip{display:inline-flex;align-items:center;gap:6px;max-width:360px;background:rgba(90,160,255,.12);border:1px solid rgba(90,160,255,.38);border-radius:14px;padding:3px 10px;font-size:12.5px;color:var(--fg)}
+#queueStrip .qchip .qi{color:var(--dim)}
+#queueStrip .qchip .qt{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text}
+#queueStrip .qchip .qx{cursor:pointer;color:var(--dim)}
+#queueStrip .qchip .qx:hover{color:#ff6b6b}
 .deliver{border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;background:var(--bg2);padding:8px 12px;margin:4px 0;font-size:12.5px}
 .deliver .t{color:var(--accent2);font-weight:600;margin-bottom:2px}
 .deliver .i{color:var(--dim);padding:1px 0;font-family:ui-monospace,Consolas,monospace}
@@ -861,6 +868,8 @@ body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions 
   </div>
   <input type="file" id="fileInput" accept="image/png,image/jpeg,image/gif,image/webp,.txt,.md,.json,.js,.py,.log,.csv,.html,.css" multiple style="display:none">
   <div id="attachList" style="display:none"></div>
+  <!-- v0.6.39 输入队列：生成中继续输入会排队，本轮结束后自动依次发出（不打断当前任务） -->
+  <div id="queueStrip" style="display:none"></div>
   <div id="composer">
     <button id="attachBtn" title="上传图片或文本文件（图片需支持视觉的模型）">📎</button>
     <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送，Shift+Enter 换行）"></textarea>
