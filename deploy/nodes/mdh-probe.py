@@ -16,6 +16,9 @@
 import json, os, sys, time, urllib.request, urllib.error
 
 BASE = os.environ.get('MDH_BASE', 'https://harness.mingdao.ai')
+# v0.6.37：国内镜像（深圳节点 + 已备案域名）。镜像挂了用户仍可用源站，但体验会掉一个量级，
+# 所以它也要进拨测——只是判据略宽（镜像多一层反代，允许更慢）。
+MIRROR = os.environ.get('MDH_MIRROR', 'https://harness.southdns.com')
 LOG_DIR = '/var/log/mdh'
 STATE = os.path.join(LOG_DIR, 'probe-state.json')
 TIMEOUT = 15
@@ -63,14 +66,21 @@ def fetch(name, url, want, contains, budget, headers=None):
 def main():
     os.makedirs(LOG_DIR, exist_ok=True)
     results = []
+    # 镜像基础可达性（不测大文件：镜像下载由下面的 Range 用例间接覆盖）
+    for name, url, budget in (('mirror_home', f'{MIRROR}/', 4.0), ('mirror_feed', f'{MIRROR}/updates/latest.yml', 5.0)):
+        r = fetch(name, url, 200, 'version:' if 'feed' in name else None, budget)
+        results.append(r)
     dl = current_download_url()
     checks = list(CHECKS)
     if dl:
         checks.insert(2, ('download_range', dl, 206, None, 5.0))
+        # 镜像的同名文件 Range 也必须可用（桌面端会从镜像续传）
+        mirror_dl = dl.replace(BASE, MIRROR)
+        checks.insert(3, ('mirror_range', mirror_dl, 206, None, 30.0))
     else:
         results.append({'name': 'download_range', 'ok': False, 'error': 'feed 里取不到 path:'})
     for name, url, want, contains, budget in checks:
-        if name == 'download_range':
+        if 'range' in name:
             results.append(fetch(name, url, want, contains, budget, {'Range': 'bytes=0-1023'}))
         else:
             results.append(fetch(name, url, want, contains, budget))
