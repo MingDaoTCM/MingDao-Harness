@@ -3,6 +3,75 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.36（2026-11-06）— 更新来源签名密钥环与文案分层（仍不发布 `.sig`）；官网 404 修复
+
+> **无产品行为变化。** 核心是给下一版签发更新来源签名铺路：本版先让客户端内置**新旧两把公钥**
+> （密钥环），仍**不发布**任何 `.sig`；弹窗只改文案，把「Apple 公证」与「更新来源签名」分开。
+> 另含站点仓的 nginx 404 修复与收割脚本代理/续传、深圳拨测/备份节点文档，以及一处**测试基础设施修复**
+> （4 个"永远不会红"的变异批次 + 结构性预检）。除测试外均不改产品代码。
+> 完整说明见 `RELEASE-NOTES-0.6.36.md`。
+
+### 一、更新来源签名密钥环（`70613cd`）
+
+- `desktop/update-verify.js` 新增 `UPDATE_PUBLIC_KEYS`（旧钥 `legacy-2025` + 新钥 `2026-11`）与
+  `verifyArtifactSignatureWithKeyring()`：任一内置公钥验过即通过，并返回命中的 `keyId`。
+- **为什么分两版**：`decideUpdatePolicy` 对「有签名但验不过」是 **reject**。若本版直接用新钥签发，
+  存量客户端（只内置旧公钥）会**永久拒绝更新**。所以本版只扩密钥环、不签发；
+  下一版 0.6.37 再签发 `.sig`，届时旧客户端已通过本版认识新钥。
+- `test/update-signing.js` 明确断言「内置密钥环 ≥2 把且都是 ed25519」「旧钥签名仍可验」。
+
+### 二、签名脚本（`70613cd`）
+
+- `scripts/sign-release-assets.mjs`：只签安装包（`.exe/.dmg/.zip/.AppImage/.deb`）与
+  `latest(-linux|-mac)?.yml`；产物 `<文件名>.sig`，内容 `ed25519:<base64>`。
+- 缺私钥时 **CLI 非零退出**（`UPDATE_SIGNING_KEY` 或 `UPDATE_SIGNING_KEY_FILE`），
+  不允许静默发出「无签名」的发布产物。
+- 私钥不入库：`~/.mingdao/update-signing-key.pem`（0600）；上线规程见 `docs/CODE-SIGNING.md §六`。
+
+### 三、更新弹窗文案分层（`70613cd`、`3406ae6`）
+
+- 弹窗仍保持**两行**：第一行说明「未验证更新来源签名」，并明确
+  **「macOS 的 Apple 公证不受影响」**（非 darwin 平台为「系统级代码签名不受影响」）；
+  第二行说明它防的是「更新源被投毒」，给出 `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1` 收紧开关与详情入口。
+- 目的：用户此前把「未验证来源签名」读成「没签名 / 没公证」。这是两层信任：
+  Apple 公证管 `.app` 能不能运行；更新来源签名管更新包是否由发布私钥签发。
+
+### 四、测试与 CI（`70613cd`、`c9b86d8`）
+
+- 新增 `test/update-signing.js` **10 项**（密钥环多钥/篡改必拒/签名脚本产物可验/缺钥 CLI 非零/
+  文案分层）；`test/mutate/batch77-update-signing.mjs` **8 条**。
+- 已接入 `test/run-all.mjs`（35 套）与 CI（Linux 腿的 `update-signing` 步骤）；变异总数 727 → **735**。
+- **测试基础设施修复（发布前门禁复跑时抓到）**：`batch47/54/67/77` 四个批次文件末尾漏了
+  `const ok = M.report(); process.exit(ok ? 0 : 1);`——无论多少条逃逸或锚点失配都 exit 0，
+  门禁"66/66 全中"对这些批次**永远成立**；`batch77 ⑧` 的 `from` 还停在旧文案（`3406ae6` 改文案后从未真正变异）。
+  现已补齐四处收尾、锚点跟随，并在 `test/mutate/run.mjs` 加**开跑前结构预检**：任何 `batch*.mjs`
+  缺 `M.report()` 或 `process.exit(` 直接拒绝开跑并点名。反验证两条：删 report → 拒绝开跑；
+  `batch67 ①` 锚点改不存在 → 该批 **exit=1、5/6 + 变异点未找到**（修复前 exit 0）。
+  4 批复跑 9/9、10/10、6/6、8/8，**没有**暴露新的真逃逸；全量 **66/66 批、735 条全中（有效判定）**。
+
+### 五、官网下载/更新 404 修复与收割提速（站点仓 `7ad37a9`、`b704ed6`）
+
+- nginx 的 `location /` SPA 回退把**任何未知路径**都回成 200 + HTML：
+  `/downloads/nope.dmg` 与 `/updates/latest.yml.sig` 因此「看起来存在」，缺文件被伪装成下载成功。
+  现为 `/downloads/` 与 `/updates/` 加 `try_files $uri =404`，**真 404**；其余人类路由仍走 SPA 回退。
+- `scripts/harvest-release.mjs` 新增 `HARVEST_PROXY`（镜像代理）与**断点续传**（Range 从已有长度续传、
+  大小不一致自动重下）；实测 633MB 收割从 1.5–6 小时降到 **<3 分钟**。
+
+### 六、深圳拨测 / 备份节点（`6891756`）
+
+- 新增 `deploy/nodes/mdh-probe.py`（大陆视角 cron 拨测：首页 / feed / 当前版 Range / 缺文件 404，
+  安装包名从 feed 动态取）与 `deploy/nodes/mdh-backup.sh`（香港 → 深圳异地备份 nginx 配置、
+  站点静态与安装包 sha256 清单，保留 14 份），说明见 `docs/DEPLOY-NODES.md`。
+- 深圳节点**不**做公网下载站（大陆服务器绑域名需 ICP 备案），有备案后可升级为国内镜像；
+  实测香港直连 GitHub 1.6MB/s、代理 2.07MB/s，故采集走 `HARVEST_PROXY` + 续传即可。
+
+### 七、未做
+
+- **本版不发布 `.sig`**：CI 开关 `UPDATE_SIGNING_ENABLED` 保持关闭，站点 `/updates/*.sig` 不应存在
+  （下一版 0.6.37 才签发）。
+- **Windows 代码签名仍未接入**（Authenticode），与更新来源签名是两件事。
+
+
 ## v0.6.35（2026-11-05）— v0.7.0 §1.1 切片 A：会话事件日志与确定性重放（双写，未改读取路径）
 
 > **无行为变化、无界面变化。** 本版为 v0.7.0 §1.1 事件溯源打地基：会话消息仍是唯一事实源，
