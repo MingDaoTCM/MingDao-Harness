@@ -52,13 +52,19 @@ M.mutate({
   run: SEC,
 });
 
-// ④ 瞬时预算缩到 50ms：Windows 杀软扫描窗口（数百 ms）还没过去就放弃
+// ④ 瞬时预算缩到 300ms：Windows 杀软扫描窗口（数百 ms）还没过去就放弃
+//
+// v0.6.38（macOS CI 确定性红）：原变异把预算改成 **50ms**，而注入的 EACCES 退避是 5+10+20=35ms——
+// 在慢 runner 上「35ms + 进程开销」就超过 50ms，于是套件在**更早**的一条断言（"遇 EACCES 不得直接失败"）
+// 先红，报错文案不含本条的 expect，被判定为"逃逸"（同一现象 0.6.37 的 macOS 腿连续 3 次复现）。
+// 改成 300ms：仍远小于 2000ms（缺陷语义不变），但足够跨过退避窗口，让**本意**那条断言（预算≈2s）来红。
+// 同时把两条可能的失败文案都列入 expect（`some` 语义：任一命中即算抓到），防止别的机器上再出现同类竞态。
 M.mutate({
-  name: '④ 瞬时拒绝预算缩到 50ms（等不到杀软扫描结束）',
+  name: '④ 瞬时拒绝预算缩到 300ms（等不到杀软扫描结束）',
   file: 'src/atomic-write.js',
   from: 'const TRANSIENT_RETRY_BUDGET_MS = 2000;',
-  to: 'const TRANSIENT_RETRY_BUDGET_MS = 50;',
-  expect: ['瞬时拒绝的重试预算应接近 2s'],
+  to: 'const TRANSIENT_RETRY_BUDGET_MS = 300;',
+  expect: ['瞬时拒绝的重试预算应接近 2s', '不得直接失败'],
   run: SEC,
 });
 

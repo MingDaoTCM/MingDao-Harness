@@ -393,6 +393,48 @@ fs.writeSync(1, JSON.stringify({ own: Object.keys(out.files).length, names: ${JS
 }
 
 // ===========================================================================
+// ⑤a M-12（确定性判据，v0.6.38）：**外部持锁时去重必须等待**
+//
+// 为什么要有它：⑤ 的并发用例靠"同一刻放行"制造交错，在快机器上**可能不复现**——
+// 0.6.37 的 macOS CI 就出现过 `batch60 ⑩`（去掉去重锁）exit=0 的 flaky 逃逸。
+// 这里换一个**不靠运气**的判据：让子进程先持有记忆文件的锁，再调 dedupeMemory；
+//   · 正常实现：必须等锁释放（实测 ≥ 持锁时长的一半）；
+//   · 无锁变异：立刻返回（个位数毫秒）→ 当场红。
+// 复现性由"持锁 600ms、断言等待 ≥250ms"保证，与机器快慢无关。
+// ===========================================================================
+{
+  const memHome = path.join(baseHome, 'memhome-lock');
+  fs.mkdirSync(memHome, { recursive: true });
+  const prevHome = process.env.MINGDAO_HOME;
+  process.env.MINGDAO_HOME = memHome;
+  fs.writeFileSync(MEM.memoryFile(), '- [2026-01-01] 锁等待用例\n');
+  const lockPath = MEM.memoryFile() + '.lock';
+  // 子进程**先持锁再报 READY**——否则父进程可能在它拿到锁之前就开始计时（那正是要避免的运气）。
+  const holder = startChild(`
+import fs from 'node:fs';
+import { withFileLockSync } from ${atomicUrl};
+withFileLockSync(${JSON.stringify(lockPath)}, () => {
+  fs.writeSync(1, 'READY\\n');          // 此刻锁已在自己手里
+  const t0 = Date.now();
+  while (Date.now() - t0 < 600) {}       // 纯忙等：不依赖 sleep 精度，确保真的持锁 600ms
+});
+`);
+  await withDeadline(holder.ready, '⑤a 持锁子进程就绪（锁已在子进程手里）');
+  const t0 = Date.now();
+  const removed = MEM.dedupeMemory();
+  const waited = Date.now() - t0;
+  await withDeadline(holder.done, '⑤a 持锁子进程结束');
+  assert.ok(
+    waited >= 250,
+    `外部持锁时 dedupeMemory 必须等待（实际 ${waited}ms）——无锁的变异会立刻返回`
+  );
+  assert.equal(removed, 0, '只有一条记忆时不应删掉任何内容');
+  process.env.MINGDAO_HOME = prevHome;
+  safeRm(memHome);
+  ok(`M-12（确定性）：外部持锁 600ms → 去重等待 ${waited}ms（不靠并发运气）`);
+}
+
+// ===========================================================================
 // ⑤ M-12：AGENTS.md 自动追加与去重并发不得丢条目
 // ===========================================================================
 {
