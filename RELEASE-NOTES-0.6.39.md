@@ -1,6 +1,6 @@
 # MingDao Harness v0.6.39 发布说明
 
-> 状态：**待发布**
+> 状态：**已发布**（tag `v0.6.39`）
 > 主题：**输入队列 + CI 直推产物 + 更新签名阶段一**
 > 范围：`v0.6.38..HEAD` 3 个提交（`a2886bd`、`d1768dd`、`c75de8b` + 本版发布前的 CI 修正）。
 > 影响面：Web UI 一处交互增强（生成中继续输入 → 排队）；桌面版**分发链路**两处 CI 能力
@@ -132,7 +132,10 @@ node scripts/ui-shot.mjs --out /tmp/shots --eval "document.querySelector('#queue
 覆盖率（只报告，不判失败）：
 
 ```
-<待回填>
+行覆盖率（分母 = src 全部 94 个文件）：68.7%（18764/27313 行）· 阈值 72.5%
+  · code-lines  68.7%（18764/27313 行）  基线 72.5%  ⛔ 低于基线 3.8pp（仅报告）
+  · all-lines   49.5%（18764/37899 行）  基线 52.3%  ✅
+  · functions   70.1%（2924/4173 个）     基线 75.4%  ✅
 ```
 
 ### 3.1 发布树截图（1440×900，Electron 真实渲染）
@@ -142,11 +145,11 @@ node scripts/ui-shot.mjs --out /tmp/shots --eval "document.querySelector('#queue
 
 | 页面 | `/tmp/shots-0639` sha256 | 与 v0.6.38 |
 | --- | --- | --- |
-| `home.png` | `<待回填>` | `<待回填>` |
-| `settings.png` | `<待回填>` | `<待回填>` |
-| `palette.png` | `<待回填>` | `<待回填>` |
-| `session.png` | `<待回填>` | `<待回填>` |
-| `sheet.png` | `<待回填>` | `<待回填>` |
+| `home.png` | `00a68c1358e623b33d794da23944680c1e6350968ca2d3640caa54570fed1b5e` | ✅ 一致 |
+| `settings.png` | `1c27e00102ad098ef28baa24419098162f05e291a53b0b2a90e49a4aa8dac414` | ✅ 一致 |
+| `palette.png` | `f9369ef19cd7659da12711abcb34225cc549b30c35a572dec363a2406f018dcb` | ✅ 一致 |
+| `session.png` | `f285c44022a3a0d7c1c23d1da6724c2455394176b956c3ebfae89fffa3ed3e11` | ✅ 一致 |
+| `sheet.png` | `cdc5ea7cb88b5c68482b56361955374f131ac8748d9d5d64ccdd950812dcb6ca` | ✅ 一致 |
 
 ---
 
