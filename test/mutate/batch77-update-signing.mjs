@@ -70,8 +70,11 @@ M.mutate({
 M.mutate({
   name: '⑧ 弹窗正文超过两行（回退成说明书）',
   file: 'desktop/update-verify.js',
-  from: "      '它防的是\"更新源被投毒\"；高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝无签名更新。',",
+  from: "      '它防的是\"更新源被投毒\"；高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝；详情见日志与官网。',",
   to: "      '它防的是\"更新源被投毒\"；\\n高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝无签名更新。\\n详情见日志与官网。',",
   expect: ['最多两行'],
   run: RUN,
 });
+
+const ok = M.report();
+process.exit(ok ? 0 : 1);

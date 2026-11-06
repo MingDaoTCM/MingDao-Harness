@@ -57,3 +57,6 @@ M.mutate({
   expect: ['非有限'],
   run: RUN,
 });
+
+const ok = M.report();
+process.exit(ok ? 0 : 1);

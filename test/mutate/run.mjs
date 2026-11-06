@@ -55,6 +55,27 @@ if (!files.length) {
   process.exit(1);
 }
 
+// v0.6.36（发布前被负责人抓到）：**批次必须自己会红**。
+//
+// 事故：`batch47/54/67/77` 四个批次文件末尾漏了 `const ok = M.report(); process.exit(ok ? 0 : 1);`，
+// 于是无论里面有多少条逃逸、多少条"变异点未找到"，进程都正常退出 0，run.mjs 记为"全中"——
+// 门禁看上去 66/66，实际有 4 个批次**永远不可能失败**。
+// 这类缺陷不会自己暴露（越"绿"越可疑），必须在开跑前用结构判据挡住：
+// ① 每个批次必须出现 `M.report()`（打印汇总并给出 ok）；
+// ② 必须出现 `process.exit(`（把 ok 变成退出码）。
+const BAD_BATCH = [];
+for (const f of files) {
+  const src = fs.readFileSync(path.join(dir, f), 'utf8');
+  if (!/\bM\.report\s*\(/.test(src)) BAD_BATCH.push(`${f}：缺 M.report()`);
+  else if (!/process\.exit\s*\(/.test(src)) BAD_BATCH.push(`${f}：缺 process.exit(…)，汇总不会变成退出码`);
+}
+if (BAD_BATCH.length) {
+  lock.release();
+  console.error('✗ 变异批次结构不合格（这些批次永远不会红，先修再加）：');
+  for (const b of BAD_BATCH) console.error('  · ' + b);
+  process.exit(1);
+}
+
 // 开跑前自检（自愈残留 / 拒绝冲突与在飞 / 脏工作树清单）。
 const pre = preflight({ root: path.join(dir, '..', '..'), allowDirty });
 if (!pre.ok) {

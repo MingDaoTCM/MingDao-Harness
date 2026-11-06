@@ -110,3 +110,6 @@ M.mutate({
   expect: ['设置入口与 #cfgModal 必须保留'],
   run: SEC,
 });
+
+const ok = M.report();
+process.exit(ok ? 0 : 1);

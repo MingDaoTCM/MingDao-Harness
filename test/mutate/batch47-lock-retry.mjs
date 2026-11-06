@@ -143,3 +143,6 @@ M.mutate({
   expect: ['成功后锁文件必须被释放'],
   run: SEC,
 });
+
+const ok = M.report();
+process.exit(ok ? 0 : 1);
