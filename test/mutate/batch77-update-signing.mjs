@@ -34,7 +34,8 @@ M.mutate({
 M.mutate({
   name: '④ 签名脚本连非产物文件也签（.sig 会覆盖无关文件）',
   file: 'scripts/sign-release-assets.mjs',
-  from: "    if (ARTIFACT_EXT.test(entry.name) || MANIFEST_RE.test(entry.name)) out.push(path.join(dir, entry.name));",
+  // v0.6.39：listSignableFiles 改成递归 walk 后，锚点跟随（out.push(dir/name) → out.push(full)）。
+  from: "      if (ARTIFACT_EXT.test(entry.name) || MANIFEST_RE.test(entry.name)) out.push(full);",
   to: "    out.push(path.join(dir, entry.name)); // 变异：所有文件都签",
   expect: ['只签安装包'],
   run: RUN,
@@ -73,6 +74,15 @@ M.mutate({
   from: "      '它防的是\"更新源被投毒\"；高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝；详情见日志与官网。',",
   to: "      '它防的是\"更新源被投毒\"；\\n高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝无签名更新。\\n详情见日志与官网。',",
   expect: ['最多两行'],
+  run: RUN,
+});
+
+M.mutate({
+  name: '⑨ 签名只扫单层目录（download-artifact 的子目录产物全部漏签）',
+  file: 'scripts/sign-release-assets.mjs',
+  from: '        if (recursive) walk(full);',
+  to: '        if (false) walk(full); // 变异：不递归',
+  expect: ['子目录里的产物必须全部签到'],
   run: RUN,
 });
 

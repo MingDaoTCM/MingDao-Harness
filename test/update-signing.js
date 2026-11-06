@@ -93,6 +93,29 @@ const ok = (name) => { passed += 1; console.log(`  ✓ ${name}`); };
     assert.match(String(cli.stderr), /签名私钥/, 'CLI 必须说明缺私钥');
     ok('⑦b 签名 CLI：无密钥时非零退出且说明原因（不静默）');
 
+    // ⑩ 递归：download-artifact 把每个 artifact 解到 `artifacts/<name>/` 子目录，
+    //    首版脚本只扫单层 →「签名完成：0 个」却 exit 0（看起来成功、其实什么都没签）。
+    {
+      const nested = path.join(dir, 'nested');
+      const win = path.join(nested, 'win-x64');
+      const linux = path.join(nested, 'linux-x64');
+      fs.mkdirSync(win, { recursive: true });
+      fs.mkdirSync(linux, { recursive: true });
+      fs.writeFileSync(path.join(win, 'a.exe'), 'a');
+      fs.writeFileSync(path.join(win, 'latest.yml'), 'win');
+      fs.writeFileSync(path.join(linux, 'b.deb'), 'b');
+      fs.writeFileSync(path.join(linux, 'latest.yml'), 'linux');
+      const r = S.signReleaseAssets({ dir: nested, privateKey: pair.privateKey });
+      assert.equal(r.signed.length, 4, `子目录里的产物必须全部签到（实际 ${JSON.stringify(r.signed)}）`);
+      assert.ok(fs.existsSync(path.join(win, 'a.exe.sig')), '签名必须写回**原相对目录**');
+      assert.ok(fs.existsSync(path.join(linux, 'b.deb.sig')), '第二个子目录也要签');
+      assert.ok(fs.existsSync(path.join(win, 'latest.yml.sig')) && fs.existsSync(path.join(linux, 'latest.yml.sig')),
+        '两个同名 latest.yml 必须各留一份签名（扁平化会互相覆盖）');
+      const flat = S.signReleaseAssets({ dir: nested, outDir: path.join(dir, 'flat'), privateKey: pair.privateKey, flat: true });
+      assert.ok(flat.skipped.some((x) => x.includes('重名')), '扁平化遇到重名必须报 skipped，不许静默覆盖');
+      ok('⑩b 签名递归：子目录全签、保留相对路径、扁平化重名告警');
+    }
+
     // 私钥缺省时必须**显式失败**（不能静默产出无签名发布）
     const r = S.loadSigningKey({ keyPem: '' });
     assert.equal(r.ok, false, '没有私钥时必须 ok:false');

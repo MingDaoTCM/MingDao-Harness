@@ -19,14 +19,33 @@ import { pathToFileURL } from 'node:url';
 const ARTIFACT_EXT = /\.(exe|dmg|zip|AppImage|deb)$/i;
 const MANIFEST_RE = /^latest(-linux|-mac)?\.yml$/i;
 
-/** @param {string} dir @returns {string[]} */
-export function listSignableFiles(dir) {
+/**
+ * 列出可签名的文件（**默认递归**）。
+ *
+ * 为什么必须递归：`actions/download-artifact@v4` 会把每个 artifact 解到 `artifacts/<name>/` 下，
+ * 于是所有安装包都在**子目录**里。v0.6.39 首版只扫单层，结果是「签名完成：0 个」并 exit 0——
+ * 一个"看起来成功、其实什么都没签"的步骤，比失败更危险（随后 `gh release upload` 因空文件失败才暴露）。
+ * 这里把"要不要递归"从调用方收回来：脚本自己保证"给一个目录就把里面能签的都签了"。
+ *
+ * @param {string} dir
+ * @param {{recursive?: boolean}} [opts]
+ * @returns {string[]} 绝对路径
+ */
+export function listSignableFiles(dir, { recursive = true } = {}) {
   /** @type {string[]} */
   const out = [];
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    if (!entry.isFile()) continue;
-    if (ARTIFACT_EXT.test(entry.name) || MANIFEST_RE.test(entry.name)) out.push(path.join(dir, entry.name));
-  }
+  const walk = (/** @type {string} */ d) => {
+    for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, entry.name);
+      if (entry.isDirectory()) {
+        if (recursive) walk(full);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+      if (ARTIFACT_EXT.test(entry.name) || MANIFEST_RE.test(entry.name)) out.push(full);
+    }
+  };
+  walk(dir);
   return out.sort();
 }
 
@@ -48,7 +67,7 @@ export function signBytes(bytes, privateKey) {
  * @param {{dir: string, outDir?: string, privateKey: import('node:crypto').KeyObject}} opts
  * @returns {{signed: string[], skipped: string[]}}
  */
-export function signReleaseAssets({ dir, outDir = dir, privateKey }) {
+export function signReleaseAssets({ dir, outDir = dir, privateKey, flat = false }) {
   const signed = [];
   /** @type {string[]} */
   const skipped = [];
@@ -56,11 +75,20 @@ export function signReleaseAssets({ dir, outDir = dir, privateKey }) {
     if (file.endsWith('.sig')) continue;
     try {
       const text = signBytes(fs.readFileSync(file), privateKey) + '\n';
-      fs.mkdirSync(outDir, { recursive: true });
-      fs.writeFileSync(path.join(outDir, path.basename(file) + '.sig'), text, { mode: 0o644 });
-      signed.push(path.basename(file));
+      // 默认**保持相对目录结构**（`artifacts/win-x64/xxx.exe` → `artifacts/win-x64/xxx.exe.sig`）：
+      // 不同平台各有一份 `latest.yml`，扁平化会互相覆盖——那等于"签了但只剩一份"。
+      // 需要扁平时显式 `flat: true`，重名会作为 skipped 报出来（不静默覆盖）。
+      const rel = path.relative(dir, file);
+      const target = flat ? path.join(outDir, path.basename(file) + '.sig') : path.join(outDir, rel + '.sig');
+      if (flat && fs.existsSync(target)) {
+        skipped.push(`${path.basename(file)}: 扁平化后与已有 .sig 重名，已跳过（请改用默认的保留目录结构）`);
+        continue;
+      }
+      fs.mkdirSync(path.dirname(target), { recursive: true });
+      fs.writeFileSync(target, text, { mode: 0o644 });
+      signed.push(rel);
     } catch (err) {
-      skipped.push(`${path.basename(file)}: ${String(/** @type {any} */ (err)?.message || err)}`);
+      skipped.push(`${path.relative(dir, file)}: ${String(/** @type {any} */ (err)?.message || err)}`);
     }
   }
   return { signed, skipped };
