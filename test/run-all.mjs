@@ -67,6 +67,8 @@ const SUITES = [
   ['structure-limits', 'node', ['test/structure-limits.js']],
   // v0.6.36：更新来源签名（密钥环 / 签名脚本 / 弹窗文案分层）
   ['update-signing', 'node', ['test/update-signing.js']],
+  // v0.6.39：安装包目录裁剪（保留最近 N 版），纯逻辑
+  ['prune-downloads', 'node', ['test/prune-downloads.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];
