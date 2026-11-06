@@ -65,6 +65,8 @@ const SUITES = [
   ['web-auth', 'node', ['test/web-auth.js']],
   ['provider-cache', 'node', ['test/provider-cache.js']],
   ['structure-limits', 'node', ['test/structure-limits.js']],
+  // v0.6.36：更新来源签名（密钥环 / 签名脚本 / 弹窗文案分层）
+  ['update-signing', 'node', ['test/update-signing.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];

@@ -53,8 +53,45 @@ export const UPDATE_FEED_BASE = 'https://harness.mingdao.ai/updates/';
  */
 export const UPDATE_PUBLIC_KEY_PEM = `-----BEGIN PUBLIC KEY-----
 MCowBQYDK2VwAyEAH3hTAqAm8Lju/y49sIDxs8/QFZAxbMgo+0Q1en5GEyc=
------END PUBLIC KEY-----
-`;
+-----END PUBLIC KEY-----`;
+
+// v0.6.36（§CODE-SIGNING 五之补）：**密钥环**。
+//
+// 为什么需要它：签名一旦启用，`decideUpdatePolicy` 对"有签名但验不过"是 **reject**。
+// 如果直接用新密钥签发、而存量客户端内置的还是旧公钥，那么**所有旧客户端会永久拒绝更新**——
+// 比"没签名"严重得多。所以分两版走：
+//   · 本版（0.6.36）：把**新旧两把公钥**都内置（旧 = UPDATE_PUBLIC_KEY_PEM，新 = 下面这把），
+//     仍然**不发布** .sig；
+//   · 下一版起（旧版已被覆盖）：用新私钥签发 .sig，旧客户端此时基本都已在本版上，能认。
+// 私钥**不在仓内**：`~/.mingdao/update-signing-key.pem`（0600），发布时经 CI secret 注入。
+export const UPDATE_PUBLIC_KEYS = Object.freeze([
+  { id: 'legacy-2025', pem: UPDATE_PUBLIC_KEY_PEM, role: 'legacy' },
+  {
+    id: '2026-11',
+    role: 'current',
+    pem: `-----BEGIN PUBLIC KEY-----
+MCowBQYDK2VwAyEACsYjcXqbeXRT1DPkK/urizbKy8HstGTn7Of1Hsmfy2Y=
+-----END PUBLIC KEY-----`,
+  },
+]);
+
+/**
+ * 用**密钥环**验签：任一内置公钥验过即通过（返回命中的 keyId）。
+ * 与单密钥版本的区别只在"多试几把"，判定语义（字节、64 字节签名、ed25519）完全一致。
+ * @param {{filePath?: string, bytes?: Buffer|Uint8Array|string, signatureB64?: string, keys?: Array<{id:string,pem:string}>}} [input]
+ * @returns {{ok: boolean, reason?: string, keyId?: string|null, bytes?: number}}
+ */
+export function verifyArtifactSignatureWithKeyring({ filePath, bytes, signatureB64, keys } = {}) {
+  const ring = Array.isArray(keys) && keys.length ? keys : UPDATE_PUBLIC_KEYS;
+  /** @type {string[]} */
+  const reasons = [];
+  for (const k of ring) {
+    const r = verifyArtifactSignature({ filePath, bytes, signatureB64, publicKeyPem: k.pem });
+    if (r.ok) return { ...r, keyId: r.keyId || k.id };
+    reasons.push(`${k.id}: ${r.reason || '验签失败'}`);
+  }
+  return { ok: false, reason: `密钥环里没有可验签的公钥（${reasons.join('；')}）`, keyId: null };
+}
 
 /**
  * 取本次校验用的公钥：默认**只**用内置常量。
@@ -273,18 +310,23 @@ export function buildUpdateNotice({ decision, version, keyId, reason }) {
       noLink: true,
     };
   }
-  // v0.6.21（§3.72）：负责人实测这版提示"太长、像一篇说明书"——弹窗正文只留**两行**：
-  // 第一行结论（未验证事实 + 默认仍安装，不是失败），第二行可操作入口（环境变量收紧 + 详情看哪）。
-  // 完整解释（发布链路未接入签名 → 无法用密码学证明来源；feed 被投毒时与官方包无法区分；
-  // 不改配置与会话）**原样留在 evaluateUpdate 的 logLine 里**，弹窗不再长篇罗列。
+  // v0.6.21（§3.72）：弹窗正文只留**两行**（结论 + 可操作入口），完整解释留在 evaluateUpdate 的 logLine。
+  // v0.6.36（负责人实测）：用户把这条读成"没签名/没公证"，与 Apple 公证混为一谈。
+  //   ——**这是两层不同的信任**：Apple 公证（Developer ID + notarize + staple）管"这个 .app 能不能运行"；
+  //     而"更新来源签名"管"这个更新包是不是由我们的私钥签发"（防 feed 被投毒换源）。
+  //   所以第一行明确写"Apple 公证不受影响"，避免再被误读成"没公证"。
+  const platformHint =
+    process.platform === 'darwin'
+      ? 'macOS 的 Apple 公证不受影响（Apple 已校验并公证，可正常安装）'
+      : '系统级代码签名不受影响（与更新来源签名是两件事）';
   return {
     allowInstall: true,
     type: 'warning',
     title: '更新已就绪（未验证来源签名）',
     message: `MingDao Harness v${v} 下载完成，重启应用即可完成更新`,
     detail:
-      '本次更新未验证来源签名（发布链路尚未接入签名）——已按默认策略安装。\n' +
-      '高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝无签名更新；详情见日志与官网。',
+      '本次更新未验证来源签名（发布链路下一版接入）——已按默认策略安装；' + platformHint + '。\n' +
+      '它防的是"更新源被投毒"；高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝无签名更新。',
     buttons: ['立即重启安装', '稍后'],
     defaultId: 0,
     cancelId: 1,

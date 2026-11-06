@@ -195,3 +195,40 @@ node scripts/update-sign.mjs --verify desktop/dist/mingdao-setup-<ver>-x64.exe -
 
 *配置文件位置：`desktop/electron-builder.yml`（azureSignOptions 注释）、`.github/workflows/desktop.yml`（env 段）。*
 *来源签名实现：`desktop/update-verify.js`（判据/文案单源）、`desktop/main.js`（门禁接线）、`scripts/update-sign.mjs`（发布侧工具）、`test/smoke.js` §135、`test/mutate/batch21-update-sign.mjs`。*
+
+## 六、更新来源签名的**两版上线**规程（v0.6.36 起）
+
+### 6.1 为什么不能一次上线
+
+`decideUpdatePolicy()` 对"**有签名但验不过**"是 **reject**（这是对的：攻击者换掉 `.sig` 就等于伪造来源）。
+因此如果直接用**新私钥**签发 `.sig` 并发布，而存量客户端内置的还是**旧公钥**，它们会：
+下载 → 取到 `.sig` → 用旧公钥验 → 失败 → **永久拒绝更新**。
+这比"没有签名"严重得多——用户会被卡死在旧版本，只能手动重装。
+
+### 6.2 两版
+
+| 版本 | 代码 | 发布侧 |
+| --- | --- | --- |
+| **v0.6.36（本版）** | `desktop/update-verify.js` 内置**密钥环**（`UPDATE_PUBLIC_KEYS` = 旧钥 `legacy-2025` + 新钥 `2026-11`），任一验过即通过；弹窗文案区分「Apple 公证」与「更新来源签名」 | **仍然不发布 `.sig`**（签名脚本已就绪但 CI 开关关闭） |
+| **v0.6.37（下一版）** | 不需再改代码（密钥环已能认新钥） | 用新私钥签 `.sig` → 发布到 GitHub Release **与** 站点 `/updates/<文件名>.sig`；CI 开关打开 |
+
+### 6.3 开关与密钥
+
+- 私钥**不入库**：`~/.mingdao/update-signing-key.pem`（0600），CI 里放 `secrets.UPDATE_SIGNING_KEY`（PEM 全文）；
+- CI 开关：仓库变量 `UPDATE_SIGNING_ENABLED=true` 才执行签名与上传（默认关闭）；
+- 生成/轮换：`node desktop/update-verify.js --keygen`（沿用既有实现，私钥不打印、拒绝入库），
+  然后把新公钥追加到 `UPDATE_PUBLIC_KEYS`（**旧钥必须保留至少一个大版本**，否则又会断掉存量客户端）。
+
+### 6.4 发布时 `.sig` 放哪里
+
+客户端按 **`https://harness.mingdao.ai/updates/<安装包文件名>.sig`** 取（`collectUpdateSignature` 的第三来源）。
+所以发版脚本要把 `scripts/sign-release-assets.mjs --out <sig 目录>` 的产物同时：
+1. 传到 GitHub Release（便于审计与镜像）；
+2. **复制到站点 `updates/` 目录**（客户端真正读取的位置）。
+
+### 6.5 验收
+
+- `node test/update-signing.js`（10 项）：密钥环多钥、篡改必拒、签名脚本产物可验、缺钥 CLI 非零退出、文案分层；
+- `batch77`（8 条变异）必须全中；
+- 启用后的首个版本，必须实测"旧版客户端（0.6.35）能从 0.6.36 正常更新"——
+  若旧版拒绝，说明 `.sig` 已发布但旧版不在密钥环内，**立即撤下 `/updates/*.sig`**（回滚只要删文件，不动代码）。

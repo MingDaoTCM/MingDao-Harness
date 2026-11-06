@@ -501,6 +501,20 @@ jobs:
             echo "::error title=structure-limits 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
           fi
           exit $code
+      - name: 更新来源签名（v0.6.36：密钥环 / 签名脚本 / 文案分层）
+        # 只挂 Linux 腿：纯函数 + 临时目录（自生成测试密钥，不接触发布私钥）。
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          node test/update-signing.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=update-signing 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
       - name: 文档守卫（链接 / 命令表 / kind / 模型 id / 架构覆盖 / API 表 / 变异总数）
         # v0.6.8（文档审计 §7.7）：把"文档与代码不一致"变成 CI 红——此前全靠人肉复查，
         # 结果 ARCHITECTURE 停在 v0.1.x、PACK-API 列了未实现的 kind、README 的 CI 矩阵与模型 id 过时。
