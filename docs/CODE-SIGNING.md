@@ -199,7 +199,8 @@ node scripts/update-sign.mjs --verify desktop/dist/mingdao-setup-<ver>-x64.exe -
 ## 六、更新来源签名的**两版上线**规程（v0.6.37 起）
 
 > 版本说明：v0.6.36 因 GitHub 退役 macOS 14 runner 未能发布（tag 保留、无 Release/npm/官网），
-> 内容随 **v0.6.37** 首发；因此密钥环在本版到达用户，**签发顺延到 v0.6.38**。
+> 内容随 **v0.6.37** 首发；因此密钥环在 v0.6.37 到达用户。v0.6.38 是 macOS CI 测试判据的修复版
+> （无产品行为变化），**签发继续顺延**——从 **v0.6.39** 开始。
 
 ### 6.1 为什么不能一次上线
 
@@ -212,8 +213,8 @@ node scripts/update-sign.mjs --verify desktop/dist/mingdao-setup-<ver>-x64.exe -
 
 | 版本 | 代码 | 发布侧 |
 | --- | --- | --- |
-| **v0.6.37（本版）** | `desktop/update-verify.js` 内置**密钥环**（`UPDATE_PUBLIC_KEYS` = 旧钥 `legacy-2025` + 新钥 `2026-11`），任一验过即通过；弹窗文案区分「Apple 公证」与「更新来源签名」 | **仍然不发布 `.sig`**（签名脚本已就绪但 CI 开关关闭） |
-| **v0.6.38（下一版）** | 不需再改代码（密钥环已能认新钥） | 用新私钥签 `.sig` → 发布到 GitHub Release **与** 站点 `/updates/<文件名>.sig`；CI 开关打开 |
+| **v0.6.38（本版）** | 密钥环/签名脚本/文案均沿用 v0.6.37（本版只修 macOS CI 测试判据） | **仍然不发布 `.sig`**（CI 开关关闭） |
+| **v0.6.39（下一版）** | 不需再改代码（密钥环已能认新钥） | 用新私钥签 `.sig` → 发布到 GitHub Release **与** 站点 `/updates/<文件名>.sig`；CI 开关打开 |
 
 ### 6.3 开关与密钥
 
@@ -233,5 +234,5 @@ node scripts/update-sign.mjs --verify desktop/dist/mingdao-setup-<ver>-x64.exe -
 
 - `node test/update-signing.js`（10 项）：密钥环多钥、篡改必拒、签名脚本产物可验、缺钥 CLI 非零退出、文案分层；
 - `batch77`（8 条变异）必须全中；
-- 启用后的首个版本，必须实测"旧版客户端（0.6.35 或 0.6.37）能从 0.6.38 正常更新"——
+- 启用后的首个版本，必须实测"旧版客户端（0.6.35 或 0.6.37/0.6.38）能从 0.6.39 正常更新"——
   若旧版拒绝，说明 `.sig` 已发布但旧版不在密钥环内，**立即撤下 `/updates/*.sig`**（回滚只要删文件，不动代码）。
