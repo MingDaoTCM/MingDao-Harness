@@ -73,3 +73,51 @@
 
 所以采集不需要中转：`HARVEST_PROXY=https://ghfast.top/ node scripts/harvest-release.mjs <版本> <目录>`
 （已支持断点续传），633MB 实测 < 3 分钟。深圳节点保留为**故障时的备选通道**（真拥塞时可改由它拉取再回传）。
+
+---
+
+## 四、OSS（香港）——安装包的唯一集散地（v0.6.39 起）
+
+### 4.1 为什么必须上 OSS
+
+2026-11-06 实测：香港 ECS 的公网带宽被打满后，**所有入向路径都只有 ~0.1MB/s**
+（GitHub Actions 推、深圳中转推、本机推，全部如此），633MB 传了 1 小时未完成。
+而 **OSS 香港的内网端点**对同地域 ECS 是 **18.5MB/s**（同一对象，差 185 倍）。
+
+### 4.2 端点必须分两种（这一条最容易错）
+
+| 使用者 | 端点 | 实测 |
+| --- | --- | --- |
+| 本机 / GitHub Actions | `https://mingdaoharness.oss-cn-hongkong.aliyuncs.com` | **2.44MB/s** |
+| 同地域 ECS（香港） | `https://mingdaoharness.oss-cn-hongkong-internal.aliyuncs.com` | **18.5MB/s** |
+
+**用公网端点给 ECS 拉文件 = 白付公网带宽且慢 185 倍。**
+
+### 4.3 三个已经踩过的坑
+
+1. **新 bucket 默认开「阻止公共访问」**：此时 `PutBucketAcl public-read` 报
+   `Put public bucket acl is not allowed`（不是 RAM 权限问题）。先
+   `PUT /?publicAccessBlock`（XML body `<BlockPublicAccess>false</BlockPublicAccess>`），再设 ACL。
+2. **对象键必须扁平**：`downloads/<文件名>`（文件名自带版本号）。用 `downloads/<版本>/` 会让
+   nginx 的 302 落到 404。需要改结构时用 **服务端 CopyObject**（不耗流量）。
+3. **签名细节**：`CanonicalizedOSSHeaders` 里冒号后**不带空格**（`x-oss-acl:public-read`），
+   否则 `SignatureDoesNotMatch`；`?publicAccessBlock` 需要 XML body 与 `Content-Type: application/xml`。
+
+### 4.4 现在的下载链路
+
+```
+用户 → harness.mingdao.ai/downloads/<文件>
+        ├─ 302 → OSS 香港（源站不再出任何下载流量）
+        └─ 大陆用户由 harness.southdns.com（深圳）**本地优先**直供 18MB/s，
+           本地没有的同样 302 → OSS
+```
+
+- 发布侧：`MirrorSync` 工作流把 Release 资产直接传 OSS（Actions 出网快，实测 **100 秒内**跑完）；
+- 服务器侧：不再互传安装包；源站只保留最近 1 版做回滚（本次清理 **9.3GB → 633MB**）；
+- 本地磁盘治理：`node scripts/prune-downloads.mjs <目录> --keep N [--apply]`（默认 dry-run）。
+
+### 4.5 凭据
+
+`~/.mingdao/oss.env`（0600，**不入库**）：`OSS_BUCKET / OSS_ENDPOINT / OSS_AK / OSS_SK`；
+CI 侧用同名 GitHub Secrets（`OSS_*`）。RAM 子账号只需 `oss:PutObject / GetObject / ListObjects`，
+若要改 ACL 另需 `oss:PutBucketAcl`（**仅一次性操作时才需要，平时可以收回**）。
