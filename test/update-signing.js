@@ -67,7 +67,11 @@ const ok = (name) => { passed += 1; console.log(`  ✓ ${name}`); };
     fs.writeFileSync(path.join(dir, 'README.txt'), 'should be ignored\n');
 
     const res = S.signReleaseAssets({ dir, privateKey: pair.privateKey });
-    assert.deepEqual(res.signed.sort(), ['latest.yml', 'mingdao-test-1.2.3-x64.exe'], '只签安装包与 latest*.yml（其它文件忽略）');
+    // v0.6.39 教训：默认**只签安装包**。两个 mac 构建各产一份 `latest-mac.yml`，
+    // 都签会得到两个同名 `.sig` → `gh release upload` 422（附件名必须唯一），整个 publish job 红。
+    assert.deepEqual(res.signed.sort(), ['mingdao-test-1.2.3-x64.exe'], '默认只签安装包（清单不签）');
+    const withManifests = S.signReleaseAssets({ dir, outDir: path.join(dir, 'with-m'), privateKey: pair.privateKey, includeManifests: true });
+    assert.deepEqual(withManifests.signed.sort(), ['latest.yml', 'mingdao-test-1.2.3-x64.exe'], '显式 includeManifests 时才签清单（调用方自负唯一性）');
     assert.equal(res.skipped.length, 0, `不应有失败：${JSON.stringify(res.skipped)}`);
     assert.equal(fs.existsSync(path.join(dir, 'README.txt.sig')), false, '非产物文件不得产出 .sig');
 
@@ -106,12 +110,12 @@ const ok = (name) => { passed += 1; console.log(`  ✓ ${name}`); };
       fs.writeFileSync(path.join(linux, 'b.deb'), 'b');
       fs.writeFileSync(path.join(linux, 'latest.yml'), 'linux');
       const r = S.signReleaseAssets({ dir: nested, privateKey: pair.privateKey });
-      assert.equal(r.signed.length, 4, `子目录里的产物必须全部签到（实际 ${JSON.stringify(r.signed)}）`);
+      assert.equal(r.signed.length, 2, `子目录里的**安装包**必须全部签到（清单默认不签，实际 ${JSON.stringify(r.signed)}）`);
       assert.ok(fs.existsSync(path.join(win, 'a.exe.sig')), '签名必须写回**原相对目录**');
       assert.ok(fs.existsSync(path.join(linux, 'b.deb.sig')), '第二个子目录也要签');
-      assert.ok(fs.existsSync(path.join(win, 'latest.yml.sig')) && fs.existsSync(path.join(linux, 'latest.yml.sig')),
-        '两个同名 latest.yml 必须各留一份签名（扁平化会互相覆盖）');
-      const flat = S.signReleaseAssets({ dir: nested, outDir: path.join(dir, 'flat'), privateKey: pair.privateKey, flat: true });
+      assert.equal(fs.existsSync(path.join(win, 'latest.yml.sig')), false, '清单默认不签（否则同名 .sig 会让上传 422）');
+      // 扁平化重名：用 includeManifests 让两个同名 latest.yml 都参与（默认只签安装包时它们不签）
+      const flat = S.signReleaseAssets({ dir: nested, outDir: path.join(dir, 'flat'), privateKey: pair.privateKey, flat: true, includeManifests: true });
       assert.ok(flat.skipped.some((x) => x.includes('重名')), '扁平化遇到重名必须报 skipped，不许静默覆盖');
       ok('⑩b 签名递归：子目录全签、保留相对路径、扁平化重名告警');
     }

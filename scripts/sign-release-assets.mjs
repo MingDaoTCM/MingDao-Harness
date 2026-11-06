@@ -31,7 +31,7 @@ const MANIFEST_RE = /^latest(-linux|-mac)?\.yml$/i;
  * @param {{recursive?: boolean}} [opts]
  * @returns {string[]} 绝对路径
  */
-export function listSignableFiles(dir, { recursive = true } = {}) {
+export function listSignableFiles(dir, { recursive = true, includeManifests = false } = {}) {
   /** @type {string[]} */
   const out = [];
   const walk = (/** @type {string} */ d) => {
@@ -42,7 +42,14 @@ export function listSignableFiles(dir, { recursive = true } = {}) {
         continue;
       }
       if (!entry.isFile()) continue;
-      if (ARTIFACT_EXT.test(entry.name) || MANIFEST_RE.test(entry.name)) out.push(full);
+      // **默认只签安装包，不签 latest*.yml**（v0.6.39 实测教训）：
+      // 两个 mac 构建各自产出 `latest-mac.yml`，签完都叫 `latest-mac.yml.sig` →
+      // `gh release upload` 直接 422（Release 附件名必须唯一），整个 publish job 变红。
+      // 而且这些清单在站点上是**我们自己的 feed 生成器**产出的（不是从 artifacts 拷的），
+      // 签 CI 里的那份对客户端没有任何作用；清单的完整性由 HTTPS + 安装包签名共同保证。
+      // 需要审计清单时显式 `includeManifests: true`（调用方要自己保证文件名唯一）。
+      const wanted = ARTIFACT_EXT.test(entry.name) || (includeManifests && MANIFEST_RE.test(entry.name));
+      if (wanted) out.push(full);
     }
   };
   walk(dir);
@@ -67,11 +74,11 @@ export function signBytes(bytes, privateKey) {
  * @param {{dir: string, outDir?: string, privateKey: import('node:crypto').KeyObject}} opts
  * @returns {{signed: string[], skipped: string[]}}
  */
-export function signReleaseAssets({ dir, outDir = dir, privateKey, flat = false }) {
+export function signReleaseAssets({ dir, outDir = dir, privateKey, flat = false, includeManifests = false }) {
   const signed = [];
   /** @type {string[]} */
   const skipped = [];
-  for (const file of listSignableFiles(dir)) {
+  for (const file of listSignableFiles(dir, { includeManifests })) {
     if (file.endsWith('.sig')) continue;
     try {
       const text = signBytes(fs.readFileSync(file), privateKey) + '\n';

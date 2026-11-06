@@ -35,8 +35,8 @@ M.mutate({
   name: '④ 签名脚本连非产物文件也签（.sig 会覆盖无关文件）',
   file: 'scripts/sign-release-assets.mjs',
   // v0.6.39：listSignableFiles 改成递归 walk 后，锚点跟随（out.push(dir/name) → out.push(full)）。
-  from: "      if (ARTIFACT_EXT.test(entry.name) || MANIFEST_RE.test(entry.name)) out.push(full);",
-  to: "    out.push(path.join(dir, entry.name)); // 变异：所有文件都签",
+  from: "      const wanted = ARTIFACT_EXT.test(entry.name) || (includeManifests && MANIFEST_RE.test(entry.name));",
+  to: "      const wanted = true; // 变异：所有文件都签",
   expect: ['只签安装包'],
   run: RUN,
 });
@@ -82,7 +82,16 @@ M.mutate({
   file: 'scripts/sign-release-assets.mjs',
   from: '        if (recursive) walk(full);',
   to: '        if (false) walk(full); // 变异：不递归',
-  expect: ['子目录里的产物必须全部签到'],
+  expect: ['子目录里的'],
+  run: RUN,
+});
+
+M.mutate({
+  name: '⑩ 清单也签（两个 latest-mac.yml → 同名 .sig → Release 上传 422）',
+  file: 'scripts/sign-release-assets.mjs',
+  from: '      const wanted = ARTIFACT_EXT.test(entry.name) || (includeManifests && MANIFEST_RE.test(entry.name));',
+  to: '      const wanted = ARTIFACT_EXT.test(entry.name) || MANIFEST_RE.test(entry.name);',
+  expect: ['默认只签安装包'],
   run: RUN,
 });
 
