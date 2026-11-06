@@ -209,30 +209,45 @@ node scripts/update-sign.mjs --verify desktop/dist/mingdao-setup-<ver>-x64.exe -
 下载 → 取到 `.sig` → 用旧公钥验 → 失败 → **永久拒绝更新**。
 这比"没有签名"严重得多——用户会被卡死在旧版本，只能手动重装。
 
-### 6.2 两版
+### 6.2 三个阶段
 
 | 版本 | 代码 | 发布侧 |
 | --- | --- | --- |
-| **v0.6.38（本版）** | 密钥环/签名脚本/文案均沿用 v0.6.37（本版只修 macOS CI 测试判据） | **仍然不发布 `.sig`**（CI 开关关闭） |
-| **v0.6.39（下一版）** | 不需再改代码（密钥环已能认新钥） | 用新私钥签 `.sig` → 发布到 GitHub Release **与** 站点 `/updates/<文件名>.sig`；CI 开关打开 |
+| **v0.6.38** | 密钥环/签名脚本/文案均沿用 v0.6.37（本版只修 macOS CI 测试判据） | **仍然不发布 `.sig`**（CI 开关关闭） |
+| **v0.6.39（阶段一，已上线）** | 无需改代码（密钥环已能认新钥） | 用新私钥签 `.sig`，**只上传 GitHub Release**；站点 `/updates/` **绝不放 `.sig`** |
+| **阶段二（0.6.40+，未上线）** | 无需改代码 | 把 Release 里的 `.sig` **复制到站点 `/updates/`**（客户端真正读取的位置） |
+
+> **阶段一为什么不放站点**：存量客户端（≤0.6.35）只内置旧公钥，拿到用新私钥签的 `.sig` 会
+> "有签名但验不过"→ `decideUpdatePolicy` 判 **reject** → **永久拒绝更新**，只能手动重装。
+> 阶段一先把 `.sig` 关在 Release 里（可审计、客户端不读），等 0.6.36+（含密钥环）覆盖绝大多数
+> 活跃用户后再进入阶段二。
+>
+> **阶段二切换条件与回滚**：0.6.36+ 覆盖绝大多数活跃用户后，把 `.sig` 复制到 `/updates/` 即可；
+> 切换前必须实测 0.6.35 / 0.6.37 / 0.6.38 客户端能从新版正常更新。若旧版拒绝，**立即删除
+> `/updates/*.sig`**（回滚只需删文件，不动代码）。
 
 ### 6.3 开关与密钥
 
 - 私钥**不入库**：`~/.mingdao/update-signing-key.pem`（0600），CI 里放 `secrets.UPDATE_SIGNING_KEY`（PEM 全文）；
-- CI 开关：仓库变量 `UPDATE_SIGNING_ENABLED=true` 才执行签名与上传（默认关闭）；
+- CI 开关：**`secrets.UPDATE_SIGNING_KEY` 存在**即执行签名与上传（v0.6.39 起；此前文档写的是仓库变量
+  `UPDATE_SIGNING_ENABLED`，实际未接线）。`secrets` **不能**直接用在 step 级 `if`（整份 workflow 会判无效），
+  所以在 job 级 `env` 折算成 `HAS_UPDATE_SIGNING_KEY` 再判；
 - 生成/轮换：`node desktop/update-verify.js --keygen`（沿用既有实现，私钥不打印、拒绝入库），
   然后把新公钥追加到 `UPDATE_PUBLIC_KEYS`（**旧钥必须保留至少一个大版本**，否则又会断掉存量客户端）。
 
 ### 6.4 发布时 `.sig` 放哪里
 
 客户端按 **`https://harness.mingdao.ai/updates/<安装包文件名>.sig`** 取（`collectUpdateSignature` 的第三来源）。
-所以发版脚本要把 `scripts/sign-release-assets.mjs --out <sig 目录>` 的产物同时：
-1. 传到 GitHub Release（便于审计与镜像）；
-2. **复制到站点 `updates/` 目录**（客户端真正读取的位置）。
+`scripts/sign-release-assets.mjs artifacts` 会**递归**扫描（CI 的产物在 `artifacts/<name>/` 子目录）
+并**保留相对目录**产出 `.sig`（不同平台的 `latest.yml` 不会互相覆盖）。发布侧：
+
+1. **阶段一（v0.6.39）**：只传到 GitHub Release（便于审计与镜像）；**站点 `updates/` 不放**。
+2. **阶段二（未上线）**：再把同样的 `.sig` **复制到站点 `updates/` 目录**（客户端真正读取的位置）。
 
 ### 6.5 验收
 
-- `node test/update-signing.js`（10 项）：密钥环多钥、篡改必拒、签名脚本产物可验、缺钥 CLI 非零退出、文案分层；
-- `batch77`（8 条变异）必须全中；
-- 启用后的首个版本，必须实测"旧版客户端（0.6.35 或 0.6.37/0.6.38）能从 0.6.39 正常更新"——
-  若旧版拒绝，说明 `.sig` 已发布但旧版不在密钥环内，**立即撤下 `/updates/*.sig`**（回滚只要删文件，不动代码）。
+- `node test/update-signing.js`（**11 项**）：密钥环多钥、篡改必拒、签名脚本产物可验（含子目录递归/相对路径/
+  扁平化重名告警）、缺钥 CLI 非零退出、文案分层；
+- `batch77`（**9 条变异**）必须全中；
+- **阶段二启用后**的首个版本，必须实测"旧版客户端（0.6.35 或 0.6.37/0.6.38）能从新版正常更新"——
+  若旧版拒绝，说明 `.sig` 已发布但旧版不在密钥环内，**立即撤下 `/updates/*.sig`**。

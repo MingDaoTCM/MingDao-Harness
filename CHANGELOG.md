@@ -3,6 +3,63 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.39（2026-11-06）— 输入队列 + CI 直推产物 + 更新签名阶段一
+
+> **桌面端体验**：生成中继续输入不再被"仍在执行"吞掉——按 Enter 入队（输入框上方 chips：
+> 序号 / 截断文本 / ✕；点文本回填编辑），本轮结束后**自动依次发送**；**用户中止时队列保留、
+> 不自动发**（中止=停下）。上限 20 条，队列只在内存（刷新即丢）。纯逻辑在 `viewmodel.js`，
+> `test/viewmodel.js` 110 → **134 条**，新增 `batch78` **8 条**变异。
+> **CI 两处新能力（本版首次真实生效）**：publish 用新 secret `DEPLOY_SSH_KEY` 把安装包
+> scp 直推源站 `downloads/`（`continue-on-error: true`，收割仍是兜底）；`UPDATE_SIGNING_KEY`
+> 存在时签安装包与 `latest*.yml`，`.sig` **只上传 GitHub Release**——站点 `/updates/`
+> **绝不放** `.sig`（存量客户端只有旧公钥，放了会让它们永久拒绝更新）。阶段二（复制到
+> `/updates/`）等 0.6.36+ 密钥环覆盖绝大多数活跃用户后再做。
+> `scripts/ui-shot.mjs` 新增 `--eval`；新增 `docs/REVIEW-v0.7-vs-DSH-Octop.md` 复盘。
+> 完整说明见 `RELEASE-NOTES-0.6.39.md`。
+
+### 一、输入队列（`a2886bd` / `d1768dd`）
+
+- 生成中按 Enter **入队**，不再只弹"上一个任务仍在执行"；本轮结束（完成/出错）后自动依次发出下一条。
+- chips 显示 `序号. 截断文本 ✕`：点文本把该条**放回输入框编辑**（同时移出队列，避免发两次），点 ✕ 删除。
+- 上限 **20** 条，空文本拒绝；满员给出可读提示。点「■ 停止」中止时**不排空**，队列保留待用户处置。
+- 队列是"这一刻的输入意图"，只在内存，页面刷新即丢（不是持久任务）。
+- 纯逻辑 `enqueueMessage/dequeueMessage/shouldDrainQueue/queueView/queueLabel` 放 `viewmodel.js`；
+  `test/viewmodel.js` 110 → 134 条，`batch78` 8 条变异。
+
+### 二、CI 直推产物（`.github/workflows/desktop.yml`）
+
+- publish 新增一步：用 `DEPLOY_SSH_KEY`（配套 `DEPLOY_HOST/DEPLOY_USER/DEPLOY_DIR`）把安装包与
+  `.blockmap` scp 到源站 `$DEPLOY_DIR/downloads/`；`continue-on-error: true`——失败不判红，
+  官网收割（`HARVEST_PROXY` + 续传）仍是兜底。
+- 只推安装包与 blockmap；`latest*.yml` 不直推（双架构合并版由服务器侧 `gen-update-feeds.sh` 生成）。
+- 发布前修正：`download-artifact` 把文件放在 `artifacts/<name>/` 子目录，首版的 `artifacts/*.exe`
+  一个都匹配不到且被 `|| true` 吞掉——改为 `find` 收集并打印 `DIRECT_PUSH_DONE` / 失败告警。
+
+### 三、更新来源签名阶段一
+
+- `UPDATE_SIGNING_KEY` 存在时，对安装包与 `latest*.yml` 做 ed25519 签名，`.sig` **只上传 GitHub Release**。
+- **边界（最容易搞错）**：站点 `/updates/` **不放任何 `.sig`**。`decideUpdatePolicy` 对"有签名但验不过"
+  是 reject，而存量客户端（≤0.6.35）只有旧公钥——现在放上去会让它们**永久拒绝更新**。
+- 阶段二切换条件：0.6.36+（含密钥环）覆盖绝大多数活跃用户后，把 `.sig` 复制到 `/updates/`
+  （不改代码）；切换前必须实测 0.6.35/0.6.37/0.6.38 客户端能从新版正常更新，若被拒立即删掉
+  `/updates/*.sig`（回滚只需删文件）。
+- 发布前修正：原写法 `if: secrets.X != ''` 在 GitHub 的 step 级 `if` 里是**非法上下文**（整份
+  workflow 会失效），改为 job 级 env 折算布尔标记；签名脚本改为**默认递归**并保留相对目录
+  （不同平台的 `latest.yml` 不再互相覆盖）。
+
+### 四、工具与文档
+
+- `scripts/ui-shot.mjs` 新增 `--eval "<js>"`：首次截图前在页面执行 JS，用于只能由交互产生的界面状态
+  （如队列条）；会影响同一次运行的全部截图。
+- 新增 `docs/REVIEW-v0.7-vs-DSH-Octop.md`（对照 DSH/Octop 实码的复盘，纠正两处归属并列出 0.6.40 路线）。
+
+### 五、未做
+
+- **插话（steer）** 在 0.6.40：本版只有"排队"一条 lane，不能打断当前步。
+- **`.sig` 站点发布**留到阶段二（见上）；本版 `/updates/*.sig` 必须保持 404。
+- **Windows Authenticode** 仍未接入（与更新来源签名是两件事）。
+
+
 ## v0.6.38（2026-11-06）— 修 macOS CI 两条确定性测试缺陷（无产品行为变化）
 
 > **纯测试改动（仅 `test/`）。** 0.6.37 的 macOS CI 红在变异自审（step 44），两次同点：不是"慢 runner 的
