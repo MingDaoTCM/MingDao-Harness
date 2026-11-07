@@ -66,8 +66,17 @@ function makeAgent(/** @type {any} */ provider, /** @type {any} */ cfg = {}, max
 }
 
 /** 子进程封装：READY 屏障 → 父进程发令（GO）→ 同时开跑，不靠进程启动先后碰运气。 */
+// v0.6.40：把锁等待上限放宽到 30s（默认 5s）。
+//
+// 为什么是**夹具**而不是产品：本套件刻意制造 8 路并发写同一把锁，CI 上 runner 被同机其它 job 抢 CPU 时，
+// "排队等锁"很容易超过 5s → 报「获取文件锁超时」，看起来像产品缺陷，实际是断言之外的超时。
+// 被测语义是「并发不丢条目」，不是「多久能拿到锁」，所以放宽等待**不放宽断言**。
+// （同 0.6.34 对 state-locks 的处理；那次是 3s，这次是产品默认 5s。）
+process.env.MINGDAO_LOCK_TIMEOUT_MS = process.env.MINGDAO_LOCK_TIMEOUT_MS || '30000';
+
 function startChild(/** @type {string} */ body) {
-  const p = spawn(process.execPath, ['--input-type=module', '-e', body], { stdio: ['pipe', 'pipe', 'pipe'] });
+  // env 显式透传：子进程同样要放宽锁等待（否则父进程放宽没用）
+  const p = spawn(process.execPath, ['--input-type=module', '-e', body], { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, MINGDAO_LOCK_TIMEOUT_MS: process.env.MINGDAO_LOCK_TIMEOUT_MS || '30000' } });
   p.stdin.on('error', () => {});
   p.stdout.setEncoding('utf8');
   p.stderr.setEncoding('utf8');
