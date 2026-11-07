@@ -482,6 +482,3 @@ MINGDAO_GITEE_TOKEN=xxx MINGDAO_GITCODE_TOKEN=yyy \
 | gitee AppImage 上传失败 | 单文件 >100MB 被拒，若整轮失败会连带其它包 | 脚本已逐文件判大小并跳过，看日志确认 |
 | 在真实 `~/.mingdao` 上跑测试 | 污染用户配置与会话 | 自检一律 `MINGDAO_HOME=$(mktemp -d)` |
 | 提交信息里的反引号/`$()` | bash 抢先展开，命令被破坏 | 提交信息用单引号 heredoc |
-
-> 产物分发（对象存储 / 国内镜像 / 302 回源 / 就近选择）的完整做法与验收清单见
-> [`DISTRIBUTION-PLAYBOOK.md`](./DISTRIBUTION-PLAYBOOK.md)。
