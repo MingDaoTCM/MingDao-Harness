@@ -3,7 +3,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { appendEvent, eventFileFor, eventLogEnabled, isEventLogName, warnEventFailure } from './session-events.js';
+import { appendEvent, eventFileFor, eventLogEnabled, isEventLogName, repairEventLog, warnEventFailure } from './session-events.js';
 
 // —— 冲突备份名（单一事实来源，v0.4.6）——
 // 同步冲突时写入的备份：<会话名>.server-<时间戳>[-<随机后缀>].jsonl（远端版本）与 .remote-（远端拉取版本）。
@@ -168,8 +168,48 @@ export function rewriteSession(file, messages) {
   atomicWriteFileSync(file, lines + (lines ? '\n' : ''), { mode: 0o600 }); // 质检 H4：会话文件原子写
 }
 
-/** @param {any} file */
-export function loadSession(file) {
+/** 每个会话文件每进程只尝试修补一次；失败也不重试（避免每次读取都整份读事件日志）。 */
+const repairAttempted = new Set();
+
+/**
+ * v0.6.40：首次读取会话时闭合「悬空事件」——`approval.asked` 没有 decided、`tool.start`
+ * 没有 tool.end、`turn.start` 没有 turn.end（进程被 kill / 崩溃 / 用户等审批时关应用）。
+ *
+ * 纪律：
+ *   · **只追加**闭合事件，不改写/删除既有行；修补失败只 warn，绝不影响会话读取；
+ *   · 同一会话文件在进程内只跑一次（`repairAttempted`），后续读取直接跳过；
+ *   · `cfg.eventLog === false`（或环境变量关闭）时完全不碰事件文件。
+ * @param {any} file 会话文件（不是事件文件；内部换算成 `<session>.events.ndjson`）
+ * @param {any} [cfg] 传入时尊重 `cfg.eventLog === false`
+ * @returns {{ok:boolean,error:string|null,repaired:number,dangling:{asks:any[],tools:any[],turns:any[]},skipped?:boolean,deduped?:boolean}}
+ */
+export function repairSessionEvents(file, cfg = null) {
+  /** @type {{asks:any[],tools:any[],turns:any[]}} */
+  const empty = { asks: [], tools: [], turns: [] };
+  try {
+    if (cfg && cfg.eventLog === false) return { ok: true, error: null, repaired: 0, dangling: empty, skipped: true };
+    if (!eventLogEnabled(cfg)) return { ok: true, error: null, repaired: 0, dangling: empty, skipped: true };
+    const sessionFile = String(file || '');
+    if (!sessionFile) return { ok: false, error: '会话文件路径为空', repaired: 0, dangling: empty };
+    const key = path.resolve(sessionFile);
+    if (repairAttempted.has(key)) return { ok: true, error: null, repaired: 0, dangling: empty, deduped: true };
+    // 先登记再修补：即使修补失败也不再重试（同一会话每进程只跑一次是硬约束）。
+    repairAttempted.add(key);
+    const eventFile = eventFileFor(key);
+    const result = repairEventLog(eventFile, { reason: '进程中断：启动/首次读取会话时合成闭合事件' });
+    if (!result.ok) warnEventFailure(eventFile, result.error ?? null);
+    return result;
+  } catch (err) {
+    const error = String(/** @type {any} */ (err)?.message ?? err);
+    try {
+      warnEventFailure(eventFileFor(String(file || '')), error);
+    } catch {}
+    return { ok: false, error, repaired: 0, dangling: empty };
+  }
+}
+
+/** @param {any} file @param {any} [cfg] */
+export function loadSession(file, cfg = null) {
   const raw = fs.readFileSync(file, 'utf8');
   const messages = [];
   for (const line of raw.split('\n')) {
@@ -181,6 +221,9 @@ export function loadSession(file) {
       }
     } catch {}
   }
+  // v0.6.40：消息读完后顺带闭合悬空事件。失败只 warn（repairSessionEvents 内部吞掉），
+  // 返回值与消息数组一字不动——事件侧车坏了/修不了，会话照样可读。
+  repairSessionEvents(file, cfg);
   return { file, messages };
 }
 

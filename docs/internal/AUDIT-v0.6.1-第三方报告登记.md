@@ -6862,3 +6862,57 @@ requestToken / trustedHost`），`createProviderCache({...})` 实例化并 `awai
 - `replayToMessages` 在 `interrupt` 找不到对应 assistant 时不凭空造占位（避免与 compact
   后的真实消息数组分叉）；真实双写顺序下占位已由 `message.append` 提供，不会重复。
 - 事件日志写失败只影响该事件流完整性，不影响会话、账本、SSE 或回合结果。
+
+## 9.2 v0.6.40：审批/工具/回合的「悬空事件」闭合（对齐 DSH `repair.js`）
+
+### 9.2.1 问题
+
+事件日志是 append-only 的（v0.6.35 §1.1），进程被 kill、崩溃或用户在「等审批」时关应用，
+会留下**没有配对**的事件：`approval.asked` 没有 `approval.decided`、`tool.start` 没有
+`tool.end`、`turn.start` 没有 `turn.end`。会话历史里表现为「永远在等审批 / 工具永远在跑」，
+`replayToMessages` 也无法确定这些回合的结局。DSH 的做法是在启动时**合成闭合事件**，
+不改历史、只追加；本切片把同一思路落在本地事件日志上。
+
+### 9.2.2 实现（只改 `src/session-events.js` / `src/session.js`）
+
+- `findDangling(events)`：纯函数，按 `seq` 升序返回 `{asks,tools,turns}` 三组未闭合事件。
+  ask/tool 按 `requestId`/`callId` 等关联键配对，无键时关闭最近一条；turn 用栈配对
+  （`turn.end` 关闭最近一次 `turn.start`）；同 id 多次出现以最后一次为准。
+- `synthClosers(dangling,{at,reason})`：纯函数，产出**待追加**的闭合事件，顺序为
+  `approval.decided{decision:'aborted'}` → `tool.end{ok:false,error:'进程中断，工具结果未知'}`
+  → `turn.end{status:'aborted'}`；每条 `data` 带 `synthetic:true` 与 `reason`，不预分配 `seq`。
+- `repairEventLog(eventFile,{reason})`：读全量事件 → `findDangling` → 有悬空才逐条走
+  **现有 `appendEvent`**（锁内分配连续 seq，接在尾部不重号）→ 返回
+  `{ok,repaired:n,dangling}`。没有悬空时不碰文件；`readEvents.skipped>0`（半行/坏行）视为
+  损坏，返回 `{ok:false}` 且**一个字节都不写**；绝不删除/改写既有行。
+- 审批事件（`approval.asked/decided`）**不进**对外 `EVENT_TYPES`（该清单的 12 条被
+  `test/session-events.js` 逐字钉死，本切片不允许改那套断言），但内部可读写集合包含它们，
+  否则修补器看不见悬空 ask、也无法把合成 decided 追加进日志。若后续审批轨道把这两类
+  正式并入 `EVENT_TYPES`，本处取并集，行为不变。
+- 接线：`src/session.js#loadSession` 消息解析完成后调用 `repairSessionEvents(file,cfg)`；
+  同一会话每进程只跑一次（模块级 `Set` 按绝对路径去重，先登记后修补），
+  `cfg.eventLog===false` / `MINGDAO_EVENT_LOG=0` / 进程开关关闭时直接跳过；修补失败只
+  `warnEventFailure`，`loadSession` 的返回值与消息数组一字不动。
+
+### 9.2.3 测试与变异
+
+| 项 | 结果 |
+| --- | --- |
+| `test/session-repair.js` | **15 项**：单 ask / 单 tool / 单 turn、三类并存 + 排序 + 同 id 取最后、closers 字段与顺序、已闭合不重复、单/三类修补、历史字节不变、幂等第二次 0、多回合只补最后、损坏日志 ok:false 且字节不变、空日志不建文件、`cfg.eventLog=false` 跳过、`loadSession` 一次 + 进程内去重、seq 连续不重号 |
+| `test/mutate/batch82-repair.mjs` | **8/8 全中**：不检测悬空 / 漏掉 approval / 漏掉 tool / 无 synthetic / 破坏幂等 / 损坏仍写入 / reason 丢失 / 顺序错（先 turn.end 后 tool.end） |
+| `npm run typecheck` / `typecheck:strict` | 通过（strict 0/0） |
+| `node test/session-events.js` | 25 项全部通过（公共 12 类清单未动） |
+| `node test/smoke.js` | 通过 |
+| `test/mutate/README.md` | 计数 750 → 758（仅计数） |
+
+### 9.2.4 边界（本切片明确不做）
+
+- 修补在**首次读取**该会话时触发：若另一个进程此刻正在该会话里真实执行 turn，本进程会把
+  「进行中的 turn/tool」误判为悬空（每进程只读一次、不感知跨进程 owner）。多进程同时打开
+  同一会话的协调留给后续 owner/lease 设计。
+- 损坏判定保守：任何被 `readEvents` 计入 `skipped` 的行（含未来新增的未知 type）都会让
+  修补整体拒绝；换取「绝不在坏日志上固化损坏」。
+- 合成事件只写事件流，不回填消息数组（不造 `tool` 占位、不改会话 `.jsonl`）；重放侧仍由
+  `interrupt` 占位负责消息形态。
+- 未接入 `src/web/**`、`src/agent.js`：审批事件的实际写入点由并行轨道落地，本切片只保证
+  识别 + 闭合；`test/run-all.mjs` / CI 未改（不在允许范围）。

@@ -42,7 +42,27 @@ export const EVENT_TYPES = Object.freeze([
   'checkpoint',
 ]);
 
-const EVENT_TYPE_SET = new Set(EVENT_TYPES);
+/**
+ * 审批事件（v0.6.40 悬空闭合切片）：`approval.asked` / `approval.decided` 由审批轨道写入。
+ *
+ * 为什么不并进 `EVENT_TYPES`：那份清单是**对外公开**的 12 类事件，条数被既有回归套件
+ * （`test/session-events.js` ①）逐字钉死；本切片不允许改那套断言。但读取与追加又必须认它们——
+ * 否则修补器看不见「永远在等审批」的悬空 ask，也没法把合成的 decided 追加进日志。
+ * 因此：`EVENT_TYPES` 仍是 12 类；内部可读写集合 = 12 类 + 审批 2 类。
+ */
+export const APPROVAL_EVENT_TYPES = Object.freeze(['approval.asked', 'approval.decided']);
+
+/** 内部接受的事件类型：公共 12 类 + 审批 2 类（变量名保持 `EVENT_TYPE_SET`，既有变异锚点不变）。 */
+const EVENT_TYPE_SET = new Set([...EVENT_TYPES, ...APPROVAL_EVENT_TYPES]);
+
+/** 审批/工具的关联键字段（按优先级；没有键时按「最近一条」兜底配对）。 */
+const APPROVAL_ID_FIELDS = Object.freeze(['requestId', 'approvalId', 'approvalRequestId', 'id', 'callId']);
+const TOOL_ID_FIELDS = Object.freeze(['callId', 'toolCallId', 'id']);
+
+/** 合成闭合事件的固定文案：工具结果未知（不是失败，是进程中断后无从得知）。 */
+export const SYNTHETIC_TOOL_ERROR = '进程中断，工具结果未知';
+/** 合成闭合事件的默认原因（`repairEventLog` 调用方也可覆盖）。 */
+export const SYNTHETIC_REASON = '进程中断（启动时合成闭合事件）';
 
 /** 回滚开关：`MINGDAO_EVENT_LOG=0`（或 false/off/no）时全局关闭双写。 */
 export const EVENT_LOG_ENV = 'MINGDAO_EVENT_LOG';
@@ -383,6 +403,166 @@ export function readEvents(eventFile) {
   }
 }
 
+/**
+ * v0.6.40：中断 / 崩溃 / 等审批时关应用会留下**没有配对**的事件。这里把它们找出来。
+ *
+ * 纯函数：不读写文件、不改入参。配对规则（全部按 `seq` 升序处理）：
+ *   · `approval.asked` ↔ `approval.decided`：按 requestId/approvalId/id/callId 配对；
+ *     没有 id 时 decided 关闭最近一条无 id 的 ask（审批不嵌套）；
+ *   · `tool.start` ↔ `tool.end`：按 callId/toolCallId/id 配对；没有 id 时同样关闭最近一条；
+ *   · `turn.start` ↔ `turn.end`：turn 没有 id，用栈配对（end 关闭最近一次 start）；
+ *   · **同 id 多次出现以最后一次为准**：后一次 start/asked 覆盖前一次，不会把已覆盖的旧事件报成悬空。
+ *
+ * @param {any[]} events
+ * @returns {{asks: SessionEvent[], tools: SessionEvent[], turns: SessionEvent[]}}
+ */
+export function findDangling(events) {
+  /** @type {Map<string, any>} */
+  const asks = new Map();
+  /** @type {Map<string, any>} */
+  const tools = new Map();
+  /** @type {any[]} */
+  const turns = [];
+  /** @param {any} ev @param {readonly string[]} fields @returns {string} */
+  const idOf = (ev, fields) => {
+    for (const f of fields) {
+      const v = ev?.data?.[f];
+      if (v !== null && v !== undefined && String(v) !== '') return String(v);
+    }
+    return '';
+  };
+  /**
+   * 关闭 map 里最近一条（无 id 的 end/decided 兜底）。
+   * @param {Map<string, any>} map
+   */
+  const closeLatest = (map) => {
+    const keys = [...map.keys()];
+    const last = keys.length ? keys[keys.length - 1] : '';
+    if (last) map.delete(last);
+  };
+  for (const ev of ordered(events)) {
+    if (ev.type === 'approval.asked') {
+      const key = idOf(ev, APPROVAL_ID_FIELDS) || `#${ev.seq}`;
+      asks.delete(key); // 先删再插：Map 的插入顺序也要反映「最后一次出现」
+      asks.set(key, ev);
+    } else if (ev.type === 'approval.decided') {
+      const key = idOf(ev, APPROVAL_ID_FIELDS);
+      if (key) asks.delete(key);
+      else closeLatest(asks);
+    } else if (ev.type === 'tool.start') {
+      const key = idOf(ev, TOOL_ID_FIELDS) || `#${ev.seq}`;
+      tools.delete(key); // 同上：覆盖时刷新插入顺序
+      tools.set(key, ev);
+    } else if (ev.type === 'tool.end') {
+      const key = idOf(ev, TOOL_ID_FIELDS);
+      if (key) tools.delete(key);
+      else closeLatest(tools);
+    } else if (ev.type === 'turn.start') {
+      turns.push(ev);
+    } else if (ev.type === 'turn.end') {
+      turns.pop();
+    }
+  }
+  /** @param {any} a @param {any} b @returns {number} */
+  const bySeq = (a, b) => (Number(a?.seq) || 0) - (Number(b?.seq) || 0);
+  return {
+    asks: [...asks.values()].sort(bySeq).map(cloneSessionEvent),
+    tools: [...tools.values()].sort(bySeq).map(cloneSessionEvent),
+    turns: turns.sort(bySeq).map(cloneSessionEvent),
+  };
+}
+
+/**
+ * v0.6.40：为悬空事件合成**要追加**的闭合事件（纯函数，不写文件）。
+ *
+ * 顺序是嵌套的自然顺序：先 `approval.decided`（内层）→ 再 `tool.end` → 最后 `turn.end`。
+ * 每条都带 `data.synthetic=true` 与 `data.reason`——重放/审计能一眼看出这是修补出来的事实，
+ * 而不是真实发生过的结束。合成事件不带 `seq`：由 `appendEvent` 在锁内分配，保证接在尾部不重号。
+ *
+ * @param {{asks?: any[], tools?: any[], turns?: any[]}} dangling
+ * @param {{at?: number|Date|null, reason?: string}} [opts]
+ * @returns {{type: string, time: number, data: any}[]}
+ */
+export function synthClosers(dangling, { at = null, reason = '' } = {}) {
+  const rawTime = Number(at instanceof Date ? at.getTime() : at);
+  const time = Number.isFinite(rawTime) && rawTime > 0 ? rawTime : Date.now();
+  const why = String(reason || SYNTHETIC_REASON);
+  /** @type {{type: string, time: number, data: any}[]} */
+  const closers = [];
+  const asks = Array.isArray(dangling?.asks) ? dangling.asks : [];
+  const tools = Array.isArray(dangling?.tools) ? dangling.tools : [];
+  const turns = Array.isArray(dangling?.turns) ? dangling.turns : [];
+  /** @param {any} ev @param {readonly string[]} fields @returns {{field: string, value: any}|null} */
+  const keyOf = (ev, fields) => {
+    for (const f of fields) {
+      const v = ev?.data?.[f];
+      if (v !== null && v !== undefined && String(v) !== '') return { field: f, value: v };
+    }
+    return null;
+  };
+  for (const ask of asks) {
+    /** @type {any} */
+    const data = { decision: 'aborted', synthetic: true, reason: why };
+    const key = keyOf(ask, APPROVAL_ID_FIELDS);
+    if (key) data[key.field] = key.value; // 带上原 ask 的关联键，否则第二次 findDangling 仍配不上
+    closers.push({ type: 'approval.decided', time, data });
+  }
+  for (const tool of tools) {
+    /** @type {any} */
+    const data = { ok: false, error: SYNTHETIC_TOOL_ERROR, synthetic: true, reason: why };
+    if (tool?.data?.name !== undefined) data.name = String(tool.data.name);
+    const key = keyOf(tool, TOOL_ID_FIELDS);
+    if (key) data[key.field] = key.value;
+    closers.push({ type: 'tool.end', time, data });
+  }
+  for (let i = 0; i < turns.length; i += 1) {
+    // 每条悬空 turn 各补一条；事件形状不需要 turn 的任何字段。
+    closers.push({ type: 'turn.end', time, data: { status: 'aborted', synthetic: true, reason: why } });
+  }
+  return closers;
+}
+
+/**
+ * v0.6.40：闭合一个事件日志里的悬空事件。**只追加，不删除/不改写既有行**。
+ *
+ * 流程：读全量事件 → `findDangling` → 有悬空才 `synthClosers` → 逐条走 `appendEvent`
+ * （从而拿到锁内分配的连续 seq）。没有悬空时**连文件都不碰**（返回 repaired:0）。
+ *
+ * 损坏日志：`readEvents` 会把半截 JSON / 未知 type / 缺 seq 的行计入 `skipped`。只要
+ * `skipped > 0` 就视为日志损坏，返回 `{ok:false}` 且**一个字节都不写**——修补器的前提是
+ * 「日志是完整的、只是缺收尾」，在坏日志上追加只会把损坏固化进事实源。
+ *
+ * @param {string} eventFile 事件文件（`.events.ndjson`，不是会话 `.jsonl`）
+ * @param {{reason?: string}} [opts]
+ * @returns {{ok: boolean, error: string|null, repaired: number, dangling: {asks:any[],tools:any[],turns:any[]}, disabled?: boolean}}
+ */
+export function repairEventLog(eventFile, { reason = '' } = {}) {
+  /** @type {{asks:any[],tools:any[],turns:any[]}} */
+  const empty = { asks: [], tools: [], turns: [] };
+  try {
+    const file = path.resolve(String(eventFile || ''));
+    if (!String(eventFile || '')) return { ok: false, error: '事件文件路径为空', repaired: 0, dangling: empty };
+    if (!eventLogEnabled()) return { ok: true, error: null, repaired: 0, dangling: empty, disabled: true };
+    const read = readEvents(file);
+    if (!read.ok) return { ok: false, error: read.error ?? '读取事件日志失败', repaired: 0, dangling: empty };
+    if (read.skipped > 0) {
+      return { ok: false, error: `事件日志损坏（跳过 ${read.skipped} 行），拒绝修补`, repaired: 0, dangling: empty };
+    }
+    const dangling = findDangling(read.events);
+    const closers = synthClosers(dangling, { reason });
+    if (!closers.length) return { ok: true, error: null, repaired: 0, dangling };
+    let repaired = 0;
+    for (const closer of closers) {
+      const r = appendEvent(file, { type: closer.type, data: closer.data, at: closer.time });
+      if (!r.ok) return { ok: false, error: r.error ?? '追加闭合事件失败', repaired, dangling };
+      repaired += 1;
+    }
+    return { ok: true, error: null, repaired, dangling };
+  } catch (err) {
+    return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err), repaired: 0, dangling: empty };
+  }
+}
+
 /** @param {any} value @returns {any} 深拷贝（事件里只会有 JSON 值）。 */
 function cloneJson(value) {
   try {
@@ -390,6 +570,21 @@ function cloneJson(value) {
   } catch {
     return value;
   }
+}
+
+/**
+ * 悬空事件的对外快照：只保留 `seq/time/type/data`，data 深拷贝。
+ * 找悬空是纯函数，调用方拿到的对象不能反过来改到入参上。
+ * @param {any} ev
+ * @returns {SessionEvent}
+ */
+function cloneSessionEvent(ev) {
+  return {
+    seq: Number.isInteger(Number(ev?.seq)) ? Number(ev.seq) : 0,
+    time: Number.isFinite(Number(ev?.time)) ? Number(ev.time) : 0,
+    type: String(ev?.type || ''),
+    data: cloneJson(ev?.data && typeof ev.data === 'object' ? ev.data : {}),
+  };
 }
 
 /**
