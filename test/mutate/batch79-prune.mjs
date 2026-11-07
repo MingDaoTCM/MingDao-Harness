@@ -49,3 +49,6 @@ M.mutate({
   expect: ['版本按新→旧排序'],
   run: RUN,
 });
+
+const ok = M.report();
+process.exit(ok ? 0 : 1);
