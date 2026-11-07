@@ -69,6 +69,8 @@ const SUITES = [
   ['update-signing', 'node', ['test/update-signing.js']],
   // v0.6.39：安装包目录裁剪（保留最近 N 版），纯逻辑
   ['prune-downloads', 'node', ['test/prune-downloads.js']],
+  // v0.6.39：OSS 自定义域名证书绑定的 XML 语义（两个静默失败点）
+  ['oss-cname-cert', 'node', ['test/oss-cname-cert.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];

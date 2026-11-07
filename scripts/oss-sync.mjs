@@ -91,6 +91,21 @@ export async function putObject({ cfg, key, filePath, fetchImpl = globalThis.fet
 }
 
 /**
+ * 删除一个对象（签名 DELETE）。ACME 挑战清理、重复前缀治理都会用到。
+ * @param {{cfg:any, key:string, fetchImpl?: typeof fetch}} p
+ */
+export async function deleteObject({ cfg, key, fetchImpl = globalThis.fetch }) {
+  const d = ossDate();
+  const resource = ossResource(cfg.bucket, key);
+  const signature = signOss({ method: 'DELETE', date: d, resource, sk: cfg.sk });
+  const res = await fetchImpl(`${cfg.endpoint}/${String(key).split('/').map(encodeURIComponent).join('/')}`, {
+    method: 'DELETE',
+    headers: { Date: d, Authorization: `OSS ${cfg.ak}:${signature}` },
+  });
+  return { ok: res.ok || res.status === 204, status: res.status, key };
+}
+
+/**
  * 下载一个对象到本地文件（签名 GET）。
  * 用途：跨机器搬运——本机/CI 上传到 OSS，服务器再从 OSS **内网**拉取，
  * 避开"公网入向只有 0.1MB/s"的瓶颈（实测本机→OSS 2.4MB/s、OSS→同区域 ECS 秒级）。
@@ -145,6 +160,19 @@ if (import.meta.url === `file://${process.argv[1]}`) {
     }
     console.log(`\n上传完成：${ok} 个${bad.length ? `，失败 ${bad.length} 个` : ''}`);
     process.exit(bad.length ? 1 : 0);
+  }
+  if (cmd === 'putone') {
+    if (!a || !b) { console.error('用法: oss-sync.mjs putone <本地文件> <OSS 键>'); process.exit(2); }
+    const r = await putObject({ cfg, key: b, filePath: a });
+    if (!r.ok) { console.error(`✗ HTTP ${r.status}`); process.exit(1); }
+    console.log(`  ✓ ${a} → ${b}（${r.size} 字节）`);
+    process.exit(0);
+  }
+  if (cmd === 'del') {
+    if (!a) { console.error('用法: oss-sync.mjs del <OSS 键>'); process.exit(2); }
+    const r = await deleteObject({ cfg, key: a });
+    console.log(`  ${r.ok ? '✓' : '✗'} 删除 ${a}（HTTP ${r.status}）`);
+    process.exit(r.ok ? 0 : 1);
   }
   if (cmd === 'get') {
     if (!a || !b) { console.error('用法: oss-sync.mjs get <OSS 键> <本地文件>'); process.exit(2); }
