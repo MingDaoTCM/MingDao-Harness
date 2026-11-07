@@ -46,6 +46,8 @@ import { appendEvent, eventFileFor, eventLogEnabled, missingToolCallIds, setEven
 // ② 工具结果怎么回填（序列化 / 复用前缀 / 约束拒绝文案 / 按窗口截断）；
 // ③ 工具参数怎么解析（v0.6.17 第四刀：JSON + 容错 + 归一化 + 错误文案）。
 import { READONLY_TIER_SET, visibleToolsFor, serializeToolResult, toolResultMessage, parseToolArgs } from './tools-flow.js';
+// v0.6.40：插话"有→继续、无→收尾"的判据与前端共用同一份纯函数（viewmodel 不读 DOM/全局）。
+import { shouldContinueAfterModel } from './web/viewmodel.js';
 
 const MAX_STEPS = 24;
 // 子代理步数上限：审计/精读类只读子任务需要读多个文件 + 交叉引用，12 步易在「读不全」时被截断
@@ -139,13 +141,54 @@ function resolveAgentEventFile(sessionRef, cfg) {
 }
 
 /**
+ * v0.6.40：把插话缓冲里的**全部**条目注入当前回合的消息数组。
+ *
+ * 车道语义（与 next-turn 排队严格区分）：
+ *   · 每个 step 边界调用一次，`drain()` 必须**全量取走**（不是一条一步）；
+ *   · 每条插话以 `{role:'user', content:text}` 追加在末尾——模型下一步请求就能看到；
+ *   · 通过既有 io 事件通道推 `{type:'steer', text}`（Web 端渲染"↳ 已插入本轮"）。
+ *
+ * 纯判据（"有插话→继续"）在 web/viewmodel.js 的 shouldContinueAfterModel；这里只做副作用。
+ * drain 抛异常的边界：视为本轮没有插话（插话是旁路，绝不能让一个坏 buffer 打断回合）。
+ *
+ * @param {{ drain?: () => any } | undefined} steering
+ * @param {any[]} messages
+ * @param {any} io
+ * @returns {any[]} 本次实际注入的条目（供收尾分支判断是否继续）
+ */
+function drainSteeringInto(steering, messages, io) {
+  /** @type {any} */
+  let raw;
+  try {
+    raw = steering?.drain?.() || [];
+  } catch {
+    return [];
+  }
+  const list = Array.isArray(raw) ? raw : Array.isArray(raw?.taken) ? raw.taken : [];
+  /** @type {any[]} */
+  const injected = [];
+  for (const it of list) {
+    const text = String(it && typeof it === 'object' ? it.text ?? '' : it ?? '');
+    if (!text.trim()) continue;
+    messages.push({ role: 'user', content: text });
+    injected.push(it);
+    try {
+      if (typeof io?.steer === 'function') io.steer(text);
+      else if (typeof io?.push === 'function') io.push({ type: 'steer', text });
+    } catch {}
+  }
+  return injected;
+}
+
+/**
  * 创建 Agent 循环（调用方只需传 provider/permission/io/modelName/workingDir，其余可选）
  * @param {{ provider: any, permission: any, io: any, modelName: any, workingDir: any,
  *   cfg?: any, undoStore?: any, maxSteps?: number, mcp?: any, onCompact?: any, sessionRef?: any,
  *   onUsage?: (modelName: string, usage: any) => void,
- *   constraints?: any[] }} params
+ *   constraints?: any[],
+ *   steering?: { drain?: () => any } }} params
  */
-export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact, sessionRef, onUsage, constraints: rawConstraints }) {
+export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact, sessionRef, onUsage, constraints: rawConstraints, steering }) {
   const preset = modelPreset(modelName) || {};
   // v0.3.2 模型自适应：预算按模型上下文窗口推导（留输出余量 + 75% 舒适区），
   // 自定义/本地小模型不再套 128000 默认撑爆窗口；prompt 永不逼近窗口边缘（prefill 不爆炸）。
@@ -1039,6 +1082,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           durationMs: Date.now() - startedAt, perf: perf(),
         };
       }
+      // 接线点①（v0.6.40）：每个 step 边界全量取走插话；放在中止检查之后 = 停止优先。
+      drainSteeringInto(steering, messages, io);
       // 本轮的 AbortController 提到压缩之前创建（审计 BUG-037）：压缩是一次**大开销的真实请求**
       // （30K 输入 × executor 模型），此前它在 `ac` 创建之前发生、拿不到任何 signal，
       // 于是压缩期间 Ctrl+C 只能等它返回（远程 600s / 本地 1800s，且还有一次重试）。
@@ -2063,6 +2108,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           });
           continue;
         }
+        // 接线点②（v0.6.40）：没有工具调用、本要收尾——刚插话就继续下一步（本轮不结束）。
+        const steeredNow = drainSteeringInto(steering, messages, io);
+        if (shouldContinueAfterModel({ steer: steeredNow, aborted, stalled: noProgressFired })) continue;
         markOutcome(finish === 'length' ? 'capped' : 'done', { capHit: false, truncated: finish === 'length' });
         return {
           text: finalText,

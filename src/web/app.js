@@ -1,7 +1,7 @@
 import { $, esc, highlight, renderMarkdown, scrollBottom, expandableBody, resultText, truncText, textBody, fmtDur, fmtTok, fmtT } from './util.js';
 import { MAX_ATTACHMENTS, MAX_IMAGE_BYTES, MAX_TEXT_BYTES } from './constants.js';
 import { sideNavBreakpoint, sideNavLayout, errCardParts, runStripView, permissionSourceLabel, toolStepView, toolTimelineSummary, toolTimelineVisibility, traceRoundView } from './viewmodel.js';
-import { enqueueMessage, dequeueMessage, shouldDrainQueue, queueView, QUEUE_MAX } from './viewmodel.js';
+import { enqueueMessage, dequeueMessage, shouldDrainQueue, queueView, QUEUE_MAX, enqueueSteer, steerView, STEER_MAX } from './viewmodel.js';
 
 // 访问令牌（P1-3）：地址带 ?token= 时记入 sessionStorage 并从地址栏移除（防截图/历史外泄），
 // 之后所有同源请求统一附加 X-MingDao-Token 头；无令牌时行为与旧版一致。
@@ -773,6 +773,95 @@ function drainQueue(){
   setTimeout(()=>{ try{ send(); }catch(e){ console.error('[MingDao] 队列续发失败',e); } },120);
 }
 
+// —— 插话队列（v0.6.40，next-step 车道）——
+// 语义：生成中 **Cmd/Ctrl+Enter** → POST /api/steer，服务端在每个 step 边界全量取走，
+// 作为新的 user 消息插进**当前轮**——当前任务不会因此结束；与 Enter 的"排队到下一轮"是两条车道。
+// 失败（网络/404 已结束/429 满/413 超长）一律回落到排队并明确提示，输入不丢。
+let steering=[];      // [{id,text,at}]
+let steerSeq=0;
+
+/** 插话 chips：橙色 + ⚡，与蓝色排队 chips 视觉区分。 */
+function renderSteer(){
+  const strip=$('#steerStrip'); if(!strip) return;
+  const items=steerView(steering);
+  if(!items.length){ strip.style.display='none'; strip.innerHTML=''; return; }
+  strip.style.display='flex';
+  strip.innerHTML='';
+  const cap=document.createElement('span'); cap.className='scap';
+  cap.textContent='⚡ 插话中 '+items.length+' 条（下一步注入本轮，不结束当前任务；上限 '+STEER_MAX+' 条）';
+  strip.appendChild(cap);
+  for(const it of items){
+    const chip=document.createElement('span'); chip.className='schip';
+    const ico=document.createElement('span'); ico.className='si'; ico.textContent=it.icon;
+    const txt=document.createElement('span'); txt.className='st'; txt.textContent=it.label; txt.title=it.text;
+    // 点文本 → 放回输入框编辑（从插话队列移除，避免"编辑完插两次"）
+    txt.onclick=()=>{ const r=dequeueMessage(steering,it.id); steering=r.queue; renderSteer(); input.value=r.removed?r.removed.text:input.value; input.focus(); input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; };
+    const x=document.createElement('span'); x.className='sx'; x.textContent='✕'; x.title='撤销这条插话';
+    x.onclick=()=>{ steering=dequeueMessage(steering,it.id).queue; renderSteer(); };
+    chip.appendChild(ico); chip.appendChild(txt); chip.appendChild(x);
+    strip.appendChild(chip);
+  }
+}
+
+/** 注入成功后按文本移除本地 chip（服务端 id 与前端 id 不同源，按文本配对最稳）。 */
+function dropSteerByText(text){
+  const t=String(text||'');
+  const idx=steering.findIndex(s=>s.text===t);
+  if(idx<0) return false;
+  steering=[...steering.slice(0,idx),...steering.slice(idx+1)];
+  renderSteer();
+  return true;
+}
+
+/** 插话失败 → 回落到 next-turn 队列（绝不静默吞掉用户输入）。 */
+function fallbackSteer(text,why){
+  if(!enqueueInput(text)) return;
+  input.value=''; input.style.height='44px';
+  const d=document.createElement('div'); d.className='msg-sys';
+  d.textContent='⚠ 插话失败（'+why+'），已改为排队：本轮结束后自动发送。';
+  chatEl.appendChild(d); scroll();
+}
+
+/** 生成中 Cmd/Ctrl+Enter：插话（POST /api/steer）；失败回落排队。 */
+async function steerInput(){
+  const text=input.value.trim();
+  if(!text) return;
+  if(!generating||!curTaskId){ fallbackSteer(text,'当前回合尚未建立任务'); return; }
+  try{
+    const r=await fetch('/api/steer',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({taskId:curTaskId,message:text})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok||!j.ok) throw new Error(j.error||('HTTP '+r.status));
+    steerSeq+=1;
+    const en=enqueueSteer(steering,text,'s'+steerSeq,Date.now());
+    steering=en.steer;
+    if(en.ok) renderSteer();
+    input.value=''; input.style.height='44px';
+    const ht=$('#hintText');
+    if(ht) ht.textContent='⚡ 插话已入队（共 '+(j.queued||steering.length)+' 条）：模型下一步会收到，当前任务不会因此结束 · 普通 Enter 仍为「排队到下一轮」';
+  }catch(err){
+    fallbackSteer(text,(err&&err.message)||'网络错误');
+  }
+}
+
+/** 本轮收尾：服务端没来得及注入的插话转回排队（不能因为回合结束就丢掉用户已经写下的内容）。 */
+function settleSteering(){
+  if(!steering.length) return;
+  const left=steering; steering=[]; renderSteer();
+  let moved=0;
+  for(const s of left){
+    const r=enqueueMessage(queued,s.text,'q'+(queueSeq+=1));
+    if(!r.ok) break;
+    queued=r.queue; moved+=1;
+  }
+  const dropped=left.length-moved;
+  if(moved) renderQueue();
+  const d=document.createElement('div'); d.className='msg-sys';
+  d.textContent=moved
+    ? '⚠ 本轮结束前插话未及注入，已转为排队：'+moved+' 条'+(dropped?'（另有 '+dropped+' 条因排队已满未保留）':'')
+    : '⚠ 插话未能注入，且排队已满：'+dropped+' 条未保留。';
+  chatEl.appendChild(d); scroll();
+}
+
 async function send(){
   const text=input.value.trim();
   console.log('[MingDao] send 点击：generating=' + generating + ' text=' + text.length + ' attachments=' + attachments.length);
@@ -916,6 +1005,13 @@ async function send(){
       else if(ev.type==='tool'){ onActivity(); update(); runningTools.delete(ev.seq); const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.result=ev.result; tj.durationMs=ev.durationMs; } renderToolEvent(ev); }
       else if(ev.type==='toolDenied'){ onActivity(); const tj=msg._traj.find(x=>x.kind==='tool'&&x.seq===ev.seq); if(tj){ tj.done=true; tj.denied=ev.reason||'未授权'; } renderToolDeniedEvent(ev); const d=document.createElement('div'); d.className='errline'; d.textContent='✖ '+(ev.reason==='未授权'||!ev.reason?'未授权':ev.reason)+'：'+ev.name; msg.appendChild(d); scroll(); }
       else if(ev.type==='banner'){ renderBanner(ev); }
+      else if(ev.type==='steer'){
+        // v0.6.40：queued 是 POST 即时应答（同页 steerInput 已反馈，不重复插行）；
+        // injected 才是 agent 真正把它作为 user 消息喂进当前回合——在对话流里留痕。
+        if(ev.queued!==true){ const st=String(ev.text||''); dropSteerByText(st);
+          const d=document.createElement('div'); d.className='msg-sys'; d.textContent='↳ 已插入本轮：'+st.slice(0,60);
+          chatEl.appendChild(d); scroll(); }
+      }
       else if(ev.type==='ask'){ runState.rawPhase='等待权限确认'; runState.phase='执行工具'; update(); renderWorkStatus(); handleAskEvent(ev); }
       else if(ev.type==='usage'){ onActivity(); runState.cost=String(ev.cost||'');
         // P1-4：本**轮**实际用到的模型（服务端 usage.modelName）——不是"当前选择"的猜测。
@@ -962,7 +1058,7 @@ async function send(){
     // 具体错误形态已进日志（fetch failed 等不再绕开续跑提示）。
     d.textContent=(e&&e.name==='AbortError')?(killedByWatchdog?'响应超时已中断（120 秒无任何响应），请重试':'已中断'):('连接中断，本轮未完成。已执行的工作已保存检查点——直接发送「继续」即可从断点续跑（' + Math.round((Date.now() - workT0) / 1000) + 's · ' + stepsCount + ' 步）。');
     msg.appendChild(d); scroll(); }
-  finally{ clearInterval(hintTimer); disarm(); clearTimeout(stopFallbackTimer); stopFallbackTimer=null; stopping=false; turnAbortCtrl=null; generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; msg._endedAt=Date.now(); finalizePendingSubagent(msg); content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); renderTracePanels(); activeAiMsg=null; curWorkT0=0; if(!runState.aborted){ runState.rawPhase='空闲'; runState.phase='空闲'; } else { runState.rawPhase='已中止'; runState.phase='已中止'; } renderWorkStatus(); scroll(); updateTasksPanel(); drainQueue(); }
+  finally{ clearInterval(hintTimer); disarm(); clearTimeout(stopFallbackTimer); stopFallbackTimer=null; stopping=false; turnAbortCtrl=null; generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; msg._endedAt=Date.now(); finalizePendingSubagent(msg); content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); renderTracePanels(); activeAiMsg=null; curWorkT0=0; if(!runState.aborted){ runState.rawPhase='空闲'; runState.phase='空闲'; } else { runState.rawPhase='已中止'; runState.phase='已中止'; } renderWorkStatus(); scroll(); updateTasksPanel(); settleSteering(); drainQueue(); }
 }
 
 let curTaskId=null; // 本轮 SSE 任务 id（质检 L1：主停止按钮只断本任务，不再误伤其他 tab）
@@ -3042,7 +3138,14 @@ async function loadSession(file){ if(currentSession && currentSession!==file) fi
 
 // §138：主按钮在生成态=停止，必须走**同一个**停止出口（stopTurnFromButton → stopTurn → POST /api/abort）
 sendBtn.onclick=()=>{ if(generating){ stopTurnFromButton(); } else { send(); } };
-input.addEventListener('keydown',e=>{ if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); send(); } });
+input.addEventListener('keydown',e=>{
+  if(e.isComposing) return;
+  if(e.key!=='Enter'||e.shiftKey) return;
+  e.preventDefault();
+  // v0.6.40：生成中 Cmd/Ctrl+Enter = 插话（注入当前轮）；Enter = 排队（本轮结束后发送）。
+  if((e.metaKey||e.ctrlKey)&&generating){ steerInput(); return; }
+  send();
+});
 input.addEventListener('input',()=>{ input.style.height='44px'; input.style.height=Math.min(input.scrollHeight,200)+'px'; });
 $('#newChat').onclick=()=>{ finalizeCurrentSession(); currentSession=null; chatEl.innerHTML=''; resetTraceState(); renderEmptyState(); renderCrumb(); refreshSessions(); };
 $('#sessMgrBtn').onclick=openSessModal;

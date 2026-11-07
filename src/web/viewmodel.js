@@ -519,3 +519,90 @@ export function queueView(queue) {
   const list = Array.isArray(queue) ? queue : [];
   return list.map((q, i) => ({ id: String(q?.id || ''), index: i + 1, label: queueLabel(q), text: String(q?.text ?? '') }));
 }
+
+// ---------------------------------------------------------------------------
+// 插话（v0.6.40）：生成中 Cmd/Ctrl+Enter → **插入当前轮**，不是排到下一轮
+//
+// 与 next-turn 队列（上面的 enqueueMessage 一族）是**两条车道**：
+//   · next-turn：本轮全部结束后，才按每轮 1 条依次发出（drainQueue）；
+//   · next-step：每个 step 边界**全量取走**（drainSteer），作为新的 user 消息插进当前请求；
+//     模型本次没有工具调用、本来要收尾时，只要 next-step 非空就继续下一步（shouldContinueAfterModel）。
+// 纯逻辑仍放在这里：上限、字节口径、全量取走、是否继续，都必须被单测钉住。
+// ---------------------------------------------------------------------------
+
+/** 插话队列上限（Octop 的 STEER_DEPTH_CAP 同值）：一次最多积 8 条，多则拒绝。 */
+export const STEER_MAX = 8;
+/** 单条插话文本上限：200KB（UTF-8 字节，不是字符数——中文一字 3 字节）。 */
+export const STEER_TEXT_MAX = 200 * 1024;
+
+/**
+ * 文本的 UTF-8 字节数（浏览器与 Node 同一口径；TextEncoder 不可用时退回字符数）。
+ * @param {unknown} text
+ * @returns {number}
+ */
+export function steerBytes(text) {
+  const t = String(text == null ? '' : text);
+  try {
+    return new TextEncoder().encode(t).length;
+  } catch {
+    return t.length;
+  }
+}
+
+/**
+ * 把一条输入加入**插话**队列（下一步注入本轮）。
+ * 空文本 / 超长（>200KB）/ 满员（≥8 条）都拒绝并给出可读 reason；超长先于满员判定，
+ * 这样"又能插但太长"始终得到 413 而不是 429。
+ * @param {Array<{id:string,text:string,at?:number}>} steer
+ * @param {string} text
+ * @param {string} id
+ * @param {number} [at] 入队时刻（由调用方注入，保持本函数纯净；缺省 0）
+ * @returns {{ok:boolean, steer:Array<{id:string,text:string,at?:number}>, reason?:string}}
+ */
+export function enqueueSteer(steer, text, id, at) {
+  const list = Array.isArray(steer) ? steer : [];
+  const t = String(text == null ? '' : text);
+  if (!t.trim()) return { ok: false, steer: list, reason: 'empty' };
+  if (steerBytes(t) > STEER_TEXT_MAX) return { ok: false, steer: list, reason: 'too-long' };
+  if (list.length >= STEER_MAX) return { ok: false, steer: list, reason: 'full' };
+  return { ok: true, steer: [...list, { id: String(id || ''), text: t, at: Number(at) || 0 }] };
+}
+
+/**
+ * **全量取走**插话队列（每个 step 边界消费一次，不是每条一步）。
+ * 取走后原队列变空；对空队列再调用返回空 taken（幂等，不抛）。
+ * @param {Array<{id:string,text:string,at?:number}>} steer
+ * @returns {{steer:Array<{id:string,text:string,at?:number}>, taken:Array<{id:string,text:string,at?:number}>}}
+ */
+export function drainSteer(steer) {
+  const list = Array.isArray(steer) ? steer : [];
+  return { steer: [], taken: [...list] };
+}
+
+/**
+ * 插话 chip 的渲染模型（与 queueView 同形，另带 kind/icon 供 UI 用不同配色区分）。
+ * @param {Array<{id:string,text:string,at?:number}>} steer
+ * @returns {Array<{id:string,index:number,label:string,text:string,kind:'steer',icon:'⚡'}>}
+ */
+export function steerView(steer) {
+  const list = Array.isArray(steer) ? steer : [];
+  return list.map((s, i) => ({
+    id: String(s?.id || ''),
+    index: i + 1,
+    label: queueLabel(s),
+    text: String(s?.text ?? ''),
+    kind: /** @type {'steer'} */ ('steer'),
+    icon: /** @type {'⚡'} */ ('⚡'),
+  }));
+}
+
+/**
+ * 模型本次没有工具调用、本来要收尾时，是否应当**继续下一步**（而不是结束本轮）。
+ * 有插话就继续；用户中止 / 无进展看门狗触发时不继续（"停下"优先于插话）。
+ * @param {{steer?:Array<any>, aborted?:boolean, stalled?:boolean}} st
+ * @returns {boolean}
+ */
+export function shouldContinueAfterModel(st) {
+  const list = Array.isArray(st?.steer) ? st.steer : [];
+  return list.length > 0 && !st?.aborted && !st?.stalled;
+}

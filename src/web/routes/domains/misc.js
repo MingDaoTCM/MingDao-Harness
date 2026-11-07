@@ -109,6 +109,12 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     return true;
   }
 
+  // v0.6.40：插话（next-step 车道）。鉴权/CSRF 已由 routes/api.js 统一完成，这里只做域分发；
+  // 缓冲/上限/SSE 应答的唯一实现在 server.js 的 createSteering（路由层不另写一套判定）。
+  if (method === 'POST' && p === '/api/steer') {
+    return deps.handleSteer(req, res);
+  }
+
   if (method === 'POST' && p === '/api/abort') {
     const body = await readBody(req, MAX_API_BODY);
     /**

@@ -6863,6 +6863,66 @@ requestToken / trustedHost`），`createProviderCache({...})` 实例化并 `awai
   后的真实消息数组分叉）；真实双写顺序下占位已由 `message.append` 提供，不会重复。
 - 事件日志写失败只影响该事件流完整性，不影响会话、账本、SSE 或回合结果。
 
+## 9.1 v0.6.40：插话（steer / next-step）闭环（对齐 DSH / Octop）
+
+### 9.1.1 语义
+
+生成中继续输入有**两条车道**，互不覆盖：
+
+| 车道 | 快捷键 | 消费时机 | 本轮是否结束 |
+| --- | --- | --- | --- |
+| next-turn（v0.6.39 既有） | `Enter` | 本轮全部结束后，每轮 1 条 `drainQueue()` | 结束 |
+| next-step（本节） | `Cmd/Ctrl+Enter` | **每个 step 边界全量取走** | **不结束**（continue 下一步） |
+
+- 插话上限：队列 ≤8 条、单条 ≤200KB（UTF-8 字节）；超限分别返回 429 / 413（可读错误）。
+- 模型本次没有工具调用、本来要收尾时，若 `next-step` 非空 → 继续下一步（`continue`），
+  不 `return`；插话以 `{role:'user', content:text}` 追加在 assistant 文本之后。
+- 用户中止（aborted）/ 无进展看门狗（stalled）优先于插话——"停下"不因插话而继续。
+
+### 9.1.2 实现与接线
+
+- `src/web/viewmodel.js`：纯逻辑 `enqueueSteer(steer,text,id,at)` / `drainSteer(steer)` /
+  `steerView(steer)` / `shouldContinueAfterModel(st)`；常量 `STEER_MAX=8`、
+  `STEER_TEXT_MAX=200*1024`、字节口径 `steerBytes(text)`。与 queue 一族风格一致、全部 JSDoc。
+- `src/web/server.js`：`createSteering({tasks,srvlog})` 工厂——每 task 一份
+  `Map<taskId, Array<{id,text,at}>>`；`handleSteer` 实现 `POST /api/steer`（404 未知/已结束、
+  400 空、413 超长、429 满员），入队成功即经该任务 SSE 推 `{type:'steer', queued:true, queuedCount:N}`；
+  `finishChat` 里 `steering.clear(taskId)` 清缓冲（任务结束即释放，Map 不随会话数增长）。
+- 路由入口 `src/web/routes/domains/misc.js:114`（鉴权/CSRF 仍由 `routes/api.js` 统一完成）。
+- `src/agent.js` 两处接线：**行 1086** 每步边界 `drainSteeringInto()`（中止检查之后）；
+  **行 2112–2113** 收尾分支再 drain 一次，`shouldContinueAfterModel(...)` 为真则 `continue`。
+  注入时经既有 io 通道 `io.steer(text)` → web-io 发 `{type:'steer', injected:true}`；
+  非 Web io 没有 steer 时退回 `io.push({type:'steer'})`。
+- 前端：`src/web/app.js` 的 `steerInput()`（Cmd/Ctrl+Enter → POST /api/steer）、
+  `fallbackSteer()`（失败回落 next-turn 排队并提示，输入不丢）、`settleSteering()`
+  （回合结束仍未注入的插话转回排队）；SSE 收到 `injected:true` 时在对话流写
+  `msg-sys「↳ 已插入本轮：<前 60 字>」`，并撤掉本地 chip。
+- UI 区分：`#steerStrip` 橙色 chips + `⚡` 前缀（"插话中 N 条，下一步注入本轮"）；
+  `#queueStrip` 保持蓝色 chips（"排队中 N 条，本轮结束后自动发送"）。快捷键表同步写明
+  "生成中 Enter=排队、⌘/Ctrl+Enter=插话"。
+
+### 9.1.3 测试与变异
+
+| 项 | 结果 |
+| --- | --- |
+| `test/steering.js`（新建） | **18 项**：入队/空文本/上限 8/超长 200KB（边界放行、UTF-8 字节口径、超长优先于满员）/drain 全量取走且幂等/steerView/`shouldContinueAfterModel`（有→继续、无→收尾、中止与 stalled 优先）；agent 桩 provider 验证"插话注入为 user 消息""无工具调用时本轮不结束（两次请求）""无插话时正常一次收尾"；真实 HTTP server 验证 `/api/steer` 的 200×8 / 429 / 413 / 404 / 400、SSE 8 条 queued + 8 条 injected、第二次模型请求按序带全部 8 条插话、任务结束后同 taskId 404；前端/服务端接线绊线 |
+| `test/mutate/batch81-steering.mjs`（新建） | **10/10 全中**：drain 只取一条 / 插话后不 continue / 上限失效 / 超长不拒 / 未知 taskId 不报错 / SSE 不发 steer / 失败不回落到排队 / agent 每步不 drain / 收尾不再 drain / web-io 不发 type=steer |
+| `test/viewmodel.js` | 既有 134 条断言全部通过（未改旧断言；插话纯函数另在 `test/steering.js` 覆盖） |
+| `npm run typecheck` / `typecheck:strict` | 通过（strict 0/0） |
+| `node test/smoke.js`（单独）/ `node test/e2e-web.js` | 通过 |
+| `node test/structure-limits.js` | 4/4；基线按实测同步：`createAgent` 2265→2270、`runTurnInner` 1743→1748、`runWebServer` 1007→1009、`handleChat` 695→696（插话接线，无预留余量） |
+| `test/mutate/README.md` | 计数 758 → 768（batch81 新增 10 条，仅计数） |
+
+### 9.1.4 边界（本切片明确不做）
+
+- 插话只在 **step 边界**生效：模型正在长 prefill、或工具正在执行时，插话要等本步结束；
+  不中断进行中的请求（与 DSH 的 step 边界语义一致）。
+- 插话不落盘：它是"这一刻的输入意图"，不进会话文件；进程崩溃/页面刷新即丢（POST 已返回
+  `queued` 的条目在内存里，任务结束后由 `steering.clear` 释放）。
+- 达到 `maxSteps`/`maxRounds` 预算后到达的插话仍会被注入消息数组，但可能没有下一次请求；
+  兜底总结请求只带 system + 交付物 + 提示，不保证模型看到该条（预算边界，未额外破例）。
+- 未改 `src/session-events.js` / `src/session.js`；`docs/REVIEW-v0.7-vs-DSH-Octop.md` 未动。
+
 ## 9.2 v0.6.40：审批/工具/回合的「悬空事件」闭合（对齐 DSH `repair.js`）
 
 ### 9.2.1 问题

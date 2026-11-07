@@ -9,7 +9,8 @@
 //   POST /api/chat         {message, file?} → 运行一轮，SSE 事件流
 //   POST /api/permission   {id, answer} → 应答权限确认
 //   POST /api/abort        中断当前生成
-// SSE 事件：banner/text/reasoning/code/tool/toolDenied/todo/usage/ask/error/done
+//   POST /api/steer        {taskId, message} → 插话（下一步边界注入当前轮）
+// SSE 事件：banner/text/reasoning/code/tool/toolDenied/todo/usage/ask/steer/error/done
 
 import http from 'node:http';
 import { DEFAULT_MODEL } from '../models.js';
@@ -41,6 +42,8 @@ import { buildSystemPrompt } from '../prompts.js';
 import { loadProjectMemory, loadProjectMemoryEntries, retrieveRelevant, extractAndAppendProjectMemory } from '../memory.js';
 import { saveTaskStateMergeAsync, clearTaskState, loadTaskState, resumePrompt, checkpointHint } from '../task-state.js';
 import { createWebIO } from './web-io.js';
+// v0.6.40：插话的纯语义（上限/字节口径/全量取走）与前端共用同一份实现，避免服务端另写一套。
+import { enqueueSteer, drainSteer, STEER_MAX, STEER_TEXT_MAX } from './viewmodel.js';
 import { installPipeGuards } from '../proc.js';
 import { startMcpServers } from '../mcp.js';
 import {
@@ -298,6 +301,80 @@ function readBody(req, limit = 40 * 1024 * 1024) {
   });
 }
 
+// ---------------------------------------------------------------------------
+// 插话（v0.6.40）：生成中 Cmd/Ctrl+Enter → 插入**当前轮**（不是下一轮）。
+//
+// 每个 task 一份缓冲；agent 在**每个 step 边界**全量 drain 一次，所以此刻 POST 的三条
+// 会一起进入下一次请求，而不是一条一步。上限/字节口径复用 viewmodel.js 的纯函数
+// （前端 chip 与服务端拒绝同一套判据），本工厂只负责"按 taskId 存取 + HTTP 应答 + SSE 通知"。
+// ---------------------------------------------------------------------------
+/** 普通 JSON 接口的请求体上限（与 routes/api.js 的 MAX_API_BODY 同值）。 */
+const STEER_BODY_LIMIT = 1024 * 1024;
+
+/**
+ * 创建插话缓冲与其唯一消费者（放在 runWebServer 内，多个 server 实例互不串味）。
+ *
+ * @param {{ tasks: Map<string, any>, srvlog?: (line: string) => void }} deps
+ * @returns {{
+ *   state: {buffers: Map<string, Array<{id:string,text:string,at?:number}>>, seq: number},
+ *   handleSteer: (req: any, res: any) => Promise<boolean>,
+ *   drain: (taskId: string) => Array<{id:string,text:string,at?:number}>,
+ *   clear: (taskId: string) => void,
+ * }}
+ */
+export function createSteering({ tasks, srvlog }) {
+  const state = { buffers: new Map(), seq: 0 };
+  /** @param {string} taskId */
+  const clear = (taskId) => {
+    state.buffers.delete(taskId);
+  };
+  /** @param {string} taskId @returns {Array<{id:string,text:string,at?:number}>} */
+  const drain = (taskId) => {
+    const list = state.buffers.get(taskId) || [];
+    if (!list.length) return [];
+    const r = drainSteer(list);
+    state.buffers.set(taskId, r.steer);
+    return r.taken;
+  };
+  /** POST /api/steer 的唯一实现（鉴权/CSRF 由 routes/api.js 在域分发之前统一完成）。 */
+  const handleSteer = async (/** @type {any} */ req, /** @type {any} */ res) => {
+    let body;
+    try {
+      body = await readBody(req, STEER_BODY_LIMIT);
+    } catch (/** @type {any} */ e) {
+      return json(res, e?.status || 400, { error: e?.message || '请求体读取失败' });
+    }
+    const taskId = String(body?.taskId || '');
+    const entry = tasks.get(taskId);
+    // 只接受**运行中**的任务：已完成的任务保留在 tasks 里 10 分钟只是任务面板历史，
+    // 往它的缓冲里写东西永远没人消费（泄漏），而且对用户是"假成功"。
+    if (!entry || entry.status !== 'running') {
+      return json(res, 404, { error: '任务不存在或已结束（插话只能发给运行中的任务）' });
+    }
+    state.seq += 1;
+    const list = state.buffers.get(taskId) || [];
+    const r = enqueueSteer(list, String(body?.message == null ? '' : body.message), 's' + state.seq, Date.now());
+    if (!r.ok) {
+      if (r.reason === 'too-long') {
+        return json(res, 413, { error: `插话过长（上限 ${Math.round(STEER_TEXT_MAX / 1024)}KB，UTF-8 字节）——请拆短或改用排队（Enter）分次发送。` });
+      }
+      if (r.reason === 'full') {
+        return json(res, 429, { error: `插话队列已满（上限 ${STEER_MAX} 条）——等下一步注入后再插，或按 Enter 排队。` });
+      }
+      return json(res, 400, { error: '插话不能为空。' });
+    }
+    state.buffers.set(taskId, r.steer);
+    const text = r.steer[r.steer.length - 1].text;
+    // 入队成功 → 即时应答（queued:true）；真正注入时 agent 还会再推 injected:true。
+    try {
+      entry.send?.({ type: 'steer', text, queued: true, queuedCount: r.steer.length });
+    } catch {}
+    srvlog?.(`chat 插话入队 ${taskId} 第 ${r.steer.length} 条（${String(text).length} 字）`);
+    return json(res, 200, { ok: true, queued: r.steer.length });
+  };
+  return { state, handleSteer, drain, clear };
+}
+
 /** @param {{ host?: string, port?: number, authToken?: string|null, onBusy?: (busy: boolean) => void, [key: string]: any }} [opts] */
 export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken, onBusy } = {}) {
   // v0.6.2：常驻服务**不能**因日志管道断开而自杀——重新安装为「静默吞掉 EPIPE」策略。
@@ -391,6 +468,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   // 任务注册表：支持多会话并行——每个任务独立的 SSE 流、权限确认、中断控制
   let inflight = 0; // 质检 S2：在途聊天请求计数（与请求生命周期绑定，防 readBody 期间并发超限）
   const tasks = new Map(); // taskId -> { res, send, abortHandler, pendingAsk, session, startedAt, status, message, durationMs }
+  const steering = createSteering({ tasks, srvlog }); // v0.6.40：每任务一份插话缓冲（结束后 clear）
   // v0.4.7（T10）：正在跑回合的会话文件集合——同一会话同一时刻只允许一个回合。
   // 此前 /api/chat 各自 loadSession → 各自推理 → 按完成顺序追加：会话记录会交错
   // （A/B 互相看不到对方的 user 消息、回答归属错乱）；若其中一路触发自动压缩，
@@ -568,8 +646,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
       try {
         res.end();
       } catch {}
-      // ⑦ prune + 释放闭包
+      // ⑦ prune + 释放闭包（插话缓冲随任务结束清掉，避免 Map 随会话数无限增长）
       entry.send = null;
+      steering.clear(taskId);
       try {
         pruneTasks();
       } catch {}
@@ -1010,7 +1089,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     const agent = createAgent({
       provider: providerNow,
       permission,
-      io,
+      io, steering: { drain: () => steering.drain(taskId) }, // v0.6.40：每步边界全量取走本任务插话
       modelName: runModel,
       workingDir: taskDir,
       cfg: chatCfg, // v0.4.0：预设覆盖后的配置（工具白名单 presetTools/参数/权限）
@@ -1192,7 +1271,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
   const dispatch = createApiDispatch({
     json, srvlog, readBody, cfg, home,
     providerCache, invalidateProviderCache, getProviderFor, tasks,
-    MAX_CONCURRENT, pruneTasks, handleChat,
+    MAX_CONCURRENT, pruneTasks, handleChat, handleSteer: steering.handleSteer,
     mcpFacade, provider, validateRemoteUrl, isPrivateHost,
     authEnabled, tokenMatches, requestToken, trustedHost, INDEX_HTML, draftTexts, startupCwd, sessionMemoryCache,
     state: { get modelName() { return modelName; }, set modelName(v) { modelName = v; },

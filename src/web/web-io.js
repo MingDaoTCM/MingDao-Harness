@@ -115,6 +115,14 @@ export function createWebIO({ send, askHandler, setAbortHandler }) {
     renderTodo(todos) {
       send({ type: 'todo', todos });
     },
+    /**
+     * v0.6.40：插话已真正注入当前回合——`injected:true` 与 POST /api/steer 的即时应答
+     * （`queued:true`）区分开，前端只对后者之外的事件在对话流里写「↳ 已插入本轮」。
+     * @param {any} text
+     */
+    steer(text) {
+      send({ type: 'steer', text: String(text ?? ''), injected: true });
+    },
     /** @param {{ modelName: any, usage: any, durationMs: any }} param0 */
     printUsageLine({ modelName, usage, durationMs }) {
       send({

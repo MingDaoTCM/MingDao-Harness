@@ -225,6 +225,14 @@ main{flex:1;overflow-y:auto;padding:18px 0 12px;min-width:0}
 #queueStrip .qchip .qt{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text}
 #queueStrip .qchip .qx{cursor:pointer;color:var(--dim)}
 #queueStrip .qchip .qx:hover{color:#ff6b6b}
+/* v0.6.40 插话（next-step）chips：橙色 + ⚡，与蓝色排队 chips 区分（两条车道不混淆） */
+#steerStrip{max-width:860px;margin:0 auto 6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+#steerStrip .scap{font-size:12px;color:var(--warn)}
+#steerStrip .schip{display:inline-flex;align-items:center;gap:6px;max-width:360px;background:rgba(245,158,11,.14);border:1px solid rgba(245,158,11,.48);border-radius:14px;padding:3px 10px;font-size:12.5px;color:var(--fg)}
+#steerStrip .schip .si{color:var(--warn)}
+#steerStrip .schip .st{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:text}
+#steerStrip .schip .sx{cursor:pointer;color:var(--dim)}
+#steerStrip .schip .sx:hover{color:#ff6b6b}
 .deliver{border:1px solid var(--border);border-left:3px solid var(--accent);border-radius:10px;background:var(--bg2);padding:8px 12px;margin:4px 0;font-size:12.5px}
 .deliver .t{color:var(--accent2);font-weight:600;margin-bottom:2px}
 .deliver .i{color:var(--dim);padding:1px 0;font-family:ui-monospace,Consolas,monospace}
@@ -868,11 +876,13 @@ body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions 
   </div>
   <input type="file" id="fileInput" accept="image/png,image/jpeg,image/gif,image/webp,.txt,.md,.json,.js,.py,.log,.csv,.html,.css" multiple style="display:none">
   <div id="attachList" style="display:none"></div>
-  <!-- v0.6.39 输入队列：生成中继续输入会排队，本轮结束后自动依次发出（不打断当前任务） -->
+  <!-- v0.6.40 插话（next-step）：生成中 Cmd/Ctrl+Enter 会插进当前轮，不结束当前任务 -->
+  <div id="steerStrip" style="display:none"></div>
+  <!-- v0.6.39 输入队列（next-turn）：生成中 Enter 排队，本轮结束后自动依次发出（不打断当前任务） -->
   <div id="queueStrip" style="display:none"></div>
   <div id="composer">
     <button id="attachBtn" title="上传图片或文本文件（图片需支持视觉的模型）">📎</button>
-    <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送，Shift+Enter 换行）"></textarea>
+    <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送；生成中 Enter=排队、⌘/Ctrl+Enter=插话）"></textarea>
     <!-- P1-5 会话设置弹层（v0.6.19 §3.70）：模型 / 预设 / 权限三件套收进同一个 popover，
          按钮上直接印当前生效的模型与权限（用户一眼知道"东西没丢"）。原三个 select 保留在弹层内
          （send()/init() 仍按既有 id 读取），不再占输入区。 -->
@@ -1056,9 +1066,9 @@ body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions 
       <div class="shortcut-row" data-shortcut="⌘K"><span class="kbd">⌘K / Ctrl+K</span><span class="grow">命令面板（搜索 / 切换 / 执行）</span></div>
       <div class="shortcut-row" data-shortcut="⌘/"><span class="kbd">⌘/ / Ctrl+/</span><span class="grow">打开本表</span></div>
       <div class="shortcut-row" data-shortcut="Esc"><span class="kbd">Esc</span><span class="grow">分层关闭：浮层 › 确认卡 › 停止本轮</span></div>
-      <div class="shortcut-row" data-shortcut="Enter"><span class="kbd">Enter</span><span class="grow">发送</span></div>
+      <div class="shortcut-row" data-shortcut="Enter"><span class="kbd">Enter</span><span class="grow">发送；生成中 = 排队到本轮结束后发送</span></div>
       <div class="shortcut-row" data-shortcut="Shift+Enter"><span class="kbd">Shift+Enter</span><span class="grow">换行</span></div>
-      <div class="shortcut-row" data-shortcut="⌘Enter"><span class="kbd">⌘Enter / Ctrl+Enter</span><span class="grow">发送（与 Enter 等价）</span></div>
+      <div class="shortcut-row" data-shortcut="⌘Enter"><span class="kbd">⌘Enter / Ctrl+Enter</span><span class="grow">发送；生成中 = ⚡ 插话（立即注入当前轮，不结束任务）</span></div>
       <div class="shortcut-row" data-shortcut="y/n"><span class="kbd">y / n</span><span class="grow">权限确认：本次放行 / 拒绝（输入框内不触发）</span></div>
       <div class="shortcut-note">输入法组合（isComposing）期间不触发上述快捷键；⌘ 在 Windows/Linux 上为 Ctrl。</div>
     </div>
