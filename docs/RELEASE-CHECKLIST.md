@@ -307,6 +307,20 @@ git push <mirror> refs/tags/v<版本>:refs/tags/v<版本>
 缺素材**不会让更新失败**——electron-updater 捕获异常后回退整包下载——所以这是一个
 **静默**降级，不特意查就发现不了。
 
+### 产物分发：首选「Actions → 对象存储」，收割只作兜底（v0.6.39 起）
+
+**首选路径**（不占任何机器上行，实测 100 秒内跑完）：
+
+```
+Actions → MirrorSync → Run workflow → tag=v<版本>
+# 它做三件事：从 Release 下载资产 → 上传对象存储 → 匿名 Range 拉 1KB 断言 206
+```
+
+源站与国内镜像的 `/downloads/` 都已 **302 到对象存储**，所以**不需要再往服务器拷安装包**；
+服务器本地只留最近 1–2 版做回滚（`node scripts/prune-downloads.mjs <目录> --keep 2 --apply`）。
+
+**只有以下情况才走下面的收割兜底**：对象存储不可用、或需要把包同步回服务器本地做回滚副本。
+
 ```bash
 # 采集：用脚本，别再手写 /tmp/harvest-<版本>.sh（手写漏过 mac zip，见 ①）
 scp MingDao-Harness-Site/scripts/harvest-release.mjs mingdao-server:/tmp/
