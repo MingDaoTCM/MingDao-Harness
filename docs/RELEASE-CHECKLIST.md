@@ -496,3 +496,7 @@ MINGDAO_GITEE_TOKEN=xxx MINGDAO_GITCODE_TOKEN=yyy \
 | gitee AppImage 上传失败 | 单文件 >100MB 被拒，若整轮失败会连带其它包 | 脚本已逐文件判大小并跳过，看日志确认 |
 | 在真实 `~/.mingdao` 上跑测试 | 污染用户配置与会话 | 自检一律 `MINGDAO_HOME=$(mktemp -d)` |
 | 提交信息里的反引号/`$()` | bash 抢先展开，命令被破坏 | 提交信息用单引号 heredoc |
+
+> **发版后（v0.6.41 起）**：把当前版本的安装包推一份到**深圳镜像**的本地目录
+> （`/opt/1panel/www/mirror-downloads/downloads/`，本机→深圳实测 10MB/s，约 1 分钟）。
+> 不做的话镜像会对本版 302 到对象存储，大陆用户就退回跨境链路——镜像就白建了。

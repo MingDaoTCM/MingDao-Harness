@@ -73,7 +73,10 @@
     "typecheck:strict": "node scripts/strict-ratchet.mjs",
     "preversion": "node test/smoke.js && node test/e2e-local.js && npm run bench",
     "version": "node scripts/bump-changelog.mjs",
-    "postversion": "git add package.json package-lock.json CHANGELOG.md 2>/dev/null; git commit -m \"chore: release v$npm_package_version\" --no-verify || true"
+    "postversion": "git add package.json package-lock.json CHANGELOG.md 2>/dev/null; git commit -m \"chore: release v$npm_package_version\" --no-verify || true",
+    "preflight": "node scripts/preflight.mjs",
+    "mutate:shard": "node test/mutate/shard.mjs",
+    "mutate:changed": "node test/mutate/run.mjs --changed HEAD~1"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

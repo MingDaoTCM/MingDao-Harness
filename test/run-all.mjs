@@ -75,6 +75,8 @@ const SUITES = [
   ['session-repair', 'node', ['test/session-repair.js']],
   // v0.6.40：插话（steer）——两车道语义 + agent 注入/不结束 + 真实 HTTP 与 SSE
   ['steering', 'node', ['test/steering.js']],
+  // v0.6.41：预检自身（守卫必须有守卫）
+  ['preflight', 'node', ['test/preflight.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];

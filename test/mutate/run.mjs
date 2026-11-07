@@ -44,7 +44,9 @@ if (changedIdx >= 0) {
   const next = argv[changedIdx + 1];
   changedBase = next && !next.startsWith('-') ? next : 'HEAD~1';
 }
-const filter = argv.find((a) => !a.startsWith('-') && a !== changedBase) || '';
+const onlyIdx = argv.indexOf('--only');
+const onlyList = onlyIdx >= 0 && argv[onlyIdx + 1] ? argv[onlyIdx + 1].split(',').map((x) => x.trim()).filter(Boolean) : null;
+const filter = argv.find((a) => !a.startsWith('-') && a !== changedBase && a !== (onlyIdx >= 0 ? argv[onlyIdx + 1] : '')) || '';
 
 // 锁：整轮跑都持有；批次子进程通过 MINGDAO_MUTATE_LOCK 继承，不再各自抢锁。
 let lock;
@@ -60,6 +62,7 @@ const files = fs
   .readdirSync(dir)
   .filter((f) => /^batch.*\.mjs$/.test(f))
   .filter((f) => f.includes(filter))
+  .filter((f) => (onlyList ? onlyList.includes(f) : true))
   .sort();
 if (!files.length) {
   lock.release();

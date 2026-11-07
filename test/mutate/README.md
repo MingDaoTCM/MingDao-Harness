@@ -80,3 +80,16 @@ node test/mutate/run.mjs --changed HEAD~1 --select-only   # 只看会跑哪些�
 结构预检（批次必须有 `report/exit`）仍然检查**全部**批次，不会因为"这次没选中"漏掉坏批次。
 
 > **发版前必须跑一次全量**（不带 `--changed`）；`--changed` 只服务于迭代。
+
+## 三种跑法（v0.6.41 起）
+
+| 场景 | 命令 | 实测耗时 |
+| --- | --- | --- |
+| **提交前**（2 秒，只查结构） | `npm run preflight` | **0.03 秒** |
+| **日常迭代**（只跑受影响的批次） | `npm run mutate:changed` | 1–6 分钟（6–17/70 批） |
+| **发版前**（全量，必须） | `node test/mutate/run.mjs` | ~25 分钟 |
+| **发版前（推荐，并行）** | `npm run mutate:shard`（默认 4 片） | **7 分 14 秒**（实测 70 批全中） |
+
+`shard.mjs` 的做法：按批次体积做 LPT 分桶 → 每片一个 **独立 `git worktree`**（HEAD）+ 独立
+`MINGDAO_MUTATE_LOCK_DIR` + 独立 `TMPDIR` → 同时跑 → 汇总。
+注意它跑的是**已提交**的代码（worktree 检出 HEAD）；要跑未提交改动设 `SHARD_ALLOW_DIRTY=1`（会用 `git diff` 打补丁）。
