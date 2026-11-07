@@ -32,7 +32,19 @@ if (!normalizeEol('a\r\nb\r\nc\r').includes('a\nb\nc\n')) {
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const argv = process.argv.slice(2);
 const allowDirty = argv.includes('--allow-dirty');
-const filter = argv.find((a) => !a.startsWith('-')) || '';
+// v0.6.41：`--changed [base]` 只跑"本次改动可能影响到的批次"。
+//
+// 为什么：全量 70 批 / 768 条要 **20+ 分钟**，而这其中绝大多数与本次改动无关。
+// 日常提交只需要跑"锚点落在改动文件上"的批次；**全量只在发版前跑一次**。
+// 规则保守：只要有 test/** 改动就退回全量——因为断言/expect 变了，可能影响任意批次。
+const changedIdx = argv.indexOf('--changed');
+const selectOnly = argv.includes('--select-only');
+let changedBase = '';
+if (changedIdx >= 0) {
+  const next = argv[changedIdx + 1];
+  changedBase = next && !next.startsWith('-') ? next : 'HEAD~1';
+}
+const filter = argv.find((a) => !a.startsWith('-') && a !== changedBase) || '';
 
 // 锁：整轮跑都持有；批次子进程通过 MINGDAO_MUTATE_LOCK 继承，不再各自抢锁。
 let lock;
@@ -53,6 +65,36 @@ if (!files.length) {
   lock.release();
   console.log(`没有匹配的批次脚本（filter=${JSON.stringify(filter)}）`);
   process.exit(1);
+}
+
+// --changed：按"锚点文件"筛批次
+let selected = files;
+if (changedIdx >= 0) {
+  const { spawnSync } = await import('node:child_process');
+  const rootDir = path.join(dir, '..', '..');
+  const diff = spawnSync('git', ['diff', '--name-only', changedBase], { cwd: rootDir, encoding: 'utf8' });
+  if (diff.status !== 0) {
+    lock.release();
+    console.log(`✗ git diff 失败（base=${changedBase}）：${(diff.stderr || '').slice(0, 300)}`);
+    process.exit(1);
+  }
+  const changed = new Set((diff.stdout || '').split('\n').map((x) => x.trim()).filter(Boolean));
+  const testTouched = [...changed].some((f) => f.startsWith('test/'));
+  if (testTouched) {
+    console.log(`⚠ 本次改动了 test/**（断言/expect 可能影响任意批次）→ 退回全量 ${files.length} 批`);
+  } else {
+    selected = files.filter((f) => {
+      const src = fs.readFileSync(path.join(dir, f), 'utf8');
+      const targets = [...src.matchAll(/^\s+file:\s*'([^']+)'/gm)].map((m) => m[1]);
+      return targets.some((t) => changed.has(t));
+    });
+    const list = selected.map((f) => f.replace(/\.mjs$/, ''));
+    console.log(`--changed ${changedBase}: 改动 ${changed.size} 个文件 → 选中 ${selected.length}/${files.length} 批`);
+    if (list.length) console.log('   ' + list.join(' '));
+    else console.log('   （没有锚点落在改动文件上的批次）');
+  }
+  if (selectOnly) { lock.release(); process.exit(0); }
+  if (!selected.length) { lock.release(); console.log('没有需要跑的批次（--changed）'); process.exit(0); }
 }
 
 // v0.6.36（发布前被负责人抓到）：**批次必须自己会红**。
@@ -89,7 +131,7 @@ const yieldTick = () => new Promise((resolve) => setImmediate(resolve));
 
 let failed = 0;
 let aborted = false;
-for (const f of files) {
+for (const f of selected) {
   console.log(`\n=== ${f} ===`);
   const r = spawnSync(process.execPath, [path.join(dir, f)], {
     stdio: 'inherit',
@@ -110,5 +152,5 @@ for (const f of files) {
 }
 lock.release();
 if (aborted) process.exit(1);
-console.log(`\n批次：${files.length - failed}/${files.length} 全中`);
+console.log(`\n批次：${selected.length - failed}/${selected.length} 全中${selected.length !== files.length ? `（--changed 只跑了 ${selected.length}/${files.length}）` : ''}`);
 process.exit(failed ? 1 : 0);

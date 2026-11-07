@@ -57,3 +57,26 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 > v0.6.28（§3.96）：新增 `batch56-layout-ttft`（8 条）——恢复 #trajRail 空窄条/`.rail-btn` 样式、
 > 删除 header 的 z-index、面板 z-index 反超 header、面板 top 写死 52px、删除 JS 写入 `--hdr-h`、
 > TTFT 恢复每轮都打、<900 正文恢复 48px 窄条补偿（484 → 492）。
+
+## 日常 vs 发版：`--changed` 只跑受影响的批次（v0.6.41 起）
+
+全量 70 批 / 768 条要 **20+ 分钟**，但绝大多数与本次改动无关。日常提交用：
+
+```bash
+node test/mutate/run.mjs --changed HEAD~1        # 只跑"锚点落在改动文件上"的批次
+node test/mutate/run.mjs --changed HEAD~1 --select-only   # 只看会跑哪些，不执行
+```
+
+实测选择效果（改一个文件时）：
+
+| 改动 | 选中批次 |
+| --- | --- |
+| `src/web/viewmodel.js` | 6 / 70 |
+| `src/agent.js` | 17 / 70 |
+| `src/session-events.js` | 4 / 70 |
+| 只改 `README.md` | 0 / 70 |
+
+**规则是保守的**：只要改动里出现 `test/**`（断言/expect 可能影响任意批次）→ 自动**退回全量**。
+结构预检（批次必须有 `report/exit`）仍然检查**全部**批次，不会因为"这次没选中"漏掉坏批次。
+
+> **发版前必须跑一次全量**（不带 `--changed`）；`--changed` 只服务于迭代。
