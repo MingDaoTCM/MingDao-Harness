@@ -71,6 +71,10 @@ const SUITES = [
   ['prune-downloads', 'node', ['test/prune-downloads.js']],
   // v0.6.39：OSS 自定义域名证书绑定的 XML 语义（两个静默失败点）
   ['oss-cname-cert', 'node', ['test/oss-cname-cert.js']],
+  // v0.6.40：悬空事件闭合（崩溃/强杀后的 approval/tool/turn 收尾）
+  ['session-repair', 'node', ['test/session-repair.js']],
+  // v0.6.40：插话（steer）——两车道语义 + agent 注入/不结束 + 真实 HTTP 与 SSE
+  ['steering', 'node', ['test/steering.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];
