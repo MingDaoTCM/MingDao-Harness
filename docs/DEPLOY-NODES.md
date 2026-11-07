@@ -88,10 +88,20 @@
 
 | 使用者 | 端点 | 实测 |
 | --- | --- | --- |
-| 本机 / GitHub Actions | `https://mingdaoharness.oss-cn-hongkong.aliyuncs.com` | **2.44MB/s** |
-| 同地域 ECS（香港） | `https://mingdaoharness.oss-cn-hongkong-internal.aliyuncs.com` | **18.5MB/s** |
+| 本机 / GitHub Actions | `https://<bucket>.oss-<region>.aliyuncs.com`（公网） | **2.44MB/s** |
+| 同地域 ECS（香港） | `https://<bucket>.oss-<region>-internal.aliyuncs.com`（内网） | **18.5MB/s** |
 
 **用公网端点给 ECS 拉文件 = 白付公网带宽且慢 185 倍。**
+
+**但内网端点只对「同地域」ECS 有效**（实测）：
+
+| 发起方 | 内网端点 | 公网端点 |
+| --- | --- | --- |
+| 香港 ECS（同地域） | ✅ 200 / 18.5MB/s | ✅ 2.44MB/s |
+| 深圳 ECS（跨地域） | ❌ 超时（12s 不通） | ✅ 200（但 5s 才拿到 1KB，跨地域很慢） |
+
+所以：**跨地域节点不要指望内网端点**，让它「本地优先、缺失才 302」比让它去跨地域拉文件更实际。
+（对象存储的「经典网络」与「VPC 内网」在该地域用的是同一个 internal 端点。）
 
 ### 4.3 三个已经踩过的坑
 
