@@ -3,6 +3,57 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.40（2026-11-07）— 插话（steer）+ 悬空事件闭合
+
+> **两条交互车道**：生成中按 `Enter` 仍是排队（0.6.39 既有行为不变，本轮结束后发）；
+> 按 **`Cmd/Ctrl+Enter` = 插话**，在下一次 step 边界把内容作为新的 user 消息注入**当前轮**，
+> 当前任务不会因此结束；若模型本要收尾，刚插话则继续下一步。输入框上方用**橙色 ⚡ `#steerStrip`**
+> 与**蓝色 `#queueStrip`** 区分两条车道。上限 8 条 / 单条 200KB（UTF-8 字节）。
+> **事件侧车自愈**：崩溃/强杀后无配对的 `approval.asked` / `tool.start` / `turn.start` 在会话加载时
+> **合成闭合事件**（`synthetic:true` + `reason`），只追加不改历史、幂等、损坏日志零写。
+> 完整说明见 `RELEASE-NOTES-0.6.40.md`。
+
+### 一、插话（steer）闭环（`95be24b`）
+
+- 生成中 `Cmd/Ctrl+Enter` → `POST /api/steer`，插入**当前轮**；`Enter` 仍为排队到下一轮。
+- 服务端按 task 维护缓冲，agent 在**每个 step 边界全量取走**（`src/agent.js:1086`），
+  并在"模型没有工具调用、本要收尾"处再 drain 一次——有插话就 `continue`（`:2112-2113`），本轮不结束。
+- SSE 两种事件：入队即推 `{type:'steer',queued:true}`；真正注入时推 `{type:'steer',injected:true}`。
+  前端只用 `injected` 在对话流留痕「↳ 已插入本轮」，避免同一句显示两次。
+- `/api/steer` 状态码：**200** 入队 / **400** 空文本 / **404** 任务不存在或已结束 /
+  **413** 单条超 200KB / **429** 满 8 条。
+- 失败回落：网络错误或 404/413/429 时自动转为**排队**并提示，输入不丢；本轮结束时尚未注入的插话也转回排队。
+- UI：橙色 ⚡ `#steerStrip`（点文本回填编辑、✕ 撤销）与蓝色 `#queueStrip` 区分；
+  默认隐藏，未插话时界面与 0.6.39 一致。
+- `test/steering.js` **18 项**（纯函数 / agent 桩 / 真实 HTTP+SSE），`batch81` **10 条**变异。
+
+### 二、悬空事件闭合（`c00b796`）
+
+- 新增 `findDangling` / `synthClosers` / `repairEventLog`（`src/session-events.js`）与
+  `repairSessionEvents`（`src/session.js`）：会话首次加载时补齐崩溃/强杀留下的
+  `approval.asked`、`tool.start`、`turn.start` 的闭合事件。
+- 闭合顺序：`approval.decided(aborted)` → `tool.end(ok:false, error:进程中断，工具结果未知)` →
+  `turn.end(aborted)`；每条带 `data.synthetic=true` 与 `data.reason`，与真实结束可区分。
+- **只追加**、不改写/删除既有行；合成事件由 `appendEvent` 在锁内分配连续 `seq`；重复读取**幂等**
+  （第二次 `repaired:0`、文件字节不变）。
+- **损坏日志零写**：`readEvents` 有 `skipped > 0` 时直接 `ok:false`，一个字节都不写。
+- `cfg.eventLog === false` 时完全跳过；同一会话在本进程内只修补一次。
+- `test/session-repair.js` **15 项**，`batch82` **8 条**变异。
+
+### 三、接线与门禁（`b76fe33` / `c651e9d`）
+
+- `steering`、`session-repair` 进入 `test/run-all.mjs`（**39 套**）与 CI 两个独立步骤。
+- 变异总数 750 → **768**（`batch79` 补 `report/exit`，被结构预检拦下后修正）。
+- 发布门禁：typecheck 0 / strict 0 / smoke 156 组 / run-all 39/39 / 变异 70 批 768 条 0 逃逸 /
+  coverage / doc-lint / diagnose 全绿。
+
+### 四、未做 / 已知边界
+
+- 插话**只在 step 边界生效**，不会打断正在进行的模型调用（不做"中途取消当前请求"）。
+- **`.sig` 站点发布（阶段二）仍未开**：`/updates/*.sig` 保持 404。
+- **Windows Authenticode** 未接入（与更新来源签名是两件事）。
+- 已知边界：**跨进程同时修复同一会话**可能各写一份 closers（只追加、不影响正确性，留 0.6.41）。
+
 ## v0.6.39（2026-11-06）— 输入队列 + CI 直推产物 + 更新签名阶段一
 
 > **桌面端体验**：生成中继续输入不再被"仍在执行"吞掉——按 Enter 入队（输入框上方 chips：
