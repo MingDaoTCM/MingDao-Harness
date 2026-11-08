@@ -3,6 +3,56 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.43（2026-11-08）— 修主入口守卫的静默失效 + 事件日志格式戳
+
+> **修掉一个「看起来成功」的失效**：`scripts/event-parity.mjs` 经**符号链接路径**调用时，主入口守卫
+> `import.meta.url === file://${argv[1]}` 永远不成立——Node 把模块解析成 realpath，而 `argv[1]`
+> 仍是链接路径，于是整段 CLI 不执行却 **exit 0、零输出**。现在改为比较 `fs.realpathSync`，
+> 并补 `test/event-parity.js ②`：专门经符号链接调用，断言**必须有输出**。
+> 同时给事件日志加**格式戳** `EVENT_LOG_FORMAT = 2`（`session.start.data.format`），让双读对拍
+> 能可靠区分「旧日志不可回溯」与「新日志重放回归」——初版靠「无 `messages.replace`」猜，
+> 会把**内容不一致**误判成历史噪声。
+> **用户可见：无变化**（事件日志是旁路，读取路径与 UI 均未改）。
+> 完整说明见 `RELEASE-NOTES-0.6.43.md`。
+
+### 一、主入口守卫改 realpath（`cf77afc`）
+
+- 现象：`node scripts/event-parity.mjs` 经 `/tmp/...`（macOS 上符号链接到 `/private/tmp/...`）调用时
+  **静默 exit 0、零输出**。根因是 `import.meta.url`（realpath）与 `file://${argv[1]}`（链接路径）
+  字符串永不相等，`if (isMainModule())` 整块被跳过；失败模式是「看起来跑过了」，比报错更危险。
+- 修复：`event-parity.mjs` 与 `oss-sync.mjs` 的主入口改为
+  `fs.realpathSync(fileURLToPath(import.meta.url))` vs `fs.realpathSync(argv[1])`，两侧都归一化；
+  realpath 失败时返回 `false`（不误判为主模块）。
+- **同类错误第三次出现**：`sign-release-assets`（Windows 盘符）、`prune-downloads`（同）、这次（符号链接）。
+  根因都是**用字符串比路径**；主入口判定必须比较 realpath。
+- 回归：`test/event-parity.js ②` 专门经符号链接目录调用脚本，断言 stdout 含「对拍结果」；
+  仅断言 exit 0 不够——静默失效恰好也是 exit 0。
+
+### 二、事件日志格式戳 `EVENT_LOG_FORMAT = 2`（`cf77afc`）
+
+- `session.start` 的 `data` 新增 `format`：`1` = 0.6.35–0.6.41（`rewriteSession()` 不写事件，
+  旧日志无法回溯）；`2` = 0.6.42 起（有 `messages.replace`）。
+- 只在**新建**事件侧车时写一次（与既有 `session.start` 同口径）；旧日志没有该字段，读侧照常可读。
+- 对拍据此三分类：
+  - **pass**：逐条等价；
+  - **fail**（exit 1）：不一致，且有**新格式戳**（`format >= 2`）**或**日志里已有 `messages.replace`
+    ——能重放的日志对不上就是真回归；
+  - **incomplete**（不计失败）：不一致，且**既没有新格式戳、整条日志也没有 `messages.replace`**
+    （确属 0.6.41 及以前）——历史噪声；
+  - **skip**：无事件侧车。
+- 初版判据「无 `messages.replace` 且不一致 → incomplete」过宽：0.6.43 新建的日志带 `format: 2`，
+  但只要没发生重写就没有 replace，内容被改坏也会被误判成历史噪声。现在 incomplete 必须同时满足
+  「没有新格式戳」与「没有 replace」；0.6.42 的日志（有 replace、无戳）也按 fail 处理。
+  `isPrefixPair` 仅保留为辅助诊断，不参与判定。
+
+### 三、测试、CI 与门禁
+
+- 新套件 `test/event-parity.js` **5 项**：等价会话 exit 0 有汇总 / **经符号链接调用仍有输出** /
+  新格式 + 内容不一致 exit 1 / 无侧车跳过 / 旧格式 + 不一致判 incomplete。
+- `test/run-all.mjs` → **44 套**；CI 新增独立步骤 `event-parity`（Linux/Windows，macOS 跳过）。
+- 本版门禁：typecheck / strict / preflight / smoke（单独 + 私有 `TMPDIR`）/ run-all 44 /
+  变异 73 批 794 条 / event-parity / coverage（只报告）/ doc-lint / diagnose 全绿。
+
 ## v0.6.42（2026-11-08）— §1.1 B2-a：事件日志完整记录消息 + 双读对拍
 
 > **事件流终于能重建整份历史**：`rewriteSession()`（手动 `/compact`、`/clear`、CLI/worker 全量
