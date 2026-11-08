@@ -50,13 +50,14 @@ const ok = (name) => {
       'message.append',
       'usage',
       'compact',
+      'messages.replace',
       'interrupt',
       'checkpoint',
     ],
-    '事件类型必须恰好是这 12 个（新增类型要同时改测试与文档）'
+    '事件类型必须恰好是这 13 个（新增类型要同时改测试与文档）'
   );
-  assert.equal(new Set(E.EVENT_TYPES).size, 12, '12 类事件不得重名');
-  ok('① 事件类型恰好 12 个且无重复');
+  assert.equal(new Set(E.EVENT_TYPES).size, 13, '13 类事件不得重名');
+  ok('① 事件类型恰好 13 个且无重复');
 }
 
 {

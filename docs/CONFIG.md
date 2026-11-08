@@ -90,21 +90,28 @@ MingDao 先用 executor 模型（路由关闭时为当前模型）把被裁段�
 
 每个会话在消息文件旁多一条 append-only 的事件流 `<session>.events.ndjson`（0600，与
 `<session>.jsonl` 同级）：每条 `{seq,time,type,data}`，seq 单调、是 turn/step/tool/message
-之间的唯一关联键。当前 12 类事件：`session.start` / `turn.start` / `turn.end` / `step.start` /
-`step.end` / `tool.start` / `tool.end` / `message.append` / `usage` / `compact` / `interrupt` /
-`checkpoint`。
+之间的唯一关联键。当前 13 类事件：`session.start` / `turn.start` / `turn.end` / `step.start` /
+`step.end` / `tool.start` / `tool.end` / `message.append` / `usage` / `compact` /
+`messages.replace` / `interrupt` / `checkpoint`。
 
-- **双写、旁路**：`appendMessages()` 在会话消息落盘**之后**追加 `message.append`；agent 在
+- **双写、旁路**：`appendMessages()` 在会话消息落盘**之后**追加 `message.append`；
+  `rewriteSession()`（压缩 / `--resume` / `/clear` / CLI 全量重写）在会话文件**写盘成功之后**
+  追加 `messages.replace`（`data={messages,reason}`，reason 为 `compact` / `resume` / `rewrite`）——
+  语义是「把当前派生窗口整体替换为 data.messages」，append-only、不删旧行。agent 在
   turn/step/工具/用量/压缩/中断边界追加结构事件。事件日志写失败只 warn，**不影响会话写入**，
   也不改变 `loadSession()` / `rewriteSession()` 的返回值。
-- **确定性重放**：`replayToMessages(events)` 由事件流派生消息数组（`compact` 重置基线、
-  `interrupt` 补 tool 占位），已对拍单轮 / 工具调用 / 压缩 / 中断四个场景与消息数组 deepEqual。
+- **确定性重放**：`replayToMessages(events)` 由事件流派生消息数组（`compact` 与
+  `messages.replace` 重置基线、`interrupt` 补 tool 占位），已对拍单轮 / 工具调用 / 压缩 /
+  resume / 空会话 / `tool_calls` 等场景与消息数组 deepEqual。
 - **回滚开关**：`"eventLog": false`（默认开）或环境变量 `MINGDAO_EVENT_LOG=0`。关闭后**完全**
-  停止事件写入（含 `message.append` 双写），会话文件照常写入。
-- **兼容**：旧会话没有 events 文件时读取返回空流；事件侧车不会出现在会话列表/最近会话中；
-  事件文件不参与云同步。SSE 帧与 UI 在本切片**未改**。
-- **已知边界**：手动 `/compact` 走 `rewriteSession` 时没有对应 `compact` 事件；自动标题重命名
-  会话文件不会搬迁事件侧车；这两类留待后续切片（事件日志目前是旁路，不参与既有读取）。
+  停止事件写入（含 `message.append` 与 `messages.replace` 双写），会话文件照常写入。
+- **兼容**：新增类型只追加、不改变既有事件形状；读侧对未知 type 一律跳过并计入 `skipped`，
+  因此旧版本读到 `messages.replace` 只会当它不存在，旧日志（没有该类型）在新版本照常可读。
+  旧会话没有 events 文件时读取返回空流；事件侧车不会出现在会话列表/最近会话中；事件文件不
+  参与云同步。SSE 帧与 UI 不受影响。
+- **已知边界**：自动标题重命名会话文件不会搬迁事件侧车；WebUI 的 `onCompact` 目前按默认
+  `rewrite` 记 reason（本轮不改 `src/web/**`）；本版之前写下的日志没有 `messages.replace`，
+  `scripts/event-parity.mjs` 将这类「不可回溯」会话判为 `incomplete`（不计失败）。
 
 ## 会话级工作空间（P3-4）
 

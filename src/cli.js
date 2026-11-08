@@ -508,7 +508,7 @@ async function main() {
     sessionRef,
     // 自动压缩后重写会话文件 + 同步落盘游标（经 tuiState 共享槽与 REPL 会话联动）
     onCompact: (/** @type {any} */ msgs) => {
-      if (tuiState.session) rewriteSession(tuiState.session.file, msgs);
+      if (tuiState.session) rewriteSession(tuiState.session.file, msgs, 'compact');
       tuiState.persisted = msgs.length;
     },
   });
@@ -547,7 +547,7 @@ async function main() {
       mcp: mcpFacade,
       sessionRef: oneShotRef,
       onCompact: (/** @type {any} */ msgs) => {
-        rewriteSession(session.file, msgs);
+        rewriteSession(session.file, msgs, 'compact');
         oneShotPersisted = msgs.length;
       },
     });

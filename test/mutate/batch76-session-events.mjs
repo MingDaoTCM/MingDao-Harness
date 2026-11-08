@@ -60,13 +60,13 @@ M.mutate({
   name: '④ replay 丢掉 compact（压缩基线不生效）',
   file: 'src/session-events.js',
   from: [
-    "    } else if (ev.type === 'compact') {",
+    "    } else if (ev.type === 'compact' || ev.type === 'messages.replace') {",
     '      const base = ev.data?.messages;',
     '      if (Array.isArray(base)) {',
     '        messages = base.filter((m) => m && typeof m === \'object\' && !Array.isArray(m)).map(cloneJson);',
     '      }',
   ].join('\n'),
-  to: "    } else if (ev.type === 'compact') { // 变异：丢掉 compact",
+  to: "    } else if (ev.type === 'compact') { // 变异：丢掉 compact（与 messages.replace）",
   expect: ['compact 必须重置重放基线'],
   run: EVENTS,
 });

@@ -107,7 +107,7 @@ export async function runWorkerTask(id, question, { permission, model, offpeak }
       mcp: mcpFacade || undefined,
       sessionRef,
       onCompact: (/** @type {any} */ msgs) => {
-        rewriteSession(session.file, msgs);
+        rewriteSession(session.file, msgs, 'compact');
         persistedCount = msgs.length;
       },
     });

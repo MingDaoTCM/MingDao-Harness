@@ -238,7 +238,7 @@ export async function runRepl(ctx) {
         mcp: mcpFacade,
         sessionRef,
         onCompact: (/** @type {any} */ msgs) => {
-          rewriteSession(session.file, msgs);
+          rewriteSession(session.file, msgs, 'compact');
           tuiState.persisted = msgs.length;
         },
       });
@@ -327,7 +327,7 @@ export async function runRepl(ctx) {
           provider, permission: permissionNow, io, modelName, workingDir, cfg: agentCfg,
           undoStore: sessionUndoStore, mcp: mcpFacade, sessionRef,
           onCompact: (/** @type {any} */ msgs) => {
-            rewriteSession(session.file, msgs);
+            rewriteSession(session.file, msgs, 'compact');
             tuiState.persisted = msgs.length;
           },
         });
@@ -363,7 +363,7 @@ export async function runRepl(ctx) {
           provider, permission: permissionNow, io, modelName, workingDir, cfg: agentCfg,
           undoStore: sessionUndoStore, mcp: mcpFacade, sessionRef,
           onCompact: (/** @type {any} */ msgs) => {
-            rewriteSession(session.file, msgs);
+            rewriteSession(session.file, msgs, 'compact');
             tuiState.persisted = msgs.length;
           },
         });
@@ -415,7 +415,7 @@ export async function runRepl(ctx) {
         // v0.6.3（H-4）：手动 /compact 此前用**追加**落盘（再补一条"压缩点"标记），而压缩前的历史
         // 早已在文件里 → 每次 /compact 文件近乎翻倍，`-c/--continue` 恢复后历史重复并立刻再次触发压缩。
         // 自动压缩走的是 rewriteSession（原子重写）——两处写盘口径不一致，这里统一到重写。
-        rewriteSession(session.file, messages);
+        rewriteSession(session.file, messages, 'compact');
         tuiState.persisted = messages.length;
         // v0.6.3（M-1）：压缩把早期消息（含文件正文）换成了摘要，但读取去重缓存仍记着"这个文件你看过"
         // → 模型再读同一文件只会拿到「内容与上次读取一致」的占位串，而正文已不在上下文里。

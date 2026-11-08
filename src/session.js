@@ -161,11 +161,65 @@ export function appendMessages(file, messages) {
   doubleWriteSessionEvents(file, messages); // 旁路：失败只 warn，不影响上面的会话写入
 }
 
+/** 允许的整份重写原因；认不出的一律按 `rewrite`（事件里的 reason 永远是有限集合）。 */
+const REWRITE_REASONS = new Set(['compact', 'resume', 'rewrite']);
+
+/**
+ * 归一化 `rewriteSession` 的 reason：`compact` / `resume` / `rewrite`，其余（含缺省）→ `rewrite`。
+ * @param {any} value
+ * @returns {string}
+ */
+function normalizeRewriteReason(value) {
+  const s = String(value ?? '').trim();
+  return REWRITE_REASONS.has(s) ? s : 'rewrite';
+}
+
+/**
+ * v0.7.0 B2-a：整份重写（压缩 / --resume / /clear / CLI 全量重写）的双写。
+ *
+ * 必须在会话文件**写盘成功之后**调用：`messages.replace` 的语义是「把当前派生窗口整体替换为
+ * data.messages」，不是增量。先写事件后写会话，一旦会话写失败就会留下「事件侧车已前进、消息
+ * 文件没动」的分叉。事件写入失败只 warn（与 appendMessages 同口径），绝不回滚也不抛出——
+ * 会话文件已经落盘，事件的完整性不能反过来决定会话是否成功。
+ * @param {any} file
+ * @param {any[]} messages
+ * @param {any} reason
+ */
+function doubleWriteReplaceEvents(file, messages, reason) {
+  if (!eventLogEnabled()) return;
+  const eventFile = eventFileFor(file);
+  if (!eventFile) return;
+  try {
+    // 与 appendMessages 一致：事件流的第一条 session.start 只在文件尚不存在时写一次。
+    if (!fs.existsSync(eventFile)) {
+      const start = appendEvent(eventFile, { type: 'session.start', data: { session: path.basename(String(file)) } });
+      if (!start.ok) {
+        warnEventFailure(eventFile, start.error ?? null);
+        return;
+      }
+    }
+    const r = appendEvent(eventFile, {
+      type: 'messages.replace',
+      data: { messages, reason: normalizeRewriteReason(reason) },
+    });
+    if (!r.ok) warnEventFailure(eventFile, r.error ?? null);
+  } catch (err) {
+    warnEventFailure(eventFile, String(/** @type {any} */ (err)?.message ?? err));
+  }
+}
+
 // 整文件原子重写：自动压缩后把会话文件同步为压缩形态（否则每次加载历史都会重新触发压缩）
-/** @param {any} file @param {any} messages */
-export function rewriteSession(file, messages) {
+/**
+ * @param {any} file
+ * @param {any} messages
+ * @param {string} [reason] `compact` / `resume` / `rewrite`（缺省或非法 = `rewrite`）
+ */
+export function rewriteSession(file, messages, reason = 'rewrite') {
   const lines = messages.map((/** @type {any} */ m) => JSON.stringify(m)).join('\n');
   atomicWriteFileSync(file, lines + (lines ? '\n' : ''), { mode: 0o600 }); // 质检 H4：会话文件原子写
+  // v0.7.0 B2-a：重写是「整体替换窗口」，必须以 messages.replace 落事件（append-only，不删旧行）。
+  // 只有会话文件写成功之后才写；失败只 warn（见 doubleWriteReplaceEvents）。
+  doubleWriteReplaceEvents(file, messages, reason);
 }
 
 /** 每个会话文件每进程只尝试修补一次；失败也不重试（避免每次读取都整份读事件日志）。 */

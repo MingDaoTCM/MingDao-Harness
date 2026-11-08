@@ -8636,7 +8636,7 @@ withFileLockSync(${JSON.stringify(lockPath)}, () => {
       assert.deepEqual(SESS.loadSession(sf).messages.map((m) => m.content), ['s', '汇总'], '重写是真替换：旧消息不得残留');
       const replSrc = fs.readFileSync(path.join(srcDir, 'commands', 'repl.js'), 'utf8');
       const branch = replSrc.slice(replSrc.indexOf("cmd === '/compact'"), replSrc.indexOf("cmd === '/init'"));
-      assert.ok(/rewriteSession\(session\.file, messages\)/.test(branch), '/compact 必须用 rewriteSession（与自动压缩同口径）');
+      assert.ok(/rewriteSession\(session\.file, messages(?:, 'compact')?\)/.test(branch), '/compact 必须用 rewriteSession（与自动压缩同口径）');
       assert.ok(!/appendMessages\(session\.file/.test(branch), '/compact 不得再用追加落盘（这正是文件膨胀与恢复重复的根因）');
       assert.ok(/agent\.clearReadCache\?\.\(\)/.test(branch), '/compact 后必须让读取去重缓存失效（见 M-1）');
       const clearBranch = replSrc.slice(replSrc.indexOf("cmd === '/clear'"), replSrc.indexOf("cmd === '/preset'"));

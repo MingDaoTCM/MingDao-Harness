@@ -26,7 +26,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { appendFilePrivateSync } from './atomic-write.js';
 
-/** 本切片先定这 12 类事件；新增类型必须同时更新这里与 `test/session-events.js` 的清单。 */
+/**
+ * 公开事件类型（v0.7.0 B2-a：12 → 13，新增 `messages.replace`）。
+ *
+ * **可忽略性是新增类型的前提**：读侧对未知 type 一律跳过并计入 `skipped`（见 `readEvents`），
+ * 因此旧版读者遇到 `messages.replace` 只会当它不存在，不会把整份日志读坏；反过来，旧日志
+ * （没有该类型）在本版照常可读——语义退化为「只有 compact/message.append」，不改变任何
+ * 既有事件形状。新增类型必须同时更新这里与 `test/session-events.js` 的清单。
+ */
 export const EVENT_TYPES = Object.freeze([
   'session.start',
   'turn.start',
@@ -38,6 +45,7 @@ export const EVENT_TYPES = Object.freeze([
   'message.append',
   'usage',
   'compact',
+  'messages.replace',
   'interrupt',
   'checkpoint',
 ]);
@@ -45,14 +53,14 @@ export const EVENT_TYPES = Object.freeze([
 /**
  * 审批事件（v0.6.40 悬空闭合切片）：`approval.asked` / `approval.decided` 由审批轨道写入。
  *
- * 为什么不并进 `EVENT_TYPES`：那份清单是**对外公开**的 12 类事件，条数被既有回归套件
- * （`test/session-events.js` ①）逐字钉死；本切片不允许改那套断言。但读取与追加又必须认它们——
- * 否则修补器看不见「永远在等审批」的悬空 ask，也没法把合成的 decided 追加进日志。
- * 因此：`EVENT_TYPES` 仍是 12 类；内部可读写集合 = 12 类 + 审批 2 类。
+ * 为什么不并进 `EVENT_TYPES`：那份清单是**对外公开**的事件类型（v0.7.0 B2-a 起 13 类），
+ * 条数被回归套件（`test/session-events.js` ①）逐字钉死；本切片不允许改那套断言。但读取与
+ * 追加又必须认它们——否则修补器看不见「永远在等审批」的悬空 ask，也没法把合成的 decided
+ * 追加进日志。因此：`EVENT_TYPES` 仍是 13 类；内部可读写集合 = 13 类 + 审批 2 类。
  */
 export const APPROVAL_EVENT_TYPES = Object.freeze(['approval.asked', 'approval.decided']);
 
-/** 内部接受的事件类型：公共 12 类 + 审批 2 类（变量名保持 `EVENT_TYPE_SET`，既有变异锚点不变）。 */
+/** 内部接受的事件类型：公共 13 类 + 审批 2 类（变量名保持 `EVENT_TYPE_SET`，既有变异锚点不变）。 */
 const EVENT_TYPE_SET = new Set([...EVENT_TYPES, ...APPROVAL_EVENT_TYPES]);
 
 /** 审批/工具的关联键字段（按优先级；没有键时按「最近一条」兜底配对）。 */
@@ -327,13 +335,24 @@ export function appendEvent(eventFile, { type = '', data = {}, at = null } = {})
         const newSize = tail.size + Buffer.byteLength(prefix + json + '\n', 'utf8');
         // 末尾校验：确认最后一行就是刚写下的事件（锁内不会有第二个写方）。
         const verify = readTail(file);
-        const lines = verify.text.split('\n').filter((l) => l.trim());
-        const last = lines.length ? lines[lines.length - 1] : '';
+        const lastLineOf = (/** @type {string} */ text) => {
+          const lines = text.split('\n').filter((l) => l.trim());
+          return lines.length ? lines[lines.length - 1] : '';
+        };
         let ok = false;
         try {
-          const parsed = JSON.parse(last.replace(/\r$/, ''));
+          const parsed = JSON.parse(lastLineOf(verify.text).replace(/\r$/, ''));
           ok = parsed?.seq === seq && parsed?.type === type;
         } catch {}
+        // v0.7.0 B2-a：单条事件可能 > TAIL_BYTES（压缩摘要/工具结果/整份 messages.replace）。
+        // 尾窗会把最后一行截断，JSON.parse 必然失败——这不是写失败。只在「尾窗确实没覆盖
+        // 整个文件」时回退整文件重验最后一行（大事件才走这条路，代价与事件大小同阶）。
+        if (!ok && verify.size > TAIL_BYTES) {
+          try {
+            const parsed = JSON.parse(lastLineOf(fs.readFileSync(file, 'utf8')).replace(/\r$/, ''));
+            ok = parsed?.seq === seq && parsed?.type === type;
+          } catch {}
+        }
         if (!ok) return { ok: false, error: `事件写入后校验失败（seq=${seq}）` };
         seqCache.set(file, { seq, size: newSize });
         return { ok: true, error: null, seq };
@@ -692,7 +711,9 @@ export function missingToolCallIds(messages) {
  *
  * 语义（与双写顺序一致）：
  *   · `message.append`：`data.message` 追加到末尾；
- *   · `compact`：`data.messages` 是压缩后的**新基线**，整体替换（后续 append 接在它后面）；
+ *   · `compact` / `messages.replace`：`data.messages` 是**新基线**，整体替换当前窗口
+ *     （后续 message.append 按 seq 顺序接在它后面）。两者语义相同：`compact` 是切片 A 的旧
+ *     类型，`messages.replace`（v0.7.0 B2-a）覆盖压缩 / rewrite / resume 等所有整份重写。
  *   · `interrupt`：`data.toolCallIds` 里的 id 若在最终消息里仍没有 tool 回填，则在对应
  *     assistant 之后补一条 `（已中断，未执行）` 占位——**延迟到所有事件处理完再补**，这样
  *     随后到达的 message.append 若已含占位就不会重复，也不会插错位置。
@@ -708,7 +729,7 @@ export function replayToMessages(events) {
     if (ev.type === 'message.append') {
       const m = ev.data?.message;
       if (m && typeof m === 'object' && !Array.isArray(m)) messages.push(cloneJson(m));
-    } else if (ev.type === 'compact') {
+    } else if (ev.type === 'compact' || ev.type === 'messages.replace') {
       const base = ev.data?.messages;
       if (Array.isArray(base)) {
         messages = base.filter((m) => m && typeof m === 'object' && !Array.isArray(m)).map(cloneJson);

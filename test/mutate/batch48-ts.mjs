@@ -64,9 +64,9 @@ M.mutate({
 M.mutate({
   name: '⑤ 压缩重写刷新已有 ts',
   file: 'src/session.js',
-  from: ['export function rewriteSession(file, messages) {', '  const lines = messages.map'].join('\n'),
+  from: ["export function rewriteSession(file, messages, reason = 'rewrite') {", '  const lines = messages.map'].join('\n'),
   to: [
-    'export function rewriteSession(file, messages) {',
+    "export function rewriteSession(file, messages, reason = 'rewrite') {",
     '  messages = messages.map((m) => (m && typeof m === \'object\' ? { ...m, ts: new Date().toISOString() } : m)); // 变异：重写时刷新 ts',
     '  const lines = messages.map',
   ].join('\n'),
