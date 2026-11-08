@@ -77,7 +77,20 @@ jobs:
           if [ "$RUNNER_OS" != "macOS" ]; then
             unset CSC_LINK CSC_KEY_PASSWORD
           fi
+          # electron-builder 会从 GitHub Release 端点拉取工具链（winCodeSign / nsis / appimage）。
+          # v0.6.44 实测该端点持续返回 **HTTP 504**（本机/香港/深圳同时刻同 URL 也 504，是外部故障），
+          # 整条发版因此卡住，只能临时开恢复分支手工改镜像。这里把"失败了再换镜像"做成一等公民：
+          # 先走默认（最快、最新），失败一次自动切 npmmirror 重试，最后仍失败才红。
+          set +e
           npx electron-builder ${{ matrix.args }} --publish never
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            echo "::warning title=electron-builder 首次失败，切镜像重试::rc=$rc（常见原因：GitHub 工具链端点 504）"
+            export ELECTRON_BUILDER_BINARIES_MIRROR="https://registry.npmmirror.com/-/binary/electron-builder-binaries/"
+            npx electron-builder ${{ matrix.args }} --publish never
+            rc=$?
+          fi
+          exit $rc
       # 打包冒烟（0.2.2 事故护栏）：真实运行打包产物主进程（xvfb 无窗口），模块求值通过即退出 0。
       # 只跑 Linux 腿：导入缺失/路径错误这类 bug 平台无关，一个平台就足以拦截；三平台都跑浪费时长。
       - name: 打包冒烟（主进程模块求值，xvfb）
