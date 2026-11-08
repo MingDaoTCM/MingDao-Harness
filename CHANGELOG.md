@@ -3,6 +3,68 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.41（2026-11-08）— §1.1 切片 B1：SSE 帧号 / 事件游标 / 跳号整窗重取（+ 开发效率工具）
+
+> **传输层补两套编号**：SSE 每一帧新增 `streamSeq`（**每个 task** 从 1 起）并同时写标准
+> `id: <n>` 行，既有的 `seq`（工具卡片配对号）**一个字节都没动**；会话事件日志另有一套
+> `eventSeq`（**每个会话**跨轮单调），由 `GET /api/events?file=&after=` 与
+> `/api/session.lastEventSeq` 暴露。**两套编号绝不互相推导。**
+> **用户可见**：SSE 断流/丢帧时界面会**自动整窗重新同步**（不再静默错位），重取失败有明确提示；
+> 其余无可见变化。**开发效率**：`npm run preflight`（0.03 秒结构预检）、
+> `npm run mutate:changed`（只跑受影响批次）、`npm run mutate:shard`（4 片并行，全量 25 分钟 → 7 分钟级）。
+> 完整说明见 `RELEASE-NOTES-0.6.41.md`。
+
+### 一、服务端：SSE 帧号 + 事件游标（`25b28cc`）
+
+- `createSseWriter(res, taskId)`：每帧 `streamSeq` 从 1 起单调 +1、同时写 `id: <streamSeq>` 行；
+  计数器是**每个 task 一个闭包**（并发任务各自从 1 起，不互相占号）；心跳 `progress` 同走该函数。
+- 帧上既有 `seq` **保持原语义**（`toolStart` ↔ `tool` 的工具卡片配对号，e2e 有断言），
+  新字段叫 `streamSeq`，不覆盖、不复用。
+- `session-events.js` 新增 `readAfter(eventFile, afterSeq)`（只返回 `seq > after`，`lastSeq` 取整条日志
+  最大值；事件文件不存在按 `{ok:true,events:[],lastSeq:0}`）与 `continuityOf(seqs)`（从 1 起逐条 +1，
+  报 `gaps:[{after,before}]`）。
+- `GET /api/events?file=&after=`：`after` 缺省 0；非数字/负数 **400**；`file` 只接受 basename
+  （含 `/` `\` 或 `.`/`..` → **400**，防目录穿越）；会话不存在 **404**；旧会话无事件文件 **200 空窗口**；
+  返回体带 `seqKind:'event'`，机器可读地声明这是事件日志编号。
+- `GET /api/session` **只增** `lastEventSeq`（事件日志最大 seq；无日志为 0），既有字段不变。
+
+### 二、前端：跳号 → 整窗重取（`1a1b4aa`）
+
+- `seqContinuity`：首帧必须 1；`last+1` accept；重复/乱序 ignore；跳号 `resync` + `gap`；
+  无 `streamSeq`（旧服务端）ignore 且**业务照常分派**。
+- `resyncPlan`：**只有 `snapshot` / `none` 两态**——有会话文件走 `loadSession` 整窗重取；
+  没有会话（新会话尚未落盘）只提示、不重建空窗口。事件→UI 投影属 B2，B1 **不做** `events` 重放。
+- `seqBanner`：成功重取后插「已跳过 N 条事件，正在重新同步…」；重取失败插可见
+  「⚠ 事件流中断且重取失败，请刷新页面」，并把游标推进到触发帧以便后续帧继续渲染；
+  连续两次补不回来即停手，不每帧打网络。
+- `loadSession` 改为**先取快照、成功后再清窗**：重取失败时当前窗口原样保留。
+- `test/viewmodel.js` +51 条，`test/seq-gap.js` **44 项**。
+
+### 三、开发效率工具（`4d04457`）
+
+- `npm run preflight`（**0.03 秒**）：批次必须有 `M.report()` + `process.exit(…)`、必须真的有
+  `M.mutate({...})`、`src/**` 不得残留变异标记、总数必须与 README 一致；`test/preflight.js` **6 项**
+  专门验证"坏批次真的会被抓到"。
+- `npm run mutate:changed`：只跑"锚点落在本次改动文件上"的批次；改到 `test/**` 自动退回全量。
+- `npm run mutate:shard`：4 片 LPT 分桶并行，每片独立 `git worktree`（HEAD）+ 独立锁目录 + 独立
+  `TMPDIR`；**全量 72 批 / 785 条**由约 25 分钟压到 **7 分钟级**（本版实测见发布说明）。
+
+### 四、文档与接线（`200f8d5` / `bae88a7` / `f6c6c18`）
+
+- `docs/ROADMAP-v0.7.md`：§1.1 拆成 A / B1 / B2，并写明 `streamSeq`（每 task）与 `eventSeq`
+  （每会话）两套编号域；`test/seq-gap.js`、`test/event-cursor.js` 进入 `run-all`（**42 套**）与 CI
+  独立步骤（连同 `test/preflight.js` 共 **3 个新步骤**）。
+- `docs/ARCHITECTURE.md` 同步双游标；`docs/RELEASE-CHECKLIST.md` 增加"发版后推一份到深圳镜像本地目录"。
+- `test/event-cursor.js` **18 项**、`test/seq-gap.js` **44 项**、`batch83` **9 条**、`batch84` **8 条**；
+  变异总数 768 → **785**。
+
+### 五、未做 / 已知边界
+
+- **B2 未做**：UI/账本从事件派生、`session-format-*` 迁移用例仍留 v0.7.0。
+- `Last-Event-ID` **只写 `id:` 行**，未实现按它补尾页（断线重连仍靠快照重取）。
+- `.sig` 站点发布（阶段二）未开，`/updates/latest.yml.sig` 保持 **404**；Windows Authenticode 未接入。
+- 0.6.40 登记的"跨进程同时自愈同一会话"仍未处理（只追加 + `synthetic` 标记，不影响正确性）。
+
 ## v0.6.40（2026-11-07）— 插话（steer）+ 悬空事件闭合
 
 > **两条交互车道**：生成中按 `Enter` 仍是排队（0.6.39 既有行为不变，本轮结束后发）；
