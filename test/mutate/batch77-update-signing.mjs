@@ -62,8 +62,9 @@ M.mutate({
 M.mutate({
   name: '⑦ 弹窗文案不再区分「公证」与「来源签名」',
   file: 'desktop/update-verify.js',
-  from: "      '本次更新未验证来源签名（发布链路下一版接入）——已按默认策略安装；' + platformHint + '。\\n' +",
-  to: "      '本次更新未验证来源签名（发布链路尚未接入签名）——已按默认策略安装。\\n' +",
+  // v0.6.45：发布链路已接入签名，文案同步改过；锚点必须跟着代码走（失配要让批次红，不要宽容匹配）
+  from: "      '本次更新未验证来源签名（没能取得本版更新的发布签名）——已按默认策略安装；' + platformHint + '。\\n' +",
+  to: "      '本次更新未验证来源签名——已按默认策略安装。\\n' +",
   expect: ['必须提到系统级签名'],
   run: RUN,
 });
@@ -71,8 +72,8 @@ M.mutate({
 M.mutate({
   name: '⑧ 弹窗正文超过两行（回退成说明书）',
   file: 'desktop/update-verify.js',
-  from: "      '它防的是\"更新源被投毒\"；高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝；详情见日志与官网。',",
-  to: "      '它防的是\"更新源被投毒\"；\\n高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝无签名更新。\\n详情见日志与官网。',",
+  from: "      '签名用于防范\"更新源被投毒\"；若你的环境要求必须验签，可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝；详情见日志与官网。',",
+  to: "      '签名用于防范\"更新源被投毒\"；\\n若你的环境要求必须验签，可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝。\\n详情见日志与官网。',",
   expect: ['最多两行'],
   run: RUN,
 });
