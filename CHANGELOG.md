@@ -3,6 +3,63 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.7.0（2026-11-08）— 会话真源翻转为事件日志（可一键回退）
+
+> **本版把会话读取真源从 `.jsonl` 消息数组翻到事件日志（`events`）**——0.x 的 minor，
+> 语义上是「会话真源翻转」。**用户可见：无强制变化**：历史会话仍按原样显示（旧格式
+> `session.start.data.format < 2` 永远回退消息数组），新会话以事件日志为真源；任何对拍不一致
+> 只 warn（带文件与首个差异位置）并自动回退消息数组。**运维级一键回退**：
+> `MINGDAO_EVENT_SOURCE=messages` 立即回到旧真源，不改配置、不重启改文件。
+> 证据见 `docs/EVENT-SOURCE-EVIDENCE.md`（4 类真实会话对拍 4/4、双读 `deepEqual` 4/4）。
+> 完整说明见 `RELEASE-NOTES-0.7.0.md`。
+
+### 一、默认真源翻转为 `events`（`6378034`）
+
+- `src/config.js`：`DEFAULT_EVENT_SOURCE = EVENT_SOURCE_EVENTS`（`EVENT_SOURCE_ENV = 'MINGDAO_EVENT_SOURCE'`）。
+- 优先级链：**`MINGDAO_EVENT_SOURCE`（环境变量）> `config.eventSource` > 默认 `events`**。
+  环境变量只在**读取时**生效、**不落盘**（写回配置仍只走配置值；撤销变量即恢复配置文件的值）。
+- **非法值视为「未设」**：拼错 / 大小写不符 / 空串都继续走 `config.eventSource` / 默认 `events`，
+  **不会**悄悄回落 `messages`（否则一个拼错的变量就能把真源切回旧路径）。
+- **旧格式日志永远回退**：`session.start.data.format < 2`、无事件侧车、侧车读失败一律静默回退
+  消息数组——旧会话的读取字节不变。
+- 对拍不一致 → warn（带文件与首个差异位置）+ 回退（既有机制，**判据未改**；消息数组始终是兜底真源）。
+
+### 二、运维级一键回退
+
+```bash
+MINGDAO_EVENT_SOURCE=messages mingdao ...   # 立即回到旧真源（不必改 config.json）
+```
+
+- 也可显式写 `"eventSource": "messages"`；环境变量优先于配置文件，适合「先止血再排查」。
+- 事件侧车仍照常双写，回退只影响**读取路径**，不丢数据。
+
+### 三、过时文案修正
+
+- `desktop/update-verify.js`：签名缺失的 warn 日志不再说「发布链路尚未接入签名」，改为
+  「没能取得本版更新的发布签名」（阶段二已在 0.6.45 接入，旧文案与事实不符）。
+
+### 四、证据与测试
+
+- `docs/EVENT-SOURCE-EVIDENCE.md`：4 类真实写入路径（工具调用 / 自动压缩 / 手动 `/compact` /
+  resume 继续）对拍 **4/4**、`eventSource=events` 与 `messages` 双读 `deepEqual` **4/4**，
+  `fail=0`、`incomplete=0`——满足翻默认门槛。
+- `scripts/make-event-fixtures.mjs`：可重复造上述 4 类真实会话（临时 `MINGDAO_HOME` + 桩 provider
+  驱动真实 CLI/REPL，不手写 `.jsonl`），造完即跑对拍与双读交叉验证，`--rm` 清理。
+- `docs/ROADMAP-v0.7.md` §1.1 标记 B2-b 完成。
+- 套件：`event-source` **27 项**、`update-signing` **12 项**、`batch86` **10/10**；变异总数 **804 条**。
+
+### 五、未做 / 已知边界
+
+- 派生以**对拍为门**：不一致只 warn + 回退，不阻断会话读取，也不改名/不迁移文件。
+- 未覆盖的样本类型（翻转后仍建议补样）：中断占位（`interrupt` + 悬空 tool 回填）、审批拒绝、
+  `/clear` 产生的 `messages.replace`、工具执行失败 / 参数解析失败、WebUI 服务端写入路径、
+  真实远端 provider 的 usage/reasoning 字段差异。
+- 更新来源签名（`.sig`）阶段二**已接入（0.6.45）**——本版不再是待办；**Windows Authenticode 仍未接**；
+  桌面更新下载仍走 **OSS 香港**，国内镜像提速待做。
+- 默认档签名策略沿用 0.6.45：`warn-and-install`（缺失签名时提示后放行）；
+  `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1` 仍可 fail-closed。
+
+
 ## v0.6.45（2026-11-08）— 更新来源签名接入发布链路（阶段二）
 
 > **本版起，更新包的「来源签名」真正进入发布链路**：CI 签出的 `<安装包>.sig` 由
