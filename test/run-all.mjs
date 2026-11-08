@@ -89,6 +89,8 @@ const SUITES = [
   ['event-source', 'node', ['test/event-source.js']],
   // v0.6.45：签名发布计划的纯逻辑（只发本版安装包签名）
   ['update-sig-publish', 'node', ['test/update-sig-publish.js']],
+  // v0.7.1：官方 Pack 的版本窗口必须覆盖当前内核版本（0.7.0 事故的守卫）
+  ['pack-window', 'node', ['test/pack-window.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];
