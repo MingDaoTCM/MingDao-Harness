@@ -3,7 +3,10 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { appendEvent, eventFileFor, eventLogEnabled, isEventLogName, repairEventLog, warnEventFailure, EVENT_LOG_FORMAT } from './session-events.js';
+import { appendEvent, eventFileFor, eventLogEnabled, diffMessages, isEventLogName, readEvents, replayToMessages, repairEventLog, warnEventFailure, EVENT_LOG_FORMAT } from './session-events.js';
+// v0.7.0 B2-b：读取真源开关。归一化放在 config.js（配置读取/写回/直接传 cfg 三条路径共用），
+// 对拍比较函数抽在 session-events.js 的 `diffMessages`（与 scripts/event-parity.mjs 同一判据）。
+import { normalizeEventSource, EVENT_SOURCE_EVENTS } from './config.js';
 
 // —— 冲突备份名（单一事实来源，v0.4.6）——
 // 同步冲突时写入的备份：<会话名>.server-<时间戳>[-<随机后缀>].jsonl（远端版本）与 .remote-（远端拉取版本）。
@@ -262,7 +265,44 @@ export function repairSessionEvents(file, cfg = null) {
   }
 }
 
-/** @param {any} file @param {any} [cfg] */
+/**
+ * v0.7.0 B2-b：从事件侧车派生消息（灰度读取真源）。
+ *
+ * 返回 `null` 表示**不采用事件源**——无侧车 / 格式戳缺失或早于本版 / 事件日志读失败。
+ * 这三种都是灰度期常态（旧会话本来就没有 `messages.replace`），调用方必须**静默**回退到
+ * 消息数组，不刷 warn；只有「格式够新、派生出来了、但与消息文件对拍不一致」才是需要可见的异常。
+ * @param {any} file 会话文件（.jsonl）
+ * @returns {any[]|null}
+ */
+function messagesFromEvents(file) {
+  const eventFile = eventFileFor(file);
+  if (!eventFile) return null;
+  try {
+    if (!fs.existsSync(eventFile)) return null;
+    const read = readEvents(eventFile);
+    if (!read.ok) return null;
+    // 与 scripts/event-parity.mjs 同一判据：format >= EVENT_LOG_FORMAT 才认为日志可完整回溯
+    // （旧日志没有 rewrite 记录，派生出来必然缺窗口，不能拿它当读取真源）。
+    const newFormat = read.events.some((ev) => ev.type === 'session.start' && Number(ev.data?.format) >= EVENT_LOG_FORMAT);
+    if (!newFormat) return null;
+    return replayToMessages(read.events);
+  } catch {
+    // 事件侧车是旁路：任何异常都只意味着「这次不用事件源」，绝不能让会话读不出来。
+    return null;
+  }
+}
+
+/**
+ * 读取会话。默认（`eventSource` 缺省或 `messages`）只读 `.jsonl` 消息数组，行为与 0.6.x 一致。
+ *
+ * `cfg.eventSource === 'events'`（v0.7.0 B2-b 灰度开关）时额外尝试事件日志派生，但必须通过
+ * **对拍兜底**：派生结果与消息文件逐条等价才采用；不一致就 warn（带文件与首个差异位置）并
+ * 回退到消息数组。事件源缺失 / 格式旧 / 读失败一律静默回退。
+ *
+ * @param {any} file
+ * @param {any} [cfg] 传入时尊重 `cfg.eventSource` 与 `cfg.eventLog === false`（后者只影响修补器）
+ * @returns {{file:any, messages:any[]}} 形状与旧版完全一致
+ */
 export function loadSession(file, cfg = null) {
   const raw = fs.readFileSync(file, 'utf8');
   const messages = [];
@@ -275,10 +315,30 @@ export function loadSession(file, cfg = null) {
       }
     } catch {}
   }
+  let result = messages;
+  if (normalizeEventSource(cfg?.eventSource) === EVENT_SOURCE_EVENTS) {
+    const derived = messagesFromEvents(file);
+    if (derived) {
+      const d = diffMessages(messages, derived);
+      if (d.ok) result = derived;
+      else {
+        // 对拍失败是**真异常**（新格式日志理应可完整重放）：必须可见，并带首个差异位置。
+        // 但读取结果仍回退到消息数组——灰度期不能让实验分支改变用户看到的历史。
+        const at = d.index >= 0 ? `第 ${d.index + 1} 条` : '未知';
+        try {
+          console.warn(
+            `[MingDao] ⚠ 会话事件源对拍不一致（${file}）：${d.reason}；差异位置：${at}——已回退到消息数组` +
+              `（config.eventSource=events 仅灰度验证用，默认仍是 messages）。`
+          );
+        } catch {}
+      }
+    }
+  }
   // v0.6.40：消息读完后顺带闭合悬空事件。失败只 warn（repairSessionEvents 内部吞掉），
   // 返回值与消息数组一字不动——事件侧车坏了/修不了，会话照样可读。
+  // v0.7.0 B2-b：放在事件派生之后，派生读到的是修补前的日志（与 scripts/event-parity.mjs 同口径）。
   repairSessionEvents(file, cfg);
-  return { file, messages };
+  return { file, messages: result };
 }
 
 // 会话预览：第一条用户消息（用于会话选择器）

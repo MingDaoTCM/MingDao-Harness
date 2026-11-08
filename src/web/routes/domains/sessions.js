@@ -89,7 +89,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     const file = url.searchParams.get('file');
     if (!file) return json(res, 400, { error: '缺少 file 参数' });
     try {
-      const loaded = loadSession(path.join(home, 'sessions', path.basename(file)));
+      const loaded = loadSession(path.join(home, 'sessions', path.basename(file)), deps.cfg);
       // 载入会话时聚焦其工作空间（P3-4）：全局默认切到该会话的目录，前端下拉同步显示
       const wsDir = getSessionWorkspace(path.basename(file));
       const ws = workspaceForDir(wsDir);
@@ -189,7 +189,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       return json(res, 404, { error: `会话不存在：${file}` });
     }
     try {
-      const loaded = loadSession(path.join(home, 'sessions', file));
+      const loaded = loadSession(path.join(home, 'sessions', file), deps.cfg);
       if (loaded.messages.length) {
         const wsDir = getSessionWorkspace(file) || state.workingDir;
         const { finalizeSession } = await import('../../../memory.js');

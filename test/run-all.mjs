@@ -85,6 +85,8 @@ const SUITES = [
   ['event-completeness', 'node', ['test/event-completeness.js']],
   // v0.6.42：双读对拍工具（含主入口守卫的符号链接回归）
   ['event-parity', 'node', ['test/event-parity.js']],
+  // v0.7.0 B2-b：事件读取真源灰度开关（默认 messages / events 对拍兜底与静默回退）
+  ['event-source', 'node', ['test/event-source.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];

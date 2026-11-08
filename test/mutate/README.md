@@ -19,7 +19,11 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：794（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：803（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+
+> v0.7.0 B2-b：新增 `batch86-event-source`（9 条）——对拍失败也采用派生、旧格式也派生、
+> cfg 非法时当 events、回退时不 warn、warn 不带差异位置、派生结果不深拷贝、默认值改成 events、
+> 事件读失败直接抛、无侧车用空数组冒充（794 → 803）。
 
 > v0.7.0（§1.1 B2-a）：新增 `batch85-completeness`（9 条）——rewrite 不写事件、写了但不带
 > messages、replay 忽略 messages.replace、事件写失败拖垮 rewrite、eventLog=false 仍写、

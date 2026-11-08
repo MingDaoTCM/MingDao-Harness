@@ -164,7 +164,7 @@ export async function runRepl(ctx) {
         '选择要恢复的会话：',
         list.map((s) => ({ value: s.file, label: `${relativeTime(s.mtime)} · ${sessionPreview(s.file)}` }))
       );
-      const loaded = loadSession(choice);
+      const loaded = loadSession(choice, cfg);
       if (loaded.messages.length) {
         session = loaded;
         io.print(style(`✓ 已载入会话 ${path.basename(choice)}（${loaded.messages.length} 条消息）`, C.green));
@@ -174,7 +174,7 @@ export async function runRepl(ctx) {
   if (!session && opts.continueSession) {
     const latest = latestSession(home);
     if (latest) {
-      const loaded = loadSession(latest.file);
+      const loaded = loadSession(latest.file, cfg);
       if (loaded.messages.length) {
         session = loaded;
         io.print(style(`已载入会话 ${latest.name}（${loaded.messages.length} 条消息）`, C.dim));

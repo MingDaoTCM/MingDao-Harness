@@ -819,7 +819,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     const isNew = !body.file;
     if (body.file) {
       try {
-        const loaded = loadSession(path.join(home, 'sessions', path.basename(body.file)));
+        const loaded = loadSession(path.join(home, 'sessions', path.basename(body.file)), cfg);
         if (loaded.messages.length) session = loaded;
       } catch {}
     }

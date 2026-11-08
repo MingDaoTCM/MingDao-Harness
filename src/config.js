@@ -227,6 +227,43 @@ function applyModelLabels(/** @type {any} */ cfg) {
   return cfg;
 }
 
+/**
+ * 会话读取真源（v0.7.0 B2-b 灰度开关）。
+ *
+ * `messages`（默认）：继续只读 `.jsonl` 消息数组——与 0.6.x 完全一致，事件侧车坏掉也不影响。
+ * `events`：用事件日志重放派生消息，但**必须与消息文件对拍一致**才采用；不一致就 warn 并
+ * 回退到消息数组。这只用于灰度验证「事件流能否当唯一真源」，**不是**新的默认值：
+ * 翻默认要等真实会话的 `scripts/event-parity.mjs` 证据（pass 覆盖足够广、incomplete 清零）。
+ *
+ * 校验口径与 `config.eventLog` 一致：只认字面量 `'events'`，其余（缺省 / 大小写不符 /
+ * 任意非法值）一律按 `'messages'` 处理，绝不因为一个拼错的值把读取路径切到实验分支。
+ */
+export const EVENT_SOURCE_MESSAGES = 'messages';
+export const EVENT_SOURCE_EVENTS = 'events';
+/** 默认真源：`messages`。改这里等于改所有 ENOENT/未配置用户的读取路径，必须等灰度证据。 */
+export const DEFAULT_EVENT_SOURCE = EVENT_SOURCE_MESSAGES;
+const EVENT_SOURCE_SET = new Set([EVENT_SOURCE_MESSAGES, EVENT_SOURCE_EVENTS]);
+
+/**
+ * 归一化 `config.eventSource`：合法枚举原样返回，其余一律回落默认值 `messages`。
+ * 纯函数，读配置/写配置/直接调用 `loadSession(file, cfg)` 三条路径共用同一判据。
+ * @param {any} value
+ * @returns {'messages'|'events'}
+ */
+export function normalizeEventSource(value) {
+  return EVENT_SOURCE_SET.has(value) ? value : DEFAULT_EVENT_SOURCE;
+}
+
+/**
+ * 就地归一化配置对象里的 `eventSource`（字段不存在时**不新增**，保持旧配置文件字节不变）。
+ * @param {any} cfg
+ */
+function applyEventSource(/** @type {any} */ cfg) {
+  if (!isConfigObject(cfg) || cfg.eventSource === undefined) return cfg;
+  cfg.eventSource = normalizeEventSource(cfg.eventSource);
+  return cfg;
+}
+
 // ---------------------------------------------------------------------------
 // v0.7.0 §1.3：配置写入的「基线 + 增量」。
 //
@@ -350,12 +387,12 @@ function prepareConfigForWrite(cfg) {
     quarantineCorruptConfig(`保存配置时读不出来：${strict.error}`);
     base = {};
   }
-  if (!sameHome) return cfg; // 无基线（新配置/字面量）或换了 home → 保持原语义：整份写入
+  if (!sameHome) return applyEventSource(cfg); // 无基线（新配置/字面量）或换了 home → 保持原语义：整份写入
   /** @type {{set: [string[], any][], del: string[][]}} */
   const patch = { set: [], del: [] };
   collectConfigPatch(snapshot.data, cfg, [], patch);
   applyConfigPatch(base, patch);
-  return base;
+  return applyEventSource(base);
 }
 
 /**
@@ -379,7 +416,7 @@ function applyEventLogGate(cfg) {
 export function loadConfig() {
   const r = readConfigStrict();
   if (!r.ok) return null;
-  const cfg = applyModelLabels(applyCachedModelDefaults(r.data));
+  const cfg = applyEventSource(applyModelLabels(applyCachedModelDefaults(r.data)));
   rememberConfig(cfg); // v0.7.0 §1.3：记下基线，saveConfig 只合并增量
   applyEventLogGate(cfg); // v0.7.0 §1.1：config.eventLog=false 在「先落盘、后建 agent」路径也生效
   return cfg;
@@ -401,7 +438,7 @@ export function loadConfig() {
 export function loadConfigForWrite(why = '某个写配置的命令') {
   const r = readConfigStrict();
   if (r.ok) {
-    const cfg = r.data || {};
+    const cfg = applyEventSource(r.data || {});
     rememberConfig(cfg);
     applyEventLogGate(cfg);
     return cfg;
@@ -418,7 +455,7 @@ export function loadConfigForWrite(why = '某个写配置的命令') {
 export function ensureMinimalConfig() {
   const strict = readConfigStrict();
   if (strict.ok && strict.data) {
-    const cfg = applyModelLabels(strict.data);
+    const cfg = applyEventSource(applyModelLabels(strict.data));
     rememberConfig(cfg);
     return cfg;
   }
@@ -457,6 +494,7 @@ export function ensureMinimalConfig() {
 export function saveConfig(cfg) {
   try {
     ensureHome();
+    applyEventSource(cfg); // B2-b：写回前也归一化，保证内存基线与落盘值一致
     withStateFileLockSync(configLockFile(), () => {
       writeConfigUnlocked(prepareConfigForWrite(cfg));
       rememberConfig(cfg); // 成功后把这版对象当作下次增量比较的基线
@@ -479,6 +517,7 @@ export function saveConfig(cfg) {
 export async function saveConfigAsync(cfg) {
   try {
     ensureHome();
+    applyEventSource(cfg); // B2-b：写回前也归一化，保证内存基线与落盘值一致
     await withFileLock(configLockFile(), () => {
       writeConfigUnlocked(prepareConfigForWrite(cfg));
       rememberConfig(cfg);
@@ -513,7 +552,7 @@ export function updateConfigSync(/** @type {(cfg: any) => any} */ mutate) {
         cfg = {};
       }
       const next = typeof mutate === 'function' ? mutate(cfg) : cfg;
-      const out = isConfigObject(next) ? next : cfg;
+      const out = applyEventSource(isConfigObject(next) ? next : cfg);
       writeConfigUnlocked(out);
       rememberConfig(out);
       return { ok: true, error: null, config: out };
@@ -543,7 +582,7 @@ export async function updateConfig(/** @type {(cfg: any) => any} */ mutate) {
         cfg = {};
       }
       const next = typeof mutate === 'function' ? mutate(cfg) : cfg;
-      const out = isConfigObject(next) ? next : cfg;
+      const out = applyEventSource(isConfigObject(next) ? next : cfg);
       writeConfigUnlocked(out);
       rememberConfig(out);
       return { ok: true, error: null, config: out };

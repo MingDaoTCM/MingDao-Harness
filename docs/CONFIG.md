@@ -28,7 +28,9 @@
 可选字段：`temperature`、`maxOutputTokens`、`includeUsage`（流式请求 usage 统计，个别网关不支持
 `stream_options` 时设 `false`）、`autoTitle`（自动生成会话标题，默认开）、`notify`（任务桌面通知，默认开）、
 `autoCompact`（上下文自动压缩，默认开，见下）、`audit`（工具调用审计，默认开，见下）、
-`eventLog`（会话事件日志双写，默认开，见下）。
+`eventLog`（会话事件日志双写，默认开，见下）、`eventSource`（会话读取真源，`messages`（默认）/
+`events`，见下——**灰度开关，风险提示**：`events` 会用事件日志派生消息，一旦与消息文件对拍不一致
+就 warn 并回退到消息数组；只在验证「事件流能否当唯一真源」时临时开启，**不要长期依赖**）。
 
 ### WebUI 设置项的「默认值」列（只读，不落盘）
 
@@ -105,6 +107,12 @@ MingDao 先用 executor 模型（路由关闭时为当前模型）把被裁段�
   resume / 空会话 / `tool_calls` 等场景与消息数组 deepEqual。
 - **回滚开关**：`"eventLog": false`（默认开）或环境变量 `MINGDAO_EVENT_LOG=0`。关闭后**完全**
   停止事件写入（含 `message.append` 与 `messages.replace` 双写），会话文件照常写入。
+- **读取真源（灰度开关，默认 `messages`）**：`"eventSource": "events"` 时 `loadSession()` 尝试用事件日志
+  重放派生消息；只有 `session.start.data.format >= 2` **且**与 `.jsonl` 消息数组逐条对拍一致才
+  采用。日志缺失 / 格式戳缺失或过旧 / 读失败 → **静默**回退消息数组（灰度期常态，不刷 warn）；
+  对拍不一致 → warn 一行（含文件与首个差异位置：`第 N 条`）并回退。返回值形状不变。默认
+  `"messages"` 保持只读消息数组、与 0.6.x 逐字节一致；**翻默认要等 `scripts/event-parity.mjs`
+  的真实会话证据（不再有 incomplete）**，不要仅凭配置开启就认为事件已是唯一真源。
 - **兼容**：新增类型只追加、不改变既有事件形状；读侧对未知 type 一律跳过并计入 `skipped`，
   因此旧版本读到 `messages.replace` 只会当它不存在，旧日志（没有该类型）在新版本照常可读。
   旧会话没有 events 文件时读取返回空流；事件侧车不会出现在会话列表/最近会话中；事件文件不

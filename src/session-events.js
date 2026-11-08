@@ -778,6 +778,39 @@ export function replayToMessages(events) {
 }
 
 /**
+ * 比较两个消息数组（v0.7.0 B2-b 从 `scripts/event-parity.mjs` 抽出的共享判据）。
+ *
+ * 逐条按 `role + content + tool_calls`（tool_calls 只比 id，排序后）比较；`_` 开头的运行时注记
+ * 不落盘、不参与比较。**必须与 scripts/event-parity.mjs 的 `diffMessages` 保持同一语义**：
+ * 对拍工具说「等价」的会话，`loadSession({eventSource:'events'})` 才能采用派生结果；两边判据
+ * 一旦漂移，对拍结论与灰度读取就会互相打脸。
+ *
+ * 为什么不直接 import 脚本：`scripts/` 不在 `package.json#files`（npm 安装形态没有它），
+ * 且 tsconfig 会把脚本拉进类型检查；因此判据放在 src 侧，脚本侧保留同名实现（硬约束：本切片
+ * 不改 `scripts/event-parity.mjs`）。
+ *
+ * @param {any[]} a
+ * @param {any[]} b
+ * @returns {{ok:boolean, index:number, reason:string}}
+ */
+export function diffMessages(a, b) {
+  const A = Array.isArray(a) ? a : [];
+  const B = Array.isArray(b) ? b : [];
+  if (A.length !== B.length) return { ok: false, index: Math.min(A.length, B.length), reason: `条数不同：消息 ${A.length} vs 重放 ${B.length}` };
+  const norm = (/** @type {any} */ m) => {
+    /** @type {{role:string, content:any, tool_calls?:string[], tool_call_id?:string}} */
+    const out = { role: String(m?.role ?? ''), content: m?.content ?? '' };
+    if (Array.isArray(m?.tool_calls)) out.tool_calls = m.tool_calls.map((/** @type {any} */ t) => String(t?.id ?? '')).sort();
+    if (m?.tool_call_id != null) out.tool_call_id = String(m.tool_call_id);
+    return JSON.stringify(out);
+  };
+  for (let i = 0; i < A.length; i += 1) {
+    if (norm(A[i]) !== norm(B[i])) return { ok: false, index: i, reason: `第 ${i + 1} 条不同` };
+  }
+  return { ok: true, index: -1, reason: '' };
+}
+
+/**
  * 供后续 UI/诊断用的 turn 摘要（可选；纯函数）。只从事件自己推导，不读消息正文。
  * @param {any[]} events
  * @returns {{turn:number, startedAt:number, endedAt:number|null, status:string, steps:number, toolCalls:number, usage:any}[]}
