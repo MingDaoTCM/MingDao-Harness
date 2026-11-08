@@ -3,6 +3,65 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.44（2026-11-08）— 事件为源的灰度开关（默认不变）+ 判据单源
+
+> **本版不改变任何用户可见行为**：默认读取路径仍是 `.jsonl` 消息数组，与 v0.6.43 逐字节一致。
+> 新增的 `config.eventSource` 只是一个**默认关闭的灰度开关**：只有显式设为 `"events"` 时，
+> `loadSession()` 才会尝试用事件日志重放，并且**必须与消息数组对拍一致才采用**；不一致就
+> warn（带文件与首个差异位置）并回退。对拍判据从「脚本与实现各一份」收敛为**单源**
+> （`src/session-events.js#diffMessages`）。同时处理了一次**变异锚点跟随**——`batch48 ⑨` 因
+> `loadSession` 返回形状变化而失配时**响亮失败**（不是静默通过），已更新锚点恢复 10/10。
+> 完整说明见 `RELEASE-NOTES-0.6.44.md`。
+
+### 一、`config.eventSource` 灰度开关（默认 `messages`）
+
+- 新增 `src/config.js` 导出：`EVENT_SOURCE_MESSAGES` / `EVENT_SOURCE_EVENTS` /
+  `DEFAULT_EVENT_SOURCE = 'messages'`；`normalizeEventSource()` **只认字面量 `'events'`**，
+  其余（缺省 / 大小写不符 / 任意非法值）一律回落 `'messages'`。读配置、写回、直接调用
+  `loadSession(file, cfg)` 三条路径共用同一判据。
+- 配置对象里**没有** `eventSource` 字段时**不新增**——旧配置文件字节不变。
+- `loadSession(file, cfg)`：
+  - 默认（`messages`）：只读 `.jsonl` 消息数组，**不读事件源、不 warn**，返回值形状
+    `{file, messages}` 与旧版完全一致；
+  - `events`：仅当 `session.start.data.format >= EVENT_LOG_FORMAT`（2）**且**与消息数组逐条
+    对拍一致时才采用 `replayToMessages` 派生结果；
+  - 对拍不一致：`console.warn` 一行（含会话文件、原因、`差异位置：第 N 条`），并**回退消息数组**；
+  - 侧车缺失 / 格式戳缺失或过旧 / 读失败：**静默回退**（灰度常态，不刷 warn）。
+- `src/commands/repl.js`、`src/web/server.js`、`src/web/routes/domains/sessions.js` 把 `cfg`
+  传给 `loadSession`；`repairSessionEvents(file, cfg)` 仍在派生之后执行，顺序与对拍工具同口径。
+- **默认路径字节级不变**：用 75 个真实会话逐一 `JSON.stringify(loadSession(file))` 对比，
+  **75/75 一致**。
+- **风险**：`events` 分支仅用于灰度验证，不能当成新默认；翻默认必须等
+  `scripts/event-parity.mjs` 的真实会话证据（pass 覆盖足够广、incomplete 清零），**本版不翻**。
+
+### 二、判据单源：`diffMessages` 收敛到 `src/session-events.js`
+
+- 此前 `diffMessages` / `isPrefixPair` 在 `scripts/event-parity.mjs` 与 `src/session-events.js`
+  各有一份（B2-b 引入时复制），**两份判据迟早漂移**：对拍工具说「等价」、被测代码却按另一把
+  尺子回退。
+- 现在实现只住在 `src/session-events.js`，`scripts/event-parity.mjs` **import 并再导出**，
+  对外签名不变；脚本只做采集与汇总。
+- `test/event-source.js` 同时覆盖脚本入口与实现，防止「单源」退化回复制。
+
+### 三、变异锚点跟随：失配必须红，不能静默通过
+
+- `loadSession` 返回 `messages: result` 后，`batch48 ⑨` 的锚点字符串失配。变异器**响亮失败**
+  （`变异点未找到`），而不是静默算作「已变异且未逃逸」——这正是我们想要的失败模式。
+- 已更新 `test/mutate/batch48-ts.mjs` 锚点，batch48 恢复 **10/10**。
+- 原则：代码形状变了，变异锚点必须跟着改；锚点找不到要**红**，否则变异测试会变成空转。
+
+### 四、测试、CI 与门禁
+
+- 新增 `test/event-source.js` **19 项**：默认逐字节一致 / 非法值当 messages / events 对拍一致
+  才采用 / 不一致 warn 且回退（含差异位置）/ 条数不同 / 格式戳缺失或过旧静默 / 无侧车 /
+  半行损坏 / 读失败 / `messages.replace` 后 append / 返回值形状与修补副作用 / 深拷贝 /
+  配置读回归一化 / 空事件文件 / 派生新数组。
+- `test/run-all.mjs` → **45 套**（新增 `event-source`）；CI 新增独立步骤 `event-source`
+  （Linux / Windows，macOS 跳过），失败时把断言原文做成 `::error` 注解。
+- `test/mutate/batch86-event-source.mjs` **9 条**；变异总数 **74 批 803 条**。
+- 本版门禁：typecheck / strict / preflight / smoke（单独 + 私有 `TMPDIR`）/ run-all 45 /
+  变异 74 批 803 条 / event-parity / coverage（只报告）/ doc-lint / diagnose 全绿。
+
 ## v0.6.43（2026-11-08）— 修主入口守卫的静默失效 + 事件日志格式戳
 
 > **修掉一个「看起来成功」的失效**：`scripts/event-parity.mjs` 经**符号链接路径**调用时，主入口守卫
