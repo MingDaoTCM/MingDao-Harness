@@ -3,6 +3,61 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.45（2026-11-08）— 更新来源签名接入发布链路（阶段二）
+
+> **本版起，更新包的「来源签名」真正进入发布链路**：CI 签出的 `<安装包>.sig` 由
+> `scripts/publish-update-sigs.mjs` 搬到官网 `/updates/`，客户端按 `/updates/<包名>.sig`
+> 取签名并用内置 `current` 公钥验签。**≥0.6.36 的客户端**更新时不再弹「未验证来源签名」，
+> 直接走 `install`；**≤0.6.35 的客户端**只认已丢弃私钥的 `legacy-2025` 公钥，会看到
+> 「更新包来源不可信，已拒绝」，**需手动下载一次**。默认档仍是 `warn-and-install`
+> （签名缺失时提示后放行），`MINGDAO_REQUIRE_UPDATE_SIGNATURE=1` 仍可 fail-closed。
+> 完整说明见 `RELEASE-NOTES-0.6.45.md`。
+
+### 一、发布侧：`publish-update-sigs.mjs`（阶段二）
+
+- 新增 `scripts/publish-update-sigs.mjs <版本>`：从 GitHub Release 取本版 `.sig` →
+  `scp` 到源站 `/opt/1panel/www/sites/mingdao-site/updates/`；`--dry-run` 只列计划，
+  `--dir <目录>` 可从本地已有签名发布（离线或 Release 取不到时）。
+- 纯函数 `planSignaturePublish(assets, version)` 决定发哪些签名：
+  - **只发本版安装包**的签名（别的版本混进来 → 旧 feed 验签会莫名失败）；
+  - `latest.yml.sig` / `latest-linux.yml.sig` / `latest-mac.yml.sig` **不进 `/updates/`**
+    ——客户端只对下载到的安装包验签；把清单签名放上去会让 `rm *.sig` 的回滚语义变模糊。
+- 回滚：`ssh mingdao-server 'rm -f /opt/1panel/www/sites/mingdao-site/updates/*.sig'`
+  → 立即回到「无签名 → 提示后照常安装」（warn-and-install）。
+- 已实测端到端（2026-11-08）：`latest.yml` 里的包名 → 下载 `mingdao-setup-0.6.44-x64.exe`
+  （80,202,343 字节）→ 取 `/updates/<包名>.sig` → 用客户端内置 `current` 公钥验签**通过**。
+- **0.6.44 的 7 个安装包签名已在线上**（发布前手工发过并逐项验过）。
+
+### 二、用户可见变化（重要）
+
+- **≥0.6.36 的客户端**（内置 `current` 公钥）：更新时取到 `/updates/<包名>.sig`，验签通过 →
+  走 `install`，**不再提示「未验证来源签名」**。
+- **≤0.6.35 的客户端**（只认 `legacy-2025` 公钥，其私钥已丢弃）：本版签名由 `current` 密钥
+  签发，验签失败 → 显示「更新包来源不可信，已拒绝」，**自动更新被拒**。
+  这些用户需**手动下载一次**（<https://harness.mingdao.ai/#downloads>）；
+  装成 0.6.45 之后，再往后的版本恢复正常自动更新。
+- 文案更新：删掉过时的「发布链路下一版接入」，改为「没能取得本版更新的发布签名」。
+
+### 三、文档与测试
+
+- `docs/CODE-SIGNING.md §五` 状态改为「已接入」，写明版本门槛与回滚方式；
+  `docs/RELEASE-CHECKLIST.md` 增加「发版后发布签名」一步与验收命令。
+- 新增 `test/update-sig-publish.js` **5 项**（只发本版 / 清单签名不误发 / 由 sig 名还原
+  安装包名 / 空输入 / 目标目录常量）；`test/update-signing.js` 11 项仍绿。
+- `batch77 ⑦⑧` 的变异锚点跟随本版文案（失配必须红，不写宽容匹配）；`run-all` **46 套**。
+- 一并纳入 0.7.0 翻默认的**覆盖性证据**（`e5d5a2c`，不改 `src/` 产品逻辑）：
+  `scripts/make-event-fixtures.mjs` 用桩 provider 驱动真实 CLI/REPL，造「工具调用 / 自动压缩 /
+  手动 `/compact` / resume 继续」四类真实会话并跑对拍 + 双读 `deepEqual`；
+  `docs/EVENT-SOURCE-EVIDENCE.md` 记录门槛判定、构造方式、原样输出与未覆盖边界。
+
+### 四、未做 / 已知边界
+
+- **默认档未改成 fail-closed**：仍是 `warn-and-install`——签名缺失（发布侧故障 / 网络取不到 /
+  feed 被剥离签名）时宁可提示后放行，也不把用户挡在更新之外；
+  `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1` 仍可用于强制拒绝。
+- **`legacy-2025` 客户端没有回退通道**：其私钥已丢弃，无法为它们补签名；只能手动下载一次。
+- **Windows Authenticode 未接入**：与更新来源签名是两件事，SmartScreen 提示不变。
+
 ## v0.6.44（2026-11-08）— 事件为源的灰度开关（默认不变）+ 判据单源
 
 > **本版不改变任何用户可见行为**：默认读取路径仍是 `.jsonl` 消息数组，与 v0.6.43 逐字节一致。
