@@ -26,8 +26,12 @@
 //   docs/CODE-SIGNING.md §五）。若默认 reject，等于一夜之间掐死所有存量用户的自动更新——
 //   而威胁模型里"官网 feed 被投毒"是**低概率高影响**，"更新永远装不上"是**必然发生**。
 //   所以默认放行但把话说清楚（UI + 日志都写"未验证来源签名"），把 fail-closed 开关交给
-//   发行方/高安全用户（MINGDAO_REQUIRE_UPDATE_SIGNATURE=1）。发布链路接入签名后，默认值
-//   是否改成 reject 由发行方决定——代码已就位、开关已存在，改一个默认值即可。
+//   发行方/高安全用户（MINGDAO_REQUIRE_UPDATE_SIGNATURE=1）。
+//
+// v0.6.45 更新：**发布链路已接入签名**（`scripts/publish-update-sigs.mjs` 把每版 `.sig` 发到
+// `https://harness.mingdao.ai/updates/`），所以正常更新会走 "有签名 + 验签通过 → install"，
+// 不再出现"未验证来源签名"的提示。默认值仍保持 warn-and-install：签名缺失（发布侧故障、
+// 网络取不到、或 feed 被剥离签名）时，宁可提示后放行，也不把用户挡在更新之外。
 //
 // **同一处诚实**：feed 被攻击者控制时，他可以**删掉签名**把这次更新降级成"无签名"（本模块
 // 无法区分"本来没签"与"签名被剥离"）——默认档下这仍然会走到 warn-and-install。要真正关闭它，
@@ -325,8 +329,8 @@ export function buildUpdateNotice({ decision, version, keyId, reason }) {
     title: '更新已就绪（未验证来源签名）',
     message: `MingDao Harness v${v} 下载完成，重启应用即可完成更新`,
     detail:
-      '本次更新未验证来源签名（发布链路下一版接入）——已按默认策略安装；' + platformHint + '。\n' +
-      '它防的是"更新源被投毒"；高安全场景可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝；详情见日志与官网。',
+      '本次更新未验证来源签名（没能取得本版更新的发布签名）——已按默认策略安装；' + platformHint + '。\n' +
+      '签名用于防范"更新源被投毒"；若你的环境要求必须验签，可设 MINGDAO_REQUIRE_UPDATE_SIGNATURE=1 拒绝；详情见日志与官网。',
     buttons: ['立即重启安装', '稍后'],
     defaultId: 0,
     cancelId: 1,

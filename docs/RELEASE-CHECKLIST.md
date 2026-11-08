@@ -500,3 +500,8 @@ MINGDAO_GITEE_TOKEN=xxx MINGDAO_GITCODE_TOKEN=yyy \
 > **发版后（v0.6.41 起）**：把当前版本的安装包推一份到**深圳镜像**的本地目录
 > （`/opt/1panel/www/mirror-downloads/downloads/`，本机→深圳实测 10MB/s，约 1 分钟）。
 > 不做的话镜像会对本版 302 到对象存储，大陆用户就退回跨境链路——镜像就白建了。
+
+> **发版后必做（v0.6.45 起）**：发布更新来源签名，否则客户端会一直弹"未验证来源签名"：
+> `MINGDAO_GITHUB_TOKEN=... MDH_SITE_HOST=mingdao-server node scripts/publish-update-sigs.mjs <版本>`
+> 然后按验收第 ⑦ 条验一遍：取 feed 里的包名 → 下载 → 取 `/updates/<包名>.sig` → 用内置公钥验签必须通过。
+> 回滚：`ssh mingdao-server 'rm -f /opt/1panel/www/sites/mingdao-site/updates/*.sig'`（立即回到"提示后照常安装"）。

@@ -100,14 +100,20 @@ macOS 作业的 `--mac dmg` 在检测到 `CSC_LINK` + Apple 凭证时自动完�
 > 两者互不替代：代码签名不能阻止应用从被投毒的更新源装一个**同样签了名**的包，来源签名也不负责
 > 消除 SmartScreen 提示。
 >
-> **本轮状态（诚实标注）**：代码已就位并 fail-closed，但**发布链路尚未接入签名**——
-> `desktop/gen-update-yml.mjs` 与服务器发布脚本都没有签名步骤，feed 里**没有** `.sig` 文件。
-> 因此客户端当前实际走的是**默认档 `warn-and-install`**：照旧安装，弹窗给两行——
-> 「本次更新未验证来源签名（发布链路尚未接入签名）——已按默认策略安装。」+
-> 「高安全场景可设 `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1` 拒绝无签名更新；详情见日志与官网。」
-> 完整解释（为什么无法用密码学证明来源、feed 被投毒时无法区分、不改配置与会话）写在**日志**里：
-> 桌面版 `<userData>/logs/mingdao.log` 的 `更新来源校验：…` 行。要让"没签名就拒绝"生效，发行方需要：
-> ① 按下面步骤接入签名；② 在客户端设 `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1`（或改成默认值）。
+> **当前状态（v0.6.45 起，已接入）**：签名由 CI 产出（`scripts/sign-release-assets.mjs` → GitHub Release），
+> `scripts/publish-update-sigs.mjs <版本>` 再把每版的 `<安装包>.sig` 发到
+> `https://harness.mingdao.ai/updates/`。客户端取到签名并用**内置公钥**（密钥环，0.6.36 起内置
+> `current` 公钥）验证，通过即走 `install`，**不再弹"未验证来源签名"**。
+>
+> 已实测（2026-11-08）：`latest.yml` → `mingdao-setup-0.6.44-x64.exe`（80,202,343 字节）
+> → `/updates/mingdao-setup-0.6.44-x64.exe.sig` → 用 `current` 公钥验签**通过**。
+>
+> 仍是**默认档 `warn-and-install`** 的原因：签名缺失（发布侧故障 / 网络取不到 / feed 被剥离签名）
+> 时宁可提示后放行，也不把用户挡在更新之外。要 fail-closed，设 `MINGDAO_REQUIRE_UPDATE_SIGNATURE=1`。
+>
+> **客户端的版本门槛**：`current` 公钥是 **0.6.36** 起内置的。0.6.36+ 的客户端能验签；
+> **≤0.6.35 的客户端**会看到"更新包来源不可信，已拒绝"（它们只认 `legacy-2025` 那把已丢弃私钥的公钥），
+> 需要手动下载一次。回滚方式：删掉源站 `/updates/*.sig`，立即回到"提示后照常安装"。
 
 ### 5.1 为什么不是"再算一次 sha512"
 
@@ -149,6 +155,11 @@ node scripts/update-sign.mjs --sign desktop/dist/mingdao-<ver>-x86_64.AppImage
 node scripts/update-sign.mjs --verify desktop/dist/mingdao-setup-<ver>-x64.exe --pub update-signing-pub.pem
 
 # ④ 上传：安装包 + 它的 .sig **一起**放进 feed 目录（官网 /updates/，与 latest*.yml 同级）
+#    现实做法（v0.6.45 起）：CI 已把 .sig 传进 Release，用脚本一次性搬到 feed 目录：
+MINGDAO_GITHUB_TOKEN=... MDH_SITE_HOST=mingdao-server \
+  node scripts/publish-update-sigs.mjs <版本>        # 加 --dry-run 只列计划
+#    · 只发**本版安装包**的签名；`latest*.yml.sig` 不进 /updates/（否则 `rm *.sig` 的回滚语义会变模糊）
+#    · 镜像的 /updates 代理到源站，无需重复上传
 ```
 
 判据与文案在 `desktop/update-verify.js`（纯函数，`test/smoke.js` §135 逐条钉边界）：
