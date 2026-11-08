@@ -19,7 +19,12 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：768（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：777（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+
+
+> v0.6.41（§1.1 B1 服务端）：新增 `batch83-event-cursor`（9 条）——streamSeq 全局递增（跨 task 共享）、
+> streamSeq 从 0 起、跳号不检测、`after` 过滤用 `>=`、目录穿越不拦、旧会话返回 404、`lastEventSeq` 恒 0、
+> 心跳帧不带 streamSeq、把工具配对 seq 覆盖成 streamSeq（双游标合流）（768 → 777）。
 
 > v0.6.20（§3.79）：界面重排回滚到 v0.6.18，`batch42-ui-p2`（15 条）与 `batch43-ui-shell`（12 条）
 > 断言的 P2/新骨架已不在代码里，随 `test/ui-p2.js` 一并移除（369 → 342）。

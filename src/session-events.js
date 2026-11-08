@@ -10,7 +10,7 @@
 //     **为什么不是 .jsonl**：全仓（以及用户脚本/测试）有大量 `readdirSync(sessions).filter(f => f.endsWith('.jsonl'))`
 //     的写法，侧车若也叫 `.jsonl` 就会被当成会话——本版实测已挂掉 2 个 e2e（分享时把侧车当会话推给服务端，
 //     服务端回「你还没有这个会话」）。改成 `.ndjson`（同格式、不同扩展名）让这类碰撞在命名层就不存在。
-//   · SSE 帧、UI、账本、同步都不读事件文件。
+//   · SSE 帧、UI、账本、同步都不读事件文件（切片 B1 起仅 `GET /api/events` 用 `readAfter` 只读游标读取）。
 // 因此事件日志坏掉/写不进去，最多是「这条时间线不完整」，绝不影响会话本身。
 //
 // 可靠性约定：
@@ -401,6 +401,64 @@ export function readEvents(eventFile) {
   } catch (err) {
     return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err), events: [], skipped: 0 };
   }
+}
+
+/**
+ * 从游标处读取事件（v0.7.0 §1.1 切片 B1）：`GET /api/events?after=` 的数据源。
+ *
+ * **两套编号域（别混）**：本文件所有的 seq 都是**事件日志游标**——每个会话跨轮单调
+ * （appendEvent 从 1 开始只增）。SSE 帧上的 `streamSeq` 是**每个 task 从 1 起**的流游标
+ * （见 `web/server.js#createSseWriter`），用于客户端漏帧检测；两者互不推导，`after` 只收事件 seq。
+ *
+ * 语义（纯函数：只读文件、不改入参）：
+ *   · 只返回 `seq > afterSeq` 的事件——**严格大于**：客户端持有的 `afterSeq` 那一帧已经收到过，
+ *     重复下发会让「跳号检测」把重帧误判成跳号（DSH 的 cursor 语义同此）；
+ *   · `lastSeq` 是**整条日志**的最大 seq（不是过滤后的最后一条）：客户端拿它建基线、判断是否追平；
+ *   · `eventFile` 不存在（旧会话 / `eventLog=false`）是**正常形态**：`{ok:true, events:[], lastSeq:0}`，
+ *     不是错误（事件日志是旁路，绝不能让旧会话读不了）；
+ *   · `afterSeq` 非法（非数字 / 负数 / 非安全整数）按 0 处理，与 HTTP 层「after 缺省 = 0」同口径。
+ *   · 复用 `readEvents`：torn 行 / 未知 type / 缺 seq 的行照旧跳过并计入 `skipped`（可见，不静默丢）。
+ *
+ * @param {string} eventFile
+ * @param {number} [afterSeq]
+ * @returns {{ok: boolean, error: string|null, events: SessionEvent[], lastSeq: number, skipped: number}}
+ */
+export function readAfter(eventFile, afterSeq = 0) {
+  const read = readEvents(eventFile);
+  if (!read.ok) return { ok: false, error: read.error, events: [], lastSeq: 0, skipped: read.skipped };
+  const n = Number(afterSeq);
+  const after = Number.isSafeInteger(n) && n > 0 ? n : 0;
+  let lastSeq = 0;
+  for (const ev of read.events) if (ev.seq > lastSeq) lastSeq = ev.seq;
+  return { ok: true, error: null, events: read.events.filter((ev) => ev.seq > after), lastSeq, skipped: read.skipped };
+}
+
+/**
+ * 序号连续性自检（v0.7.0 §1.1 切片 B1）：给测试与服务端自检用，回答「这条流/这份日志有没有漏帧」。
+ *
+ * 判定：序号必须从 **1** 起、逐条 +1；`[]` 视为连续（没有事件就没有缺口）。任何不合法的序号
+ * （非整数 / ≤0）同样算作缺口——「这一帧的编号都读不出来」与丢帧在客户端是同一件事。
+ * 发现缺口后以**实际值**继续比较（`[1,3,4]` 只报一个缺口，而不是把 4 也连带报错）。
+ *
+ * @param {number[]} seqs 按到达顺序（应为升序）的 seq 列表
+ * @returns {{ok: boolean, gaps: {after: number, before: number}[]}}
+ *   `after` = 缺口前一条的 seq（首条缺 1 时为 0），`before` = 缺口后一条的 seq
+ */
+export function continuityOf(seqs) {
+  const list = Array.isArray(seqs) ? seqs : [];
+  /** @type {{after: number, before: number}[]} */
+  const gaps = [];
+  let expected = 1;
+  for (const raw of list) {
+    const seq = Number(raw);
+    if (!Number.isSafeInteger(seq) || seq < 1) {
+      gaps.push({ after: expected - 1, before: Number.isFinite(seq) && seq > 0 ? seq : 0 });
+      continue; // 坏序号不推进 expected：下一条合法序号仍按原期望判定
+    }
+    if (seq !== expected) gaps.push({ after: expected - 1, before: seq });
+    expected = seq + 1;
+  }
+  return { ok: gaps.length === 0, gaps };
 }
 
 /**

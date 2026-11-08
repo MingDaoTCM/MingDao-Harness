@@ -96,7 +96,7 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 ### 2.4 会话 / 记忆 / 任务（11）
 
 - `session.js` —— 会话持久化：`<home>/sessions/<时间戳>-<随机>.jsonl` 每轮追加，`--continue` 载入最近一次，`--resume` 打开选择器 —— 会话文件是消息结构的唯一权威，检查点等旁挂状态另存侧车文件。
-- `session-events.js` —— 会话事件日志（v0.7.0 §1.1 切片 A）：`<session>.events.ndjson` 追加 12 类事件 `{seq,time,type,data}`（session/turn/step/tool/message/usage/compact/interrupt/checkpoint）—— **seq 是唯一关联键**：跨进程短临界区锁内「读尾行 last+1」、单次 append 后回读校验；读侧跳过 torn 行/未知 type 并返回 `skipped`；`replayToMessages()` 是纯函数（`message.append` 提供消息本体、`compact` 重置基线、`interrupt` 延迟补 tool 占位），由事件流重放的消息数组必须与原消息数组逐字节等价；事件文件是**旁路**，`loadSession`/`rewriteSession`/SSE/UI 都不读它，`cfg.eventLog=false` 或 `MINGDAO_EVENT_LOG=0` 可整体回滚。
+- `session-events.js` —— 会话事件日志（v0.7.0 §1.1 切片 A）：`<session>.events.ndjson` 追加 12 类事件 `{seq,time,type,data}`（session/turn/step/tool/message/usage/compact/interrupt/checkpoint）—— **seq 是唯一关联键**：跨进程短临界区锁内「读尾行 last+1」、单次 append 后回读校验；读侧跳过 torn 行/未知 type 并返回 `skipped`；`replayToMessages()` 是纯函数（`message.append` 提供消息本体、`compact` 重置基线、`interrupt` 延迟补 tool 占位），由事件流重放的消息数组必须与原消息数组逐字节等价；事件文件是**旁路**：`loadSession`/`rewriteSession` 不读它，`cfg.eventLog=false` 或 `MINGDAO_EVENT_LOG=0` 可整体回滚；切片 B1 起新增两个纯函数供传输层使用——`readAfter(eventFile, afterSeq)` 只读游标读取（`seq > after`，返回 `{ok,events,lastSeq,skipped}`，文件不存在按空窗口）与 `continuityOf(seqs)` 连续性自检（`{ok,gaps:[{after,before}]}`，seq 必须从 1 起逐条 +1）——仅 `GET /api/events?file=&after=` 与 `GET /api/session` 的 `lastEventSeq` 读事件文件，SSE 帧/UI 仍不读。
 - `session-index.js` —— 会话检索索引：词表倒排 + 按 mtime/size 的增量同步，分片存 `<home>/sessions-index/<2位sha1前缀>.json`（256 片）—— 未变化直接用缓存词表，>8MB 文件跳过并移除条目；中文按 bigram + 单字、查询串同口径分词后 AND 匹配。
 - `memory.js` —— 长记忆与自主进化：用户记忆 `~/.mingdao/AGENTS.md`（手动 + 会话结束自动提取用户偏好并去重追加）、会话日志 `journal.jsonl`（默认不注入系统提示，`--journal` / WebUI 勾选才取最近 3 条）—— 自动提取用 executor 模型（约几十 token），`autoMemory: false` 可关。
 - `tasks.js` —— 多会话后台任务面板：`mingdao run` 拉起独立 worker 子进程，状态落 `<home>/tasks/<id>.json`，命令族 `run` / `tasks` / `tasks watch` / `tasks kill` —— taskId 用不可枚举随机值；kill 前必须过 PID 归属校验（见 `proc.js`）。
@@ -121,12 +121,12 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 
 ### 2.7 Web 层（16）
 
-- `web/server.js` —— WebUI 服务器：零依赖 `node:http` + SSE，复用 `createAgent` + `createPermission` + `createWebIO` —— 非回环绑定强制访问令牌（参数/配置/本次随机生成，`timingSafeEqual` 比对）；Host 白名单防 DNS rebinding；同一会话并发回合由进程级 `busySessions` 串行化。
+- `web/server.js` —— WebUI 服务器：零依赖 `node:http` + SSE，复用 `createAgent` + `createPermission` + `createWebIO` —— 非回环绑定强制访问令牌（参数/配置/本次随机生成，`timingSafeEqual` 比对）；Host 白名单防 DNS rebinding；同一会话并发回合由进程级 `busySessions` 串行化；SSE 每帧带**按 task 从 1 起**的单调 `streamSeq` 与 `id:` 行（心跳 progress 同样带），供客户端跳号检测/断线续订；**双游标**：`streamSeq`（每 task，漏帧检测）与事件日志 seq（每会话跨轮，`lastEventSeq` / `/api/events?after=`）互不推导；帧上既有的 `seq` 是工具卡片配对号（toolStart↔tool 同号），不属于这两套游标。
 - `web/auth.js`（v0.7.0 §1.5）—— WebUI 访问控制的**纯函数层**（从 `server.js` 逐字切出）：`resolveWebToken`（参数 > 配置 > 非回环随机生成）、`extractRequestToken`（`?token=` > `X-MingDao-Token` > `Authorization: Bearer`）、`resolveAuthDecision`（放行/拒绝 + `via` 通道）、`tokenEquals`（`timingSafeEqual`，长度不等直接 false）、`isTrustedHost`（Host 白名单防 DNS rebinding）、`authStartupNotice`（启动文案）—— **不读全局、不写 `res`**；401/403 仍由 `routes/api.js` 唯一写入。
 - `web/provider-cache.js`（v0.7.0 §1.5）—— Provider 缓存 / 预检运行时（从 `server.js` 逐字切出，依赖注入工厂）：`createProviderCache(deps)` 提供 `providerFingerprint`（代际号 + baseUrl + apiKey 的 sha256 摘要 + timeout 配置）、`getProviderFor`、`ensureProbe`（单次 15s 上限 / TTL 备忘 / 失败只降级）、`invalidateProviderCache`（实例与探测备忘**一起清**）与 `start`（缺 Key 告警 + 本地端点观察者 + 初始 provider）—— 缓存键含出网指纹，配置一变新任务绝不拿旧实例（H-04）。
 - `web/routes/api.js` —— API 编排器：访问控制（token / Host / CSRF）→ 静态壳资源 → 按域分发 —— 跨站浏览器请求按 `Sec-Fetch-Site` 一律 403。
 - `web/routes/domains/config.js` —— 配置域：`/api/state` `/api/config` `/api/models-config`，服务商 Key 管理、自定义模型增删改、API 地址覆盖、系统状态快照 —— `endpointChangeGuard` 防「改地址把 Key 送到别处」。
-- `web/routes/domains/sessions.js` —— 会话域：`/api/sessions` `/api/session` `/api/draft`，列表/搜索、载入（聚焦工作空间）、重命名/删除、按会话隔离的草稿槽。
+- `web/routes/domains/sessions.js` —— 会话域：`/api/sessions` `/api/session` `/api/events` `/api/draft`，列表/搜索、载入（聚焦工作空间，含事件日志位置 `lastEventSeq`）、重命名/删除、按**事件 seq** 游标只读事件日志（`/api/events?file=&after=`，只接受 basename，响应带 `seqKind:'event'`）、按会话隔离的草稿槽。
 - `web/routes/domains/skills.js` —— 技能域：`/api/skills` `/api/skill-library` `/api/mcp-presets`，技能列表/安装/卸载、内置库与线上注册表搜索、MCP 预设接入。
 - `web/routes/domains/schedule.js` —— 调度域：`/api/schedule` `/api/tasks`，定时任务增删暂停恢复/链式编排，聊天 SSE 任务 + 后台 worker + 调度任务合并面板。
 - `web/routes/domains/sync.js` —— 同步域：`/api/sync` `/api/sync-conflicts`，登录/登出/推拉/改密/分享与冲突处理。

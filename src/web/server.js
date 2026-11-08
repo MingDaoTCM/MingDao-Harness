@@ -4,7 +4,8 @@
 //   GET  /                 前端单页（src/web/index.html）
 //   GET  /api/state        模型/权限/会话列表
 //   GET  /api/sessions     会话列表（含预览与相对时间）
-//   GET  /api/session?file= 载入会话消息
+//   GET  /api/session?file= 载入会话消息（含 lastEventSeq 基线）
+//   GET  /api/events?file=&after= 按游标读会话事件日志（SSE 续订 / 跳号整窗重取）
 //   GET  /api/skills       技能列表
 //   POST /api/chat         {message, file?} → 运行一轮，SSE 事件流
 //   POST /api/permission   {id, answer} → 应答权限确认
@@ -299,6 +300,37 @@ function readBody(req, limit = 40 * 1024 * 1024) {
     });
     req.on('error', (/** @type {any} */ e) => settle(reject, e));
   });
+}
+
+// ---------------------------------------------------------------------------
+// SSE 帧写入（v0.7.0 §1.1 切片 B1）：**双游标**——本函数只负责流游标，别把两套编号对齐。
+//
+//   · `streamSeq`（本函数）：**每个 task** 从 1 起的单调帧号，同时写标准 `id: <streamSeq>` 行
+//     （EventSource 断线续订的 Last-Event-ID 就是它）。客户端只用它判断「**这条流**有没有漏帧」，
+//     发现跳号 → 整窗重取。作用域必须是 task：全局/会话级计数器会让并发任务互相占号，
+//     两个都正常的流各自看到"跳号"，检测直接失效。
+//   · 事件日志的 seq（`session-events.js`）：**每个会话**跨 task 单调，供 `lastEventSeq` /
+//     `GET /api/events?after=` 的事件游标（B2 的事件派生）使用——与 streamSeq 互不推导，
+//     客户端**不得**拿 lastEventSeq 去校验帧号。
+//   · 帧上既有的 `seq` 字段（toolStart/tool/toolDenied）是**工具卡片配对号**（同一工具调用的
+//     开始/完成同号），语义早已存在且被前端消费；本函数不碰它，只新增 `streamSeq`。
+//
+// 心跳 progress 也走这一个函数——它同样是状态更新，跳号检测不能漏它。
+// ---------------------------------------------------------------------------
+/**
+ * 为一个 task 创建 SSE 写入器（计数器闭包在该 task 内，`handleChat` 每次请求新建一个）。
+ * @param {any} res
+ * @param {string} taskId
+ * @returns {(obj: any) => void}
+ */
+function createSseWriter(res, taskId) {
+  let streamSeq = 0;
+  return (obj) => {
+    try {
+      streamSeq += 1;
+      res.write(`id: ${streamSeq}\ndata: ${JSON.stringify({ ...obj, taskId, streamSeq })}\n\n`);
+    } catch {}
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -657,12 +689,8 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     srvlog('chat 开始 ' + taskId + ' session=' + (body.file || '新会话') + ' 消息长度=' + String(body.message || '').length);
     tasks.set(taskId, entry);
     notifyBusy(); // 进入 running → 忙
-    /** @param {any} obj */
-    const send = (obj) => {
-      try {
-        res.write(`data: ${JSON.stringify({ ...obj, taskId })}\n\n`);
-      } catch {}
-    };
+    // 每帧带 streamSeq/id（切片 B1）：流游标随本 task 新建，两个并发请求互不占号。
+    const send = createSseWriter(res, taskId);
     entry.send = send;
     entry.finish = finishChat; // 路由层最外层 try/catch/finally 的入口（见 routes/domains/misc.js）
     // 进度心跳（审计：长时间健康生成的可感知性——模型持续输出工具参数期间可能长时间

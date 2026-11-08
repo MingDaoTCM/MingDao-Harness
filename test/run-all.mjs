@@ -59,6 +59,8 @@ const SUITES = [
   ['workspace-fence', 'node', ['test/workspace-fence.js']],
   // v0.7.0 §1.2：前端纯函数 viewmodel（搬家后与原实现 deepEqual 对拍；app.js 从此可测）
   ['viewmodel', 'node', ['test/viewmodel.js']],
+  // v0.6.41 §1.1 B1：SSE 跳号 → 整窗重取（streamSeq 与 eventSeq 两套编号域，B1 只用前者）
+  ['seq-gap', 'node', ['test/seq-gap.js']],
   // v0.7.0 §1.5：文案/预测层（从 agent.js 切出到 messages.js，行为逐字不变）
   ['messages', 'node', ['test/messages.js']],
   // v0.7.0 §1.5：server.js 切块后的两块（auth / provider-cache）+ 结构上限守卫
@@ -75,6 +77,8 @@ const SUITES = [
   ['session-repair', 'node', ['test/session-repair.js']],
   // v0.6.40：插话（steer）——两车道语义 + agent 注入/不结束 + 真实 HTTP 与 SSE
   ['steering', 'node', ['test/steering.js']],
+  // v0.6.41：SSE 帧带 streamSeq/id + /api/events 事件游标（双游标作用域 / 过滤 / 旧会话 / 跳号自检）
+  ['event-cursor', 'node', ['test/event-cursor.js']],
   // v0.6.41：预检自身（守卫必须有守卫）
   ['preflight', 'node', ['test/preflight.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）

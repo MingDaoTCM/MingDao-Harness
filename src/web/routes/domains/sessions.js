@@ -1,7 +1,9 @@
-// 会话域（Phase C C1）：/api/sessions /api/session /api/draft
-// 会话列表/搜索、载入（聚焦工作空间）、重命名/删除、按会话隔离的草稿槽。
+// 会话域（Phase C C1）：/api/sessions /api/session /api/events /api/draft
+// 会话列表/搜索、载入（聚焦工作空间）、重命名/删除、按会话隔离的草稿槽；
+// v0.7.0 §1.1 切片 B1：`GET /api/events?file=&after=` 按 seq 游标只读事件日志（SSE 续订 / 跳号整窗重取）。
 import fs from 'node:fs';
 import path from 'node:path';
+import { eventFileFor, readAfter } from '../../../session-events.js';
 import {
   listSessions,
   loadSession,
@@ -105,11 +107,50 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         workspace: ws?.name || null,
         // v0.3.0 P0-2：未完成检查点（供前端提示续跑）
         taskState: loadTaskState(path.basename(file)),
+        // v0.7.0 §1.1 切片 B1：**事件游标**（event seq）——该会话事件日志的最大 seq；无日志为 0。
+        // 注意：这是「每个会话跨轮单调」的事件日志编号，**不是** SSE 帧的 streamSeq（每个 task 从 1 起），
+        // 两者互不推导；前端不得拿它去校验帧号（见 server.js#createSseWriter 的双游标说明）。
+        lastEventSeq: readAfter(eventFileFor(path.join(home, 'sessions', path.basename(file))), 0).lastSeq,
       });
     } catch {
       json(res, 404, { error: '会话不存在' });
     }
     return true;
+  }
+
+  // v0.7.0 §1.1 切片 B1：按 **event seq** 游标读取会话事件日志（不是 SSE 帧的 streamSeq！）。
+  //
+  // 双游标（见 server.js#createSseWriter）：本端点与 `lastEventSeq` 用的是「每个会话跨轮单调」的
+  // 事件日志 seq；SSE 帧上的 `streamSeq` 是「每个 task 从 1 起」的流游标——两者互不推导，
+  // 客户端用 streamSeq 检测漏帧、用本端点的 after/event seq 整窗重取事件。
+  //
+  // 契约：
+  //   · `after` 缺省 = 0（返回全部）；非数字 / 负数 → 400（**严格**，不把垃圾解析成 0：
+  //     否则客户端一次拼错 URL 就会静默收到全量重放，跳号检测反而更难查）；
+  //   · `file` 只接受 basename：含 / \ 或就是 . / .. → 400（事件日志与会话同目录，放开即目录穿越）；
+  //   · 会话 `.jsonl` 不存在 → 404（问的是「这个会话」，会话本身没有）；
+  //   · 会话存在但事件文件不存在（旧会话 / eventLog 关闭）→ **200** + `{lastSeq:0, events:[]}`，
+  //     不是 404——事件日志是旁路，缺它不代表会话不可读。
+  if (method === 'GET' && p === '/api/events') {
+    const file = String(url.searchParams.get('file') || '');
+    if (!file) return json(res, 400, { error: '缺少 file 参数' });
+    if (/[\\/]/.test(file) || file === '.' || file === '..') {
+      return json(res, 400, { error: 'file 只接受会话文件名（不得含路径）' });
+    }
+    const afterRaw = url.searchParams.get('after');
+    let after = 0;
+    if (afterRaw !== null) {
+      if (!/^\d+$/.test(afterRaw) || !Number.isSafeInteger(Number(afterRaw))) {
+        return json(res, 400, { error: 'after 必须是非负整数' });
+      }
+      after = Number(afterRaw);
+    }
+    const full = path.join(home, 'sessions', file);
+    if (!fs.existsSync(full)) return json(res, 404, { error: '会话不存在' });
+    const read = readAfter(eventFileFor(full), after);
+    if (!read.ok) return json(res, 500, { error: `读取事件日志失败：${read.error || '未知原因'}` });
+    // `seqKind:'event'`：机器可读地声明 lastSeq/events[].seq 是**事件日志**编号（不是 streamSeq）。
+    return json(res, 200, { ok: true, file, seqKind: 'event', lastSeq: read.lastSeq, events: read.events });
   }
 
   if (method === 'POST' && p === '/api/session') {
