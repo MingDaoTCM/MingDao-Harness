@@ -48,7 +48,17 @@ MINGDAO_EVENT_SOURCE=messages mingdao ...   # 立即回到旧真源（不必改 
 - `docs/ROADMAP-v0.7.md` §1.1 标记 B2-b 完成。
 - 套件：`event-source` **27 项**、`update-signing` **12 项**、`batch86` **10/10**；变异总数 **804 条**。
 
-### 五、未做 / 已知边界
+### 五、兼容性修复：示例 Pack 的引擎窗口
+
+- `packs/example-hello/pack.json` 的 `engines.mingdao` 从 `>=0.4.6 <0.7` 放宽到 `>=0.4.6 <0.8`。
+  否则本版（0.7.0）自身会让**官方示例 Pack 校验失败、无法挂载**——这是版本号翻到 0.7.0 后
+  在 tag 树上跑 smoke 才暴露的（本地门禁跑在 0.6.45 的版本号下，CI 是第一次以 0.7.0 执行）。
+  这是**版本窗口元数据**，不是产品逻辑变更。
+- `test/smoke.js` 的 manifest 夹具同步放宽（16 处），断言意图不变（合法 manifest 仍必须通过、
+  各类非法 manifest 仍必须被拒）。
+- 待办：Pack 生态的 `engines` 窗口应随内核 minor 定期复核；本版只修官方示例与夹具。
+
+### 六、未做 / 已知边界
 
 - 派生以**对拍为门**：不一致只 warn + 回退，不阻断会话读取，也不改名/不迁移文件。
 - 未覆盖的样本类型（翻转后仍建议补样）：中断占位（`interrupt` + 悬空 tool 回填）、审批拒绝、
