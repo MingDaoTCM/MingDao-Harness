@@ -134,12 +134,15 @@ M.mutate({
 M.mutate({
   name: '⑨ 读取路径改写旧会话文件（回填 ts 落盘）',
   file: 'src/session.js',
-  from: ['  return { file, messages };', '}'].join('\n'),
+  // v0.7.0 B2-b：loadSession 的返回值改成 `messages: result`（事件派生开关），锚点同步更新。
+  // 记住：**锚点失配要让批次红**（"变异点未找到"），不要写成"找不到就跳过"——那等于守卫消失。
+  from: ['  repairSessionEvents(file, cfg);', '  return { file, messages: result };', '}'].join('\n'),
   to: [
-    '  if (messages.some((m) => !m.ts)) {',
-    "    fs.writeFileSync(file, messages.map((m) => JSON.stringify({ ...m, ts: new Date().toISOString() })).join('\\n') + '\\n');",
+    '  repairSessionEvents(file, cfg);',
+    '  if (result.some((m) => !m.ts)) {',
+    "    fs.writeFileSync(file, result.map((m) => JSON.stringify({ ...m, ts: new Date().toISOString() })).join('\\n') + '\\n');",
     '  }',
-    '  return { file, messages };',
+    '  return { file, messages: result };',
     '}',
   ].join('\n'),
   expect: ['旧会话读取不得改写会话文件（不得回填 ts）'],

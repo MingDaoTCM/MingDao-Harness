@@ -31,47 +31,12 @@ function isMainModule() {
 }
 
 import { loadSession } from '../src/session.js';
-import { eventFileFor, readEvents, replayToMessages, isEventLogName, EVENT_LOG_FORMAT } from '../src/session-events.js';
+// 判据**单源**：比较逻辑住在 `src/session-events.js`，本脚本只做采集与汇总。
+// 曾经这里复制过一份（0.7.0 B2-b），两份判据迟早漂移——对拍工具与被测代码的判据不一致，
+// 等于用两把尺子量同一件事。这里改为导入 + 再导出，保持脚本对外签名不变。
+import { eventFileFor, readEvents, replayToMessages, isEventLogName, EVENT_LOG_FORMAT, diffMessages } from '../src/session-events.js';
 
-/**
- * 比较两个消息数组：逐条按 role + content + tool_calls（按 id 排序）比较。
- * 只比较**语义字段**，不比较 `_` 开头的运行时注记（`_endedAt` 等不落盘）。
- * @param {any[]} a
- * @param {any[]} b
- * @returns {{ok:boolean, index:number, reason:string}}
- */
-export function diffMessages(a, b) {
-  const A = Array.isArray(a) ? a : [];
-  const B = Array.isArray(b) ? b : [];
-  if (A.length !== B.length) return { ok: false, index: Math.min(A.length, B.length), reason: `条数不同：消息 ${A.length} vs 重放 ${B.length}` };
-  const norm = (m) => {
-    const out = { role: String(m?.role ?? ''), content: m?.content ?? '' };
-    if (Array.isArray(m?.tool_calls)) out.tool_calls = m.tool_calls.map((t) => String(t?.id ?? '')).sort();
-    if (m?.tool_call_id != null) out.tool_call_id = String(m.tool_call_id);
-    return JSON.stringify(out);
-  };
-  for (let i = 0; i < A.length; i += 1) {
-    if (norm(A[i]) !== norm(B[i])) return { ok: false, index: i, reason: `第 ${i + 1} 条不同` };
-  }
-  return { ok: true, index: -1, reason: '' };
-}
-
-/**
- * 两个消息数组是否存在**前缀关系**（一方是另一方的前缀）。
- * 用于把"压缩后窗口未落事件"（少了尾巴）与"旧消息仍留在事件流"（多了尾巴）
- * 这类**不可回溯的历史噪声**，跟"条数相同但内容不同"的真回归区分开。
- * @param {any[]} a
- * @param {any[]} b
- * @returns {boolean}
- */
-export function isPrefixPair(a, b) {
-  const A = Array.isArray(a) ? a : [];
-  const B = Array.isArray(b) ? b : [];
-  const n = Math.min(A.length, B.length);
-  const norm = (m) => JSON.stringify({ role: String(m?.role ?? ''), content: m?.content ?? '' });
-  for (let i = 0; i < n; i += 1) if (norm(A[i]) !== norm(B[i])) return false;
-  return true;
-}
+export { diffMessages };
 
 /**
  * 对一个会话做对拍。

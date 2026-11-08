@@ -76,7 +76,7 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 日常 vs 发版：`--changed` 只跑受影响的批次（v0.6.41 起）
 
-全量 **73 批 / 794 条**要 **20+ 分钟**（用 `npm run mutate:shard` 并行约 **8 分钟**），但绝大多数与本次改动无关。日常提交用：
+全量 **74 批 803 条**要 **20+ 分钟**（用 `npm run mutate:shard` 并行约 **8 分钟**），但绝大多数与本次改动无关。日常提交用：
 
 ```bash
 node test/mutate/run.mjs --changed HEAD~1        # 只跑"锚点落在改动文件上"的批次
@@ -103,7 +103,7 @@ node test/mutate/run.mjs --changed HEAD~1 --select-only   # 只看会跑哪些�
 | --- | --- | --- |
 | **提交前**（2 秒，只查结构） | `npm run preflight` | **0.03 秒** |
 | **日常迭代**（只跑受影响的批次） | `npm run mutate:changed` | 1–6 分钟（6–17/70 批） |
-| **发版前**（全量，必须） | `node test/mutate/run.mjs`（73 批 794 条） | ~25 分钟 |
+| **发版前**（全量，必须） | `node test/mutate/run.mjs`（74 批 803 条） | ~25 分钟 |
 | **发版前（推荐，并行）** | `npm run mutate:shard`（默认 4 片） | **约 8 分钟**（实测 73 批全中） |
 
 `shard.mjs` 的做法：按批次体积做 LPT 分桶 → 每片一个 **独立 `git worktree`**（HEAD）+ 独立
