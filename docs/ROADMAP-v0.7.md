@@ -41,7 +41,7 @@
 | **A** | 0.6.35 | 事件日志模块 + 双写 + 确定性重放对拍（不动读取路径） | ✅ 已发布 |
 | **B1** | 0.6.41 | **传输层**：SSE 帧带 `seq`/`id`、`/api/events?after=` 游标、前端**跳号 → 整窗重取**；UI 仍按增量渲染 | 🔄 进行中 |
 | **B2-a** | 0.6.42 | **事件完整性**：`rewriteSession` 也写 `messages.replace`（此前压缩/resume 的整份重写完全不写事件）；`scripts/event-parity.mjs` 双读对拍（pass / fail / incomplete 三分类） | ✅ 本次 |
-| **B2-b** | 0.7.0 | **真源切换**：UI/账本改为从事件派生（对拍 pass 后才允许开始），并补 `session-format-*` 迁移用例 | ⬜ 未开始 |
+| **B2-b** | 0.7.0 | **真源切换**：UI/账本改为从事件派生（对拍 pass 后才允许开始），并补 `session-format-*` 迁移用例 | ✅ 默认已翻，证据见 [EVENT-SOURCE-EVIDENCE.md](EVENT-SOURCE-EVIDENCE.md) |
 
 **两套编号域（B1 实施时发现，必须区分）**
 

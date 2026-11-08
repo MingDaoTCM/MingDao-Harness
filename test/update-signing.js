@@ -140,6 +140,14 @@ const ok = (name) => { passed += 1; console.log(`  ✓ ${name}`); };
   assert.match(warn.detail, /MINGDAO_REQUIRE_UPDATE_SIGNATURE=1/, '必须给出收紧开关');
   ok('⑧ 文案：两行内说清「公证不受影响 / 来源签名未接入」并给出开关');
 
+  // v0.7.0：发布链路自 0.6.45 起已接入签名，日志里不能再写「发布链路尚未接入签名」。
+  // 完整解释与 buildUpdateNotice 必须用同一句事实（"没能取得本版更新的发布签名"）。
+  const warnLog = U.evaluateUpdate({ signatureB64: '', requireSignature: false, version: '9.9.9' });
+  assert.equal(warnLog.decision, 'warn-and-install', '无签名 + 默认档 → warn-and-install');
+  assert.match(warnLog.logLine, /没能取得本版更新的发布签名/, 'logLine 必须与 buildUpdateNotice 一致：没能取得本版更新的发布签名');
+  assert.doesNotMatch(warnLog.logLine, /发布链路尚未接入签名/, '发布链路已接入签名（0.6.45），logLine 不得再写"尚未接入签名"');
+  ok('⑧b 文案：warn 日志不再写「发布链路尚未接入签名」（与弹窗同源）');
+
   const good = U.buildUpdateNotice({ decision: 'install', version: '9.9.9', keyId: 'abc123' });
   assert.ok(good.detail.includes('校验通过') && good.detail.includes('abc123'), '验签通过时必须写明 keyId');
   const rejected = U.buildUpdateNotice({ decision: 'reject', version: '9.9.9', reason: '签名与更新包字节不匹配' });

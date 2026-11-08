@@ -1,6 +1,6 @@
 // 造 0.7.0「事件为真源」翻默认所需的**真实会话样本**，并当场对拍 + 双读交叉验证。
 //
-// 为什么需要：`config.eventSource` 从 messages 翻到 events 之前，必须证明「事件重放 ==
+// 为什么需要：`config.eventSource` 从 messages 翻到 events（v0.7.0 B2-b），必须证明「事件重放 ==
 // 消息数组」在**工具调用 / 自动压缩 / 手动 /compact / resume 继续**这四类真实写入路径上都成立。
 // 手上只有 1 个 format=2 的真实会话，样本太薄。本脚本用仓库既有的「桩 provider」手法
 // （HTTP SSE mock，见 test/e2e-web.js）驱动**真实 CLI/REPL**，让真实会话落盘——不是手写
@@ -240,7 +240,8 @@ for (const f of fixtures) {
   let byMessages;
   let byEvents;
   try {
-    byMessages = loadSession(f.file);
+    // 默认已翻成 events：这里显式锁 messages，双读才仍然比较「旧真源 vs 新真源」。
+    byMessages = loadSession(f.file, { eventSource: 'messages' });
     byEvents = loadSession(f.file, { eventSource: 'events' });
   } finally {
     console.warn = origWarn;

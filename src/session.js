@@ -293,11 +293,12 @@ function messagesFromEvents(file) {
 }
 
 /**
- * 读取会话。默认（`eventSource` 缺省或 `messages`）只读 `.jsonl` 消息数组，行为与 0.6.x 一致。
+ * 读取会话。默认（`eventSource` 缺省或 `events`）尝试事件日志派生，但必须通过**对拍兜底**：
+ * 派生结果与消息文件逐条等价才采用；不一致就 warn（带文件与首个差异位置）并回退到消息数组。
+ * 事件源缺失 / 格式旧 / 读失败一律静默回退。`cfg.eventSource === 'messages'`（或环境变量
+ * `MINGDAO_EVENT_SOURCE=messages`）时只读 `.jsonl` 消息数组，行为与 0.6.x 完全一致。
  *
- * `cfg.eventSource === 'events'`（v0.7.0 B2-b 灰度开关）时额外尝试事件日志派生，但必须通过
- * **对拍兜底**：派生结果与消息文件逐条等价才采用；不一致就 warn（带文件与首个差异位置）并
- * 回退到消息数组。事件源缺失 / 格式旧 / 读失败一律静默回退。
+ * v0.7.0 B2-b：默认已翻到 `events`；证据见 `docs/EVENT-SOURCE-EVIDENCE.md`。
  *
  * @param {any} file
  * @param {any} [cfg] 传入时尊重 `cfg.eventSource` 与 `cfg.eventLog === false`（后者只影响修补器）
@@ -328,7 +329,7 @@ export function loadSession(file, cfg = null) {
         try {
           console.warn(
             `[MingDao] ⚠ 会话事件源对拍不一致（${file}）：${d.reason}；差异位置：${at}——已回退到消息数组` +
-              `（config.eventSource=events 仅灰度验证用，默认仍是 messages）。`
+              `（消息数组始终是兜底真源；可设 MINGDAO_EVENT_SOURCE=messages 强制回退）。`
           );
         } catch {}
       }

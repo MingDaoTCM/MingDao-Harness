@@ -6,11 +6,12 @@
 
 ## 1. 为什么需要这份证据
 
-`config.eventSource` 当前默认 `messages`；改成 `events` 后，历史会话将由事件日志
-`replayToMessages()` 派生。派生结果只要与 `.jsonl` 消息数组有一处不同，用户看到的历史就会
-静默变形（标题、工具卡片、压缩后的窗口、中断占位）。因此「事件与消息数组等价」不能靠推理，
-必须在**每一种会改写会话文件的真实路径**上留下样本与对拍输出。此前本机只有 1 个
-`session.start.data.format >= 2` 的真实会话，样本太薄，不足以支撑翻默认。
+`config.eventSource` 此前默认 `messages`；v0.7.0 B2-b 已翻成 `events`（本文即翻默认的证据）。
+翻成 `events` 后，历史会话将由事件日志 `replayToMessages()` 派生。派生结果只要与 `.jsonl`
+消息数组有一处不同，用户看到的历史就会静默变形（标题、工具卡片、压缩后的窗口、中断占位）。
+因此「事件与消息数组等价」不能靠推理，必须在**每一种会改写会话文件的真实路径**上留下样本
+与对拍输出。此前本机只有 1 个 `session.start.data.format >= 2` 的真实会话，样本太薄，
+不足以支撑翻默认。
 
 判据（[event-parity.mjs](../scripts/event-parity.mjs)）：`fail` 才算回归；旧日志缺格式戳
 （`format < 2`）且无 `messages.replace` 判 `incomplete`，不计失败。

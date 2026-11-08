@@ -228,39 +228,70 @@ function applyModelLabels(/** @type {any} */ cfg) {
 }
 
 /**
- * 会话读取真源（v0.7.0 B2-b 灰度开关）。
+ * 会话读取真源（v0.7.0 B2-b：默认已翻到 `events`）。
  *
- * `messages`（默认）：继续只读 `.jsonl` 消息数组——与 0.6.x 完全一致，事件侧车坏掉也不影响。
- * `events`：用事件日志重放派生消息，但**必须与消息文件对拍一致**才采用；不一致就 warn 并
- * 回退到消息数组。这只用于灰度验证「事件流能否当唯一真源」，**不是**新的默认值：
- * 翻默认要等真实会话的 `scripts/event-parity.mjs` 证据（pass 覆盖足够广、incomplete 清零）。
+ * 优先级：环境变量 `MINGDAO_EVENT_SOURCE` > `config.eventSource` > 默认值 `events`。
  *
- * 校验口径与 `config.eventLog` 一致：只认字面量 `'events'`，其余（缺省 / 大小写不符 /
- * 任意非法值）一律按 `'messages'` 处理，绝不因为一个拼错的值把读取路径切到实验分支。
+ * `events`（默认）：用事件日志重放派生消息，但**必须与消息文件对拍一致**才采用；不一致就
+ * warn 并回退到消息数组（消息数组永远是最后兜底）。格式戳缺失 / 旧格式（format < 2）/
+ * 无侧车 / 读失败一律静默回退——旧会话永远从消息数组读。
+ * `messages`：继续只读 `.jsonl` 消息数组——与 0.6.x 完全一致，事件侧车坏掉也不影响。
+ *
+ * 翻默认的证据：`docs/EVENT-SOURCE-EVIDENCE.md`（4 类真实会话、fail=0、双读 deepEqual 4/4）。
+ * 回归：`scripts/event-parity.mjs` + `test/event-source.js`。
+ *
+ * 校验口径：只认字面量 `'messages'` / `'events'`，其余（缺省 / 大小写不符 / 任意非法值）
+ * 回落默认值，绝不因为一个拼错的值悄悄把真源切回旧路径。
  */
 export const EVENT_SOURCE_MESSAGES = 'messages';
 export const EVENT_SOURCE_EVENTS = 'events';
-/** 默认真源：`messages`。改这里等于改所有 ENOENT/未配置用户的读取路径，必须等灰度证据。 */
-export const DEFAULT_EVENT_SOURCE = EVENT_SOURCE_MESSAGES;
+/** 运维级回退开关：`MINGDAO_EVENT_SOURCE=messages` 立即回到旧真源（优先于配置文件）。 */
+export const EVENT_SOURCE_ENV = 'MINGDAO_EVENT_SOURCE';
+/** 默认真源：`events`（v0.7.0 B2-b；证据见 docs/EVENT-SOURCE-EVIDENCE.md）。 */
+export const DEFAULT_EVENT_SOURCE = EVENT_SOURCE_EVENTS;
 const EVENT_SOURCE_SET = new Set([EVENT_SOURCE_MESSAGES, EVENT_SOURCE_EVENTS]);
 
 /**
- * 归一化 `config.eventSource`：合法枚举原样返回，其余一律回落默认值 `messages`。
- * 纯函数，读配置/写配置/直接调用 `loadSession(file, cfg)` 三条路径共用同一判据。
+ * 读环境变量覆盖：只认精确的 `messages` / `events`；未设或非法返回 null（视为「没有覆盖」）。
+ * 非法值**不**回落 `messages`——否则一个拼错的变量会悄悄把真源切回旧路径。
+ * @returns {'messages'|'events'|null}
+ */
+function eventSourceFromEnv() {
+  // 空字符串按「未设」处理；Set.has('') 为 false，正好走回落。
+  const raw = process.env[EVENT_SOURCE_ENV] || '';
+  return EVENT_SOURCE_SET.has(raw) ? /** @type {'messages'|'events'} */ (raw) : null;
+}
+
+/**
+ * 归一化**配置自身的值**（不含环境变量覆盖）：合法枚举原样返回，其余回落默认值 `events`。
+ * 写配置/落盘走这条，避免运维期的临时环境变量被写进 config.json。
  * @param {any} value
  * @returns {'messages'|'events'}
  */
-export function normalizeEventSource(value) {
+function normalizeConfiguredEventSource(value) {
   return EVENT_SOURCE_SET.has(value) ? value : DEFAULT_EVENT_SOURCE;
 }
 
 /**
+ * 解析**运行期**真源：环境变量 > 配置值 > 默认值 `events`。
+ * 纯函数，读配置/直接调用 `loadSession(file, cfg)` 共用同一判据；环境变量只影响本次进程，
+ * 撤销变量即恢复配置文件里的值（回退无需改配置、无需改文件）。
+ * @param {any} value
+ * @returns {'messages'|'events'}
+ */
+export function normalizeEventSource(value) {
+  const fromEnv = eventSourceFromEnv();
+  return fromEnv ?? normalizeConfiguredEventSource(value);
+}
+
+/**
  * 就地归一化配置对象里的 `eventSource`（字段不存在时**不新增**，保持旧配置文件字节不变）。
+ * 注意：这里**不**应用 `MINGDAO_EVENT_SOURCE`——环境变量只在读取会话时解析，绝不落盘。
  * @param {any} cfg
  */
 function applyEventSource(/** @type {any} */ cfg) {
   if (!isConfigObject(cfg) || cfg.eventSource === undefined) return cfg;
-  cfg.eventSource = normalizeEventSource(cfg.eventSource);
+  cfg.eventSource = normalizeConfiguredEventSource(cfg.eventSource);
   return cfg;
 }
 
