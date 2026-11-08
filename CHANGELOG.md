@@ -3,6 +3,65 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.6.42（2026-11-08）— §1.1 B2-a：事件日志完整记录消息 + 双读对拍
+
+> **事件流终于能重建整份历史**：`rewriteSession()`（手动 `/compact`、`/clear`、CLI/worker 全量
+> 重写等）此前**一个事件都不写**——重写后的消息窗口只存在于 `.jsonl`，事件重放永远停在旧基线
+> （自动压缩路径另有一条 agent 侧 `compact` 事件携带基线，其余重写路径没有）。
+> 本版新增 append-only 的 `messages.replace{messages, reason:'compact'|'resume'|'rewrite'}`，
+> 在会话文件**写盘成功之后**追加；事件写失败只 warn，**会话写入不受影响**；`eventLog=false` 时
+> 完全不写。同时新增双读对拍工具 `scripts/event-parity.mjs`（pass / fail / incomplete 三分类），
+> 为 v0.7.0 B2-b「切真源」立硬门槛：**真实会话对拍 fail 必须为 0**。
+> **用户可见：无可见变化**（内部事件日志更完整，读取路径与 UI 均未改）。
+> 完整说明见 `RELEASE-NOTES-0.6.42.md`。
+
+### 一、事件类型 13 类：新增 `messages.replace`（`708036b`）
+
+- `EVENT_TYPES` 12 → 13；语义：`data.messages` 是**新基线**，按 seq 顺序把当前派生窗口
+  **整体替换**（后续 `message.append` 接在它后面）；append-only，**不删历史行**。
+- `reason` 只收 `compact` / `resume` / `rewrite`（缺省或非法一律 `rewrite`）——reason 是有限集合，
+  保证审计/排障时机器可读；生产侧目前只有压缩路径显式传 `compact`，`/clear`、WebUI `onCompact`
+  与其它整份重写走默认 `rewrite`（`resume` 已支持，留给后续调用点）。
+- `replayToMessages()` 把 `messages.replace` 与既有 `compact` 当**同义**的「替换基线」处理，按 seq
+  顺序生效；未知 type 仍按旧策略跳过并计入 `skipped`——**旧读者遇到新类型只当它不存在**，
+  旧日志（没有该类型）在新版本照常可读，两个方向都不破坏兼容。
+
+### 二、`rewriteSession` 双写与容错（`708036b`）
+
+- 顺序固定：**先原子写会话文件，写盘成功之后**才追加 `messages.replace`；会话写失败则**一个事件
+  都不写**（避免「事件侧车已前进、消息文件没动」的分叉）。
+- 事件侧车不存在时先补一条 `session.start`（与 `appendMessages` 同口径），再写 replace。
+- 事件写失败（含 EACCES / EISDIR 注入）**只 warn**，不抛、不回滚——旁路完整性不能反过来决定
+  会话是否成功；`eventLog=false` / `MINGDAO_EVENT_LOG=0` 时整条路径直接跳过。
+- 压缩调用点（`cli.js` ×2、`repl.js` ×4、`tasks/worker.js` ×1）显式传 `'compact'`。
+
+### 三、修「单条事件 > 64KB 写后校验误判失败」（`708036b`）
+
+- `appendEvent()` 写后校验原先只看尾部 64KB（`TAIL_BYTES`）的最后一行；整份 `messages.replace`
+  很容易超过 64KB，尾窗会把最后一行截断 → `JSON.parse` 失败 → 误判为「写失败」。
+- 现在仅在**尾窗没覆盖整个文件**（`size > TAIL_BYTES`）且首次校验失败时，回退整文件重验最后一行；
+  小事件路径不变，大事件代价与事件大小同阶。
+
+### 四、双读对拍工具 `scripts/event-parity.mjs`（`708036b`）
+
+- 对同一会话比较「消息数组（旧真源）」与「事件重放（候选真源）」：按 role / content /
+  tool_calls（按 id 排序）/ tool_call_id 逐条比较，不看 `_` 开头的运行时注记。
+- 三分类：`pass`（等价）/ `fail`（不一致且日志里**有** `messages.replace`）/ `incomplete`
+  （不一致且整条日志**没有** `messages.replace`——日志写于本版之前，历史不可回溯，不计失败）；
+  无事件侧车为 `skip`。退出码 `0` = 无 fail，`1` = 有 fail，`2` = 用法/环境错误。
+- 支持 `--home` / `--limit` / `--verbose`；本机真实会话实测：**pass 1 / incomplete 3 / fail 0**（exit 0）。
+
+### 五、测试、CI 与文档
+
+- 新套件 `test/event-completeness.js` **17 项**（类型清单、双写内容/顺序、三种 reason、混合序列
+  ⋅压缩/resume/空会话/tool_calls、append↔replace 顺序、`eventLog=false`、EACCES 注入、200KB
+  大消息不截断、旧日志兼容、未知 type、写盘失败零事件、重放纯函数）。
+- 新变异 `batch85-completeness` **9 条**：总数 785 → **794**（73 批）。
+- `test/run-all.mjs` → **43 套**；CI 新增独立步骤 `event-completeness`（Linux/Windows，macOS 跳过）。
+- `docs/ROADMAP-v0.7.md` 把 B2 拆成 **B2-a / B2-b**，并写入硬门槛：
+  **B2-b 开始前，真实会话 `event-parity` 的 fail 必须为 0**（incomplete 不算失败）。
+- `docs/ARCHITECTURE.md` / `docs/CONFIG.md` 同步 13 类事件、双写顺序、容错与回滚语义。
+
 ## v0.6.41（2026-11-08）— §1.1 切片 B1：SSE 帧号 / 事件游标 / 跳号整窗重取（+ 开发效率工具）
 
 > **传输层补两套编号**：SSE 每一帧新增 `streamSeq`（**每个 task** 从 1 起）并同时写标准
