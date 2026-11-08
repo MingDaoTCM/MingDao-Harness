@@ -606,3 +606,74 @@ export function shouldContinueAfterModel(st) {
   const list = Array.isArray(st?.steer) ? st.steer : [];
   return list.length > 0 && !st?.aborted && !st?.stalled;
 }
+
+// ---------------------------------------------------------------------------
+// SSE 序号连续性（v0.6.41 §1.1 切片 B1 的客户端一半）
+//
+// 服务端每帧带 `streamSeq`（**每个 task** 从 1 单调 +1）与 `id:` 行；客户端持流游标 lastSeq。
+// 丢帧（跳号）时**不逐帧续接**，而是按 DSH 的 resync 语义整窗重取快照——
+// 否则界面会停在"少了几段正文/几个工具结果"的错误状态且无人知晓。
+// 三个函数都是纯函数：判定表、救援顺序、给用户的一行文案都必须被单测钉住。
+// ---------------------------------------------------------------------------
+
+/**
+ * SSE 帧序号连续性判定（客户端游标 lastSeq，首帧前为 0）。
+ *
+ * 判定表：
+ *   incomingSeq == null（旧服务端 / 无 streamSeq 帧） → `ignore`（**只跳过序号判定，业务照常处理**）
+ *   lastSeq === 0 且 incomingSeq === 1          → `accept`（首帧基线）
+ *   lastSeq === 0 且 incomingSeq !== 1          → `resync`（连开头都缺了，gap = incomingSeq-1）
+ *   incomingSeq === lastSeq + 1                 → `accept`
+ *   incomingSeq <= lastSeq                      → `ignore`（重复/乱序旧帧，不重复渲染）
+ *   incomingSeq > lastSeq + 1                   → `resync`（gap = incomingSeq - lastSeq - 1）
+ *
+ * `ok` 只表示"连续性没坏"：`accept`/`ignore` 都是 true，只有 `resync` 是 false。
+ * @param {{lastSeq?:number, incomingSeq?:number|null}} [frame]
+ * @returns {{ok:boolean, gap:number, action:'accept'|'resync'|'ignore'}}
+ */
+export function seqContinuity({ lastSeq, incomingSeq } = {}) {
+  const incoming = incomingSeq == null ? null : Number(incomingSeq);
+  if (incoming === null || !Number.isInteger(incoming)) {
+    // 旧服务端兼容：没有 streamSeq（或它不是整数）→ 不参与连续性判断，业务照常。
+    return { ok: true, gap: 0, action: 'ignore' };
+  }
+  const rawLast = Number(lastSeq);
+  const last = Number.isInteger(rawLast) && rawLast > 0 ? rawLast : 0;
+  if (last === 0) {
+    // 首帧必须是 1：否则说明客户端错过的不是"中间几帧"，而是流开头。
+    return incoming === 1
+      ? { ok: true, gap: 0, action: 'accept' }
+      : { ok: false, gap: Math.max(0, incoming - 1), action: 'resync' };
+  }
+  if (incoming === last + 1) return { ok: true, gap: 0, action: 'accept' };
+  if (incoming <= last) return { ok: true, gap: 0, action: 'ignore' };
+  return { ok: false, gap: incoming - last - 1, action: 'resync' };
+}
+
+/**
+ * 跳号后怎么救（v0.6.41 B1 只有两态）：
+ *   · 有会话文件 → `snapshot`：复用「加载会话」整窗重取/重渲染（DSH `resync()` 语义）；
+ *   · 没有会话文件（新会话首轮，服务端还没落盘）→ `none`：不重建空窗口，调用方插可见提示。
+ *
+ * 为什么没有 `events`：`GET /api/events` 返回的是**会话事件**（`message.append` / `tool.start`），
+ * 不是 SSE 帧（`text` / `toolStart`），塞进现有 SSE 分派器渲染不出来——事件→UI 的投影留到 B2。
+ * `hasTask` 只为调用方/B2 预留，B1 的判断不依赖它（没有会话快照就没有可重取的窗口）。
+ * @param {{gap?:number, hasSession?:boolean, hasTask?:boolean}} [ctx]
+ * @returns {{mode:'snapshot'|'none', reason:string}}
+ */
+export function resyncPlan({ gap, hasSession } = {}) {
+  const g = Math.max(0, Math.floor(Number(gap) || 0));
+  if (hasSession) return { mode: 'snapshot', reason: `会话文件可用：整窗重取快照（跳过 ${g} 条事件）` };
+  return { mode: 'none', reason: `没有可重取的会话快照（新会话尚未落盘）：只提示、不重建窗口（跳过 ${g} 条事件）` };
+}
+
+/**
+ * 重取成功后插进对话流的一行**低调**提示（不是 errline，不吓人）。
+ * @param {{gap?:number}} [ctx]
+ * @returns {string} gap<=0 / 非法值 → 空串（不插提示）
+ */
+export function seqBanner({ gap } = {}) {
+  const g = Math.floor(Number(gap));
+  if (!Number.isFinite(g) || g <= 0) return '';
+  return `已跳过 ${g} 条事件，正在重新同步…`;
+}

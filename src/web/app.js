@@ -2,6 +2,8 @@ import { $, esc, highlight, renderMarkdown, scrollBottom, expandableBody, result
 import { MAX_ATTACHMENTS, MAX_IMAGE_BYTES, MAX_TEXT_BYTES } from './constants.js';
 import { sideNavBreakpoint, sideNavLayout, errCardParts, runStripView, permissionSourceLabel, toolStepView, toolTimelineSummary, toolTimelineVisibility, traceRoundView } from './viewmodel.js';
 import { enqueueMessage, dequeueMessage, shouldDrainQueue, queueView, QUEUE_MAX, enqueueSteer, steerView, STEER_MAX } from './viewmodel.js';
+// v0.6.41（§1.1 B1）：SSE 序号跳号 → 整窗重取（resync），不逐帧续接
+import { seqContinuity, resyncPlan, seqBanner } from './viewmodel.js';
 
 // 访问令牌（P1-3）：地址带 ?token= 时记入 sessionStorage 并从地址栏移除（防截图/历史外泄），
 // 之后所有同源请求统一附加 X-MingDao-Token 头；无令牌时行为与旧版一致。
@@ -877,6 +879,12 @@ async function send(){
     return;
   }
   if(!text && !attachments.length) return;
+  // v0.6.41（§1.1 B1）：**流游标** streamSeq——每个 task（每轮 SSE 流）都从 1 重新编号，
+  // 所以每轮 send() 从 0 起算、首帧必须是 1。
+  // 注意：`/api/session.lastEventSeq` 是**会话事件日志**游标（跨轮单调），与流序号是两套编号域，
+  // 绝不能拿来初始化 streamSeq——否则同一会话第二轮首帧 seq=1 会被判成"旧帧"、整轮不渲染。
+  // 事件日志游标（eventSeq）留给 B2 的事件派生/重放，B1 不消费。
+  let streamSeq = 0;
   const turnCtrl=new AbortController();
   turnAbortCtrl=turnCtrl; // 模块级引用：停止的兜底路径要能断开本轮 SSE（服务端 res.on('close') 同样会收尾）
   // 回合看门狗（无活动超时，非总时长——审计：此前 120s 定时炸弹误杀长时间健康生成，
@@ -965,11 +973,89 @@ async function send(){
       return postAskAnswer(ev, plan.post);
     });
   };
+  // —— v0.6.41（§1.1 B1）：跳号 → 整窗重取（resync） ——
+  // 与 DSH 的 resync() 同语义：漏帧不逐帧续接，整窗重取会话快照。
+  //   ① incomingSeq > streamSeq+1 → 暂停逐帧渲染（不把缺口当连续）；
+  //   ② 有会话文件 → loadSession 整窗重渲染（本轮已丢的增量不补，最终状态以快照为准）；
+  //      没有会话文件（新会话首轮，服务端还没落盘）→ 不重建，只留可见提示；
+  //   ③ 成功后把流游标推进到"触发跳号的那一帧"（该帧与缺口由快照代表），再按 seq 去重重放暂存帧；
+  //   ④ 重取失败 / 无处可重取 → 在对话流里插可见 msg-sys，绝不静默丢弃。
+  // 事件重放（/api/events）不在 B1：它返回的是会话事件而非 SSE 帧，投影是 B2 的活。
+  let resyncing = false;
+  let resyncGiveUp = false;
+  let resyncInFlight = null;
+  let resyncAttempts = 0;
+  const pausedFrames = [];
+  /** @type {(ev:any)=>void} 每帧分派器（重取成功后要按 seq 重放暂存帧，故需同一入口） */
+  let onEvent = () => {};
+  /**
+   * @param {number} gap 缺了多少条
+   * @param {number} atSeq 触发跳号的那一帧的 streamSeq（快照代表到它为止）
+   */
+  const beginResync = (gap, atSeq) => {
+    if (resyncing || resyncGiveUp) return;
+    // 连续两次都补不回来就停手：避免与仍在到达的流互相对打，也避免每帧打一次网络。
+    if (resyncAttempts >= 2) { resyncGiveUp = true; return; }
+    resyncAttempts += 1;
+    resyncing = true;
+    resyncInFlight = (async () => {
+      const plan = resyncPlan({ gap, hasSession: !!currentSession });
+      let taken = false;
+      try {
+        if (plan.mode === 'snapshot') {
+          // 复用「加载会话」的唯一实现：既有的消息加载/工作空间/检查点提示逻辑不另写一套。
+          const j = await loadSession(currentSession);
+          if (j && j.ok !== false && Array.isArray(j.messages)) {
+            // 快照重渲染会清空 chatEl；把在途的流式消息接回窗口末尾，后续帧仍写得进来。
+            if (msg.parentNode !== chatEl) chatEl.appendChild(msg);
+            taken = true;
+          }
+          // 注：j.lastEventSeq 是事件日志游标，与 streamSeq 无关——B1 不拿它当流游标。
+        }
+      } catch { taken = false; }
+      if (!taken) {
+        resyncGiveUp = true;
+        resyncing = false;
+        pausedFrames.length = 0;
+        // 已经警告，但**不把后续帧也丢掉**：把游标推进到 atSeq，让 atSeq+1 起继续渲染，
+        // 用户至少能看到本轮剩余的进展（缺口本身无法补，错误已可见）。
+        streamSeq = Math.max(streamSeq, Number(atSeq) || streamSeq);
+        const d = document.createElement('div');
+        d.className = 'msg-sys';
+        d.textContent = '⚠ 事件流中断且重取失败，请刷新页面';
+        chatEl.appendChild(d);
+        scroll();
+        return;
+      }
+      resyncing = false;
+      resyncAttempts = 0; // 成功一次就清零：只有"连续两次补不回来"才停手
+      // 快照代表到 atSeq 为止的窗口：流游标推进到 atSeq，后续帧从 atSeq+1 继续。
+      streamSeq = Math.max(streamSeq, Number(atSeq) || streamSeq);
+      const banner = seqBanner({ gap });
+      if (banner) {
+        const d = document.createElement('div');
+        d.className = 'msg-sys';
+        d.textContent = banner;
+        chatEl.appendChild(d);
+        scroll();
+      }
+      const frames = pausedFrames.splice(0);
+      for (const ev of frames) onEvent(ev);
+    })().catch(() => { resyncing = false; });
+  };
   try{
     const resp=await fetch('/api/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),signal:turnCtrl.signal});
     if(!resp.ok){ const j=await resp.json().catch(()=>({})); onActivity(); msg.innerHTML='<div class="errline">'+esc(j.error||('HTTP '+resp.status))+'</div>'; updateTasksPanel(); return; }
-    await handleEvents(resp.body, ev=>{
-      if(ev.taskId){ taskId=ev.taskId; curTaskId=taskId; } // 质检 L1：主停止按钮只断本任务
+    onEvent = ev => {
+      if(ev.taskId){ taskId=ev.taskId; curTaskId=taskId; } // 质检 L1：主停止按钮只断本任务（重取计划要用它）
+      // v0.6.41（§1.1 B1）：每帧先过序号闸门，再决定是否走业务分派。
+      // 重取期间不判连续性（基线马上要换），先攒着，成功后再按 streamSeq 去重放行。
+      if (resyncing) { pausedFrames.push(ev); return; }
+      const gate = seqContinuity({ lastSeq: streamSeq, incomingSeq: ev?.streamSeq });
+      if (gate.action === 'accept') streamSeq = Number(ev.streamSeq);
+      else if (gate.action === 'resync') { beginResync(gate.gap, ev.streamSeq); return; }
+      // 重复/乱序旧帧：只跳过这一帧；**无 streamSeq 帧不在这里返回**，业务照常处理（旧服务端兼容）。
+      else if (ev?.streamSeq != null) return;
       if(ev.type==='ask') disarm(); else arm(); // 有活动→重置；权限等待→暂停计时
       if(ev.type==='progress'){ const p=ev.seconds||0; if(ev.phase) curPhase=String(ev.phase); curTools=Number(ev.steps)||0; curTasks=Number(ev.tasks)||0; showThink();
         // P0-1：同一个 runState 同时喂状态条六字段与悬浮详情（服务端 progress ≈1s 一次，无新增轮询）
@@ -1046,7 +1132,9 @@ async function send(){
         if(ev.stalled){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent='⏹ 本轮因长时间无进展已中止（不是步数上限 capped、也不是你点的停止 aborted）——'+(ev.note||'详情见上方告警条。'); msg.appendChild(d); }
         else if(ev.note){ const d=document.createElement('div'); d.className='errline'; d.style.color='var(--warn)'; d.textContent=ev.note; msg.appendChild(d); }
         currentSession=ev.session; update(); refreshSessions(); updateTasksPanel(); }
-    });
+    };
+    await handleEvents(resp.body, onEvent);
+    if (resyncInFlight) await resyncInFlight.catch(() => {});
   }catch(e){ onActivity(); // 诊断（v0.4.2 network error 排查）：静默中断此前无任何日志，无法区分
     if((e&&e.name==='AbortError')||killedByWatchdog) runState.aborted=true;
     // 「手点停止 / 看门狗 / fetch 流静默断裂」。v0.4.3 修：第二参改 JSON 字符串——Electron 日志
@@ -3134,7 +3222,16 @@ function finalizeCurrentSession(){
   if(!currentSession) return;
   fetch('/api/session-finalize',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({file:currentSession})}).catch(()=>{});
 }
-async function loadSession(file){ if(currentSession && currentSession!==file) finalizeCurrentSession(); currentSession=file; chatEl.innerHTML=''; resetTraceState(); const r=await fetch('/api/session?file='+encodeURIComponent(file)); const j=await r.json(); for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content, m.ts); else { const el=newAiMsg(m.ts); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); renderEmptyState(); renderCrumb(); }
+async function loadSession(file){
+  // v0.6.41（§1.1 B1）：先取快照、成功后再清窗——resync 重取失败时当前窗口必须原样保留。
+  if(currentSession && currentSession!==file) finalizeCurrentSession();
+  const r=await fetch('/api/session?file='+encodeURIComponent(file));
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok) return null; // 不抛：既有调用方忽略返回值；resync 看到 null 就走"重取失败"的可见提示
+  currentSession=file; chatEl.innerHTML=''; resetTraceState();
+  for(const m of j.messages||[]){ if(typeof m.content==='string'&&m.content.startsWith('（系统提示）')) continue; if(m.role==='user') addUser(m.content, m.ts); else { const el=newAiMsg(m.ts); aiContent(el).innerHTML=renderMarkdown(m.content); } } if(j.workspace){ const sel=$('#wsSel'); const has=[...sel.options].some(o=>o.value===j.workspace); if(has){ sel.value=j.workspace; } else { refreshWsSel(); } renderBanner({text:'↩ 已回到该会话的工作空间：'+j.workspace}); } if(j.taskState&&(j.taskState.status==='cap'||j.taskState.status==='interrupted')){ renderBanner({text:'⚠ 该会话有未完成任务（步数上限中断）——直接发送消息即可从断点续跑，已完成文件不会重复做。', warn:true}); } scrollBottom(); renderEmptyState(); renderCrumb();
+  return j; // resync 用 j.messages 确认快照形状；j.lastEventSeq 属 B2（事件日志游标）
+}
 
 // §138：主按钮在生成态=停止，必须走**同一个**停止出口（stopTurnFromButton → stopTurn → POST /api/abort）
 sendBtn.onclick=()=>{ if(generating){ stopTurnFromButton(); } else { send(); } };

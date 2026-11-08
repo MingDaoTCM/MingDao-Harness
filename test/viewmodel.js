@@ -42,6 +42,9 @@ import {
   fmtTraceDur,
   subagentRowView,
   traceRoundView,
+  seqContinuity,
+  resyncPlan,
+  seqBanner,
 } from '../src/web/viewmodel.js';
 
 let passed = 0;
@@ -470,4 +473,50 @@ function REF_traceRoundView(round) {
   eq(queueView(null), [], '非数组返回空数组');
 }
 
-console.log(`✅ test/viewmodel.js：${passed} 条断言通过（4 个搬家函数 × 6+ 组输入 × 与搬家前参照实现 deepEqual 对拍 + 输出形状）`);
+// ---------------------------------------------------------------------------
+// SSE 序号连续性（v0.6.41 §1.1 B1）：跳号 → 整窗重取，而不是逐帧续接
+// ---------------------------------------------------------------------------
+{
+  // 首帧：必须从 1 开始（0 是"还没有游标"的哨兵，不是合法序号）
+  eq(seqContinuity({ lastSeq: 0, incomingSeq: 1 }), { ok: true, gap: 0, action: 'accept' }, '首帧 seq=1 → accept');
+  eq(seqContinuity({ lastSeq: 0, incomingSeq: 2 }), { ok: false, gap: 1, action: 'resync' }, '首帧 seq≠1 → resync（开头就缺）');
+  eq(seqContinuity({ lastSeq: 0, incomingSeq: 5 }).gap, 4, '首帧缺 4 条时 gap=4');
+
+  // 连续
+  eq(seqContinuity({ lastSeq: 5, incomingSeq: 6 }), { ok: true, gap: 0, action: 'accept' }, 'lastSeq+1 → accept');
+
+  // 重复 / 乱序旧帧：忽略但不算"连续性坏了"（ok 仍为 true）
+  eq(seqContinuity({ lastSeq: 5, incomingSeq: 5 }), { ok: true, gap: 0, action: 'ignore' }, '重复帧 → ignore（不重复渲染）');
+  eq(seqContinuity({ lastSeq: 5, incomingSeq: 4 }), { ok: true, gap: 0, action: 'ignore' }, '乱序旧帧 → ignore');
+  eq(seqContinuity({ lastSeq: 99, incomingSeq: 1 }).action, 'ignore', '远旧帧 → ignore');
+
+  // 跳号：gap 是**缺多少条**，不是差值
+  eq(seqContinuity({ lastSeq: 5, incomingSeq: 7 }), { ok: false, gap: 1, action: 'resync' }, '只差 1（漏 1 帧）→ resync，gap=1');
+  eq(seqContinuity({ lastSeq: 5, incomingSeq: 12 }), { ok: false, gap: 6, action: 'resync' }, '跳很多 → resync，gap=6');
+  eq(seqContinuity({ lastSeq: 3, incomingSeq: 7 }).gap, 3, 'gap 必须等于缺多少（7-3-1）');
+
+  // 旧服务端 / 无序号帧：不参与连续性，业务照常（由 app.js 的另一条分支保证）
+  eq(seqContinuity({ lastSeq: 0, incomingSeq: null }), { ok: true, gap: 0, action: 'ignore' }, 'null 帧 → ignore（旧服务端兼容）');
+  eq(seqContinuity({ lastSeq: 9, incomingSeq: undefined }).action, 'ignore', 'undefined 帧 → ignore');
+  eq(seqContinuity({}).action, 'ignore', '空入参不崩');
+  eq(seqContinuity({ lastSeq: 9, incomingSeq: '10' }).action, 'accept', '数字串按数字处理');
+
+  // B1 的救援只有两态：有会话文件 → snapshot；没有会话（新会话首轮）→ none
+  eq(resyncPlan({ gap: 3, hasSession: true, hasTask: true }).mode, 'snapshot', '有会话 → snapshot（任务在跑也一样）');
+  eq(resyncPlan({ gap: 3, hasSession: true, hasTask: false }).mode, 'snapshot', '有会话 → snapshot（不看 hasTask）');
+  eq(resyncPlan({ gap: 3, hasSession: false, hasTask: true }).mode, 'none', '没有会话必须选 none（B1 不重建空窗口）');
+  eq(resyncPlan({ gap: 3, hasSession: false, hasTask: false }).mode, 'none', '都没有 → none');
+  eq(resyncPlan({ gap: 3, hasSession: true }).reason.length > 0, true, 'reason 必须可读（不能空）');
+  eq(resyncPlan({ gap: 3, hasSession: true }).reason.includes('3'), true, 'reason 带上 gap，便于日志取证');
+  eq(resyncPlan({}).mode, 'none', '缺参不崩');
+  eq(resyncPlan({ gap: 1, hasSession: false }).mode === 'events', false, 'B1 不得再有 events 模式（投影属 B2）');
+
+  // 文案：低调、单行；gap<=0 不插
+  eq(seqBanner({ gap: 3 }), '已跳过 3 条事件，正在重新同步…', 'gap=3 的文案');
+  eq(seqBanner({ gap: 1 }).includes('\n'), false, '文案必须单行（msg-sys 一行）');
+  eq(seqBanner({ gap: 0 }), '', 'gap=0 不插提示');
+  eq(seqBanner({ gap: -2 }), '', 'gap<0 不插提示');
+  eq(seqBanner({}), '', '缺参不插提示');
+}
+
+console.log(`✅ test/viewmodel.js：${passed} 条断言通过（搬家函数与搬家前实现 deepEqual 对拍 + 输出形状 + 队列/插话 + SSE 序号连续性/两态救援）`);
