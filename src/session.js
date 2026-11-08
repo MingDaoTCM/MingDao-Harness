@@ -3,7 +3,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { appendEvent, eventFileFor, eventLogEnabled, isEventLogName, repairEventLog, warnEventFailure } from './session-events.js';
+import { appendEvent, eventFileFor, eventLogEnabled, isEventLogName, repairEventLog, warnEventFailure, EVENT_LOG_FORMAT } from './session-events.js';
 
 // —— 冲突备份名（单一事实来源，v0.4.6）——
 // 同步冲突时写入的备份：<会话名>.server-<时间戳>[-<随机后缀>].jsonl（远端版本）与 .remote-（远端拉取版本）。
@@ -134,7 +134,7 @@ function doubleWriteSessionEvents(file, messages) {
   try {
     // 事件流的第一条：只在文件尚不存在时写一次（并发下最多重复一条 session.start，无害）。
     if (!fs.existsSync(eventFile)) {
-      const start = appendEvent(eventFile, { type: 'session.start', data: { session: path.basename(String(file)) } });
+      const start = appendEvent(eventFile, { type: 'session.start', data: { session: path.basename(String(file)), format: EVENT_LOG_FORMAT } });
       if (!start.ok) {
         warnEventFailure(eventFile, start.error ?? null);
         return;
@@ -192,7 +192,7 @@ function doubleWriteReplaceEvents(file, messages, reason) {
   try {
     // 与 appendMessages 一致：事件流的第一条 session.start 只在文件尚不存在时写一次。
     if (!fs.existsSync(eventFile)) {
-      const start = appendEvent(eventFile, { type: 'session.start', data: { session: path.basename(String(file)) } });
+      const start = appendEvent(eventFile, { type: 'session.start', data: { session: path.basename(String(file)), format: EVENT_LOG_FORMAT } });
       if (!start.ok) {
         warnEventFailure(eventFile, start.error ?? null);
         return;

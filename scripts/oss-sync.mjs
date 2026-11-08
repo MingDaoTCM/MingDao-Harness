@@ -13,6 +13,20 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// 主入口守卫：比较 **realpath**（不是字符串）。
+// `file://${argv[1]}` 在三种情况下会静默失效：Windows 盘符、符号链接路径（/tmp → /private/tmp）、
+// 以及 Node 默认把模块解析成 realpath 而 argv[1] 仍是链接路径。失效时整段 CLI 不执行并 exit 0——
+// "看起来跑过了"比报错危险得多（0.6.42 实测踩到）。
+function isMainModule() {
+  try {
+    const self = fs.realpathSync(fileURLToPath(import.meta.url));
+    const argv = process.argv[1] ? fs.realpathSync(process.argv[1]) : '';
+    return Boolean(argv) && self === argv;
+  } catch { return false; }
+}
+
 
 const MIME = {
   '.exe': 'application/octet-stream',
@@ -144,7 +158,7 @@ export async function listObjects({ cfg, prefix = '', fetchImpl = globalThis.fet
 }
 
 // CLI
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule()) {
   const [cmd, a, b] = process.argv.slice(2);
   const loaded = loadOssConfig();
   if (!loaded.ok) { console.error(`✗ ${loaded.error}`); process.exit(2); }

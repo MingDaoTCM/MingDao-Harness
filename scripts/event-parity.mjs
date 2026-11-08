@@ -16,8 +16,22 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+// 主入口守卫：比较 **realpath**（不是字符串）。
+// `file://${argv[1]}` 在三种情况下会静默失效：Windows 盘符、符号链接路径（/tmp → /private/tmp）、
+// 以及 Node 默认把模块解析成 realpath 而 argv[1] 仍是链接路径。失效时整段 CLI 不执行并 exit 0——
+// "看起来跑过了"比报错危险得多（0.6.42 实测踩到）。
+function isMainModule() {
+  try {
+    const self = fs.realpathSync(fileURLToPath(import.meta.url));
+    const argv = process.argv[1] ? fs.realpathSync(process.argv[1]) : '';
+    return Boolean(argv) && self === argv;
+  } catch { return false; }
+}
+
 import { loadSession } from '../src/session.js';
-import { eventFileFor, readEvents, replayToMessages, isEventLogName } from '../src/session-events.js';
+import { eventFileFor, readEvents, replayToMessages, isEventLogName, EVENT_LOG_FORMAT } from '../src/session-events.js';
 
 /**
  * 比较两个消息数组：逐条按 role + content + tool_calls（按 id 排序）比较。
@@ -43,6 +57,23 @@ export function diffMessages(a, b) {
 }
 
 /**
+ * 两个消息数组是否存在**前缀关系**（一方是另一方的前缀）。
+ * 用于把"压缩后窗口未落事件"（少了尾巴）与"旧消息仍留在事件流"（多了尾巴）
+ * 这类**不可回溯的历史噪声**，跟"条数相同但内容不同"的真回归区分开。
+ * @param {any[]} a
+ * @param {any[]} b
+ * @returns {boolean}
+ */
+export function isPrefixPair(a, b) {
+  const A = Array.isArray(a) ? a : [];
+  const B = Array.isArray(b) ? b : [];
+  const n = Math.min(A.length, B.length);
+  const norm = (m) => JSON.stringify({ role: String(m?.role ?? ''), content: m?.content ?? '' });
+  for (let i = 0; i < n; i += 1) if (norm(A[i]) !== norm(B[i])) return false;
+  return true;
+}
+
+/**
  * 对一个会话做对拍。
  *
  * `incomplete` 的判据（v0.7.0 B2-a）：
@@ -64,8 +95,11 @@ export function parityOf(file) {
   const replay = replayToMessages(read.events);
   const d = diffMessages(loaded.messages, replay);
   if (d.ok) return { status: 'pass', file, reason: '', messages: loaded.messages.length };
+  // 新日志（session.start.format >= EVENT_LOG_FORMAT）出现不一致 = 真回归；
+  // 旧日志没有格式戳，缺 rewrite 记录是**历史噪声**，判 incomplete。
+  const newFormat = read.events.some((ev) => ev.type === 'session.start' && Number(ev.data?.format) >= EVENT_LOG_FORMAT);
   const hasReplace = read.events.some((ev) => ev.type === 'messages.replace');
-  if (!hasReplace) {
+  if (!newFormat && !hasReplace) {
     return {
       status: 'incomplete',
       file,
@@ -91,7 +125,7 @@ export function sessionsIn(home) {
     .sort();
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isMainModule()) {
   const argv = process.argv.slice(2);
   const readArg = (flag) => { const i = argv.indexOf(flag); return i >= 0 ? argv[i + 1] : null; };
   const home = readArg('--home') || process.env.MINGDAO_HOME || path.join(os.homedir(), '.mingdao');

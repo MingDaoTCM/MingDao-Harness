@@ -75,6 +75,18 @@ export const SYNTHETIC_REASON = '进程中断（启动时合成闭合事件）';
 /** 回滚开关：`MINGDAO_EVENT_LOG=0`（或 false/off/no）时全局关闭双写。 */
 export const EVENT_LOG_ENV = 'MINGDAO_EVENT_LOG';
 
+/**
+ * 事件日志**格式版本**（写在 `session.start` 的 `data.format` 里）。
+ *
+ * 为什么需要：0.6.42 之前 `rewriteSession()` 完全不写事件，旧日志**无法**从事件流恢复历史。
+ * 对拍工具需要一个可靠依据来区分"旧日志不可回溯（历史噪声）"与"新日志重放回归（真 bug）"——
+ * 靠"条数/前缀"猜是不行的（实测会把内容不一致误判成历史噪声）。这就是 DSH `session-format-v*` 的同一思路。
+ *
+ *   1 = 0.6.35–0.6.41：只有 appendMessages 双写，rewrite 无事件
+ *   2 = 0.6.42 起：rewriteSession 也写 `messages.replace`
+ */
+export const EVENT_LOG_FORMAT = 2;
+
 /** 中断时补的 tool 占位文案——与 `agent.js#finishTurn` 的既有文案保持逐字一致。 */
 export const INTERRUPTED_TOOL_CONTENT = '（已中断，未执行）';
 
