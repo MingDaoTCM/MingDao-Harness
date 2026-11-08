@@ -81,6 +81,8 @@ const SUITES = [
   ['event-cursor', 'node', ['test/event-cursor.js']],
   // v0.6.41：预检自身（守卫必须有守卫）
   ['preflight', 'node', ['test/preflight.js']],
+  // v0.7.0 B2-a：事件完整性（rewriteSession 也必须记事件）
+  ['event-completeness', 'node', ['test/event-completeness.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];
