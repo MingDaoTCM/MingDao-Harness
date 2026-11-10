@@ -3,6 +3,48 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.7.1（2026-11-10）— 四份审计报告的止血与性能
+
+> 本版是四份审计报告（S/H/M/A）的**止血与性能**收口。**用户可见的翻车级修复**：桌面自动更新
+> 主路径从 legacy 单钥改为密钥环 `UPDATE_PUBLIC_KEYS`——否则 0.6.45 起发布的 current 签名会被
+> 真实客户端「验签失败 → 拒绝」。**用户可见**：只读 git 不再能触发外部 diff/textconv 程序；
+> 会话加载更快（事件读放大修复）。完整说明见 `RELEASE-NOTES-0.7.1.md`。
+
+### 一、止血（H-02，翻车级）
+
+- `desktop/update-verify.js`：`evaluateUpdate` 主路径改用密钥环 `UPDATE_PUBLIC_KEYS`（含
+  `role: 'current'`），不再走 legacy 单钥；否则 0.6.45 起发布的 current 签名会被「验签失败 → 拒绝」。
+
+### 二、性能
+
+- **S4 事件读放大**：`readLastEventSeq` 导出、`loadSession` 一次解析、`diffMessages` 结构化、
+  `readAfter` 尾窗游标、`sessionPreview` 8KB 上限、消息计数缓存。
+- **H-7 会话列表**：N×2 读收为一次读。
+- **H-6 模型发现**：并发 + 负缓存 + single-flight。
+- **M-6 SSE 背压**：`write` 返回 false 时暂停、`drain` 恢复、128 帧未消费即断开。
+
+### 三、正确性
+
+- **S-5 会话写锁**：`withFileLockSync`；`state-locks` 16 子进程场景。
+- **S-1/S-2/H-2 agent outcome 漏网出口**：`allSettled` 抽 `runToolBatch`、`markOutcome` 补点、
+  `toolOk` 顶层解析。
+
+### 四、安全
+
+- **H-01 只读 git 外部 diff/textconv 围栏**：PoC 级回归 C2-14/15。
+
+### 五、门禁接线
+
+- **S2**：`ci.yml` 增加 tag 触发；`desktop.yml` 新增 `test` job，`publish` 依赖 `needs: [build, test]`。
+- **M-11**：`session-events` 注册进 `test/run-all.mjs`（52 套）；覆盖率步骤名诚实化。
+
+### 六、已知遗留（本轮为控风险未做）
+
+- S-3 事件 append 与 S-5 会话写锁仍用同步锁（审计点名要异步化）；覆盖率门禁仍关闭（趋势参考）；
+  strict 靠 1270 处 `@type {any}`；agent.js 仍未拆分；`.sig` 默认档仍 warn-and-install。
+- 未做：Windows Authenticode、版本语义重整、Pack 子进程隔离。
+
+
 ## v0.7.0（2026-11-08）— 会话真源翻转为事件日志（可一键回退）
 
 > **本版把会话读取真源从 `.jsonl` 消息数组翻到事件日志（`events`）**——0.x 的 minor，
