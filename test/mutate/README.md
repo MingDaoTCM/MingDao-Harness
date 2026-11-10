@@ -19,7 +19,11 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：812（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：828（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+
+> v0.7.1（性能 H-7 / M-07）：新增 `batch87-read-path`（8 条）——readLastEventSeq 去掉 export、
+> 路由 lastEventSeq 回退 readAfter、diffMessages 退回整段 stringify、readAfter 无视 after 仍全量、
+> sessionPreview 又全文件读、loadSession 解析多次、计数缓存 key 不含 size、尾窗读成全量（820 → 828）。
 
 > v0.7.1（性能 H-6 / M-6）：新增 `batch89-model-sse`（8 条）——并发退成串行、负缓存 TTL 恒命中、
 > 成功不清负缓存、AbortController 死代码复活、res.write 返回值被忽略、drain 未监听、
