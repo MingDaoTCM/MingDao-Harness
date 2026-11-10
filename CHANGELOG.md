@@ -3,6 +3,24 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.7.2（2026-11-10）— 修复桌面更新无法自动关闭
+
+> 本版是**桌面端补丁**：macOS 点「立即重启安装」后应用不退出、需手动关闭才能继续安装。
+> **用户可见**：更新安装现在会真正自动退出并完成。完整说明见 `RELEASE-NOTES-0.7.2.md`。
+
+### 修复
+
+- `desktop/main.js`：放行分支在 `quitAndInstall()` 前**显式**置位 `autoInstallOnAppQuit = true` 与
+  `quitting = true`，保证「重启安装」一定先真正退出应用。
+  - 根因①：`autoInstallOnAppQuit` 曾因「拒绝更新」被置 false 时，`quitAndInstall()` 会直接
+    `install()` 而不 `app.quit()` → 运行中的 .app 无法被替换（macOS 替换 bundle 需进程先退）。
+  - 根因②：托盘 close 处理器在 `quitting` 未置位时把窗口 `hide` 而非 `close`。
+
+### 发布流程
+
+- `docs/RELEASE-CHECKLIST.md`：更新来源签名发布**必须排在 `gen-update-feeds` / `update-downloads`
+  之前**（v0.7.1 空窗事故：feed 已翻到新版、`.sig` 仍 404 → 客户端弹「未验证来源签名」）。
+
 ## v0.7.1（2026-11-10）— 四份审计报告的止血与性能
 
 > 本版是四份审计报告（S/H/M/A）的**止血与性能**收口。**用户可见的翻车级修复**：桌面自动更新
