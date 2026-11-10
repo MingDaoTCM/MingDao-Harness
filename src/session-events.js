@@ -295,10 +295,13 @@ function lastSeqInText(text) {
 
 /**
  * 读文件尾的 last seq；尾窗读不到且文件更大时回退整文件（只发生在文件损坏/超长时）。
+ *
+ * v0.7.1 性能：**导出**给路由层取 `lastEventSeq`（`/api/session` 只想要一个整数，此前为了它
+ * 调 `readAfter(...,0)` 整份解析，20k 事件时约 13.9ms；这里只读 64KB 尾窗）。
  * @param {string} file
  * @returns {{lastSeq: number, size: number, endsWithNewline: boolean}}
  */
-function readLastEventSeq(file) {
+export function readLastEventSeq(file) {
   const tail = readTail(file);
   let lastSeq = lastSeqInText(tail.text);
   if (!lastSeq && tail.size > Buffer.byteLength(tail.text, 'utf8')) {
@@ -455,13 +458,26 @@ export function readEvents(eventFile) {
  * @returns {{ok: boolean, error: string|null, events: SessionEvent[], lastSeq: number, skipped: number}}
  */
 export function readAfter(eventFile, afterSeq = 0) {
-  const read = readEvents(eventFile);
-  if (!read.ok) return { ok: false, error: read.error, events: [], lastSeq: 0, skipped: read.skipped };
   const n = Number(afterSeq);
   const after = Number.isSafeInteger(n) && n > 0 ? n : 0;
-  let lastSeq = 0;
-  for (const ev of read.events) if (ev.seq > lastSeq) lastSeq = ev.seq;
-  return { ok: true, error: null, events: read.events.filter((ev) => ev.seq > after), lastSeq, skipped: read.skipped };
+  const file = path.resolve(String(eventFile || ''));
+  let tail;
+  try {
+    tail = readLastEventSeq(file);
+  } catch (err) {
+    return { ok: false, error: String(/** @type {any} */ (err)?.message ?? err), events: [], lastSeq: 0, skipped: 0 };
+  }
+  // v0.7.1 性能（读放大修复·降级策略）：事件是 append-only 且 seq 单调，尾窗的最后一条 seq 就是
+  // 整条日志的最大 seq。`after` 已追平/超尾时直接空窗口返回，**不再整份解析**——SSE 续订每 15s
+  // 轮询一次，绝大多数都落在这条近尾路径上（报告实测 20k 事件 cursor 与 full 同 ~13.9ms 的根因）。
+  if (tail.lastSeq === 0 || after >= tail.lastSeq) {
+    return { ok: true, error: null, events: [], lastSeq: tail.lastSeq, skipped: 0 };
+  }
+  // 需要中间段：尾窗给不出 `after` 之后的事件，退化为整份解析（after 远离末尾时的既有全量路径；
+  // `events.idx` 字节偏移侧车是 v0.8 的事，本版只做到「近尾不整份」）。
+  const read = readEvents(file);
+  if (!read.ok) return { ok: false, error: read.error, events: [], lastSeq: tail.lastSeq, skipped: read.skipped };
+  return { ok: true, error: null, events: read.events.filter((ev) => ev.seq > after), lastSeq: tail.lastSeq, skipped: read.skipped };
 }
 
 /**
@@ -623,16 +639,18 @@ export function synthClosers(dangling, { at = null, reason = '' } = {}) {
  *
  * @param {string} eventFile 事件文件（`.events.ndjson`，不是会话 `.jsonl`）
  * @param {{reason?: string}} [opts]
+ * @param {{ok: boolean, error: string|null, events: any[], skipped: number}|null} [pre] v0.7.1 性能：调用方已用 `readEvents`
+ *   解析好的产物（`loadSession` 一次解析喂给派生与修补）；缺省时自己读。传入时仍保留「skipped>0 拒绝修补」。
  * @returns {{ok: boolean, error: string|null, repaired: number, dangling: {asks:any[],tools:any[],turns:any[]}, disabled?: boolean}}
  */
-export function repairEventLog(eventFile, { reason = '' } = {}) {
+export function repairEventLog(eventFile, { reason = '' } = {}, pre = null) {
   /** @type {{asks:any[],tools:any[],turns:any[]}} */
   const empty = { asks: [], tools: [], turns: [] };
   try {
     const file = path.resolve(String(eventFile || ''));
     if (!String(eventFile || '')) return { ok: false, error: '事件文件路径为空', repaired: 0, dangling: empty };
     if (!eventLogEnabled()) return { ok: true, error: null, repaired: 0, dangling: empty, disabled: true };
-    const read = readEvents(file);
+    const read = pre && pre.ok ? pre : readEvents(file);
     if (!read.ok) return { ok: false, error: read.error ?? '读取事件日志失败', repaired: 0, dangling: empty };
     if (read.skipped > 0) {
       return { ok: false, error: `事件日志损坏（跳过 ${read.skipped} 行），拒绝修补`, repaired: 0, dangling: empty };
@@ -778,12 +796,59 @@ export function replayToMessages(events) {
 }
 
 /**
+ * 单条消息的 `content` 结构化比较（v0.7.1 性能）：普通字符串直接 `===`，非字符串才退回 JSON
+ * 序列化等价比较。与旧实现「整条 JSON.stringify 后比字符串」严格等价——旧实现里 content 就嵌在
+ * 整串里、键序固定，逐字段独立比较不会改变判定（`m?.content ?? ''` 把 null/undefined 归一成 `''`）。
+ * @param {any} a
+ * @param {any} b
+ * @returns {boolean}
+ */
+function sameContent(a, b) {
+  const ca = a?.content ?? '';
+  const cb = b?.content ?? '';
+  if (ca === cb) return true;
+  try {
+    return JSON.stringify(ca) === JSON.stringify(cb);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 单条消息的结构化等价判定（与旧 `norm` 整条 stringify 严格等价）：
+ *   · `role` 一律 `String(m?.role ?? '')`；
+ *   · `content` 见 `sameContent`；
+ *   · `tool_calls` 只在两侧都是数组时参与比较，且只比 id（`String(t?.id ?? '')` 排序后）——
+ *     name/arguments 差异**不**判不等（与旧实现一致）；仅这一处对 id 数组做序列化比较；
+ *   · `tool_call_id` 的「是否存在」（`!= null`）与字符串值分别比较。
+ * @param {any} a
+ * @param {any} b
+ * @returns {boolean}
+ */
+function sameMessageShape(a, b) {
+  if (String(a?.role ?? '') !== String(b?.role ?? '')) return false;
+  if (!sameContent(a, b)) return false;
+  const ta = Array.isArray(a?.tool_calls);
+  const tb = Array.isArray(b?.tool_calls);
+  if (ta !== tb) return false;
+  if (ta && JSON.stringify(a.tool_calls.map((/** @type {any} */ t) => String(t?.id ?? '')).sort()) !== JSON.stringify(b.tool_calls.map((/** @type {any} */ t) => String(t?.id ?? '')).sort())) return false;
+  const ida = a?.tool_call_id != null ? String(a.tool_call_id) : null;
+  const idb = b?.tool_call_id != null ? String(b.tool_call_id) : null;
+  return ida === idb;
+}
+
+/**
  * 比较两个消息数组（v0.7.0 B2-b 从 `scripts/event-parity.mjs` 抽出的共享判据）。
  *
  * 逐条按 `role + content + tool_calls`（tool_calls 只比 id，排序后）比较；`_` 开头的运行时注记
  * 不落盘、不参与比较。**必须与 scripts/event-parity.mjs 的 `diffMessages` 保持同一语义**：
  * 对拍工具说「等价」的会话，`loadSession({eventSource:'events'})` 才能采用派生结果；两边判据
  * 一旦漂移，对拍结论与灰度读取就会互相打脸。
+ *
+ * v0.7.1 性能：从「逐条整段 JSON.stringify 后比字符串」改为结构化比较（见 `sameMessageShape`），
+ * 20k 条的两侧数组原本要做 4 万次整段序列化；现在普通字符串消息零序列化，只有 tool_calls 的
+ * id 数组做序列化比较，且语义与旧实现**逐字节等价**（由 `test/event-parity.js` /
+ * `test/event-source.js` 与 `test/session-read-path.js` 的对拍夹具共同钉住）。
  *
  * 为什么不直接 import 脚本：`scripts/` 不在 `package.json#files`（npm 安装形态没有它），
  * 且 tsconfig 会把脚本拉进类型检查；因此判据放在 src 侧，脚本侧保留同名实现（硬约束：本切片
@@ -797,15 +862,8 @@ export function diffMessages(a, b) {
   const A = Array.isArray(a) ? a : [];
   const B = Array.isArray(b) ? b : [];
   if (A.length !== B.length) return { ok: false, index: Math.min(A.length, B.length), reason: `条数不同：消息 ${A.length} vs 重放 ${B.length}` };
-  const norm = (/** @type {any} */ m) => {
-    /** @type {{role:string, content:any, tool_calls?:string[], tool_call_id?:string}} */
-    const out = { role: String(m?.role ?? ''), content: m?.content ?? '' };
-    if (Array.isArray(m?.tool_calls)) out.tool_calls = m.tool_calls.map((/** @type {any} */ t) => String(t?.id ?? '')).sort();
-    if (m?.tool_call_id != null) out.tool_call_id = String(m.tool_call_id);
-    return JSON.stringify(out);
-  };
   for (let i = 0; i < A.length; i += 1) {
-    if (norm(A[i]) !== norm(B[i])) return { ok: false, index: i, reason: `第 ${i + 1} 条不同` };
+    if (!sameMessageShape(A[i], B[i])) return { ok: false, index: i, reason: `第 ${i + 1} 条不同` };
   }
   return { ok: true, index: -1, reason: '' };
 }

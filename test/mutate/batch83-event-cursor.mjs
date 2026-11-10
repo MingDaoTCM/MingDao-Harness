@@ -113,7 +113,7 @@ M.mutate({
 M.mutate({
   name: '⑦ lastEventSeq 恒 0（/api/session 不报事件日志位置）',
   file: 'src/web/routes/domains/sessions.js',
-  from: '        lastEventSeq: readAfter(eventFileFor(path.join(home, \'sessions\', path.basename(file))), 0).lastSeq,',
+  from: '        lastEventSeq: readLastEventSeq(eventFileFor(path.join(home, \'sessions\', path.basename(file)))).lastSeq,',
   to: '        lastEventSeq: 0, // 变异：lastEventSeq 恒 0',
   expect: ['第一轮 chat 必须写入事件日志'],
   run: CURSOR,

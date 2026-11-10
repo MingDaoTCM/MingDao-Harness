@@ -3,7 +3,7 @@
 // v0.7.0 §1.1 切片 B1：`GET /api/events?file=&after=` 按 seq 游标只读事件日志（SSE 续订 / 跳号整窗重取）。
 import fs from 'node:fs';
 import path from 'node:path';
-import { eventFileFor, readAfter } from '../../../session-events.js';
+import { eventFileFor, readAfter, readLastEventSeq } from '../../../session-events.js';
 import {
   listSessions,
   loadSession,
@@ -27,13 +27,39 @@ import {
  * 只读文件、绝不改写；坏行/不可读文件按 0 条处理，不得让整个列表接口 500——
  * 真机上确实存在历史遗留的半截 JSONL（进程被 kill 时最后一行可能不完整）。
  * 标题沿用既有事实来源：会话文件名（自动标题 / 手工重命名都会落到文件名）。
+ *
+ * v0.7.1 性能（报告一 H-7 / 报告二 M-07）：消息计数从「每个会话读全文件数行」改为
+ * `sessionMessageCount` 的 **mtime+size 双键进程内缓存**（照 cachestats.js 的范式），
+ * 缓存命中时不读文件——`/api/state` 每 15s 轮询一次会话列表，读放大从此降为 O(变更文件)。
  * @param {string} file 会话文件绝对路径
  * @param {string} name 会话文件名
+ * @param {{mtimeMs?: number, size?: number}|null} [stat] listSessions 已拿到的 stat 信息
  * @returns {{messageCount:number,title:string}}
  */
-function sessionMeta(file, name) {
-  let messageCount = 0;
+function sessionMeta(file, name, stat = null) {
+  return { messageCount: sessionMessageCount(file, stat), title: name.replace(/\.jsonl$/, '') };
+}
+
+/** 进程内消息计数缓存：key=file → {mtimeMs, size, messageCount}（照 cachestats.js 的 mtime+size 范式）。 */
+const messageCountCache = new Map();
+
+/**
+ * 读会话文件的消息计数。mtime+size 双键缓存：命中时不读文件；未命中才读全文件数行。
+ * 追加/重写都会同时改 mtime 与 size，缓存自动失效（与 cachestats.js 的 `listCacheStatsStrict` 同款）。
+ * @param {string} file 会话文件绝对路径
+ * @param {{mtimeMs?: number, size?: number}|null} [stat] listSessions 已拿到的 stat 信息（缺省内部 statSync）
+ * @returns {number}
+ */
+export function sessionMessageCount(file, stat = null) {
   try {
+    const st = stat && Number.isFinite(Number(stat.mtimeMs)) && Number.isFinite(Number(stat.size))
+      ? stat
+      : fs.statSync(file);
+    const mtimeMs = Number(st.mtimeMs);
+    const size = Number(st.size);
+    const hit = messageCountCache.get(file);
+    if (hit && hit.mtimeMs === mtimeMs && hit.size === size) return hit.messageCount;
+    let messageCount = 0;
     const raw = fs.readFileSync(file, 'utf8');
     for (const line of raw.split('\n')) {
       if (!line.trim()) continue;
@@ -44,10 +70,12 @@ function sessionMeta(file, name) {
         // 单行损坏只跳过该行：旧会话/半截写入都不能把整个列表打挂。
       }
     }
+    messageCountCache.set(file, { mtimeMs, size, messageCount });
+    return messageCount;
   } catch {
     // 文件在 readdir 之后被删除/无权限：计数按 0，元数据仍可返回。
+    return 0;
   }
-  return { messageCount, title: name.replace(/\.jsonl$/, '') };
 }
 
 /**
@@ -67,7 +95,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     // v0.6.22（§3.84）：每项**只增** updatedAt / messageCount / title 三个字段；
     // file / mtime / label 的既有语义与顺序不变（前端 crumb、命令面板、同步等仍按旧字段消费）。
     const decorate = (/** @type {any} */ s, /** @type {string} */ label) => {
-      const meta = sessionMeta(path.join(home, 'sessions', path.basename(s.name)), s.name);
+      const meta = sessionMeta(path.join(home, 'sessions', path.basename(s.name)), s.name, { mtimeMs: s.mtime, size: s.size });
       return {
         file: s.name,
         mtime: s.mtime,
@@ -110,7 +138,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         // v0.7.0 §1.1 切片 B1：**事件游标**（event seq）——该会话事件日志的最大 seq；无日志为 0。
         // 注意：这是「每个会话跨轮单调」的事件日志编号，**不是** SSE 帧的 streamSeq（每个 task 从 1 起），
         // 两者互不推导；前端不得拿它去校验帧号（见 server.js#createSseWriter 的双游标说明）。
-        lastEventSeq: readAfter(eventFileFor(path.join(home, 'sessions', path.basename(file))), 0).lastSeq,
+        lastEventSeq: readLastEventSeq(eventFileFor(path.join(home, 'sessions', path.basename(file)))).lastSeq,
       });
     } catch {
       json(res, 404, { error: '会话不存在' });

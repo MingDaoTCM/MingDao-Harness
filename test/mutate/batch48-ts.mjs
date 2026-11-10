@@ -135,10 +135,11 @@ M.mutate({
   name: '⑨ 读取路径改写旧会话文件（回填 ts 落盘）',
   file: 'src/session.js',
   // v0.7.0 B2-b：loadSession 的返回值改成 `messages: result`（事件派生开关），锚点同步更新。
+  // v0.7.1 性能：loadSession 一次解析复用，`repairSessionEvents` 加第三参（预解析产物），锚点再次同步。
   // 记住：**锚点失配要让批次红**（"变异点未找到"），不要写成"找不到就跳过"——那等于守卫消失。
-  from: ['  repairSessionEvents(file, cfg);', '  return { file, messages: result };', '}'].join('\n'),
+  from: ['  repairSessionEvents(file, cfg, parsed && parsed.ok ? parsed : null);', '  return { file, messages: result };', '}'].join('\n'),
   to: [
-    '  repairSessionEvents(file, cfg);',
+    '  repairSessionEvents(file, cfg, parsed && parsed.ok ? parsed : null);',
     '  if (result.some((m) => !m.ts)) {',
     "    fs.writeFileSync(file, result.map((m) => JSON.stringify({ ...m, ts: new Date().toISOString() })).join('\\n') + '\\n');",
     '  }',

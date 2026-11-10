@@ -30,12 +30,13 @@ export function isConflictBackupName(n) {
  * 现在每个条目独立 try/catch：失败的**跳过并计数**（`skipped`），其余照常返回；
  * 同时打一条可见 warning（含文件名与原因），避免"少了几条"完全无感。
  * `listSessions()` 保持既有的数组返回形状（调用方很多），需要诊断时用本函数。
+ * v0.7.1 性能：条目新增 `size`（同一 statSync 顺带取回），供会话列表消息计数的 mtime+size 缓存。
  * @param {any} home
- * @returns {{ list: {file:string,name:string,mtime:number}[], skipped: {file:string,name:string,error:string}[] }}
+ * @returns {{ list: {file:string,name:string,mtime:number,size:number}[], skipped: {file:string,name:string,error:string}[] }}
  */
 export function listSessionsDetailed(home) {
   const dir = path.join(home, 'sessions');
-  /** @type {{file:string,name:string,mtime:number}[]} */
+  /** @type {{file:string,name:string,mtime:number,size:number}[]} */
   const list = [];
   /** @type {{file:string,name:string,error:string}[]} */
   const skipped = [];
@@ -53,7 +54,10 @@ export function listSessionsDetailed(home) {
     if (!f.endsWith('.jsonl') || isEventLogName(f) || isConflictBackupName(f)) continue;
     const file = path.join(dir, f);
     try {
-      list.push({ file, name: f, mtime: fs.statSync(file).mtimeMs });
+      // v0.7.1 性能：同一次 statSync 同时取 mtime 与 size（size 给会话列表消息计数的 mtime+size 缓存用，
+      // 不再为计数单独 stat）。
+      const st = fs.statSync(file);
+      list.push({ file, name: f, mtime: st.mtimeMs, size: st.size });
     } catch (err) {
       skipped.push({ file, name: f, error: String(/** @type {any} */ (err)?.code || /** @type {any} */ (err)?.message || err) });
     }
@@ -252,9 +256,11 @@ const repairAttempted = new Set();
  *   · `cfg.eventLog === false`（或环境变量关闭）时完全不碰事件文件。
  * @param {any} file 会话文件（不是事件文件；内部换算成 `<session>.events.ndjson`）
  * @param {any} [cfg] 传入时尊重 `cfg.eventLog === false`
+ * @param {{ok: boolean, error: string|null, events: any[], skipped: number}|null} [pre] v0.7.1 性能：调用方已 `readEvents` 解析好的
+ *   产物（loadSession 一次解析复用）；缺省时内部读。
  * @returns {{ok:boolean,error:string|null,repaired:number,dangling:{asks:any[],tools:any[],turns:any[]},skipped?:boolean,deduped?:boolean}}
  */
-export function repairSessionEvents(file, cfg = null) {
+export function repairSessionEvents(file, cfg = null, pre = null) {
   /** @type {{asks:any[],tools:any[],turns:any[]}} */
   const empty = { asks: [], tools: [], turns: [] };
   try {
@@ -267,7 +273,7 @@ export function repairSessionEvents(file, cfg = null) {
     // 先登记再修补：即使修补失败也不再重试（同一会话每进程只跑一次是硬约束）。
     repairAttempted.add(key);
     const eventFile = eventFileFor(key);
-    const result = repairEventLog(eventFile, { reason: '进程中断：启动/首次读取会话时合成闭合事件' });
+    const result = repairEventLog(eventFile, { reason: '进程中断：启动/首次读取会话时合成闭合事件' }, pre);
     if (!result.ok) warnEventFailure(eventFile, result.error ?? null);
     return result;
   } catch (err) {
@@ -286,20 +292,26 @@ export function repairSessionEvents(file, cfg = null) {
  * 这三种都是灰度期常态（旧会话本来就没有 `messages.replace`），调用方必须**静默**回退到
  * 消息数组，不刷 warn；只有「格式够新、派生出来了、但与消息文件对拍不一致」才是需要可见的异常。
  * @param {any} file 会话文件（.jsonl）
+ * @param {any[]|null} [events] v0.7.1 性能：调用方已用 `readEvents` 解析好的事件数组（loadSession 一次解析复用）；
+ *   缺省（null）时自己读。
  * @returns {any[]|null}
  */
-function messagesFromEvents(file) {
+function messagesFromEvents(file, events = null) {
   const eventFile = eventFileFor(file);
   if (!eventFile) return null;
   try {
-    if (!fs.existsSync(eventFile)) return null;
-    const read = readEvents(eventFile);
-    if (!read.ok) return null;
+    let list = events;
+    if (list == null) {
+      if (!fs.existsSync(eventFile)) return null;
+      const read = readEvents(eventFile);
+      if (!read.ok) return null;
+      list = read.events;
+    }
     // 与 scripts/event-parity.mjs 同一判据：format >= EVENT_LOG_FORMAT 才认为日志可完整回溯
     // （旧日志没有 rewrite 记录，派生出来必然缺窗口，不能拿它当读取真源）。
-    const newFormat = read.events.some((ev) => ev.type === 'session.start' && Number(ev.data?.format) >= EVENT_LOG_FORMAT);
+    const newFormat = list.some((ev) => ev.type === 'session.start' && Number(ev.data?.format) >= EVENT_LOG_FORMAT);
     if (!newFormat) return null;
-    return replayToMessages(read.events);
+    return replayToMessages(list);
   } catch {
     // 事件侧车是旁路：任何异常都只意味着「这次不用事件源」，绝不能让会话读不出来。
     return null;
@@ -331,8 +343,15 @@ export function loadSession(file, cfg = null) {
     } catch {}
   }
   let result = messages;
-  if (normalizeEventSource(cfg?.eventSource) === EVENT_SOURCE_EVENTS) {
-    const derived = messagesFromEvents(file);
+  // v0.7.1 性能：事件真源翻转后，一次 loadSession 之前要读事件日志**两次**（派生 + 修补）。
+  // 这里只 `readEvents` 一次，把同一份产物同时喂给 `messagesFromEvents` 与 `repairSessionEvents`。
+  // 读失败/无侧车时 `parsed` 为 null，二者各自按旧语义兜底（派生静默回退、修补按需自读）。
+  const wantEvents = normalizeEventSource(cfg?.eventSource) === EVENT_SOURCE_EVENTS;
+  const eventFile = eventFileFor(file);
+  const parsed = wantEvents && eventFile && fs.existsSync(eventFile) ? readEvents(eventFile) : null;
+  const events = parsed && parsed.ok ? parsed.events : null;
+  if (wantEvents) {
+    const derived = messagesFromEvents(file, events);
     if (derived) {
       const d = diffMessages(messages, derived);
       if (d.ok) result = derived;
@@ -352,25 +371,67 @@ export function loadSession(file, cfg = null) {
   // v0.6.40：消息读完后顺带闭合悬空事件。失败只 warn（repairSessionEvents 内部吞掉），
   // 返回值与消息数组一字不动——事件侧车坏了/修不了，会话照样可读。
   // v0.7.0 B2-b：放在事件派生之后，派生读到的是修补前的日志（与 scripts/event-parity.mjs 同口径）。
-  repairSessionEvents(file, cfg);
+  repairSessionEvents(file, cfg, parsed && parsed.ok ? parsed : null);
   return { file, messages: result };
 }
 
 // 会话预览：第一条用户消息（用于会话选择器）
+/** 预览头部读取窗口：首条用户消息必在文件开头，8KB 足够覆盖绝大多数会话的开头几条消息。 */
+const PREVIEW_HEAD_BYTES = 8 * 1024;
+
+/**
+ * 从文本里找第一条 user 消息的预览串；找不到返回 null。
+ * 注意：JSON.parse **不捕获**——坏行让它上抛，由 sessionPreview 的外层 catch 折成「(无法读取)」
+ * （与旧实现逐字一致：旧实现同样不捕获单行 parse 失败）。
+ * @param {string} text
+ * @returns {string|null}
+ */
+function previewFromText(text) {
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue;
+    const m = JSON.parse(line);
+    if (!m || typeof m !== 'object') continue; // 审计 B4：null/非对象行跳过而非中断预览
+    if (m.role === 'user') {
+      const s = String(m.content).split('\n')[0].trim().slice(0, 60);
+      return s || '(空消息)';
+    }
+  }
+  return null;
+}
+
+/**
+ * 只读文件头 PREVIEW_HEAD_BYTES 字节（v0.7.1 性能：会话列表 N×2 全文件读的一半来源）。
+ * 头部没覆盖整个文件时，丢弃被截断的最后半行，避免把它当坏行误判。
+ * @param {string} file
+ * @returns {string}
+ */
+function readPreviewHead(file) {
+  const fd = fs.openSync(file, 'r');
+  try {
+    const size = fs.fstatSync(fd).size;
+    const len = Math.min(size, PREVIEW_HEAD_BYTES);
+    const buf = Buffer.alloc(len);
+    if (len > 0) fs.readSync(fd, buf, 0, len, 0);
+    let text = buf.toString('utf8');
+    if (len < size && !text.endsWith('\n')) {
+      const cut = text.lastIndexOf('\n');
+      text = cut >= 0 ? text.slice(0, cut) : '';
+    }
+    return text;
+  } finally {
+    try {
+      fs.closeSync(fd);
+    } catch {}
+  }
+}
+
 /** @param {any} file */
 export function sessionPreview(file) {
   try {
-    const raw = fs.readFileSync(file, 'utf8');
-    for (const line of raw.split('\n')) {
-      if (!line.trim()) continue;
-      const m = JSON.parse(line);
-      if (!m || typeof m !== 'object') continue; // 审计 B4：null/非对象行跳过而非中断预览
-      if (m.role === 'user') {
-        const s = String(m.content).split('\n')[0].trim().slice(0, 60);
-        return s || '(空消息)';
-      }
-    }
-    return '(无内容)';
+    // 首条用户消息必在头部：找到即返回；找不到（首条超长 / 首条非 user / 文件极小）再读全量兜底。
+    const found = previewFromText(readPreviewHead(file));
+    if (found) return found;
+    return previewFromText(fs.readFileSync(file, 'utf8')) || '(无内容)';
   } catch {
     return '(无法读取)';
   }
