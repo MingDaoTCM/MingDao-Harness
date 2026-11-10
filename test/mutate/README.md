@@ -19,7 +19,11 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：804（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：812（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+
+> v0.7.1（性能 H-6 / M-6）：新增 `batch89-model-sse`（8 条）——并发退成串行、负缓存 TTL 恒命中、
+> 成功不清负缓存、AbortController 死代码复活、res.write 返回值被忽略、drain 未监听、
+> 写入异常被吞、背压上限被去掉（804 → 812）。
 
 > v0.7.0 B2-b：新增 `batch86-event-source`（10 条）——对拍失败也采用派生、旧格式也派生、
 > cfg 非法时回落 messages、回退时不 warn、warn 不带差异位置、派生结果不深拷贝、默认值回退成

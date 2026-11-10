@@ -979,10 +979,32 @@ function isChatModel(/** @type {any} */ id) {
 // 返回 { models: [名称], fromCache, fetchedAt }；失败返回 { error }
 const inflight = new Map(); // 同服务商并发去重：合并为同一请求
 
+// v0.7.1（审计报告1 H-6 / 自审 H-6）：短期负缓存。
+// 某服务商探测失败后 TTL 内直接跳过、不再出网——网络不可达时每次打开设置面板都重演最坏
+// 8s×N，负缓存把「失败」本身也缓存起来；TTL 必须短（30~60s），否则「引擎刚起 / 网络刚恢复」
+// 这类瞬时失败会被长期误判。成功探测即清除；`force` 仍强制重试（绕过负缓存）。
+export const NEGATIVE_TTL_MS = 45 * 1000;
+/** 负缓存：providerName -> { failUntil: epoch ms }。 */
+const negativeCache = new Map();
+
+/**
+ * 负缓存是否命中（纯函数，便于断言/变异）：failUntil 必须是数字且尚未过期。
+ * @param {{failUntil?: number}|undefined} entry
+ * @param {number} [now]
+ * @returns {boolean}
+ */
+export function negativeCacheHit(/** @type {{failUntil?: number}|undefined} */ entry, /** @type {number} */ now = Date.now()) {
+  return typeof entry?.failUntil === 'number' && now < entry.failUntil;
+}
+
 export async function fetchProviderModels(/** @type {any} */ cfg, /** @type {any} */ providerName, { force = false } = {}) {
   const base = providerBaseUrl(cfg, providerName).replace(/\/+$/, '');
   const key = providerApiKey(providerName);
   if (!base || !key) return { error: '该服务商未设置 API Key' };
+  // v0.7.1（H-6）负缓存：失败后 TTL 内直接跳过、不出网；force 仍强制重试。
+  if (!force && negativeCacheHit(negativeCache.get(providerName))) {
+    return { error: '该服务商近期探测失败，已短期跳过（负缓存）' };
+  }
   const cache = loadCache();
   const entry = cache[providerName];
   if (!force && entry && Date.now() - entry.fetchedAt < TTL_MS && Array.isArray(entry.models)) {
@@ -990,8 +1012,6 @@ export async function fetchProviderModels(/** @type {any} */ cfg, /** @type {any
   }
   if (!force && inflight.has(providerName)) return inflight.get(providerName);
   const p = (async () => {
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 8000);
     try {
       // v0.6.2（代码审计 P2-7 的普查）：这里也是 `redirect: 'follow'`——自动跟随且不逐跳复检。
       // 迁到 safe-fetch 单一来源。allowPrivate: 服务商端点是**用户自己配置**的
@@ -1005,7 +1025,10 @@ export async function fetchProviderModels(/** @type {any} */ cfg, /** @type {any
         allowPrivate: true,
         headers: { Authorization: `Bearer ${key}` },
       });
-      if (_r.error) return { error: _r.error };
+      if (_r.error) {
+        negativeCache.set(providerName, { failUntil: Date.now() + NEGATIVE_TTL_MS });
+        return { error: _r.error };
+      }
       let j = /** @type {any} */ (null);
       try {
         j = JSON.parse(String(_r.text ?? ''));
@@ -1014,19 +1037,22 @@ export async function fetchProviderModels(/** @type {any} */ cfg, /** @type {any
         .map((/** @type {any} */ m) => String(m?.id || '').trim())
         .filter((/** @type {any} */ id) => id && isChatModel(id))
         .slice(0, 200);
-      if (!list.length) return { error: '接口未返回可用模型' };
+      if (!list.length) {
+        negativeCache.set(providerName, { failUntil: Date.now() + NEGATIVE_TTL_MS });
+        return { error: '接口未返回可用模型' };
+      }
       // 锁内重读再改（v0.7.0 §1.3）：两个进程同时刷新不同服务商时，各自的名单都要在。
       const written = saveCache((cache2) => {
         cache2[providerName] = { models: list, fetchedAt: Date.now() };
         return cache2;
       });
       void written; // 失败已在 saveCache 内 warn 并返回 {ok:false}
+      negativeCache.delete(providerName); // v0.7.1（H-6）：成功即清除负缓存
       return { models: list, fromCache: false, fetchedAt: Date.now() };
     } catch (e) {
       const ee = /** @type {any} */ (e);
+      negativeCache.set(providerName, { failUntil: Date.now() + NEGATIVE_TTL_MS });
       return { error: ee.name === 'AbortError' ? '请求超时（8s）' : ee.message };
-    } finally {
-      clearTimeout(timer);
     }
   })();
   inflight.set(providerName, p);
@@ -1194,6 +1220,20 @@ export async function resolveRoutingDefaults(/** @type {any} */ cfg, { force = f
   return { planner, executor, offline: planner.offline || executor.offline, note };
 }
 
+/**
+ * 并发探测多个服务商（v0.7.1 H-6：把串行 `for + await` 改成 `Promise.all`）。
+ * 依赖注入 `fetchModels`：生产传 `fetchProviderModels`，测试传带延迟的桩以断言
+ * 「总耗时≈单次而非串行累加」。single-flight 由 `fetchProviderModels` 内部的 `inflight`
+ * 保证——本函数只让**不同**服务商并行，列表里每个 provider 只出现一次，不会重复出网。
+ * @param {any} cfg
+ * @param {Array<[string, any]>} providers
+ * @param {(cfg: any, name: string) => Promise<any>} fetchModels
+ * @returns {Promise<Array<{pname: string, pp: any, dynamic: any}>>}
+ */
+export async function probeProviderModels(/** @type {any} */ cfg, /** @type {Array<[string, any]>} */ providers, /** @type {(cfg: any, name: string) => Promise<any>} */ fetchModels) {
+  return Promise.all(providers.map(async ([pname, pp]) => ({ pname, pp, dynamic: await fetchModels(cfg, pname) })));
+}
+
 // 合并可用模型列表：只含已设置 Key 的服务商；动态名单优先、预设回退；自定义模型恒在。
 //
 // v0.6.13（B）：**每个条目都要能看出"来自哪个服务商/端点"**。此前自定义条目只有
@@ -1209,10 +1249,10 @@ export async function availableModels(/** @type {any} */ cfg, /** @type {any} */
   // 原来的能力/来源说明保留到 `detail` 字段（下拉 title / 提示可读）。
   // 出网请求的 model 字段只从 config.model / state.modelName 取，**永不**从 label 取。
   const modelLabels = normalizeModelLabels(cfg?.modelLabels, { warn: false });
-  for (const [pname, pp] of Object.entries(PROVIDERS)) {
-    if (pname === 'custom') continue;
-    if (!providerHasKey(pname)) continue;
-    const dynamic = await fetchProviderModels(cfg, pname);
+  // v0.7.1（H-6）：并发探测所有已设 Key 的服务商（总耗时≈单次而非串行累加）。
+  const withKey = Object.entries(PROVIDERS).filter(([pname]) => pname !== 'custom' && providerHasKey(pname));
+  const probed = await probeProviderModels(cfg, withKey, fetchProviderModels);
+  for (const { pname, pp, dynamic } of probed) {
     // §3.67：拉取失败时用内置名单，但必须**明确标成离线兜底**——
     // 否则界面会把这些可能过期的名字当成「官方实时名单」展示。
     const offline = Boolean(dynamic?.error) && !dynamic?.models?.length;

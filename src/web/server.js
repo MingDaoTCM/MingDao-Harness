@@ -317,19 +317,78 @@ function readBody(req, limit = 40 * 1024 * 1024) {
 //
 // 心跳 progress 也走这一个函数——它同样是状态更新，跳号检测不能漏它。
 // ---------------------------------------------------------------------------
+// v0.7.1（审计报告1 M-6 / 报告2 M-08）：SSE 背压。
+// 此前 `res.write(...)` 的返回值被忽略——缓冲区满时仍继续写，慢读客户端会让服务端为单个连接
+// 无界缓存 SSE 帧；写入异常也被空 catch 吞掉。现在：
+//   · 检查 res.write 返回值：false → 暂停后续写入，等 'drain' 恢复（恢复前积压的帧有界排队）；
+//   · 写入异常显式 warn（每连接一次）并停止该连接的后续写入；
+//   · 用帧计数做保守上限：积压超过上限即断开慢客户端（客户端按 streamSeq 跳号整窗重取）。
+// streamSeq 仍在**每次 send 时单调 +1**，帧格式逐字不变——暂停/断线都不会让序号出现空洞。
+export const SSE_MAX_BUFFERED_FRAMES = 128;
+
 /**
  * 为一个 task 创建 SSE 写入器（计数器闭包在该 task 内，`handleChat` 每次请求新建一个）。
  * @param {any} res
  * @param {string} taskId
  * @returns {(obj: any) => void}
  */
-function createSseWriter(res, taskId) {
+export function createSseWriter(res, taskId) {
   let streamSeq = 0;
-  return (obj) => {
+  let paused = false;   // 上次 res.write 返回 false：暂停后续写入，等 drain
+  let stopped = false;  // 写异常 / 背压超限：不再写任何帧
+  let warned = false;   // 写异常只 warn 一次
+  /** @type {string[]} */
+  const queue = [];     // paused 期间积压的帧（有界）
+
+  const stop = (/** @type {string} */ reason) => {
+    if (stopped) return;
+    stopped = true;
+    queue.length = 0;
+    if (!warned) {
+      warned = true;
+      try {
+        console.warn(`[MingDao] ⚠ SSE 写入中止（${taskId}）：${reason}`);
+      } catch {}
+    }
+    // 释放慢客户端连接：断线后客户端按 streamSeq 跳号整窗重取。
     try {
-      streamSeq += 1;
-      res.write(`id: ${streamSeq}\ndata: ${JSON.stringify({ ...obj, taskId, streamSeq })}\n\n`);
-    } catch {}
+      res.end();
+    } catch {
+      try {
+        res.destroy();
+      } catch {}
+    }
+  };
+
+  const writeNow = (/** @type {string} */ frame) => {
+    try {
+      if (res.write(frame) === false) paused = true;
+    } catch (e) {
+      const ee = /** @type {any} */ (e);
+      stop(`写入异常：${String(ee?.message || ee)}`);
+    }
+  };
+
+  const flush = () => {
+    if (paused || stopped) return;
+    while (queue.length && !paused && !stopped) writeNow(/** @type {string} */ (queue.shift()));
+  };
+
+  res.on('drain', () => {
+    paused = false;
+    flush();
+  });
+
+  return (obj) => {
+    if (stopped) return;
+    streamSeq += 1;
+    const frame = `id: ${streamSeq}\ndata: ${JSON.stringify({ ...obj, taskId, streamSeq })}\n\n`;
+    if (paused) {
+      queue.push(frame);
+      if (queue.length > SSE_MAX_BUFFERED_FRAMES) stop('背压超限（慢客户端），已断开连接');
+      return;
+    }
+    writeNow(frame);
   };
 }
 
