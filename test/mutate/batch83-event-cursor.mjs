@@ -21,29 +21,8 @@ const CURSOR = () => M.suite('test/event-cursor.js');
 M.mutate({
   name: '① streamSeq 全局递增（跨 task 共享）',
   file: 'src/web/server.js',
-  from: [
-    'function createSseWriter(res, taskId) {',
-    '  let streamSeq = 0;',
-    '  return (obj) => {',
-    '    try {',
-    '      streamSeq += 1;',
-    '      res.write(`id: ${streamSeq}\\ndata: ${JSON.stringify({ ...obj, taskId, streamSeq })}\\n\\n`);',
-    '    } catch {}',
-    '  };',
-    '}',
-  ].join('\n'),
-  to: [
-    'let globalStreamSeq = 0; // 变异：streamSeq 全局递增（跨 task 共享）',
-    'function createSseWriter(res, taskId) {',
-    '  return (obj) => {',
-    '    try {',
-    '      globalStreamSeq += 1;',
-    '      const streamSeq = globalStreamSeq;',
-    '      res.write(`id: ${streamSeq}\\ndata: ${JSON.stringify({ ...obj, taskId, streamSeq })}\\n\\n`);',
-    '    } catch {}',
-    '  };',
-    '}',
-  ].join('\n'),
+  from: ['export function createSseWriter(res, taskId) {', '  let streamSeq = 0;'].join('\n'),
+  to: ['export function createSseWriter(res, taskId) {', '  let streamSeq = 1; // 变异：首帧从 2 起（streamSeq 不再 per-task 从 1）'].join('\n'),
   expect: ['每个 task 的 SSE streamSeq 必须从 1 起'],
   run: CURSOR,
 });
@@ -76,8 +55,8 @@ M.mutate({
 M.mutate({
   name: '④ after 过滤用 >=（重帧被当成新帧）',
   file: 'src/session-events.js',
-  from: '  return { ok: true, error: null, events: read.events.filter((ev) => ev.seq > after), lastSeq, skipped: read.skipped };',
-  to: '  return { ok: true, error: null, events: read.events.filter((ev) => ev.seq >= after), lastSeq, skipped: read.skipped }; // 变异：after 过滤用 >=',
+  from: '  return { ok: true, error: null, events: read.events.filter((ev) => ev.seq > after), lastSeq: tail.lastSeq, skipped: read.skipped };',
+  to: '  return { ok: true, error: null, events: read.events.filter((ev) => ev.seq >= after), lastSeq: tail.lastSeq, skipped: read.skipped }; // 变异：after 过滤用 >=',
   expect: ['readAfter(after=2) 只返回 seq > 2 的事件（严格大于，重帧不算）'],
   run: CURSOR,
 });
@@ -123,14 +102,11 @@ M.mutate({
 M.mutate({
   name: '⑧ 心跳帧不带 streamSeq（progress 被排除在流游标之外）',
   file: 'src/web/server.js',
-  from: [
-    '      streamSeq += 1;',
-    '      res.write(`id: ${streamSeq}\\ndata: ${JSON.stringify({ ...obj, taskId, streamSeq })}\\n\\n`);',
-  ].join('\n'),
+  from: ['    streamSeq += 1;', '    const frame = `id: ${streamSeq}\\ndata: ${JSON.stringify({ ...obj, taskId, streamSeq })}\\n\\n`;'].join('\n'),
   to: [
-    '      streamSeq += 1;',
-    "      const frame = obj?.type === 'progress' ? { ...obj, taskId } : { ...obj, taskId, streamSeq }; // 变异：心跳帧不带 streamSeq",
-    '      res.write(`id: ${streamSeq}\\ndata: ${JSON.stringify(frame)}\\n\\n`);',
+    '    streamSeq += 1;',
+    "    const payload = obj?.type === 'progress' ? { ...obj, taskId } : { ...obj, taskId, streamSeq }; // 变异：心跳帧不带 streamSeq",
+    '    const frame = `id: ${streamSeq}\\ndata: ${JSON.stringify(payload)}\\n\\n`;',
   ].join('\n'),
   expect: ['每一帧都必须带整数 streamSeq（含心跳 progress）'],
   run: CURSOR,
@@ -140,8 +116,8 @@ M.mutate({
 M.mutate({
   name: '⑨ 把工具配对 seq 覆盖成 streamSeq（双游标合流）',
   file: 'src/web/server.js',
-  from: '      res.write(`id: ${streamSeq}\\ndata: ${JSON.stringify({ ...obj, taskId, streamSeq })}\\n\\n`);',
-  to: '      res.write(`id: ${streamSeq}\\ndata: ${JSON.stringify({ ...obj, seq: streamSeq, taskId, streamSeq })}\\n\\n`); // 变异：双游标合流',
+  from: '    const frame = `id: ${streamSeq}\\ndata: ${JSON.stringify({ ...obj, taskId, streamSeq })}\\n\\n`;',
+  to: '    const frame = `id: ${streamSeq}\\ndata: ${JSON.stringify({ ...obj, seq: streamSeq, taskId, streamSeq })}\\n\\n`; // 变异：双游标合流',
   expect: ['双游标：toolStart 与 tool 的既有 seq 必须仍然同号（不得被 streamSeq 覆盖）'],
   run: CURSOR,
 });

@@ -188,6 +188,24 @@ function drainSteeringInto(steering, messages, io) {
  *   constraints?: any[],
  *   steering?: { drain?: () => any } }} params
  */
+
+// v0.7.1（审计报告1 S-2/H-2）：把"并行只读批 + allSettled 收集"抽成模块级 helper，
+// 避免把这段展开在 runTurnInner 里又把结构基线顶破（基线只许降不许升）。
+// allSettled：单个兄弟工具即使拒绝也绝不整体丢弃其余并行结果；rejected 记 {ok:false} 占位。
+async function runToolBatch(items, runTool, finishTool) {
+  const settled = await Promise.allSettled(
+    items.map((b) => {
+      const t0 = Date.now();
+      return runTool(b.prep).then((r) => ({ r, t0 }));
+    })
+  );
+  for (let idx = 0; idx < items.length; idx += 1) {
+    const s = settled[idx];
+    if (s.status === 'fulfilled') await finishTool(items[idx].prep, s.value.r, s.value.t0);
+    else await finishTool(items[idx].prep, JSON.stringify({ ok: false, error: String(s.reason?.message || s.reason) }), Date.now());
+  }
+}
+
 export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact, sessionRef, onUsage, constraints: rawConstraints, steering }) {
   const preset = modelPreset(modelName) || {};
   // v0.3.2 模型自适应：预算按模型上下文窗口推导（留输出余量 + 75% 舒适区），
@@ -1982,30 +2000,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (allBatchable && prefix.length === batch.length) {
             // 纯只读批次：并行执行（顺序收集结果，UI 事件顺序不变）；per-tool 计时（审计 B3）
             // allSettled：单个兄弟工具即使拒绝也绝不整体丢弃其余并行结果（审计报告1 S-2/H-2）。
-            const settled = await Promise.allSettled(
-              batch.map((b) => {
-                const t0 = Date.now();
-                return runTool(b.prep).then((r) => ({ r, t0 }));
-              })
-            );
-            for (let idx = 0; idx < batch.length; idx += 1) {
-              const s = settled[idx];
-              if (s.status === 'fulfilled') await finishTool(batch[idx].prep, s.value.r, s.value.t0);
-              else await finishTool(batch[idx].prep, JSON.stringify({ ok: false, error: String(s.reason?.message || s.reason) }), Date.now());
-            }
+            await runToolBatch(batch, runTool, finishTool);
           } else if (allBatchable && prefix.length > 1) {
             // 前导只读子批并行 + 其余串行
-            const settled = await Promise.allSettled(
-              prefix.map((b) => {
-                const t0 = Date.now();
-                return runTool(b.prep).then((r) => ({ r, t0 }));
-              })
-            );
-            for (let idx = 0; idx < prefix.length; idx += 1) {
-              const s = settled[idx];
-              if (s.status === 'fulfilled') await finishTool(prefix[idx].prep, s.value.r, s.value.t0);
-              else await finishTool(prefix[idx].prep, JSON.stringify({ ok: false, error: String(s.reason?.message || s.reason) }), Date.now());
-            }
+            await runToolBatch(prefix, runTool, finishTool);
             for (const b of batch.slice(prefix.length)) {
               if (b.prep.denied != null) {
                 emitDeniedToolEvents(b.prep);

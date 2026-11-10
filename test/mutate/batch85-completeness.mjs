@@ -112,16 +112,17 @@ M.mutate({
 M.mutate({
   name: '⑨ 先写事件后写会话（写盘失败也留下 messages.replace）',
   file: 'src/session.js',
+  // v0.7.1（会话写锁 S-5）：rewriteSession 现在包在 withFileLockSync 里，缩进 +2，锚点跟随。
   from: [
-    "  atomicWriteFileSync(file, lines + (lines ? '\\n' : ''), { mode: 0o600 }); // 质检 H4：会话文件原子写",
-    '  // v0.7.0 B2-a：重写是「整体替换窗口」，必须以 messages.replace 落事件（append-only，不删旧行）。',
-    '  // 只有会话文件写成功之后才写；失败只 warn（见 doubleWriteReplaceEvents）。',
-    '  doubleWriteReplaceEvents(file, messages, reason);',
+    "    atomicWriteFileSync(file, lines + (lines ? '\\n' : ''), { mode: 0o600 }); // 质检 H4：会话文件原子写",
+    '    // v0.7.0 B2-a：重写是「整体替换窗口」，必须以 messages.replace 落事件（append-only，不删旧行）。',
+    '    // 只有会话文件写成功之后才写；失败只 warn（见 doubleWriteReplaceEvents）。',
+    '    doubleWriteReplaceEvents(file, messages, reason);',
   ].join('\n'),
   to: [
-    '  // 变异：先写事件后写会话',
-    '  doubleWriteReplaceEvents(file, messages, reason);',
-    "  atomicWriteFileSync(file, lines + (lines ? '\\n' : ''), { mode: 0o600 }); // 质检 H4：会话文件原子写",
+    '    // 变异：先写事件后写会话',
+    '    doubleWriteReplaceEvents(file, messages, reason);',
+    "    atomicWriteFileSync(file, lines + (lines ? '\\n' : ''), { mode: 0o600 }); // 质检 H4：会话文件原子写",
   ].join('\n'),
   expect: ['会话写盘失败时不得留下 messages.replace（事件必须在写盘成功之后）'],
   run: COMPLETE,

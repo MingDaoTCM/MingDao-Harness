@@ -120,9 +120,10 @@ M.mutate({
 M.mutate({
   name: '⑪ main.js：不再使用内置公钥常量（信任根被换掉）',
   file: 'desktop/main.js',
-  from: '  const key = resolveUpdatePublicKeyPem(); // 内置常量（可用 --keygen 生成的公钥替换；不从网络取）',
-  to: "  const key = { pem: '', source: 'pinned' }; // 变异：不再用内置常量",
-  expect: ['门禁里必须用内置公钥常量'],
+  // v0.7.1 H-02：main.js 从单钥 resolveUpdatePublicKeyPem 改为密钥环 UPDATE_PUBLIC_KEYS，锚点跟随。
+  from: '    keys: UPDATE_PUBLIC_KEYS,',
+  to: "    keys: [], // 变异：掏空密钥环（信任根被换掉）",
+  expect: ['门禁必须把内置密钥环'],
   run: SEC,
 });
 
