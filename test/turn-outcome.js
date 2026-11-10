@@ -117,11 +117,16 @@ function lastRunEvents(/** @type {string} */ home) {
 {
   const agentSrc = fs.readFileSync(path.join(srcDir, 'agent.js'), 'utf8');
 
+  // v0.7.1：allSettled 抽成模块级 runToolBatch helper 后，正文只剩 1 处 Promise.allSettled，
+  // 但两处并行批都必须调用 helper——所以同时钉「helper 内用 allSettled」与「两处调用 helper」。
   const allSettledCount = (agentSrc.match(/Promise\.allSettled\(/g) || []).length;
-  assert.ok(allSettledCount >= 2, `两个并行批次（纯只读 + 前导子批）都必须用 Promise.allSettled（退回 all 会整体丢弃兄弟结果），实际 ${allSettledCount} 处`);
-  ok('结构守卫：并行批次使用 Promise.allSettled');
+  const runToolBatchCalls = (agentSrc.match(/runToolBatch\(/g) || []).length;
+  assert.ok(allSettledCount >= 1, `并行批次必须用 Promise.allSettled（退回 all 会整体丢弃兄弟结果），实际 ${allSettledCount} 处`);
+  assert.ok(runToolBatchCalls >= 2, `两处并行批次（纯只读 + 前导子批）都必须调用 runToolBatch helper，实际 ${runToolBatchCalls} 处`);
+  ok('结构守卫：并行批次使用 Promise.allSettled（经 runToolBatch helper）');
 
-  const runToolSrc = agentSrc.slice(agentSrc.indexOf('async function runTool'), agentSrc.indexOf('async function finishTool'));
+  // 用带括号的形式避免前缀匹配到 `runToolBatch`（否则 try 会去 helper 里找，守卫失效）。
+  const runToolSrc = agentSrc.slice(agentSrc.indexOf('async function runTool('), agentSrc.indexOf('async function finishTool('));
   const tryAt = runToolSrc.indexOf('try {');
   assert.ok(tryAt !== -1 && tryAt < runToolSrc.indexOf('io.renderToolStart'), 'io.renderToolStart 必须在 try 内（渲染抛错才不拒绝整批）');
   ok('结构守卫：io.renderToolStart 在 try 内');
