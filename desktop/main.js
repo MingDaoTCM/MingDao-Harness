@@ -612,6 +612,14 @@ function setupAutoUpdate() {
                 .catch(() => {});
               return;
             }
+            // v0.7.2（用户实测）：macOS 上 quitAndInstall 偶发"无法自动关闭，需手动退出后才能安装"。
+            // 根因是两条并存：① autoInstallOnAppQuit 若曾因"拒绝更新"被置 false，quitAndInstall 会直接
+            //   调 install() 而不 app.quit() → 运行中的 .app 无法被替换；② 托盘 close 处理器会把窗口
+            //   hide 而非 close（quitting 未置位时）。这里在放行分支显式置位两处，再 quitAndInstall，
+            //   保证"重启安装"一定先真正退出应用。
+            autoUpdater.autoInstallOnAppQuit = true;
+            quitting = true;
+            appLog('用户确认安装更新，退出并安装（' + v + '）');
             autoUpdater.quitAndInstall();
           })
           .catch(() => {});
