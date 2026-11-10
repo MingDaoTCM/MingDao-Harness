@@ -5,6 +5,7 @@ name: CI
 on:
   push:
     branches: [main, master]
+    tags: ['v*']
   pull_request:
 
 jobs:
@@ -56,7 +57,7 @@ jobs:
         run: npm run bench
       - name: 全量 strict 棘轮（错误数只降不升）
         run: node scripts/strict-ratchet.mjs
-      - name: 覆盖率门禁（V8 行覆盖率 ≥60%）
+      - name: 覆盖率（趋势参考，不判失败；恢复闸门见 docs/DEVELOPER.md §7.3）
         if: runner.os == 'Linux' && matrix.node == 20
         run: npm run coverage
       - name: 端到端：本地 Agent / 同步 / 分享
@@ -671,6 +672,58 @@ jobs:
             msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
             [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
             echo "::error title=pack-window 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
+      - name: 事件读路径（v0.7.1 S4/H-7：readLastEventSeq/一次解析/8KB 预览/计数缓存）
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          set +e
+          node test/session-read-path.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=session-read-path 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
+      - name: 回合结局单源（v0.7.1 S-1/S-2/H-2：allSettled/markOutcome/toolOk 顶层解析）
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          set +e
+          node test/turn-outcome.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=turn-outcome 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
+      - name: 模型发现并发（v0.7.1 H-6：并发+负缓存+single-flight）
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          set +e
+          node test/model-discovery-parallel.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=model-discovery-parallel 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
+      - name: SSE 背压（v0.7.1 M-6：write 返回值/drain/断开上限）
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          set +e
+          node test/sse-backpressure.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=sse-backpressure 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
           fi
           exit $code
       - name: 文档守卫（链接 / 命令表 / kind / 模型 id / 架构覆盖 / API 表 / 变异总数）

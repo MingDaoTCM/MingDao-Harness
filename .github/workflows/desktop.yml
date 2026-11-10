@@ -123,8 +123,29 @@ jobs:
             # 不需要独立文件，但 feed 必须给出 blockMapSize。
             desktop/dist/*.blockmap
           if-no-files-found: warn
-  publish:
+  # 发布门禁（审计报告1 S2）：publish 此前只 needs build，坏树也能产出正式 Release。
+  # v0.7.0 首次 tag 在 smoke 红时仍构建出 21 个安装包，暴露的正是"质量门禁与产物发布无强制连接"。
+  # 这里新增一个最小 test job：在 tag 树上跑 preflight + smoke + strict tsc，publish 依赖它。
+  test:
     needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: 安装类型检查依赖
+        run: npm ci --no-audit --no-fund
+      - name: 发布前门禁（preflight + 冒烟 + strict 棘轮）
+        shell: bash
+        run: |
+          set -e
+          node scripts/preflight.mjs
+          node test/smoke.js
+          node scripts/strict-ratchet.mjs
+  publish:
+    needs: [build, test]
     runs-on: ubuntu-latest
     # 只允许 tag 触发的构建发版（workflow_dispatch 用于签名/公证验证，绝不创建 Release）
     if: startsWith(github.ref, 'refs/tags/')

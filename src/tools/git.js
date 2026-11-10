@@ -213,10 +213,28 @@ export async function runGit(/** @type {any} */ args, /** @type {any} */ ctx) {
     // diff 全量可能极巨：默认 --stat 概览，模型需要全文再显式加 --no-stat 或指定文件
     effectiveArgv = [...argv, '--stat'];
   }
+  // ④ 外部程序围栏（审计报告2 H-01，PoC 已复现）：只读 git 本不该执行任何外部程序，
+  // 但仓库 .git/config 的 `diff.external`、`.gitattributes` 的 textconv、或环境注入的
+  // `GIT_EXTERNAL_DIFF` 都能让 `git diff/log/show` 以当前用户权限跑一个外部脚本。
+  // 白名单挡的是"参数"，挡不住"配置/环境"，所以这里**强制关闭**外部 diff/textconv，并清空相关环境。
+  const PATCH_SUB = sub === 'diff' || sub === 'log' || sub === 'show';
+  const hardenedArgv = PATCH_SUB
+    ? [...effectiveArgv, '--no-ext-diff', '--no-textconv']
+    : effectiveArgv;
+  const env = { ...process.env };
+  delete env.GIT_EXTERNAL_DIFF;
+  delete env.GIT_PAGER;
+  delete env.GIT_PAGER_OPTS;
+  delete env.PAGER;
+  delete env.GIT_CONFIG_COUNT;
+  for (const k of Object.keys(env)) {
+    if (/^GIT_CONFIG_(KEY|VALUE)_/.test(k)) delete env[k];
+  }
   const cwd = ctx.workingDir || process.cwd();
   try {
-    const { stdout, stderr } = await execFileAsync('git', effectiveArgv, {
+    const { stdout, stderr } = await execFileAsync('git', hardenedArgv, {
       cwd,
+      env,
       timeout: 15000,
       maxBuffer: 4 * 1024 * 1024,
     });

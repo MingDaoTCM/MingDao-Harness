@@ -91,6 +91,13 @@ const SUITES = [
   ['update-sig-publish', 'node', ['test/update-sig-publish.js']],
   // v0.7.1：官方 Pack 的版本窗口必须覆盖当前内核版本（0.7.0 事故的守卫）
   ['pack-window', 'node', ['test/pack-window.js']],
+  // v0.7.1（审计报告2 M-11）：此前 session-events 从未进默认运行器，"46/46"含水分
+  ['session-events', 'node', ['test/session-events.js']],
+  // v0.7.1 审计收口（四份报告）
+  ['session-read-path', 'node', ['test/session-read-path.js']],
+  ['turn-outcome', 'node', ['test/turn-outcome.js']],
+  ['model-discovery-parallel', 'node', ['test/model-discovery-parallel.js']],
+  ['sse-backpressure', 'node', ['test/sse-backpressure.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];

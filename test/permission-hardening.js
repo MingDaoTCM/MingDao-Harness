@@ -242,6 +242,34 @@ async function testC2GitAllowlist() {
       assert.ok(!/白名单|被禁止/.test(String(r.error || '')), `只读 ref 查询不得被误拦：${c}（实际 ${r.error || ''}）`);
     }
   });
+
+  await check('C2-14 仓库配置 diff.external 不得触发外部程序（审计报告2 H-01，PoC 已复现）', async () => {
+    if (!repo) return; // 无 git 无法构造真实仓库
+    const marker = path.join(repo, 'EXTERNAL_DIFF_FIRED');
+    const hook = path.join(repo, 'git-external-hook.sh');
+    fs.writeFileSync(hook, '#!/bin/sh\ntouch "$MARKER"\n', { mode: 0o755 });
+    const g = (/** @type {string[]} */ args, /** @type {any} */ opt) => spawnSync('git', args, { cwd: repo, encoding: 'utf8', ...(opt || {}) });
+    g(['config', 'diff.external', hook]);
+    const r = await run('diff');
+    assert.equal(r.ok, true, 'diff 仍应正常返回（外部 diff 被强制关闭）');
+    assert.equal(fs.existsSync(marker), false, '只读 git diff 不得执行仓库配置的外部 diff 程序');
+  });
+
+  await check('C2-15 环境注入 GIT_EXTERNAL_DIFF 不得触发外部程序', async () => {
+    if (!repo) return;
+    const marker = path.join(repo, 'ENV_EXTERNAL_DIFF_FIRED');
+    const hook = path.join(repo, 'env-hook.sh');
+    fs.writeFileSync(hook, '#!/bin/sh\ntouch "$MARKER"\n', { mode: 0o755 });
+    const prev = process.env.GIT_EXTERNAL_DIFF;
+    process.env.GIT_EXTERNAL_DIFF = hook;
+    try {
+      const r = await run('diff');
+      assert.equal(r.ok, true, 'diff 仍应正常返回');
+      assert.equal(fs.existsSync(marker), false, '环境注入的 GIT_EXTERNAL_DIFF 不得被执行');
+    } finally {
+      if (prev === undefined) delete process.env.GIT_EXTERNAL_DIFF; else process.env.GIT_EXTERNAL_DIFF = prev;
+    }
+  });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

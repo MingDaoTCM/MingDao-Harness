@@ -12989,11 +12989,12 @@ console.log(`\n全部通过：${passed} 组断言 ✓`);
       assert.ok(rejectGuard135 > gateFn135, '必须有"拒绝 → 不安装"的显式分支');
       assert.ok(quitIdx135 > rejectGuard135, 'quitAndInstall 必须排在拒绝分支**之后**（安装前已过门禁）');
       assert.ok(/autoUpdater\.autoInstallOnAppQuit = false/.test(mainCode135.slice(rejectGuard135, quitIdx135)), '拒绝分支必须关掉 autoInstallOnAppQuit（否则退出应用时照样装）');
-      assert.ok(/collectUpdateSignature\(/.test(mainCode135) && /resolveUpdatePublicKeyPem\(\)/.test(mainCode135), '签名取材与公钥都必须走 update-verify.js（单源）');
-      // 门禁**体内**必须现取内置公钥并把它交给校验：否则"公钥常量"就只是启动日志里的摆设
+      assert.ok(/collectUpdateSignature\(/.test(mainCode135), '签名取材必须走 update-verify.js（单源）');
+      // 门禁**体内**必须把内置**密钥环**交给校验：v0.7.1（审计报告2 H-02）前这里只用 legacy 单钥，
+      // 导致 current 私钥签发的合法更新被误拒。所以本守卫从"单钥 resolveUpdatePublicKeyPem"改为"密钥环 keys"。
       const gateBody135 = mainCode135.slice(gateFn135, mainCode135.indexOf('function setupAutoUpdate()'));
-      assert.ok(gateBody135.length > 0 && /resolveUpdatePublicKeyPem\(\)/.test(gateBody135), '门禁里必须用内置公钥常量取公钥（不从网络取，resolveUpdatePublicKeyPem）');
-      assert.ok(/publicKeyPem:\s*key\.pem/.test(gateBody135), '取到的内置公钥必须真的交给 evaluateUpdate（不能取了不用）');
+      assert.ok(gateBody135.length > 0 && /keys:\s*UPDATE_PUBLIC_KEYS/.test(gateBody135), '门禁必须把内置密钥环 UPDATE_PUBLIC_KEYS 交给 evaluateUpdate（不能只传单钥）');
+      assert.ok(/UPDATE_PUBLIC_KEYS/.test(mainCode135), 'main.js 必须导入内置密钥环（UPDATE_PUBLIC_KEYS）');
       assert.ok(/from '\.\/update-verify\.js'/.test(mainCode135), 'main.js 必须静态导入 update-verify.js');
       assert.ok(/autoUpdater\.on\('update-downloaded', async/.test(mainCode135), 'update-downloaded 处理器必须是 async（要 await 校验）');
     }
