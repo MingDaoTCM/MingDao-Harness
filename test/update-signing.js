@@ -156,4 +156,27 @@ const ok = (name) => { passed += 1; console.log(`  ✓ ${name}`); };
   ok('⑨ 文案：install 写明 keyId / reject 写明原因且不允许安装');
 }
 
+// ---------- ⑩ 主路径回归：evaluateUpdate 必须走密钥环，而不是 legacy 单钥（审计报告2 H-02） ----------
+{
+  // 用一把临时 current 等价钥签测试字节，放进密钥环；模拟"发布侧用 current 私钥签、客户端用环验"。
+  const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
+  const pem = publicKey.export({ type: 'spki', format: 'pem' });
+  const bytes = Buffer.from('mdh-update-fixture-' + Date.now());
+  const sig = crypto.sign(null, bytes, privateKey).toString('base64');
+  const ring = [{ id: 'test-current', pem, role: 'current' }];
+
+  const viaRing = U.evaluateUpdate({ bytes, signatureB64: sig, keys: ring, requireSignature: false });
+  assert.equal(viaRing.decision, 'install', `密钥环命中必须 install：${viaRing.reason}`);
+  assert.ok(viaRing.keyId && viaRing.keyId !== '?', '必须报告命中的 keyId 指纹');
+  ok('⑩ 主路径：evaluateUpdate 走密钥环（keys）→ current 签发的更新验签通过 install');
+
+  // 旧 main.js 的 bug：只用 legacy 单钥。这里用另一把无关钥模拟 legacy，签名的 current 钥不在其中 → 必 reject。
+  const otherKey = crypto.generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' });
+  const legacyOnly = U.evaluateUpdate({ bytes, signatureB64: sig, publicKeyPem: otherKey, requireSignature: false });
+  assert.equal(legacyOnly.decision, 'reject', '单钥路径（旧 main.js 接线）对不在该钥的签名必须 reject');
+  ok('⑩b 主路径：不再走单钥（否则 current 更新会被误拒）——单钥路径仍按既定策略 reject');
+}
+
+console.log(`\n更新来源签名：${passed} 项通过`);
+
 console.log(`\n更新来源签名：${passed} 项通过`);

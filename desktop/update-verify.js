@@ -340,7 +340,7 @@ export function buildUpdateNotice({ decision, version, keyId, reason }) {
 
 /**
  * 「下载完成 → 安装」之间那一道关：校验 + 决策 + 文案（main.js 调用它，smoke §135 直接测它）。
- * @param {{filePath?: string, bytes?: Buffer | Uint8Array | string, signatureB64?: string, declaredSignature?: boolean, publicKeyPem?: string | import('node:crypto').KeyObject, requireSignature?: boolean, source?: string, version?: string}} [input]
+ * @param {{filePath?: string, bytes?: Buffer | Uint8Array | string, signatureB64?: string, declaredSignature?: boolean, publicKeyPem?: string | import('node:crypto').KeyObject, keys?: Array<{id:string, pem:string, role?:string}>, requireSignature?: boolean, source?: string, version?: string}} [input]
  * @returns {{decision: 'install'|'warn-and-install'|'reject', hasSignature: boolean, verifyResult: {ok: boolean, reason?: string, keyId?: string | null} | null, keyId: string | null, reason: string | null, allowInstall: boolean, logLine: string, notice: ReturnType<typeof buildUpdateNotice>}}
  */
 export function evaluateUpdate({
@@ -349,6 +349,7 @@ export function evaluateUpdate({
   signatureB64,
   declaredSignature,
   publicKeyPem,
+  keys,
   requireSignature,
   source,
   version,
@@ -360,7 +361,11 @@ export function evaluateUpdate({
   let verifyResult = null;
   if (hasSignature) {
     verifyResult = value
-      ? verifyArtifactSignature({ filePath, bytes, signatureB64: value, publicKeyPem })
+      // v0.7.1（审计报告2 H-02）：主路径此前只传 legacy 单钥，导致 current 私钥签发的更新被误判「验签失败→拒绝」。
+      // 这里改为：给了 keys（密钥环）就走环——任一内置公钥验过即通过并返回命中 keyId；否则回退单钥。
+      ? (Array.isArray(keys) && keys.length
+          ? verifyArtifactSignatureWithKeyring({ filePath, bytes, signatureB64: value, keys })
+          : verifyArtifactSignature({ filePath, bytes, signatureB64: value, publicKeyPem }))
       : { ok: false, reason: '更新清单声明了签名，但签名字段为空——"拿不到证据"不等于"没问题"' };
   }
   const decision = decideUpdatePolicy({ hasSignature, verifyResult, requireSignature: requireSignature === true });

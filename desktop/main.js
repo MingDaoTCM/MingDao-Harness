@@ -12,7 +12,7 @@ import os from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 // 更新包**来源签名**校验（审计 K-8）：纯函数 + 内置公钥常量，判据/文案/取舍见该模块文件头。
 // electron-updater 自带的 sha512 只防传输损坏，不防"换了发布源 / 被投毒的 feed"——这一步补的是来源。
-import { collectUpdateSignature, evaluateUpdate, keyIdOf, requireSignatureFromEnv, resolveUpdatePublicKeyPem } from './update-verify.js';
+import { collectUpdateSignature, evaluateUpdate, keyIdOf, requireSignatureFromEnv, UPDATE_PUBLIC_KEYS } from './update-verify.js';
 
 /**
  * 更新遥测是否被显式关闭（审计 BUG-083）。
@@ -468,12 +468,13 @@ async function verifyDownloadedUpdate(info) {
   } catch (err) {
     sig = { signatureB64: '', source: '无', reason: '取签名失败：' + String(err?.message || err) };
   }
-  const key = resolveUpdatePublicKeyPem(); // 内置常量（可用 --keygen 生成的公钥替换；不从网络取）
+  // v0.7.1（审计报告2 H-02）：这里**必须用密钥环**，而不是单钥 resolveUpdatePublicKeyPem()——
+  // 后者默认返回 legacy 公钥，而发布链路签的是环里的 current 私钥；单钥会让所有合法更新被误拒。
   return evaluateUpdate({
     filePath,
     signatureB64: sig.signatureB64,
     declaredSignature,
-    publicKeyPem: key.pem,
+    keys: UPDATE_PUBLIC_KEYS,
     requireSignature: requireSignatureFromEnv(),
     source: sig.source,
     version: String(info?.version ?? app.getVersion()),
@@ -492,14 +493,13 @@ function setupAutoUpdate() {
       }
       const LINUX_NO_APPIMAGE = process.platform === 'linux' && !process.env.APPIMAGE; // deb 安装形态
       autoUpdater.autoDownload = !LINUX_NO_APPIMAGE;
-      const key0 = resolveUpdatePublicKeyPem();
+      const current = (UPDATE_PUBLIC_KEYS || []).find((k) => k.role === 'current') || UPDATE_PUBLIC_KEYS?.[0];
       appLog(
         '自动更新检查启动（feed: 官网 /updates' +
           (LINUX_NO_APPIMAGE ? '，deb 形态：仅检测不下载' : '') +
           '；来源签名：' +
           (requireSignatureFromEnv() ? '必须验签（MINGDAO_REQUIRE_UPDATE_SIGNATURE=1）' : '默认档（无签名时警告后安装）') +
-          '，内置公钥 keyId=' + (keyIdOf(key0.pem) ?? '不可用') + '，公钥来源=' + key0.source +
-          '）'
+          '，密钥环 ' + (UPDATE_PUBLIC_KEYS?.length ?? 0) + ' 把（current keyId=' + (current ? keyIdOf(current.pem) ?? '?' : '?') + '）'
       );
       let updateSeen = false;
       let downloaded = false;
