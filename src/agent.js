@@ -180,21 +180,16 @@ function drainSteeringInto(steering, messages, io) {
   return injected;
 }
 
-/**
- * 创建 Agent 循环（调用方只需传 provider/permission/io/modelName/workingDir，其余可选）
- * @param {{ provider: any, permission: any, io: any, modelName: any, workingDir: any,
- *   cfg?: any, undoStore?: any, maxSteps?: number, mcp?: any, onCompact?: any, sessionRef?: any,
- *   onUsage?: (modelName: string, usage: any) => void,
- *   constraints?: any[],
- *   steering?: { drain?: () => any } }} params
- */
-
 // v0.7.1（审计报告1 S-2/H-2）：把"并行只读批 + allSettled 收集"抽成模块级 helper，
 // 避免把这段展开在 runTurnInner 里又把结构基线顶破（基线只许降不许升）。
 // allSettled：单个兄弟工具即使拒绝也绝不整体丢弃其余并行结果；rejected 记 {ok:false} 占位。
-async function runToolBatch(items, runTool, finishTool) {
+async function runToolBatch(
+  /** @type {any[]} */ items,
+  /** @type {(prep: any) => Promise<any>} */ runTool,
+  /** @type {(prep: any, result: any, t0: number) => Promise<any>} */ finishTool
+) {
   const settled = await Promise.allSettled(
-    items.map((b) => {
+    items.map((/** @type {any} */ b) => {
       const t0 = Date.now();
       return runTool(b.prep).then((r) => ({ r, t0 }));
     })
@@ -205,6 +200,15 @@ async function runToolBatch(items, runTool, finishTool) {
     else await finishTool(items[idx].prep, JSON.stringify({ ok: false, error: String(s.reason?.message || s.reason) }), Date.now());
   }
 }
+
+/**
+ * 创建 Agent 循环（调用方只需传 provider/permission/io/modelName/workingDir，其余可选）
+ * @param {{ provider: any, permission: any, io: any, modelName: any, workingDir: any,
+ *   cfg?: any, undoStore?: any, maxSteps?: number, mcp?: any, onCompact?: any, sessionRef?: any,
+ *   onUsage?: (modelName: string, usage: any) => void,
+ *   constraints?: any[],
+ *   steering?: { drain?: () => any } }} params
+ */
 
 export function createAgent({ provider, permission, io, modelName, workingDir, cfg = {}, undoStore, maxSteps, mcp, onCompact, sessionRef, onUsage, constraints: rawConstraints, steering }) {
   const preset = modelPreset(modelName) || {};
