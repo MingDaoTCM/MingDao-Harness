@@ -1787,26 +1787,28 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         // 审计 Hermes C4：同回合相同参数的只读工具（read/ls/glob/grep/skill）合并执行一次，
         // 后续相同调用直接复用结果（仍逐个回填 tool 消息以保持 tool_call_id 配对）
         async function runTool(/** @type {any} */ prep) {
-          io.renderToolStart?.(prep.name, prep.args);
-          // v0.7.0 §1.1：工具边界事件（只记 id/名字/是否命中缓存，不记参数正文）
-          emitEvent('tool.start', { callId: prep.tc?.id ?? null, name: String(prep.name || ''), cached: Boolean(prep.cached) });
-          // v0.6.13（A）：登记"正在等待哪个工具"——`task` 子代理/长命令动辄几十分钟，
-          // 界面与日志必须能显示"在等谁、等了多久"，否则与卡死无法区分。
+          // 渲染 / 去重键 / 进度登记全部移入 try：任何一步抛错都落成错误结果，绝不把整批拖进 Promise 拒绝
+          // （审计报告1 S-1/S-2/H-2：渲染在 try 外抛错即 Promise 拒绝，Promise.all 下其余并行工具结果被丢弃）。
           const prevPending = turnProgress.pendingTool;
-          turnProgress.pendingTool = { name: String(prep.name || ''), startedAt: Date.now() };
-          turnProgress.phase = `执行工具 ${prep.name}`;
-          // Pack 工具名形如 pack__<pack>__<tool>；执行期间标注来源，供 ctx.llm 归因
-          const pkMatch = /^pack__([a-z0-9-]+)__/.exec(String(prep.name || ''));
           const prevPack = currentPack;
-          currentPack = pkMatch ? pkMatch[1] : null;
-          usedToolNames.add(prep.name); // 省钱 B1：执行过即标记，后续轮次省略其 description
-          const dedupKey = !prep.isMcp && READONLY_TOOLS_SET.has(prep.name) ? prep.name + ':' + JSON.stringify(prep.args || {}) : null;
-          if (dedupKey && turnToolCache.has(dedupKey)) {
-            prep.cached = true;
-            turnProgress.pendingTool = prevPending;
-            return turnToolCache.get(dedupKey);
-          }
           try {
+            io.renderToolStart?.(prep.name, prep.args);
+            // v0.7.0 §1.1：工具边界事件（只记 id/名字/是否命中缓存，不记参数正文）
+            emitEvent('tool.start', { callId: prep.tc?.id ?? null, name: String(prep.name || ''), cached: Boolean(prep.cached) });
+            // v0.6.13（A）：登记"正在等待哪个工具"——`task` 子代理/长命令动辄几十分钟，
+            // 界面与日志必须能显示"在等谁、等了多久"，否则与卡死无法区分。
+            turnProgress.pendingTool = { name: String(prep.name || ''), startedAt: Date.now() };
+            turnProgress.phase = `执行工具 ${prep.name}`;
+            // Pack 工具名形如 pack__<pack>__<tool>；执行期间标注来源，供 ctx.llm 归因
+            const pkMatch = /^pack__([a-z0-9-]+)__/.exec(String(prep.name || ''));
+            currentPack = pkMatch ? pkMatch[1] : null;
+            usedToolNames.add(prep.name); // 省钱 B1：执行过即标记，后续轮次省略其 description
+            const dedupKey = !prep.isMcp && READONLY_TOOLS_SET.has(prep.name) ? prep.name + ':' + JSON.stringify(prep.args || {}) : null;
+            if (dedupKey && turnToolCache.has(dedupKey)) {
+              prep.cached = true;
+              turnProgress.pendingTool = prevPending;
+              return turnToolCache.get(dedupKey);
+            }
             let result;
             if (prep.isMcp) {
               if (!mcp) throw new Error('MCP 工具未启用');
@@ -1845,7 +1847,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           turnSigCounts.set(sig, repeatedBefore + 1);
           let toolOk = true;
           if (typeof result === 'string') {
-            toolOk = !result.includes('"ok": false');
+            // 顶层 ok 解析（与下方审计/账本的 rObj 判定同款）：字符串是合法 JSON 且带顶层 ok 时看顶层，
+            // 正文里出现 `"ok": false` 只是文本、不是失败信号（审计报告A H-1）。
+            let rObj = null;
+            try { rObj = JSON.parse(result); } catch { rObj = null; }
+            toolOk = rObj ? rObj.ok !== false : !result.includes('"ok": false');
           } else if (result && typeof result === 'object') {
             toolOk = result.ok !== false;
           }
@@ -1975,22 +1981,31 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           const allBatchable = prefix.length > 1 && prefix.every((b) => b.batchable);
           if (allBatchable && prefix.length === batch.length) {
             // 纯只读批次：并行执行（顺序收集结果，UI 事件顺序不变）；per-tool 计时（审计 B3）
-            const results = await Promise.all(
+            // allSettled：单个兄弟工具即使拒绝也绝不整体丢弃其余并行结果（审计报告1 S-2/H-2）。
+            const settled = await Promise.allSettled(
               batch.map((b) => {
                 const t0 = Date.now();
                 return runTool(b.prep).then((r) => ({ r, t0 }));
               })
             );
-            for (let idx = 0; idx < batch.length; idx += 1) await finishTool(batch[idx].prep, results[idx].r, results[idx].t0);
+            for (let idx = 0; idx < batch.length; idx += 1) {
+              const s = settled[idx];
+              if (s.status === 'fulfilled') await finishTool(batch[idx].prep, s.value.r, s.value.t0);
+              else await finishTool(batch[idx].prep, JSON.stringify({ ok: false, error: String(s.reason?.message || s.reason) }), Date.now());
+            }
           } else if (allBatchable && prefix.length > 1) {
             // 前导只读子批并行 + 其余串行
-            const results = await Promise.all(
+            const settled = await Promise.allSettled(
               prefix.map((b) => {
                 const t0 = Date.now();
                 return runTool(b.prep).then((r) => ({ r, t0 }));
               })
             );
-            for (let idx = 0; idx < prefix.length; idx += 1) await finishTool(prefix[idx].prep, results[idx].r, results[idx].t0);
+            for (let idx = 0; idx < prefix.length; idx += 1) {
+              const s = settled[idx];
+              if (s.status === 'fulfilled') await finishTool(prefix[idx].prep, s.value.r, s.value.t0);
+              else await finishTool(prefix[idx].prep, JSON.stringify({ ok: false, error: String(s.reason?.message || s.reason) }), Date.now());
+            }
             for (const b of batch.slice(prefix.length)) {
               if (b.prep.denied != null) {
                 emitDeniedToolEvents(b.prep);
@@ -2047,6 +2062,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           emptyRounds += 1;
           if (emptyRounds >= maxEmptyRounds) {
             finishTurn();
+            markOutcome('capped', { truncated: true }); // 截断续写也是「预算用尽」：账本/返回值/事件流三口径必须一致（审计报告1 S-1/H-2）
             return {
               text: res.text || null,
               reasoning: res.reasoning || '',
@@ -2257,6 +2273,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       // 只删 assistant.tool_calls 会让**已经执行**的 tool 结果失去配对，同样 400。
       flushToolMessages();
       finishTurn();
+      markOutcome('error'); // 崩溃回合必须被账本记"异常"，不得记"正常完成"（审计报告1 S-1/H-2）
       throw err;
     } finally {
       // v0.6.29（C-01）：最后一道保险——所有出口（正常/中断/预算/异常）都做一次配对补齐。

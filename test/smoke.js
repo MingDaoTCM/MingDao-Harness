@@ -7811,6 +7811,7 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
         'providers/index.js': { n: 2, why: 'endpoint-limits 学习值合并；CLI 侧同步版（WebUI chat 走 provider 内部异步链，已实测不冻结）' },
         'schedule.js': { n: 12, why: 'daemon 独立进程（runSleeper 内），非 web 请求路径；WebUI 走 *Async' },
         'session-index.js': { n: 3, why: 'CLI 同步版（WebUI 走 syncSessionIndexAsync/searchSessionsAsync）' },
+        'session.js': { n: 2, why: 'CLI/REPL/worker 同步链共用（append 单行原子、rewrite tmp+rename 临界区 <1ms，与 ledger/egress append 同口径）；WebUI 由 withSessionLock 进程内串行，文件锁只做跨进程互斥' },
         'sync.js': { n: 1, why: 'CLI 一次性命令（同步 CLI 用），web 路径走 commitStateAsync' },
         'task-state.js': { n: 1, why: 'CLI/REPL 同步版；WebUI 走 saveTaskStateMergeAsync（同链可重入）' },
         'tasks.js': { n: 1, why: 'CLI 同步版（WebUI 走 patchTaskAsync/listTasksAsync）' },

@@ -41,6 +41,7 @@ const credentialsUrl = pathToFileURL(path.join(srcDir, 'credentials.js')).href;
 const providersUrl = pathToFileURL(path.join(srcDir, 'providers', 'index.js')).href;
 const ledgerUrl = pathToFileURL(path.join(srcDir, 'ledger.js')).href;
 const netGuardUrl = pathToFileURL(path.join(srcDir, 'net-guard.js')).href;
+const sessionUrl = pathToFileURL(path.join(srcDir, 'session.js')).href;
 
 const { configPath, loadConfig, saveConfig, readModelCache, writeModelCache, updateModelCacheSync } = await import(configUrl);
 const { credentialsPath, readCredentialsStrict, setStoredKey } = await import(credentialsUrl);
@@ -660,6 +661,88 @@ process.stdout.write('FAILURES ' + JSON.stringify(cases) + '\\n');
   );
   assert.equal(cases.length, 6, 'E7：六条写路径都必须被覆盖（config / credentials / model-cache / endpoint-limits / ledger / egress）');
   ok('写失败：六条路径均 warn 可见且不崩（注入 EACCES）');
+}
+
+// ===========================================================================
+// ⑧ 会话写锁：N 个真子进程并发追加同一会话 → 恰好 N 行；外部持锁时 append/rewrite 都被阻塞
+// ===========================================================================
+// 缺陷形态（审计报告1 S-5/H2）：appendMessages（追加）与 rewriteSession（tmp+rename 原子替换）
+// 此前**无锁**。并发下 append 的 fd 若在 rename 前 open、rename 后 write，数据就写到被换掉的旧
+// inode → 消息静默丢失。锁必须两处共用同一把 `<session>.lock`，且外部持锁时两处都写不进去。
+{
+  const home = freshHome('session-write-lock');
+  const { createSession, appendMessages } = await import(sessionUrl);
+  const s = createSession(home);
+  const file = s.file;
+  const N = 16;
+  // ⑧a 并发追加：16 路真子进程各 append 一条消息 → 恰好 16 行，逐行可解析。
+  const kids = [];
+  for (let i = 0; i < N; i += 1) {
+    const body = `
+const { appendMessages } = await import(${JSON.stringify(sessionUrl)});
+const file = process.env.MDH_SESSION_FILE;
+const idx = Number(process.env.MDH_IDX);
+process.stdout.write('READY\\n');
+await new Promise((resolve) => process.stdin.once('data', resolve));
+appendMessages(file, [{ role: 'user', content: 'concurrent-msg-' + idx }]);
+process.stdout.write('DONE\\n');
+`;
+    kids.push(startChild(body, { MDH_SESSION_FILE: file, MDH_IDX: String(i) }));
+  }
+  await Promise.all(kids.map((k) => withDeadline(k.ready, 'session append READY')));
+  for (const k of kids) k.go();
+  const results = await Promise.all(kids.map((k) => withDeadline(k.done, 'session append 子进程')));
+  for (const [i, r] of results.entries()) {
+    assert.equal(r.code, 0, `会话追加子进程 ${i} 必须正常退出：${r.err || r.out}`);
+    assert.match(r.out, /DONE/, `会话追加子进程 ${i} 必须完成：${r.out}${r.err}`);
+  }
+  const lines = fs.readFileSync(file, 'utf8').split('\n').filter(Boolean);
+  assert.equal(
+    lines.length,
+    N,
+    `E8a：${N} 路并发追加同一会话后必须恰好 ${N} 行，实际 ${lines.length} 行（追加写到被 rename 的旧 inode 即静默丢失）`
+  );
+  let badLines = 0;
+  for (const line of lines) {
+    try {
+      const m = JSON.parse(line);
+      if (!m || typeof m !== 'object' || typeof m.content !== 'string') badLines += 1;
+    } catch {
+      badLines += 1;
+    }
+  }
+  assert.equal(badLines, 0, `E8a：${N} 行必须逐行可解析，实际 ${badLines} 行不可解析`);
+
+  // ⑧b 锁探针：外部持 `<session>.lock` 时，append 与 rewrite 都必须被阻塞（抛错），不得绕开锁直写。
+  const probe = `
+const fs = (await import('node:fs')).default;
+const path = (await import('node:path')).default;
+const { appendMessages, rewriteSession } = await import(${JSON.stringify(sessionUrl)});
+const file = process.env.MDH_SESSION_FILE;
+const lock = file + '.lock';
+const meta = JSON.stringify({ pid: process.pid, at: Date.now(), cmd: path.basename(process.argv[1] || process.execPath) });
+fs.mkdirSync(path.dirname(lock), { recursive: true, mode: 0o700 });
+
+fs.writeFileSync(lock, meta);
+let appendThrew = false;
+try { appendMessages(file, [{ role: 'user', content: 'probe-append' }]); } catch { appendThrew = true; }
+fs.unlinkSync(lock);
+
+fs.writeFileSync(lock, meta);
+let rewriteThrew = false;
+try { rewriteSession(file, [{ role: 'user', content: 'probe-rewrite' }], 'compact'); } catch { rewriteThrew = true; }
+fs.unlinkSync(lock);
+
+process.stdout.write('PROBE ' + JSON.stringify({ appendThrew, rewriteThrew }) + '\\n');
+`;
+  const pr = await withDeadline(runChild(probe, { MDH_SESSION_FILE: file, MINGDAO_LOCK_TIMEOUT_MS: '700' }), 'session 锁探针');
+  assert.equal(pr.code, 0, `会话锁探针必须正常退出：${pr.err || pr.out}`);
+  const probeLine = String(pr.out).split('\n').find((l) => l.startsWith('PROBE '));
+  assert.ok(probeLine, `会话锁探针必须输出结果：${pr.out}${pr.err}`);
+  const probeData = JSON.parse(String(probeLine).slice('PROBE '.length));
+  assert.equal(probeData.appendThrew, true, 'E8b：appendMessages 必须持 `<session>.lock`（外部持锁时写入必须被阻塞，而不是绕开锁直写）');
+  assert.equal(probeData.rewriteThrew, true, 'E8b：rewriteSession 必须与 append 共用同一把 `<session>.lock`（外部持锁时写入必须被阻塞）');
+  ok(`session：${N} 路并发追加恰好 ${N} 行 + append/rewrite 外部持锁均被阻塞`);
 }
 
 console.log(`\nstate-locks：${passed} 项全部通过`);

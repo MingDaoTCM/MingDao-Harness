@@ -155,13 +155,25 @@ function doubleWriteSessionEvents(file, messages) {
   }
 }
 
+/**
+ * 会话写路径的跨进程互斥键：`<session file>.lock`。
+ * append（追加）与 rewrite（tmp+rename 原子替换）必须用**同一把锁**，否则并发下 append 会
+ * 写到被 rename 掉的旧 inode → 消息静默丢失（审计报告1 S-5/H2）。
+ * @param {any} file
+ */
+function sessionLockFile(file) {
+  return `${String(file)}.lock`;
+}
+
 /** @param {any} file @param {any} messages */
 export function appendMessages(file, messages) {
   if (!messages?.length) return;
   stampMessageTs(messages); // 单一来源：所有写入路径在这里补 ts（已有 ts 不覆盖）
   const lines = messages.map((/** @type {any} */ m) => JSON.stringify(m)).join('\n') + '\n';
-  appendFilePrivateSync(file, lines);
-  doubleWriteSessionEvents(file, messages); // 旁路：失败只 warn，不影响上面的会话写入
+  withFileLockSync(sessionLockFile(file), () => {
+    appendFilePrivateSync(file, lines);
+    doubleWriteSessionEvents(file, messages); // 旁路：失败只 warn，不影响上面的会话写入
+  });
 }
 
 /** 允许的整份重写原因；认不出的一律按 `rewrite`（事件里的 reason 永远是有限集合）。 */
@@ -219,10 +231,12 @@ function doubleWriteReplaceEvents(file, messages, reason) {
  */
 export function rewriteSession(file, messages, reason = 'rewrite') {
   const lines = messages.map((/** @type {any} */ m) => JSON.stringify(m)).join('\n');
-  atomicWriteFileSync(file, lines + (lines ? '\n' : ''), { mode: 0o600 }); // 质检 H4：会话文件原子写
-  // v0.7.0 B2-a：重写是「整体替换窗口」，必须以 messages.replace 落事件（append-only，不删旧行）。
-  // 只有会话文件写成功之后才写；失败只 warn（见 doubleWriteReplaceEvents）。
-  doubleWriteReplaceEvents(file, messages, reason);
+  withFileLockSync(sessionLockFile(file), () => {
+    atomicWriteFileSync(file, lines + (lines ? '\n' : ''), { mode: 0o600 }); // 质检 H4：会话文件原子写
+    // v0.7.0 B2-a：重写是「整体替换窗口」，必须以 messages.replace 落事件（append-only，不删旧行）。
+    // 只有会话文件写成功之后才写；失败只 warn（见 doubleWriteReplaceEvents）。
+    doubleWriteReplaceEvents(file, messages, reason);
+  });
 }
 
 /** 每个会话文件每进程只尝试修补一次；失败也不重试（避免每次读取都整份读事件日志）。 */
@@ -376,7 +390,7 @@ export function relativeTime(mtime) {
 // v0.6.30（E3）：新增异步版 searchSessionsAsync —— WebUI 请求路径必须用异步版（索引同步的
 // 锁等待不能阻塞事件循环）；CLI/REPL 保留同步版 searchSessions。
 import { syncSessionIndex, syncSessionIndexAsync, tokenize, extractSessionText } from './session-index.js';
-import { atomicWriteFileSync, appendFilePrivateSync } from './atomic-write.js';
+import { atomicWriteFileSync, appendFilePrivateSync, withFileLockSync } from './atomic-write.js';
 
 /** 用已同步好的索引做匹配 + 片段（同步/异步两版共用）。 @param {any[]} sessions @param {any} idx @param {string} kw */
 function matchSessions(/** @type {any[]} */ sessions, /** @type {any} */ idx, /** @type {string} */ kw, /** @type {number} */ limit) {
