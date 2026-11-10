@@ -501,7 +501,13 @@ MINGDAO_GITEE_TOKEN=xxx MINGDAO_GITCODE_TOKEN=yyy \
 > （`/opt/1panel/www/mirror-downloads/downloads/`，本机→深圳实测 10MB/s，约 1 分钟）。
 > 不做的话镜像会对本版 302 到对象存储，大陆用户就退回跨境链路——镜像就白建了。
 
-> **发版后必做（v0.6.45 起）**：发布更新来源签名，否则客户端会一直弹"未验证来源签名"：
-> `MINGDAO_GITHUB_TOKEN=... MDH_SITE_HOST=mingdao-server node scripts/publish-update-sigs.mjs <版本>`
+> **⚠ 顺序硬约束（v0.7.1 事故）**：发布更新来源签名，**必须排在 `gen-update-feeds` 与
+> `update-downloads` **之前**。签名文件来自 GitHub Release（Desktop 发布产物），只要 Release 就绪即可发；
+> 而 feed/update-downloads 是把客户端**指到新版本号**的那一步。若先翻 feed 再发签名，中间有个窗口
+> 让"已更新到新版的客户端"取不到 `.sig` → 弹"未验证来源签名"（v0.7.1 实测踩到：feed 已 0.7.1、
+> npm 已发，`.sig` 还是 404）。
+>
+> 正确顺序：**Desktop 发布（Release 就绪）→ MirrorSync → publish-update-sigs → 再 gen-update-feeds + update-downloads**。
+> 命令：`MINGDAO_GITHUB_TOKEN=... MDH_SITE_HOST=mingdao-server node scripts/publish-update-sigs.mjs <版本>`
 > 然后按验收第 ⑦ 条验一遍：取 feed 里的包名 → 下载 → 取 `/updates/<包名>.sig` → 用内置公钥验签必须通过。
 > 回滚：`ssh mingdao-server 'rm -f /opt/1panel/www/sites/mingdao-site/updates/*.sig'`（立即回到"提示后照常安装"）。
