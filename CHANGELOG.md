@@ -3,6 +3,70 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.8.1（2026-11-14）— WebUI 应用模式开关 + 空态示例随机化
+
+> 本版给 WebUI 输入区加一个 **🔍「应用模式」开关**：开启后这一轮交给 DeepSeek 应用接口
+> 在服务端执行**联网搜索 / 深度思考 / 阅读链接**，一轮只发 **1 次 HTTP 请求**；同时把新建对话的
+> 空态示例改成**办公 / 生活 / 编程三类各 5 条随机抽三条**（每次进入空态都不一样，旧的开发向
+> 三条已移除）。**默认关闭**：不开启时请求体与行为逐字节不变；`src/agent.js` 的工具循环
+> **一行未改**，`server.js#handleChat` 只加一行分派。完整说明见 `RELEASE-NOTES-0.8.1.md`。
+
+### 一、WebUI 应用模式开关（`21b7f2f` / `5039296` / `da82c78` / `8aa14e9`）
+
+- 新增 `src/web/app-mode.js`（纯函数层，零依赖、无 IO）：
+  `appFrameOf`（`streamAppChat` 的 delta → 既有 SSE 帧：thinking→reasoning、text→text、
+  search/fetch/citation/title→appSearch/appFetch/appCitation/appTitle，usage/stop/未知不产帧）、
+  `buildAppMessages`（只留 user/assistant 的字符串 content、丢 tool/system/附件数组/附加字段、
+  取最后 `maxTurns*2` 条并追加当前文本）、`appModeEnabled` / `appModelOf` / `shouldRunAppMode`。
+- 新增 `src/web/app-mode-run.js`（服务端编排，从 `handleChat` 切出）：解析 provider
+  （`MINGDAO_APP_BASEURL` 可注入）→ `streamAppChat` → 逐帧 `send()`（沿用既有 taskId/streamSeq）→
+  成功 `appendMessages(user+assistant)`、仅默认时间戳名按服务端标题改名、发 `done`、`finishChat()`；
+  失败先发完已产出正文再报错；连接关闭 abort 上游。
+- `src/web/server.js`：`handleChat` 只加**一行**分派；`/api/state` 透出 `appMode`（前端据此决定
+  按钮可见性）。`src/agent.js` 与 Agent 路径**一行未改**。
+- 前端（`index.html` / `app.js`）：composer 内 `#appSearchBtn`（**图标 🔍**，默认关闭、`.on` 高亮）；
+  开启时 `send()` 带 `appMode/search/think`（关闭时请求体与改动前逐字节一致）；
+  `appSearch`/`appFetch` 以 `msg-sys` 插正文前，`appCitation` 正文后汇总「参考：…」（≤5 条）；
+  入口兼容 `ev.delta ?? ev.text`（不复制第二套渲染分支）。
+- **可见性口径**：当前配置模型是 **flash 家族**（`deepseek-flash*`）即显示开关（`appApi.enabled`
+  也会显示），不再「默认关就永远看不见」。执行闸门 `shouldRunAppMode` =
+  **显式 UI 开关**（`body.appMode===true`）**且**（`appApi.enabled` **或** 本回合模型是 flash 家族）——
+  UI 开关本身即显式同意，与 CLI `mingdao app` 同口径。
+- **结构守卫**：判据移进 `shouldRunAppMode` 后，`runWebServer` 1009→**1008**、`handleChat` 696→**695**
+  （实测各降 1 行，基线按实测同步，只许降不许升）。
+- **发布前门禁修复（`8aa14e9`，仅注释移动）**：`da82c78` 把 `shouldRunAppMode` 的 JSDoc 插在
+  `appModelOf` 的 JSDoc 与函数之间，`appModelOf(cfg)` 因此丢掉 `@param` → `tsc` 报 `TS7006`
+  （typecheck / strict 双红）。发布前门禁复跑发现；修复只移动注释位置，函数体与行为零变化。
+
+### 二、空态示例随机化（`5039296`）
+
+- `src/web/viewmodel.js`：新增 `EXAMPLE_PROMPTS`（**办公 / 生活 / 编程各 5 条**，每条 ≤26 字）与
+  `pickExamples()`（每类先随机 1 条保证三类覆盖，再 Fisher–Yates 打散；同批不重复；
+  `rng` 可注入、`count` 越界安全）。
+- 前端 `renderEmptyState()` 用一次性标记 `emptyExamplesDrawn`：**每次进入空态重抽一次**
+  （新建对话 / 删空消息），输入与频繁重绘时不抖动；离开空态重置。
+- 旧的开发向三条（「给这个仓库写 README / 跑测试修失败 / 解释 agent.js」）已移除；编程类只保留
+  1 条与本仓库相关的（`解释 src/agent.js 的主循环`），其余为通用任务。
+
+### 三、占位文案收紧（`5039296`）
+
+- 输入框占位改为 `输入任务…（Enter 发送 · 生成中 ⌘/Ctrl+Enter 插话）`——
+  图标按钮占位后原长文案在 1440 宽下换行被裁切。
+
+### 四、测试与门禁
+
+- 新增 `test/app-mode.js` **21 项**：帧映射六种 + 未知/null、历史裁剪、配置默认值、
+  **真实 HTTP 服务 + 本地 Anthropic SSE 桩**的完整链路（无 Key 文案 / 一轮 1 次请求 / 服务端工具与
+  think / 帧序列 / 会话落盘 user+assistant / 服务端标题改名 / **关闭态回落 Agent 路径且零应用帧**）、
+  接线绊线（按钮 / 请求字段 / 三帧渲染 / 双闸门 / Agent 路径仍在）。
+- `test/viewmodel.js`：新增示例池断言（三类覆盖 / 每条 ≤26 字 / 同批不重复 / 固定 rng 可复现 /
+  连续抽签有随机性 / `count` 越界安全）。
+- `test/run-all.mjs` **54 → 55 套**；`ci.yml` 增加 `app-mode` 一步（失败原文进注解，与其它步骤同口径）。
+- `test/structure-limits.js` 基线按实测同步（1008 / 695）。
+- 门禁（发布树）：typecheck 0 / strict 0-0 / preflight ✓ / smoke ✓（单独 + 私有 TMPDIR）/
+  run-all **55/55** / `mutate:shard` 4 片 **840 条 0 逃逸** / event-parity / coverage（只报告）/
+  doc-lint ✓ / diagnose ✓。
+
 ## v0.8.0（2026-11-14）— DeepSeek 应用全家桶接入（搜索/文件/语音）+ 两处性能优化
 
 > 本版接入 DeepSeek「应用全家桶」API：服务端联网搜索 / 深度思考搜索 / 阅读链接 / 文件解析 /
