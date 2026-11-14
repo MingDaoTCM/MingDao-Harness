@@ -351,16 +351,17 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)
   const htmlSrc = fs.readFileSync(path.join(srcDir, 'web', 'index.html'), 'utf8');
   const serverSrc = fs.readFileSync(path.join(srcDir, 'web', 'server.js'), 'utf8');
   assert.ok(/id="appSearchBtn"/.test(htmlSrc), '输入区必须有 #appSearchBtn 开关按钮');
-  assert.ok(/title="联网搜索 \/ 深度思考 \/ 阅读链接/.test(htmlSrc), '按钮 title 必须说明服务端执行/一轮 1 次请求');
+  assert.ok(/title="[^"]*联网搜索 \/ 深度思考 \/ 阅读链接[^"]*"/.test(htmlSrc), '按钮 title 必须说明服务端执行/一轮 1 次请求');
+  assert.ok(/服务端执行/.test(htmlSrc) && /1 次请求/.test(htmlSrc), 'title 必须写清服务端执行与一轮 1 次请求');
   assert.ok(/payload\.appMode=true/.test(appSrc), 'send() 开启态必须带 appMode');
   assert.ok(/payload\.search=true/.test(appSrc) && /payload\.think=/.test(appSrc), 'send() 开启态必须带 search/think');
   assert.ok(/ev\.type==='appSearch'/.test(appSrc) && /ev\.type==='appFetch'/.test(appSrc) && /ev\.type==='appCitation'/.test(appSrc), '前端必须渲染 appSearch/appFetch/appCitation');
   assert.ok(/参考：/.test(appSrc), '引用必须汇总成「参考：…」（最多 5 条）');
   // v0.8.1：闸门 = 配置开启 **或** 显式 UI 开关（与 CLI `mingdao app` 同口径），且模型必须是 flash 家族。
-  assert.ok(
-    /body\.appMode === true && \(appModeEnabled\(cfg\) \|\| supportsAppTools\(/.test(serverSrc),
-    '服务端必须由「配置开启 或 显式 UI 开关」触发，且限 flash 家族模型'
-  );
+  assert.ok(/shouldRunAppMode\(body, cfg, runModel\)/.test(serverSrc), '服务端必须用 shouldRunAppMode 单点判据触发应用模式');
+  const gateSrc = fs.readFileSync(path.join(srcDir, 'web', 'app-mode.js'), 'utf8');
+  assert.ok(/body\.appMode !== true\) return false/.test(gateSrc), 'shouldRunAppMode：非显式开关一律 false');
+  assert.ok(/appModeEnabled\(cfg\) \|\| supportsAppTools\(/.test(gateSrc), 'shouldRunAppMode：配置开启 或 flash 家族模型');
   assert.ok(/const agent = createAgent\(/.test(serverSrc), '应用模式分支不得删除 Agent 路径');
   ok('接线绊线：按钮 / 请求字段 / 三帧渲染 / 服务端双闸门 / Agent 路径仍在');
 }

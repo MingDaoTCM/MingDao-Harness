@@ -11,7 +11,7 @@
 //
 // 零运行时依赖。
 
-import { APP_DEFAULT_MODEL } from '../deepseek-app.js';
+import { APP_DEFAULT_MODEL, supportsAppTools } from '../deepseek-app.js';
 
 /**
  * 应用模式缺 Key 时的用户可见文案（server 与测试共用同一份，避免两处文案漂移）。
@@ -116,6 +116,23 @@ export function appModeEnabled(cfg) {
  * @param {any} cfg
  * @returns {string}
  */
+/**
+ * 是否走应用模式（服务端闸门）。判据集中在这里，`server.js` 只需一行调用——
+ * 也让 `handleChat`/`runWebServer` 的函数行数不因这条分支而上涨（结构守卫只许降不许升）。
+ *
+ * v0.8.1 口径：`cfg.appApi.enabled` 是「默认预开启」；UI 开关（`body.appMode===true`）是**显式同意**，
+ * 与 CLI `mingdao app` 一致（那条命令也不看这个开关）。仍要求模型是 flash 家族——
+ * 服务端工具（`deepseek_web_search`/`deepseek_read_url`）在别的模型上会 400。
+ * @param {any} body
+ * @param {any} cfg
+ * @param {string} model
+ * @returns {boolean}
+ */
+export function shouldRunAppMode(body, cfg, model) {
+  if (!body || body.appMode !== true) return false;
+  return appModeEnabled(cfg) || supportsAppTools(String(model || ''));
+}
+
 export function appModelOf(cfg) {
   const model = cfg?.appApi?.model;
   return typeof model === 'string' && model.trim() ? model.trim() : APP_DEFAULT_MODEL;

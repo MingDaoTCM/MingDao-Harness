@@ -35,7 +35,7 @@ import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { routeTask, routingConfig } from '../routing.js';
 import { buildUserContent } from './attachments.js';
 // v0.8.1：应用模式（联网搜索 / 深度思考 / 阅读链接）——纯映射/裁剪 + 服务端编排各一模块。
-import { appModeEnabled } from './app-mode.js';
+import { appModeEnabled, shouldRunAppMode } from './app-mode.js';
 import { supportsAppTools } from '../deepseek-app.js';
 import { runAppModeChat } from './app-mode-run.js';
 import { MAX_CONCURRENT, SECURITY_HEADERS } from './constants.js';
@@ -1031,9 +1031,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     }
 
     // v0.8.1：应用模式（联网搜索 / 深度思考 / 阅读链接）——独立路径，实现见 web/app-mode-run.js。
-    // v0.8.1：双闸门。`appApi.enabled` 是「默认预开启」；UI 开关（body.appMode===true）是**显式同意**，
-    // 与 CLI `mingdao app` 同口径（那条命令也不看这个开关）。仍要求模型是 flash 家族——服务端工具在别的模型上会 400。
-    if (body.appMode === true && (appModeEnabled(cfg) || supportsAppTools(String(runModel || '')))) return await runAppModeChat({ cfg, body, session, built, userMessage, home, taskId, send, srvlog, entry, res, fs, path, withSessionLock, appendMessages, renameSessionFile, moveSessionWorkspace, claimSessionKey, chatFailure, finishChat });
+    if (shouldRunAppMode(body, cfg, runModel)) return await runAppModeChat({ cfg, body, session, built, userMessage, home, taskId, send, srvlog, entry, res, fs, path, withSessionLock, appendMessages, renameSessionFile, moveSessionWorkspace, claimSessionKey, chatFailure, finishChat });
     const systemPrompt = buildSystemPrompt({ workingDir: taskDir, withJournal: body.withJournal === true, projectMemory: projectMemorySnapshot, presetBlock });
     let messages =
       session.messages?.length && session.messages[0]?.role === 'system'
