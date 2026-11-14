@@ -112,11 +112,6 @@ export function appModeEnabled(cfg) {
 }
 
 /**
- * 应用模式使用的模型：`cfg.appApi.model` 优先，缺省回落官方应用模型 `deepseek-flash`。
- * @param {any} cfg
- * @returns {string}
- */
-/**
  * 是否走应用模式（服务端闸门）。判据集中在这里，`server.js` 只需一行调用——
  * 也让 `handleChat`/`runWebServer` 的函数行数不因这条分支而上涨（结构守卫只许降不许升）。
  *
@@ -133,6 +128,11 @@ export function shouldRunAppMode(body, cfg, model) {
   return appModeEnabled(cfg) || supportsAppTools(String(model || ''));
 }
 
+/**
+ * 应用模式使用的模型：`cfg.appApi.model` 优先，缺省回落官方应用模型 `deepseek-flash`。
+ * @param {any} cfg
+ * @returns {string}
+ */
 export function appModelOf(cfg) {
   const model = cfg?.appApi?.model;
   return typeof model === 'string' && model.trim() ? model.trim() : APP_DEFAULT_MODEL;
