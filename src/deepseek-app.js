@@ -80,6 +80,21 @@ export function buildAppRequest({
   return body;
 }
 
+/** `tool_use_id → 该次调用对应的 search/fetch 条目` 的配对索引（挂在聚合结果对象上）。
+ *  官方明确：**按 tool_use_id 配对**，因为多个调用会先全部到达、结果随后才到（深度思考搜索尤甚）；
+ *  用「最后一个 search」挂结果会在并发调用时把 A 的结果写到 B 上，A 静默变空。 */
+const pairIndex = new WeakMap();
+
+/** @param {any} out */
+function pairingOf(/** @type {any} */ out) {
+  let m = pairIndex.get(out);
+  if (!m) {
+    m = new Map();
+    pairIndex.set(out, m);
+  }
+  return /** @type {Map<string, any>} */ (m);
+}
+
 /**
  * 把「日期/星期/地点/渠道/语言」拼成官方约定的 latest_reminder 文本。
  * 官方 demo：`2026-11-14,Saturday,浙江杭州,Web,中文`（五项逗号分隔，日期用**本地**时区）。
@@ -235,27 +250,33 @@ export function applyAppEvent(ev, out, openBlocks, onDelta) {
     if (block.type === 'server_tool_use') {
       const action = block.input?.action || '';
       const kind = block.kind || '';
-      out.blocks.push({ type: 'tool_use', name: block.name, action, kind, url: block.input?.url || '', queries: block.input?.queries || [] });
+      const id = String(block.id || '');
+      out.blocks.push({ type: 'tool_use', id, name: block.name, action, kind, url: block.input?.url || '', queries: block.input?.queries || [] });
       if (action === 'search') {
-        const item = { queries: block.input?.queries || [], kind, results: [] };
+        const item = { id, queries: block.input?.queries || [], kind, results: [] };
         out.searches.push(item);
+        if (id) pairingOf(out).set(id, item);
         onDelta?.({ type: 'search', queries: item.queries, kind, results: [] });
       } else if (action === 'open_page' || action === 'read_link' || action === 'find_in_page') {
+        const item = { id, action, url: block.input?.url || '', kind };
+        if (id) pairingOf(out).set(id, item);
         onDelta?.({ type: 'fetch', action, url: block.input?.url || '', kind });
       }
       return;
     }
     if (block.type === 'web_search_tool_result') {
       const results = (block.content || []).filter((/** @type {any} */ r) => r && r.type === 'web_search_result');
-      const last = out.searches[out.searches.length - 1];
-      if (last) last.results = results;
-      out.blocks.push({ type: 'search_result', results });
-      if (last) onDelta?.({ type: 'search', queries: last.queries, kind: block.kind, results });
+      const id = String(ev.tool_use_id || '');
+      const target = (id && pairingOf(out).get(id)) || out.searches[out.searches.length - 1];
+      if (target) target.results = results;
+      out.blocks.push({ type: 'search_result', id, results });
+      if (target) onDelta?.({ type: 'search', queries: target.queries, kind: block.kind, results });
       return;
     }
     if (block.type === 'web_fetch_tool_result') {
       const content = block.content || {};
-      const item = { url: content.url || '', title: content.content?.title || '', error: content.type === 'web_fetch_tool_result_error' ? content.error_code : '', signature: block.signature || '' };
+      const id = String(ev.tool_use_id || '');
+      const item = { id, url: content.url || '', title: content.content?.title || '', error: content.type === 'web_fetch_tool_result_error' ? content.error_code : '', signature: block.signature || '' };
       out.fetches.push(item);
       out.blocks.push({ type: 'fetch_result', ...item });
       onDelta?.({ type: 'fetch', action: 'result', ...item });

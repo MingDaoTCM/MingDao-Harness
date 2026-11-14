@@ -254,4 +254,29 @@ function sseBody(frames) {
   ok('⑰ 性能口径：一次请求内完成多步搜索/开页（客户端往返 = 1）');
 }
 
+// ---------- ⑩ 并发调用：结果必须按 tool_use_id 配对（官方原文：Match calls to results by tool_use_id） ----------
+// 深度思考搜索会「多个调用先全部到达、结果随后才到」。若按"最后一个 search"挂结果，
+// A 的结果会被写到 B 上，A 静默变空——UI 上表现为"搜了但一条结果都没有"。
+{
+  const out = { text: '', thinking: '', blocks: [], citations: [], searches: [], fetches: [], title: '', usage: null, stopReason: '' };
+  const open = new Map();
+  const ev = (e) => applyAppEvent(e, out, open);
+  ev({ type: 'content_block_start', index: 0, content_block: { type: 'server_tool_use', id: 'srvtoolu_A', name: 'deepseek_web_search', input: { action: 'search', queries: ['A'] }, kind: 'deep_search' } });
+  ev({ type: 'content_block_start', index: 1, content_block: { type: 'server_tool_use', id: 'srvtoolu_B', name: 'deepseek_web_search', input: { action: 'search', queries: ['B'] }, kind: 'deep_search' } });
+  ev({ type: 'content_block_start', index: 2, content_block: { type: 'web_search_tool_result', content: [{ type: 'web_search_result', title: 'a', url: 'https://a' }], kind: 'deep_search' }, tool_use_id: 'srvtoolu_A' });
+  ev({ type: 'content_block_start', index: 3, content_block: { type: 'web_search_tool_result', content: [{ type: 'web_search_result', title: 'b', url: 'https://b' }], kind: 'deep_search' }, tool_use_id: 'srvtoolu_B' });
+  assert.equal(out.searches.length, 2);
+  assert.deepEqual(out.searches[0].results.map((r) => r.url), ['https://a'], 'A 的搜索结果必须挂回 A（不能按"最后一个 search"错配）');
+  assert.deepEqual(out.searches[1].results.map((r) => r.url), ['https://b'], 'B 的结果挂回 B');
+  assert.equal(out.searches[0].id, 'srvtoolu_A', 'search 条目要带 tool_use_id，供 UI/日志配对');
+  ok('⑱ 并发搜索：结果按 tool_use_id 配对（不是"最后一个"）');
+
+  // 结果先于调用到达（缺 id 的残缺负载）时，退回最后一个 search，不能崩
+  const out2 = { text: '', thinking: '', blocks: [], citations: [], searches: [], fetches: [], title: '', usage: null, stopReason: '' };
+  applyAppEvent({ type: 'content_block_start', index: 0, content_block: { type: 'server_tool_use', id: 'x', name: 'deepseek_web_search', input: { action: 'search', queries: ['q'] }, kind: 'search' } }, out2, new Map());
+  applyAppEvent({ type: 'content_block_start', index: 1, content_block: { type: 'web_search_tool_result', content: [{ type: 'web_search_result', url: 'https://z' }], kind: 'search' } }, out2, new Map());
+  assert.deepEqual(out2.searches[0].results.map((r) => r.url), ['https://z'], '缺 tool_use_id 时退回最后一个 search（容错，不丢结果）');
+  ok('⑲ 残缺负载：缺 tool_use_id 时容错回退');
+}
+
 console.log(`\nDeepSeek 应用全家桶：${passed} 项通过`);

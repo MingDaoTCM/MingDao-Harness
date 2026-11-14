@@ -80,8 +80,9 @@ M.mutate({
 M.mutate({
   name: '⑦ 搜索结果不挂回发起它的 search',
   file: F,
-  from: '      const last = out.searches[out.searches.length - 1];\n      if (last) last.results = results;',
-  to: '      const last = out.searches[out.searches.length - 1]; // 变异：搜索结果不挂回 search',
+  // v0.8.0：配对已改为按 tool_use_id（官方要求），锚点跟随；变异改成"永远挂到最后一个 search"。
+  from: "      const target = (id && pairingOf(out).get(id)) || out.searches[out.searches.length - 1];\n      if (target) target.results = results;",
+  to: "      const target = out.searches[out.searches.length - 1]; // 变异：按最后一个 search 挂结果（并发时错配）",
   expect: ['搜索结果必须挂回发起它的那次 search'],
   run: APP,
 });
