@@ -66,8 +66,9 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `titles.js` —— 会话标题自动生成：首轮完成后用 executor 模型生成简短中文标题并重命名会话文件（`autoTitle: false` 可关）—— 生成失败只跳过，不影响回合结论。
 - `model-caps.js` —— 模型能力解析的单一来源：上下文窗口 / 单次最大输出 / 是否本地部署，供预算推导、超时、工具截断统一引用 —— 本地判定复用 `ssrf-guard.js#isPrivateHost`，不另维护一份；本地小模型自动收紧预算与超时。
 
-### 2.2 Provider 与计价（8）
+### 2.2 Provider 与计价（9）
 
+- `deepseek-app.js`（v0.8.0）—— DeepSeek「应用全家桶」API 客户端：Anthropic Messages 风格的服务端工具（联网/深度思考搜索、阅读链接）、Files 上传（`purpose` 三档）、`safety_check` / `title` / `latest_reminder`、ASR / TTS —— 服务端工具与客户端工具**互斥**（同请求声明即 400），因此只服务「纯问答/搜索」；`read_link` 的页面正文在 `signature` 里，多轮必须原样回传；流内 `error` 事件（HTTP 仍 200）必须判失败，不能把半截回答当成功。
 - `providers/index.js` —— Provider 注册表与工厂：`resolveProviderConfig`（模型预设 → 服务商预设 → config → 凭证库/环境变量）、超时与 429/5xx 指数退避重试、自定义模块加载（`<home>/providers/<name>.mjs`）—— 解析优先级只此一份。
 - `providers/openai-compatible.js` —— OpenAI 兼容协议的 HTTP + SSE 流式客户端：增量解析容错跨 chunk 断行、分片 tool_calls 拼接、`reasoning_content` 分流 —— 只负责协议搬运，不感知权限与工具语义。
 - `models.js` —— 模型与服务商预设目录：上下文窗口 1M、`maxOutputCeiling` 384K、pro/flash 的温度与输出上限、缓存命中价差（命中价 = 未命中 1/30）、峰谷价 —— 默认模型名与价格表的唯一来源，禁止在别处写模型名字面量。
@@ -139,8 +140,9 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
   为什么抽出来：此前 `app.js` 3252 行、可执行覆盖 0%，只靠源码正则守卫——UI 改动的"绿"等于"文本没变"。
 - `web/util.js` / `web/app.js` —— 前端：`util.js` 是零状态工具（选择器/转义/Markdown/格式化），`app.js` 是页面主脚本（消息渲染与轨迹、设置面板、自绘气泡与模态框）—— 地址带 `?token=` 时记入 `sessionStorage` 并从地址栏移除，此后请求统一附加 `X-MingDao-Token`。
 
-### 2.8 CLI 层（13）
+### 2.8 CLI 层（14）
 
+- `commands/app.js` —— `mingdao app`：应用全家桶模式的 CLI 入口（纯对话/搜索/读链接/文件/语音），配置项 `appApi` 默认关闭 —— 需要工具或改文件的回合仍走 Agent 工具循环（服务端工具与客户端工具互斥）。
 - `cli.js` —— CLI 入口与唯一 argv 解析点：初始化向导、凭证管理、单次提问、交互式会话分发；会话能力含 `/plan` `/compact` `/init` `/memory` `/skills` `/mode` `/verbose` `/status` `/cost` —— 遇第一个位置参数即停止解析全局 flag，子命令 flag 交子命令自行解析（防 `mingdao run "任务" --model X` 被顶层剥除）。
 - `commands/repl.js` —— 交互式 TUI REPL 主循环：斜杠命令 + 多行输入 + 回合执行 + 自动压缩/标题/记忆/同步。
 - `commands/key.js` —— `mingdao key`：status / set / remove / import，凭证库读写与掩码展示。

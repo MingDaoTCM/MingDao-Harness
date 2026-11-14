@@ -19,7 +19,12 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：828（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：840（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+
+> v0.8.0：新增 `batch90-app-api`（12 条）——服务端工具丢声明、`safety_check` 恒不下发、`title`
+> 恒不下发、`purpose` 排到 `file` 之后、文件请求丢 `anthropic-beta`、TTS 用 `x-api-key` 而非
+> `Bearer`、搜索结果不挂回发起它的 search、`read_link` 丢 `signature`、`citations_delta` 不累积、
+> 错误体只报 `HTTP <code>`、`latest_reminder` 少一项、流内 `error` 当成功（828 → 840）。
 
 > v0.7.1（性能 H-7 / M-07）：新增 `batch87-read-path`（8 条）——readLastEventSeq 去掉 export、
 > 路由 lastEventSeq 回退 readAfter、diffMessages 退回整段 stringify、readAfter 无视 after 仍全量、
