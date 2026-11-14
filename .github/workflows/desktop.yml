@@ -52,7 +52,7 @@ jobs:
       AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
       AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -157,7 +157,7 @@ jobs:
       HAS_UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY != '' }}
       HAS_DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: 下载全部工件
         uses: actions/download-artifact@v4
         with:
@@ -298,7 +298,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: 改写指定 tag 的 Release 正文与标题
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
