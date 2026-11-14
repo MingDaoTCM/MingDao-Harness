@@ -45,6 +45,8 @@ import {
   seqContinuity,
   resyncPlan,
   seqBanner,
+  EXAMPLE_PROMPTS,
+  pickExamples,
 } from '../src/web/viewmodel.js';
 
 let passed = 0;
@@ -517,6 +519,41 @@ function REF_traceRoundView(round) {
   eq(seqBanner({ gap: 0 }), '', 'gap=0 不插提示');
   eq(seqBanner({ gap: -2 }), '', 'gap<0 不插提示');
   eq(seqBanner({}), '', '缺参不插提示');
+}
+
+// ---------------------------------------------------------------------------
+// 空态示例任务池（v0.8.1）：办公/生活/编程三类齐全、随机但可复现、同批不重复
+// ---------------------------------------------------------------------------
+{
+  const cats = [...new Set(EXAMPLE_PROMPTS.map((p) => p.category))].sort();
+  eq(cats, ['code', 'life', 'office'], '示例池必须覆盖办公/生活/编程三类');
+  ok(['office', 'life', 'code'].every((c) => EXAMPLE_PROMPTS.filter((p) => p.category === c).length >= 4), '每类至少 4 条示例（够随机抽还不重复）');
+  ok(EXAMPLE_PROMPTS.every((p) => [...p.text].length <= 26), '每条示例 ≤26 字（超长会让 chip 换行、顶高空态布局）');
+  ok(EXAMPLE_PROMPTS.every((p) => p.category !== 'code' || [...p.text].length > 0), '示例文案非空');
+  const repoCode = EXAMPLE_PROMPTS.filter((p) => p.category === 'code' && /src\/agent\.js/.test(p.text));
+  eq(repoCode.length, 1, '编程类只保留 1 条与本仓库相关的示例（其余为通用编程任务）');
+  eq(EXAMPLE_PROMPTS.filter((p) => /README|仓库/.test(p.text)).length, 0, '不得再有「给这个仓库写 README」这类只对开发者有意义的示例');
+
+  const picked = pickExamples();
+  eq(picked.length, 3, '默认抽 3 条（对应空态三个示例按钮）');
+  eq([...new Set(picked.map((p) => p.category))].sort(), ['code', 'life', 'office'], '默认抽签必须三类各 1 条（不能纯随机碰运气）');
+  ok(picked.every((p) => typeof p.text === 'string' && typeof p.category === 'string'), '返回形状必须是 {text, category}');
+  ok(new Set(picked.map((p) => p.text)).size === picked.length, '同一批内不得重复');
+
+  // 注入固定 rng：同一随机源两次抽签必须完全一致（可复现，便于回归/截图）
+  const seeded = () => 0.42;
+  eq(pickExamples({ rng: seeded }), pickExamples({ rng: seeded }), '注入固定 rng → 两次结果完全一致（可复现）');
+  // 不同 rng 抽出的组合不应永远相同（池子每类 ≥4，默认随机必须真的在随机）
+  const variants = new Set();
+  for (let i = 0; i < 24; i += 1) variants.add(pickExamples().map((p) => p.text).join('|'));
+  ok(variants.size >= 3, '连续 24 次随机抽签至少出现 3 种组合（示例不能一成不变）');
+
+  const five = pickExamples({ count: 5, rng: seeded });
+  eq(five.length, 5, 'count=5 抽 5 条');
+  ok(new Set(five.map((p) => p.text)).size === 5, 'count=5 时同批仍不重复');
+  eq([...new Set(five.map((p) => p.category))].length, 3, 'count>3 时仍覆盖三类（先每类 1 条再补）');
+  eq(pickExamples({ count: 0 }).length, 3, '非法 count 回落默认 3（不返回空）');
+  eq(pickExamples({ count: 99 }).length, EXAMPLE_PROMPTS.length, 'count 超过池子大小时抽干为止、不重复不崩');
 }
 
 console.log(`✅ test/viewmodel.js：${passed} 条断言通过（搬家函数与搬家前实现 deepEqual 对拍 + 输出形状 + 队列/插话 + SSE 序号连续性/两态救援）`);

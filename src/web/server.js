@@ -34,6 +34,9 @@ import { createProviderCache } from './provider-cache.js';
 import { MODELS, modelPreset, PROVIDERS } from '../models.js';
 import { routeTask, routingConfig } from '../routing.js';
 import { buildUserContent } from './attachments.js';
+// v0.8.1：应用模式（联网搜索 / 深度思考 / 阅读链接）——纯映射/裁剪 + 服务端编排各一模块。
+import { appModeEnabled } from './app-mode.js';
+import { runAppModeChat } from './app-mode-run.js';
 import { MAX_CONCURRENT, SECURITY_HEADERS } from './constants.js';
 // v0.6.13（A）：进度行文案与 Agent 共用同一份纯函数（口径不漂移）
 import { createAgent, formatTurnProgress } from '../agent.js';
@@ -1025,6 +1028,9 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         });
       }
     }
+
+    // v0.8.1：应用模式（联网搜索 / 深度思考 / 阅读链接）——独立路径，实现见 web/app-mode-run.js。
+    if (body.appMode === true && appModeEnabled(cfg)) return await runAppModeChat({ cfg, body, session, built, userMessage, home, taskId, send, srvlog, entry, res, fs, path, withSessionLock, appendMessages, renameSessionFile, moveSessionWorkspace, claimSessionKey, chatFailure, finishChat });
     const systemPrompt = buildSystemPrompt({ workingDir: taskDir, withJournal: body.withJournal === true, projectMemory: projectMemorySnapshot, presetBlock });
     let messages =
       session.messages?.length && session.messages[0]?.role === 'system'
@@ -1395,7 +1401,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
               const body = JSON.parse(String(chunk));
               if (body && body.ok === true && Array.isArray(body.permissions)) {
                 body.permissionSource = statePermissionSource();
-                body.defaults = SETTING_DEFAULTS;
+                body.defaults = SETTING_DEFAULTS; body.appMode = appModeEnabled(cfg); // v0.8.1：应用模式开关可见性（未启用时前端不显示按钮，避免"点了没反应"；服务端另有双闸门）
                 chunk = JSON.stringify(body);
               }
             }

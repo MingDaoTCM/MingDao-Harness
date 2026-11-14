@@ -101,6 +101,8 @@ const SUITES = [
   // v0.8.0：DeepSeek 应用全家桶（服务端搜索/阅读/文件/语音）客户端与 CLI
   ['deepseek-app', 'node', ['test/deepseek-app.js']],
   ['app-command', 'node', ['test/app-command.js']],
+  // v0.8.1：WebUI 应用模式开关（帧映射/历史裁剪 + 真实 HTTP 链路 + 关闭态回落 Agent 路径）
+  ['app-mode', 'node', ['test/app-mode.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];

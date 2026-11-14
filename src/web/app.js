@@ -1,7 +1,7 @@
 import { $, esc, highlight, renderMarkdown, scrollBottom, expandableBody, resultText, truncText, textBody, fmtDur, fmtTok, fmtT } from './util.js';
 import { MAX_ATTACHMENTS, MAX_IMAGE_BYTES, MAX_TEXT_BYTES } from './constants.js';
 import { sideNavBreakpoint, sideNavLayout, errCardParts, runStripView, permissionSourceLabel, toolStepView, toolTimelineSummary, toolTimelineVisibility, traceRoundView } from './viewmodel.js';
-import { enqueueMessage, dequeueMessage, shouldDrainQueue, queueView, QUEUE_MAX, enqueueSteer, steerView, STEER_MAX } from './viewmodel.js';
+import { enqueueMessage, dequeueMessage, shouldDrainQueue, queueView, QUEUE_MAX, enqueueSteer, steerView, STEER_MAX, pickExamples } from './viewmodel.js';
 // v0.6.41（§1.1 B1）：SSE 序号跳号 → 整窗重取（resync），不逐帧续接
 import { seqContinuity, resyncPlan, seqBanner } from './viewmodel.js';
 
@@ -527,6 +527,19 @@ function newAiMsg(ts){ const el=document.createElement('div'); el.className='msg
 function aiContent(msg){ const c=msg.querySelector('.content'); return c || (()=>{const d=document.createElement('div');d.className='content';msg.appendChild(d);return d;})(); }
 function addReasoning(msg){ const d=document.createElement('details'); d.className='reasoning'; d.innerHTML='<summary>思考过程</summary><div class="body"></div>'; msg.appendChild(d); return d.querySelector('.body'); }
 
+// v0.8.1｜应用模式的引用汇总：正文结束后把 appCitation 帧汇总成「参考：<title> — <url>」，
+// 最多 5 条（按 url/标题去重）；沿用既有 msg-sys 容器，不新增 UI 块。关闭态永不调用。
+function renderAppCitations(msg, list, scrollFn){
+  if(!Array.isArray(list)||!list.length) return;
+  const seen=new Set(); const uniq=[];
+  for(const c of list){ const k=String((c&&(c.url||c.title))||''); if(!k||seen.has(k)) continue; seen.add(k); uniq.push(c); if(uniq.length>=5) break; }
+  if(!uniq.length||!msg) return;
+  const d=document.createElement('div'); d.className='msg-sys';
+  d.textContent='参考：'+uniq.map(c=>[c.title,c.url].filter(Boolean).join(' — ')).join('；');
+  msg.appendChild(d);
+  try{ scrollFn&&scrollFn(); }catch{}
+}
+
 function addUser(text, ts){ const el=document.createElement('div'); el.className='msg-user'; const t=msgTimeText(ts); el.innerHTML='<div class="bubble">'+esc(text)+(t?'<span class="msg-time">'+esc(t)+'</span>':'')+'</div>'; chatEl.appendChild(el); renderEmptyState(); scrollBottom(); }
 
 const runningTools = new Map();
@@ -689,6 +702,9 @@ async function handleEvents(stream, onEvent){
 // —— 附件（图片 / 文本文件） ——
 let attachments=[];
 $('#attachBtn').onclick=()=>{ $('#fileInput').click(); };
+// v0.8.1｜应用模式开关（联网搜索 / 深度思考 / 阅读链接）：默认关闭，开启态加 .on；
+// 点击只改本地状态，send() 时按需往请求体加字段（关闭时请求体与改动前逐字节一致）。
+$('#appSearchBtn').onclick=()=>{ const b=$('#appSearchBtn'); const on=!b.classList.contains('on'); b.classList.toggle('on',on); b.setAttribute('aria-pressed',on?'true':'false'); };
 $('#fileInput').addEventListener('change', async e=>{
   for(const f of e.target.files||[]){
     if(attachments.length>=MAX_ATTACHMENTS){ uiAlert('最多 '+MAX_ATTACHMENTS+' 个附件'); break; }
@@ -916,6 +932,13 @@ async function send(){
   if(permVal) payload.permission=permVal;
   // 带上文开关：勾选后系统提示注入最近会话日志（默认不注入——新会话全新开始，避免串到历史会话上下文）
   if($('#journalChk')?.checked) payload.withJournal=true;
+  // v0.8.1｜应用模式（服务端执行搜索/阅读，一轮只 1 次请求）：**仅开启时**带这三个字段——
+  // 关闭时请求体与改动前逐字节一致（默认关闭）。think 沿用既有「思考模式」下拉的当前档位。
+  if($('#appSearchBtn')?.classList.contains('on')){
+    payload.appMode=true;
+    payload.search=true;
+    payload.think=($('#reasoningSel')?.value||'off')!=='off';
+  }
   if(attachments.length) payload.attachments=attachments;
   const sentAttachments=attachments;
   attachments=[]; renderAttachments();
@@ -929,6 +952,8 @@ async function send(){
   runState.cost=''; runState.detail=''; runState.turnModel='';
   renderWorkStatus();
   let reason=null; let taskId=null;
+  // v0.8.1｜应用模式：本轮收到的引用（appCitation），正文结束后汇总渲染（最多 5 条）。
+  const citations=[];
   // 等待输出时的可见状态：脉动「正在思考…」（每轮生成重新显示）
   const think=document.createElement('div'); think.className='think'; think.textContent='💭 正在思考…'; msg.appendChild(think);
   const showThink=()=>{ if(!think.parentNode) msg.appendChild(think); };
@@ -1056,6 +1081,9 @@ async function send(){
       else if (gate.action === 'resync') { beginResync(gate.gap, ev.streamSeq); return; }
       // 重复/乱序旧帧：只跳过这一帧；**无 streamSeq 帧不在这里返回**，业务照常处理（旧服务端兼容）。
       else if (ev?.streamSeq != null) return;
+      // v0.8.1｜应用模式帧的字段兼容：appFrameOf 产出 `text` 字段（Agent 路径历史帧用 `delta`）。
+      // 在入口归一成既有字段，正文/思考的分支一行不改（不复制第二套渲染）。
+      if((ev.type==='text'||ev.type==='reasoning')&&ev.delta==null&&ev.text!=null) ev.delta=ev.text;
       if(ev.type==='ask') disarm(); else arm(); // 有活动→重置；权限等待→暂停计时
       if(ev.type==='progress'){ const p=ev.seconds||0; if(ev.phase) curPhase=String(ev.phase); curTools=Number(ev.steps)||0; curTasks=Number(ev.tasks)||0; showThink();
         // P0-1：同一个 runState 同时喂状态条六字段与悬浮详情（服务端 progress ≈1s 一次，无新增轮询）
@@ -1084,6 +1112,20 @@ async function send(){
         if (ev.subagent) renderSubagentSections(); }
       if(ev.type==='text'){ curPhase='模型输出中'; runState.rawPhase='解码中（收到增量）'; runState.phase='解码中'; runState.contentChars=raw.length; onActivity(); raw+=ev.delta; update(); }
       else if(ev.type==='reasoning'){ if(!reason){ reason=addReasoning(msg); reason.dataset.full=''; } if(!reason.parentElement.open) reason.parentElement.open=true; reason.parentElement.querySelector('summary').classList.add('live'); reason.dataset.full+=ev.delta; const full=reason.dataset.full; reason.textContent=(full.length>9000?full.slice(-9000)+'\n…（思考内容较长，仅显示末尾；已 '+full.length+' 字符）':full); reason.scrollTop=reason.scrollHeight; scroll(); }
+      // v0.8.1｜应用模式三帧（搜索 / 阅读 / 引用）：都沿用既有 msg-sys 容器，不新造 UI 块。
+      else if(ev.type==='appSearch'){ onActivity(); showThink();
+        const qs=Array.isArray(ev.queries)?ev.queries.filter(Boolean).map(String):[];
+        const n=Array.isArray(ev.results)?ev.results.length:0;
+        const d=document.createElement('div'); d.className='msg-sys';
+        d.textContent='🔍 搜索：'+(qs.length?qs.join('、'):'（无关键词）')+(n?' · '+n+' 条':'');
+        // 搜索/阅读发生在正文之前：插在正文容器之前，读起来才是「先搜索、再回答」。
+        if(content.parentNode===msg) msg.insertBefore(d,content); else msg.appendChild(d); scroll(); }
+      else if(ev.type==='appFetch'){ onActivity(); showThink();
+        const d=document.createElement('div'); d.className='msg-sys';
+        d.textContent='📄 阅读：'+String(ev.url||ev.title||'');
+        if(content.parentNode===msg) msg.insertBefore(d,content); else msg.appendChild(d); scroll(); }
+      else if(ev.type==='appCitation'){ const title=String(ev.title||''), url=String(ev.url||''); if(title||url) citations.push({title,url}); }
+      else if(ev.type==='appTitle'){ /* 服务端会话标题：只用于改名（done 后 refreshSessions 刷新），正文不渲染 */ }
       else if(ev.type==='turnStart'){ stepsCount+=1; curSteps+=1; msg._steps=curSteps; curPhase='模型推理中'; runState.rawPhase='发请求（等首帧）'; runState.phase='等首帧'; msg._traj.push({kind:'turn', t:Date.now()}); showThink(); think.textContent='💭 第 '+msg._steps+' 回合：模型推理中…'; renderWorkStatus(); scroll(); }
       else if(ev.type==='turnEnd'){ curPhase='回合完成，进入下一回合'; showThink(); think.textContent='⏸ 第 '+msg._steps+' 回合完成（累计 '+(ev.toolSteps||0)+' 工具步）· 进入下一回合…'; renderWorkStatus(); }
       else if(ev.type==='toolStart'){ stepsCount+=1; curSteps+=1; curPhase=ev.name==='task'?'子 Agent 执行中':'执行工具中'; runState.rawPhase=curPhase; runState.phase='执行工具'; msg._steps=curSteps; msg._traj.push({kind:'tool', seq:ev.seq, name:ev.name, args:ev.args, t:Date.now(), done:false}); onActivity(); update(); renderToolStartEvent(ev); renderWorkStatus(); }
@@ -1146,7 +1188,7 @@ async function send(){
     // 具体错误形态已进日志（fetch failed 等不再绕开续跑提示）。
     d.textContent=(e&&e.name==='AbortError')?(killedByWatchdog?'响应超时已中断（120 秒无任何响应），请重试':'已中断'):('连接中断，本轮未完成。已执行的工作已保存检查点——直接发送「继续」即可从断点续跑（' + Math.round((Date.now() - workT0) / 1000) + 's · ' + stepsCount + ' 步）。');
     msg.appendChild(d); scroll(); }
-  finally{ clearInterval(hintTimer); disarm(); clearTimeout(stopFallbackTimer); stopFallbackTimer=null; stopping=false; turnAbortCtrl=null; generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; msg._endedAt=Date.now(); finalizePendingSubagent(msg); content.innerHTML=renderMarkdown(raw); attachTrajMeta(msg); renderTracePanels(); activeAiMsg=null; curWorkT0=0; if(!runState.aborted){ runState.rawPhase='空闲'; runState.phase='空闲'; } else { runState.rawPhase='已中止'; runState.phase='已中止'; } renderWorkStatus(); scroll(); updateTasksPanel(); settleSteering(); drainQueue(); }
+  finally{ clearInterval(hintTimer); disarm(); clearTimeout(stopFallbackTimer); stopFallbackTimer=null; stopping=false; turnAbortCtrl=null; generating=false; setBtn(); curTaskId=null; curPhase='模型推理中'; console.log('[MingDao] 回合收尾：generating=false，按钮恢复发送'); hintEl.classList.remove('working'); if(hintTextEl) hintTextEl.textContent=defaultHint; pending=false; msg._endedAt=Date.now(); finalizePendingSubagent(msg); content.innerHTML=renderMarkdown(raw); renderAppCitations(msg, citations, scroll); attachTrajMeta(msg); renderTracePanels(); activeAiMsg=null; curWorkT0=0; if(!runState.aborted){ runState.rawPhase='空闲'; runState.phase='空闲'; } else { runState.rawPhase='已中止'; runState.phase='已中止'; } renderWorkStatus(); scroll(); updateTasksPanel(); settleSteering(); drainQueue(); }
 }
 
 let curTaskId=null; // 本轮 SSE 任务 id（质检 L1：主停止按钮只断本任务，不再误伤其他 tab）
@@ -2343,6 +2385,9 @@ $('#shortcutClose').onclick = closeShortcutSheet;
 $('#shortcutMask').addEventListener('mousedown', (e) => { if (e.target === $('#shortcutMask')) closeShortcutSheet(); });
 
 // —— 空态三步引导：示例只填入，不发送 ——
+// v0.8.1：每次「进入」空态抽一次示例（办公/生活/编程各 1 条，随机顺序）。用一次性标记，
+// 保证输入/重绘（renderEmptyState 被频繁调用）时不抖动；离开空态后重置，下次新建对话再抽。
+let emptyExamplesDrawn = false;
 function fillExampleTask(text) {
   input.value = String(text == null ? '' : text);
   try { input.dispatchEvent(new Event('input', { bubbles: true })); } catch { /* 桩 DOM 无 Event */ }
@@ -2354,7 +2399,16 @@ function renderEmptyState() {
   const es = $('#emptyState'); if (!es) return;
   const show = shouldShowEmpty(chatEl.children.length, generating);
   es.hidden = !show;
-  if (!show) return;
+  if (!show) { emptyExamplesDrawn = false; return; }
+  if (!emptyExamplesDrawn) {
+    emptyExamplesDrawn = true;
+    const picks = pickExamples({ count: 3 });
+    const btns = es.querySelectorAll ? es.querySelectorAll('.es-ex') : [];
+    for (let i = 0; i < btns.length && i < picks.length; i += 1) {
+      btns[i].textContent = picks[i].text;
+      btns[i].setAttribute('data-example', picks[i].text);
+    }
+  }
   const md = modelDisplay(currentModelEntry());
   const set = (id, text) => { const n = $(id); if (n) n.textContent = text; };
   set('#esModel', md.name ? md.label + ' · ' + md.subtitle : '还没有可用模型：在 ⚙ 设置 › 模型与端点填 Key');
@@ -2653,6 +2707,13 @@ let searchTimer=null;
 $('#sessionSearch').addEventListener('input',e=>{ clearTimeout(searchTimer); searchTimer=setTimeout(()=>refreshSessions(e.target.value.trim()),300); });
 // 思考模式 / 推理等级（v0.2.8）：与模型选择并列在输入区，按当前模型独立。
 // 仅 reasoning 模型显示该下拉（关/低/高/最高）；切换模型时随 /api/state 的 reasoning 字段刷新。
+// v0.8.1｜应用模式开关的可见性：由 /api/state 的 `appMode`（服务端 cfg.appApi.enabled）决定。
+// 未启用时按钮保持 hidden——否则用户点开一个被服务端双闸门忽略的开关，等于"点了没反应"。
+// 截图脚本演示开启态时可先 `document.querySelector('#appSearchBtn').hidden=false` 再点击。
+function applyAppModeUI(enabled){
+  const b=$('#appSearchBtn'); if(!b) return;
+  b.hidden = enabled !== true;
+}
 function applyReasoningUI(reasoning){
   const sel=$('#reasoningSel');
   if(!sel) return;
@@ -2730,6 +2791,7 @@ async function init(){
     $('#autoStartChk').checked=Boolean(j.autostart);
     $('#notifyChk').checked=j.notify!==false;
     applyReasoningUI(j.reasoning);
+    applyAppModeUI(j.appMode);
     const env = ('路由'+(j.routing?'开':'关')+' · 沙箱'+((j.sandbox&&j.sandbox!=='off')?(j.sandboxSupported?j.sandbox:'降级'):'off'));
     $('#envBadge').textContent=env; $('#envBadge').style.display='';
     // 首次使用引导：无 API Key 时明确提示去设置（桌面版自动初始化后必走这里）
@@ -3051,6 +3113,7 @@ async function reloadModels(){
     if(j.contextBudget){ ctxLimit=Number(j.contextBudget)||ctxLimit; runState.contextTotal=ctxLimit; }
     runState.permissionMode=String(j.permission||'ask'); runState.permissionSource=String(j.permissionSource||'');
     applyReasoningUI(j.reasoning);
+    applyAppModeUI(j.appMode);
     renderWorkStatus();
     renderSessionSettings();
   }catch(e){}

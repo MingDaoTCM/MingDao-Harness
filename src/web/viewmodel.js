@@ -677,3 +677,84 @@ export function seqBanner({ gap } = {}) {
   if (!Number.isFinite(g) || g <= 0) return '';
   return `已跳过 ${g} 条事件，正在重新同步…`;
 }
+
+// ---------------------------------------------------------------------------
+// v0.8.1：新建对话空态的「示例任务」池（办公 / 生活 / 编程三类，每次进空态随机抽）。
+//
+// 为什么放在 viewmodel.js：抽签/去重都是纯计算，放这里才能 node 直测（不读 DOM）。
+// 约束：每条 ≤26 个字——示例按钮是圆角 chip，超长会换行并把空态整体顶高（用户反馈的
+// "布局被文案破坏"）；编程类只保留 1 条与本仓库相关的（解释 src/agent.js），其余用通用任务，
+// 避免空态只对开发者有意义（v0.8.1 用户反馈）。
+// ---------------------------------------------------------------------------
+
+/**
+ * 示例任务池：三类，每类 ≥4 条，每条 ≤26 字。
+ * `category` 是稳定机器名（office/life/code），前端若要显示中文标签请另建映射，不要改这里的值。
+ * @type {ReadonlyArray<{text: string, category: 'office'|'life'|'code'}>}
+ */
+export const EXAMPLE_PROMPTS = Object.freeze([
+  { text: '把这周的会议记录整理成待办清单', category: 'office' },
+  { text: '写一封项目延期说明邮件给客户', category: 'office' },
+  { text: '把季度数据提炼成汇报要点', category: 'office' },
+  { text: '整理今天收到的需求并排优先级', category: 'office' },
+  { text: '起草一份周报，突出完成项', category: 'office' },
+  { text: '帮我列一周低脂晚餐菜单并生成购物清单', category: 'life' },
+  { text: '周末两天城市周边游怎么安排', category: 'life' },
+  { text: '家里大扫除按房间列个清单', category: 'life' },
+  { text: '把这些食材做成三道家常菜', category: 'life' },
+  { text: '规划每天 20 分钟运动计划', category: 'life' },
+  { text: '解释 src/agent.js 的主循环', category: 'code' },
+  { text: '用 Python 写一个批量重命名文件的脚本', category: 'code' },
+  { text: '帮我排查这个报错并给出修复建议', category: 'code' },
+  { text: '给这段代码补上单元测试', category: 'code' },
+  { text: '把这段代码改写成另一种语言', category: 'code' },
+]);
+
+/**
+ * 从示例池里抽 `count` 条：**每类先随机取 1 条**（保证办公/生活/编程都出现），再随机打散顺序；
+ * 不足 `count` 时从剩余条目里去重随机补齐（类别不足 3 类时即降级为纯随机去重）。
+ * 同一批内绝不重复。`rng` 可注入（测试用固定随机源复现同一结果）。
+ * @param {{count?: number, rng?: () => number}} [opts]
+ * @returns {Array<{text: string, category: string}>}
+ */
+export function pickExamples({ count = 3, rng = Math.random } = {}) {
+  const want = Number(count);
+  const n = Number.isFinite(want) && want > 0 ? Math.floor(want) : 3;
+  const rand = typeof rng === 'function' ? rng : Math.random;
+  /** 取 [0, len) 的整数；对注入的越界 rng（返回 1 / 负数）也安全。 */
+  const at = (/** @type {number} */ len) => Math.min(len - 1, Math.max(0, Math.floor(Number(rand()) * len) || 0));
+  /** @type {Array<{text: string, category: string}>} */
+  const chosen = [];
+  /** @type {Set<string>} */
+  const used = new Set();
+  // ① 按类别首次出现顺序，每类先取 1 条（三类覆盖是硬要求，不能纯随机抽签碰运气）。
+  /** @type {Map<string, Array<{text: string, category: string}>>} */
+  const byCat = new Map();
+  for (const p of EXAMPLE_PROMPTS) {
+    const arr = byCat.get(p.category);
+    if (arr) arr.push({ text: p.text, category: p.category });
+    else byCat.set(p.category, [{ text: p.text, category: p.category }]);
+  }
+  for (const items of byCat.values()) {
+    if (chosen.length >= n) break;
+    const pick = items[at(items.length)];
+    chosen.push(pick);
+    used.add(pick.text);
+  }
+  // ② count 大于类别数（或池子类别不足 3）→ 从剩余里去重补齐；池子抽干就提前返回。
+  while (chosen.length < n) {
+    const rest = EXAMPLE_PROMPTS.filter((p) => !used.has(p.text));
+    if (!rest.length) break;
+    const pick = rest[at(rest.length)];
+    chosen.push({ text: pick.text, category: pick.category });
+    used.add(pick.text);
+  }
+  // ③ 打散顺序（Fisher–Yates，同一 rng）：顺序本身也不该每次一样。
+  for (let i = chosen.length - 1; i > 0; i -= 1) {
+    const j = at(i + 1);
+    const tmp = chosen[i];
+    chosen[i] = chosen[j];
+    chosen[j] = tmp;
+  }
+  return chosen;
+}

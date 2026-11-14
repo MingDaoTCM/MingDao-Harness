@@ -136,6 +136,8 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `web/constants.js` —— 前端与服务端共享常量：并发上限 8（`MAX_CONCURRENT`）、附件数与体积上限、单文件读取上限 —— 数值只在此定义，防客户端预检/服务端校验/工具读取三处漂移。
 - `web/attachments.js` —— 聊天附件构造（纯函数）：图片转 `data:` URL（仅视觉模型，单张 ≤5MB、最多 4 个），文本文件拼接进消息（≤200KB）—— 服务端按同一组常量校验。
 - `web/web-io.js` —— WebUI 的 io 适配器：把 Agent 的 io 事件翻译为 SSE 事件，权限确认/选择类交互经 `askHandler` 转发到浏览器模态框并等待 `POST /api/permission` 应答。
+- `web/app-mode.js`（v0.8.1）—— WebUI「应用模式」的**纯函数层**（联网搜索/深度思考/阅读链接）：`appFrameOf`（`streamAppChat` 的 delta → 既有 SSE 帧：thinking→reasoning、text→text、search/fetch/citation/title→appSearch/appFetch/appCitation/appTitle，其余不产生帧）、`buildAppMessages`（只留 user/assistant 的字符串 content、丢 tool/system/附加字段、取最后 maxTurns*2 条并在末尾追加当前文本）、`appModeEnabled` / `appModelOf`（默认关闭 / 默认 `deepseek-flash`）。**不读 IO**：会话落盘、标题改名、SSE 收尾都仍由 `web/server.js` 的既有路径负责。
+- `web/app-mode-run.js`（v0.8.1）—— WebUI「应用模式」的**服务端编排**（从 `server.js#handleChat` 切出）：解析 provider（`MINGDAO_APP_BASEURL` 可注入点）→ `streamAppChat` → `appFrameOf` 逐帧 `send()`（带既有 taskId/streamSeq）→ 成功则 `appendMessages(user+assistant)`、按服务端标题 `renameSessionFile`（仅默认时间戳名）、发 `done` 并 `finishChat`；失败先保留已产出正文/思考再报错（`prefix=''` 沿用原文）；客户端断开 abort 上游。**Agent 路径与 `agent.js` 一行未改**；切出也是为了让 `runWebServer`/`handleChat` 的行数红线只降不升。
 - `web/viewmodel.js`（v0.7.0 §1.2）—— 前端的**纯计算层**：`sideNavLayout`（三档断点下的左栏形态）、`errCardParts`（错误卡文案分解）、`runStripView`（状态条六字段）、`traceRoundView`（轨迹一轮的视图模型）以及它们依赖的格式化助手。**不读 DOM、不读全局**，因此可以被 node 直测；`app.js` 只负责把结果渲染到 DOM。
   为什么抽出来：此前 `app.js` 3252 行、可执行覆盖 0%，只靠源码正则守卫——UI 改动的"绿"等于"文本没变"。
 - `web/util.js` / `web/app.js` —— 前端：`util.js` 是零状态工具（选择器/转义/Markdown/格式化），`app.js` 是页面主脚本（消息渲染与轨迹、设置面板、自绘气泡与模态框）—— 地址带 `?token=` 时记入 `sessionStorage` 并从地址栏移除，此后请求统一附加 `X-MingDao-Token`。

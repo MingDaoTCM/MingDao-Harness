@@ -43,8 +43,10 @@ const ALLOWED_LONG_FUNCTIONS = {
   // 实测 2265→2270、1743→1748、1007→1009、695→696。基线只按**实测**同步，不预留余量。
   'src/agent.js::createAgent': 2270,
   'src/agent.js::runTurnInner': 1748,
-  'src/web/server.js::runWebServer': 1009,
-  'src/web/server.js::handleChat': 696,
+  // v0.8.1：应用模式分支切到 `web/app-mode-run.js` 后，两个函数实测各降 1 行（1009→1008 /
+  // 696→695）；基线按实测同步，之后仍只许降不许升。
+  'src/web/server.js::runWebServer': 1008,
+  'src/web/server.js::handleChat': 695,
   'src/commands/repl.js::runRepl': 687,
   'src/cli.js::main': 509,
 };
