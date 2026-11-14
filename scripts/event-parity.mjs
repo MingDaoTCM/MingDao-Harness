@@ -64,11 +64,23 @@ export function parityOf(file) {
   // 旧日志没有格式戳，缺 rewrite 记录是**历史噪声**，判 incomplete。
   const newFormat = read.events.some((ev) => ev.type === 'session.start' && Number(ev.data?.format) >= EVENT_LOG_FORMAT);
   const hasReplace = read.events.some((ev) => ev.type === 'messages.replace');
+  const hasCompact = read.events.some((ev) => ev.type === 'compact');
   if (!newFormat && !hasReplace) {
     return {
       status: 'incomplete',
       file,
       reason: `事件日志早于本版，缺 rewrite 记录：${d.reason}`,
+      messages: loaded.messages.length,
+    };
+  }
+  // v0.8.0：format=2 却有 compact 而没有 messages.replace —— 说明某次 rewrite 的重写事件没落盘
+  // （事件写失败只 warn、或当时 eventLog 被关）。这类日志**无法**从事件流回溯，不是"重放回归"，
+  // 单列 incomplete 并点明原因，避免把"历史某次写失败"当成本版的重放 bug。
+  if (newFormat && !hasReplace && hasCompact) {
+    return {
+      status: 'incomplete',
+      file,
+      reason: `format=2 但只有 compact 没有 messages.replace（某次整份重写未落事件），事件流无法回溯：${d.reason}`,
       messages: loaded.messages.length,
     };
   }

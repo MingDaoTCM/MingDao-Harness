@@ -35,7 +35,12 @@ export const TTS_SAMPLE_RATE = 24000;
  * @returns {string}
  */
 export function apiRoot(baseUrl) {
-  return String(baseUrl || '').trim().replace(/\/+$/, '');
+  // 兼容三种常见写法：`https://api.deepseek.com`、`.../v1`（OpenAI 兼容预设）、`.../anthropic/v1`。
+  // 不归一就会拼成 `/v1/anthropic/v1/messages`（404）——provider.appChat 直接透传 baseUrl 时必须挡住。
+  let s = String(baseUrl || '').trim().replace(/\/+$/, '');
+  s = s.replace(/\/anthropic\/v1$/i, '').replace(/\/+$/, '');
+  s = s.replace(/\/v1$/i, '').replace(/\/+$/, '');
+  return s;
 }
 
 /**

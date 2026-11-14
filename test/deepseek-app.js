@@ -47,6 +47,9 @@ function sseBody(frames) {
   assert.equal(supportsAppTools('deepseek-flash'), true);
   assert.equal(supportsAppTools('deepseek-v4-pro'), false, '非 flash 模型不得开应用工具');
   assert.equal(apiRoot('https://api.deepseek.com///'), 'https://api.deepseek.com');
+  assert.equal(apiRoot('https://api.deepseek.com/v1'), 'https://api.deepseek.com', 'OpenAI 兼容预设的 baseUrl 带 /v1，必须剥掉');
+  assert.equal(apiRoot('https://api.deepseek.com/v1/'), 'https://api.deepseek.com');
+  assert.equal(apiRoot('https://api.deepseek.com/anthropic/v1'), 'https://api.deepseek.com', '已经带 /anthropic/v1 也不得再拼一次');
   assert.equal(APP_DEFAULT_MODEL, 'deepseek-flash');
   ok('③ 模型门与 URL 归一化');
 }

@@ -98,6 +98,9 @@ const SUITES = [
   ['turn-outcome', 'node', ['test/turn-outcome.js']],
   ['model-discovery-parallel', 'node', ['test/model-discovery-parallel.js']],
   ['sse-backpressure', 'node', ['test/sse-backpressure.js']],
+  // v0.8.0：DeepSeek 应用全家桶（服务端搜索/阅读/文件/语音）客户端与 CLI
+  ['deepseek-app', 'node', ['test/deepseek-app.js']],
+  ['app-command', 'node', ['test/app-command.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];

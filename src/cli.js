@@ -122,6 +122,30 @@ async function generatePlan(/** @type {any} */ provider, /** @type {any} */ mode
 
 // —— 后台任务 worker（Phase C C2）：已抽取至 src/tasks/worker.js，入口处动态导入 ——
 
+/** CLI 子命令分发表（模块级常量：main 里每加一个命令都会让它变长，把它搬出来既不占函数行数、也少一层缩进）。 */
+const DISPATCH_TABLE = /** @type {Record<string, any>} */ ({
+    update: { module: 'update', handler: 'handleUpdateFamily' },
+    rollback: { module: 'update', handler: 'handleUpdateFamily' },
+    batch: { module: 'update', handler: 'handleUpdateFamily' },
+    cost: { module: 'update', handler: 'handleUpdateFamily' },
+    audit: { module: 'update', handler: 'handleUpdateFamily' },
+    tasks: { module: 'schedule', handler: 'handleTasks' },
+    schedule: { module: 'schedule', handler: 'handleSchedule' },
+    workspace: { module: 'workspace', handler: 'handleWorkspace' },
+    mcp: { module: 'workspace', handler: 'handleMcp' },
+    sync: { module: 'sync', handler: 'handleSync' },
+    skill: { module: 'skill', handler: 'handleSkill' },
+    web: { module: 'skill', handler: 'handleWeb' },
+    sessions: { module: 'skill', handler: 'handleSessions' },
+    key: { module: 'key', handler: 'handleKey' },
+    desktop: { module: 'desktop', handler: 'handleDesktop' },
+    diagnose: { module: 'diagnose', handler: 'handleDiagnose' },
+    pack: { module: 'pack', handler: 'handlePack' }, // v0.5.0：垂域 Pack 查看/校验/脚手架
+    ledger: { module: 'ledger', handler: 'handleLedger' }, // v0.6.0 C1：执行账本（导出/校验）
+    net: { module: 'net', handler: 'handleNet' }, // v0.6.0 C3：出网白名单与出网自证
+    app: { module: 'app', handler: 'handleApp' }, // v0.8.0：DeepSeek 应用全家桶（服务端搜索/思考/阅读/文件/语音）
+});
+
 async function main() {
   // v0.6.2（B-UI-1/B-CLI-1/B-REPL-1）：先装管道兜底，再输出任何东西。
   // `mingdao … | head -1` 这类最常见的用法此前会因 stdout EPIPE 未捕获而带堆栈崩溃。
@@ -145,28 +169,7 @@ async function main() {
   // 各 handler 返回 true = 已处理；false = 按普通提问继续（保留词劫持防护）。
   // 质检 M3：显式命令映射（命令 → {module, handler}），模块与命令一一对应、handler 名显式可查
   {
-    const dispatchTable = /** @type {Record<string, any>} */ ({
-      update: { module: 'update', handler: 'handleUpdateFamily' },
-      rollback: { module: 'update', handler: 'handleUpdateFamily' },
-      batch: { module: 'update', handler: 'handleUpdateFamily' },
-      cost: { module: 'update', handler: 'handleUpdateFamily' },
-      audit: { module: 'update', handler: 'handleUpdateFamily' },
-      tasks: { module: 'schedule', handler: 'handleTasks' },
-      schedule: { module: 'schedule', handler: 'handleSchedule' },
-      workspace: { module: 'workspace', handler: 'handleWorkspace' },
-      mcp: { module: 'workspace', handler: 'handleMcp' },
-      sync: { module: 'sync', handler: 'handleSync' },
-      skill: { module: 'skill', handler: 'handleSkill' },
-      web: { module: 'skill', handler: 'handleWeb' },
-      sessions: { module: 'skill', handler: 'handleSessions' },
-      key: { module: 'key', handler: 'handleKey' },
-      desktop: { module: 'desktop', handler: 'handleDesktop' },
-      diagnose: { module: 'diagnose', handler: 'handleDiagnose' },
-      pack: { module: 'pack', handler: 'handlePack' }, // v0.5.0：垂域 Pack 查看/校验/脚手架
-      ledger: { module: 'ledger', handler: 'handleLedger' }, // v0.6.0 C1：执行账本（导出/校验）
-      net: { module: 'net', handler: 'handleNet' }, // v0.6.0 C3：出网白名单与出网自证
-      app: { module: 'app', handler: 'handleApp' }, // v0.8.0：DeepSeek 应用全家桶（服务端搜索/思考/阅读/文件/语音）
-    });
+    const dispatchTable = DISPATCH_TABLE;
     const hit = dispatchTable[opts.prompt[0]];
     if (hit) {
       const mod = await import(`./commands/${hit.module}.js`);
