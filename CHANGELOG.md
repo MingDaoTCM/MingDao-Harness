@@ -3,6 +3,68 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.8.0（2026-11-14）— DeepSeek 应用全家桶接入（搜索/文件/语音）+ 两处性能优化
+
+> 本版接入 DeepSeek「应用全家桶」API：服务端联网搜索 / 深度思考搜索 / 阅读链接 / 文件解析 /
+> 安全校验 / 服务端会话标题 / 语音（ASR、TTS），并新增 `mingdao app` 命令。**用户可见：有**，
+> 但**默认关闭**——`cfg.appApi` 不配置时行为一字不变，Agent 工具循环零改动。另外两处性能：
+> 应用模式一轮深度思考搜索只发 **1 次 HTTP 请求**；每步 token 总数只遍历一次（M-5）。
+> 完整说明见 `RELEASE-NOTES-0.8.0.md`。
+
+### 一、应用全家桶 API 客户端（`5951291` / `c3cfb4d`）
+
+- 新增 `src/deepseek-app.js`（零依赖、可注入 fetch）：`buildAppRequest`（Anthropic Messages 形状）、
+  `applyAppEvent`（流式块解析）、`streamAppChat`、`uploadAppFile`、`transcribeAudio`、
+  `synthesizeSpeech`、`buildLatestReminder`、`supportsAppTools`、`apiRoot`。
+  - **Messages 服务端工具**：`deepseek_web_search`（含图片搜索、深度思考搜索 `deep_search`）与
+    `deepseek_read_url`；`safety_check`（`high`/`low`/`off`）、`title`（服务端会话标题）。
+  - **Files API**：`purpose` 解析两档（`rich_layout_recognition` / `text_recognition`）+ `user_data`；
+    上传顺序钉死（`purpose` 必须在 `file` 之前），引用文件带 `anthropic-beta`。
+  - **ASR / TTS**：`POST {base}/v1/tools/asr`（multipart）与 `POST {base}/v1/tools/tts`（JSON，
+    返回裸 PCM 24kHz 单声道 16-bit 小端），都走 `Authorization: Bearer`。
+  - `latest_reminder`：官方五项逗号分隔、日期用**本地**时区（UTC 会差一天）。
+- 并发修正（`c3cfb4d`）：搜索结果按 `tool_use_id` 配对，并发调用不再错配；流内 `error` 事件判
+  `ok:false` 但保留已产出正文（生成中途失败 HTTP 仍是 200）。
+- `provider.appChat(opts)`（`src/providers/index.js`）：供库调用方直接使用，复用同一次
+  `resolveProviderConfig` 的 `baseUrl`/`apiKey`（`...opts` 在后，可覆盖）。
+
+### 二、`mingdao app` 命令（`cfe4a0d`）
+
+- `src/commands/app.js`（723 行）：
+  `mingdao app "问题" [--search|--think|--no-url|--file <路径>|--json|--out|--voice stella|tide]`，
+  以及 **`--asr <音频>` / `--tts "文本"`** 两种单接口调用。
+  - `--file` 可多次；按扩展名决定 purpose（PDF/Word/PPT/图片 → 版面解析；md/csv/源码 → `user_data`）。
+  - `--voice` 时聊天后把正文合成 PCM；`--json` 输出 8 个字段的结构化结果。
+  - 无 API Key / 缺问题 / 非法参数都**非零退出并给可操作提示**（不静默成功）。
+- `cfg.appApi`（`src/config.js`）：**默认关闭**，且缺省**不落盘、不在内存新增字段**；
+  归一化只认字面量 `true`（`"true"` 不算），`safetyLevel` 白名单外回落 `high`，
+  `model` 非 flash 系回落 `deepseek-flash`。
+- `src/cli.js`：分发表提升为模块级常量 `DISPATCH_TABLE`（结构守卫只许降不许升，`main` 反而变短）。
+
+### 三、性能
+
+- **应用模式一轮深度思考搜索只发 1 次 HTTP 请求**：客户端工具循环里每搜一次都要「模型 → 工具 →
+  再发一次带全上下文」；服务端把 `search → open_page → find_in_page → 作答` 全放在一次请求内。
+  钉成断言：`test/deepseek-app.js` ⑰ 断言 `fetch` 调用次数 `=== 1`（会话越长省下的重发 token 越多）。
+- **服务端标题省一次模型调用**：标题随 `message_delta.delta.title` 返回，不再单独补全一次。
+- **M-5 单遍 token（`src/agent.js`）**：`sanitized` 本步内不变，`promptTokens` 只遍历一次；
+  此前成本护栏与 prefill 预告各遍历一遍（每步 2 次 O(n)）。
+
+### 四、对拍分类修正（`scripts/event-parity.mjs`）
+
+- `format=2` 但**只有 `compact` 没有 `messages.replace`**（某次整份重写未落事件）单列
+  `incomplete` 并点明原因，不再误判为「重放回归（fail）」——这类日志无法从事件流回溯，
+  是历史写失败，不是本版 bug。
+
+### 五、测试与门禁
+
+- 新增 `test/deepseek-app.js` **19 项**、`test/app-command.js` **32 项**；
+  `test/mutate/batch90-app-api.mjs` **12 条**变异；`test/run-all.mjs` **52 → 54 套**。
+- `ci.yml` 增加两步（`deepseek-app` / `app-command`），失败时同样把断言原文做成注解。
+- `packs/example-hello/pack.json`：`engines.mingdao` 放宽为 `>=0.4.6 <0.9`；
+  `test/smoke.js` 同步 16 处 manifest 夹具窗口（`<0.8` → `<0.9`，断言意图不变）——
+  v0.7.0 教训：版本 bump 本身就是一次代码变更，`pack-window` 守卫与 smoke 夹具都会当场红。
+
 ## v0.7.2（2026-11-10）— 修复桌面更新无法自动关闭
 
 > 本版是**桌面端补丁**：macOS 点「立即重启安装」后应用不退出、需手动关闭才能继续安装。

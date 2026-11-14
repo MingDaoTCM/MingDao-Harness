@@ -3494,7 +3494,7 @@ console.log(JSON.stringify({ okOn, xml }));`;
   for (const [v, r, want] of sem) assert.equal(packs.satisfiesRange(v, r), want, `semver ${v} in ${r} 应 ${want}`);
 
   // 57b. manifest 校验：合法通过、各类非法被拒且原因可操作
-  const base = { apiVersion: 1, name: 'demo', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' } };
+  const base = { apiVersion: 1, name: 'demo', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' } };
   assert.equal(packs.validateManifest(base).ok, true, '合法 manifest 应通过');
   const rejects = [
     [{ ...base, apiVersion: 99 }, 'apiVersion'],
@@ -3544,7 +3544,7 @@ console.log(JSON.stringify({ okOn, xml }));`;
   // 57e. 坏 Pack 不阻塞启动（缺 pack.mjs / 非法约束）
   const badDir = path.join(home57, 'packs', 'broken');
   fs.mkdirSync(badDir, { recursive: true });
-  fs.writeFileSync(path.join(badDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'broken', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: { tools: true } }));
+  fs.writeFileSync(path.join(badDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'broken', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: { tools: true } }));
   const bad = await packs.loadPack(badDir);
   assert.equal(bad.ok, false, '声明代码贡献但缺 pack.mjs 应被拒');
   assert.ok(String(bad.errors[0]).includes('pack.mjs'), '应指出缺 pack.mjs');
@@ -3552,7 +3552,7 @@ console.log(JSON.stringify({ okOn, xml }));`;
   // 57f. A4.6 静态提示：Pack 自建模型调用（fetch 且不用 ctx.llm）应告警但**不阻断**
   const lintDir = path.join(home57, 'packs', 'lintprobe');
   fs.mkdirSync(lintDir, { recursive: true });
-  fs.writeFileSync(path.join(lintDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'lintprobe', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: { tools: true } }));
+  fs.writeFileSync(path.join(lintDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'lintprobe', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: { tools: true } }));
   // 注意：注释里出现 ctx.llm 不得掩盖真实调用（lint 先剥注释）
   fs.writeFileSync(path.join(lintDir, 'pack.mjs'), 'export function createPack(){ /* ctx.llm 才是正道 */\n return { tools: [{ name: "x", run: async () => { await fetch("https://api.deepseek.com/v1/chat/completions"); return { ok: true }; } }] }; }');
   const lintRes = await packs.loadPack(lintDir);
@@ -3560,7 +3560,7 @@ console.log(JSON.stringify({ okOn, xml }));`;
   assert.ok((lintRes.warnings || []).some((w) => w.includes('ctx.llm')), '自建模型调用应产生 ctx.llm 静态提示');
   const okDir = path.join(home57, 'packs', 'lintclean');
   fs.mkdirSync(okDir, { recursive: true });
-  fs.writeFileSync(path.join(okDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'lintclean', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: { tools: true } }));
+  fs.writeFileSync(path.join(okDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'lintclean', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: { tools: true } }));
   fs.writeFileSync(path.join(okDir, 'pack.mjs'), 'export function createPack(){ return { tools: [{ name: "y", run: async (_a, c) => { const r = await c.llm({ user: "hi" }); return { ok: true, output: r.text }; } }] }; }');
   const cleanRes = await packs.loadPack(okDir);
   assert.equal(cleanRes.ok, true, '使用 ctx.llm 的 Pack 应正常加载');
@@ -3570,7 +3570,7 @@ console.log(JSON.stringify({ okOn, xml }));`;
   {
     const bDir = path.join(home57, 'packs', 'budgeted');
     fs.mkdirSync(bDir, { recursive: true });
-    fs.writeFileSync(path.join(bDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'budgeted', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, budget: { dailyYuan: 0.5, action: 'block' }, contributes: { tools: true } }));
+    fs.writeFileSync(path.join(bDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'budgeted', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, budget: { dailyYuan: 0.5, action: 'block' }, contributes: { tools: true } }));
     fs.writeFileSync(path.join(bDir, 'pack.mjs'), 'export function createPack(){ return { tools:[{ name:"go", description:"d", parameters:{type:"object",properties:{}}, readOnly:true, run: async (_a,c)=>{ const r= await c.llm({user:"hi",maxTokens:10}); return {ok:true,output:r.text}; } }] }; }');
     const { registerTool: regB } = await import(pathToFileURL(path.join(srcDir, 'tools', 'index.js')).href);
     const { resetPacksForTest: resetB } = await import(pathToFileURL(path.join(srcDir, 'packs.js')).href);
@@ -3601,7 +3601,7 @@ console.log(JSON.stringify({ okOn, xml }));`;
 
   const badDir2 = path.join(home57, 'packs', 'badconstraint');
   fs.mkdirSync(badDir2, { recursive: true });
-  fs.writeFileSync(path.join(badDir2, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'badconstraint', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: { constraints: true } }));
+  fs.writeFileSync(path.join(badDir2, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'badconstraint', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: { constraints: true } }));
   fs.writeFileSync(path.join(badDir2, 'pack.mjs'), 'export function createPack(){ return { constraints: [{ id: "x", kind: "not-a-kind" }] }; }');
   const bad2 = await packs.loadPack(badDir2);
   assert.equal(bad2.ok, false, '非法 constraint.kind 应被拒');
@@ -4577,7 +4577,7 @@ console.log(JSON.stringify({ okOn, xml }));`;
     const mk = (name, constraints) => {
       const d = path.join(root72, name);
       fs.mkdirSync(d, { recursive: true });
-      fs.writeFileSync(path.join(d, 'pack.json'), JSON.stringify({ apiVersion: 1, name, version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: { constraints: true } }));
+      fs.writeFileSync(path.join(d, 'pack.json'), JSON.stringify({ apiVersion: 1, name, version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: { constraints: true } }));
       fs.writeFileSync(path.join(d, 'pack.mjs'), `export function createPack() { return { constraints: ${JSON.stringify(constraints)} } }`);
       return d;
     };
@@ -5320,7 +5320,7 @@ console.log(JSON.stringify({ okOn, xml }));`;
   fs.mkdirSync(dir81, { recursive: true });
   fs.writeFileSync(
     path.join(dir81, 'pack.json'),
-    JSON.stringify({ apiVersion: 1, name: 'evil', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: { tools: true } })
+    JSON.stringify({ apiVersion: 1, name: 'evil', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: { tools: true } })
   );
   const writeEntry81 = (marker) =>
     fs.writeFileSync(
@@ -6131,7 +6131,7 @@ if (process.platform !== 'win32') {
       const d = fs.mkdtempSync(path.join(os.tmpdir(), `mingdao-p93-${name}-`));
       fs.writeFileSync(
         path.join(d, 'pack.json'),
-        JSON.stringify({ apiVersion: 1, name, version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: { tools: true }, ...manifestExtra })
+        JSON.stringify({ apiVersion: 1, name, version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: { tools: true }, ...manifestExtra })
       );
       fs.writeFileSync(path.join(d, 'pack.mjs'), body);
       return d;
@@ -6200,7 +6200,7 @@ if (process.platform !== 'win32') {
       fs.mkdirSync(dir, { recursive: true });
       fs.writeFileSync(
         path.join(dir, 'pack.json'),
-        JSON.stringify({ apiVersion: 1, name, version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: {} })
+        JSON.stringify({ apiVersion: 1, name, version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: {} })
       );
     };
     // 形态 A：直接指向 Pack 目录（文档与 Deyi 迁移指南的写法）
@@ -6416,7 +6416,7 @@ if (process.platform !== 'win32') {
   try {
     fs.writeFileSync(
       path.join(d98, 'pack.json'),
-      JSON.stringify({ apiVersion: 1, name: 'redos98', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: { constraints: true } })
+      JSON.stringify({ apiVersion: 1, name: 'redos98', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: { constraints: true } })
     );
     fs.writeFileSync(
       path.join(d98, 'pack.mjs'),
@@ -8383,7 +8383,7 @@ const isPosix111 = process.platform !== 'win32';
             name: 'batch3probe',
             displayName: '批三回归探针',
             version: '1.0.0',
-            engines: { mingdao: '>=0.4.6 <0.8' },
+            engines: { mingdao: '>=0.4.6 <0.9' },
             description: '仅用于测试：贡献一条 tool-deny，验证 ledger replay 在 CLI 下能挂载到 Pack 约束。',
             license: 'MIT',
             contributes: { constraints: true },
@@ -8444,7 +8444,7 @@ const isPosix111 = process.platform !== 'win32';
       try {
         fs.writeFileSync(
           path.join(badPack, 'pack.json'),
-          JSON.stringify({ apiVersion: 1, name: 'badpack114', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: { constraints: true } })
+          JSON.stringify({ apiVersion: 1, name: 'badpack114', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: { constraints: true } })
         );
         fs.writeFileSync(
           path.join(badPack, 'pack.mjs'),
@@ -9014,7 +9014,7 @@ process.stdout.write('done');`
       const marker117 = path.join(dir117, 'EXECUTED.txt');
       fs.writeFileSync(
         path.join(dir117, 'pack.json'),
-        JSON.stringify({ apiVersion: 1, name: 'probe117', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: { constraints: true } })
+        JSON.stringify({ apiVersion: 1, name: 'probe117', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: { constraints: true } })
       );
       fs.writeFileSync(
         path.join(dir117, 'pack.mjs'),
@@ -9044,12 +9044,12 @@ process.stdout.write('done');`
       // 用户级放一个同名 Pack（受信任、会真的挂载）
       const userDir = path.join(home117, 'packs', 'shadowprobe');
       fs.mkdirSync(userDir, { recursive: true });
-      fs.writeFileSync(path.join(userDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'shadowprobe', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: { constraints: true } }));
+      fs.writeFileSync(path.join(userDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'shadowprobe', version: '1.0.0', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: { constraints: true } }));
       fs.writeFileSync(path.join(userDir, 'pack.mjs'), 'export function createPack() { return { constraints: [{ id: "user-line", kind: "tool-deny", tool: "bash" }] }; }\n');
       // 项目级放一个同名 Pack（**未信任**）
       const projDir = path.join(proj117, '.mingdao', 'packs', 'shadowprobe');
       fs.mkdirSync(projDir, { recursive: true });
-      fs.writeFileSync(path.join(projDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'shadowprobe', version: '9.9.9', engines: { mingdao: '>=0.4.6 <0.8' }, contributes: { constraints: true } }));
+      fs.writeFileSync(path.join(projDir, 'pack.json'), JSON.stringify({ apiVersion: 1, name: 'shadowprobe', version: '9.9.9', engines: { mingdao: '>=0.4.6 <0.9' }, contributes: { constraints: true } }));
       fs.writeFileSync(path.join(projDir, 'pack.mjs'), 'export function createPack() { return { constraints: [{ id: "evil-line", kind: "tool-deny", tool: "bash" }] }; }\n');
       const listed = PACKS117.listPacks({}, proj117);
       const hit117 = listed.find((x) => x.name === 'shadowprobe');
