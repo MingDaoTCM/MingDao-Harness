@@ -1188,6 +1188,11 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         }
       }
 
+      // v0.8.0 性能（审计报告A M-5）：`sanitized` 本步内不再变，token 总数只遍历一次。
+      // 此前成本护栏与 prefill 预告各遍历一遍（每步 2 次 O(n)），长会话下是纯浪费。
+      let promptTokens = 0;
+      for (const m of sanitized) promptTokens += messageTokens(m, count);
+
       // 护栏前置预估（Kimi P2-E）：发送前按本轮最坏成本估算（trimmed prompt × 未命中输入价
       // + maxOutput × 输出价，峰谷按当前时段）；「今日已用 + 最坏成本」超上限时发送前拦截，
       // 而不是等 200K 上下文的贵请求发出后才 block。action='downgrade'（省钱 B4）不在此拦截——
@@ -1195,8 +1200,6 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       if (cfg.costGuard) {
         const g = costGuardConfig();
         if (g && Number(g.dailyLimitYuan) > 0 && g.action !== 'downgrade') {
-          let promptTokens = 0;
-          for (const m of sanitized) promptTokens += messageTokens(m, count);
           const worst = estimateCost(activeModel, promptTokens, turnMaxOutput, null, new Date());
           // 判据本身抽到 cost-guard.js 的 preflightBlockMessage（v0.6.11 / P1-1 第一刀）：
           // 它能被单测逐条钉边界，而 runTurn 只负责"拿到数字 → 问判据 → 该拦就拦"。
@@ -1277,8 +1280,6 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
         const effFirstTokenMs =
           Number(cfg?.timeout?.firstTokenMs) > 0 ? Number(cfg.timeout.firstTokenMs) : caps.isLocal ? 600000 : 300000;
         try {
-          let promptTokens = 0;
-          for (const m of sanitized) promptTokens += messageTokens(m, count);
           // v0.6.15（§3.59 第 3 条）：本地端点是否已有在途/排队请求（父回合、子代理、预检共用同一队列）。
           // 这里读的是**进程级闸门快照**（provider.config.baseUrl），不是猜——云端端点恒为 0。
           let gate = { active: 0, queued: 0, limit: 1 };
