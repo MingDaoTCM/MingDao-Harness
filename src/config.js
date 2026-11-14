@@ -8,6 +8,7 @@ import { PROVIDERS, modelPreset, providerPreset, pickFamilyModel, normalizeModel
 import { setStoredKey, resolveApiKey, maskKey } from './credentials.js';
 import { atomicWriteFileSync, withFileLock, withFileLockSync as withStateFileLockSync } from './atomic-write.js';
 import { setEventLogEnabled } from './session-events.js';
+import { APP_DEFAULT_MODEL } from './deepseek-app.js';
 
 export function mingdaoHome() {
   return process.env.MINGDAO_HOME || path.join(os.homedir(), '.mingdao');
@@ -296,6 +297,62 @@ function applyEventSource(/** @type {any} */ cfg) {
 }
 
 // ---------------------------------------------------------------------------
+// v0.8.0：DeepSeek「应用全家桶」配置（appApi）。
+//
+// 默认**关闭**，且**缺省不落盘、不在内存里新增字段**：不配置时既有配置的读写字节与
+// 其他命令的行为一字不变（这是本项必须用测试钉住的边界）。
+//
+// 归一化守则（都为了「配置坏了只降级、不抛错、不把字符串当布尔」）：
+//   · 布尔项只认字面量 `true`（`"true"` / `1` 一律不算）；键缺省时才用默认值；
+//   · `safetyLevel` 只认 high|low|off，其余（含拼错/大小写不符）回落 high；
+//   · `model` 只认非空字符串，否则回落 deepseek-flash（应用工具目前只有 flash 系列支持）。
+// ---------------------------------------------------------------------------
+/** 应用全家桶配置的默认值（`appApi` 缺省时按这一份解释，但**不写回**配置）。 */
+export const DEFAULT_APP_API = Object.freeze({
+  enabled: false,
+  model: APP_DEFAULT_MODEL,
+  search: false,
+  readUrl: true,
+  thinking: false,
+  safetyLevel: 'high',
+  title: true,
+});
+
+/** safetyLevel 白名单：其余值一律回落 high。 */
+const APP_SAFETY_LEVELS = new Set(['high', 'low', 'off']);
+
+/**
+ * 归一化 `appApi` 配置：任何非法值都回落到安全默认，绝不抛错（配置坏了只降级）。
+ * @param {any} raw
+ * @returns {{enabled: boolean, model: string, search: boolean, readUrl: boolean, thinking: boolean, safetyLevel: 'high'|'low'|'off', title: boolean}}
+ */
+export function normalizeAppApi(raw) {
+  const src = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const model = typeof src.model === 'string' && src.model.trim() ? src.model.trim() : APP_DEFAULT_MODEL;
+  const level = APP_SAFETY_LEVELS.has(src.safetyLevel) ? /** @type {'high'|'low'|'off'} */ (src.safetyLevel) : 'high';
+  return {
+    enabled: src.enabled === true,
+    model,
+    search: src.search === true,
+    // 默认 true 的两项：键缺省才取 true，显式给出时同样只认字面量 true（避免 "false" 字符串被当成开）。
+    readUrl: src.readUrl === undefined || src.readUrl === null ? true : src.readUrl === true,
+    thinking: src.thinking === true,
+    safetyLevel: level,
+    title: src.title === undefined || src.title === null ? true : src.title === true,
+  };
+}
+
+/**
+ * 就地归一化配置里的 `appApi`（字段不存在时**不新增**，保持旧配置文件字节不变）。
+ * @param {any} cfg
+ */
+function applyAppApi(/** @type {any} */ cfg) {
+  if (!isConfigObject(cfg) || cfg.appApi === undefined) return cfg;
+  cfg.appApi = normalizeAppApi(cfg.appApi);
+  return cfg;
+}
+
+// ---------------------------------------------------------------------------
 // v0.7.0 §1.3：配置写入的「基线 + 增量」。
 //
 // 缺陷形态：调用方 `loadConfig() → 改一个字段 → saveConfig(cfg)`，而 saveConfig 把**整份
@@ -418,12 +475,12 @@ function prepareConfigForWrite(cfg) {
     quarantineCorruptConfig(`保存配置时读不出来：${strict.error}`);
     base = {};
   }
-  if (!sameHome) return applyEventSource(cfg); // 无基线（新配置/字面量）或换了 home → 保持原语义：整份写入
+  if (!sameHome) return applyAppApi(applyEventSource(cfg)); // 无基线（新配置/字面量）或换了 home → 保持原语义：整份写入
   /** @type {{set: [string[], any][], del: string[][]}} */
   const patch = { set: [], del: [] };
   collectConfigPatch(snapshot.data, cfg, [], patch);
   applyConfigPatch(base, patch);
-  return applyEventSource(base);
+  return applyAppApi(applyEventSource(base));
 }
 
 /**
@@ -447,7 +504,7 @@ function applyEventLogGate(cfg) {
 export function loadConfig() {
   const r = readConfigStrict();
   if (!r.ok) return null;
-  const cfg = applyEventSource(applyModelLabels(applyCachedModelDefaults(r.data)));
+  const cfg = applyAppApi(applyEventSource(applyModelLabels(applyCachedModelDefaults(r.data))));
   rememberConfig(cfg); // v0.7.0 §1.3：记下基线，saveConfig 只合并增量
   applyEventLogGate(cfg); // v0.7.0 §1.1：config.eventLog=false 在「先落盘、后建 agent」路径也生效
   return cfg;
@@ -469,7 +526,7 @@ export function loadConfig() {
 export function loadConfigForWrite(why = '某个写配置的命令') {
   const r = readConfigStrict();
   if (r.ok) {
-    const cfg = applyEventSource(r.data || {});
+    const cfg = applyAppApi(applyEventSource(r.data || {}));
     rememberConfig(cfg);
     applyEventLogGate(cfg);
     return cfg;
@@ -486,7 +543,7 @@ export function loadConfigForWrite(why = '某个写配置的命令') {
 export function ensureMinimalConfig() {
   const strict = readConfigStrict();
   if (strict.ok && strict.data) {
-    const cfg = applyEventSource(applyModelLabels(strict.data));
+    const cfg = applyAppApi(applyEventSource(applyModelLabels(strict.data)));
     rememberConfig(cfg);
     return cfg;
   }
@@ -525,7 +582,7 @@ export function ensureMinimalConfig() {
 export function saveConfig(cfg) {
   try {
     ensureHome();
-    applyEventSource(cfg); // B2-b：写回前也归一化，保证内存基线与落盘值一致
+    applyAppApi(applyEventSource(cfg)); // B2-b：写回前也归一化（eventSource / appApi），保证内存基线与落盘值一致
     withStateFileLockSync(configLockFile(), () => {
       writeConfigUnlocked(prepareConfigForWrite(cfg));
       rememberConfig(cfg); // 成功后把这版对象当作下次增量比较的基线
@@ -548,7 +605,7 @@ export function saveConfig(cfg) {
 export async function saveConfigAsync(cfg) {
   try {
     ensureHome();
-    applyEventSource(cfg); // B2-b：写回前也归一化，保证内存基线与落盘值一致
+    applyAppApi(applyEventSource(cfg)); // B2-b：写回前也归一化（eventSource / appApi），保证内存基线与落盘值一致
     await withFileLock(configLockFile(), () => {
       writeConfigUnlocked(prepareConfigForWrite(cfg));
       rememberConfig(cfg);
@@ -583,7 +640,7 @@ export function updateConfigSync(/** @type {(cfg: any) => any} */ mutate) {
         cfg = {};
       }
       const next = typeof mutate === 'function' ? mutate(cfg) : cfg;
-      const out = applyEventSource(isConfigObject(next) ? next : cfg);
+      const out = applyAppApi(applyEventSource(isConfigObject(next) ? next : cfg));
       writeConfigUnlocked(out);
       rememberConfig(out);
       return { ok: true, error: null, config: out };
@@ -613,7 +670,7 @@ export async function updateConfig(/** @type {(cfg: any) => any} */ mutate) {
         cfg = {};
       }
       const next = typeof mutate === 'function' ? mutate(cfg) : cfg;
-      const out = applyEventSource(isConfigObject(next) ? next : cfg);
+      const out = applyAppApi(applyEventSource(isConfigObject(next) ? next : cfg));
       writeConfigUnlocked(out);
       rememberConfig(out);
       return { ok: true, error: null, config: out };

@@ -17,6 +17,7 @@ export { isMemoryPressureError };
 import { modelPreset, providerPreset } from '../models.js';
 import { mingdaoHome } from '../config.js';
 import { resolveApiKey, getStoredKey } from '../credentials.js';
+import { streamAppChat } from '../deepseek-app.js';
 import { isLocalBaseUrl } from '../model-caps.js';
 import { atomicWriteJsonSync, withFileLockSync as withStateFileLockSync } from '../atomic-write.js';
 
@@ -824,6 +825,20 @@ export async function createProvider(/** @type {any} */ cfg, /** @type {any} */ 
           try { releaseLocal?.(); } catch {}
         }
       }
+    },
+    /**
+     * 应用全家桶对话（v0.8.0）：服务端联网搜索 / 深度思考 / 阅读链接 / 文件输入。
+     *
+     * 与 `chat` 是**两条协议、两条路径**：这里走 Anthropic Messages 风格端点
+     * （`POST {base}/anthropic/v1/messages`，`x-api-key` 鉴权），服务端工具不能与客户端
+     * 工具同时声明，所以不参与 Agent 的工具循环；`baseUrl/apiKey` 取自同一次
+     * `resolveProviderConfig` 解析（与 `chat` 用同一套 key 优先级：环境变量 → 凭证库 → config）。
+     * 调用方可显式传 `baseUrl`/`apiKey` 覆盖（`...opts` 在后）。
+     * @param {any} opts
+     * @returns {ReturnType<typeof streamAppChat>}
+     */
+    appChat(opts) {
+      return streamAppChat({ baseUrl: pc.baseUrl, apiKey: pc.apiKey, ...opts });
     },
   };
 }

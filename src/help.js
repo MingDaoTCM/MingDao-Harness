@@ -65,6 +65,7 @@ export function helpLines({ variant = 'cli', home = '' } = {}) {
     ['  mingdao cost [天数]        费用与缓存命中统计（¥/天、命中率、按模型/工具分账）', null],
     ['  mingdao batch run|status|cancel  Batch API 半价批处理（自建任务清单，服务端异步跑）', null],
     ['  mingdao pack list/info/new/trust/verify  垂域 Pack（脚手架、信任门、静态校验）', null],
+    ['  mingdao app "问题" [--search] [--think] [--file <路径>] 应用全家桶（服务端联网搜索/深度思考/阅读链接/文件输入；比工具循环少几轮往返）', null],
     ['  mingdao mcp list/add/remove/serve/preset  MCP 服务器（接入外部工具）与预设', null],
     ...diagnoseRow,
     ['  mingdao desktop            启动桌面版（Electron，任意目录可用，托盘常驻）', null],

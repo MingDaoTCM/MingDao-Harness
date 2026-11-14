@@ -165,6 +165,7 @@ async function main() {
       pack: { module: 'pack', handler: 'handlePack' }, // v0.5.0：垂域 Pack 查看/校验/脚手架
       ledger: { module: 'ledger', handler: 'handleLedger' }, // v0.6.0 C1：执行账本（导出/校验）
       net: { module: 'net', handler: 'handleNet' }, // v0.6.0 C3：出网白名单与出网自证
+      app: { module: 'app', handler: 'handleApp' }, // v0.8.0：DeepSeek 应用全家桶（服务端搜索/思考/阅读/文件/语音）
     });
     const hit = dispatchTable[opts.prompt[0]];
     if (hit) {
