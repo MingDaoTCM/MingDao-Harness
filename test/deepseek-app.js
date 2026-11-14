@@ -224,4 +224,34 @@ function sseBody(frames) {
   ok('⑯ 流内 error：判失败但保留已产出正文');
 }
 
+// ---------- ⑨ 性能断言：一轮「深度思考搜索」只发 1 次 HTTP 请求 ----------
+// 这是「应用模式比工具循环快」的可验证口径：工具循环每搜一次要回到模型再发一次全上下文，
+// 而服务端工具在一次请求内完成 search → open_page → find_in_page → 作答。
+{
+  const frames = [
+    { type: 'message_start', message: { usage: { input_tokens: 3 } } },
+    { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '先搜' } },
+    { type: 'content_block_start', index: 1, content_block: { type: 'server_tool_use', name: 'deepseek_web_search', input: { action: 'search', queries: ['q1', 'q2'] }, kind: 'deep_search' } },
+    { type: 'content_block_start', index: 2, content_block: { type: 'web_search_tool_result', content: [{ type: 'web_search_result', title: 'A', url: 'https://a' }], kind: 'deep_search' } },
+    { type: 'content_block_start', index: 3, content_block: { type: 'server_tool_use', name: 'deepseek_web_search', input: { action: 'open_page', url: 'https://a' }, kind: 'deep_search' } },
+    { type: 'content_block_start', index: 4, content_block: { type: 'web_fetch_tool_result', content: { type: 'web_fetch_result', url: 'https://a', content: { title: 'A' } }, kind: 'deep_search' } },
+    { type: 'content_block_start', index: 5, content_block: { type: 'server_tool_use', name: 'deepseek_web_search', input: { action: 'search', queries: ['q3'] }, kind: 'deep_search' } },
+    { type: 'content_block_start', index: 6, content_block: { type: 'web_search_tool_result', content: [{ type: 'web_search_result', title: 'B', url: 'https://b' }], kind: 'deep_search' } },
+    { type: 'content_block_start', index: 7, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 7, delta: { type: 'text_delta', text: '答案' } },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn', title: 'T' }, usage: { output_tokens: 2 } },
+    { type: 'message_stop' },
+  ];
+  let calls = 0;
+  const fakeFetch = async () => { calls += 1; return new Response(sseBody(frames), { status: 200, headers: { 'Content-Type': 'text/event-stream' } }); };
+  const r = await streamAppChat({ baseUrl: 'https://api.deepseek.com', apiKey: 'k', thinking: true, search: true, fetchImpl: /** @type {any} */ (fakeFetch) });
+  assert.equal(calls, 1, '深度思考搜索（2 次搜索 + 1 次开页）必须只发 1 次 HTTP 请求');
+  assert.equal(r.searches.length, 2, '两次 search 步骤都要被记录下来');
+  assert.equal(r.fetches.length, 1, '开页步骤要记录');
+  assert.equal(r.text, '答案');
+  assert.equal(r.thinking, '先搜');
+  ok('⑰ 性能口径：一次请求内完成多步搜索/开页（客户端往返 = 1）');
+}
+
 console.log(`\nDeepSeek 应用全家桶：${passed} 项通过`);
