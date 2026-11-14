@@ -218,7 +218,7 @@ main{flex:1;overflow-y:auto;padding:18px 0 12px;min-width:0}
 #composer{display:flex;gap:8px;align-items:flex-end}
 #attachBtn{padding:10px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;cursor:pointer;font-size:15px}
 /* v0.8.1 应用模式开关（联网搜索 / 深度思考 / 阅读链接）：默认关闭；开启态 .on 复用既有按钮样式口径。 */
-#appSearchBtn{padding:10px 12px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;cursor:pointer;font-size:13px;white-space:nowrap;flex:none}
+#appSearchBtn{padding:10px 11px;background:var(--bg3);border:1px solid var(--border);border-radius:10px;cursor:pointer;font-size:14px;line-height:1;white-space:nowrap;flex:none}
 #appSearchBtn.on{background:rgba(90,160,255,.18);border-color:var(--accent2);color:var(--accent2);font-weight:600}
 #attachList{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:6px}
 #queueStrip{max-width:860px;margin:0 auto 6px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
@@ -887,11 +887,11 @@ body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions 
   <div id="queueStrip" style="display:none"></div>
   <div id="composer">
     <button id="attachBtn" title="上传图片或文本文件（图片需支持视觉的模型）">📎</button>
-    <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送；生成中 Enter=排队、⌘/Ctrl+Enter=插话）"></textarea>
+    <textarea id="input" rows="1" placeholder="输入任务…（Enter 发送 · 生成中 ⌘/Ctrl+Enter 插话）"></textarea>
     <!-- v0.8.1 应用模式开关：开启后本轮由服务端执行联网搜索/深度思考/阅读链接（一轮只 1 次请求）。
          默认关闭（无 .on）：关闭时请求体与改动前完全一致；仅当 config.json 的 appApi.enabled=true
          时由 applyAppModeUI() 解除 hidden（服务端双闸门，未启用时不给用户一个"点了没反应"的按钮）。 -->
-    <button id="appSearchBtn" type="button" aria-pressed="false" hidden title="联网搜索 / 深度思考 / 阅读链接（服务端执行，一轮只 1 次请求）">🔍 应用模式</button>
+    <button id="appSearchBtn" type="button" aria-pressed="false" aria-label="应用模式" hidden title="应用模式：联网搜索 / 深度思考 / 阅读链接（服务端执行，一轮只 1 次请求；会产生搜索/抓取费用）">🔍</button>
     <!-- P1-5 会话设置弹层（v0.6.19 §3.70）：模型 / 预设 / 权限三件套收进同一个 popover，
          按钮上直接印当前生效的模型与权限（用户一眼知道"东西没丢"）。原三个 select 保留在弹层内
          （send()/init() 仍按既有 id 读取），不再占输入区。 -->

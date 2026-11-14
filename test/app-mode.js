@@ -356,7 +356,11 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)
   assert.ok(/payload\.search=true/.test(appSrc) && /payload\.think=/.test(appSrc), 'send() 开启态必须带 search/think');
   assert.ok(/ev\.type==='appSearch'/.test(appSrc) && /ev\.type==='appFetch'/.test(appSrc) && /ev\.type==='appCitation'/.test(appSrc), '前端必须渲染 appSearch/appFetch/appCitation');
   assert.ok(/参考：/.test(appSrc), '引用必须汇总成「参考：…」（最多 5 条）');
-  assert.ok(/body\.appMode === true && appModeEnabled\(cfg\)/.test(serverSrc), '服务端必须由 appMode + 配置双闸门触发');
+  // v0.8.1：闸门 = 配置开启 **或** 显式 UI 开关（与 CLI `mingdao app` 同口径），且模型必须是 flash 家族。
+  assert.ok(
+    /body\.appMode === true && \(appModeEnabled\(cfg\) \|\| supportsAppTools\(/.test(serverSrc),
+    '服务端必须由「配置开启 或 显式 UI 开关」触发，且限 flash 家族模型'
+  );
   assert.ok(/const agent = createAgent\(/.test(serverSrc), '应用模式分支不得删除 Agent 路径');
   ok('接线绊线：按钮 / 请求字段 / 三帧渲染 / 服务端双闸门 / Agent 路径仍在');
 }
