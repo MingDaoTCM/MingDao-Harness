@@ -3,6 +3,33 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.8.2（2026-11-15）— DeepSeek 应用协议收尾（错误不再成功）+ 两处门禁诚实化 + 应用模式记账
+
+> **patch，纯修复**：不引入新能力，应用模式仍 experimental / 默认关闭。
+> 依据 5 份 v0.8.1 审计报告（1 份自审 + 4 份第三方）与审计方给出的 24 项协议准入套件。
+> 完整说明见 `RELEASE-NOTES-0.8.2.md`，路线见 `docs/PLAN-v0.8.2.md`。
+>
+> **① 错误不再"成功"（T01/T02/T03/T04）**：请求固定 `stream:true`；2xx 但非 SSE 明确失败；
+> 新增机器可读 `outcome`（`ok|truncated|failed|refused`，`ok===true` 仅当 `ok`）；SSE 按空行分派、
+> 合并多行 `data:`、正确处理 CRLF 与 EOF 残行；缺 `message_stop` → `truncated`；坏帧与
+> `event: error` 不再静默放过；**拒答撤回**（不落盘、不发成功通知、CLI 非零退出、前端清屏）；
+> 工具结果按官方 `content_block.tool_use_id` 配对（删除"最后一次搜索"回落）；多轮历史原样保留
+> 原始内容块（`signature`/`kind`/`id`）。
+> **② 预算与能力（T05/T06）**：新增 `src/app-protocol.js` 纯函数预算层——文档 100 MiB / 合计 32 MiB / ≤20 个、
+> ASR 仅 WAV/Ogg Opus ≤8 MiB ≤120s、TTS ≤10000 字符 ≤64 KiB，**超限在读取/上传前失败（零网络调用）**；
+> `supportsAppTools` 改精确表，`resolveAppModel` 三入口统一回落 `deepseek-flash`。
+> **③ 记账（4/4 报告共识）**：应用模式此前完全不进 `cache-stats`、日上限形同虚设——现在 CLI/Web 都记账
+> 并受成本护栏约束。
+> **④ 门禁诚实化（G1/G2/T07）**：`doc-lint` ② 因 v0.8.0 分发表重构而**匹配 0 个却判绿**（空转守卫）→
+> 现在读 `DISPATCH_TABLE`、输出 20 个、**0 个或 <15 即红**；`mutation-coverage` 不认 `const F='…'` 别名，
+> 把 `deepseek-app.js` 的 12 条变异记成 0 条 → 已修并加"大模块零变异"告警；24 项协议套件入 `run-all` 与 CI。
+> **⑤ 账本/预算（F1/F2）**：Ctrl+C 中断两处出口补 `markOutcome('aborted')`（此前记成 `done`）；
+> 非末轮步数耗尽不再吞掉 `maxRounds-1` 轮续跑预算。
+> **门禁**：typecheck 0 / strict 0 / preflight ✓ / smoke ✓ / `run-all` **56 套全绿** / 协议套件 **24/24** /
+> 变异 4 片全中（含 `batch91` 新代码守卫）/ event-parity exit 0 / doc-lint ✓。
+> **边界**：真实开发账户验收未执行（全部假 fetch 契约测试）；WebUI 附件不进应用接口；`latest_reminder` 未接线；
+> 覆盖率闸门仍关闭。
+
 ## v0.8.1（2026-11-14）— WebUI 应用模式开关 + 空态示例随机化
 
 > 本版给 WebUI 输入区加一个 **🔍「应用模式」开关**：开启后这一轮交给 DeepSeek 应用接口
