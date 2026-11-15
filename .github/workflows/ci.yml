@@ -781,6 +781,21 @@ jobs:
             echo "::error title=deepseek-app-contract 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
           fi
           exit $code
+      - name: deb 安装形态自动更新（v0.8.3：feed 解析 / 版本比较 / sha512+来源签名双校验 / pkexec 安装计划）
+        # 只挂「非 macOS」腿（与 update-signing / prune-downloads 同一口径），失败用注解暴露断言原文。
+        # 套件全程零网络、零 electron、零 root：只测"决定装不装"的纯逻辑，真实 dpkg 安装不在 CI 验证。
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          set +e
+          node test/deb-update.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=deb-update 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
       - name: 文档守卫（链接 / 命令表 / kind / 模型 id / 架构覆盖 / API 表 / 变异总数）
         # v0.6.8（文档审计 §7.7）：把"文档与代码不一致"变成 CI 红——此前全靠人肉复查，
         # 结果 ARCHITECTURE 停在 v0.1.x、PACK-API 列了未实现的 kind、README 的 CI 矩阵与模型 id 过时。

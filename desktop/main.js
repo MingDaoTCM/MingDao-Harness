@@ -9,10 +9,15 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import https from 'node:https';
+import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 // 更新包**来源签名**校验（审计 K-8）：纯函数 + 内置公钥常量，判据/文案/取舍见该模块文件头。
 // electron-updater 自带的 sha512 只防传输损坏，不防"换了发布源 / 被投毒的 feed"——这一步补的是来源。
 import { collectUpdateSignature, evaluateUpdate, keyIdOf, requireSignatureFromEnv, UPDATE_PUBLIC_KEYS } from './update-verify.js';
+// v0.8.3：deb 安装形态（无 $APPIMAGE）的独立更新通道——feed 解析 / 版本比较 / sha512 / 安装计划
+// 都在这个纯函数模块里（可单测）；本文件只负责 https 下载、对话框与 spawn 安装。
+import { debFeedUrl, installPlan, isNewer, parseDebFeed, parseSigFile, verifySha512Base64 } from './deb-update.js';
 
 /**
  * 更新遥测是否被显式关闭（审计 BUG-083）。
@@ -355,6 +360,381 @@ async function createWindow() {
   });
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// v0.8.3：deb 安装形态（`/opt/MingDao Harness/`，无 `$APPIMAGE`）的自动更新通道。
+//
+// 背景：electron-updater 只支持 AppImage / NSIS / dmg+zip——deb 安装此前只弹"请到官网下载"。
+// 现在：独立 feed（latest-linux-deb.yml）→ 语义化版本比较 → 下载 → **sha512 且 ed25519 来源签名**
+// 双校验 → `pkexec dpkg -i` → 重启。判断/校验/安装计划的纯函数在 desktop/deb-update.js（可单测），
+// 本段只做 I/O 与对话框。
+//
+// 信任边界（与 AppImage 路径同一口径，不降级）：sha512 只防传输损坏；来源信任必须靠
+// UPDATE_PUBLIC_KEYS 验签。两者是**与**关系，任一失败 → 删除下载文件并报错，**绝不安装**。
+// ─────────────────────────────────────────────────────────────────────────────
+const DEB_SIG_BASE = 'https://harness.mingdao.ai/updates/';
+const DEB_MAX_BYTES = 400 * 1024 * 1024; // 400 MiB 上限：deb 约 76 MB，异常大包直接拒绝
+const DEB_FEED_TIMEOUT_MS = 15000; // 清单/签名是静态小文件，15 秒拿不到就报错
+const DEB_DOWNLOAD_TIMEOUT_MS = 300000; // 安装包大文件给 5 分钟总超时
+
+/** 窗口任务栏进度（无窗口时静默忽略）；value: 0~1 = 百分比，-1 = 清除，>1 = 不确定态。 */
+function setUpdateProgress(value) {
+  try {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed()) w.setProgressBar(value);
+    }
+  } catch {}
+}
+
+/** 人类可读字节数（只用于弹窗/日志，不做精确计算）。 */
+function formatBytes(n) {
+  const size = Number(n) || 0;
+  if (size >= 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(1)} MiB`;
+  if (size >= 1024) return `${(size / 1024).toFixed(0)} KiB`;
+  return `${size} B`;
+}
+
+/**
+ * 极简 HTTPS GET → Buffer：跟随最多 5 次重定向、总超时、可选大小上限与进度回调。
+ * 下载 deb 走它（而不是 fetch）是为了渐进式拿到 content-length 更新窗口进度，
+ * 并在超过 400 MiB 时**边下边停**，不把异常大包整个读进内存。
+ * @param {string} url
+ * @param {{timeoutMs?: number, maxBytes?: number, onProgress?: ((got: number, total: number) => void) | null, redirects?: number}} [opts]
+ * @returns {Promise<Buffer>}
+ */
+function httpsGetBuffer(url, { timeoutMs = DEB_FEED_TIMEOUT_MS, maxBytes = 0, onProgress = null, redirects = 0 } = {}) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    /** @type {NodeJS.Timeout | null} */
+    let timer = null;
+    /** @param {any} err @param {Buffer} [buf] */
+    const done = (err, buf) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      if (err) reject(err);
+      else resolve(/** @type {Buffer} */ (buf));
+    };
+    /** @type {import('node:http').ClientRequest} */
+    let req;
+    try {
+      req = https.get(url, { headers: { 'User-Agent': 'MingDaoHarness/' + app.getVersion(), Accept: '*/*' } }, (res) => {
+        const code = Number(res.statusCode || 0);
+        if (code >= 300 && code < 400 && res.headers.location) {
+          res.resume();
+          if (redirects >= 5) return done(new Error('重定向次数过多'));
+          const next = new URL(String(res.headers.location), url).href;
+          httpsGetBuffer(next, { timeoutMs, maxBytes, onProgress, redirects: redirects + 1 }).then(
+            (b) => done(null, b),
+            (e) => done(e)
+          );
+          return;
+        }
+        if (code !== 200) {
+          res.resume();
+          return done(new Error('HTTP ' + code));
+        }
+        const total = Number(res.headers['content-length'] || 0);
+        if (maxBytes > 0 && total > maxBytes) {
+          res.resume();
+          return done(new Error('安装包过大（' + total + ' 字节，上限 ' + maxBytes + ' 字节）'));
+        }
+        /** @type {Buffer[]} */
+        const chunks = [];
+        let got = 0;
+        res.on('data', (/** @type {Buffer} */ chunk) => {
+          got += chunk.length;
+          if (maxBytes > 0 && got > maxBytes) {
+            try { req.destroy(); } catch {}
+            return done(new Error('下载超过上限 ' + maxBytes + ' 字节，已中止'));
+          }
+          chunks.push(chunk);
+          if (typeof onProgress === 'function') {
+            try { onProgress(got, total); } catch {}
+          }
+        });
+        res.on('end', () => done(null, Buffer.concat(chunks)));
+        res.on('error', (/** @type {any} */ err) => done(err));
+      });
+    } catch (err) {
+      done(err);
+      return;
+    }
+    req.on('error', (/** @type {any} */ err) => done(err));
+    timer = setTimeout(() => {
+      try { req.destroy(); } catch {}
+      done(new Error('请求超时（' + timeoutMs + 'ms）'));
+    }, timeoutMs);
+  });
+}
+
+/** 同一时刻只允许一个 deb 更新流程（启动自动检查与菜单手动检查可能撞车）。 */
+let debUpdateInFlight = false;
+
+/**
+ * deb 安装形态的更新主流程（v0.8.3）：检查 → 确认 → 下载 → 双校验 → 授权安装 → 重启。
+ * 所有用户可见文案都在这里；纯判断与安装计划在 desktop/deb-update.js。
+ * @param {{fromMenu?: boolean}} [opts]
+ * @returns {Promise<{ok: boolean, stage?: string, upToDate?: boolean, deferred?: boolean, cancelled?: boolean, installed?: boolean, busy?: boolean, exitCode?: number}>}
+ */
+async function runDebUpdateFlow({ fromMenu = false } = {}) {
+  /** @type {(opts: any) => Promise<{response: number}>} */
+  const show = (opts) => dialog.showMessageBox(mainWindow ?? undefined, opts).catch(() => ({ response: 1 }));
+  const errText = (/** @type {any} */ err) => String(err?.message || err);
+  if (debUpdateInFlight) {
+    if (fromMenu) await show({ type: 'info', title: '检查更新', message: '正在检查更新，请稍候…', detail: '上一轮 deb 更新流程尚未结束。' });
+    return { ok: false, busy: true };
+  }
+  debUpdateInFlight = true;
+  try {
+    const current = String(app.getVersion());
+
+    // ① 拉取 deb 专用清单（15s 超时；解析失败一律不下载）
+    /** @type {string} */
+    let feedText;
+    try {
+      feedText = (
+        await httpsGetBuffer(debFeedUrl(), { timeoutMs: DEB_FEED_TIMEOUT_MS, maxBytes: 1024 * 1024 })
+      ).toString('utf8');
+    } catch (err) {
+      appLog('deb 更新：拉取清单失败 ' + errText(err));
+      await show({
+        type: 'warning',
+        title: '检查更新',
+        message: '检查更新失败',
+        detail: `无法获取 deb 更新清单（${errText(err)}）。\n请检查网络后重试，或到官网下载：https://harness.mingdao.ai/#downloads`,
+        buttons: ['知道了'],
+        noLink: true,
+      });
+      return { ok: false, stage: 'feed' };
+    }
+    const feed = parseDebFeed(feedText);
+    if (!feed) {
+      appLog('deb 更新：清单解析失败（缺 version/path/sha512 或格式非法）');
+      await show({
+        type: 'warning',
+        title: '检查更新',
+        message: '检查更新失败',
+        detail: 'deb 更新清单不可用（格式不符）。\n请稍后重试，或到官网下载：https://harness.mingdao.ai/#downloads',
+        buttons: ['知道了'],
+        noLink: true,
+      });
+      return { ok: false, stage: 'parse' };
+    }
+    appLog(`deb 更新：清单 v${feed.version}（当前 v${current}，size=${feed.size}，path=${feed.path}）`);
+
+    // ② 版本比较：不新就明确说"已是最新"
+    if (!isNewer(feed.version, current)) {
+      appLog(`deb 更新：已是最新（当前 v${current}，清单 v${feed.version}）`);
+      await show({
+        type: 'info',
+        title: '检查更新',
+        message: `当前版本：v${current}，已是最新版本`,
+        detail: `deb 更新清单最新版本：v${feed.version}`,
+        buttons: ['知道了'],
+        noLink: true,
+      });
+      return { ok: true, upToDate: true };
+    }
+
+    // ③ 确认下载
+    const confirm = await show({
+      type: 'info',
+      title: '发现新版本',
+      message: `发现新版本 v${feed.version}（当前 v${current}）`,
+      detail: `deb 安装形态将下载安装包并做双重校验（sha512 完整性 + 来源签名），通过后才需要管理员授权安装。\n安装包约 ${formatBytes(feed.size)}。`,
+      buttons: ['下载并安装', '稍后'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (confirm.response !== 0) {
+      appLog('deb 更新：用户选择稍后');
+      return { ok: true, deferred: true };
+    }
+
+    // ④ 下载到临时目录（文件名按任务书：mingdao-update-<ver>.deb；目录用 mkdtemp 防 /tmp 预置同名文件）
+    //    feed 声明的 size 超过上限时直接拒绝，不浪费带宽下载一个注定被丢弃的包。
+    if (feed.size > DEB_MAX_BYTES) {
+      appLog(`deb 更新：清单 size ${feed.size} 超过上限 ${DEB_MAX_BYTES}，拒绝下载`);
+      await show({
+        type: 'warning',
+        title: '更新包异常',
+        message: `更新包大小异常（${formatBytes(feed.size)}），已拒绝下载`,
+        detail: '请稍后重试，或到官网下载：https://harness.mingdao.ai/#downloads',
+        buttons: ['知道了'],
+        noLink: true,
+      });
+      return { ok: false, stage: 'size' };
+    }
+    const safeVer = feed.version.replace(/[^0-9A-Za-z._-]/g, '_');
+    let workDir = os.tmpdir();
+    try { workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-update-')); } catch {}
+    const filePath = path.join(workDir, `mingdao-update-${safeVer}.deb`);
+    appLog(`deb 更新：开始下载 ${feed.url} → ${filePath}`);
+    setUpdateProgress(2);
+    /** @type {Buffer} */
+    let bytes;
+    try {
+      bytes = await httpsGetBuffer(feed.url, {
+        timeoutMs: DEB_DOWNLOAD_TIMEOUT_MS,
+        maxBytes: DEB_MAX_BYTES,
+        onProgress: (got, total) => {
+          if (total > 0) setUpdateProgress(Math.max(0, Math.min(1, got / total)));
+          else setUpdateProgress(2);
+        },
+      });
+    } catch (err) {
+      setUpdateProgress(-1);
+      appLog('deb 更新：下载失败 ' + errText(err));
+      await show({
+        type: 'warning',
+        title: '更新下载失败',
+        message: '新版本下载失败：' + errText(err),
+        detail: '请检查网络后重试，或到官网下载：https://harness.mingdao.ai/#downloads',
+        buttons: ['知道了'],
+        noLink: true,
+      });
+      return { ok: false, stage: 'download' };
+    }
+    setUpdateProgress(-1);
+    if (feed.size > 0 && bytes.length !== feed.size) {
+      appLog(`deb 更新：大小与清单不一致（清单 ${feed.size}，实际 ${bytes.length}；交给 sha512 判定）`);
+    }
+    try {
+      fs.writeFileSync(filePath, bytes);
+    } catch (err) {
+      appLog('deb 更新：写临时文件失败 ' + errText(err));
+      await show({
+        type: 'warning',
+        title: '更新下载失败',
+        message: '无法保存下载的安装包',
+        detail: `${errText(err)}\n请检查磁盘空间/权限后重试，或到官网下载：https://harness.mingdao.ai/#downloads`,
+        buttons: ['知道了'],
+        noLink: true,
+      });
+      return { ok: false, stage: 'save' };
+    }
+    appLog(`deb 更新：下载完成 ${bytes.length} 字节`);
+
+    // ⑤ 双校验：sha512 完整性 + ed25519 来源签名。任一失败 → 删除文件、绝不安装。
+    const shaOk = verifySha512Base64(bytes, feed.sha512);
+    const sigName = path.posix.basename(feed.path);
+    const sigCandidates = [DEB_SIG_BASE + encodeURIComponent(sigName) + '.sig', feed.url + '.sig'];
+    let signatureB64 = '';
+    let sigSource = '';
+    let sigReason = '';
+    for (const sigUrl of sigCandidates) {
+      try {
+        const sigText = (await httpsGetBuffer(sigUrl, { timeoutMs: DEB_FEED_TIMEOUT_MS })).toString('utf8');
+        const parsed = parseSigFile(sigText);
+        if (parsed) { signatureB64 = parsed; sigSource = path.posix.basename(sigUrl); break; }
+        sigReason = `${path.posix.basename(sigUrl)} 不是可用的 ed25519 签名（应为 64 字节 base64）`;
+      } catch (err) {
+        sigReason = `拉取 ${path.posix.basename(sigUrl)} 失败：${errText(err)}`;
+      }
+    }
+    const sigResult = signatureB64
+      ? verifyArtifactSignatureWithKeyring({ bytes, signatureB64, keys: UPDATE_PUBLIC_KEYS })
+      : { ok: false, reason: sigReason || '没有取得可用的来源签名' };
+    if (!shaOk || !sigResult.ok) {
+      try { fs.unlinkSync(filePath); } catch {}
+      appLog(
+        `deb 更新：校验失败（sha512=${shaOk ? 'ok' : 'mismatch'}，签名=${sigResult.ok ? 'ok' : 'invalid'}，` +
+          `原因=${sigReason || sigResult.reason || 'sha512 不匹配'}）→ 已删除下载文件，未安装`
+      );
+      await show({
+        type: 'warning',
+        title: '更新校验失败',
+        message: '更新包未通过校验，已删除下载文件，未安装',
+        detail:
+          `sha512：${shaOk ? '通过' : '不匹配'}\n` +
+          `来源签名：${sigResult.ok ? '通过' : sigResult.reason || '不可用'}\n\n` +
+          '请检查网络后重试，或到官网下载：https://harness.mingdao.ai/#downloads',
+        buttons: ['知道了'],
+        noLink: true,
+      });
+      return { ok: false, stage: 'verify' };
+    }
+    appLog(`deb 更新：双校验通过（sha512=ok，sig=${sigSource}，keyId=${sigResult.keyId ?? '?'}）`);
+
+    // ⑥ 校验通过后再谈安装
+    /** @type {{cmd: string, args: string[], fallbackHint: string}} */
+    const plan = installPlan({ filePath });
+    const go = await show({
+      type: 'info',
+      title: '更新已校验通过',
+      message: '已校验通过。安装需要管理员授权（会弹出系统密码框）',
+      detail: `版本 v${feed.version}\n安装包：${filePath}\n\n点「立即安装」后由系统弹出密码框；取消则不会安装。`,
+      buttons: ['立即安装', '取消'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+    });
+    if (go.response !== 0) {
+      appLog('deb 更新：用户取消安装（安装包保留：' + filePath + '）');
+      return { ok: true, cancelled: true };
+    }
+
+    // ⑦ 安装：pkexec dpkg -i（本地文件，不联网），等退出码。
+    //    0 = 成功；126/127 = 用户取消授权 / 系统没有 polkit → 回落到可复制的 sudo 命令。
+    const exitCode = await new Promise((resolve) => {
+      /** @type {import('node:child_process').ChildProcess} */
+      let child;
+      try {
+        child = spawn(plan.cmd, plan.args, { stdio: 'ignore' });
+      } catch {
+        resolve(-1);
+        return;
+      }
+      let settled = false;
+      const finish = (/** @type {number | null} */ code) => {
+        if (settled) return;
+        settled = true;
+        resolve(typeof code === 'number' ? code : -1);
+      };
+      child.on('error', () => finish(-1));
+      child.on('close', (code) => finish(code));
+    });
+    appLog(`deb 更新：安装进程退出码 ${exitCode}`);
+    if (exitCode === 0) {
+      const done = await show({
+        type: 'info',
+        title: '安装完成',
+        message: '安装完成，重启后生效',
+        buttons: ['立即重启', '稍后'],
+        defaultId: 0,
+        cancelId: 1,
+        noLink: true,
+      });
+      if (done.response === 0) {
+        appLog('deb 更新：用户选择立即重启');
+        quitting = true;
+        app.relaunch();
+        app.exit(0);
+      }
+      return { ok: true, installed: true };
+    }
+    appLog(`deb 更新：安装未完成（退出码 ${exitCode}），已给出可复制命令回落`);
+    await show({
+      type: 'warning',
+      title: '安装未完成',
+      message: `安装未完成（退出码 ${exitCode}）`,
+      detail:
+        '可能取消了管理员授权，或系统未提供 polkit。\n\n' +
+        '可复制下面的命令在终端手动安装：\n' +
+        `${plan.fallbackHint}\n\n` +
+        `安装包位置：${filePath}\n` +
+        '也可以到官网重新下载：https://harness.mingdao.ai/#downloads',
+      buttons: ['知道了'],
+      noLink: true,
+    });
+    return { ok: false, stage: 'install', exitCode };
+  } finally {
+    debUpdateInFlight = false;
+    setUpdateProgress(-1);
+  }
+}
+
 // 菜单「检查更新」：手动触发并弹出结果。
 // 审计（点击无响应根因）：此前依赖 autoUpdater 事件回调，任何一步异常
 // （electron-updater 导入失败 / 事件不触发 / 网络挂起）都会静默吞掉——用户点击后毫无反馈。
@@ -370,7 +750,10 @@ async function checkUpdatesFromMenu() {
   const ver = app.getVersion();
   const LINUX_NO_APPIMAGE = process.platform === 'linux' && !process.env.APPIMAGE; // deb 安装形态
   if (LINUX_NO_APPIMAGE) {
-    finish(() => show({ type: 'info', title: '检查更新', message: `当前版本：v${ver}`, detail: 'deb 安装不支持自动更新（electron-updater 仅支持 AppImage）。检测到新版时会直接引导到官网下载。' }));
+    // v0.8.3：deb 安装形态不再"只引导去官网"——走独立 deb 更新通道
+    // （feed → 版本比较 → 下载 → sha512 + 来源签名双校验 → pkexec dpkg -i）。
+    await runDebUpdateFlow({ fromMenu: true });
+    return;
   }
   try {
     // 审计（"Cannot read properties of undefined (reading 'once')"）：
@@ -397,24 +780,6 @@ async function checkUpdatesFromMenu() {
       clearTimeout(timer);
       // 质检：info 可能为 undefined（打包环境事件参数形状差异），版本号做多层兜底
       const v = info?.version ?? '';
-      if (LINUX_NO_APPIMAGE) {
-        // deb 安装：无法自动下载——引导到官网
-        finish(() =>
-          show({
-            type: 'info',
-            title: '发现新版本',
-            message: '发现新版本 v' + v + '（当前 v' + ver + '）',
-            detail: 'deb 安装不支持自动更新，请到官网下载安装：https://harness.mingdao.ai/#downloads',
-            buttons: ['去官网下载', '稍后'],
-            defaultId: 0,
-            cancelId: 1,
-            noLink: true,
-          }).then((r) => {
-            if (r.response === 0) shell.openExternal('https://harness.mingdao.ai/#downloads');
-          })
-        );
-        return;
-      }
       finish(() => show({ type: 'info', title: '检查更新', message: '发现新版本 v' + v + '，开始自动下载…', detail: '下载完成后会提示重启安装。' }));
     });
     const result = await autoUpdater.checkForUpdates();
@@ -496,7 +861,7 @@ function setupAutoUpdate() {
       const current = (UPDATE_PUBLIC_KEYS || []).find((k) => k.role === 'current') || UPDATE_PUBLIC_KEYS?.[0];
       appLog(
         '自动更新检查启动（feed: 官网 /updates' +
-          (LINUX_NO_APPIMAGE ? '，deb 形态：仅检测不下载' : '') +
+          (LINUX_NO_APPIMAGE ? '，deb 形态：走独立 deb 更新通道（不自动下载）' : '') +
           '；来源签名：' +
           (requireSignatureFromEnv() ? '必须验签（MINGDAO_REQUIRE_UPDATE_SIGNATURE=1）' : '默认档（无签名时警告后安装）') +
           '，密钥环 ' + (UPDATE_PUBLIC_KEYS?.length ?? 0) + ' 把（current keyId=' + (current ? keyIdOf(current.pem) ?? '?' : '?') + '）'
@@ -541,22 +906,9 @@ function setupAutoUpdate() {
         const v = String(info?.version ?? '?');
         appLog('updater 发现新版本 ' + v);
         if (LINUX_NO_APPIMAGE) {
-          // deb 安装：无法自动下载——静默弹一次引导（不打断工作，点按钮才跳官网）
-          dialog
-            .showMessageBox({
-              type: 'info',
-              title: '发现新版本',
-              message: `发现新版本 v${v}（当前 v${app.getVersion()}）`,
-              detail: 'deb 安装不支持自动更新，请到官网下载安装：https://harness.mingdao.ai/#downloads',
-              buttons: ['去官网下载', '稍后'],
-              defaultId: 0,
-              cancelId: 1,
-              noLink: true,
-            })
-            .then((r) => {
-              if (r.response === 0) shell.openExternal('https://harness.mingdao.ai/#downloads');
-            })
-            .catch(() => {});
+          // v0.8.3：deb 安装形态改走独立更新通道（deb feed → 下载 → sha512+签名双校验 → pkexec dpkg -i）。
+          // 不再"仅弹去官网"；autoDownload 仍为 false，electron-updater 这一步只负责发现新版本号。
+          void runDebUpdateFlow({ fromMenu: false });
           return;
         }
         appLog('开始自动下载（autoDownload=true）');

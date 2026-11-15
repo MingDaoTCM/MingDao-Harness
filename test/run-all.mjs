@@ -69,6 +69,8 @@ const SUITES = [
   ['structure-limits', 'node', ['test/structure-limits.js']],
   // v0.6.36：更新来源签名（密钥环 / 签名脚本 / 弹窗文案分层）
   ['update-signing', 'node', ['test/update-signing.js']],
+  // v0.8.3：deb 安装形态（无 $APPIMAGE）的自动更新——feed 解析 / 版本比较 / sha512+来源签名双校验 / 安装计划（纯函数）
+  ['deb-update', 'node', ['test/deb-update.js']],
   // v0.6.39：安装包目录裁剪（保留最近 N 版），纯逻辑
   ['prune-downloads', 'node', ['test/prune-downloads.js']],
   // v0.6.39：OSS 自定义域名证书绑定的 XML 语义（两个静默失败点）
