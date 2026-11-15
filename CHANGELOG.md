@@ -3,6 +3,29 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+## v0.9.0（2026-11-15）— Linux deb 安装形态自动更新
+
+> **minor（新能力）**：按项目版本语义，对外可见的新能力走 minor，patch 只收修复。
+> 完整说明见 `RELEASE-NOTES-0.9.0.md`。
+>
+> **背景**：此前 deb 安装形态（`/opt/MingDao Harness/`）在检查更新时只弹"请到官网下载"——
+> `electron-updater` 的 Linux 自更新只支持 AppImage。deb 用户因此拿不到任何应用内更新。
+>
+> **做法**：不走 electron-updater，改走**我方独立 feed** `updates/latest-linux-deb.yml`
+> （`gen-update-feeds.sh` 产出：version / path / sha512 / size / releaseDate；不复用 `latest-linux.yml`
+> 的 `files:`，以免干扰 electron-updater 对 AppImage 的选择）。客户端流程：
+> 拉 feed → 语义化版本比较 → 下载 `.deb`（≤400 MiB、带进度）→ **sha512 + 来源签名（ed25519）双校验** →
+> `pkexec dpkg -i`（一次管理员授权）→ 提示重启。
+> **任一校验不过即删除文件并拒绝安装**；提权失败/取消会给出可复制的 `sudo dpkg -i <path>` 与安装包路径。
+> 新增 `desktop/deb-update.js`（6 个纯函数，零依赖）与 16 项单测 + `batch92` 变异守卫。
+>
+> **已回填**：`latest-linux-deb.yml` 已为 0.8.2 补一份（sha512 与 OSS 上的 deb 逐字一致），
+> 0.8.2 的 deb 用户因此能收到本版更新。
+> **门禁**：typecheck 0 / strict 0 / preflight ✓ / smoke ✓ / `run-all` **57 套全绿** / 变异 4 片全中 /
+> doc-lint ✓。
+> **边界（重要）**：真实的 `dpkg -i`、polkit 授权弹窗、`pkexec` 失败回落**无法在 CI 验证**（CI 不安装系统包），
+> 只覆盖"决定装不装"的纯逻辑与源码接线，需在 Linux 桌面机人工验收；AppImage / Windows / macOS 路径一行未改。
+
 ## v0.8.2（2026-11-15）— DeepSeek 应用协议收尾（错误不再成功）+ 两处门禁诚实化 + 应用模式记账
 
 > **patch，纯修复**：不引入新能力，应用模式仍 experimental / 默认关闭。
