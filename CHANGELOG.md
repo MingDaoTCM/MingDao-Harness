@@ -9,7 +9,25 @@
 > 原因：发版时 tag 被重打两次，而 `npm publish` 用了更早的工作树快照；既有门禁只检查工作树，
 > 不检查"用户实际拿到的 tarball"。**修正**：新增 `scripts/verify-npm-tarball.mjs`（发布后强制比对
 > tarball 与 tag 树的 sha256，已写入 RELEASE-CHECKLIST），并在下一个版本重新发布修正后的包。
-> 桌面版 / GitHub Release / feed / 镜像的 0.9.0 **没有**此问题。
+> 桌面版 / GitHub Release / feed / 镜像的 0.9.0 **没有**此问题。**已在 v0.9.1 修正 npm 包。**
+
+## v0.9.1（2026-11-15）— 修正 npm 包的示例 pack 窗口（0.9.0 的 npm tarball 与 tag 漂移）
+
+> **patch，纯打包修正**：产品代码与 v0.9.0 **逐字节相同**，桌面安装包同理。
+> 完整说明见 `RELEASE-NOTES-0.9.1.md`。
+>
+> **问题**：npm 上的 0.9.0 tarball 里 `packs/example-hello/pack.json` 的引擎窗口仍是
+> `>=0.4.6 <0.9`（tag 树是 `<0.10`），**恰好排除了 0.9.0 自己** →
+> `npm i -g mingdao-harness@0.9.0` 的用户执行 `mingdao pack install example-hello` 会被拒绝。
+> 根因：发版时 tag 被重打两次（修 pack 引擎窗口 / 补 `desktop/deb-update.js` 打包白名单），
+> 而 `npm publish` 用的是**更早**的工作树快照；既有门禁只检查工作树，不检查用户实际拿到的 tarball。
+>
+> **修正**：本版从 tag 树重新打包发布，tarball 与 tag **逐字节一致**（已用新门禁核对）。
+> **新增门禁**：`scripts/verify-npm-tarball.mjs`——发布后从 registry 拉 tarball，与 tag 树逐字节比对
+> `package.json` / `packs/example-hello/pack.json` / `packs/example-hello/pack.mjs` /
+> `src/deepseek-app.js` / `src/app-protocol.js` 的 sha256，并核对版本号；不一致即 exit 1。
+> 已写入 `docs/RELEASE-CHECKLIST.md`（npm 发布后**强制**执行）。
+> **门禁**：typecheck 0 / strict 0 / preflight ✓ / smoke ✓ / `run-all` 57 套 / 变异 863 条 / doc-lint ✓。
 
 ## v0.9.0（2026-11-15）— Linux deb 安装形态自动更新
 
