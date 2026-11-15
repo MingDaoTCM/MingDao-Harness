@@ -3,6 +3,14 @@
 本项目自 v0.1.69 起维护变更日志；此前版本（0.1.0–0.1.68）的演进见 git 历史（`git log --reverse`）。
 
 
+> **已知问题（0.9.0 的 npm 包，桌面安装包不受影响）**：npm 上的 0.9.0 tarball 里
+> `packs/example-hello/pack.json` 的引擎窗口仍是 `>=0.4.6 <0.9`（应为 `<0.10`）——
+> 恰好排除了 0.9.0 自己，`mingdao pack install example-hello` 会拒绝加载这个示例包。
+> 原因：发版时 tag 被重打两次，而 `npm publish` 用了更早的工作树快照；既有门禁只检查工作树，
+> 不检查"用户实际拿到的 tarball"。**修正**：新增 `scripts/verify-npm-tarball.mjs`（发布后强制比对
+> tarball 与 tag 树的 sha256，已写入 RELEASE-CHECKLIST），并在下一个版本重新发布修正后的包。
+> 桌面版 / GitHub Release / feed / 镜像的 0.9.0 **没有**此问题。
+
 ## v0.9.0（2026-11-15）— Linux deb 安装形态自动更新
 
 > **minor（新能力）**：按项目版本语义，对外可见的新能力走 minor，patch 只收修复。

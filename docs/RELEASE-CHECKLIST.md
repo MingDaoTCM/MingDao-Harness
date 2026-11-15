@@ -14,7 +14,7 @@
 | **GitHub** | 代码（main + tag）+ Release（安装包长期保留） | `git push origin main` + tag 触发 `desktop.yml` |
 | **Gitee** | 代码（main + tag）+ Release（**不附安装包**） | `bash scripts/publish-mirror-releases.sh` |
 | **GitCode** | 同上 | 同上（同一脚本） |
-| **npm** | **版本化包**（不是代码分支） | `npm publish`（见 RELEASE-TRAIN §2；补发用 `--tag backfill`） |
+| **npm** | **版本化包**（不是代码分支） | `npm publish`（见 RELEASE-TRAIN §2；补发用 `--tag backfill`），**发布后必须** `node scripts/verify-npm-tarball.mjs <版本>` 且 exit 0 |
 
 > ⚠ **npm 不能「推分支」**：它只接收带版本号的包。所以「代码改动」推的是三个 git 平台，
 > 而**每次发版必须四个渠道齐全**——npm 只在发版时加入。别把这两件事混为一谈。
@@ -511,3 +511,19 @@ MINGDAO_GITEE_TOKEN=xxx MINGDAO_GITCODE_TOKEN=yyy \
 > 命令：`MINGDAO_GITHUB_TOKEN=... MDH_SITE_HOST=mingdao-server node scripts/publish-update-sigs.mjs <版本>`
 > 然后按验收第 ⑦ 条验一遍：取 feed 里的包名 → 下载 → 取 `/updates/<包名>.sig` → 用内置公钥验签必须通过。
 > 回滚：`ssh mingdao-server 'rm -f /opt/1panel/www/sites/mingdao-site/updates/*.sig'`（立即回到"提示后照常安装"）。
+
+## npm 发布后核对（强制，2026-11-15 事故后加）
+
+```bash
+node scripts/verify-npm-tarball.mjs <版本>   # 从 registry 拉 tarball，与 tag 树逐字节比对关键文件
+```
+
+**为什么必须做**：v0.9.0 发布时 tag 被重打过两次（修 pack 引擎窗口 / 补打包白名单），而 `npm publish`
+用的是**更早**的工作树快照 → npm 上的 0.9.0 里 `packs/example-hello/pack.json` 仍是 `>=0.4.6 <0.9`，
+**恰好排除了 0.9.0 自己**（`mingdao pack install example-hello` 会拒绝加载）。
+所有既有门禁都没发现，因为它们检查的是**工作树**，不是"用户实际拿到的东西"。
+
+判据：tarball 里 `package.json` / `packs/example-hello/pack.json` / `packs/example-hello/pack.mjs` /
+`src/deepseek-app.js` / `src/app-protocol.js` 必须与 tag **sha256 逐字一致**，版本号必须等于目标版本。
+不一致 → **不要移动 tag**，改发一个修正版本（patch）。
+
