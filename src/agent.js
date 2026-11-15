@@ -1098,6 +1098,8 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             durationMs: Date.now() - startedAt, perf: perf(),
           };
         }
+        // v0.8.2（自审 S-1）：中断出口此前不写 outcome，账本会把 Ctrl+C 记成 status='done'——合规不可信。
+        markOutcome('aborted', { aborted: true });
         return {
           text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: true,
           note: '已按 Ctrl+C 中断（工具执行期间收到中断信号），本回合未再发出请求。',
@@ -1666,9 +1668,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
           if (res.text) {
             const ap = await applyOutputConstraints(res.text, { messages, provider, activeModel, temperature, maxOutput: turnMaxOutput, usage, signal: currentAc?.signal });
             messages.push({ role: 'assistant', content: ap.text });
-            // 步数已耗尽：这一条与下方 `break`（→ 兜底总结/截断收尾）必须是同一口径
-            markOutcome('capped', { capHit: true });
-            return { text: ap.text, reasoning: res.reasoning || '', usage, steps, finish, truncated: false, aborted: false, capHit: outcome.capHit, upstreamTruncated, note: ap.note || undefined, durationMs: Date.now() - startedAt, perf: perf() };
+            // 步数已耗尽：**末轮**才按 capped 收尾（与下方 `break` 同口径）；非末轮只保留正文后跳出，
+            // 交给自动续跑——此前无条件 return 会把剩余轮次预算整体吞掉，长任务被提前判「完成」（自审 S-2）。
+            if (round === maxRounds - 1) { markOutcome('capped', { capHit: true }); return { text: ap.text, reasoning: res.reasoning || '', usage, steps, finish, truncated: false, aborted: false, capHit: outcome.capHit, upstreamTruncated, note: ap.note || undefined, durationMs: Date.now() - startedAt, perf: perf() }; }
           }
           break;
         }
@@ -1979,7 +1981,7 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             // v0.6.29（H-02）：已执行批次的结果先按原序落盘，再由 finishTurn 补齐未执行项；
             // 否则中断会把"已经跑完的工具"变成"未执行"占位，账实不符。
             flushToolMessages();
-            finishTurn();
+            finishTurn(); markOutcome('aborted', { aborted: true });
             return {
               text: null, reasoning: '', usage, steps, finish, truncated: false, aborted: true,
               note: '已按 Ctrl+C 中断（工具执行期间收到中断信号），本回合未再发出请求。',
