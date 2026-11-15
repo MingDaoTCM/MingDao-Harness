@@ -8,6 +8,16 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+// v0.8.2：应用模式开始把用量落进 cache-stats / 跑费用护栏——测试必须隔离 MINGDAO_HOME，
+// 否则会往开发机真实账本写记录，也读不到确定的护栏配置。放在动态 import 之前。
+const isolatedHome = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-app-command-'));
+process.env.MINGDAO_HOME = isolatedHome;
+process.on('exit', () => {
+  try {
+    fs.rmSync(isolatedHome, { recursive: true, force: true });
+  } catch {}
+});
+
 const appMod = await import(new URL('../src/commands/app.js', import.meta.url).href);
 const cfgMod = await import(new URL('../src/config.js', import.meta.url).href);
 const {
@@ -80,6 +90,38 @@ async function runApp(argv, overrides = {}) {
 const PC_OK = { baseUrl: 'https://api.deepseek.com/v1', apiKey: 'sk-test', envHint: 'DEEPSEEK_API_KEY' };
 const CFG = { provider: 'deepseek', model: 'deepseek-flash' };
 
+/** 造一段合法的 16-bit PCM WAV（ASR 预算/头校验用例；与契约套件同款口径）。 */
+function pcm16Wav(/** @type {number} */ seconds) {
+  const sampleRate = 24000;
+  const channels = 1;
+  const dataSize = seconds * sampleRate * channels * 2;
+  const buffer = Buffer.alloc(44 + dataSize);
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + dataSize, 4);
+  buffer.write('WAVEfmt ', 8);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20); // PCM
+  buffer.writeUInt16LE(channels, 22);
+  buffer.writeUInt32LE(sampleRate, 24);
+  buffer.writeUInt32LE(sampleRate * channels * 2, 28);
+  buffer.writeUInt16LE(channels * 2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(dataSize, 40);
+  return buffer;
+}
+
+/** 虚拟大字节（不实际分配），用于「预算必须先于读取/上传」用例。 */
+function virtualBytes(/** @type {number} */ byteLength) {
+  return new Proxy(new Uint8Array(1), {
+    get(target, property) {
+      if (property === 'byteLength') return byteLength;
+      const value = Reflect.get(target, property, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
 // ---------- ① 参数解析（纯函数） ----------
 {
   const d = parse([]);
@@ -145,7 +187,8 @@ const CFG = { provider: 'deepseek', model: 'deepseek-flash' };
   ok('⑤ purpose 判定：pdf/doc/ppt/图片 → rich_layout_recognition；md/未知 → user_data');
 }
 {
-  assert.equal(blockTypeForFile('pic.png'), 'image');
+  // v0.8.2（T05/DS-16）：Files API 的文件引用一律 document 块（图片也不再生成 image+file）。
+  assert.equal(blockTypeForFile('pic.png'), 'document', '图片也按 document 引用');
   assert.equal(blockTypeForFile('a.pdf'), 'document');
   assert.equal(blockTypeForFile('a.md'), 'document');
   ok('⑥ 内容块类型：图片 → image，其余 → document');
@@ -261,11 +304,15 @@ const CFG = { provider: 'deepseek', model: 'deepseek-flash' };
   ok('⑭ saveConfig：appApi 归一化后才落盘（非法值不进入 config.json）');
 }
 {
-  assert.equal(resolveAppModel({ model: 'deepseek-v4-pro' }), 'deepseek-v4-pro', '未配置 appApi 时沿用 cfg.model');
+  // v0.8.2（T06/DS-24）：模型能力是**单一判据**——未支持应用工具的模型一律回落 deepseek-flash，
+  // 不再出现「CLI 保留 pro、Web 回落 flash」的双口径（那会让服务端工具请求 400）。
+  assert.equal(resolveAppModel({ model: 'deepseek-flash' }), 'deepseek-flash', '官方应用模型原样使用');
+  assert.equal(resolveAppModel({ model: 'deepseek-v4-pro' }), 'deepseek-flash', '未支持模型回落默认');
+  assert.equal(resolveAppModel({ model: 'custom-deepseek-flash-experimental' }), 'deepseek-flash', '伪冒 flash 子串也回落（不能靠子串放行）');
   assert.equal(resolveAppModel({ model: 'deepseek-v4-pro', appApi: { model: 'deepseek-flash' } }), 'deepseek-flash', 'appApi.model 优先');
   assert.equal(resolveAppModel({ model: 'deepseek-v4-pro', appApi: { model: 1 } }), 'deepseek-flash', 'appApi.model 非法 → 回落默认');
   assert.equal(resolveAppModel({}), 'deepseek-flash');
-  ok('⑮ 模型优先级：appApi.model（归一化后）> cfg.model > deepseek-flash');
+  ok('⑮ 模型解析：appApi.model（归一化后）> cfg.model > deepseek-flash；未支持模型统一回落');
 }
 
 // ---------- ④ handleApp：失败必须非零退出并说明原因 ----------
@@ -460,8 +507,9 @@ const CFG = { provider: 'deepseek', model: 'deepseek-flash' };
   assert.deepEqual(chatOpts.messages[0].content[0], { type: 'text', text: '分析这些文件' });
   assert.deepEqual(chatOpts.messages[0].content[1], { type: 'document', source: { type: 'file', file_id: 'file-1' } });
   assert.deepEqual(chatOpts.messages[0].content[2], { type: 'document', source: { type: 'file', file_id: 'file-2' } });
-  assert.deepEqual(chatOpts.messages[0].content[3], { type: 'image', source: { type: 'file', file_id: 'file-3' } });
-  ok('㉔ --file：purpose 按扩展名选择、file_id 以 document/image 块拼进 user 消息、hasFiles=true');
+  // v0.8.2（DS-16）：图片上传后同样以 document(file) 块引用。
+  assert.deepEqual(chatOpts.messages[0].content[3], { type: 'document', source: { type: 'file', file_id: 'file-3' } });
+  ok('㉔ --file：purpose 按扩展名选择、file_id 统一以 document 块拼进 user 消息、hasFiles=true');
 }
 {
   const r = await runApp(['问', '--file', 'a.pdf'], {
@@ -500,7 +548,8 @@ const CFG = { provider: 'deepseek', model: 'deepseek-flash' };
   const r = await runApp(['--asr', 'talk.wav'], {
     cfg: CFG,
     resolveProviderConfig: () => PC_OK,
-    readFile: () => new Uint8Array([7]),
+    // v0.8.2（T05）：ASR 会校验 WAV 头（16-bit PCM）与时长——夹具必须是合法 WAV，不能是任意字节。
+    readFile: () => pcm16Wav(1),
     transcribeAudio: async (/** @type {any} */ args) => {
       asrArgs = args;
       return { ok: true, text: '转写结果' };
@@ -602,6 +651,263 @@ const CFG = { provider: 'deepseek', model: 'deepseek-flash' };
   assert.equal(chatOpts.safetyLevel, 'low');
   assert.equal(chatOpts.title, true);
   ok('㉜ appApi 配置：model/search/readUrl/thinking/safetyLevel 作为命令默认值，命令开关可覆盖');
+}
+
+// ---------- ⑪ v0.8.2 接线：拒答撤回 / 本地预算 / 记账与护栏 ----------
+{
+  // T02：拒答是撤回终态——已流出的正文不得出现在终端；退出码非零；记账仍保留 usage。
+  /** @type {any} */
+  let recorded = null;
+  const fake = async (/** @type {any} */ opts) => {
+    opts.onDelta({ type: 'text', text: '不得显示的原正文' });
+    return {
+      ok: false,
+      outcome: 'refused',
+      stopReason: 'refusal',
+      error: '安全拒答：服务端撤回了本次回答',
+      text: '不得显示的原正文',
+      thinking: '',
+      title: '',
+      searches: [],
+      citations: [],
+      fetches: [],
+      usage: { output_tokens: 2 },
+      stopReason2: '',
+    };
+  };
+  const r = await runApp(['问'], {
+    cfg: CFG,
+    resolveProviderConfig: () => PC_OK,
+    streamAppChat: fake,
+    recordUsage: (/** @type {any} */ model, /** @type {any} */ usage) => {
+      recorded = { model, usage };
+      return { ok: true };
+    },
+  });
+  assert.notEqual(r.exitCode, 0, '拒答必须非零退出');
+  assert.equal(r.output.includes('不得显示的原正文'), false, '拒答不得打印被撤下的正文');
+  assert.match(r.output, /拒答/, '必须给出固定拒答提示');
+  assert.equal(recorded?.usage?.completion_tokens, 2, '拒答也是一次真实调用：usage 仍入账（审计）');
+  ok('㉝ T02 拒答（非 --json）：撤下正文、固定拒答文案、非零退出、usage 仍记账');
+}
+{
+  const fake = async (/** @type {any} */ opts) => {
+    opts.onDelta?.({ type: 'text', text: '不得显示的原正文' });
+    return {
+      ok: false,
+      outcome: 'refused',
+      stopReason: 'refusal',
+      error: '安全拒答：服务端撤回了本次回答',
+      text: '不得显示的原正文',
+      thinking: '',
+      title: '',
+      searches: [],
+      citations: [],
+      fetches: [],
+      usage: { output_tokens: 2 },
+    };
+  };
+  const r = await runApp(['问', '--json'], {
+    cfg: CFG,
+    resolveProviderConfig: () => PC_OK,
+    streamAppChat: fake,
+    recordUsage: () => ({ ok: true }),
+  });
+  assert.notEqual(r.exitCode, 0);
+  const payload = JSON.parse(r.output);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.outcome, 'refused', '--json 必须带机器可读终态 outcome:refused');
+  assert.equal('text' in payload, false, '--json 不得夹带被拒答的正文');
+  assert.equal(String(payload.error).includes('不得显示的原正文'), false);
+  ok('㉞ T02 拒答（--json）：outcome:"refused" 且不含被撤下的 text');
+}
+{
+  // T05：扩展名不受支持的 ASR 必须在**读取文件/转写之前**本地失败（零网络、零读取）。
+  let reads = 0;
+  let calls = 0;
+  const r = await runApp(['--asr', 'voice.mp3'], {
+    cfg: CFG,
+    resolveProviderConfig: () => PC_OK,
+    readFile: () => {
+      reads += 1;
+      return new Uint8Array([1, 2, 3]);
+    },
+    transcribeAudio: async () => {
+      calls += 1;
+      return { ok: true, text: '不应执行' };
+    },
+  });
+  assert.notEqual(r.exitCode, 0);
+  assert.equal(calls, 0, '不支持的格式不得发起转写');
+  assert.equal(reads, 0, '不支持的格式连读文件都不做');
+  assert.match(r.output, /WAV|Ogg|不支持/);
+  ok('㉟ T05 ASR 不支持的扩展名：读取 0 次 / 转写 0 次（本地失败）');
+}
+{
+  let calls = 0;
+  const r = await runApp(['--asr', 'large.wav'], {
+    cfg: CFG,
+    resolveProviderConfig: () => PC_OK,
+    readFile: () => virtualBytes(8 * 1024 * 1024 + 1),
+    transcribeAudio: async () => {
+      calls += 1;
+      return { ok: true, text: '不应执行' };
+    },
+  });
+  assert.notEqual(r.exitCode, 0);
+  assert.equal(calls, 0, '超过 8 MiB 不得发起转写');
+  assert.match(r.output, /8\s*MiB|大小|超过/);
+  ok('㊱ T05 ASR 超过 8 MiB：转写 0 次（本地失败，错误含实际上限/单位）');
+}
+{
+  let calls = 0;
+  const r = await runApp(['--asr', 'long.wav'], {
+    cfg: CFG,
+    resolveProviderConfig: () => PC_OK,
+    readFile: () => pcm16Wav(121),
+    transcribeAudio: async () => {
+      calls += 1;
+      return { ok: true, text: '不应执行' };
+    },
+  });
+  assert.notEqual(r.exitCode, 0);
+  assert.equal(calls, 0, '超过 120 秒不得发起转写');
+  assert.match(r.output, /120|时长|超过/);
+  ok('㊲ T05 16-bit PCM WAV 超过 120 秒：转写 0 次（读 WAV 头算时长）');
+}
+{
+  let calls = 0;
+  const r = await runApp(['--tts', 'a'.repeat(10001)], {
+    cfg: CFG,
+    resolveProviderConfig: () => PC_OK,
+    synthesizeSpeech: async () => {
+      calls += 1;
+      return { ok: true, pcm: new Uint8Array([1]) };
+    },
+    writeFile: () => {},
+  });
+  assert.notEqual(r.exitCode, 0);
+  assert.equal(calls, 0, '超过 10000 字符不得发起合成');
+  assert.match(r.output, /10000|字符|超过/);
+  ok('㊳ T05 TTS 超过 10000 字符：合成 0 次（本地失败）');
+}
+{
+  // DS-21：数量预算先于任何文件 IO——21 个文件时连读都不读、上传 0 次。
+  let reads = 0;
+  let uploads = 0;
+  const files = Array.from({ length: 21 }, (_, index) => `f${index}.txt`);
+  const r = await runApp(['question', ...files.flatMap((file) => ['--file', file])], {
+    cfg: CFG,
+    resolveProviderConfig: () => PC_OK,
+    readFile: () => {
+      reads += 1;
+      return new Uint8Array([1]);
+    },
+    uploadAppFile: async () => {
+      uploads += 1;
+      return { ok: true, fileId: `id-${uploads}` };
+    },
+    streamAppChat: async () => {
+      throw new Error('超限时不应进入对话请求');
+    },
+  });
+  assert.notEqual(r.exitCode, 0);
+  assert.equal(uploads, 0, '数量超限不得上传');
+  assert.equal(reads, 0, '数量超限不得读文件');
+  assert.match(r.output, /20|数量|超过/);
+  ok('㊴ T05 超过 20 个文件：读取 0 次 / 上传 0 次（上传前失败）');
+}
+{
+  let uploads = 0;
+  const r = await runApp(['question', '--file', 'huge.pdf'], {
+    cfg: CFG,
+    resolveProviderConfig: () => PC_OK,
+    readFile: () => virtualBytes(100 * 1024 * 1024 + 1),
+    uploadAppFile: async () => {
+      uploads += 1;
+      return { ok: true, fileId: 'should-not-upload' };
+    },
+    streamAppChat: async () => {
+      throw new Error('超限时不应进入对话请求');
+    },
+  });
+  assert.notEqual(r.exitCode, 0);
+  assert.equal(uploads, 0, '单文件超 100 MiB 不得上传');
+  assert.match(r.output, /100\s*MiB|大小|超过/);
+  ok('㊵ T05 单文件超过 100 MiB：上传 0 次（转换/上传前失败）');
+}
+{
+  // 记账：Anthropic usage 归一成 prompt/completion + 请求发起时刻（峰谷价锚点）。
+  /** @type {any} */
+  let recorded = null;
+  const r = await runApp(['问'], {
+    cfg: CFG,
+    resolveProviderConfig: () => PC_OK,
+    streamAppChat: async () => ({
+      ok: true,
+      text: '记账答案',
+      thinking: '',
+      title: '',
+      searches: [],
+      citations: [],
+      fetches: [],
+      usage: { input_tokens: 5, output_tokens: 3 },
+      stopReason: 'end_turn',
+    }),
+    recordUsage: (/** @type {any} */ model, /** @type {any} */ usage, /** @type {any} */ perf) => {
+      recorded = { model, usage, perf };
+      return { ok: true };
+    },
+  });
+  assert.equal(r.exitCode, 0);
+  assert.equal(recorded.model, 'deepseek-flash', '按实际应用模型记账');
+  assert.deepEqual(recorded.usage, { prompt_tokens: 5, completion_tokens: 3 }, 'Anthropic usage → prompt/completion');
+  assert.equal(Number(recorded.perf?.requestStartAt) > 0, true, '必须带请求发起时刻（峰谷价锚点）');
+  ok('㊶ 应用模式记账：usage 归一 + 请求发起时刻（cache-stats 口径）');
+}
+{
+  // 记账失败只 warn：不得吞掉回答、也不得把成功改成失败。
+  const r = await runApp(['问'], {
+    cfg: CFG,
+    resolveProviderConfig: () => PC_OK,
+    streamAppChat: async (/** @type {any} */ opts) => {
+      opts.onDelta({ type: 'text', text: '回答仍在' });
+      return {
+      ok: true,
+      text: '回答仍在',
+      thinking: '',
+      title: '',
+      searches: [],
+      citations: [],
+      fetches: [],
+      usage: { input_tokens: 1, output_tokens: 1 },
+      stopReason: 'end_turn',
+      };
+    },
+    recordUsage: () => {
+      throw new Error('账单写失败');
+    },
+  });
+  assert.equal(r.exitCode, 0, '记账失败不得把成功改成失败');
+  assert.match(r.output, /回答仍在/, '记账失败不得吞掉已产出的回答');
+  ok('㊷ 记账失败只 warn：回答照常输出、退出码仍为 0');
+}
+{
+  // 费用护栏：日上限超限 → 发送前拒绝并说明，零网络调用。
+  let network = 0;
+  const r = await runApp(['问'], {
+    cfg: CFG,
+    resolveProviderConfig: () => PC_OK,
+    checkCostGuard: () => ({ blocked: true, message: '今日费用已达上限 ¥1.00（实际 ¥1.02），已暂停执行。' }),
+    streamAppChat: async () => {
+      network += 1;
+      return { ok: true, text: '', thinking: '', title: '', searches: [], citations: [], fetches: [], usage: null, stopReason: '' };
+    },
+  });
+  assert.notEqual(r.exitCode, 0);
+  assert.equal(network, 0, '护栏拦截时不得发请求');
+  assert.match(r.output, /今日费用已达上限/);
+  ok('㊸ 费用护栏：日上限超限 → 发送前拒绝并说明（零网络）');
 }
 
 console.log(`\nmingdao app 命令：${passed} 项通过`);

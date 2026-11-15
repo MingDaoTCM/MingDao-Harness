@@ -72,6 +72,10 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)
   ok('citation → {type:appCitation, url, title}');
   eq(A.appFrameOf({ type: 'title', title: '会话标题' }), { type: 'appTitle', title: '会话标题' }, 'title → appTitle');
   ok('title → {type:appTitle, title}');
+  // v0.8.2（T02/DS-11）：拒答撤回帧只带类型——被撤下的正文/思考不得通过这一帧二次流出。
+  eq(A.appFrameOf({ type: 'refusal' }), { type: 'appRefusal' }, 'refusal → appRefusal（撤回帧，只带类型）');
+  eq(A.appFrameOf({ type: 'refusal', text: '不得夹带' }), { type: 'appRefusal' }, 'refusal 帧不得夹带被撤下的正文');
+  ok('refusal → appRefusal（只带类型，不带原文）');
   eq(A.appFrameOf({ type: 'usage', usage: { input_tokens: 1 } }), null, 'usage 不产生帧');
   eq(A.appFrameOf({ type: 'stop', reason: 'end_turn' }), null, 'stop 不产生帧');
   eq(A.appFrameOf(null), null, 'null 不崩、不产生帧');
@@ -101,15 +105,17 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)
     [
       { role: 'user', content: '第一问' },
       { role: 'assistant', content: '第一答' },
+      // v0.8.2（T04/DS-15）：assistant 的数组 content 是协议原始块，必须原样保留（不能丢/压平）。
+      { role: 'assistant', content: [{ type: 'text', text: '数组内容' }] },
       { role: 'user', content: '第二问' },
       { role: 'assistant', content: '第二答' },
       { role: 'user', content: '本轮问题' },
     ],
-    '只留 user/assistant + 字符串 content；tool/system/数组/非法项全丢；末尾追加当前文本'
+    'user/assistant 保留；assistant 数组内容原样留下；tool/system/非法项丢弃；末尾追加当前文本'
   );
-  eq(Object.keys(built[2]), ['role', 'content'], '重建消息：不透传 `_` 开头等附加字段');
-  ok('丢弃 tool/system/数组 content/非对象，且不透传附加字段');
-  ok('只保留文本 content，消息重建为 {role, content}');
+  eq(Object.keys(built[3]), ['role', 'content'], '重建消息：不透传 `_` 开头等附加字段');
+  eq(Object.keys(built[2]), ['role', 'content'], '数组消息同样重建为 {role, content}（tool_calls 等非协议字段不带）');
+  ok('丢弃 tool/system/非对象；assistant 数组 content 保留、附加字段不透传');
   const many = Array.from({ length: 20 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: 'm' + i }));
   const cut = A.buildAppMessages(many, 'current', { maxTurns: 2 });
   eq(cut.length, 5, 'maxTurns=2 → 最后 4 条 + 当前 1 条 = 5 条');
@@ -122,6 +128,43 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)
 }
 
 // ===========================================================================
+// ②-b v0.8.2 T04：协议原始块是历史真源（深拷贝回传 + 完整回合原子裁剪）
+// ===========================================================================
+{
+  const rawAssistant = {
+    role: 'assistant',
+    content: [
+      { type: 'server_tool_use', id: 'R', name: 'deepseek_read_url', input: { action: 'read_link', url: 'https://e.invalid' }, kind: 'read_link' },
+      {
+        type: 'web_fetch_tool_result',
+        tool_use_id: 'R',
+        content: { type: 'web_fetch_result', url: 'https://e.invalid', content: { type: 'document', source: { type: 'text', media_type: 'text/plain', data: '' }, title: 'E' } },
+        kind: 'read_link',
+        signature: 'signed-page-content',
+      },
+      { type: 'text', text: 'answer' },
+    ],
+  };
+  const out = A.buildAppMessages([{ role: 'user', content: 'q' }, rawAssistant], 'next');
+  eq(out[1], rawAssistant, '协议原始块逐字段保留（id/tool_use_id/kind/signature 与未知合法字段）');
+  assert.notEqual(out[1].content, rawAssistant.content, '内容数组必须是深拷贝（不与会话内存共享引用）');
+  out[1].content[0].id = 'MUTATED';
+  eq(rawAssistant.content[0].id, 'R', '深拷贝：改回传对象不得改到会话历史');
+  const manyTurns = [
+    { role: 'user', content: 'u1' },
+    { role: 'assistant', content: 'a1' },
+    { role: 'user', content: 'u2' },
+    { role: 'assistant', content: [{ type: 'text', text: 'a2' }] },
+    { role: 'user', content: 'u3' },
+    { role: 'assistant', content: 'a3' },
+  ];
+  const cut = A.buildAppMessages(manyTurns, 'now', { maxTurns: 1 });
+  eq(cut.map((m) => m.role), ['user', 'assistant', 'user'], 'maxTurns=1：只留最后一个完整回合 + 当前 user');
+  eq(cut[0], { role: 'user', content: 'u3' }, '原子裁剪：user 与它的 assistant 不被拆散、不留孤立结果块');
+  ok('T04：原始块深拷贝回传 + 按完整回合原子裁剪（裁剪后首条恒为 user）');
+}
+
+// ===========================================================================
 // ③ 纯函数：配置判定默认值
 // ===========================================================================
 {
@@ -131,9 +174,12 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)
   eq(A.appModeEnabled({ appApi: { enabled: true } }), true, 'enabled===true → 开启');
   ok('appModeEnabled：默认关闭，只认字面量 true');
   eq(A.appModelOf(null), 'deepseek-flash', '默认模型 deepseek-flash');
-  eq(A.appModelOf({ appApi: { model: 'deepseek-v4-pro' } }), 'deepseek-v4-pro', 'appApi.model 优先');
+  // v0.8.2（T06/DS-24）：未支持应用工具的模型不得原样保留——Web 与 CLI 统一回落 deepseek-flash。
+  eq(A.appModelOf({ appApi: { model: 'deepseek-v4-pro' } }), 'deepseek-flash', '不支持的模型回落默认');
+  eq(A.appModelOf({ appApi: { model: 'custom-deepseek-flash-experimental' } }), 'deepseek-flash', '伪冒 flash 子串也回落（不能靠子串放行）');
+  eq(A.appModelOf({ appApi: { model: 'deepseek-flash' } }), 'deepseek-flash', '受支持模型原样使用');
   eq(A.appModelOf({ appApi: { model: '  ' } }), 'deepseek-flash', '空字符串回落默认');
-  ok('appModelOf：appApi.model || deepseek-flash');
+  ok('appModelOf：appApi.model || deepseek-flash，未支持模型统一回落（CLI/Web 同口径）');
   eq(A.APP_NO_KEY_MESSAGE.includes('mingdao key set deepseek'), true, '缺 Key 文案必须给出可执行的命令');
 }
 
@@ -168,15 +214,16 @@ const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms)
           index: 1,
           content_block: { type: 'server_tool_use', id: 's1', name: 'deepseek_web_search', input: { action: 'search', queries: ['深蓝', 'DeepSeek'] }, kind: 'search' },
         });
+        // v0.8.2（T03）：官方配对键在 `content_block.tool_use_id`（外层 ev.tool_use_id 不是协议字段）。
         ev({
           type: 'content_block_start',
           index: 2,
           content_block: {
             type: 'web_search_tool_result',
+            tool_use_id: 's1',
             content: [{ type: 'web_search_result', title: '结果一', url: 'https://example.com/a', snippet: '片段一', site_name: 'example' }],
             kind: 'search',
           },
-          tool_use_id: 's1',
         });
         ev({ type: 'content_block_start', index: 3, content_block: { type: 'text' } });
         ev({ type: 'content_block_delta', index: 3, delta: { type: 'text_delta', text: '这是应用模式回答。' } });

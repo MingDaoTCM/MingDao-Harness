@@ -66,9 +66,10 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `titles.js` —— 会话标题自动生成：首轮完成后用 executor 模型生成简短中文标题并重命名会话文件（`autoTitle: false` 可关）—— 生成失败只跳过，不影响回合结论。
 - `model-caps.js` —— 模型能力解析的单一来源：上下文窗口 / 单次最大输出 / 是否本地部署，供预算推导、超时、工具截断统一引用 —— 本地判定复用 `ssrf-guard.js#isPrivateHost`，不另维护一份；本地小模型自动收紧预算与超时。
 
-### 2.2 Provider 与计价（9）
+### 2.2 Provider 与计价（10）
 
 - `deepseek-app.js`（v0.8.0）—— DeepSeek「应用全家桶」API 客户端：Anthropic Messages 风格的服务端工具（联网/深度思考搜索、阅读链接）、Files 上传（`purpose` 三档）、`safety_check` / `title` / `latest_reminder`、ASR / TTS —— 服务端工具与客户端工具**互斥**（同请求声明即 400），因此只服务「纯问答/搜索」；`read_link` 的页面正文在 `signature` 里，多轮必须原样回传；流内 `error` 事件（HTTP 仍 200）必须判失败，不能把半截回答当成功。
+- `app-protocol.js`（v0.8.2）—— DeepSeek 应用接口的**本地协议常量与预算校验器**（纯函数、零 IO）：安全拒答固定文案（CLI/Web/前端三处同源，不夹带被撤下的正文）、文档预算（单文件 100 MiB / 请求内合计 32 MiB / 最多 20 个）、ASR 预算（仅 16-bit PCM WAV 或 Ogg Opus，≤8 MiB、≤120 秒——扩展名之外还读 WAV 头/Ogg 页头验证编码与时长）、TTS 预算（≤10000 计费字符、请求体 ≤64 KiB）、以及 Anthropic usage → `cache-stats` 的 `prompt/completion` 归一 —— 校验先于读文件/上传/转写/合成，超限时**零网络调用**；错误文案同时带实际值、上限与单位。
 - `providers/index.js` —— Provider 注册表与工厂：`resolveProviderConfig`（模型预设 → 服务商预设 → config → 凭证库/环境变量）、超时与 429/5xx 指数退避重试、自定义模块加载（`<home>/providers/<name>.mjs`）—— 解析优先级只此一份。
 - `providers/openai-compatible.js` —— OpenAI 兼容协议的 HTTP + SSE 流式客户端：增量解析容错跨 chunk 断行、分片 tool_calls 拼接、`reasoning_content` 分流 —— 只负责协议搬运，不感知权限与工具语义。
 - `models.js` —— 模型与服务商预设目录：上下文窗口 1M、`maxOutputCeiling` 384K、pro/flash 的温度与输出上限、缓存命中价差（命中价 = 未命中 1/30）、峰谷价 —— 默认模型名与价格表的唯一来源，禁止在别处写模型名字面量。
@@ -136,15 +137,15 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - `web/constants.js` —— 前端与服务端共享常量：并发上限 8（`MAX_CONCURRENT`）、附件数与体积上限、单文件读取上限 —— 数值只在此定义，防客户端预检/服务端校验/工具读取三处漂移。
 - `web/attachments.js` —— 聊天附件构造（纯函数）：图片转 `data:` URL（仅视觉模型，单张 ≤5MB、最多 4 个），文本文件拼接进消息（≤200KB）—— 服务端按同一组常量校验。
 - `web/web-io.js` —— WebUI 的 io 适配器：把 Agent 的 io 事件翻译为 SSE 事件，权限确认/选择类交互经 `askHandler` 转发到浏览器模态框并等待 `POST /api/permission` 应答。
-- `web/app-mode.js`（v0.8.1）—— WebUI「应用模式」的**纯函数层**（联网搜索/深度思考/阅读链接）：`appFrameOf`（`streamAppChat` 的 delta → 既有 SSE 帧：thinking→reasoning、text→text、search/fetch/citation/title→appSearch/appFetch/appCitation/appTitle，其余不产生帧）、`buildAppMessages`（只留 user/assistant 的字符串 content、丢 tool/system/附加字段、取最后 maxTurns*2 条并在末尾追加当前文本）、`appModeEnabled` / `appModelOf`（默认关闭 / 默认 `deepseek-flash`）。**不读 IO**：会话落盘、标题改名、SSE 收尾都仍由 `web/server.js` 的既有路径负责。
-- `web/app-mode-run.js`（v0.8.1）—— WebUI「应用模式」的**服务端编排**（从 `server.js#handleChat` 切出）：解析 provider（`MINGDAO_APP_BASEURL` 可注入点）→ `streamAppChat` → `appFrameOf` 逐帧 `send()`（带既有 taskId/streamSeq）→ 成功则 `appendMessages(user+assistant)`、按服务端标题 `renameSessionFile`（仅默认时间戳名）、发 `done` 并 `finishChat`；失败先保留已产出正文/思考再报错（`prefix=''` 沿用原文）；客户端断开 abort 上游。**Agent 路径与 `agent.js` 一行未改**；切出也是为了让 `runWebServer`/`handleChat` 的行数红线只降不升。
+- `web/app-mode.js`（v0.8.1，v0.8.2 加撤回/原始块）—— WebUI「应用模式」的**纯函数层**（联网搜索/深度思考/阅读链接）：`appFrameOf`（`streamAppChat` 的 delta → 既有 SSE 帧：thinking→reasoning、text→text、search/fetch/citation/title→appSearch/appFetch/appCitation/appTitle、**refusal→appRefusal（只带类型，不夹带被撤下的正文）**）、`buildAppMessages`（v0.8.2：user 只留字符串 content；assistant 的数组 content 是协议原始块，**逐字段深拷贝回传**——保留 id/tool_use_id/kind/signature 与未知合法字段，绝不压成字符串；丢弃 tool/system/附加字段；按**完整回合**原子裁剪最后 maxTurns 轮，裁剪后首条恒为 user）、`appModeEnabled` / `appModelOf`（默认关闭 / 默认 `deepseek-flash`，未支持应用工具的模型统一回落）。**不读 IO**：会话落盘、标题改名、SSE 收尾都仍由 `web/server.js` 的既有路径负责。
+- `web/app-mode-run.js`（v0.8.1，v0.8.2 加拒答/记账）—— WebUI「应用模式」的**服务端编排**（从 `server.js#handleChat` 切出）：发送前跑 `cost-guard`（日上限超限直接拒绝并说明）→ 解析 provider（`MINGDAO_APP_BASEURL` 可注入点）→ `streamAppChat` → `appFrameOf` 逐帧 `send()`（带既有 taskId/streamSeq）→ 成功则 `appendMessages(user+assistant)`、按服务端标题 `renameSessionFile`（仅默认时间戳名）、`cache-stats` 记 usage（失败只 warn）、发 `done` 并 `finishChat`；**拒答（`outcome:'refused'` / `stopReason:'refusal'`）是撤回终态**：发 `appRefusal`、不落盘、不发 `done.ok:true`，走唯一失败收尾；普通失败先保留已产出正文/思考再报错（`prefix=''` 沿用原文）；客户端断开 abort 上游。**Agent 路径与 `agent.js` 一行未改**；切出也是为了让 `runWebServer`/`handleChat` 的行数红线只降不升。
 - `web/viewmodel.js`（v0.7.0 §1.2）—— 前端的**纯计算层**：`sideNavLayout`（三档断点下的左栏形态）、`errCardParts`（错误卡文案分解）、`runStripView`（状态条六字段）、`traceRoundView`（轨迹一轮的视图模型）以及它们依赖的格式化助手。**不读 DOM、不读全局**，因此可以被 node 直测；`app.js` 只负责把结果渲染到 DOM。
   为什么抽出来：此前 `app.js` 3252 行、可执行覆盖 0%，只靠源码正则守卫——UI 改动的"绿"等于"文本没变"。
 - `web/util.js` / `web/app.js` —— 前端：`util.js` 是零状态工具（选择器/转义/Markdown/格式化），`app.js` 是页面主脚本（消息渲染与轨迹、设置面板、自绘气泡与模态框）—— 地址带 `?token=` 时记入 `sessionStorage` 并从地址栏移除，此后请求统一附加 `X-MingDao-Token`。
 
 ### 2.8 CLI 层（14）
 
-- `commands/app.js` —— `mingdao app`：应用全家桶模式的 CLI 入口（纯对话/搜索/读链接/文件/语音），配置项 `appApi` 默认关闭 —— 需要工具或改文件的回合仍走 Agent 工具循环（服务端工具与客户端工具互斥）。
+- `commands/app.js` —— `mingdao app`：应用全家桶模式的 CLI 入口（纯对话/搜索/读链接/文件/语音），配置项 `appApi` 默认关闭 —— 需要工具或改文件的回合仍走 Agent 工具循环（服务端工具与客户端工具互斥）。v0.8.2：文件一律异步读（预算先于读取/上传）、图片上传后按 document 引用、`resolveAppModel` 与 Web 共用单一能力判据、拒答时撤回已流出正文并打印固定文案（非零退出，`--json` 含 outcome 为 refused 且不含正文）、usage 记入 `cache-stats` 并在发送前跑费用护栏；装配函数支持全量依赖注入（单测零网络）。
 - `cli.js` —— CLI 入口与唯一 argv 解析点：初始化向导、凭证管理、单次提问、交互式会话分发；会话能力含 `/plan` `/compact` `/init` `/memory` `/skills` `/mode` `/verbose` `/status` `/cost` —— 遇第一个位置参数即停止解析全局 flag，子命令 flag 交子命令自行解析（防 `mingdao run "任务" --model X` 被顶层剥除）。
 - `commands/repl.js` —— 交互式 TUI REPL 主循环：斜杠命令 + 多行输入 + 回合执行 + 自动压缩/标题/记忆/同步。
 - `commands/key.js` —— `mingdao key`：status / set / remove / import，凭证库读写与掩码展示。

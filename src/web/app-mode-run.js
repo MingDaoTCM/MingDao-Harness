@@ -12,10 +12,18 @@
 // 与 agent 路径共用：会话 claim（busySessions）、幂等收尾 finishChat()、§3.87 的唯一落盘入口
 // appendMessages()、以及会话改名（renameSessionFile）。SSE 帧一律走 `send()`（entry.send）封装，
 // 因此 taskId / streamSeq 与既有流完全同款（断线续订/跳号检测不需要第二套编号）。
+//
+// v0.8.2（T02/T06 接线）：
+//   · 拒答（stop_reason:'refusal' / outcome:'refused'）是**撤回**终态：发 `appRefusal` 帧，
+//     不落盘 user/assistant、不发 `done.ok:true`，走唯一失败收尾；
+//   · 发送前跑 `cost-guard` 判据；用量落 `cache-stats`（失败只 warn，绝不影响已产出的回答）。
 
 import { appFrameOf, buildAppMessages, appModelOf, APP_NO_KEY_MESSAGE } from './app-mode.js';
 import { streamAppChat } from '../deepseek-app.js';
 import { resolveProviderConfig } from '../providers/index.js';
+import { recordUsageAsync } from '../cachestats.js';
+import { checkCostGuard } from '../cost-guard.js';
+import { APP_REFUSAL_MESSAGE, appUsageToCost } from '../app-protocol.js';
 
 /**
  * 执行一轮 WebUI 应用模式对话。调用方（handleChat）负责：已通过 `body.appMode === true &&
@@ -56,6 +64,27 @@ export async function runAppModeChat(deps) {
       finishChat();
       return;
     }
+    // 发送前的费用护栏（与 Agent 路径同一判据）：日上限超限时**不发请求**并说明原因。
+    // 护栏自身读失败/无配置时返回 null（放行）——护栏不得成为聊天的新单点故障。
+    try {
+      const guard = checkCostGuard(appModel);
+      // 超限即拒绝：`block` 档直接拦；`downgrade` 档在应用模式**无法降级**（服务端工具只在
+      // flash 家族可用，换模型会 400），所以同样按拒绝处理并把原因说清楚。
+      if (guard && (guard.blocked || guard.downgrade)) {
+        const base = String(guard.message || '今日费用已达上限，已暂停执行。');
+        const message = guard.downgrade ? `${base}（应用模式不支持自动降级，本次请求已拒绝。）` : base;
+        entry.status = 'failed';
+        entry.durationMs = Date.now() - entry.startedAt;
+        srvlog(`chat 应用模式费用护栏拦截 ${taskId} ${message}`);
+        send({ type: 'error', message });
+        finishChat(chatFailure(message, ''));
+        return;
+      }
+      // 非阻断提示（warn 线 / 无价格数据 / 用量未知）走既有 banner，不拦住回答。
+      if (guard && guard.message) send({ type: 'banner', text: String(guard.message) });
+    } catch (/** @type {any} */ err) {
+      srvlog(`chat 应用模式费用护栏检查失败（忽略，继续）：${String(err?.message || err)}`);
+    }
     // 上游请求的 AbortController：客户端断开（res close）→ 中止生成，避免白烧 token。
     // finishChat 幂等，连接关闭后的收尾仍由它统一负责（与 agent 路径同一收尾出口）。
     const appAbort = new AbortController();
@@ -66,7 +95,28 @@ export async function runAppModeChat(deps) {
     });
     srvlog(`chat 应用模式 ${taskId} model=${appModel} search=${body.search === true} think=${body.think === true}`);
     // 历史裁剪：服务端工具路径只发文本消息（tool/system/附件数组一律不进 Messages 请求）。
+    // v0.8.2（T04）：assistant 的协议原始块（数组 content）原样深拷贝回传，按完整回合原子裁剪。
     const appMessages = buildAppMessages(session.messages, userMessage, { maxTurns: 8 });
+    // 用量入账（v0.8.2 应用模式记账）：锚定**请求发起时刻**，与 recordUsage 的峰谷价口径一致。
+    const requestStartAt = Date.now();
+    /**
+     * 把应用接口 usage 记进 cache-stats；**失败只 warn**——记账不能吞掉已经产出的回答。
+     * @param {any} usage
+     */
+    const recordAppUsage = async (usage) => {
+      const normalized = appUsageToCost(usage);
+      if (!normalized) return;
+      try {
+        const written = await recordUsageAsync(appModel, normalized, { requestStartAt });
+        if (written && written.ok === false) {
+          srvlog(`chat 应用模式用量记账失败（warn，不影响回答） ${taskId} ${written.error || '未知原因'}`);
+        }
+      } catch (/** @type {any} */ err) {
+        srvlog(`chat 应用模式用量记账失败（warn，不影响回答） ${taskId} ${String(err?.message || err)}`);
+      }
+    };
+    /** 拒答撤回帧是否已由 onDelta 发过（同一条拒答只发一次）。 */
+    let refusalSent = false;
     const r = await streamAppChat({
       baseUrl: appBaseUrl,
       apiKey: appApiKey,
@@ -83,10 +133,25 @@ export async function runAppModeChat(deps) {
       title: appCfg.title !== false,
       onDelta: (/** @type {any} */ d) => {
         const f = appFrameOf(d);
-        if (f) send(f);
+        if (!f) return;
+        if (f.type === 'appRefusal') refusalSent = true;
+        send(f);
       },
       signal: appAbort.signal,
     });
+    // v0.8.2（T02）：拒答是撤回终态——即使传输层还没给出 `outcome`（依赖 T01 落地），
+    // `stopReason:'refusal'` 也必须按拒答收尾，绝不能落盘正文/发成功 done。
+    const refused = r?.outcome === 'refused' || r?.stopReason === 'refusal';
+    if (refused) {
+      if (!refusalSent) send({ type: 'appRefusal', message: APP_REFUSAL_MESSAGE });
+      // 拒答也是一次真实上游调用：保留 usage 入账（审计需要），但**不落正文**。
+      await recordAppUsage(r.usage);
+      entry.status = 'failed';
+      entry.durationMs = Date.now() - entry.startedAt;
+      srvlog(`chat 应用模式拒答 ${taskId} 已撤回已流出正文，未写入会话 ${entry.durationMs}ms`);
+      finishChat(chatFailure(APP_REFUSAL_MESSAGE, ''));
+      return;
+    }
     if (r.ok) {
       // 成功才把「user + assistant」两条落进会话（与 agent 路径同一把锁 / 同一个写入口）。
       /** @type {any} */
@@ -106,6 +171,8 @@ export async function runAppModeChat(deps) {
           }
         } catch {}
       }
+      // 成功回合的 usage 落账（cache-stats）；失败只 warn。
+      await recordAppUsage(r.usage);
       entry.status = 'done';
       entry.durationMs = Date.now() - entry.startedAt;
       srvlog('chat 应用模式完成 ' + taskId + ' text=' + String(r.text || '').length + ' ' + entry.durationMs + 'ms');
@@ -122,6 +189,8 @@ export async function runAppModeChat(deps) {
     }
     // 失败：正文/思考已经通过 onDelta 发完（先发完再报错），这里只补一条错误；
     // prefix='' 表示沿用 streamAppChat 的错误原文（不加「对话失败：」前缀，与 CLI 输出同款）。
+    // 流内错误也计费（上游可能已跑完一段）：保留 usage 入账，便于审计对账。
+    await recordAppUsage(r.usage);
     finishChat(chatFailure(r.error || '应用模式请求失败', ''));
   } catch (/** @type {any} */ err) {
     // 未预期异常：仍走唯一收尾出口（置 failed / 发 error / 释放 claim / 结束响应）。

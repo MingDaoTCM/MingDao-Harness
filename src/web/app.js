@@ -1126,6 +1126,18 @@ async function send(){
         if(content.parentNode===msg) msg.insertBefore(d,content); else msg.appendChild(d); scroll(); }
       else if(ev.type==='appCitation'){ const title=String(ev.title||''), url=String(ev.url||''); if(title||url) citations.push({title,url}); }
       else if(ev.type==='appTitle'){ /* 服务端会话标题：只用于改名（done 后 refreshSessions 刷新），正文不渲染 */ }
+      // v0.8.2（T02）：安全拒答是**撤回**终态——清空本轮已经流出的正文/思考缓冲与 DOM，
+      // 只留一条固定拒答提示（服务端 message 优先；缺省用与 src/app-protocol.js 同款的固定文案）。
+      // 只动本轮这条 AI 消息，不动任何历史消息（只增不删的例外仅限"被撤回的本轮内容"）。
+      else if(ev.type==='appRefusal'){ onActivity();
+        raw=''; if(content) content.innerHTML='';
+        if(reason&&reason.parentElement) reason.parentElement.remove();
+        reason=null;
+        citations.length=0;
+        runState.contentChars=0;
+        const d=document.createElement('div'); d.className='msg-sys';
+        d.textContent=String(ev.message||'DeepSeek 安全策略已拒答并撤回了这次生成：本轮已产出的正文不再显示，也不会写入会话。请修改问题或材料后重试（本次调用不计为成功）。');
+        msg.appendChild(d); scroll(); }
       else if(ev.type==='turnStart'){ stepsCount+=1; curSteps+=1; msg._steps=curSteps; curPhase='模型推理中'; runState.rawPhase='发请求（等首帧）'; runState.phase='等首帧'; msg._traj.push({kind:'turn', t:Date.now()}); showThink(); think.textContent='💭 第 '+msg._steps+' 回合：模型推理中…'; renderWorkStatus(); scroll(); }
       else if(ev.type==='turnEnd'){ curPhase='回合完成，进入下一回合'; showThink(); think.textContent='⏸ 第 '+msg._steps+' 回合完成（累计 '+(ev.toolSteps||0)+' 工具步）· 进入下一回合…'; renderWorkStatus(); }
       else if(ev.type==='toolStart'){ stepsCount+=1; curSteps+=1; curPhase=ev.name==='task'?'子 Agent 执行中':'执行工具中'; runState.rawPhase=curPhase; runState.phase='执行工具'; msg._steps=curSteps; msg._traj.push({kind:'tool', seq:ev.seq, name:ev.name, args:ev.args, t:Date.now(), done:false}); onActivity(); update(); renderToolStartEvent(ev); renderWorkStatus(); }
