@@ -19,7 +19,13 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：855（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：863（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+
+> v0.9.0：新增 `batch92-deb-update`（8 条）——`desktop/deb-update.js`（deb 安装形态自动更新的
+> 纯函数层，v0.9.0 新增）：`isNewer` 比较符反转（旧版被判成新版）、去掉「`-beta` 预发布小于同号正式版」、
+> `verifySha512Base64` 校验恒通过（篡改包也放行）、`parseSigFile` 不剥 `ed25519:` 前缀（验签永远失败）、
+> `installPlan` 的 `pkexec` 改成 `sh -c`（提权被绕过）、`parseDebFeed` 的 `url` 不拼 `/downloads/`（下载 404）、
+> 缺 `sha512` 仍返回对象（无校验值也放行）、`debFeedUrl` 清单文件名拼错（拉不到 feed）。batches 855 → 863。
 
 > v0.8.2：新增 `batch91-app-protocol`（15 条）——`app-protocol.js` 的本地预算器（单文件 100 MiB、
 > 请求内合计 32 MiB、文档数量 20 的 `>`/`>=` 差一、ASR 8 MiB / 120 秒、TTS 10000 字符 / 64 KiB 请求体、
