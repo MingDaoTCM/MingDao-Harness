@@ -765,6 +765,22 @@ jobs:
             echo "::error title=app-mode 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
           fi
           exit $code
+      - name: DeepSeek 应用协议准入（v0.8.2 T07：审计方 24 项，假 fetch 契约）
+        # 只挂「非 macOS」腿（与 app-mode / app-command 同一口径），失败用注解暴露断言原文。
+        # 说明：本步骤是 v0.8.2 的**目标门禁**——套件描述官方协议的目标行为，T01~T06 落地前会红；
+        # 变绿必须靠修实现，不许改断言（见 test/deepseek-app-contract.js 顶部口径声明）。
+        if: runner.os != 'macOS'
+        shell: bash
+        run: |
+          set +e
+          node test/deepseek-app-contract.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=deepseek-app-contract 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
       - name: 文档守卫（链接 / 命令表 / kind / 模型 id / 架构覆盖 / API 表 / 变异总数）
         # v0.6.8（文档审计 §7.7）：把"文档与代码不一致"变成 CI 红——此前全靠人肉复查，
         # 结果 ARCHITECTURE 停在 v0.1.x、PACK-API 列了未实现的 kind、README 的 CI 矩阵与模型 id 过时。

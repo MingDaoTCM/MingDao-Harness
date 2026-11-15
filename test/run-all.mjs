@@ -103,6 +103,8 @@ const SUITES = [
   ['app-command', 'node', ['test/app-command.js']],
   // v0.8.1：WebUI 应用模式开关（帧映射/历史裁剪 + 真实 HTTP 链路 + 关闭态回落 Agent 路径）
   ['app-mode', 'node', ['test/app-mode.js']],
+  // v0.8.2 T07：审计方的 24 项协议准入套件（node:test；假 fetch，描述目标行为而非反向特征）
+  ['deepseek-app-contract', 'node', ['test/deepseek-app-contract.js']],
   // Windows 上 npm 需以 npm.cmd 调用（workbuddy 报告：spawn('npm') 无 shell 在 Windows 必 ENOENT）
   ['bench', process.platform === 'win32' ? 'npm.cmd' : 'npm', ['run', 'bench']],
 ];

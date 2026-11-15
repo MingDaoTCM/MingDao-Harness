@@ -18,7 +18,13 @@
 //     「代码行」略微高估或低估，不改变「有没有真实逻辑」的判断。
 //   · 「变异条数」= 该文件在所有 `test/mutate/batch*.mjs` 的 `file:` 字段里出现的次数。
 //     只统计 `src/**` 下的文件；脚本/desktop/ide 的变异不计入内核模块覆盖。
+//     v0.8.2（G2）：`file:` 现在还支持**同文件内的 `const F = 'src/x.js'` 别名**
+//     与 `file: F + '/suffix'` 这类简单拼接（batch90 就是 `const F='src/deepseek-app.js'`
+//     + `file: F`）。修前 deepseek-app.js 被记 0 条（实际 batch90 有 12 条），
+//     在报表里表现为「零覆盖」——见下面的告警：**零覆盖可能是解析失败，而不是真的没测**。
 //   · 盲区 = 代码行 > min-lines（默认 150）且变异条数 === 0。
+//   · 告警（不影响退出码）= 代码行 > 200 且变异条数 === 0。它的用途不是判红，而是提醒
+//     「这个模块看起来一条变异都没有，先排除 file:/别名解析失败，再判断是不是真盲区」。
 //
 // 这个脚本**不修改任何文件**，也不依赖覆盖率数据（V8 覆盖率回答的是「执行过没有」，
 // 与「改坏了会不会被抓到」是两个问题）。
@@ -103,6 +109,65 @@ export function listSrcFiles(/** @type {string} */ root = repoRoot) {
   return out.sort();
 }
 
+/** 告警门槛：代码行 > 200 且 0 条变异 → 打印告警（不判红，避免打断既有流程）。 */
+export const WARN_LINES = 200;
+
+/** 从批次源码收集同文件内的 `const X = '<路径>'` 别名（v0.8.2 G2）。 */
+export function mutationFileAliases(/** @type {string} */ source) {
+  /** @type {Map<string, string>} */
+  const aliases = new Map();
+  const re = /\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(['"`])([^'"`\n]*)\2/g;
+  let m;
+  while ((m = re.exec(source))) {
+    const value = m[3].trim();
+    if (!value || value.includes('${')) continue;
+    aliases.set(m[1], value.replace(/\\/g, '/'));
+  }
+  return aliases;
+}
+
+/**
+ * 解析 `file:` 右侧的简单表达式（v0.8.2 G2）：
+ *   字面量 `'src/a.js'` / 别名 `F` / 简单拼接 `F + '/x'`（任意顺序，任意段数）。
+ * 解析不出来（函数调用、模板插值、未知标识符…）就返回 null——**不猜**，静默漏记比乱记安全。
+ * @param {string} expr
+ * @param {Map<string, string>} aliases
+ * @returns {string|null}
+ */
+export function resolveMutationTarget(expr, aliases) {
+  const text = expr.trim().replace(/\s+/g, ' ');
+  if (!text) return null;
+  // 顶层按 + 切段（不切字符串里的 +）。每段只接受「带引号的字面量」或「别名」。
+  /** @type {string[]} */
+  const terms = [];
+  let i = 0;
+  while (i < text.length) {
+    while (i < text.length && (text[i] === ' ' || text[i] === '+')) i += 1;
+    if (i >= text.length) break;
+    const quote = text[i];
+    if (quote === "'" || quote === '"' || quote === '`') {
+      let value = '';
+      let closed = false;
+      for (i += 1; i < text.length; i += 1) {
+        if (text[i] === '\\') { value += text[i + 1] ?? ''; i += 1; continue; }
+        if (text[i] === quote) { closed = true; i += 1; break; }
+        value += text[i];
+      }
+      if (!closed || value.includes('${')) return null;
+      terms.push(value);
+      continue;
+    }
+    const ident = /^[A-Za-z_$][\w$]*/.exec(text.slice(i));
+    if (!ident) return null;
+    const mapped = aliases.get(ident[0]);
+    if (mapped === undefined) return null;
+    terms.push(mapped);
+    i += ident[0].length;
+  }
+  if (!terms.length) return null;
+  return terms.join('').replace(/\\/g, '/');
+}
+
 /** 从全部 `test/mutate/batch*.mjs` 里抽出被变异的文件 → 条数。 */
 export function mutationCounts(/** @type {string} */ root = repoRoot) {
   const dir = path.join(root, 'test', 'mutate');
@@ -116,23 +181,26 @@ export function mutationCounts(/** @type {string} */ root = repoRoot) {
   }
   for (const f of files) {
     const src = fs.readFileSync(path.join(dir, f), 'utf8');
-    // 本仓约定：M.mutate({ ..., file: 'src/x.js', ... })。同时接受双引号与反引号。
-    const re = /\bfile\s*:\s*(['"`])([^'"`]+)\1/g;
+    // 本仓约定：M.mutate({ ..., file: 'src/x.js', ... })，也允许 `file: F`（同文件别名）
+    // 与 `file: F + '/x'` 这类简单拼接——只按**同文件内**的 const/let/var 解析别名。
+    const aliases = mutationFileAliases(src);
+    const re = /\bfile\s*:\s*([^,\n}]+)/g;
     let m;
     while ((m = re.exec(src))) {
-      const rel = m[2].replace(/\\/g, '/');
-      if (!rel.startsWith('src/')) continue;
+      const rel = resolveMutationTarget(m[1], aliases);
+      if (!rel || !rel.startsWith('src/')) continue;
       counts.set(rel, (counts.get(rel) || 0) + 1);
     }
   }
   return counts;
 }
 
+
 /**
- * @param {{root?: string, minLines?: number}} [opts]
- * @returns {{modules: {file: string, codeLines: number, mutations: number}[], blind: {file: string, codeLines: number, mutations: number}[], totalModules: number, totalMutations: number}}
+ * @param {{root?: string, minLines?: number, warnLines?: number}} [opts]
+ * @returns {{modules: {file: string, codeLines: number, mutations: number}[], blind: {file: string, codeLines: number, mutations: number}[], warnings: {file: string, codeLines: number, mutations: number}[], totalModules: number, totalMutations: number}}
  */
-export function scan({ root = repoRoot, minLines = 150 } = {}) {
+export function scan({ root = repoRoot, minLines = 150, warnLines = WARN_LINES } = {}) {
   const counts = mutationCounts(root);
   const modules = listSrcFiles(root).map((file) => ({
     file,
@@ -140,29 +208,44 @@ export function scan({ root = repoRoot, minLines = 150 } = {}) {
     mutations: counts.get(file) || 0,
   }));
   const blind = modules.filter((m) => m.codeLines > minLines && m.mutations === 0).sort((a, b) => b.codeLines - a.codeLines || a.file.localeCompare(b.file));
+  // 告警集：行数不小却零变异。不判红（避免打断），只是把「可能解析失败」摆到眼前。
+  const warnings = modules.filter((m) => m.codeLines > warnLines && m.mutations === 0).sort((a, b) => b.codeLines - a.codeLines || a.file.localeCompare(b.file));
   const totalMutations = [...counts.values()].reduce((a, b) => a + b, 0);
-  return { modules, blind, totalModules: modules.length, totalMutations };
+  return { modules, blind, warnings, totalModules: modules.length, totalMutations };
 }
 
-export function formatReport(/** @type {ReturnType<typeof scan>} */ { modules, blind, totalModules, totalMutations }, /** @type {number} */ minLines) {
+export function formatReport(
+  /** @type {ReturnType<typeof scan>} */ { modules, blind, warnings, totalModules, totalMutations },
+  /** @type {number} */ minLines,
+  /** @type {number} */ warnLines = WARN_LINES
+) {
   const lines = [];
   lines.push(`变异覆盖盲区检查（阈值：代码行 > ${minLines} 且 0 条变异）`);
   lines.push(`  src 模块：${totalModules} 个；src/** 变异条目：${totalMutations} 条；盲区模块：${blind.length} 个`);
-  if (!blind.length) {
-    lines.push('  ✅ 没有盲区模块');
-    return lines.join('\n');
+  if (!blind.length) lines.push('  ✅ 没有盲区模块');
+  else {
+    lines.push('');
+    lines.push('  模块（按代码行降序）：');
+    const width = Math.max(...blind.map((b) => b.file.length), '模块'.length);
+    lines.push(`  ${'模块'.padEnd(width)}  代码行  变异`);
+    for (const b of blind) {
+      lines.push(`  ${b.file.padEnd(width)}  ${String(b.codeLines).padStart(6)}  ${String(b.mutations).padStart(4)}`);
+    }
+    lines.push('');
+    lines.push(`  合计：${blind.length} 个模块、${blind.reduce((a, b) => a + b.codeLines, 0)} 行代码没有可抓的变异。`);
   }
-  lines.push('');
-  lines.push('  模块（按代码行降序）：');
-  const width = Math.max(...blind.map((b) => b.file.length), '模块'.length);
-  lines.push(`  ${'模块'.padEnd(width)}  代码行  变异`);
-  for (const b of blind) {
-    lines.push(`  ${b.file.padEnd(width)}  ${String(b.codeLines).padStart(6)}  ${String(b.mutations).padStart(4)}`);
+  // 零变异告警（v0.8.2 G2）：**零覆盖可能是 file: 解析失败，而不是真的没测**。
+  // 这里只告警不判红：判红会打断既有流程，而「先看一眼」就足以把假象戳破。
+  if (warnings.length) {
+    lines.push('');
+    lines.push(`  ⚠ 零变异告警（代码行 > ${warnLines} 且 0 条变异；不判红，仅提示）：`);
+    for (const w of warnings) lines.push(`    ${w.file}（${w.codeLines} 行）`);
+    lines.push('    这些模块若**本该有**变异批次，先查 `file:` 的写法（别名/拼接/template 插值）是否没被解析——');
+    lines.push('    零覆盖可能是解析失败，而不是真的没测。修解析器比补一批变异更优先。');
   }
-  lines.push('');
-  lines.push(`  合计：${blind.length} 个模块、${blind.reduce((a, b) => a + b.codeLines, 0)} 行代码没有可抓的变异。`);
   return lines.join('\n');
 }
+
 
 export function main(/** @type {string[]} */ argv = process.argv.slice(2)) {
   let minLines = 150;

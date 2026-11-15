@@ -55,16 +55,138 @@ const tracked = (() => {
 }
 
 // ② CLI 分发表 ⊆ --help（help 是单源的，漏列等于用户看不到命令）
+//
+// 事故（v0.8.1 审计实测）：v0.8.0 把 `main()` 里的 `dispatchTable` 提成了模块常量
+// `DISPATCH_TABLE`（少一层缩进、不占函数行数），但这里的正则还锚在旧的
+// `const dispatchTable` + 6 空格缩进上——于是匹配到 **0 个**，而 `keys.length === 0`
+// 让下面的 `for` 一条都不检查，2 行后照样打印「help 文本已核对」并判绿。
+// **空守卫是最坏情况**：它不会误报，只会让后面所有命令永久免检，比单条断言写错危险得多。
+// 所以现在的口径是 fail-closed：
+//   ① 解析器改为直接读模块常量 `DISPATCH_TABLE` 的对象字面量（括号配平 + 只取一级键名），
+//      不再依赖缩进/变量名大小写/`= /** @type */ ({` 这类包装写法；
+//   ② 解析到 0 个 → 判红（「什么都没找到」不能等于「全部正确」）；
+//   ③ 解析结果 < DISPATCH_MIN_KEYS（15）→ 也判红：这是**解析器退化自检**，不是命令数产品要求。
+//      为什么是 15 而不是当前值 20：留 5 个的余量，让「真删了 3-4 个命令」不误伤，又能在
+//      解析器再次静默只抓到一半（或换写法后抓到 0-14 个）时立刻红；否则 ② 会再次变成空转。
+const DISPATCH_MIN_KEYS = 15;
+
+/**
+ * 从 `src/cli.js` 源码里解析出 `DISPATCH_TABLE` 的**一级键名**。
+ *
+ * 不按缩进/行首匹配（那正是 v0.8.1 失效的原因），而是：定位 `DISPATCH_TABLE =` 后的
+ * 第一个 `{`，逐字符括号配平走到对应的 `}`，只收 depth === 1 且位于行首位置的 `键:`。
+ * 字符串/模板/注释里的 `{` `}` `:` 都不参与配平（否则 `handler: 'a{b'` 之类会跑偏）。
+ *
+ * 兼容性：`const DISPATCH_TABLE = {…}`、带 JSDoc 类型注解再包一层括号的写法、
+ * `const DISPATCH_TABLE = Object.freeze({…})` 都能解析；键名可带引号。
+ *
+ * @param {string} src
+ * @returns {{ keys: string[], reason: string }}（解析失败时 keys 为 []，reason 说明原因）
+ */
+function parseDispatchKeys(src) {
+  const anchor = /\bDISPATCH_TABLE\b\s*(?::[^=;{]*?)?=(?!=)/.exec(src);
+  if (!anchor) return { keys: [], reason: '未找到 DISPATCH_TABLE 赋值' };
+  // 找对象字面量的 `{`：必须跳过 `= /** @type {Record<...>} */ (` 这类注释/包装，
+  // 否则会把 JSDoc 里的 `{Record` 当成表体（v0.8.0 正是这种写法）。
+  let braceStart = -1;
+  for (let i = anchor.index + anchor[0].length; i < src.length; i += 1) {
+    const ch = src[i];
+    const next = src[i + 1];
+    if (ch === '/' && next === '/') {
+      const end = src.indexOf('\n', i);
+      i = end < 0 ? src.length : end - 1;
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      const end = src.indexOf('*/', i + 2);
+      if (end < 0) return { keys: [], reason: 'DISPATCH_TABLE 赋值后的块注释没有结束' };
+      i = end + 1;
+      continue;
+    }
+    if (ch === '{') { braceStart = i; break; }
+    if (ch === ';') break; // 赋值语句已结束却没有对象字面量
+  }
+  if (braceStart < 0) return { keys: [], reason: 'DISPATCH_TABLE 赋值后没有对象字面量' };
+  /** @type {string[]} */
+  const keys = [];
+  let depth = 0;
+  let lineStart = false;
+  for (let i = braceStart; i < src.length; i += 1) {
+    const ch = src[i];
+    const next = src[i + 1];
+    if (ch === ' ' || ch === '\t' || ch === '\r') continue;
+    // 一级键名：只认「行首第一个 token 且紧跟冒号」，嵌套对象的 module/handler 在 depth 2。
+    // 必须在字符串分支之前判：键名本身可能就是带引号的（`'update': {...}`）。
+    if (depth === 1 && lineStart) {
+      const m = /^([A-Za-z_$][\w$]*|'[^']+'|"[^"]+")\s*:/.exec(src.slice(i, i + 120));
+      if (m) keys.push(m[1].replace(/^['"]|['"]$/g, ''));
+      lineStart = false;
+    }
+    if (ch === '/' && next === '/') {
+      const end = src.indexOf('\n', i);
+      i = end < 0 ? src.length : end;
+      lineStart = true; // 跳过行注释后就是下一行行首
+      continue;
+    }
+    if (ch === '/' && next === '*') {
+      const end = src.indexOf('*/', i + 2);
+      if (end < 0) break;
+      if (src.slice(i, end).includes('\n')) lineStart = true;
+      i = end + 1;
+      continue;
+    }
+    if (ch === '"' || ch === "'" || ch === '`') {
+      const quote = ch;
+      for (i += 1; i < src.length; i += 1) {
+        if (src[i] === '\\') { i += 1; continue; }
+        if (src[i] === quote) break;
+        if (quote === '`' && src[i] === '\n') lineStart = false;
+      }
+      lineStart = false;
+      continue;
+    }
+    if (ch === '\n') { lineStart = true; continue; }
+    if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) break; // 分发表结束
+      lineStart = false;
+      continue;
+    }
+    if (ch === '{') { depth += 1; lineStart = false; continue; }
+    lineStart = false;
+  }
+  if (!keys.length) return { keys, reason: '对象字面量里没解析到一级键名（写法变了？）' };
+  return { keys, reason: '' };
+}
+
+// ② CLI 分发表 ⊆ --help（help 是单源的，漏列等于用户看不到命令）
 {
   const cli = fs.readFileSync(path.join(root, 'src', 'cli.js'), 'utf8');
-  const block = cli.slice(cli.indexOf('const dispatchTable'), cli.indexOf('const hit = dispatchTable'));
-  const keys = [...block.matchAll(/^\s{6}([a-z][a-z0-9-]*):\s*\{/gm)].map((m) => m[1]);
+  const { keys, reason } = parseDispatchKeys(cli);
   const { helpLines } = await import(pathToFileURL(path.join(root, 'src', 'help.js')).href);
   const text = helpLines({ variant: 'cli' })
     .map(([line]) => String(line))
     .join('\n');
-  for (const k of keys) if (!new RegExp(`(^|[\\s|])${k}([\\s,]|$)`).test(text)) problems.push(`--help 漏掉了子命令：${k}（src/cli.js 分发它）`);
-  console.log(`② 子命令覆盖：分发 ${keys.length} 个，help 文本已核对`);
+  // help 里的命令以「mingdao <cmd>」为首词出现；复合行（mingdao ledger list/show/…）取首词。
+  const helpCmds = new Set([...text.matchAll(/mingdao\s+([a-z][a-z0-9-]*)/g)].map((m) => m[1]));
+  const matched = keys.filter((k) => helpCmds.has(k));
+  if (!keys.length) {
+    problems.push(
+      `CLI 分发表解析到 0 个子命令（${reason}）——空守卫会让后续命令全部免检，按失败处理。` +
+        ' 请检查 src/cli.js 的 DISPATCH_TABLE 写法是否变化，并同步 scripts/doc-lint.mjs 的解析器'
+    );
+  } else if (keys.length < DISPATCH_MIN_KEYS) {
+    problems.push(
+      `CLI 分发表只解析到 ${keys.length} 个子命令（< ${DISPATCH_MIN_KEYS}）——大概率是解析器退化了，` +
+        '不是命令真的只剩这几个。这条自检就是防止 ② 再次静默空转'
+    );
+  }
+  for (const k of keys) {
+    if (!helpCmds.has(k)) problems.push(`--help 漏掉了子命令：${k}（src/cli.js 分发它）`);
+  }
+  console.log(
+    `② 子命令覆盖：分发 ${keys.length} 个（自检下限 ${DISPATCH_MIN_KEYS}），help 对齐 ${matched.length}/${keys.length} 个`
+  );
 }
 
 // ③ PACK-API 的 kind 表（未实现的必须就地标注）
