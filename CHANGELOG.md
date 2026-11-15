@@ -21,6 +21,9 @@
 >
 > **已回填**：`latest-linux-deb.yml` 已为 0.8.2 补一份（sha512 与 OSS 上的 deb 逐字一致），
 > 0.8.2 的 deb 用户因此能收到本版更新。
+> **版本窗口维护**：bump 到 0.9.0 会改变 `engines.mingdao` 的语义——旧窗口 `>=0.4.6 <0.9` 不覆盖 0.9.0，
+> 会让官方示例 Pack 自身校验失败（v0.7.0 同类事故，已有 `test/pack-window.js` 守卫）。本版把它放宽为
+> `>=0.4.6 <0.10`，smoke 夹具同步；这是版本元数据维护，不是产品逻辑变更。
 > **门禁**：typecheck 0 / strict 0 / preflight ✓ / smoke ✓ / `run-all` **57 套全绿** / 变异 4 片全中 /
 > doc-lint ✓。
 > **边界（重要）**：真实的 `dpkg -i`、polkit 授权弹窗、`pkexec` 失败回落**无法在 CI 验证**（CI 不安装系统包），
