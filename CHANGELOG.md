@@ -21,6 +21,11 @@
 >
 > **已回填**：`latest-linux-deb.yml` 已为 0.8.2 补一份（sha512 与 OSS 上的 deb 逐字一致），
 > 0.8.2 的 deb 用户因此能收到本版更新。
+> **打包白名单（发布前拦截）**：`desktop/main.js` 顶部静态 import 新增 `deb-update.js`，但
+> `electron-builder.yml` 的 `files` 是穷举白名单、漏了它 → 打包版主进程 `ERR_MODULE_NOT_FOUND`，
+> Electron 弹「A JavaScript error occurred in the main process」模态框，CI 的 Linux 冒烟在 xvfb 里
+> 无人点确定而**永久挂住**（build 不结束 → publish 不跑）。已补白名单，并把 smoke §138 ④ 改成
+> 从 `main.js` **派生**本地静态 import 逐个校验（不再靠人肉列举，杜绝同一齿根）。
 > **版本窗口维护**：bump 到 0.9.0 会改变 `engines.mingdao` 的语义——旧窗口 `>=0.4.6 <0.9` 不覆盖 0.9.0，
 > 会让官方示例 Pack 自身校验失败（v0.7.0 同类事故，已有 `test/pack-window.js` 守卫）。本版把它放宽为
 > `>=0.4.6 <0.10`，smoke 夹具同步；这是版本元数据维护，不是产品逻辑变更。

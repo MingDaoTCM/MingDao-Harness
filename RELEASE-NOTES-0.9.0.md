@@ -57,6 +57,13 @@ sig: /updates/mingdao-0.8.2-amd64.deb.sig → 200
 
 所以 **0.8.2 的 deb 用户能直接收到 0.9.0 的更新**，不需要手动重装一次。
 
+> ⚠ **发布前拦截的一个打包事故**：`desktop/main.js` 顶部静态 import 新增 `deb-update.js`，
+> 而 `electron-builder.yml` 的 `files` 是穷举白名单、第一版漏了它——打包本身不报错，但**打包版**
+> 主进程 `ERR_MODULE_NOT_FOUND`，Electron 弹「A JavaScript error occurred in the main process」
+> 模态框；CI 的 Linux 冒烟跑在 xvfb 里无人点确定，步骤**永久挂住**（run 35 分钟不结束，publish 被 build 阻塞）。
+> 已补白名单，并把 `test/smoke.js` §138 ④ 的结构守卫改成**从 `main.js` 派生**本地静态 import 逐个校验，
+> 以后再加主进程模块不会重演（这是 v0.6.10 `preload.cjs` 漏打包的同一齿根）。
+
 ## 4. 门禁
 
 | 门禁 | 结果 |

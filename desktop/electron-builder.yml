@@ -20,11 +20,16 @@ directories:
 # 后果是桌面版原生「选择目录」静默降级成手输路径（且启动就报错）。
 # `update-verify.js` 同理：main.js 顶部**静态** import 它（更新包来源签名校验，§135），
 # 漏打包不是降级而是主进程直接 ERR_MODULE_NOT_FOUND（应用起不来）——同一个齿根，一起补上。
+# v0.9.0 又踩一次：新增 `deb-update.js`（deb 自动更新的纯函数层）同样是 main.js 顶部静态 import，
+# 白名单漏了它 → 打包版主进程 ERR_MODULE_NOT_FOUND → Electron 弹「A JavaScript error occurred in
+# the main process」模态框，CI 的 Linux 冒烟在 xvfb 里无人点确定，**永久挂住**（publish 被 build 阻塞）。
+# 现在 smoke §138 ④ 改成从 main.js **派生**本地静态 import 逐个校验，不再靠人肉列举。
 # 回归：test/smoke.js §138 的打包配置守卫（结构级；产物级验证见该节注释）。
 files:
   - main.js
   - preload.cjs
   - update-verify.js
+  - deb-update.js
   - package.json
   - build/icon.png
   - build/tray.png

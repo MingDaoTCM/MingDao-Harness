@@ -13659,6 +13659,24 @@ process.exit(0);
       '打包配置 files 必须包含 update-verify.js——main.js 顶部**静态** import 它（更新包来源签名），漏打包不是降级而是主进程 ERR_MODULE_NOT_FOUND（同一个齿根）');
     const mainSrc = fs.readFileSync(path.join(repo, 'desktop', 'main.js'), 'utf8');
     assert.ok(/preload:\s*path\.join\(__dirname, 'preload\.cjs'\)/.test(mainSrc), '（前置）main.js 仍按 __dirname/preload.cjs 加载——配置项名必须与它一致');
+    // —— ④b 派生式守卫（v0.9.0 事故）：main.js 顶部**每个**本地静态 import 都必须在 files 白名单里 ——
+    // 事故：新增 `desktop/deb-update.js`（deb 自动更新的纯函数层）后漏改白名单 → 打包版主进程
+    // ERR_MODULE_NOT_FOUND → Electron 弹「A JavaScript error occurred in the main process」模态框；
+    // CI 的 Linux 冒烟跑在 xvfb 里无人点确定，步骤**永久挂住**（build 不结束 → publish 永远不跑）。
+    // 这条守卫从 main.js **派生**而不是逐个手写文件名，以后再加主进程模块不会重演同一个齿根。
+    const localImports = [...mainSrc.matchAll(/\bfrom\s+['"](\.[^'"]+)['"]/g)].map((m) => m[1]);
+    assert.ok(localImports.length >= 2, '（前置）main.js 应至少有 2 个本地静态 import（update-verify / deb-update）');
+    for (const spec of localImports) {
+      const file = spec.replace(/^\.\//, '');
+      assert.ok(
+        new RegExp('^\\s*-\\s+' + file.replace(/\./g, '\\.') + '\\s*$', 'm').test(filesBlock),
+        `打包配置 files 必须包含 main.js 静态 import 的本地模块 ${file}——漏打包 = 打包版主进程 ERR_MODULE_NOT_FOUND 起不来（v0.6.10 preload / v0.9.0 deb-update 同一齿根）`
+      );
+      assert.ok(
+        fs.existsSync(path.join(repo, 'desktop', file)),
+        `（前置）desktop/${file} 必须真的存在——配置列了不存在的文件等于没修`
+      );
+    }
   }
 
   // —— ⑤ 设置面板「登记工作空间」必须走**同一个**目录选择器（用户实测：这里不弹系统对话框） ——
