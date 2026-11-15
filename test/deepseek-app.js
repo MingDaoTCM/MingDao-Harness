@@ -5,7 +5,7 @@
 // 一旦形状错了，表现是"能跑但搜索块/引用/标题全丢"——不会报错，所以必须逐块钉死。
 import assert from 'node:assert/strict';
 import {
-  APP_DEFAULT_MODEL, FILES_BETA, TTS_SAMPLE_RATE, apiRoot, supportsAppTools,
+  APP_DEFAULT_MODEL, FILES_BETA, TTS_SAMPLE_RATE, apiRoot, supportsAppTools, resolveAppModel,
   buildAppRequest, buildLatestReminder, parseSseLine, applyAppEvent, streamAppChat,
   uploadAppFile, transcribeAudio, synthesizeSpeech, appErrorMessage,
 } from '../src/deepseek-app.js';
@@ -46,6 +46,18 @@ function sseBody(frames) {
 
   assert.equal(supportsAppTools('deepseek-flash'), true);
   assert.equal(supportsAppTools('deepseek-v4-pro'), false, '非 flash 模型不得开应用工具');
+  // v0.8.2（T06/DS-23）：能力门是精确表，任意 deepseek-flash 子串都不得绕过。
+  assert.equal(supportsAppTools('custom-deepseek-flash-experimental'), false, '伪冒后缀不得通过能力门');
+  assert.equal(supportsAppTools('notdeepseek-flash'), false, '伪冒前缀不得通过能力门');
+  assert.equal(supportsAppTools(' deepseek-flash '), true, '仅大小写/首尾空白归一，仍按精确 id 查表');
+  assert.equal(supportsAppTools('deepseek-v4-flash'), false, '旧名别名不在应用能力精确表（由 resolveAppModel 等价回落）');
+  assert.equal(resolveAppModel({ model: 'deepseek-v4-flash' }), APP_DEFAULT_MODEL, '旧名等价回落到官方应用模型');
+  // v0.8.2（T06）：CLI/Web 共用的解析器——未支持或缺失一律回落 APP_DEFAULT_MODEL。
+  assert.equal(resolveAppModel({ model: 'deepseek-flash' }), 'deepseek-flash');
+  assert.equal(resolveAppModel({ model: 'deepseek-v4-pro' }), APP_DEFAULT_MODEL, '未支持模型必须回落默认');
+  assert.equal(resolveAppModel({ model: 'deepseek-v4-pro', appApi: { model: 'custom-deepseek-flash-experimental' } }), APP_DEFAULT_MODEL, 'appApi.model 不支持同样回落');
+  assert.equal(resolveAppModel({ model: 'deepseek-v4-pro', appApi: { model: 'deepseek-flash' } }), 'deepseek-flash', 'appApi.model 优先且支持');
+  assert.equal(resolveAppModel({}), APP_DEFAULT_MODEL, '无模型信息回落默认');
   assert.equal(apiRoot('https://api.deepseek.com///'), 'https://api.deepseek.com');
   assert.equal(apiRoot('https://api.deepseek.com/v1'), 'https://api.deepseek.com', 'OpenAI 兼容预设的 baseUrl 带 /v1，必须剥掉');
   assert.equal(apiRoot('https://api.deepseek.com/v1/'), 'https://api.deepseek.com');
@@ -80,8 +92,8 @@ function sseBody(frames) {
   applyAppEvent({ type: 'message_start', message: { usage: { input_tokens: 10 } } }, out, open, emit);
   applyAppEvent({ type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } }, out, open, emit);
   applyAppEvent({ type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '想一想' } }, out, open, emit);
-  applyAppEvent({ type: 'content_block_start', index: 1, content_block: { type: 'server_tool_use', name: 'deepseek_web_search', input: { action: 'search', queries: ['a', 'b'] }, kind: 'search' } }, out, open, emit);
-  applyAppEvent({ type: 'content_block_start', index: 2, content_block: { type: 'web_search_tool_result', content: [{ type: 'web_search_result', title: 'T', url: 'https://e.com', snippet: 'S', site_name: 'E' }], kind: 'search' } }, out, open, emit);
+  applyAppEvent({ type: 'content_block_start', index: 1, content_block: { type: 'server_tool_use', id: 'call-1', name: 'deepseek_web_search', input: { action: 'search', queries: ['a', 'b'] }, kind: 'search' } }, out, open, emit);
+  applyAppEvent({ type: 'content_block_start', index: 2, content_block: { type: 'web_search_tool_result', tool_use_id: 'call-1', content: [{ type: 'web_search_result', title: 'T', url: 'https://e.com', snippet: 'S', site_name: 'E' }], kind: 'search' } }, out, open, emit);
   applyAppEvent({ type: 'content_block_start', index: 3, content_block: { type: 'text', text: '' } }, out, open, emit);
   applyAppEvent({ type: 'content_block_delta', index: 3, delta: { type: 'text_delta', text: '答案' } }, out, open, emit);
   applyAppEvent({ type: 'content_block_delta', index: 3, delta: { type: 'citations_delta', citation: { type: 'web_search_result_location', url: 'https://e.com', title: 'T', cited_text: '答案' } } }, out, open, emit);
@@ -100,8 +112,8 @@ function sseBody(frames) {
   ok('⑥ 逐块聚合：thinking/搜索+结果/正文/引用/标题/usage 全接住');
 
   const out2 = { text: '', thinking: '', blocks: [], citations: [], searches: [], fetches: [], title: '', usage: null, stopReason: '' };
-  applyAppEvent({ type: 'content_block_start', index: 0, content_block: { type: 'server_tool_use', name: 'deepseek_read_url', input: { action: 'read_link', url: 'https://a.com' }, kind: 'read_link' } }, out2, new Map());
-  applyAppEvent({ type: 'content_block_start', index: 1, content_block: { type: 'web_fetch_tool_result', content: { type: 'web_fetch_result', url: 'https://a.com', content: { title: 'A' } }, kind: 'read_link', signature: 'sig' } }, out2, new Map());
+  applyAppEvent({ type: 'content_block_start', index: 0, content_block: { type: 'server_tool_use', id: 'read-1', name: 'deepseek_read_url', input: { action: 'read_link', url: 'https://a.com' }, kind: 'read_link' } }, out2, new Map());
+  applyAppEvent({ type: 'content_block_start', index: 1, content_block: { type: 'web_fetch_tool_result', tool_use_id: 'read-1', content: { type: 'web_fetch_result', url: 'https://a.com', content: { title: 'A' } }, kind: 'read_link', signature: 'sig' } }, out2, new Map());
   assert.equal(out2.fetches.length, 1);
   assert.equal(out2.fetches[0].title, 'A');
   assert.equal(out2.fetches[0].signature, 'sig', 'read_link 的 signature 必须保留（多轮回传靠它还原页面）');
@@ -119,8 +131,8 @@ function sseBody(frames) {
     { type: 'message_start', message: { usage: { input_tokens: 5 } } },
     { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
     { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '思考' } },
-    { type: 'content_block_start', index: 1, content_block: { type: 'server_tool_use', name: 'deepseek_web_search', input: { action: 'search', queries: ['q'] }, kind: 'deep_search' } },
-    { type: 'content_block_start', index: 2, content_block: { type: 'web_search_tool_result', content: [{ type: 'web_search_result', title: 'T', url: 'https://e.com' }], kind: 'deep_search' } },
+    { type: 'content_block_start', index: 1, content_block: { type: 'server_tool_use', id: 'S1', name: 'deepseek_web_search', input: { action: 'search', queries: ['q'] }, kind: 'deep_search' } },
+    { type: 'content_block_start', index: 2, content_block: { type: 'web_search_tool_result', tool_use_id: 'S1', content: [{ type: 'web_search_result', title: 'T', url: 'https://e.com' }], kind: 'deep_search' } },
     { type: 'content_block_start', index: 3, content_block: { type: 'text', text: '' } },
     { type: 'content_block_delta', index: 3, delta: { type: 'text_delta', text: '答' } },
     { type: 'message_delta', delta: { stop_reason: 'end_turn', title: 'T1' }, usage: { output_tokens: 1 } },
@@ -143,6 +155,8 @@ function sseBody(frames) {
   assert.equal(seenBody.system, 'SYS');
   assert.equal(seenBody.title.enabled, true);
   assert.equal(r.ok, true);
+  assert.equal(r.outcome, 'ok', 'v0.8.2：完整流必须给出 outcome:ok');
+  assert.equal(seenBody.stream, true, 'v0.8.2（DS-01）：请求体固定 stream:true');
   assert.equal(r.thinking, '思考');
   assert.equal(r.text, '答');
   assert.equal(r.title, 'T1');
@@ -222,6 +236,7 @@ function sseBody(frames) {
   const fakeFetch = async () => new Response(sseBody(frames), { status: 200, headers: { 'Content-Type': 'text/event-stream' } });
   const r = await streamAppChat({ baseUrl: 'https://api.deepseek.com', apiKey: 'k', fetchImpl: /** @type {any} */ (fakeFetch) });
   assert.equal(r.ok, false, '流内 error 必须判失败，不能把半截回答当成功');
+  assert.equal(r.outcome, 'failed', 'v0.8.2：流内错误终态为 failed');
   assert.match(String(r.error), /failed to generate|中途/);
   assert.equal(r.text, '半截', '已产出的正文保留，便于用户看到进度');
   ok('⑯ 流内 error：判失败但保留已产出正文');
@@ -235,12 +250,12 @@ function sseBody(frames) {
     { type: 'message_start', message: { usage: { input_tokens: 3 } } },
     { type: 'content_block_start', index: 0, content_block: { type: 'thinking', thinking: '' } },
     { type: 'content_block_delta', index: 0, delta: { type: 'thinking_delta', thinking: '先搜' } },
-    { type: 'content_block_start', index: 1, content_block: { type: 'server_tool_use', name: 'deepseek_web_search', input: { action: 'search', queries: ['q1', 'q2'] }, kind: 'deep_search' } },
-    { type: 'content_block_start', index: 2, content_block: { type: 'web_search_tool_result', content: [{ type: 'web_search_result', title: 'A', url: 'https://a' }], kind: 'deep_search' } },
-    { type: 'content_block_start', index: 3, content_block: { type: 'server_tool_use', name: 'deepseek_web_search', input: { action: 'open_page', url: 'https://a' }, kind: 'deep_search' } },
-    { type: 'content_block_start', index: 4, content_block: { type: 'web_fetch_tool_result', content: { type: 'web_fetch_result', url: 'https://a', content: { title: 'A' } }, kind: 'deep_search' } },
-    { type: 'content_block_start', index: 5, content_block: { type: 'server_tool_use', name: 'deepseek_web_search', input: { action: 'search', queries: ['q3'] }, kind: 'deep_search' } },
-    { type: 'content_block_start', index: 6, content_block: { type: 'web_search_tool_result', content: [{ type: 'web_search_result', title: 'B', url: 'https://b' }], kind: 'deep_search' } },
+    { type: 'content_block_start', index: 1, content_block: { type: 'server_tool_use', id: 'P-S1', name: 'deepseek_web_search', input: { action: 'search', queries: ['q1', 'q2'] }, kind: 'deep_search' } },
+    { type: 'content_block_start', index: 2, content_block: { type: 'web_search_tool_result', tool_use_id: 'P-S1', content: [{ type: 'web_search_result', title: 'A', url: 'https://a' }], kind: 'deep_search' } },
+    { type: 'content_block_start', index: 3, content_block: { type: 'server_tool_use', id: 'P-F1', name: 'deepseek_web_search', input: { action: 'open_page', url: 'https://a' }, kind: 'deep_search' } },
+    { type: 'content_block_start', index: 4, content_block: { type: 'web_fetch_tool_result', tool_use_id: 'P-F1', content: { type: 'web_fetch_result', url: 'https://a', content: { title: 'A' } }, kind: 'deep_search' } },
+    { type: 'content_block_start', index: 5, content_block: { type: 'server_tool_use', id: 'P-S2', name: 'deepseek_web_search', input: { action: 'search', queries: ['q3'] }, kind: 'deep_search' } },
+    { type: 'content_block_start', index: 6, content_block: { type: 'web_search_tool_result', tool_use_id: 'P-S2', content: [{ type: 'web_search_result', title: 'B', url: 'https://b' }], kind: 'deep_search' } },
     { type: 'content_block_start', index: 7, content_block: { type: 'text', text: '' } },
     { type: 'content_block_delta', index: 7, delta: { type: 'text_delta', text: '答案' } },
     { type: 'message_delta', delta: { stop_reason: 'end_turn', title: 'T' }, usage: { output_tokens: 2 } },
@@ -257,7 +272,7 @@ function sseBody(frames) {
   ok('⑰ 性能口径：一次请求内完成多步搜索/开页（客户端往返 = 1）');
 }
 
-// ---------- ⑩ 并发调用：结果必须按 tool_use_id 配对（官方原文：Match calls to results by tool_use_id） ----------
+// ---------- ⑩ 并发调用：结果必须按 content_block.tool_use_id 配对（官方原文：Match calls to results by tool_use_id） ----------
 // 深度思考搜索会「多个调用先全部到达、结果随后才到」。若按"最后一个 search"挂结果，
 // A 的结果会被写到 B 上，A 静默变空——UI 上表现为"搜了但一条结果都没有"。
 {
@@ -266,20 +281,27 @@ function sseBody(frames) {
   const ev = (e) => applyAppEvent(e, out, open);
   ev({ type: 'content_block_start', index: 0, content_block: { type: 'server_tool_use', id: 'srvtoolu_A', name: 'deepseek_web_search', input: { action: 'search', queries: ['A'] }, kind: 'deep_search' } });
   ev({ type: 'content_block_start', index: 1, content_block: { type: 'server_tool_use', id: 'srvtoolu_B', name: 'deepseek_web_search', input: { action: 'search', queries: ['B'] }, kind: 'deep_search' } });
-  ev({ type: 'content_block_start', index: 2, content_block: { type: 'web_search_tool_result', content: [{ type: 'web_search_result', title: 'a', url: 'https://a' }], kind: 'deep_search' }, tool_use_id: 'srvtoolu_A' });
-  ev({ type: 'content_block_start', index: 3, content_block: { type: 'web_search_tool_result', content: [{ type: 'web_search_result', title: 'b', url: 'https://b' }], kind: 'deep_search' }, tool_use_id: 'srvtoolu_B' });
+  // v0.8.2（T03）：官方配对键在 content_block.tool_use_id，外层没有 tool_use_id 字段。
+  ev({ type: 'content_block_start', index: 2, content_block: { type: 'web_search_tool_result', tool_use_id: 'srvtoolu_A', content: [{ type: 'web_search_result', title: 'a', url: 'https://a' }], kind: 'deep_search' } });
+  ev({ type: 'content_block_start', index: 3, content_block: { type: 'web_search_tool_result', tool_use_id: 'srvtoolu_B', content: [{ type: 'web_search_result', title: 'b', url: 'https://b' }], kind: 'deep_search' } });
   assert.equal(out.searches.length, 2);
   assert.deepEqual(out.searches[0].results.map((r) => r.url), ['https://a'], 'A 的搜索结果必须挂回 A（不能按"最后一个 search"错配）');
   assert.deepEqual(out.searches[1].results.map((r) => r.url), ['https://b'], 'B 的结果挂回 B');
   assert.equal(out.searches[0].id, 'srvtoolu_A', 'search 条目要带 tool_use_id，供 UI/日志配对');
-  ok('⑱ 并发搜索：结果按 tool_use_id 配对（不是"最后一个"）');
 
-  // 结果先于调用到达（缺 id 的残缺负载）时，退回最后一个 search，不能崩
+  // 同一 ID 的重复结果：明确“后者替换前者”（不追加、不串到其他调用）。
+  ev({ type: 'content_block_start', index: 4, content_block: { type: 'web_search_tool_result', tool_use_id: 'srvtoolu_A', content: [{ type: 'web_search_result', title: 'a2', url: 'https://a2' }], kind: 'deep_search' } });
+  assert.deepEqual(out.searches[0].results.map((r) => r.url), ['https://a2'], '同一 ID 重复结果必须后者替换前者');
+  assert.deepEqual(out.searches[1].results.map((r) => r.url), ['https://b'], '重复结果不得污染另一个调用的结果');
+  ok('⑱ 并发搜索：结果按 content_block.tool_use_id 配对（不是"最后一个"）');
+
+  // 未知 / 缺失 tool_use_id：不得猜挂到最后一次搜索（DS-14 同源），只保留未配对块供诊断。
   const out2 = { text: '', thinking: '', blocks: [], citations: [], searches: [], fetches: [], title: '', usage: null, stopReason: '' };
   applyAppEvent({ type: 'content_block_start', index: 0, content_block: { type: 'server_tool_use', id: 'x', name: 'deepseek_web_search', input: { action: 'search', queries: ['q'] }, kind: 'search' } }, out2, new Map());
-  applyAppEvent({ type: 'content_block_start', index: 1, content_block: { type: 'web_search_tool_result', content: [{ type: 'web_search_result', url: 'https://z' }], kind: 'search' } }, out2, new Map());
-  assert.deepEqual(out2.searches[0].results.map((r) => r.url), ['https://z'], '缺 tool_use_id 时退回最后一个 search（容错，不丢结果）');
-  ok('⑲ 残缺负载：缺 tool_use_id 时容错回退');
+  applyAppEvent({ type: 'content_block_start', index: 1, content_block: { type: 'web_search_tool_result', tool_use_id: 'unknown', content: [{ type: 'web_search_result', url: 'https://z' }], kind: 'search' } }, out2, new Map());
+  assert.deepEqual(out2.searches[0].results, [], '未知 tool_use_id 不得污染已有 search');
+  assert.ok(out2.blocks.some((block) => block.type === 'search_result' && block.id === 'unknown' && block.paired === false), '未配对结果仍进 blocks 供诊断');
+  ok('⑲ 残缺负载：未知/缺失 tool_use_id 不再回退（不污染已有搜索）');
 }
 
 console.log(`\nDeepSeek 应用全家桶：${passed} 项通过`);

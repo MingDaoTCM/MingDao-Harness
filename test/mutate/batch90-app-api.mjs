@@ -76,14 +76,15 @@ M.mutate({
   run: APP,
 });
 
-// ⑦ applyAppEvent 不把搜索结果挂回发起它的 search：结果块变成孤儿，UI 只看到 query。
+// ⑦ applyAppEvent 按"最后一个 search"挂结果：并发调用时 A 的结果写到 B，A 静默变空。
 M.mutate({
-  name: '⑦ 搜索结果不挂回发起它的 search',
+  name: '⑦ 搜索结果不按 tool_use_id 配对（挂到最后一个 search）',
   file: F,
-  // v0.8.0：配对已改为按 tool_use_id（官方要求），锚点跟随；变异改成"永远挂到最后一个 search"。
-  from: "      const target = (id && pairingOf(out).get(id)) || out.searches[out.searches.length - 1];\n      if (target) target.results = results;",
-  to: "      const target = out.searches[out.searches.length - 1]; // 变异：按最后一个 search 挂结果（并发时错配）",
-  expect: ['搜索结果必须挂回发起它的那次 search'],
+  // v0.8.2（T03）：配对键改到 content_block.tool_use_id，且未知 ID 不再回落最后一个 search；
+  // 变异把"按 ID 查配对"改回"永远挂到最后一个 search"（并发时错配）。
+  from: "      const pair = id ? pairingOf(out).get(id) : undefined;\n      const paired = Boolean(pair && pair.kind === 'search');\n      // 同一 ID 重复结果：明确“后者替换前者”——重写挂回该调用的 results，不追加、不串到别的调用。\n      if (paired) pair.item.results = results;",
+  to: "      const pair = { kind: 'search', item: out.searches[out.searches.length - 1] }; // 变异：按最后一个 search 挂结果（并发时错配）\n      const paired = Boolean(pair.item);\n      if (paired) pair.item.results = results;",
+  expect: ['搜索结果必须挂回 A'],
   run: APP,
 });
 
@@ -127,13 +128,14 @@ M.mutate({
   run: APP,
 });
 
-// ⑫ 流内 error 当成功：HTTP 200 + error 事件被忽略，半截回答被当成完整答案。
+// ⑫ 流内 error 不识别：HTTP 200 + error 帧不再给出可读原因（终态会被 message_stop 守卫兜成
+// truncated，所以断言点改为“错误分类必须是 failed”）。
 M.mutate({
-  name: '⑫ 流内 error 不判失败（半截回答当成功）',
+  name: '⑫ 流内 error 帧不被识别为失败终态',
   file: F,
-  from: "          if (payload && payload.type === 'error') {\n            streamError = String(payload?.error?.message || payload?.error?.type || '生成中途失败');",
-  to: "          if (false) {\n            streamError = String(payload?.error?.message || payload?.error?.type || '生成中途失败'); // 变异：流内 error 被忽略",
-  expect: ['流内 error 必须判失败'],
+  from: "      if (evt.event === 'error' || type === 'error' || (!type && payload.error)) {",
+  to: "      if (false && (evt.event === 'error' || type === 'error' || (!type && payload.error))) { // 变异：流内 error 被忽略",
+  expect: ['流内错误终态为 failed'],
   run: APP,
 });
 
