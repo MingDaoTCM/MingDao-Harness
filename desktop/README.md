@@ -33,7 +33,11 @@ npm run dist:mac          # dmg（macOS 上运行）
 - 更新源为官网自托管 feed：`https://harness.mingdao.ai/updates/`（latest.yml / latest-mac.yml / latest-linux.yml），
   国内直连，不走 GitHub；
 - 每次发版需把新安装包与对应 latest*.yml 一并上传（发版清单见根 README）；
-- deb 安装不支持 electron-updater（仅 AppImage / NSIS / dmg+zip）。
+- **deb 安装形态**（`/opt/MingDao Harness/`）不走 electron-updater（它只支持 AppImage / NSIS / dmg+zip），
+  改由 `deb-update.js` 走**独立 feed** `latest-linux-deb.yml`：
+  检测新版 → 下载 `.deb` → **sha512 + 来源签名双校验** → `pkexec dpkg -i`（弹一次管理员授权）→ 提示重启；
+  校验任一不过即删除文件并拒绝安装；提权失败/用户取消会给出可复制的 `sudo dpkg -i <path>` 与安装包路径。
+  真实的提权安装与 polkit 弹窗只能在 Linux 桌面机人工验收（CI 不装系统包）。
 
 **更新包来源签名**（审计 K-8：`electron-updater` 自带的 sha512 与包**同源**，只防传输损坏、
 不防"换了发布源/被投毒的 feed"——补的是**来源**）：
