@@ -19,7 +19,14 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：840（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：855（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+
+> v0.8.2：新增 `batch91-app-protocol`（15 条）——`app-protocol.js` 的本地预算器（单文件 100 MiB、
+> 请求内合计 32 MiB、文档数量 20 的 `>`/`>=` 差一、ASR 8 MiB / 120 秒、TTS 10000 字符 / 64 KiB 请求体、
+> ASR 扩展名白名单放行 `.mp3`）、`commands/app.js` 的图片引用块退回 `image`（v0.8.1 的 400 缺陷）、
+> `deepseek-app.js` 的流终态机（缺 `message_stop` 当成功、`event:error` 只按 `payload.type` 识别）、
+> 官方配对键（外层 `ev.tool_use_id` / 未知 ID 回落「最后一次 search」）、能力门子串匹配，
+> 以及 `web/app-mode-run.js` 的拒答仍落盘（DS-12）。batches 840 → 855。
 
 > v0.8.0：新增 `batch90-app-api`（12 条）——服务端工具丢声明、`safety_check` 恒不下发、`title`
 > 恒不下发、`purpose` 排到 `file` 之后、文件请求丢 `anthropic-beta`、TTS 用 `x-api-key` 而非

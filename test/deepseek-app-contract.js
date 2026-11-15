@@ -40,6 +40,7 @@ const importSource = (relative) => import(pathToFileURL(path.join(repo, relative
 const D = await importSource('src/deepseek-app.js');
 const W = await importSource('src/web/app-mode.js');
 const C = await importSource('src/commands/app.js');
+const P = await importSource('src/app-protocol.js');
 const { runAppModeChat } = await importSource('src/web/app-mode-run.js');
 
 const originalFetch = globalThis.fetch;
@@ -340,10 +341,11 @@ test('DS-13 并发搜索结果只按 content_block.tool_use_id 配对', () => {
     { type: 'content_block_start', index: 3, content_block: { type: 'web_search_tool_result', tool_use_id: 'B', content: [{ type: 'web_search_result', url: 'https://b.invalid' }], kind: 'deep_search' } },
   ];
   for (const event of events) D.applyAppEvent(event, out, open);
-  assert.deepEqual(out.searches.map((item) => item.results.map((result) => result.url)), [
-    ['https://a.invalid'],
-    ['https://b.invalid'],
-  ]);
+  assert.deepEqual(
+    out.searches.map((item) => item.results.map((result) => result.url)),
+    [['https://a.invalid'], ['https://b.invalid']],
+    '并发结果必须按 tool_use_id 各归各的（不能错配/丢失）',
+  );
 });
 
 test('DS-14 未知 tool_use_id 不得猜挂到最后一次搜索', () => {
@@ -372,19 +374,25 @@ test('DS-15 多轮历史必须原样回传带 kind/signature 的 assistant 内�
 // ---------- 附件与语音预算：M-03 / M-04 ----------
 
 test('DS-16 Files API 上传后的图片必须按 document 引用', () => {
-  assert.equal(C.blockTypeForFile('image.png'), 'document');
+  assert.equal(
+    C.blockTypeForFile('image.png'),
+    'document',
+    '图片必须按 document 引用（v0.8.1 的 image 块会被上游 400）',
+  );
   const messages = C.buildAppMessages('read it', [{ type: C.blockTypeForFile('image.png'), fileId: 'file-1' }]);
   assert.deepEqual(messages[0].content.at(-1), { type: 'document', source: { type: 'file', file_id: 'file-1' } });
 });
 
 test('DS-17 不支持的 ASR 扩展名必须本地失败且零网络调用', async () => {
   let calls = 0;
+  let reads = 0;
   const result = await runApp(['--asr', 'voice.mp3'], {
-    readFile: () => new Uint8Array([1, 2, 3]),
+    readFile: () => { reads += 1; return new Uint8Array([1, 2, 3]); },
     transcribeAudio: async () => { calls += 1; return { ok: true, text: 'should not run' }; },
   });
-  assert.notEqual(result.exitCode, 0);
+  assert.notEqual(result.exitCode, 0, '不支持的格式必须本地失败（非零退出）');
   assert.equal(calls, 0);
+  assert.equal(reads, 0, '不支持的格式不得读取文件（零读取、零网络）');
   assert.match(result.output, /WAV|Ogg|不支持/);
 });
 
@@ -394,7 +402,7 @@ test('DS-18 ASR 超过 8 MiB 必须本地失败且零网络调用', async () => 
     readFile: () => virtualBytes(8 * 1024 * 1024 + 1),
     transcribeAudio: async () => { calls += 1; return { ok: true, text: 'should not run' }; },
   });
-  assert.notEqual(result.exitCode, 0);
+  assert.notEqual(result.exitCode, 0, '8 MiB 超限必须非零退出');
   assert.equal(calls, 0);
   assert.match(result.output, /8\s*MiB|8\s*MB|大小|超过/);
 });
@@ -405,7 +413,7 @@ test('DS-19 16-bit PCM WAV 超过 120 秒必须本地失败且零网络调用', 
     readFile: () => pcm16Wav(121),
     transcribeAudio: async () => { calls += 1; return { ok: true, text: 'should not run' }; },
   });
-  assert.notEqual(result.exitCode, 0);
+  assert.notEqual(result.exitCode, 0, '121 秒必须本地失败（时长上限 120 秒）');
   assert.equal(calls, 0);
   assert.match(result.output, /120|时长|超过/);
 });
@@ -416,7 +424,7 @@ test('DS-20 TTS 超过 10000 字符必须本地失败且零网络调用', async 
     synthesizeSpeech: async () => { calls += 1; return { ok: true, pcm: new Uint8Array([1]) }; },
     writeFile: () => {},
   });
-  assert.notEqual(result.exitCode, 0);
+  assert.notEqual(result.exitCode, 0, '超过 10000 字符必须本地失败');
   assert.equal(calls, 0);
   assert.match(result.output, /10000|字符|超过/);
 });
@@ -429,8 +437,8 @@ test('DS-21 超过 20 个文件必须在上传前失败', async () => {
     uploadAppFile: async () => { uploads += 1; return { ok: true, fileId: `id-${uploads}` }; },
     streamAppChat: async () => { throw new Error('超限时不应进入对话请求'); },
   });
-  assert.notEqual(result.exitCode, 0);
-  assert.equal(uploads, 0);
+  assert.notEqual(result.exitCode, 0, '21 个文件必须本地失败');
+  assert.equal(uploads, 0, '数量超限不得上传任何文件');
   assert.match(result.output, /20|数量|超过/);
 });
 
@@ -441,17 +449,64 @@ test('DS-22 单文件超过 100 MiB 必须在读取转换和上传前失败', as
     uploadAppFile: async () => { uploads += 1; return { ok: true, fileId: 'should-not-upload' }; },
     streamAppChat: async () => { throw new Error('超限时不应进入对话请求'); },
   });
-  assert.notEqual(result.exitCode, 0);
-  assert.equal(uploads, 0);
+  assert.notEqual(result.exitCode, 0, '单文件超 100 MiB 必须在读取/上传前失败');
+  assert.equal(uploads, 0, '单文件超 100 MiB 不得上传');
   assert.match(result.output, /100\s*MiB|100\s*MB|大小|超过/);
+});
+
+test('DS-25 恰好 20 个文件必须放行（数量上限是含 20 的 >，不是 >=）', async () => {
+  let uploads = 0;
+  const files = Array.from({ length: 20 }, (_, index) => `f${index}.txt`);
+  const result = await runApp(['question', ...files.flatMap((file) => ['--file', file])], {
+    readFile: () => new Uint8Array([1]),
+    uploadAppFile: async () => { uploads += 1; return { ok: true, fileId: `id-${uploads}` }; },
+    streamAppChat: async () => ({
+      ok: true, text: 'ok', thinking: '', title: '', searches: [], citations: [], fetches: [], usage: null, stopReason: 'end_turn',
+    }),
+  });
+  assert.equal(result.exitCode, 0, '恰好 20 个文件必须放行（上限 20 含 20，不能差一）');
+  assert.equal(uploads, 20, '20 个文件都必须上传');
+});
+
+test('DS-26 请求内文档合计超过 32 MiB 必须本地失败（单文件均未超 100 MiB）', async () => {
+  let uploads = 0;
+  const files = Array.from({ length: 17 }, (_, index) => `p${index}.txt`);
+  const result = await runApp(['question', ...files.flatMap((file) => ['--file', file])], {
+    readFile: () => virtualBytes(2 * 1024 * 1024),
+    uploadAppFile: async () => { uploads += 1; return { ok: true, fileId: 'should-not-upload' }; },
+    streamAppChat: async () => { throw new Error('合计超限时不应进入对话请求'); },
+  });
+  assert.notEqual(result.exitCode, 0, '合计超 32 MiB 必须非零退出');
+  assert.equal(uploads, 0, '合计超 32 MiB 不得上传任何文件');
+  assert.match(result.output, /32\s*MiB|合计|超过/, '错误必须说明合计上限 32 MiB');
+});
+
+test('DS-27 TTS 请求体超过 64 KiB 必须本地拒绝（与字符上限分开）', () => {
+  // 64 KiB 是**请求体**上限，不是字符上限：字符数合法（1 个）但请求体因 voice 过大而超限。
+  const budget = P.checkTtsBudget('读', { voice: 'v'.repeat(70 * 1024) });
+  assert.equal(budget.ok, false, '请求体超 64 KiB 必须本地拒绝');
+  assert.match(String(budget.error), /64 KiB|请求体/, '错误必须说明 64 KiB 请求体上限');
+});
+
+test('DS-28 单文件 100 MiB 规则必须独立成立（不能被 32 MiB 合计掩盖）', () => {
+  // 100 MiB > 32 MiB，所以一个超 100 MiB 的文件也必然超合计；但**单文件规则先判**，
+  // 文案必须点名「单文件上限」——否则单独把 100 MiB 改大时行为看起来没变化（合计兜底）。
+  const single = P.checkDocumentsBudget([{ name: 'huge.pdf', bytes: 100 * 1024 * 1024 + 1 }]);
+  assert.equal(single.ok, false, '单文件超 100 MiB 必须拒绝');
+  assert.match(String(single.error), /单文件上限/, '单文件超限必须点名单文件上限（先于合计判定）');
+  assert.match(String(single.error), /100\s*MiB/, '文案必须给出 100 MiB 上限');
+  // 边界：恰好 100 MiB 不触发单文件规则（严格 >），由合计规则兜底——两条规则互不替代。
+  const boundary = P.checkDocumentsBudget([{ name: 'edge.pdf', bytes: 100 * 1024 * 1024 }]);
+  assert.equal(boundary.ok, false, '恰好 100 MiB 仍超合计 32 MiB');
+  assert.match(String(boundary.error), /合计/, '恰好 100 MiB 由合计规则兜底（单文件是严格 >）');
 });
 
 // ---------- 模型能力与入口一致性：M-05 ----------
 
 test('DS-23 模型门不得被任意 deepseek-flash 子串绕过', () => {
   assert.equal(D.supportsAppTools('deepseek-flash'), true);
-  assert.equal(D.supportsAppTools('custom-deepseek-flash-experimental'), false);
-  assert.equal(D.supportsAppTools('notdeepseek-flash'), false);
+  assert.equal(D.supportsAppTools('custom-deepseek-flash-experimental'), false, '伪冒后缀不得通过能力门');
+  assert.equal(D.supportsAppTools('notdeepseek-flash'), false, '伪冒前缀不得通过能力门');
   assert.equal(D.supportsAppTools('deepseek-v4-pro'), false);
 });
 
