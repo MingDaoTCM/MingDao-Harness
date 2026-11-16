@@ -6,7 +6,7 @@
 // 本文件只保留循环与编排；导出面由下方 `export { … } from './messages.js'` 逐字保留。
 
 import path from 'node:path';
-import { trimMessages, messageTokens, approxTokens } from './context.js';
+import { trimMessages, messageTokens, approxTokens, sanitizeReasoningContent, wireMessages } from './context.js';
 import { compactConversation } from './compact.js';
 // 审计 M-1 §2.1 第 4 条（Pack 反向提权）：`makeToolCtx` 把内核 ctx 剪成"工具面向的 ctx"并冻结。
 // 两个对象从此分开：内核 ctx（makeCtx() 的产物）只在循环内用；工具只拿到 makeToolCtx() 的白名单对象。
@@ -45,7 +45,7 @@ import { appendEvent, eventFileFor, eventLogEnabled, missingToolCallIds, setEven
 // ① 本轮可见哪些工具（只读档 × 预设白名单 × 已用工具快照 × MCP 只读标注）；
 // ② 工具结果怎么回填（序列化 / 复用前缀 / 约束拒绝文案 / 按窗口截断）；
 // ③ 工具参数怎么解析（v0.6.17 第四刀：JSON + 容错 + 归一化 + 错误文案）。
-import { READONLY_TIER_SET, visibleToolsFor, serializeToolResult, toolResultMessage, parseToolArgs } from './tools-flow.js';
+import { READONLY_TIER_SET, visibleToolsFor, usedToolNamesFromMessages, serializeToolResult, toolResultMessage, parseToolArgs } from './tools-flow.js';
 // v0.6.40：插话"有→继续、无→收尾"的判据与前端共用同一份纯函数（viewmodel 不读 DOM/全局）。
 import { shouldContinueAfterModel } from './web/viewmodel.js';
 
@@ -377,9 +377,12 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   const count = makeTokenCounter(modelName);
   // MCP 工具集（每次取，服务器晚就绪也能在后续轮次出现）
   const mcpSchemas = () => (mcp ? mcp.toolSchemas() : []);
-  // 省钱 B1：本会话已调用过的工具名（内置名/MCP 前缀名）——其 schema 在后续轮次省略 description，
-  // 模型已在消息历史里见过用途；未用过的保留完整描述。省输入 token（工具 schema 按需瘦身）。
-  const usedToolNames = new Set();
+  // 前缀缓存（v0.9.2 实测修复）：DeepSeek 的 wire format 把 `## Tools` 拼在 system 之后、**所有消息
+  // 之前**（见 api-docs「Context Caching」与工具调用格式）——工具 schema 字节一变，整段历史立刻按
+  // 未命中价重计（约 10 倍差价）。所以「按需挂载 / 已用工具剥描述」这两项省 token 的优化默认**关闭**：
+  // 默认值只取决于 cfg/preset/MCP（会话内恒定）→ 同一会话内 system + tools 字节恒定。
+  // 想优先省 schema token（接受缓存失效）的用户显式配 `config.schemaTier: true`。
+  const toolTierEnabled = cfg?.schemaTier === true;
   // 省钱 B1（按需挂载）：回合起始为「只读阶段」时只发只读工具（read/ls/glob/grep/skill/todo）
   // + 已用过的工具；检测到写意图（用户消息或模型明说需要写/改/建）后注入全量工具。
   // v0.4.4：加 task——审计/调研等只读长任务此前因 task 不在只读档而看不到「派只读子代理」能力
@@ -387,8 +390,10 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
   // 只读档工具集：单一来源见模块顶部导出的 READONLY_TIER_SET
   // 中英双语写意图（CodeArts 报告：纯中文正则让英文会话整回合只读死锁）
 
-  // A1（前缀稳定）：剥描述集合按「回合冻结快照」——回合内恒定（至多两态：只读档/全量档），
-  // 新使用的工具只在下一回合才进入剥描述集合；回合边界本身就有新 user 消息，schema 变化免费。
+  // A1（前缀稳定，v0.9.2 修正）：剥描述集合**从消息历史派生**，不再用「回合冻结快照」——
+  // 快照是进程内的，而 WebUI 每个用户回合都 createAgent()，进程内集合每回合清零，于是同一会话在
+  // 回合边界上把 schema 从剥描述态翻回全量描述态，整段历史前缀失配。历史是跨回合/跨实例的真源
+  // （`usedToolNamesFromMessages`），同一份历史永远派生同一个集合。
   // v0.4.0 Agent Preset：cfg.presetTools 白名单恒生效（在只读档过滤之后收紧——预设只减不增）。
   const presetToolSet = Array.isArray(cfg.presetTools) ? new Set(cfg.presetTools.map(String)) : null;
   const activePresetName = String(cfg.presetName || ''); // 白名单拦截提示用
@@ -761,19 +766,22 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       return inflight == null ? null : today + inflight;
     };
     // 省钱 B1：本回合只读阶段判定——最新用户消息无写意图则先只发只读工具，
-    // 模型明确表达写意图后（下一轮）注入全量。cfg.schemaTier=false 可关。
-    let readOnlyPhase = true;
+    // 模型明确表达写意图后（下一轮）注入全量。**仅在 cfg.schemaTier=true 时生效**（默认关闭）：
+    // 只读档会让 tools 在"提问回合"与"干活回合"之间整体换一套字节，而 tools 位于缓存前缀最前面
+    // → 每换一次，整段历史按未命中价重计。默认取全量档 = 会话内恒定。
     // 自愈只允许一次（否则与 stepLimit 形成"放开→再收起"的循环）
     let readOnlyHealed = false;
-    {
-      const lastUser = [...messages].reverse().find((m) => m?.role === 'user');
-      // 域内 Pack 在场时**不进只读档**（域内词是开集，靠关键词判定必然漏）
-      const packCtx0 = getActivePackContext();
-      const packActive = Array.isArray(packCtx0?.mounted) && packCtx0.mounted.length > 0;
-      readOnlyPhase = startsInReadOnlyPhase(cfg, String(lastUser?.content ?? ''), packActive);
-    }
-    // A1：本回合的剥描述冻结快照（会话级 usedToolNames 的副本）——回合内 schema 字节不变
-    const turnStrippedSet = new Set(usedToolNames);
+    // 判定在 messages.js 里单源（`schemaTier !== true` 时恒 false = 会话内工具集恒定）。
+    const lastUser = [...messages].reverse().find((m) => m?.role === 'user');
+    // 域内 Pack 在场时**不进只读档**（域内词是开集，靠关键词判定必然漏）
+    const packCtx0 = getActivePackContext();
+    const packActive = Array.isArray(packCtx0?.mounted) && packCtx0.mounted.length > 0;
+    let readOnlyPhase = startsInReadOnlyPhase(cfg, String(lastUser?.content ?? ''), packActive);
+    // A1（v0.9.2）：剥描述集合从**消息历史**派生（同一份历史永远同一个集合）且在回合内冻结——
+    // 跨回合、跨 agent 实例字节一致；默认关闭时为恒空集（工具集只取决于 cfg/preset/MCP）。
+    const turnStrippedSet = toolTierEnabled
+      ? new Set(usedToolNamesFromMessages(messages))
+      : new Set();
     // 整个回合注册一次 SIGINT：思考、工具执行、权限询问期间都能中断
     const offSigint = io.onSigint ? io.onSigint(() => { aborted = true; emitInterruptOnce('sigint'); currentAc?.abort(); }) : () => {};
     // ---- v0.6.13（A）：回合级进度快照 + 无进展看门狗 ----
@@ -1168,27 +1176,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       // reasoning 回填防护（Kimi P0 修正）：带 tool_calls 的 assistant 消息必须「完整」回传
       // reasoning_content（DeepSeek thinking_mode 官方要求：后续请求含 tools 时缺/截断即 400，
       // 多轮工具会话必崩）；仅纯文本回复的 reasoning 可裁剪（不回传也不影响）。
-      // v0.4.1 P2 修复：单次遍历构建新数组（O(n)），此前循环内每次替换都 sanitized.map 全量重建（O(n²)）。
-      let sanitized = trimmed;
-      let dirty = false;
-      for (let i = 0; i < sanitized.length; i++) {
-        const m = sanitized[i];
-        const rc = m.reasoning_content;
-        if (typeof rc !== 'string' || (Array.isArray(m.tool_calls) && m.tool_calls.length)) continue;
-        let replacement = null;
-        if (rc.length > 4000) {
-          replacement = `[思考过程已省略（原 ${rc.length} 字）]`;
-        } else if (rc.length > 1000) {
-          replacement = rc.slice(-500) + ' …[思考过程已截断]';
-        }
-        if (replacement !== null) {
-          if (!dirty) {
-            sanitized = sanitized.slice();
-            dirty = true;
-          }
-          sanitized[i] = { ...m, reasoning_content: replacement };
-        }
-      }
+      // v0.9.2：规则抽到 context.js 的 sanitizeReasoningContent()（纯函数）——同一输入同一字节，
+      // 位置/轮次无关，可被 test/cache-stability.js 逐条断言（埋在内核里的投影只能端到端烧钱验证）。
+      const sanitized = sanitizeReasoningContent(trimmed);
 
       // v0.8.0 性能（审计报告A M-5）：`sanitized` 本步内不再变，token 总数只遍历一次。
       // 此前成本护栏与 prefill 预告各遍历一遍（每步 2 次 O(n)），长会话下是纯浪费。
@@ -1323,7 +1313,9 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
       try {
         res = await provider.chat({
           model: activeModel,
-          messages: sanitized,
+          // 上线形态只保留协议字段：本地时间戳等专有字段不出门（否则「发送时」与「下回合读回」
+          // 的消息字节不同，缓存前缀是否命中就取决于端点的宽容度了）。
+          messages: wireMessages(sanitized),
           tools: toolsFor(readOnlyPhase, turnStrippedSet),
           temperature,
           maxTokens: turnMaxOutput,
@@ -1827,7 +1819,6 @@ export function createAgent({ provider, permission, io, modelName, workingDir, c
             // Pack 工具名形如 pack__<pack>__<tool>；执行期间标注来源，供 ctx.llm 归因
             const pkMatch = /^pack__([a-z0-9-]+)__/.exec(String(prep.name || ''));
             currentPack = pkMatch ? pkMatch[1] : null;
-            usedToolNames.add(prep.name); // 省钱 B1：执行过即标记，后续轮次省略其 description
             const dedupKey = !prep.isMcp && READONLY_TOOLS_SET.has(prep.name) ? prep.name + ':' + JSON.stringify(prep.args || {}) : null;
             if (dedupKey && turnToolCache.has(dedupKey)) {
               prep.cached = true;

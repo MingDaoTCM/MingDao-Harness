@@ -111,6 +111,32 @@ export function visibleToolsFor(schemas, { readOnlyPhase = false, usedNames = ne
 }
 
 /**
+ * 从消息历史里取出「本会话已经调用过的工具名」——剥描述判据的**单一真源**。
+ *
+ * 为什么不是「进程内 Set 累加」（原实现 `agent.js` 的 `usedToolNames`）：WebUI 每个用户回合都会
+ * `createAgent()`，进程内 Set 每回合清零 → 同一会话在**回合边界**上会把工具 schema 从「剥描述态」
+ * 翻回「全量描述态」。而 DeepSeek 的 wire format 把 `## Tools` 拼在 system 之后、**所有消息之前**，
+ * 工具字节一变，整段历史立刻按未命中价重计（约 10 倍差价）——省下的几百 schema token 远不够赔。
+ * 消息历史是跨回合、跨 agent 实例都相同的真源：从 `assistant.tool_calls` 派生，同一份历史永远
+ * 得到同一个集合（纯函数、不读全局、不改入参）。
+ * @param {any[]} messages
+ * @returns {Set<string>}
+ */
+export function usedToolNamesFromMessages(messages) {
+  const used = new Set();
+  if (!Array.isArray(messages)) return used;
+  for (const m of messages) {
+    const calls = m?.tool_calls;
+    if (!Array.isArray(calls)) continue;
+    for (const tc of calls) {
+      const name = tc?.function?.name;
+      if (typeof name === 'string' && name) used.add(name);
+    }
+  }
+  return used;
+}
+
+/**
  * 工具结果 → 回填文本（**序列化那一步**，与下一步的"消息正文"分开是为了保持原来的求值顺序）。
  *
  * 抽取前是 `agent.js` 里的一行：

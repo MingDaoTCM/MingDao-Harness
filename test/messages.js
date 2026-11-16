@@ -490,21 +490,26 @@ const has = (text, re, label) => assert.ok(re.test(String(text)), `${label}（�
   ok('⑤ localQueue：串行化/在途/排队/上限；排队 0 时不刷"0 个排队"');
 }
 
-// ---------- 14. startsInReadOnlyPhase：只读档判定（方向是反的） ----------
+// ---------- 14. startsInReadOnlyPhase：只读档判定（方向是反的；v0.9.2 起需显式开启） ----------
 {
-  assert.equal(M.startsInReadOnlyPhase({}, '什么是闭包？', false), true, '纯提问 → 只读档（省 schema token）');
-  assert.equal(M.startsInReadOnlyPhase({}, 'what is a monad?', false), true, '英文纯提问同样进只读档');
-  ok('① 纯提问（中/英）→ 只读档');
+  // v0.9.2：分层工具 schema 改为**显式开启**——tools 位于缓存前缀最前面（DeepSeek wire format），
+  // 只读档会让它在"提问回合/干活回合"之间整体换字节，每次变化整段历史按未命中价重计。
+  // 判据本身不变，只是 `schemaTier !== true` 时恒 false（工具集恒定）。
+  const TIER = { schemaTier: true };
+  assert.equal(M.startsInReadOnlyPhase({}, '什么是闭包？', false), false, '默认（schemaTier 未设）→ 不进只读档：工具集必须恒定');
+  assert.equal(M.startsInReadOnlyPhase(TIER, '什么是闭包？', false), true, 'schemaTier=true：纯提问 → 只读档（省 schema token）');
+  assert.equal(M.startsInReadOnlyPhase(TIER, 'what is a monad?', false), true, '英文纯提问同样进只读档');
+  ok('① 纯提问（中/英）→ 只读档（需 schemaTier=true；默认恒定全量）');
 
-  assert.equal(M.startsInReadOnlyPhase({}, '帮我改一下这个文件', false), false, '含写意图 → 全量工具');
-  assert.equal(M.startsInReadOnlyPhase({}, '请生成回访看板', false), false, '"生成"是写意图 → 全量');
-  assert.equal(M.startsInReadOnlyPhase({}, '回访一下这些病人', false), false, '域内动词（不命中词表）也必须给全量——判定方向是反的');
+  assert.equal(M.startsInReadOnlyPhase(TIER, '帮我改一下这个文件', false), false, '含写意图 → 全量工具');
+  assert.equal(M.startsInReadOnlyPhase(TIER, '请生成回访看板', false), false, '"生成"是写意图 → 全量');
+  assert.equal(M.startsInReadOnlyPhase(TIER, '回访一下这些病人', false), false, '域内动词（不命中词表）也必须给全量——判定方向是反的');
   ok('② 写意图 / 域内动词 → 全量（"回访"这类开集提示词不再把工具锁死）');
 
-  assert.equal(M.startsInReadOnlyPhase({}, '什么是闭包？', true), false, '域内 Pack 在场 → 不进只读档（任务能做优先）');
+  assert.equal(M.startsInReadOnlyPhase(TIER, '什么是闭包？', true), false, '域内 Pack 在场 → 不进只读档（任务能做优先）');
   assert.equal(M.startsInReadOnlyPhase({ schemaTier: false }, '什么是闭包？', false), false, 'config.schemaTier=false → 不进只读档');
-  assert.equal(M.startsInReadOnlyPhase({}, '', false), false, '空消息 → 全量（默认从任务态出发）');
-  assert.equal(M.startsInReadOnlyPhase({}, undefined, false), false, 'undefined 消息不崩且给全量');
+  assert.equal(M.startsInReadOnlyPhase(TIER, '', false), false, '空消息 → 全量（默认从任务态出发）');
+  assert.equal(M.startsInReadOnlyPhase(TIER, undefined, false), false, 'undefined 消息不崩且给全量');
   ok('③ Pack 在场 / schemaTier=false / 空消息 → 全量（最后一条决定"任务做不了"不会发生）');
 }
 

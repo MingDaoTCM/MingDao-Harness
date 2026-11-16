@@ -67,11 +67,16 @@ const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.error('  �
       return { text: '完成', reasoning: '', toolCalls: null, usage: { prompt_tokens: 5, completion_tokens: 2 }, finish: 'stop' };
     },
   };
-  const agent = createAgent({ provider: stub, permission: { async check() { return true; } }, io, modelName: 'deepseek-v4-flash', workingDir: home, cfg: { permission: 'auto' } });
+  // v0.9.2：分层 schema（只读档 / 剥描述）改为**显式开启**（默认工具集恒定以保前缀缓存），
+  // 本节测的就是这个省 token 旋钮，所以必须显式打开。
+  const agent = createAgent({ provider: stub, permission: { async check() { return true; } }, io, modelName: 'deepseek-v4-flash', workingDir: home, cfg: { permission: 'auto', schemaTier: true } });
   // v0.6.3：只读档判定方向已反转——**只有纯提问**才进只读档，任务态直接给全量工具
   // （域内名词如「回访」曾因未命中写意图关键词而整回合拿不到工具，见 smoke §110）。
   // 这里要测"只读档 → 写意图注入全量档"的切换，所以首条必须是纯提问。
-  await agent.runTurn([{ role: 'user', content: '这个目录里都有些什么？' }]);
+  // v0.9.2：剥描述集合改为从**消息历史**派生（WebUI 每回合都带着完整历史），所以这里也必须在
+  // 同一份 messages 上连续跑两个回合——否则回合 2 看不到回合 1 的工具调用记录。
+  const convo = [{ role: 'user', content: '这个目录里都有些什么？' }];
+  await agent.runTurn(convo);
   const distinctTurn1 = new Set(payloads);
   ok(distinctTurn1.size <= 2, `回合 1 应至多 2 个 payload（实际 ${distinctTurn1.size}）`);
   ok(payloads[0] !== payloads[1], '只读档 → 全量档（写意图注入）应切换一次');
@@ -81,7 +86,8 @@ const ok = (cond, msg) => { if (cond) pass++; else { fail++; console.error('  �
   // → 比回合 1 的全量档更小（跨回合才剥描述 = A1 冻结语义）
   payloads.length = 0;
   round = 0;
-  await agent.runTurn([{ role: 'user', content: '帮我写一个文件' }]);
+  convo.push({ role: 'user', content: '帮我写一个文件' });
+  await agent.runTurn(convo);
   const turn2Full = payloads[0];
   ok(turn2Full.length < turn1Full.length, `跨回合剥描述生效：回合2 全量档（${turn2Full.length}B）应小于回合1 全量档（${turn1Full.length}B）`);
   ok(payloads.every((x) => x === turn2Full), '回合 2 内 payload 应恒定（首轮全量档后不再变化）');

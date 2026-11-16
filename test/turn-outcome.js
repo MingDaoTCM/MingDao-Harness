@@ -131,7 +131,11 @@ function lastRunEvents(/** @type {string} */ home) {
   assert.ok(tryAt !== -1 && tryAt < runToolSrc.indexOf('io.renderToolStart'), 'io.renderToolStart 必须在 try 内（渲染抛错才不拒绝整批）');
   ok('结构守卫：io.renderToolStart 在 try 内');
 
-  assert.ok(runToolSrc.indexOf('usedToolNames.add') > tryAt && runToolSrc.indexOf('JSON.stringify(prep.args') > tryAt, '去重键（usedToolNames.add / JSON.stringify(prep.args)）必须在 try 内');
+  // v0.9.2：剥描述判据从进程内 `usedToolNames` 改为从消息历史派生（createAgent 的生命周期是
+  // "一个用户回合"，进程内集合会在回合边界清零 → 工具 schema 在回合边界翻转 → 前缀缓存整体失效）。
+  // 去重键仍是 `prep.name + ':' + JSON.stringify(prep.args)`，仍必须在 try 内（渲染抛错不能拒绝整批）。
+  assert.ok(runToolSrc.indexOf('const dedupKey') > tryAt, '只读去重键必须在 try 内');
+  assert.ok(runToolSrc.indexOf('JSON.stringify(prep.args') > tryAt, '去重键（JSON.stringify(prep.args)）必须在 try 内');
   ok('结构守卫：去重键在 try 内');
 
   const toolOkBlock = agentSrc.slice(agentSrc.indexOf('let toolOk = true'), agentSrc.indexOf('if (toolOk && repeatedBefore === 0)'));

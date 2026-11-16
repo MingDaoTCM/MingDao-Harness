@@ -411,7 +411,10 @@ v0.6.29 起，**子进程 env 名单与日志脱敏词表是同一份判定**（
 `"pricing": { "timezone": "Asia/Shanghai" }`。
 
 其他护栏字段：`maxEmptyRounds`（连续空输出续写轮数上限，默认 3——每轮空输出都是全额
-completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger`（自动压缩触发线，默认 0.8）。
+completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger`（自动压缩触发线，默认 0.8）、
+`schemaTier`（**默认 `false`**：工具 schema 默认保持恒定——DeepSeek 的 wire format 把 `## Tools`
+拼在 system 之后、所有消息之前，工具字节一变整段历史就按未命中价重计；设 `true` 才启用
+「只读档收缩 + 已用工具剥描述」的省 token 模式，代价是前缀缓存会在工具集变化时整体失效）。
 
 ## 费用护栏（costGuard）
 

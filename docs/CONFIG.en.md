@@ -945,8 +945,12 @@ Troubleshooting a local engine under memory pressure:
 Other guard fields: `maxEmptyRounds` (max consecutive empty/truncated output rounds before stopping,
 default **3** — each empty round is billed as a full completion), `maxRounds` (auto-continuation rounds
 after the step limit, default **3**), `maxAgentsMdChars` (cap on injected `AGENTS.md` content, default
-**4000**; `0` disables injection; the full file stays readable on demand), `schemaTier` (`false` disables
-the tiered tool-schema injection).
+**4000**; `0` disables injection; the full file stays readable on demand), `schemaTier` (default
+`false`: the tool schema stays byte-constant for the whole session — DeepSeek's wire format appends
+`## Tools` to the system text, i.e. **before every message**, so any change to the tool bytes makes
+the whole history bill as a cache miss; set `true` to opt into the token-saving "read-only tier +
+strip descriptions of used tools" mode, accepting that the prefix cache is invalidated whenever the
+tool set changes).
 
 ### Project memory
 
@@ -1067,7 +1071,7 @@ feature is inactive until configured.
 | `maxEmptyRounds` | number | `3` | Max consecutive empty/truncated output rounds |
 | `maxRounds` | number | `3` | Auto-continuation rounds after the step limit |
 | `maxAgentsMdChars` | number | `4000` | Cap on injected `AGENTS.md` characters; `0` disables injection |
-| `schemaTier` | boolean | `true` | `false` disables tiered tool-schema injection |
+| `schemaTier` | boolean | `false` | `true` opts into tiered tool-schema injection (tiered/read-only narrowing + stripping used-tool descriptions). Costs prefix-cache hits whenever the tool bytes change; default keeps tools byte-constant |
 | `timeout.firstTokenMs` | number | local `600000`, remote `300000` | Per-attempt wait for the first frame; the clock starts **after** the local queue slot is acquired |
 | `timeout.streamIdleMs` | number | `120000` | Max gap between frames after the first one; reset by every frame |
 | `timeout.totalMs` | number | local `1800000`, remote `600000` | Whole request, **including** local queue wait, retry backoff and every attempt; expiry is not retried |

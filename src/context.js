@@ -291,3 +291,66 @@ export function clampText(/** @type {any} */ text, maxChars = TOOL_RESULT_LIMIT)
   };
   return safeHead(s, maxChars) + `\n…[输出过长已截断，原文共 ${s.length} 字符]`;
 }
+
+// ---------- 请求前缀的两个纯函数（v0.9.2 缓存可测化） ----------
+//
+// 两者都只做**投影**：不改入参、同一输入永远同一输出（字节级）。把它们抽出来是为了让
+// 「同一会话内 system + tools + 历史前缀恒定」变成可断言的测试（test/cache-stability.js）——
+// 埋在内核循环里的投影只能靠端到端烧钱验证。
+
+/**
+ * reasoning_content 回填防护（从 `agent.js` 的请求路径抽出的纯函数，行为逐字不变）。
+ *
+ * 规则（Kimi P0 修正）：带 `tool_calls` 的 assistant 消息必须**完整**回传 reasoning_content
+ * （DeepSeek thinking_mode 官方要求：后续请求含 tools 时缺/截断即 400，多轮工具会话必崩）；
+ * 仅纯文本回复的 reasoning 可以裁剪——>4000 字整段省略、>1000 字保留尾部 500 字。
+ *
+ * 关键性质：替换文本只取决于**该消息自身**（`rc.length` 与 `rc.slice(-500)`），与消息在数组里的
+ * 位置、当前预算、轮次都无关 → 同一份历史在第 1 步和第 20 步派生出的字节完全相同，不会逐轮
+ * 改写前缀（DeepSeek 按前缀字节匹配计价）。未变化时返回**原数组**（不复制、不扰动对象身份）。
+ * @param {any[]} messages
+ * @returns {any[]}
+ */
+export function sanitizeReasoningContent(messages) {
+  if (!Array.isArray(messages) || !messages.length) return messages;
+  let out = messages;
+  let dirty = false;
+  for (let i = 0; i < out.length; i += 1) {
+    const m = out[i];
+    const rc = m?.reasoning_content;
+    if (typeof rc !== 'string' || (Array.isArray(m?.tool_calls) && m.tool_calls.length)) continue;
+    let replacement = null;
+    if (rc.length > 4000) replacement = `[思考过程已省略（原 ${rc.length} 字）]`;
+    else if (rc.length > 1000) replacement = rc.slice(-500) + ' …[思考过程已截断]';
+    if (replacement === null) continue;
+    if (!dirty) {
+      out = out.slice();
+      dirty = true;
+    }
+    out[i] = { ...m, reasoning_content: replacement };
+  }
+  return out;
+}
+
+/** 仅属于协议、可以出现在请求里的消息字段（本地专有字段一律不出门）。 */
+const WIRE_MESSAGE_KEYS = ['role', 'content', 'name', 'tool_calls', 'tool_call_id', 'reasoning_content'];
+
+/**
+ * 消息 → **上线形态**（只保留协议字段）。
+ *
+ * 为什么必须有这一层：会话消息落盘时 `appendMessages()` 会补本地时间戳 `ts`（供会话列表/重放），
+ * 而 `provider.chat()` 把 messages 原样 `JSON.stringify` 发出去——于是「发送时的消息」与「下一回合
+ * 从磁盘读回的消息」字节不同（多一个 ts）。实测 DeepSeek 端点会忽略未知字段（prompt_tokens 不变），
+ * 但这是**端点的偶然宽容**，不是我们能依赖的契约：一旦哪天它把未知字段计入 prompt，同一会话的
+ * 前缀会在每个回合边界上整体失配。所以这里显式只发协议字段（纯函数、不改入参）。
+ * @param {any[]} messages
+ * @returns {any[]}
+ */
+export function wireMessages(messages) {
+  return (Array.isArray(messages) ? messages : []).map((m) => {
+    /** @type {Record<string, any>} */
+    const out = {}; // 键序恒定：role → content → …（同一消息每次序列化完全一致）
+    for (const k of WIRE_MESSAGE_KEYS) if (m && m[k] !== undefined) out[k] = m[k];
+    return out;
+  });
+}

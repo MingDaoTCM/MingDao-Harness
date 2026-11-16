@@ -74,6 +74,32 @@ enforced by the kernel is described as a declaration, not as a control.
 | **Execution ledger** | Per-turn event streams under `<home>/ledger/`, each event chained to the previous one by a truncated SHA-256 digest starting from a fixed genesis value, plus a `run.end` seal sidecar. The seal carries an **ed25519 source signature** (key at `<home>/ledger-key.json`, mode 600, generated on first seal). Details are redacted on write and again on export. Inspect with `mingdao ledger list\|show\|export\|verify` — `verify` reports chain/seal **and** provenance in four states (valid / unsigned / invalid / unverifiable) — plus `replay`, which re-evaluates recorded calls against your *current* rules offline; `ledger --sign-key` shows or rotates the key. | Hash chain + seal prove "unchanged and not truncated **since it was written**"; the signature proves "written by the holder of that key" — but the key lives on the same machine with the same permissions, so it does **not** stop a local attacker who can already rewrite the ledger. There is **no trusted timestamp**, and replacing the key makes old ledgers report "signed by another key". It is provenance, not audit-grade non-repudiation. |
 | **WebUI exposure** | Binds `127.0.0.1:3820` by default. When bound to a non-loopback address without a configured token, the server generates a random token for that run and prints a `?token=` URL. Tokens also accepted via `X-MingDao-Token` or `Authorization: Bearer`. Host header is checked against loopback/bind names (anti-DNS-rebinding), cross-site browser requests are rejected, and cloud-metadata endpoints are always refused. | On loopback with no token configured there is **no authentication** (local trust by design). With `host: 0.0.0.0` the Host-header check is relaxed and the **token becomes the only boundary**, so a token is mandatory in that mode. The token is deployment-level: everyone sharing it is the same user, and task/session lists are mutually visible. |
 
+## Cache-hit rate self-check
+
+DeepSeek's context cache is a **byte-prefix match** (64-token granularity; cached tokens are billed at
+roughly 1/10 of the input price). So "low hit rate" has exactly one measurable meaning: the prefix
+changes between requests, or too much new content is added. Measure it on your own machine with
+`node scripts/measure-cache.mjs` — non-streaming, at most **6 requests**, each prompt **≤2000 tokens**
+(a few cents; it never runs in CI):
+
+```bash
+node scripts/measure-cache.mjs            # 6 real requests, prints hit/prompt and % per step
+node scripts/measure-cache.mjs --dry-run  # local stability checks + request plan only (no requests)
+```
+
+The output has three parts: (1) whether `buildSystemPrompt` and the tool set are byte-identical across
+repeated builds — `system + tools` being byte-constant within a session is the precondition for a high
+hit rate; note `schemaTier` defaults to `false`, and setting it to `true` opts into the token-saving
+"read-only tier / strip descriptions of used tools" mode, whose tool-byte changes invalidate the whole
+cached history; (2) the hit rate of an identical repeated request, plus a control that changes **only**
+`tools` (the tool schema sits at the very front of the cached prefix, so changing it alone drops the hit
+rate to zero); (3) a simulated one-turn append, whose hit rate should equal the prefix share.
+
+Keep the units in mind: on 1–2K prompts the **absolute percentage** is capped by the endpoint's cache
+granularity (a ~200-token tail never hits, which is <1% of a real 20K+ conversation). The question to ask
+is "does an identical request keep the same hit count" and "does changing exactly one segment drop the
+hit to zero", not the absolute number.
+
 ## Command index
 
 Commands are grouped here for evaluation; `mingdao --help` and `src/help.js` are the source of truth.

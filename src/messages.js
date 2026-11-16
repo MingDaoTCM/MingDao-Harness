@@ -527,7 +527,10 @@ export const looksLikeUnmetIntent = (/** @type {any} */ text) => UNMET_INTENT_RE
  * @returns {boolean}
  */
 export function startsInReadOnlyPhase(cfg, lastUserText, packActive) {
-  if (cfg?.schemaTier === false) return false;
+  // v0.9.2：分层工具 schema 改为**显式开启**（`schemaTier !== true` 时本函数恒 false）——
+  // 只读档会让 tools 字节在"提问回合/干活回合"之间整体变化，而 tools 位于缓存前缀最前面
+  // （DeepSeek wire format：`## Tools` 拼在 system 之后、所有消息之前），一变就让整段历史按未命中价重计。
+  if (cfg?.schemaTier !== true) return false;
   if (packActive) return false;
   const t = lastUserText;
   return !hasWriteIntent(t) && looksLikeQuestion(t);

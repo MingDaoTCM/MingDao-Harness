@@ -524,7 +524,10 @@ const ctx = { cwd: tmp };
     io,
     modelName: 'deepseek-v4-flash',
     workingDir: tmp,
-    cfg: { permission: 'auto' },
+    // v0.9.2：分层工具 schema（只读档收缩 / 已用工具剥描述）改为**显式开启**——它让 tools 字节
+    // 在"提问回合/干活回合"之间整体变化，而 tools 位于缓存前缀最前面（DeepSeek wire format），
+    // 一变就让整段历史按未命中价重计。本节的契约仍然成立，只是要配 schemaTier: true。
+    cfg: { permission: 'auto', schemaTier: true },
   });
   // v0.6.3：这里的用户消息必须是**真正的纯提问**——只读档的判定方向已经反转：
   // 原实现"没命中写意图关键词就只读"，于是域内名词（回访/排班/盘点…）整回合拿不到工具
@@ -559,7 +562,7 @@ const ctx = { cwd: tmp };
       io,
       modelName: 'deepseek-v4-flash',
       workingDir: tmp,
-      cfg: { permission: 'auto' },
+      cfg: { permission: 'auto', schemaTier: true }, // v0.9.2：分层 schema 改为显式开启，见 §5t
     });
     await agent.runTurn([{ role: 'user', content: prompt }]);
     return first;
@@ -7863,6 +7866,12 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
   //    原实现要命中写意图关键词才给全量工具，而域内动词/名词是**开集**，枚举不完。
   const AG110 = await import(pathToFileURL(path.join(srcDir, 'agent.js')).href);
   const ro = AG110.startsInReadOnlyPhase;
+  // v0.9.2：分层工具 schema（只读档收缩）改为**显式开启**——它会让 tools 字节在"提问回合/干活回合"
+  // 之间整体变化，而 tools 位于缓存前缀最前面，一变整段历史按未命中价重计。默认（schemaTier 未设）
+  // 恒 false = 会话内工具集恒定；下面所有判据在 schemaTier:true 下照旧成立。
+  const TIER = { schemaTier: true };
+  assert.equal(ro({}, '什么是随访规范？', false), false, '默认（schemaTier 未设）不得进只读档：工具集必须恒定');
+  assert.equal(ro({ schemaTier: false }, '什么是随访规范？', false), false, 'schemaTier=false 必须整体关掉只读档');
   const downstream = [
     ['回访', false, '下游随访高频入口：域内名词，必须给全量工具（原实现进了只读档 → 工具不可见）'],
     ['排班', false, '同类域内名词'],
@@ -7872,7 +7881,7 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
     ['做一下这批患者的随访', false, '域内任务陈述句'],
   ];
   for (const [text, expect, why] of downstream) {
-    assert.equal(ro({}, text, false), expect, `${JSON.stringify(text)} → 只读档应为 ${expect}（${why}）`);
+    assert.equal(ro(TIER, text, false), expect, `${JSON.stringify(text)} → 只读档应为 ${expect}（${why}）`);
   }
   const realQuestions = [
     ['什么是随访规范？', '纯提问应保持只读档（省 token 的初衷不变）'],
@@ -7880,12 +7889,11 @@ for (let i = 0; i < 20000; i++) { process.stdout.write('行 ' + i + ' ' + 'x'.re
     ['今天天气怎么样', '闲聊'],
   ];
   for (const [text, why] of realQuestions) {
-    assert.equal(ro({}, text, false), true, `${JSON.stringify(text)} → 应保持只读档（${why}）`);
+    assert.equal(ro(TIER, text, false), true, `${JSON.stringify(text)} → 应保持只读档（${why}）`);
   }
   // 域内 Pack 在场 → 永不进只读档（域内词开集，不能靠关键词）
-  assert.equal(ro({}, '什么是随访规范？', true), false, '域内 Pack 在场时不得进只读档（这类部署要的是"任务能做"）');
-  assert.equal(ro({}, '回访？', true), false, '域内 Pack 在场时连"域内名词+问号"也要给全量工具（正是下游最容易踩的形态）');
-  assert.equal(ro({ schemaTier: false }, '什么是随访规范？', false), false, 'schemaTier=false 必须整体关掉只读档');
+  assert.equal(ro(TIER, '什么是随访规范？', true), false, '域内 Pack 在场时不得进只读档（这类部署要的是"任务能做"）');
+  assert.equal(ro(TIER, '回访？', true), false, '域内 Pack 在场时连"域内名词+问号"也要给全量工具（正是下游最容易踩的形态）');
 
   // ② bash 输出解码：两类乱码都必须解对。
   //    根因一：逐块 toString() → 中文被管道切成两半时两半各自解出 U+FFFD；

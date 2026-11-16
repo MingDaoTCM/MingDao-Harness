@@ -60,7 +60,7 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 
 - `agent.js` —— Agent 核心循环：消息 → 模型（流式）→ 钩子 → 约束 → 权限 → 工具执行 → 回填 → 循环，直至模型给出纯文本；附带子代理（task 工具）、todo 状态、undo 备份仓、Ctrl+C 中断 —— 每回合结局由 `outcome` 单一来源收敛，返回值与账本 `runEnd` 必须同源。
 - `messages.js` —— 文案 / 预测层（v0.7.0 §1.5 第一步，从 `agent.js` **逐字**切出，零 I/O、无状态）：TTFT 提示判定与进程级节流状态、无进展看门狗阈值与中止文案、内存降级的两级压缩（`memoryRecoveryTarget`）、端点学习值预告、prefill 外推与发送前规模预告（`prefillEstimateMs` / `prefillForecast`）、上游错误解读（`describeUpstreamError`）、回合进度行（`formatTurnProgress`）、只读档判定（`startsInReadOnlyPhase`）—— 21 个导出由 `agent.js` 用显式列名再导出（`export { … } from './messages.js'`），导入面与迁移前逐字一致；`messages.js` **不 import agent.js**（依赖方向单向、无环），唯一的模块外依赖是协议层的内存压力判据 `isMemoryPressureError`。
-- `context.js` —— token 计数与预算裁剪：恒保留首条 system，从尾部向前取到预算，被裁剪时插入说明消息；工具结果上限 20000 字符（`TOOL_RESULT_LIMIT`）—— 计数优先走 `tokenizer.js` 精确计数，只在无词表模型上回退启发式；截断按码点安全切分，不留孤立代理项。
+- `context.js` —— token 计数与预算裁剪：恒保留首条 system，从尾部向前取到预算，被裁剪时插入说明消息；工具结果上限 20000 字符（`TOOL_RESULT_LIMIT`）—— 计数优先走 `tokenizer.js` 精确计数，只在无词表模型上回退启发式；截断按码点安全切分，不留孤立代理项。另含两个**请求前缀**纯函数（v0.9.2）：`sanitizeReasoningContent()`（reasoning 回填防护的裁剪规则，同一输入同一字节）与 `wireMessages()`（只保留 role/content/tool_calls/… 协议字段，本地时间戳 `ts` 不出门）——前缀稳定性由 `test/cache-stability.js` 钉住。
 - `tokenizer.js` —— 精确 tokenizer：内置 DeepSeek 官方词表（`assets/tokenizer-data.json.gz`）做字节级 BPE 计数，内容级缓存使同一文本重复计数为 O(1)；非 DeepSeek 模型回退启发式估算（英文≈4 字符/token、CJK≈0.75 token/字）—— 只用于上下文预算计数，不输出 token id；词表加载失败会重试而非终生锁死。
 - `routing.js` —— 自动模型路由：长文本 + 规划关键词 → planner，极短指令 → executor，其余用 executor 模型做一次约几十 token 的分类（结果按文本哈希 LRU 缓存）；执行类会话粘滞，避免 pro⇄flash 抖动破坏缓存前缀 —— 子代理固定走 executor。
 - `titles.js` —— 会话标题自动生成：首轮完成后用 executor 模型生成简短中文标题并重命名会话文件（`autoTitle: false` 可关）—— 生成失败只跳过，不影响回合结论。
@@ -82,7 +82,7 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 ### 2.3 工具与围栏（13）
 
 - `tools/index.js` —— 工具注册表：模型可见的工具 Schema（OpenAI function-calling 格式）与执行分发器，含第三方 `registerTool` 与 `config.tools` 挂载 —— Schema 与 dispatch 分支必须成对增加。
-- `tools-flow.js` —— 工具编排两端的判据（v0.6.11，审计 P1-1 拆分第三刀，纯函数）：`visibleToolsFor()`（只读档 × 预设白名单 × 本会话已用工具快照 × MCP 只读标注 → 本轮**发给模型哪些工具**）、`serializeToolResult()` / `toolResultMessage()`（字符串原样 / 对象紧凑 JSON × 复用前缀 × 领域约束拒绝 × 按窗口截断 → 工具结果**怎么回填**）以及 `READONLY_TIER_SET`（`agent.js` 原样再导出，导入面不变）—— 打印/审计/账本/`messages.push` 等副作用仍留在 `agent.js`，判据只此一份，结构守卫见 `test/smoke.js` §136。
+- `tools-flow.js` —— 工具编排两端的判据（v0.6.11，审计 P1-1 拆分第三刀，纯函数）：`visibleToolsFor()`（只读档 × 预设白名单 × 已用工具集合 × MCP 只读标注 → 本轮**发给模型哪些工具**）、`usedToolNamesFromMessages()`（v0.9.2：从 `assistant.tool_calls` 派生已用工具，跨回合/跨 agent 实例稳定，取代进程内 Set）、`serializeToolResult()` / `toolResultMessage()`（字符串原样 / 对象紧凑 JSON × 复用前缀 × 领域约束拒绝 × 按窗口截断 → 工具结果**怎么回填**）以及 `READONLY_TIER_SET`（`agent.js` 原样再导出，导入面不变）—— 打印/审计/账本/`messages.push` 等副作用仍留在 `agent.js`，判据只此一份，结构守卫见 `test/smoke.js` §136。分层/剥描述（`config.schemaTier`）默认关闭：工具 schema 位于缓存前缀最前面，任何字节变化都会让整段历史按未命中价重计。
 - `tools/fs-tools.js` —— 文件系统工具 read / write / edit / ls / glob / grep：统一返回 `{ok, output?|error?}` —— 工作空间围栏 `withinRoot()` 对悬空软链递归复检、深度超 16 层 fail-closed；写/编辑自动备份供 undo。
 - `tools/bash.js` —— bash 工具：子进程执行、超时强杀、输出截断；沙箱三档 `off` / `readonly`（全盘只读 + /tmp tmpfs）/ `safe`（只读文件系统 + `--unshare-net` 断网 + 工作目录可写）—— 仅 Linux + bubblewrap 可用，缺失时降级为 `off` 并在结果中注明，不静默假装沙箱。
 - `tools/fetch.js` —— HTTP 只读抓取工具：GET 任意 http(s) URL，返回文本（512KB 上限，正文截 20K）—— 只保留工具契约（参数校验、呈现口径、错误措辞），实际抓取整条走 `safeFetchText`。
@@ -291,7 +291,10 @@ MingDao 是一个「模型循环 + 工具 + 权限」内核，纯 Node.js ≥ 18
 - **Pack 子进程隔离**（P2）：`pack.mjs` 目前与宿主同进程，`permissions` 声明无强制力。
 - **`ledger --sign-key`**：账本可选签名仍未实现，封条只提升到「防误删/漏写」。
 - **出网闸门对子进程的补强**（P1-4，含 bash `curl` 与 MCP 子进程）。
-- **在线缓存命中基准**（P0-2）：需要真实 Key 与额度，目前「删 token 不会额外劣化」是推理而非实测。
+- **在线缓存命中基准**（P0-2）：`scripts/measure-cache.mjs` 已提供**手动**实测入口（真实 Key、≤6 次请求、
+  单次 prompt ≤2000 token、非流式，只读 `usage.prompt_cache_hit_tokens`），并附带零网络的
+  `test/cache-stability.js` 钉前缀稳定性；但绝对值随账号/时段/端点缓存状态波动，所以不进 CI、
+  也不承诺固定命中率数字。
 - **`agent.js` 拆分**（P1-1，`runTurn` 已达千行量级）、**结构化摘要 + 关键事实钉死**（P1-2）、
   **预算状态注入上下文**（P1-3）。
 - **sync-server 设备级吊销、push 配额与限流**（M-8）与 **memory 子系统的锁外读-改-写**（M-9）。

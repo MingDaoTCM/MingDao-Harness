@@ -53,6 +53,21 @@ jobs:
             echo "::error title=冒烟失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
           fi
           exit $code
+      - name: 缓存前缀稳定性（system/tools 字节恒定 + 压缩不改前缀，v0.9.2）
+        # 为什么单列：DeepSeek 缓存是**前缀字节匹配**，tools 位于前缀最前面——工具集/系统提示
+        # 任何一个字节在会话内变化，整段历史就按未命中价重计（约 10 倍差价）。本套件零网络，
+        # 把「同一会话内 system + tools + 历史前缀恒定」钉成可断言的测试。
+        shell: bash
+        run: |
+          set +e
+          node test/cache-stability.js > /tmp/t.out 2>&1; code=$?
+          cat /tmp/t.out
+          if [ $code -ne 0 ]; then
+            msg=$(grep -A6 -m1 -E 'AssertionError|Error:|✗' /tmp/t.out | tr '\n' ' ' | tr -s ' ' | cut -c1-700)
+            [ -n "$msg" ] || msg=$(tail -c 500 /tmp/t.out | tr '\n' ' ')
+            echo "::error title=cache-stability 失败（${{ runner.os }} / node ${{ matrix.node }})::$msg"
+          fi
+          exit $code
       - name: 评测基准回归（tokenizer/routing/compaction）
         run: npm run bench
       - name: 全量 strict 棘轮（错误数只降不升）

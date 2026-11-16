@@ -233,6 +233,32 @@ mingdao cost --by pack          # 垂域费用分账
 三级遮蔽：`<项目>/.mingdao/packs/` > `~/.mingdao/packs/` > 内置 `packs/`；坏 Pack 只告警、不阻塞启动。
 契约与示例见 [docs/PACK-API.md](docs/PACK-API.md)、内置中立示例 `packs/example-hello/`。
 
+### 缓存命中率自测（省钱的自证口径）
+
+DeepSeek 的上下文缓存是**前缀字节匹配**（64 token 粒度，命中部分按约 1/10 价计费）。所以
+「命中率低」只有一个可测的定义：每轮请求的前缀在变，或新增长度过大。本机一条命令就能量出来
+（只读本机凭据、非流式、**≤6 次请求、单次 prompt ≤2000 token**、成本几分钱；不进 CI、不联网跑测试）：
+
+```bash
+node scripts/measure-cache.mjs            # 实测 6 次请求，打印每步 hit/prompt 与百分比
+node scripts/measure-cache.mjs --dry-run  # 只做本地稳定性检查 + 打印计划（零请求、零费用）
+```
+
+它把结论拆成三段：
+
+1. **system/tools 是否稳定**：`buildSystemPrompt` 连续 3 次构建的 sha256、工具集 3 次序列化是否一致；
+   「同一会话内 system + tools 字节恒定」是命中率的前提。
+   注意：`schemaTier` 默认 `false`（工具集恒定）；设成 `true` 会启用省 schema token 的
+   「只读档收缩 + 已用工具剥描述」，但工具字节一变，整段历史就按未命中价重计。
+2. **同一请求重复的真实命中率**（基线应当把「可缓存前缀」全部命中），外加**只更换 tools** 的对照——
+   工具 schema 位于缓存前缀最前面，只换它就能让命中归零。
+3. **模拟一回合追加的命中率**：同一前缀 + assistant 回复 + 新 user → 命中率应≈前缀占比
+   （新追加的段本来就不该命中）。
+
+口径提醒：1~2K 小 prompt 的**绝对百分比**会被端点侧的缓存单元粒度压低（尾部约 200 token 不参与命中），
+真实 20K+ 会话里这部分 <1%。要判断「是不是前缀变了」，看的是**同一请求重复时命中量是否不变**、
+**只换某一项后命中是否归零**，而不是绝对百分比。
+
 ### 模型与 Key
 
 - 内置：DeepSeek（`deepseek-v4-pro` / `deepseek-flash`〔旧名 `deepseek-v4-flash` 仍兼容，官方已改名〕/ `deepseek-v4-flash-vision-exp`）、OpenAI（GPT-5 系列）、Qwen（qwen3.7-max）、GLM（GLM-5）、Kimi（kimi-latest）

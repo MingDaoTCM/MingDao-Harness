@@ -9,6 +9,8 @@ import { fileURLToPath } from 'node:url';
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SUITES = [
   ['smoke', 'node', ['test/smoke.js']],
+  // v0.9.2：DeepSeek 前缀缓存稳定性（system/tools 字节恒定 / 请求投影纯函数 / 压缩不改前缀；零网络）
+  ['cache-stability', 'node', ['test/cache-stability.js']],
   ['e2e-local', 'node', ['test/e2e-local.js']],
   ['e2e-web', 'node', ['test/e2e-web.js']],
   ['e2e-schedule', 'node', ['test/e2e-schedule.js']],

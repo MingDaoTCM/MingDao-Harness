@@ -41,8 +41,10 @@ const ALLOWED_LONG_FUNCTIONS = {
   // 若切片 B 之后仍高于原值，说明"搬出去"没做完——请把它当成未完成项，而不是再调基线。
   // v0.6.40：插话闭环带来两处接线（step 边界 drain / 收尾前再 drain）+ 服务端缓冲/路由，
   // 实测 2265→2270、1743→1748、1007→1009、695→696。基线只按**实测**同步，不预留余量。
-  'src/agent.js::createAgent': 2270,
-  'src/agent.js::runTurnInner': 1748,
+  // v0.9.2：reasoning 裁剪抽到 context.js（runTurnInner −14 行）；工具可见性/剥描述判据改为
+  // 从消息历史派生、并删掉进程内 usedToolNames（createAgent −9 行）。按实测同步，之后仍只许降不许升。
+  'src/agent.js::createAgent': 2261,
+  'src/agent.js::runTurnInner': 1734,
   // v0.8.1：应用模式分支切到 `web/app-mode-run.js` 后，两个函数实测各降 1 行（1009→1008 /
   // 696→695）；基线按实测同步，之后仍只许降不许升。
   'src/web/server.js::runWebServer': 1008,
