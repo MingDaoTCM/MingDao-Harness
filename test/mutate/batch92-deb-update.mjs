@@ -69,8 +69,8 @@ M.mutate({
 M.mutate({
   name: '⑤ installPlan 的 pkexec 改成 sh -c（提权被绕过）',
   file: DEB,
-  from: "  return { cmd: 'pkexec', args: ['dpkg', '-i', p], fallbackHint: 'sudo dpkg -i ' + p };",
-  to: "  return { cmd: 'sh', args: ['-c', 'dpkg -i ' + p], fallbackHint: 'sudo dpkg -i ' + p }; // 变异：pkexec 改 sh -c（提权被绕过）",
+  from: "  return { cmd: 'pkexec', args: ['dpkg', '-i', p], fallbackHint: 'sudo dpkg -i ' + p, manual: pkexecAvailable === false };",
+  to: "  return { cmd: 'sh', args: ['-c', 'dpkg -i ' + p], fallbackHint: 'sudo dpkg -i ' + p, manual: pkexecAvailable === false }; // 变异：pkexec 改 sh -c（提权被绕过）",
   expect: ['必须走 pkexec'],
   run: SUITE,
 });
@@ -79,7 +79,7 @@ M.mutate({
 M.mutate({
   name: '⑥ parseDebFeed 的 url 不拼 /downloads/',
   file: DEB,
-  from: '  return { version, path: pathName, url: DEB_DOWNLOAD_BASE + pathName, sha512, size };',
+  from: '  return { version, path: pathName, url: withSlash + pathName, sha512, size };',
   to: '  return { version, path: pathName, url: pathName, sha512, size }; // 变异：url 不拼 downloads/ 前缀',
   expect: ['url 必须由 downloads'],
   run: SUITE,
