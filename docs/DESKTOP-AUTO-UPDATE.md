@@ -76,6 +76,33 @@ git tag vX.Y.Z → desktop.yml 三平台构建
 
 ---
 
+## 1.5 线路选择：香港 / 深圳（v0.9.2）
+
+背景：v0.9.1 及以前，deb feed、deb 安装包、`.sig`、electron-updater 的 feed **固定**走香港
+`https://harness.mingdao.ai`——"会按位置自动选深圳还是香港"当时**并没有实现**（对华南用户就是跨海链路）。
+
+| 项 | 实现 |
+| --- | --- |
+| 候选 | 香港 `https://harness.mingdao.ai`、深圳 `https://harness.southdns.com`（两边都提供相同的 `/updates/*` 与 `/downloads/*`） |
+| 探测 | 各发一个**极小 GET** `/updates/latest.yml`（3s 墙钟超时），比 **time to first byte**；并发探测，单条失败不影响另一条 |
+| 缓存 | 结果写 `app.getPath('userData')/endpoint.json`，24h 内直接复用（结构带版本号 `v:1`，坏数据/下线线路一律作废重探） |
+| env 覆盖 | `MINGDAO_UPDATE_BASE=https://…` 强制指定：**不探测、不写缓存**（排障/自建镜像用） |
+| 回退 | 两条都探测失败 → 回退香港（不写缓存，下次启动重新探测） |
+| 镜像缺文件 | 403/404/410 或 DNS 失败 → 自动回退香港**再试一次**；超时/连接重置不回退（链路问题回退救不了） |
+| 应用面 | deb feed、deb 安装包、`.sig`、electron-updater 的 `setFeedURL({provider:'generic', url:<base>/updates/})`、「去官网下载」链接 |
+| 日志 | `stage=endpoint endpoint=sz\|hk probe=xxms source=env\|cache\|probe\|fallback base=…` |
+
+纯逻辑在 [desktop/endpoint.js](../desktop/endpoint.js)（**零 import**、探测函数注入 → `test/desktop-endpoint.js`
+零网络单测）；主进程只做真实 TTFB 探测（`httpsProbeTtfb`）与缓存读写。
+
+**诚实边界**：探测只测「第一字节到得多快」，不测大文件持续吞吐；TTFB 能区分「通/不通/明显绕路」，
+分不出两个都很快时的细微差别（那种情况选谁都行）。真实的深圳/香港速度差异只能在国内真机（含目标运营商）验收。
+
+**AppImage 的 sha512 不受影响**：electron-updater 的 sha512 校验按 **feed 内容**判定，同一批产物在
+两个源上字节一致，所以换 base 不会导致校验失败。
+
+---
+
 ## 2. 客户端实现（desktop/main.js）
 
 ### 2.1 挂载点与开关

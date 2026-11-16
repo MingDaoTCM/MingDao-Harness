@@ -51,10 +51,14 @@ export function debFeedUrl(base = UPDATE_FEED_BASE) {
  * 规则：只认**行首无缩进**的 top-level 键（缩进行 = 嵌套块，忽略，避免 `files:` 里的
  * url/sha512 覆盖顶层值）；`#` 注释、空行、`---` 文档分隔符跳过；未知键忽略；
  * 值两侧的成对引号去掉。缺少 version/path/sha512 任一、或 version 不是合法语义化版本 → null。
+ *
+ * v0.9.2：`downloadsBase` 可覆盖安装包下载目录——线路选择（香港/深圳）后同一个清单里的
+ * `path` 要拼到**选中线路**的 `/downloads/` 上，而不是写死的香港。
  * @param {string} text
+ * @param {{downloadsBase?: string}} [opts]
  * @returns {{version: string, path: string, url: string, sha512: string, size: number} | null}
  */
-export function parseDebFeed(text) {
+export function parseDebFeed(text, { downloadsBase } = {}) {
   const src = typeof text === 'string' ? text : '';
   /** @type {Record<string, string>} */
   const values = {};
@@ -83,7 +87,9 @@ export function parseDebFeed(text) {
   if (!parseVersion(version)) return null;
   const sizeNum = Number(values.size);
   const size = Number.isFinite(sizeNum) && sizeNum >= 0 ? Math.floor(sizeNum) : 0;
-  return { version, path: pathName, url: DEB_DOWNLOAD_BASE + pathName, sha512, size };
+  const base = typeof downloadsBase === 'string' && downloadsBase.trim() ? downloadsBase.trim() : DEB_DOWNLOAD_BASE;
+  const withSlash = base.endsWith('/') ? base : base + '/';
+  return { version, path: pathName, url: withSlash + pathName, sha512, size };
 }
 
 /**
@@ -179,13 +185,36 @@ export function verifySha512Base64(bytes, expectedBase64) {
  *     在刚校验完字节之后引入新的下载源，等于把"可信安装"变成"再信一次网络"。
  *   · Debian/Ubuntu/deepin 都自带 dpkg；pkexec 由 polkit 提供（未装 polkit 时退出码 127，
  *     调用方回落到 `sudo dpkg -i` 的可复制命令）。
- * @param {{filePath?: string}} input
- * @returns {{cmd: 'pkexec', args: string[], fallbackHint: string}}
+ *
+ * v0.9.2（用户实测：精简发行版没有 pkexec 时"卡在 spawn 错误里"）：`pkexecAvailable` 允许
+ * 调用方**先探测**（`which pkexec`）再决定——没有 pkexec 时返回 `manual: true`，main.js
+ * 直接弹"手动安装"对话框（路径 + `sudo dpkg -i` + 官网链接），不再 spawn 一个必然 ENOENT 的命令。
+ * @param {{filePath?: string, pkexecAvailable?: boolean}} input
+ * @returns {{cmd: 'pkexec', args: string[], fallbackHint: string, manual: boolean}}
  */
-export function installPlan({ filePath } = {}) {
+export function installPlan({ filePath, pkexecAvailable = true } = {}) {
   const p = typeof filePath === 'string' ? filePath.trim() : '';
   if (!p) throw new TypeError('installPlan 需要 filePath（已下载并通过校验的 .deb 路径）');
-  return { cmd: 'pkexec', args: ['dpkg', '-i', p], fallbackHint: 'sudo dpkg -i ' + p };
+  return { cmd: 'pkexec', args: ['dpkg', '-i', p], fallbackHint: 'sudo dpkg -i ' + p, manual: pkexecAvailable === false };
+}
+
+/**
+ * `.sig` 旁车文件的候选 URL（按顺序尝试）：feed 目录优先，安装包同目录兜底。
+ * 线路选择后 base 跟着变（深圳镜像缺文件时由 main.js 再回退香港重试）。
+ * @param {{sigName?: string, feedUrl?: string, updatesBase?: string}} input
+ * @returns {string[]}
+ */
+export function sigUrlCandidates({ sigName = '', feedUrl = '', updatesBase = UPDATE_FEED_BASE } = {}) {
+  const name = String(sigName ?? '').trim();
+  /** @type {string[]} */
+  const out = [];
+  if (name) {
+    const base = typeof updatesBase === 'string' && updatesBase.trim() ? updatesBase.trim() : UPDATE_FEED_BASE;
+    out.push((base.endsWith('/') ? base : base + '/') + encodeURIComponent(name) + '.sig');
+  }
+  const url = String(feedUrl ?? '').trim();
+  if (url) out.push(url + '.sig');
+  return [...new Set(out)];
 }
 
 /**

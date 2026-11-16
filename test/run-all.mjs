@@ -71,6 +71,8 @@ const SUITES = [
   ['update-signing', 'node', ['test/update-signing.js']],
   // v0.8.3：deb 安装形态（无 $APPIMAGE）的自动更新——feed 解析 / 版本比较 / sha512+来源签名双校验 / 安装计划（纯函数）
   ['deb-update', 'node', ['test/deb-update.js']],
+  // v0.9.2：更新线路选择（香港/深圳）——候选/探测排序/24h 缓存/env 覆盖/镜像 404 回退香港 + main.js 接线（纯函数，零网络）
+  ['desktop-endpoint', 'node', ['test/desktop-endpoint.js']],
   // v0.6.39：安装包目录裁剪（保留最近 N 版），纯逻辑
   ['prune-downloads', 'node', ['test/prune-downloads.js']],
   // v0.6.39：OSS 自定义域名证书绑定的 XML 语义（两个静默失败点）

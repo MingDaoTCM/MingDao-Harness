@@ -60,6 +60,19 @@ const FEED_OK = [
   ok('② parseDebFeed：正常清单（version/path/url/sha512/size 全字段）');
 }
 
+// ---------- ②b 线路选择后的下载目录（v0.9.2） ----------
+{
+  const hk = D.parseDebFeed(FEED_OK, { downloadsBase: 'https://harness.mingdao.ai/downloads/' });
+  const sz = D.parseDebFeed(FEED_OK, { downloadsBase: 'https://harness.southdns.com/downloads/' });
+  const szNoSlash = D.parseDebFeed(FEED_OK, { downloadsBase: 'https://harness.southdns.com/downloads' });
+  assert.equal(sz?.url, 'https://harness.southdns.com/downloads/mingdao-0.8.2-amd64.deb', '选中深圳时安装包 url 必须拼到深圳 /downloads/');
+  assert.equal(szNoSlash?.url, sz?.url, 'downloadsBase 缺尾斜杠/带尾斜杠必须拼出同一个 url（不能双斜杠）');
+  assert.equal(hk?.url, 'https://harness.mingdao.ai/downloads/mingdao-0.8.2-amd64.deb');
+  assert.equal(D.parseDebFeed(FEED_OK, { downloadsBase: '' })?.url, 'https://harness.mingdao.ai/downloads/mingdao-0.8.2-amd64.deb', '空 downloadsBase 必须回落香港');
+  assert.equal(D.parseDebFeed(FEED_OK)?.url, hk?.url, '不传 downloadsBase 时行为与历史一致（默认香港）');
+  ok('②b parseDebFeed：downloadsBase 可切到深圳（尾斜杠归一、空值回落香港、不传保持默认）');
+}
+
 // ---------- ③ feed 解析：缺字段 ----------
 {
   assert.equal(D.parseDebFeed('version: 0.8.2\npath: a.deb\n'), null, '缺 sha512 必须整份拒绝（不能拿"无校验"的包去装）');
@@ -169,9 +182,54 @@ const FEED_OK = [
   assert.deepEqual(plan.args, ['dpkg', '-i', '/tmp/mingdao-update-0.8.3.deb'], '必须 dpkg -i 本地文件，不得用 apt（会拉网络）');
   assert.equal(plan.fallbackHint, 'sudo dpkg -i /tmp/mingdao-update-0.8.3.deb', '回落提示必须带真实路径，用户可直接复制执行');
   assert.equal(plan.args.includes('apt'), false, '安装计划不得出现 apt');
+  assert.equal(plan.manual, false, '默认（有 pkexec）必须是自动安装，不能误判成手动');
   assert.throws(() => D.installPlan({}), /filePath/, '缺路径必须抛错（不能生成一条装空路径的命令）');
   assert.throws(() => D.installPlan({ filePath: '   ' }), /filePath/, '空白路径必须抛错');
-  ok('⑪ installPlan：pkexec dpkg -i 形状 / fallbackHint 带路径 / 拒绝空路径');
+  ok('⑪ installPlan：pkexec dpkg -i 形状 / fallbackHint 带路径 / 拒绝空路径 / 默认非手动');
+}
+
+// ---------- ⑪b 没有 pkexec 的精简发行版（v0.9.2） ----------
+{
+  const manual = D.installPlan({ filePath: '/tmp/mingdao-update-0.9.2.deb', pkexecAvailable: false });
+  assert.equal(manual.manual, true, '探测不到 pkexec 时必须标记手动安装（main.js 据此弹"手动安装"对话框，不 spawn 必然 ENOENT 的命令）');
+  assert.equal(manual.cmd, 'pkexec', '计划形状保持不变（诊断信息仍要能说明本该用什么命令）');
+  assert.equal(manual.fallbackHint, 'sudo dpkg -i /tmp/mingdao-update-0.9.2.deb', '手动安装必须给出可直接复制的 sudo dpkg -i');
+  assert.equal(D.installPlan({ filePath: '/tmp/x.deb', pkexecAvailable: true }).manual, false, '探测到 pkexec → 自动安装');
+  ok('⑪b installPlan：pkexecAvailable=false → manual=true + 可复制的 sudo dpkg -i；true → 自动');
+}
+
+// ---------- ⑪c `.sig` 候选 URL（v0.9.2：跟随选中线路） ----------
+{
+  const candidates = D.sigUrlCandidates({
+    sigName: 'mingdao-0.9.2-amd64.deb',
+    feedUrl: 'https://harness.southdns.com/downloads/mingdao-0.9.2-amd64.deb',
+    updatesBase: 'https://harness.southdns.com/updates/',
+  });
+  assert.deepEqual(
+    candidates,
+    [
+      'https://harness.southdns.com/updates/mingdao-0.9.2-amd64.deb.sig',
+      'https://harness.southdns.com/downloads/mingdao-0.9.2-amd64.deb.sig',
+    ],
+    '签名候选必须是「feed 目录优先 + 安装包同目录兜底」，且都跟随选中线路'
+  );
+  assert.deepEqual(
+    D.sigUrlCandidates({ sigName: 'a.deb', feedUrl: 'https://x/downloads/a.deb', updatesBase: 'https://x/updates' }),
+    ['https://x/updates/a.deb.sig', 'https://x/downloads/a.deb.sig'],
+    'updatesBase 缺尾斜杠必须补齐'
+  );
+  assert.deepEqual(
+    D.sigUrlCandidates({ sigName: 'a.deb' }),
+    ['https://harness.mingdao.ai/updates/a.deb.sig'],
+    '不传 updatesBase 时回落默认官网 feed（历史行为）'
+  );
+  assert.deepEqual(
+    D.sigUrlCandidates({ sigName: 'a.deb', feedUrl: 'https://x/downloads/a.deb', updatesBase: 'https://x/downloads/' }),
+    ['https://x/downloads/a.deb.sig'],
+    '同一 URL 的候选必须去重（不能重复请求同一个 404）'
+  );
+  assert.deepEqual(D.sigUrlCandidates({}), [], '空输入 → 无候选（调用方按"没有签名"处理）');
+  ok('⑪c sigUrlCandidates：feed 目录优先 + 同目录兜底、补尾斜杠、空输入空数组');
 }
 
 // ---------- ⑫ 源码接线绊线：deb 分支必须真的接上（不是只有纯函数） ----------
@@ -202,15 +260,33 @@ const FEED_OK = [
 
 // ---------- ⑭ 源码绊线：deb 分支的用户可见流程与回落文案 ----------
 {
-  for (const text of ['下载并安装', '稍后', '已校验通过', '立即安装', '立即重启', 'https://harness.mingdao.ai/#downloads']) {
+  for (const text of ['下载并安装', '稍后', '已校验通过', '立即安装', '立即重启']) {
     assert.ok(mainSrc.includes(text), `deb 分支缺少用户可见文案「${text}」`);
   }
+  // v0.9.2：官网/下载链接不再写死（线路选择后要跟着变）——单源是 endpoint.js 的 downloadPageUrl()，
+  // 其默认值就是官方 http://harness.mingdao.ai/#downloads（套件 ②/③ 已钉住 URL 拼接）。
+  assert.ok(mainSrc.includes('updateDownloadPage()'), 'deb 分支的「去官网下载」必须走 downloadPageUrl（跟随选中线路），不得再写死 URL');
+  assert.ok(debSrc.includes('https://harness.mingdao.ai/updates/'), 'deb-update.js 必须保留官方 feed 默认值（回退香港与历史行为）');
   assert.ok(mainSrc.includes('plan.fallbackHint'), '安装失败弹窗必须展示可复制的回落命令（fallbackHint）');
   assert.ok(debSrc.includes("fallbackHint: 'sudo dpkg -i '"), 'fallbackHint 必须是可复制执行的 sudo dpkg -i 命令');
   assert.doesNotMatch(mainSrc, /deb 安装不支持自动更新/, 'v0.8.3 起 main.js 不得再宣称"deb 安装不支持自动更新"');
   assert.ok(mainSrc.includes('app.relaunch()'), '安装成功后必须能立即重启（app.relaunch + app.exit）');
   assert.match(mainSrc, /退出码/, '安装退出码必须落日志（便于售后定位 126/127）');
-  ok('⑭ 源码绊线：确认 → 校验通过 → 立即安装 → 立即重启；失败回落 sudo 命令 + 官网');
+  ok('⑭ 源码绊线：确认 → 校验通过 → 立即安装 → 立即重启；失败回落 sudo 命令 + 下载页（跟随线路）');
+}
+
+// ---------- ⑭b 源码绊线：deb 流程的可观测性与卡死修复（v0.9.2） ----------
+{
+  assert.match(mainSrc, /DEB_IDLE_TIMEOUT_MS/, 'deb 下载必须传空闲超时（跨海链路卡住不能干等 5 分钟）');
+  assert.match(mainSrc, /idleTimeoutMs: DEB_IDLE_TIMEOUT_MS/, '空闲超时参数必须真的接到下载调用上');
+  assert.match(mainSrc, /getUpdateResource\('\/updates\/' \+ DEB_FEED_FILE/, 'deb 清单必须走带镜像回退的取资源函数');
+  assert.match(mainSrc, /showUpdateFailure\(/, '失败必须走统一失败弹窗（带「打开日志」）');
+  assert.match(mainSrc, /打开日志/, 'deb 失败弹窗必须有「打开日志」按钮');
+  for (const st of ['stage=feed', 'stage=confirm', 'stage=download', 'stage=save', 'stage=verify', 'stage=sig', 'stage=install']) {
+    assert.ok(mainSrc.includes(st), `deb 流程缺少可定位日志 ${st}`);
+  }
+  assert.match(mainSrc, /which pkexec/, '安装前必须探测 which pkexec（精简发行版没有 polkit）');
+  ok('⑭b 源码绊线：空闲超时 / 镜像回退取资源 / 统一失败弹窗+打开日志 / 七段 stage 日志 / pkexec 探测');
 }
 
 // ---------- ⑮ 源码绊线：AppImage 路径一行未动 ----------

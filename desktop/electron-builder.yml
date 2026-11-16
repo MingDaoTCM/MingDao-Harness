@@ -30,6 +30,9 @@ files:
   - preload.cjs
   - update-verify.js
   - deb-update.js
+  # v0.9.2：更新线路选择（香港/深圳）纯函数层，main.js 顶部**静态** import——漏打包同样会
+  # ERR_MODULE_NOT_FOUND 起不来（v0.9.0 deb-update.js 同一齿根）。
+  - endpoint.js
   - package.json
   - build/icon.png
   - build/tray.png
