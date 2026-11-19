@@ -1,6 +1,6 @@
 import { $, esc, highlight, renderMarkdown, scrollBottom, expandableBody, resultText, truncText, textBody, fmtDur, fmtTok, fmtT } from './util.js';
 import { MAX_ATTACHMENTS, MAX_IMAGE_BYTES, MAX_TEXT_BYTES } from './constants.js';
-import { sideNavBreakpoint, sideNavLayout, errCardParts, runStripView, permissionSourceLabel, toolStepView, toolTimelineSummary, toolTimelineVisibility, traceRoundView } from './viewmodel.js';
+import { sideNavBreakpoint, sideNavLayout, errCardParts, runStripView, permissionSourceLabel, toolStepView, toolTimelineSummary, toolTimelineVisibility, traceRoundView, cacheHitView, CACHE_HIT_TITLE } from './viewmodel.js';
 import { enqueueMessage, dequeueMessage, shouldDrainQueue, queueView, QUEUE_MAX, enqueueSteer, steerView, STEER_MAX, pickExamples } from './viewmodel.js';
 // v0.6.41（§1.1 B1）：SSE 序号跳号 → 整窗重取（resync），不逐帧续接
 import { seqContinuity, resyncPlan, seqBanner } from './viewmodel.js';
@@ -2671,14 +2671,18 @@ $('#costBadge').onclick=()=>{
 };
 $('#dashClose').onclick=()=>{ setRunPanel(false); };
 // 底部状态栏：轮次/步数/LLM 与工具时长/首 token 平均/吞吐/缓存命中/输入输出 tokens
+// v0.10.0（缓存口径诚实化）：只显示百分比会让人拿小会话的 85% 去比别人的 99.5%——
+// 端点有一段固定的未缓存尾段（约 130~170 token），1~2K 的小 prompt 上它占百分之十几。
+// 所以这里补**绝对量**（命中/总 prompt），并把「什么会拉低它」写进该段的 tooltip。
+// 口径仍是 summary.rate = hit/(hit+miss)，不重算、也不伪造拿不到的"前缀复用率"。
 async function refreshStatusBar(){
   const r=await fetch('/api/cache-stats',{cache:'no-store'}).catch(()=>null); if(!r) return;
   const j=await r.json().catch(()=>null); if(!j) return;
   const s=j.summary||{};
   const ft = s.firstTokenAvgMs!=null ? (s.firstTokenAvgMs/1000).toFixed(0)+'s' : '—';
   const tps = s.tokensPerSec!=null ? Math.round(s.tokensPerSec)+' tok/s' : '—';
-  const rate = s.rate!=null ? (s.rate*100).toFixed(1)+'%' : '—';
-  $('#statusBar').textContent = s.turns+' 轮 · '+s.steps+' 步 | LLM '+fmtDur(s.llmMs)+' · 工具调用 '+fmtDur(s.toolMs)+' | 首 token 平均 '+ft+' · '+tps+' | 缓存命中 '+rate+' | 输入 '+fmtTok(s.prompt)+' tok · 输出 '+fmtTok(s.completion)+' tok';
+  const cache = cacheHitView(s);
+  $('#statusBar').innerHTML = s.turns+' 轮 · '+s.steps+' 步 | LLM '+fmtDur(s.llmMs)+' · 工具调用 '+fmtDur(s.toolMs)+' | 首 token 平均 '+ft+' · '+tps+' | <span id="cacheSeg" title="'+esc(CACHE_HIT_TITLE)+'">缓存命中 '+esc(cache.text)+'</span> | 输入 '+fmtTok(s.prompt)+' tok · 输出 '+fmtTok(s.completion)+' tok';
 }
 refreshStatusBar(); setInterval(refreshStatusBar, 15000);
 // §3.82：顶栏「任务」= 打开右栏「任务」标签（右栏收起时也会展开；关闭用 ✕/收起）。
@@ -3039,6 +3043,9 @@ function renderDashboard(j){
   $('#kpiRate').textContent=(rate*100).toFixed(1)+'%';
   $('#kpiSaved').textContent='¥'+saved.toFixed(4);
   $('#kpiTurns').textContent=(s.turns||0)+' / '+(s.steps||0);
+  // v0.10.0：缓存一栏的同一句口径说明（与状态栏 #cacheSeg 的 tooltip 同源，文案在 viewmodel.js）。
+  // 用户看到 85~90% 会以为"省钱是假的"——这行小字把「命中/总 prompt」与固定尾段说清楚。
+  const cacheNote=$('#dashCacheNote'); if(cacheNote) cacheNote.textContent=CACHE_HIT_TITLE;
   renderRateGauge(rate);
   $('#trendChart').innerHTML=trendChart((bd.byDay||[]).slice(-14));
   $('#dashModels').innerHTML=barList((bd.byModel||[]).slice(0,5).map((/** @type {any} */ m)=>({name:m.model, val:m.cost, sub:m.turns+' 轮'})), true);

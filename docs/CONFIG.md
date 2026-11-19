@@ -427,6 +427,18 @@ completion 计费，防止推理吃满上限时空轮白烧）、`compactTrigger
 - `action: "warn"`（默认）超限仅提醒；`"block"` 到达上限暂停执行（明天自动恢复）；`"downgrade"` 触顶后自动切换到同服务商更便宜模型（如 flash）继续执行并提示（已是 flash 则按 block 处理）；
 - `/cost` 与 WebUI 头部费用徽标实时显示「今日费用 / 上限百分比」。
 
+## 缓存命中率与自测（v0.10.0）
+
+WebUI 底部状态栏的「缓存命中」口径是 `hit/(hit+miss)`（分母为**总 prompt**），并给出绝对量，
+如 `缓存命中 93.8%（120.0K/127.9K tok）`；悬停看说明：新会话首个请求、压缩后首轮、以及端点侧
+**固定的未缓存尾段**（实测约 130~170 token）都会拉低它——小 prompt 上它占百分之十几，
+16K 上下文实测 99.2%，**不是实现缺陷**。省钱仪表盘缓存栏给出同一句说明。
+
+自测（开发用，走真机需 Key，约几分钱）：
+`node scripts/measure-cache.mjs` 打印四段命中率与结论；
+`node scripts/measure-cache.mjs --pad 20000` 把 MDH 真实 system+tools 前置一段确定性合成历史、
+撑到约 16K token，验证尾段被稀释到 <1%（实测 prompt 16129 / hit 15995 = 99.2%）。
+
 ## 战略省钱：Batch 半价 + 避峰调度
 
 - **Batch API（50% off）**：`mingdao batch <问题文件|->` 每行一个问题，单轮批量任务走

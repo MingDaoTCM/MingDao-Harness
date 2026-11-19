@@ -38,6 +38,12 @@ const argOf = (f, d) => {
 
 const DRY = hasFlag('--dry-run');
 const FULL = hasFlag('--full');
+/**
+ * `--pad <token>`：在 MDH 真实 system 之后**前置**一段确定性的合成历史，把 prompt 撑到约 N token，
+ * 用来验证「端点固定未缓存尾段」在大 prompt 下被稀释到 <1%（小 prompt 上它占百分之十几，
+ * 容易让人误以为实现有问题）。带 --pad 时跳过 ④（保持请求数 ≤6）。
+ */
+const PAD = Math.max(0, Number(argOf('--pad', '0')) || 0);
 const MAX_REQUESTS = 6;
 const MAX_PROMPT_TOKENS = 2000;
 const DELAY_MS = Math.max(0, Number(argOf('--delay-ms', '5000')) || 0);
@@ -117,7 +123,7 @@ const rows = [];
 
 async function callApi(/** @type {string} */ label, /** @type {any[]} */ messages, /** @type {any[]|null|undefined} */ tools) {
   const est = estimatePrompt(messages, tools);
-  if (est > MAX_PROMPT_TOKENS && !FULL) {
+  if (est > MAX_PROMPT_TOKENS && !FULL && !PAD) {
     throw new Error(`${label}：估算 prompt ${est} token > ${MAX_PROMPT_TOKENS}（加 --full 显式放开）`);
   }
   if (rows.length >= MAX_REQUESTS) throw new Error(`请求数上限 ${MAX_REQUESTS}：${label}`);
@@ -270,18 +276,38 @@ const r3 = await callApi('② 只换 tools（消息不变）', baseMessages, too
 
 // ③ MDH 真实 system + 真实工具子集（2 次请求，逐字节相同）
 const mdhMessages = [{ role: 'system', content: sysPrompt }, { role: 'user', content: 'U:只回复 ok，不要调用任何工具。' }];
+/** 合成一段确定性的历史（内容固定 → 前缀字节稳定），把 prompt 撑到 ~PAD token。 */
+function paddedHistory(/** @type {number} */ targetTokens) {
+  if (!targetTokens) return [];
+  const filler = '背景资料（用于把上下文撑到目标长度，内容固定以保证前缀字节稳定）。'.repeat(4);
+  /** @type {any[]} */
+  const out = [];
+  let n = estimatePrompt(mdhMessages, toolsA);
+  while (n < targetTokens) {
+    out.push({ role: 'user', content: `第 ${out.length + 1} 段资料：${filler}` });
+    out.push({ role: 'assistant', content: '已记录。' });
+    n += counter(filler) + 40;
+  }
+  return out;
+}
+const pad = paddedHistory(PAD);
+if (pad.length) mdhMessages.splice(1, 0, ...pad);
 await wait(DELAY_MS);
-const r4 = await callApi('③-1 MDH system+tools', mdhMessages, toolsA);
+const r4 = await callApi(PAD ? `③-1 MDH system+tools（+${PAD} token 合成历史）` : '③-1 MDH system+tools', mdhMessages, toolsA);
 await wait(DELAY_MS);
 const r5 = await callApi('③-2 同一请求（应≈100%）', mdhMessages, toolsA);
 
-// ④ 模拟一回合追加（1 次请求）
-await wait(DELAY_MS);
-const r6 = await callApi('④ 前缀 + assistant + 新 user', [
-  ...mdhMessages,
-  { role: 'assistant', content: 'ok' },
-  { role: 'user', content: '继续：再回复一次 ok。' },
-], toolsA);
+// ④ 模拟一回合追加（1 次请求；--pad 时跳过，保持请求数上限）
+/** @type {any} */
+let r6 = null;
+if (!PAD) {
+  await wait(DELAY_MS);
+  r6 = await callApi('④ 前缀 + assistant + 新 user', [
+    ...mdhMessages,
+    { role: 'assistant', content: 'ok' },
+    { role: 'user', content: '继续：再回复一次 ok。' },
+  ], toolsA);
+}
 
 // ---------- 5. 三段结论 ----------
 console.log('\n== 结论 ==');

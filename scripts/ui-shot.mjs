@@ -692,6 +692,22 @@ function seedHome(home, seedSession) {
     contextBudget: 128000,
   };
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+  // v0.10.0：再放一份**确定性的** cache-stats.jsonl。
+  // 理由：全空 home 的缓存命中率是「—」，截图里根本看不出状态栏/仪表盘的口径长什么样；
+  // 而口径本身（命中/总 prompt、绝对量、端点固定未缓存尾段）正是这次要验收的东西。
+  // 数据只写临时 home，不碰 ~/.mingdao；数值固定，保证同一棵树的两次截图可逐像素对比。
+  // 总命中率刻意做成 93.8%（命中 120000 / 总 prompt 127938），与真机小会话实测同量级。
+  const now = Date.now();
+  const stats = [
+    { prompt: 2728, completion: 312, hit: 2559, miss: 169, cost: 0.0042, saved: 0.0061, steps: 3, llmMs: 5400, toolMs: 800, firstTokenMs: 700 },
+    { prompt: 16129, completion: 488, hit: 15995, miss: 134, cost: 0.0108, saved: 0.0216, steps: 5, llmMs: 9200, toolMs: 1200, firstTokenMs: 640 },
+    { prompt: 109081, completion: 2604, hit: 101446, miss: 7635, cost: 0.0521, saved: 0.1082, steps: 9, llmMs: 21000, toolMs: 3400, firstTokenMs: 820 },
+  ];
+  fs.writeFileSync(
+    path.join(home, 'cache-stats.jsonl'),
+    stats.map((s, i) => JSON.stringify({ at: now - (stats.length - i) * 60000, model: cfg.model, ...s })).join('\n') + '\n',
+    { mode: 0o600 }
+  );
   if (!seedSession) return null;
   const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
   const file = path.join(home, 'sessions', `${stamp}-ui-shot.jsonl`);

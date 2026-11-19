@@ -167,6 +167,43 @@ export function runStripView(st, isGenerating) {
 }
 
 /**
+ * 缓存命中口径的**唯一**说明文案：底部状态栏该段的 tooltip 与省钱仪表盘那行小字共用它。
+ *
+ * 为什么要写这么长一句：命中率 = hit/(hit+miss)，分母是**总 prompt**——
+ * 端点侧有一段固定的未缓存尾段（缓存单元粒度，实测约 130~170 token），
+ * 新会话首个请求、压缩后首轮同样必然整体 miss。于是 1~2K 的小 prompt 上它占百分之十几，
+ * 用户拿 85% 去比别人的 99.5% 会误判成"省钱是假的"。
+ * 数字全部来自真机实测（`node scripts/measure-cache.mjs`，deepseek-flash，非流式）：
+ *   687 token → 74.5% · 1513 token → 84.6% · 2728 token（MDH 真实 system+tools）→ 93.8%
+ *   · 16129 token → 99.2%（未命中仅 134 token）。
+ *
+ * @type {string}
+ */
+export const CACHE_HIT_TITLE =
+  '命中/总 prompt。新会话首个请求、压缩后首轮、以及端点固定未缓存尾段（约 130~170 token）都会拉低它；16K 上下文实测 99.2%。';
+
+/**
+ * 底部状态栏「缓存命中」段：百分比 + 绝对量（命中/prompt tokens）。
+ *
+ * 口径与 `summary.rate` **完全一致**（hit/(hit+miss)）——这里只做格式化，不重算、
+ * 不引入拿不到的"前缀复用率"；rate 缺失（端点没回缓存字段）时只显示 —，
+ * 绝不显示 0% 冒充"完全没命中"。
+ *
+ * @param {{rate?: unknown, hit?: unknown, prompt?: unknown}} [sum] `/api/cache-stats` 的 summary
+ * @returns {{text: string, rate: string, pair: string}} text 供状态栏整段使用（如 `93.8%（120.0K/127.9K tok）`）
+ */
+export function cacheHitView(sum) {
+  const s = sum || {};
+  const rate = s.rate == null || s.rate === '' ? NaN : Number(s.rate);
+  if (!Number.isFinite(rate)) return { text: '—', rate: '', pair: '' };
+  const hit = Math.max(0, Math.round(Number(s.hit) || 0));
+  const prompt = Math.max(0, Math.round(Number(s.prompt) || 0));
+  const pct = (rate * 100).toFixed(1) + '%';
+  const pair = prompt > 0 ? fmtTok(hit) + '/' + fmtTok(prompt) + ' tok' : '';
+  return { text: pair ? pct + '（' + pair + '）' : pct, rate: pct, pair };
+}
+
+/**
  * 把一条 progress 事件并进运行状态（桩 SSE 与真实 SSE 走同一条路径）。
  * 只改传入的 st（调用方持有的状态对象），不读 DOM/全局。
  *

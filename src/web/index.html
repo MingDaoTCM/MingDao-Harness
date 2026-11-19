@@ -992,6 +992,9 @@ body.side-collapsed #sideNavSessions .sn-item.on,body.side-mid #sideNavSessions 
             <div class="kpi"><span class="kpi-l">已节省</span><span class="kpi-v" style="color:var(--accent)" id="kpiSaved">—</span></div>
             <div class="kpi"><span class="kpi-l">轮次/步数</span><span class="kpi-v" id="kpiTurns">—</span></div>
           </div>
+          <!-- v0.10.0：缓存命中口径说明（文案由 renderDashboard 从 viewmodel.CACHE_HIT_TITLE 写入，
+               与底部状态栏 #cacheSeg 的 tooltip 同源；只增不删，不改 hit/(hit+miss) 口径）。 -->
+          <div id="dashCacheNote" style="color:var(--faint);font-size:11px;line-height:1.55;margin:-2px 0 10px;text-align:left"></div>
           <div class="dash-gauge-wrap">
             <svg id="rateGauge" viewBox="0 0 120 120" width="120" height="120"></svg>
             <div class="gauge-label"><b id="rateGaugeNum">—</b><span>命中率</span></div>

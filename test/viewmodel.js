@@ -23,6 +23,8 @@ import {
   fmtRunCost,
   fmtRunCtx,
   runStripView,
+  cacheHitView,
+  CACHE_HIT_TITLE,
   enqueueMessage,
   dequeueMessage,
   shouldDrainQueue,
@@ -372,6 +374,40 @@ function REF_traceRoundView(round) {
   eq([normalizeRunPhase('解码中', true, false), normalizeRunPhase('x', true, true)], ['解码中', '已中止'], 'normalizeRunPhase 直测');
   eq([permissionSourceLabel('explicit'), permissionSourceLabel('preset'), permissionSourceLabel('config'), permissionSourceLabel('cli'), permissionSourceLabel('default'), permissionSourceLabel('zzz')],
     ['显式选择', '预设', 'config 默认', '命令行', '内置默认', '未知'], '权限来源标签');
+}
+
+// ===========================================================================
+// ③b cacheHitView —— 底部状态栏「缓存命中」段（v0.10.0：百分比 + 绝对量 + 口径说明）
+//
+// 口径约束（用户报障的诚实化）：rate 只来自 summary.rate（hit/(hit+miss)），
+// 这里**不重算**、不引入"前缀复用率"；数字用与 util.fmtTok 逐字节一致的缩写。
+// 实测数字（scripts/measure-cache.mjs）：2728 token → 93.8%，16129 token → 99.2%。
+// ===========================================================================
+{
+  // 真机实测：MDH 真实 system+tools，2728 token，命中 2559 / miss 169
+  eq(cacheHitView({ rate: 2559 / 2728, hit: 2559, miss: 169, prompt: 2728 }),
+    { text: '93.8%（2.6K/2.7K tok）', rate: '93.8%', pair: '2.6K/2.7K tok' }, '2728 token 实测 → 93.8% + 绝对量');
+  // 真机实测：--pad 20000 撑到 16129 token，命中 15995 / miss 134
+  eq(cacheHitView({ rate: 15995 / 16129, hit: 15995, miss: 134, prompt: 16129 }),
+    { text: '99.2%（16.0K/16.1K tok）', rate: '99.2%', pair: '16.0K/16.1K tok' }, '16129 token 实测 → 99.2%（尾段占比 <1%）');
+  // 截图种子里的汇总：命中 120000 / prompt 127938 → 93.8%
+  eq(cacheHitView({ rate: 120000 / 127938, hit: 120000, prompt: 127938 }).text, '93.8%（120.0K/127.9K tok）', '大数走 fmtTok 的 K 缩写');
+  // 端点没回缓存字段：rate=null 必须显示 —，不能显示 0%（"没数据"≠"全未命中"）
+  eq(cacheHitView({ rate: null, hit: 0, miss: 0, prompt: 5000 }), { text: '—', rate: '', pair: '' }, 'rate 缺失 → —（不冒充 0%）');
+  eq([cacheHitView(), cacheHitView({}), cacheHitView(null)], [{ text: '—', rate: '', pair: '' }, { text: '—', rate: '', pair: '' }, { text: '—', rate: '', pair: '' }], '缺参/空参 → — 不抛错');
+  eq(cacheHitView({ rate: 'abc', hit: 1, prompt: 2 }).text, '—', '非法 rate → —');
+  eq(cacheHitView({ rate: '' }).text, '—', '空串 rate → —');
+  // 真 0 命中（有 miss 但 hit=0）：如实显示 0.0%
+  eq(cacheHitView({ rate: 0, hit: 0, prompt: 1000 }).text, '0.0%（0/1.0K tok）', '0 命中如实显示 0.0%');
+  // 字符串型数字（JSON 里偶尔是字符串）与负值/小数归一
+  eq(cacheHitView({ rate: '0.5', hit: '512', prompt: '1024' }).text, '50.0%（512/1.0K tok）', '字符串数字可解析');
+  eq(cacheHitView({ rate: 0.5, hit: -3, prompt: -1 }).text, '50.0%', '负/非法绝对值不显示负数 token');
+  eq(cacheHitView({ rate: 0.5, hit: 10, prompt: 0 }).text, '50.0%', 'prompt=0 时省略绝对量（分母不可用）');
+  eq(cacheHitView({ rate: 1, hit: 1000, prompt: 1000 }).text, '100.0%（1.0K/1.0K tok）', '满命中不四舍五入成 99.9%');
+  eq(Object.keys(cacheHitView({ rate: 0.5 })).sort(), ['pair', 'rate', 'text'], '字段名不得变（app.js 渲染层消费 text/pair）');
+  // tooltip 文案是唯一来源：状态栏 title 与仪表盘小字都用它，措辞不得漂移
+  eq(CACHE_HIT_TITLE, '命中/总 prompt。新会话首个请求、压缩后首轮、以及端点固定未缓存尾段（约 130~170 token）都会拉低它；16K 上下文实测 99.2%。', 'tooltip 原文逐字固定');
+  ok(CACHE_HIT_TITLE.includes('130~170 token') && CACHE_HIT_TITLE.includes('99.2%'), 'tooltip 必须点明固定尾段量级与 16K 实测值');
 }
 
 // ===========================================================================
