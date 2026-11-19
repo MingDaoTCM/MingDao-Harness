@@ -11,6 +11,31 @@
 > tarball 与 tag 树的 sha256，已写入 RELEASE-CHECKLIST），并在下一个版本重新发布修正后的包。
 > 桌面版 / GitHub Release / feed / 镜像的 0.9.0 **没有**此问题。**已在 v0.9.1 修正 npm 包。**
 
+## v0.10.0（2026-11-19）— 用户三项报障修复：deb 更新可用、线路自动选择、缓存命中
+
+> **minor（用户可见能力变化）**：Linux deb 安装形态的更新链路真正可用、桌面更新/下载按地区自动选线路；
+> 另含一项性能修正（缓存前缀稳定性）与状态栏口径诚实化。完整说明见 `RELEASE-NOTES-0.10.0.md`。
+>
+> **① deb 更新"确认后没反应"（真 bug，已定位到行）**：`dialog.showMessageBox(mainWindow ?? undefined, opts)`
+> 在无父窗口时把 `undefined` 当成 options → 抛错被 `.catch(() => ({response:1}))` 吞成"用户点了稍后" →
+> 流程静默终止。修：按有无窗口分别调用、异常记录并抛出；叠加**30s 空闲超时**（原来只有 5 分钟总超时）、
+> **窗口标题进度**（`setProgressBar` 在多数 Linux 桌面不显示）、**先探测 `pkexec`** 再决定授权安装还是给手动命令、
+> 失败弹窗统一加「打开日志」、每步日志带 `stage=feed|confirm|download|save|verify|sig|install`。
+> **② 线路自动选择（此前只写在文档里、从未实现）**：新增 `desktop/endpoint.js`——香港/深圳双候选、
+> 3s TTFB 探测、24h 缓存（`userData/endpoint.json`）、`MINGDAO_UPDATE_BASE` 覆盖、镜像 403/404/410/DNS
+> 失败自动回退香港一次；应用于 deb feed / deb 包 / `.sig` / electron-updater `setFeedURL` / "去官网下载"链接。
+> **③ 缓存命中率（真机实测定位，非猜测）**：`schemaTier`（只读档收缩 + 已用工具剥描述）默认开启，
+> 且 WebUI 每回合新建 agent 会把"已用工具"集合清零 → **工具 schema 在回合边界反复翻转**，
+> 而 tools 位于缓存前缀最前面 → 整段历史按未命中价重计（实测"只换 tools"命中掉到 63.9%，差 10.6 个百分点）。
+> 修：`schemaTier` 默认关、剥描述由消息历史派生、请求只发协议字段（`wireMessages`）、reasoning 裁剪纯函数化。
+> **实测口径**（`scripts/measure-cache.mjs`，真实端点）：2728 token → 93.8%；**16129 token → 99.2%**
+> （未命中仅 134 token，是端点固定尾段，小 prompt 占比大、16K 会话 <1%）。
+> **④ 状态栏口径诚实化**：`缓存命中 93.8%（120.0K/127.9K tok）` + tooltip 说明"新会话首个请求 / 压缩后首轮 /
+> 端点固定尾段（约 130~170 token）都会拉低它；16K 上下文实测 99.2%"。**不改** `hit/(hit+miss)` 公式，不伪造指标。
+> **门禁**：typecheck 0 / strict 0 / preflight ✓ / smoke ✓ / `run-all` **59 套全绿** / 变异 4 片 20 批全中 /
+> doc-lint ✓；新增 `test/cache-stability.js`（25 项）、`test/desktop-endpoint.js`（17 项）、`test/deb-update.js` 扩到 20 项。
+> **边界**：`pkexec`/polkit 弹窗、`dpkg -i` 实际安装、窗口标题进度、深/港真实速度**只能在 Linux 桌面机人工验收**（CI 不装系统包）。
+
 ## v0.9.1（2026-11-15）— 修正 npm 包的示例 pack 窗口（0.9.0 的 npm tarball 与 tag 漂移）
 
 > **patch，纯打包修正**：产品代码与 v0.9.0 **逐字节相同**，桌面安装包同理。
