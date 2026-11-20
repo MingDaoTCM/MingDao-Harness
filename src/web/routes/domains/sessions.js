@@ -12,6 +12,7 @@ import {
   sessionPreview,
 } from '../../../session.js';
 import { sanitizeTitle, renameSessionFile, titleModel } from '../../../titles.js';
+import { deleteSessionFamily } from '../../../session-files.js';
 import { loadTaskState } from '../../../task-state.js';
 import {
   workspaceForDir,
@@ -188,19 +189,34 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     if (!file || !fs.existsSync(full)) return json(res, 404, { error: '会话不存在' });
     if (body.action === 'rename') {
       const title = sanitizeTitle(String(body.title || '会话'));
+      // v0.10.1（报告2 M-06）：renameSessionFile 现在连同事件侧车/锁/任务检查点一起原子搬迁；
+      // 返回 null 表示「一个都没搬」或「已全部回滚」——原会话保持原状。
       const renamed = renameSessionFile(fs, path, home, { file: full }, title);
-      if (!renamed) return json(res, 500, { error: '重命名失败（可能存在同名会话）' });
-      await moveSessionWorkspace(file, path.basename(renamed));
+      if (!renamed) return json(res, 500, { ok: false, error: '重命名失败（可能存在同名会话，或磁盘/权限拒绝）' });
+      messageCountCache.delete(full);
+      try {
+        await moveSessionWorkspace(file, path.basename(renamed));
+      } catch (/** @type {any} */ err) {
+        // 文件族已经搬完，映射没搬只是「下回合可能回到默认目录」，不能反过来报改名失败。
+        console.warn(`[MingDao] ⚠ 会话改名后工作目录映射迁移失败：${String(err?.message || err)}`);
+      }
+      if (deps.sessionMemoryCache) deps.sessionMemoryCache.delete(file);
       return json(res, 200, { ok: true, file: path.basename(renamed) });
     }
     if (body.action === 'delete') {
+      // v0.10.1（报告2 M-06）：删除会话必须连同全部侧车一起原子清理（事件侧车/两把锁/任务检查点），
+      // 否则磁盘只增不减且 `scripts/event-parity.mjs` 会看到「有事件、没会话」的幽灵。
+      const removed = deleteSessionFamily(full);
+      if (!removed.ok) return json(res, 500, { ok: false, error: removed.error || '删除会话失败' });
+      messageCountCache.delete(full);
+      if (deps.sessionMemoryCache) deps.sessionMemoryCache.delete(file);
       try {
-        fs.unlinkSync(full);
         await removeSessionWorkspace(file);
-        return json(res, 200, { ok: true });
       } catch (/** @type {any} */ err) {
-        return json(res, 500, { error: String(err?.message || err) });
+        // 文件已删干净：映射残留只影响一个不存在会话的条目，绝不因此报删除失败（否则用户重试也无从修复）。
+        console.warn(`[MingDao] ⚠ 会话删除后工作目录映射清理失败：${String(err?.message || err)}`);
       }
+      return json(res, 200, { ok: true });
     }
     return json(res, 400, { error: '未知操作：rename|delete' });
   }

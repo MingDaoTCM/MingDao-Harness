@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { createLinkSupport } from './_link-support.js';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const script = path.join(root, 'scripts/event-parity.mjs');
@@ -51,14 +52,22 @@ const run = (home, scriptPath = script) => spawnSync(process.execPath, [scriptPa
 }
 {
   // 核心回归：通过符号链接目录调用（Node 解析 realpath，argv[1] 是链接路径）
+  //
+  // v0.10.1（v0.8.1 审计报告3 H-3）：Windows 非管理员建链会 EPERM。建不出真链时**显式跳过**
+  // 这一支（打印统一文案），不能让整个套件红——主入口守卫本身还有 ① 的正常路径回归。
+  const linkSupport = createLinkSupport();
   const home = fixture();
   const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'parity-link-'));
   const link = path.join(linkDir, 'repo');
-  fs.symlinkSync(root, link);
-  const r = run(home, path.join(link, 'scripts/event-parity.mjs'));
-  assert.equal(r.status, 0, `符号链接调用应 exit 0：${r.stderr}`);
-  assert.match(r.stdout, /对拍结果：/, '符号链接调用必须真的有输出（0.6.42 的静默 exit 0 回归）');
-  ok('② 经符号链接路径调用：仍有输出（主入口守卫用 realpath）');
+  const linked = linkSupport.makeLink(root, link);
+  if (linked) {
+    const r = run(home, path.join(link, 'scripts/event-parity.mjs'));
+    assert.equal(r.status, 0, `符号链接调用应 exit 0：${r.stderr}`);
+    assert.match(r.stdout, /对拍结果：/, '符号链接调用必须真的有输出（0.6.42 的静默 exit 0 回归）');
+    ok('② 经符号链接路径调用：仍有输出（主入口守卫用 realpath）');
+  } else {
+    linkSupport.skip('② 经符号链接路径调用（主入口 realpath 守卫）');
+  }
   fs.rmSync(home, { recursive: true, force: true });
   fs.rmSync(linkDir, { recursive: true, force: true });
 }

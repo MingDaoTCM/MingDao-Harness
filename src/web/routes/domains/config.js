@@ -52,6 +52,29 @@ function endpointChangeGuard(current, next, submitted) {
 }
 
 /**
+ * 把配置保存失败翻译成**给用户看的原因**，用于 5xx 响应体。
+ *
+ * v0.10.1（v0.8.1 审计报告2 M-07）：此前 4 个写配置的接口都 `await saveConfigAsync(cfg)` 后
+ * 无条件 200 + `ok:true`——磁盘满 / 目录只读 / 锁超时都会被显示成「保存成功」，用户以为改生效了。
+ * 现在失败返回 500 + `ok:false` + 本条原因。
+ *
+ * **只回传 errno 级别的可操作原因**：不原样回显底层 message——那里可能带出配置文件内容片段、
+ * 凭证路径之外的其它敏感串；完整错误已由 `saveConfigAsync` 打一条服务端 warn 日志。
+ * @param {any} error
+ * @returns {string}
+ */
+function saveFailureMessage(error) {
+  const raw = String(error || '');
+  let reason = '写入配置文件失败';
+  if (/ENOSPC|no space left/i.test(raw)) reason = '磁盘空间不足';
+  else if (/EROFS|read-only file system/i.test(raw)) reason = '文件系统只读';
+  else if (/EACCES|EPERM|permission denied/i.test(raw)) reason = '没有写入权限（目录只读或权限不足）';
+  else if (/EISDIR|ENOTDIR/i.test(raw)) reason = '配置文件路径被目录/文件占用';
+  else if (/锁|lock|timeout/i.test(raw)) reason = '配置文件锁超时';
+  return `配置保存失败：${reason}，本次修改未保存，请检查磁盘空间/目录权限后重试`;
+}
+
+/**
  * 配置域路由。命中返回 true，未命中返回 false。
  * @param {{req:any,res:any,method:any,p:any,url:any}} ctx
  * @param {any} deps
@@ -60,6 +83,22 @@ function endpointChangeGuard(current, next, submitted) {
 export async function handle({ req, res, method, p, url }, deps, shared) {
   const { json, readBody, MAX_API_BODY } = shared;
   const { cfg, home, state, providerCache, invalidateProviderCache, getProviderFor, mcpFacade } = deps;
+  // 可注入的保存实现（单测用假 `{ok:false}` 复现磁盘满/只读；生产默认真实 saveConfigAsync）。
+  const persist = typeof deps.saveConfigAsync === 'function' ? deps.saveConfigAsync : saveConfigAsync;
+  /** 保存失败 → 500 + `ok:false` + 原因；成功 → true（调用方再返回既有成功形状）。
+   * @returns {Promise<boolean>} */
+  const persistConfig = async () => {
+    /** @type {{ok?: boolean, error?: any}} */
+    let result;
+    try {
+      result = await persist(cfg);
+    } catch (err) {
+      result = { ok: false, error: /** @type {any} */ (err)?.message ?? err };
+    }
+    if (result && result.ok === true) return true;
+    json(res, 500, { ok: false, error: saveFailureMessage(result?.error) });
+    return false;
+  };
   // v0.6.30（H-11）：WebUI 是否配置了访问令牌。无令牌时服务处于「本机信任」模式——同机任意进程
   // 都能 POST /api/chat 并自行应答权限确认，因此**权限档位 auto 必须要求令牌**（见 POST /api/config）。
   const tokenAuthEnabled = deps.authEnabled === true;
@@ -274,7 +313,8 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
     state.modelName = next.model;
     cfg.model = next.model;
     cfg.permission = next.permission;
-    await saveConfigAsync(cfg);
+    // v0.10.1（报告2 M-07）：写盘失败必须如实 500 + ok:false，绝不能仍回 200（磁盘满/只读时用户会以为生效）。
+    if (!(await persistConfig())) return true;
     json(res, 200, { ok: true, model: state.modelName, permission: cfg.permission, sandbox: cfg.sandbox, routing: cfg.routing?.enabled, contextBudget: cfg.contextBudget, reasoningEffort: cfg.reasoningByModel?.[state.modelName] ?? cfg.reasoningEffort, autostart: autostartChanged ? autostartStatus() : undefined, notify: cfg.notify !== false });
     return true;
   }
@@ -403,7 +443,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         const sk3 = await setStoredKeyAsync(`custom:${name}`, String(body.key).trim());
         if (sk3 && sk3.ok === false) return json(res, 400, { error: sk3.error }); // v0.6.7（M-1）
       }
-      await saveConfigAsync(cfg);
+      if (!(await persistConfig())) return true;
       // baseUrl 改动影响 isLocal 判定 → 超时档位变化；清缓存让新超时/新端点即时生效
       dropProviderCache('customModel');
       return json(res, 200, { ok: true, name });
@@ -418,7 +458,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
         state.modelName = (await resolveDefaultModel(cfg, 'executor')).model;
         cfg.model = state.modelName;
       }
-      await saveConfigAsync(cfg);
+      if (!(await persistConfig())) return true;
       dropProviderCache('removeCustom');
       return json(res, 200, { ok: true, name, model: state.modelName });
     }
@@ -472,7 +512,7 @@ export async function handle({ req, res, method, p, url }, deps, shared) {
       if (denied) return json(res, 400, { needKey: true, error: denied });
       cfg.baseUrl = baseUrl || undefined;
       if (cfg.baseUrl === undefined) delete cfg.baseUrl;
-      await saveConfigAsync(cfg);
+      if (!(await persistConfig())) return true;
       // H-04 的**根因**：此前保存后直接 200，缓存里仍是旧 baseUrl 的实例。
       // 清空 baseUrl 同样要失效（否则新任务继续用旧端点，而不是按「缺少 baseUrl」显式失败）。
       dropProviderCache(baseUrl ? 'setBaseUrl' : 'clearBaseUrl');

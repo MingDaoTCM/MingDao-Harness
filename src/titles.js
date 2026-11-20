@@ -4,6 +4,7 @@
 import { modelPreset } from './models.js';
 import { recordAuxUsageAsync } from './cachestats.js';
 import { routingConfig } from './routing.js';
+import { moveSessionFamily, sessionFamilyExists } from './session-files.js';
 
 export function titleModel(/** @type {any} */ cfg, /** @type {any} */ currentModel) {
   const rc = routingConfig(cfg);
@@ -76,18 +77,29 @@ export function sanitizeTitle(/** @type {any} */ s) {
 }
 
 // 重命名会话文件（与 /title 一致：确保存在、同名加随机后缀）
+//
+// v0.10.1（v0.8.1 审计报告2 M-06）：改名必须把**同一 basename 的全部侧车**一起搬走
+// （事件侧车 + 两把锁 + 任务检查点），否则旧会话留下孤儿 `.events.ndjson`，新会话则
+// 从「有侧车、没主文件」的幽灵状态开始（重复改名时 seq 还会继承旧日志）。
+// 搬迁本身是原子的：`moveSessionFamily()` 中途失败会逆序还原，本函数返回 null（既有契约）。
 export function renameSessionFile(/** @type {any} */ fs, /** @type {any} */ pathMod, /** @type {any} */ home, /** @type {any} */ session, /** @type {any} */ title) {
   const safe = sanitizeTitle(title);
-  let newFile = pathMod.join(home, 'sessions', safe + '.jsonl');
   try {
     fs.appendFileSync(session.file, '');
-    if (fs.existsSync(newFile)) {
-      newFile = pathMod.join(home, 'sessions', safe + '-' + Math.random().toString(36).slice(2, 6) + '.jsonl');
-    }
-    fs.renameSync(session.file, newFile);
-    session.file = newFile;
-    return newFile;
   } catch {
     return null;
   }
+  // 目标 basename 被任何一族文件占用（主文件或任一侧车）都换随机后缀，绝不覆盖别人的侧车。
+  for (let attempt = 0; attempt < 20; attempt += 1) {
+    const name = attempt === 0 ? safe : `${safe}-${Math.random().toString(36).slice(2, 6)}`;
+    const newFile = pathMod.join(home, 'sessions', name + '.jsonl');
+    if (sessionFamilyExists(newFile, fs)) continue;
+    const moved = moveSessionFamily(session.file, newFile, { io: fs });
+    if (moved.ok) {
+      session.file = newFile;
+      return newFile;
+    }
+    return null; // 真失败（权限/磁盘/目录被占）：不重试，保持原状
+  }
+  return null;
 }

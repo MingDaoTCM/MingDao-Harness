@@ -18,14 +18,34 @@ export function highlight(code, lang) {
       ' '
     )
   );
-  const re = /(\/\/[^\n]*|#[^\n]*|"(?:\\.|[^"\\])*"|'[^']*'|`[^`]*`|\b\d[\d._]*\b|[A-Za-z_$][\w$]*)/g;
-  return esc(code).replace(re, (tok) => {
-    if (tok.startsWith('//') || tok.startsWith('#')) return '<span class="hl-c">' + tok + '</span>';
-    if (/^["'`]/.test(tok)) return '<span class="hl-s">' + tok + '</span>';
-    if (/^\d/.test(tok)) return '<span class="hl-n">' + tok + '</span>';
-    if (kws.has(tok)) return '<span class="hl-kw">' + tok + '</span>';
-    return tok;
-  });
+  // v0.10.1（v0.8.1 审计报告3 M-3）：**在原文上切 token，再对每一段单独转义**。
+  //
+  // 旧实现是 `esc(code).replace(re, …)`：转义已经把 `"` 变成 `&quot;`、`'` 变成 `&#39;`，
+  // 而高亮正则还在找**原始引号**——字符串高亮分支永不命中（引号内容还会被当成普通标识符/
+  // 注释处理）。现在正则跑在未转义的原文上（转义不改变 token 边界），输出前每一段都过 `esc`：
+  // 用户内容（含 `<script>`、引号、中文、反斜杠转义）仍然全部转义，XSS 安全性不变。
+  //
+  // 字符串分支接受反斜杠转义（`"a\"b"`、`'a\'b'`、`` `a\`b` ``），但**不跨行**依赖；
+  // 注释优先级最高，与旧正则一致。
+  const re = /(\/\/[^\n]*|#[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`|\b\d[\d._]*\b|[A-Za-z_$][\w$]*)/g;
+  const src = String(code ?? '');
+  let out = '';
+  let last = 0;
+  for (const m of src.matchAll(re)) {
+    const tok = m[0];
+    const at = m.index ?? 0;
+    // 两个 token 之间的普通文本：**必须先转义**（这是唯一的用户内容直出点）。
+    out += esc(src.slice(last, at));
+    const safe = esc(tok);
+    if (tok.startsWith('//') || tok.startsWith('#')) out += '<span class="hl-c">' + safe + '</span>';
+    else if (/^["'`]/.test(tok)) out += '<span class="hl-s">' + safe + '</span>';
+    else if (/^\d/.test(tok)) out += '<span class="hl-n">' + safe + '</span>';
+    else if (kws.has(tok)) out += '<span class="hl-kw">' + safe + '</span>';
+    else out += safe;
+    last = at + tok.length;
+  }
+  out += esc(src.slice(last));
+  return out;
 }
 
 export function renderMarkdown(text) {

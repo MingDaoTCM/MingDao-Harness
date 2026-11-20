@@ -16,6 +16,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createLinkSupport } from './_link-support.js';
 
 const srcDir = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
 const load = (/** @type {string} */ rel) => import(pathToFileURL(path.join(srcDir, rel)).href);
@@ -51,7 +52,14 @@ function setHome(/** @type {string} */ tag) {
 // 不能用 `/etc`（Windows 上不存在），也不能用 os.tmpdir() 子目录（tmpdir 是允许根）。
 const OUTSIDE_REAL_DIR = () =>
   process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\\Windows', 'Temp') : '/var/tmp';
-const ok = (/** @type {string} */ n) => console.log(`  ✓ ${n}`);
+// 符号链接能力探测（v0.10.1，报告3 H-3）：Windows 非管理员建链会 EPERM。首次探测后记住结果，
+// 依赖软链的子项**显式跳过并打印**（绝不静默跳过、也绝不因此让套件红）。
+const links = createLinkSupport();
+let passed = 0;
+const ok = (/** @type {string} */ n) => {
+  passed += 1;
+  console.log(`  ✓ ${n}`);
+};
 const sleep = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
 /** @param {any} cond @param {string} tag @param {string} detail */
 function check(cond, tag, detail) {
@@ -239,24 +247,32 @@ try {
     fs.writeFileSync(path.join(outside, 'secret.txt'), 'outside-secret');
     fs.mkdirSync(path.join(root, 'inside'));
     fs.writeFileSync(path.join(root, 'inside', 'ok.txt'), 'inside-ok');
-    // 符号链接逃逸（真实建链接；建不出链接的平台直接失败而不是静默跳过）
-    fs.symlinkSync(outside, path.join(root, 'escape'), 'dir');
-    // 悬空符号链接：目标在根外且不存在
-    fs.symlinkSync(path.join(outside, 'new-target.txt'), path.join(root, 'dangling-out'), 'file');
-    // 悬空但指向根内：必须放行（新建文件路径）
-    fs.symlinkSync(path.join(root, 'inside', 'new-file.txt'), path.join(root, 'dangling-in'), 'file');
-    // 链接成环：fail-closed
-    fs.symlinkSync('cycle', path.join(root, 'cycle'), 'file');
+    // 符号链接逃逸（真实建链接）。建不出真链的平台（Windows 非管理员 EPERM）**显式跳过**，
+    // 不能直接崩：`withinRoot` 的软链判定另有桩 fs 单测覆盖（smoke §124），这里只测真实链路。
+    let symlinksReady = links.supported();
+    const makeLinks = [
+      [outside, path.join(root, 'escape'), 'dir'], // 逃逸到根外
+      [path.join(outside, 'new-target.txt'), path.join(root, 'dangling-out'), 'file'], // 悬空、指向根外
+      [path.join(root, 'inside', 'new-file.txt'), path.join(root, 'dangling-in'), 'file'], // 悬空、指向根内
+      ['cycle', path.join(root, 'cycle'), 'file'], // 链接成环
+    ];
+    for (const [target, linkPath, type] of makeLinks) {
+      if (!links.makeLink(target, linkPath, /** @type {any} */ (type))) symlinksReady = false;
+    }
 
     check(withinRoot(root, path.join(root, 'inside', 'ok.txt')) === true, 'W11：根内文件必须放行', '');
     check(withinRoot(root, path.join(root, 'inside', 'not-created.txt')) === true, 'W11：根内新文件（父目录存在）必须放行', '');
     check(withinRoot(root, path.join(root, '..', 'x.txt')) === false, 'W11：.. 逃逸必须拒绝', '');
     check(withinRoot(root, path.join(outside, 'secret.txt')) === false, 'W11：绝对路径越界必须拒绝', '');
-    check(withinRoot(root, path.join(root, 'escape', 'secret.txt')) === false, 'W11：符号链接逃逸必须拒绝（realpath 一层不能少）', '');
-    check(withinRoot(root, path.join(root, 'dangling-out')) === false, 'W11：悬空符号链接指向根外必须拒绝', '');
-    check(withinRoot(root, path.join(root, 'dangling-in')) === true, 'W11：悬空符号链接指向根内必须放行', '');
-    check(withinRoot(root, path.join(root, 'cycle')) === false, 'W11：链接成环必须 fail-closed（有界拒绝）', '');
-    ok('W11 withinRoot：.. / 绝对路径 / 软链 / 悬空 / 成环');
+    if (symlinksReady) {
+      check(withinRoot(root, path.join(root, 'escape', 'secret.txt')) === false, 'W11：符号链接逃逸必须拒绝（realpath 一层不能少）', '');
+      check(withinRoot(root, path.join(root, 'dangling-out')) === false, 'W11：悬空符号链接指向根外必须拒绝', '');
+      check(withinRoot(root, path.join(root, 'dangling-in')) === true, 'W11：悬空符号链接指向根内必须放行', '');
+      check(withinRoot(root, path.join(root, 'cycle')) === false, 'W11：链接成环必须 fail-closed（有界拒绝）', '');
+    } else {
+      links.skip('W11 符号链接逃逸 / 悬空链接 / 链接成环');
+    }
+    ok(`W11 withinRoot：.. / 绝对路径${symlinksReady ? ' / 软链 / 悬空 / 成环' : '（软链子项已跳过）'}`);
   }
 
   // -------------------------------------------------------------------------
@@ -266,15 +282,19 @@ try {
     const workdir = tmp('read-work');
     const outside = tmp('read-outside');
     fs.writeFileSync(path.join(outside, 'secret.txt'), 'outside-secret');
-    fs.symlinkSync(outside, path.join(workdir, 'link-dir'), 'dir');
+    const linkReady = links.makeLink(outside, path.join(workdir, 'link-dir'), 'dir');
     const ctx = ctxFor(workdir);
 
     const r1 = read({ path: path.relative(workdir, path.join(outside, 'secret.txt')) }, ctx);
     check(r1.ok === false && errorText(r1).includes('路径越界'), 'W12：read ../ 越界必须拒绝且报错可见', JSON.stringify(r1));
-    const r2 = read({ path: 'link-dir/secret.txt' }, ctx);
-    check(r2.ok === false && errorText(r2).includes('路径越界'), 'W12：read 经符号链接越界必须拒绝且报错可见', JSON.stringify(r2));
-    check(!String(r2.output || '').includes('outside-secret'), 'W12：越界读取不得把内容返回给模型', String(r2.output || ''));
-    ok('W12 read 围栏：越界拒绝且错误可见');
+    if (linkReady) {
+      const r2 = read({ path: 'link-dir/secret.txt' }, ctx);
+      check(r2.ok === false && errorText(r2).includes('路径越界'), 'W12：read 经符号链接越界必须拒绝且报错可见', JSON.stringify(r2));
+      check(!String(r2.output || '').includes('outside-secret'), 'W12：越界读取不得把内容返回给模型', String(r2.output || ''));
+    } else {
+      links.skip('W12 read 经符号链接越界');
+    }
+    ok(`W12 read 围栏：越界拒绝且错误可见${linkReady ? '' : '（软链子项已跳过）'}`);
   }
 
   // -------------------------------------------------------------------------
@@ -284,11 +304,14 @@ try {
     const workdir = tmp('write-work');
     const outside = tmp('write-outside');
     const target = path.join(outside, 'pwned.txt');
-    fs.symlinkSync(target, path.join(workdir, 'dangle'), 'file');
-    const r = write({ path: 'dangle', content: 'pwn' }, ctxFor(workdir));
-    check(r.ok === false && errorText(r).includes('路径越界'), 'W13：write 经悬空链接越界必须拒绝', JSON.stringify(r));
-    check(!fs.existsSync(target), 'W13：被拒绝的写入不得在根外创建文件', target);
-    ok('W13 write 围栏：悬空链接逃逸被拒且无副作用');
+    if (links.makeLink(target, path.join(workdir, 'dangle'), 'file')) {
+      const r = write({ path: 'dangle', content: 'pwn' }, ctxFor(workdir));
+      check(r.ok === false && errorText(r).includes('路径越界'), 'W13：write 经悬空链接越界必须拒绝', JSON.stringify(r));
+      check(!fs.existsSync(target), 'W13：被拒绝的写入不得在根外创建文件', target);
+      ok('W13 write 围栏：悬空链接逃逸被拒且无副作用');
+    } else {
+      links.skip('W13 write 经悬空链接逃逸');
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -304,7 +327,7 @@ try {
     // `/var/tmp` 与 `%SystemRoot%\\Temp` 都真实存在且在允许根之外，语义不变：软链指向根外。
     const outside = OUTSIDE_REAL_DIR();
     const link = path.join(workRoot, 'link-to-outside');
-    fs.symlinkSync(outside, link, 'dir');
+    const linkReady = links.makeLink(outside, link, 'dir');
     const deps = { cfg: {}, state: { workingDir: workRoot }, startupCwd: workRoot };
     const shared = {
       MAX_API_BODY: 1024 * 1024,
@@ -321,16 +344,20 @@ try {
       return { hit, status: res.status, body: res.body };
     };
 
-    const bad = await call('POST', '/api/workspaces', { action: 'add', name: 'zz-etc', dir: link, create: false });
-    check(bad.status === 400, 'W14：符号链接指向允许根之外时必须拒绝登记', JSON.stringify(bad));
-    check(String(bad.body?.error || '').includes('不在允许范围'), 'W14：拒绝理由必须可见（不在允许范围）', JSON.stringify(bad.body));
+    if (linkReady) {
+      const bad = await call('POST', '/api/workspaces', { action: 'add', name: 'zz-etc', dir: link, create: false });
+      check(bad.status === 400, 'W14：符号链接指向允许根之外时必须拒绝登记', JSON.stringify(bad));
+      check(String(bad.body?.error || '').includes('不在允许范围'), 'W14：拒绝理由必须可见（不在允许范围）', JSON.stringify(bad.body));
+    } else {
+      links.skip('W14 Web 登记闸门的软链越界');
+    }
 
     const goodDir = path.join(workRoot, 'proj');
     const good = await call('POST', '/api/workspaces', { action: 'add', name: 'zz-inside', dir: goodDir, create: true });
     check(good.status === 200 && good.body?.ok === true, 'W14：允许根内的目录必须可以登记', JSON.stringify(good));
     check(fs.existsSync(goodDir), 'W14：允许根内的目录必须按请求创建', goodDir);
     check(ws.workspacePath('zz-inside') !== null, 'W14：登记必须真的写进注册表', JSON.stringify(ws.loadWorkspaces()));
-    ok('W14 Web 登记闸门：软链越界拒绝 / 根内放行');
+    ok(`W14 Web 登记闸门：软链越界拒绝 / 根内放行${linkReady ? '' : '（软链子项已跳过）'}`);
   }
 
   // -------------------------------------------------------------------------
@@ -343,7 +370,7 @@ try {
     fs.mkdirSync(inside);
     const outside = OUTSIDE_REAL_DIR();
     const link = path.join(workRoot, 'link-to-outside');
-    fs.symlinkSync(outside, link, 'dir');
+    const linkReady = links.makeLink(outside, link, 'dir');
     const deps = { cfg: {}, state: { workingDir: workRoot }, startupCwd: workRoot };
     const shared = {
       MAX_API_BODY: 1024 * 1024,
@@ -359,17 +386,21 @@ try {
       return { hit, status: res.status, body: res.body };
     };
 
-    const bad = await call(`?dir=${encodeURIComponent(link)}`);
-    check(bad.status === 403, 'W15：目录浏览的软链逃逸必须 403', JSON.stringify(bad));
-    check(String(bad.body?.error || '').includes('不在可浏览范围'), 'W15：403 理由必须可见', JSON.stringify(bad.body));
+    if (linkReady) {
+      const bad = await call(`?dir=${encodeURIComponent(link)}`);
+      check(bad.status === 403, 'W15：目录浏览的软链逃逸必须 403', JSON.stringify(bad));
+      check(String(bad.body?.error || '').includes('不在可浏览范围'), 'W15：403 理由必须可见', JSON.stringify(bad.body));
+    } else {
+      links.skip('W15 Web 目录浏览的软链逃逸');
+    }
 
     const good = await call(`?dir=${encodeURIComponent(workRoot)}`);
     check(good.status === 200 && good.body?.ok === true, 'W15：允许根内目录必须可浏览', JSON.stringify(good));
     check((good.body?.entries || []).some((e) => e.name === 'visible'), 'W15：浏览结果必须列出根内子目录', JSON.stringify(good.body?.entries));
-    ok('W15 Web 浏览围栏：软链 403 / 根内 200');
+    ok(`W15 Web 浏览围栏：软链 403 / 根内 200${linkReady ? '' : '（软链子项已跳过）'}`);
   }
 
-  console.log('\nworkspace-fence：15 项全部通过');
+  console.log(`\nworkspace-fence：${passed} 项全部通过（软链子项按本机能力跳过时已显式打印）`);
 } finally {
   for (const dir of cleanups) {
     try {
