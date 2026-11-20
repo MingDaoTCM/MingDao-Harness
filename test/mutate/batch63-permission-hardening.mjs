@@ -25,7 +25,8 @@ M.mutate({
 M.mutate({
   name: '② C1 不剥包装前缀（env/sudo/xargs/command…）',
   file: 'src/permissions.js',
-  from: '    const spec = WRAPPER_PREFIXES[base];',
+  // v0.10.1：命令名归一小写后查表（`baseLower`），锚点跟随。
+  from: '    const spec = WRAPPER_PREFIXES[baseLower];',
   to: '    const spec = /** @type {any} */ (undefined); // mutated: 不剥包装前缀',
   expect: ['包装前缀必须剥离'],
   run: SUITE,

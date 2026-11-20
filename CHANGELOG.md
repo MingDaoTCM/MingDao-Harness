@@ -11,6 +11,38 @@
 > tarball 与 tag 树的 sha256，已写入 RELEASE-CHECKLIST），并在下一个版本重新发布修正后的包。
 > 桌面版 / GitHub Release / feed / 镜像的 0.9.0 **没有**此问题。**已在 v0.9.1 修正 npm 包。**
 
+## v0.10.1（2026-11-20）— 审计遗留安全批 + 四项正确性修复 + 发版联动根治
+
+> **patch，纯修复**：不新增能力、不改版本语义。完整说明见 `RELEASE-NOTES-0.10.1.md`。
+>
+> **① 安全批（5 份 v0.8.1 审计连续两版标"未修"的项）**
+> - `src/permissions.js` 的包装前缀补 `su` / `runuser` / `pkexec` / `chroot` / `nsenter` / `unshare` / `capsh`。
+>   此前 `pkexec rm -rf /`、`su -c 'rm -rf /'`、`chroot /srv rm -rf /` **无法被归一化到真正执行的命令**，
+>   deny 规则看不到它们 → 绕过。`su/runuser` 的 `-c/--command` 值按 shell 分词**再归一化**（同 `env -S`）；
+>   `chroot` 用 `skipOperand` 跳过 `NEWROOT`；不确定选项按"吃值"处理（fail-closed）。
+> - 软 deny 改为**大小写不敏感**，并识别 `cmd /c`、`/C`、`cmd.exe /C`、`cmd /d /s /c`、`powershell -Command`，
+>   `/c` 后的命令串再分词归一。
+> - `bash` 沙箱不可用时**明确披露**（stdout 首行 + note：「⚠ 沙箱不可用：本次命令未隔离执行」），此前只在 note 里写。
+> - **H-10（先核实后修）**：无令牌本机信任模式下，`POST /api/chat` 请求体的 `permission=auto` 此前可**直接提权**
+>   （`server.js:972/978/990` 全程不查 `authEnabled`，而 `config.js:65/190` 早已以同理由返回 403）。
+>   现在无令牌时 body 的 auto 失效、回落 config/preset 并在 banner 说明；有令牌或 config 本为 auto 不受影响。
+> **② 正确性四项**
+> - **会话侧车事务化**：删/改名会话时同步处理 `.jsonl` 与 `.events.ndjson` 等同一 basename 的所有侧车，
+>   失败**逆序回滚**（不再留半删状态、不再留孤儿事件文件）。
+> - **配置保存不再假成功**：`saveConfigAsync` 写失败返回 **500 + ok:false**（此前磁盘满/只读也返回 200）。
+> - **`highlight()` 字符串高亮修复**：此前先转义再用原始引号正则匹配 → 字符串分支永不命中；
+>   改为先按原文定位、切出片段再逐段转义包裹（XSS 安全不变）。
+> - **符号链接能力探测**：非管理员 Windows 上创建符号链接抛 EPERM 会让套件直接崩；
+>   现在探测一次并**显式打印"已跳过：本机不支持符号链接"**（不静默跳过、也不让套件红）。
+> **③ 发版联动根治（v0.7.0 / v0.10.0 各踩一次的复发）**
+> `scripts/sync-versions.mjs` 现在在 bump 时**自动把官方 Pack 的 `engines.mingdao` 上界放宽到下一个 minor**
+> （`<0.10` → `<0.11`），只替换 `<…` 段、前导 `>=…` 逐字保留、非该形状不猜；`--dry-run` 只打印。
+> `postversion` 的 `git add` 相应纳入 `desktop/package.json` 与 `packs`。
+> **门禁**：typecheck 0 / strict 0 / preflight ✓ / smoke ✓ / `run-all` **64 套全绿**（新增 5 套）/
+> 变异 **883 条**（新增 `batch93-security`、`batch93-v0101` 共 20 条）/ doc-lint ✓。
+> **边界**：非管理员 Windows 的 EPERM 路径未在真机验证；`find -delete`、脚本文件、`$VAR`、自定义包装器
+> 仍不可静态判定；删/改名会话时未持有会话锁（另有锁保护写入路径）。
+
 ## v0.10.0（2026-11-19）— 用户三项报障修复：deb 更新可用、线路自动选择、缓存命中
 
 > **minor（用户可见能力变化）**：Linux deb 安装形态的更新链路真正可用、桌面更新/下载按地区自动选线路；
