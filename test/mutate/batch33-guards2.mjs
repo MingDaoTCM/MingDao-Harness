@@ -41,7 +41,8 @@ M.mutate({
 M.mutate({
   name: '③ §137 预设分支丢掉 explicit（判据收不到显式选择）→ §144 banner 变回预设档',
   file: 'src/web/server.js',
-  from: 'turnPerm = resolveTurnPermission({ preset: chatPreset, explicit: explicitPermission, configPermission: cfg.permission ?? \'ask\' });',
+  // v0.10.1：H-10 修复后调用多传 authEnabled，锚点跟随。
+  from: 'turnPerm = resolveTurnPermission({ preset: chatPreset, explicit: explicitPermission, configPermission: cfg.permission ?? \'ask\', authEnabled });',
   to: 'turnPerm = resolveTurnPermission({ preset: chatPreset, configPermission: cfg.permission ?? \'ask\' }); // 变异：丢掉显式选择',
   expect: ['显式权限必须压过预设声明的只读档'],
   run: SEC('144'),
