@@ -62,7 +62,11 @@ const { readRun, verifyRun, digestOf, sealFile, ledgerDir } = await import(pathT
 // 显式写 config 权限 ask：③ 要证明「都不发」时来源是 config（WebUI 分支），与预设/显式区分开。
 saveConfig({ provider: 'custom', model: 'test-model', baseUrl, permission: 'ask', contextBudget: 32000, ledger: true });
 fs.writeFileSync(path.join(home, 'credentials.json'), JSON.stringify({ custom: 'sk-test-' + 'x'.repeat(20) }), { mode: 0o600 });
-const srv = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
+// v0.10.1（审计 H-10）：无令牌模式下请求体不得把权限提升到 auto（本文件 ① 正是"显式 auto"用例）。
+// 本套件验证的是**权限来源**语义，不是"无令牌能否提权"，故显式传入访问令牌——只有持 token 的
+// 请求方才有资格用请求体选 auto；无令牌时被拒的行为由 test/permissions-batch93.js 断言。
+const LEDGER_SOURCE_TOKEN = 'ledger-source-token-v0101';
+const srv = await runWebServer({ host: '127.0.0.1', port: 0, authToken: LEDGER_SOURCE_TOKEN });
 const base = `http://127.0.0.1:${srv.address().port}`;
 
 /** 当前账本目录里的 runId 集合（用于找出本轮新写的那一份） */
@@ -76,7 +80,11 @@ function ledgerIds() {
 /** 发一次 chat → 等账本落盘 → 返回该次 run.start */
 async function chatRunStart(payload, label) {
   const before = ledgerIds();
-  const res = await fetch(base + '/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+  const res = await fetch(base + '/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-MingDao-Token': LEDGER_SOURCE_TOKEN },
+    body: JSON.stringify(payload),
+  });
   assert.equal(res.status, 200, `${label}：chat 应返回 200`);
   await res.text(); // 读完 SSE，保证 runTurn 已收尾
   let newId = null;

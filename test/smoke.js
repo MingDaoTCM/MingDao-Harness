@@ -15634,7 +15634,11 @@ process.exit(0);
     fsAllowDirs: [markerDir144],
     customModels: { mock144: { label: 'Mock144', baseUrl: `http://127.0.0.1:${mock144.address().port}/v1`, contextWindow: 8192, key: 'sk-mock' } },
   });
-  const srv144 = await runWebServer({ host: '127.0.0.1', port: 0, authToken: null });
+  // v0.10.1（审计 H-10）：无令牌时请求体不得把权限提升到 auto。本段要验证「显式 auto > 预设 readonly」
+  // 这条既有语义，只有持 token 的请求方才有资格用请求体选 auto——故本实例启用访问令牌，
+  // chat / permission 两处请求都带上同一个 token（无令牌被拒的行为见 test/permissions-batch93.js）。
+  const SMOKE144_TOKEN = 'smoke144-token-v0101';
+  const srv144 = await runWebServer({ host: '127.0.0.1', port: 0, authToken: SMOKE144_TOKEN });
   const base144 = `http://127.0.0.1:${srv144.address().port}`;
   /**
    * 发一轮 chat 并**边读边答**：只读档下非只读工具会弹权限确认（ask），
@@ -15645,7 +15649,7 @@ process.exit(0);
   const chat144 = async (body) => {
     const r = await fetch(base144 + '/api/chat', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', 'X-MingDao-Token': SMOKE144_TOKEN },
       body: JSON.stringify(body),
     });
     const reader = r.body.getReader();
@@ -15673,7 +15677,7 @@ process.exit(0);
             try {
               await fetch(base144 + '/api/permission', {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: { 'Content-Type': 'application/json', 'X-MingDao-Token': SMOKE144_TOKEN },
                 body: JSON.stringify({ id: ev.id, answer: '', taskId: ev.taskId }),
               });
             } catch {}
@@ -15842,7 +15846,10 @@ process.exit(0);
   const cfgBase145 = {
     provider: 'deepseek',
     model: 'mock145',
-    permission: 'readonly',
+    // v0.10.1（审计 H-10）：本段测的是回合结局（空正文/长命令/上限/停滞），权限档位只是"别弹确认"。
+    // config 写成 auto 后请求体的 permission:'auto' 不再构成"请求体提权"，无需访问令牌也能通过闸门；
+    // 若仍写 readonly，无令牌下的 body auto 会被 H-10 闸门明确拒绝（那是正确行为，见 batch93 套件）。
+    permission: 'auto',
     autoTitle: false,
     maxRounds: 1,
     customModels: { mock145: { label: 'Mock145', baseUrl: `http://127.0.0.1:${mock145.address().port}/v1`, contextWindow: 8192, key: 'sk-mock' } },
@@ -16308,12 +16315,15 @@ process.exit(0);
         `/api/state 必须带 permissionSource（枚举 explicit|preset|config|cli|default），实际：${JSON.stringify(st0.permissionSource)}`);
       assert.equal(st0.permissionSource, map148[resolveTurnPermission({ configPermission: st0.permission }).source],
         '/api/state.permissionSource 必须与 resolveTurnPermission 的返回一致（不得另算一套）');
-      const c1 = await chat148({ message: '你好', permission: 'auto' });
+      // v0.10.1（审计 H-10）：无令牌模式下请求体**不得**提升到 auto（见 server.js chatPermissionBodyRejection）。
+      // 这里改用"收紧"的显式选择（readonly）验证同一条「显式 > 预设 > config」来源链路——
+      // 显式 auto 在无令牌模式被拒这件事有独立断言（test/permissions-batch93.js）。
+      const c1 = await chat148({ message: '你好', permission: 'readonly' });
       assert.equal(c1.status, 200, `（前置）显式权限回合必须被接受，实际 HTTP ${c1.status}`);
       const st1 = await (await fetch(base148 + '/api/state')).json();
       assert.equal(st1.permissionSource, 'explicit', `显式选择必须被如实标成 explicit（写死 config 会被这条抓住）——实际：${JSON.stringify(st1.permissionSource)}`);
-      assert.equal(st1.permissionSource, map148[resolveTurnPermission({ explicit: 'auto', configPermission: st0.permission }).source],
-        `显式选择 auto 的回合之后，/api/state.permissionSource 必须与 resolveTurnPermission 一致，实际：${JSON.stringify(st1.permissionSource)}`);
+      assert.equal(st1.permissionSource, map148[resolveTurnPermission({ explicit: 'readonly', configPermission: st0.permission }).source],
+        `显式选择 readonly 的回合之后，/api/state.permissionSource 必须与 resolveTurnPermission 一致，实际：${JSON.stringify(st1.permissionSource)}`);
       const c2 = await chat148({ message: '你好', preset: 'ro148' });
       assert.equal(c2.status, 200, `（前置）预设回合必须被接受，实际 HTTP ${c2.status}`);
       const st2 = await (await fetch(base148 + '/api/state')).json();

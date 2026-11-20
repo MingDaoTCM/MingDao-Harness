@@ -19,7 +19,18 @@ node test/mutate/run.mjs batch12    # 只跑某一批
 
 ## 变异总数
 
-变异总数：863（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+变异总数：883（由 `scripts/doc-lint.mjs` 守卫：文档里的数字必须等于各 `batch*.mjs` 里真实的 `name:` 条数，漂移即 CI 红）。
+
+> v0.10.1（patch，v0.8.1 审计遗留安全批）：新增 `batch93-security`（10 条）——提权型包装前缀缺项
+> （`su`/`runuser`/`pkexec`/`chroot`/`nsenter`/`unshare`/`capsh`：真命令位置归一、`su -c` 命令串再分词、
+> `chroot NEWROOT` 跳过、`pkexec` 无值选项不吞 PROGRAM）、软 deny 大小写不敏感与
+> `cmd /c` / `cmd.exe /C` / powershell `-Command` 归一化、bash 沙箱降级"未隔离执行"用户可见披露、
+> `/api/chat` 无令牌不得用请求体提权到 auto（batches 873 → 883）。
+
+> v0.10.1（patch，v0.8.1 审计遗留四项）：新增 `batch93-v0101`（10 条）——会话文件族
+> 侧车清单漏项 / 删除失败不回滚 / 改名失败不回滚 / 删除路由退回只 `unlink` 主文件；
+> 配置保存失败仍回 200（`POST /api/config`）；`highlight()` 普通文本段不转义 / token 不转义（XSS）/
+> 字符串高亮分支失效；符号链接能力探测不缓存 / 把 EPERM 当支持。batches 863 → 873。
 
 > v0.9.0：新增 `batch92-deb-update`（8 条）——`desktop/deb-update.js`（deb 安装形态自动更新的
 > 纯函数层，v0.9.0 新增）：`isNewer` 比较符反转（旧版被判成新版）、去掉「`-beta` 预发布小于同号正式版」、

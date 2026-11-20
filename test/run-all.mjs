@@ -39,6 +39,9 @@ const SUITES = [
   ['freeze-hardening', 'node', ['test/freeze-hardening.js']],
   // v0.6.30 审计收口：授权边界（deny 归一化 / git 只读白名单 / fetch 出网默认拒绝）
   ['permission-hardening', 'node', ['test/permission-hardening.js']],
+  // v0.10.1 遗留安全批（v0.8.1 审计 H-1/H-2/H-3 + 自审 H-10）：提权型包装器前缀、软 deny 大小写与
+  // cmd /c 归一化、bash 沙箱降级用户可见披露、/api/chat 无令牌不得用请求体提权到 auto
+  ['permissions-batch93', 'node', ['test/permissions-batch93.js']],
   // v0.6.30 审计收口：凭据（跨源重定向剥头 / 单一脱敏表 / 账本键名脱敏）
   ['credential-hardening', 'node', ['test/credential-hardening.js']],
   // v0.6.30 审计收口：Agent/上下文（孤儿 tool_calls / 多模态计数 / 末条必留 / 兜底 id / 回填顺序）
@@ -53,6 +56,8 @@ const SUITES = [
   ['state-locks', 'node', ['test/state-locks.js']],
   // v0.7.0 §1.4：请求路径同步锁改异步（持锁 5s 不再冻结事件循环）
   ['request-path-locks', 'node', ['test/request-path-locks.js']],
+  // v0.10.1（报告2 M-07）：写配置失败必须 500 + ok:false（磁盘满/只读不得报成功）
+  ['config-save-failure', 'node', ['test/config-save-failure.js']],
   // v0.7.0 §1.2：覆盖率口径（最内层区间计数；三口径 + ratchet）
   ['coverage-metric', 'node', ['test/coverage-metric.js']],
   // v0.7.0 §1.2：补盲——sync 状态增量 / Pack 能力与版本 / 路径围栏（此前 0 条变异）
@@ -61,6 +66,8 @@ const SUITES = [
   ['workspace-fence', 'node', ['test/workspace-fence.js']],
   // v0.7.0 §1.2：前端纯函数 viewmodel（搬家后与原实现 deepEqual 对拍；app.js 从此可测）
   ['viewmodel', 'node', ['test/viewmodel.js']],
+  // v0.10.1（报告3 M-3）：代码高亮的字符串分支（原文切 token + 逐段转义，XSS 安全）
+  ['highlight', 'node', ['test/highlight.js']],
   // v0.6.41 §1.1 B1：SSE 跳号 → 整窗重取（streamSeq 与 eventSeq 两套编号域，B1 只用前者）
   ['seq-gap', 'node', ['test/seq-gap.js']],
   // v0.7.0 §1.5：文案/预测层（从 agent.js 切出到 messages.js，行为逐字不变）
@@ -91,6 +98,8 @@ const SUITES = [
   ['event-completeness', 'node', ['test/event-completeness.js']],
   // v0.6.42：双读对拍工具（含主入口守卫的符号链接回归）
   ['event-parity', 'node', ['test/event-parity.js']],
+  // v0.10.1（报告3 H-3）：符号链接能力探测 helper 自身（ENOSPC/EPERM 注入、只探测一次）
+  ['link-support', 'node', ['test/link-support.js']],
   // v0.7.0 B2-b：事件读取真源灰度开关（默认 messages / events 对拍兜底与静默回退）
   ['event-source', 'node', ['test/event-source.js']],
   // v0.6.45：签名发布计划的纯逻辑（只发本版安装包签名）
@@ -101,6 +110,8 @@ const SUITES = [
   ['session-events', 'node', ['test/session-events.js']],
   // v0.7.1 审计收口（四份报告）
   ['session-read-path', 'node', ['test/session-read-path.js']],
+  // v0.10.1（报告2 M-06）：删除/改名必须原子清理/搬迁全部侧车（事件日志/两把锁/任务检查点）
+  ['session-sidecars', 'node', ['test/session-sidecars.js']],
   ['turn-outcome', 'node', ['test/turn-outcome.js']],
   ['model-discovery-parallel', 'node', ['test/model-discovery-parallel.js']],
   ['sse-backpressure', 'node', ['test/sse-backpressure.js']],

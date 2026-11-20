@@ -143,17 +143,28 @@ const LEDGER_PERMISSION_SOURCE = /** @type {Record<string, string>} */ ({ webui:
  *   · **用户自己选 auto 是正当的**：显式选择是终值，预设既不能借"更保守"静默压低它，也不能提权；
  *   · 非法/缺失的显式值一律忽略（回落预设/配置），绝不 fail-open。
  *
- * @param {{ preset?: any, explicit?: any, configPermission?: any }} [input]
+ * v0.10.1（审计 H-10，已核实成立）：**无令牌（本机信任模式）时请求体不得把权限提升到 auto**。
+ * `/api/chat` 的显式 permission 此前是最高优先级且**从不检查 authEnabled**——同机任意进程发一个
+ * `{"permission":"auto"}` 就能让 Agent 整轮免确认执行（而 POST /api/config 早就以同一理由 403）。
+ * 现在 `authEnabled` 不是 true 且 config.json 本身不是 auto 时，显式 auto **不生效**：回落预设/配置
+ * 并把原因写进 banner（`bodyEscalationRefused`）——这是"降级 ask/readonly + 明确说明"，不是静默忽略。
+ * `authEnabled` 默认 true：其它调用方（/api/state、纯函数测试）语义不变。
+ *
+ * @param {{ preset?: any, explicit?: any, configPermission?: any, authEnabled?: boolean }} [input]
  * @returns {{ permission: any, mode: string, source: 'webui'|'preset'|'config', sourceLabel: string,
  *            presetNote: string|null, escalated: boolean, usePresetPermission: boolean, baseMode: string, banner: string }}
  */
-export function resolveTurnPermission({ preset = null, explicit = null, configPermission = 'ask' } = {}) {
+export function resolveTurnPermission({ preset = null, explicit = null, configPermission = 'ask', authEnabled = true } = {}) {
   const norm = (/** @type {any} */ v) => {
     const m = v && typeof v === 'object' ? String(v.mode ?? '') : String(v ?? '');
     return PERMISSION_MODES.has(m) ? m : null;
   };
-  const explicitMode = PERMISSION_MODES.has(String(explicit)) ? String(explicit) : null;
+  const explicitModeRaw = PERMISSION_MODES.has(String(explicit)) ? String(explicit) : null;
   const configMode = norm(configPermission) ?? 'ask';
+  // v0.10.1 H-10：判定与文案的单一来源是 chatPermissionBodyRejection（纯函数，可单测）。
+  // 预设**只能收紧不能提权**（presetPermissionOverride），所以基准取 configMode 已足够。
+  const bodyEscalationRefused = chatPermissionBodyRejection({ explicit: explicitModeRaw, authEnabled, baselineMode: configMode });
+  const explicitMode = bodyEscalationRefused ? null : explicitModeRaw;
   const declared = preset && preset.permission !== undefined && PERMISSION_MODES.has(String(preset.permission)) ? String(preset.permission) : null;
   const presetName = String(preset?.name ?? '');
   const RANK = /** @type {Record<string, number>} */ ({ readonly: 0, ask: 1, auto: 2 });
@@ -163,6 +174,8 @@ export function resolveTurnPermission({ preset = null, explicit = null, configPe
     const mode = norm(permission) ?? 'ask';
     const sourceLabel =
       source === 'webui' ? 'WebUI 显式选择' : source === 'preset' ? `预设 ${presetName}` : 'config.json';
+    // 被拒绝的请求体提权必须在 banner 里说出来（否则用户以为 auto 生效了，实际按 ask/readonly 跑）
+    const refusalNote = bodyEscalationRefused ? `；⚠ ${bodyEscalationRefused}` : '';
     return {
       permission,
       mode,
@@ -172,7 +185,7 @@ export function resolveTurnPermission({ preset = null, explicit = null, configPe
       escalated,
       usePresetPermission: source === 'preset',
       baseMode,
-      banner: `🔐 本会话权限：${mode}（来源：${sourceLabel}）——${PERM_HINT[mode]}${presetNote ? `；${presetNote}` : ''}`,
+      banner: `🔐 本会话权限：${mode}（来源：${sourceLabel}）——${PERM_HINT[mode]}${presetNote ? `；${presetNote}` : ''}${refusalNote}`,
     };
   };
   // ① 显式选择：终值。预设只保留"它想提权"这个信号（安全告警不能因为用户恰好选了更宽的档就消失）
@@ -191,6 +204,38 @@ export function resolveTurnPermission({ preset = null, explicit = null, configPe
   const ov = presetPermissionOverride(preset, configPermission);
   if (ov.escalated) return build(ov.permission, 'config', null, true);
   return build(ov.permission, 'preset', null, false);
+}
+
+/**
+ * v0.10.1（遗留安全批：v0.8.1 自审 H-10，已核实成立）：`POST /api/chat` 请求体**能不能把权限提升到 auto**？
+ *
+ * 缺陷：`resolveTurnPermission` 把请求体里的显式 `permission` 当最高优先级，而 /api/chat 这条路径
+ * **从不检查 authEnabled**。无令牌＝本机信任模式（回环 + 无 token：同机任意进程都能 POST /api/chat
+ * 并自行应答权限确认）——于是一个本地进程只需 `{"message":"…","permission":"auto"}` 就能让 Agent
+ * 整轮免确认执行 bash/fs 工具。这与 POST /api/config 的既有闸门自相矛盾：config 路径早就写明
+ * 「无令牌不得改 auto」并 403（routes/domains/config.js 的 PERMISSION_AUTO_REQUIRES_TOKEN），
+ * chat 路径却是敞开的（审计报告 2 的 H-10 / 自审报告的 972、978、990 行证据）。
+ *
+ * 修法（只收紧）：无令牌 + config.json 本身不是 auto 时，请求体显式 auto **不生效**——
+ * 回落预设/配置（降级 ask/readonly）并在 banner 里写明被拒原因；配置路径的语义照旧（403）。
+ * 允许 auto 的两条路都是"已授权来源"，不是同机任意进程的临时请求体：
+ *   · 配置了访问令牌（authEnabled=true）：请求方必须持有 token 才能走到这里；
+ *   · config.json 本来就写着 permission=auto：那是用户写进文件的设置（`baselineMode` 传入），不拦。
+ * 纯函数（便于单测）；调用点是 resolveTurnPermission（返回 null 表示允许显式 auto）。
+ * @param {{ explicit?: any, authEnabled?: boolean, baselineMode?: string }} [input]
+ * @returns {string|null} 拒绝原因（null = 允许请求体中的显式权限）
+ */
+export function chatPermissionBodyRejection({ explicit = null, authEnabled = false, baselineMode = '' } = {}) {
+  const mode = PERMISSION_MODES.has(String(explicit)) ? String(explicit) : null;
+  if (mode !== 'auto') return null; // 只拦"提升到 auto"；ask/readonly 都是收紧，任何情况都允许
+  if (authEnabled === true) return null; // 有令牌：请求方已通过鉴权
+  if (String(baselineMode) === 'auto') return null; // config/预设本来授权 auto（文件设置，不是请求体提权）
+  return (
+    '未配置访问令牌：本机信任模式下不能通过 /api/chat 请求体把权限提升为 auto' +
+    '（同机任意进程都可 POST /api/chat 并自行应答权限确认，等于把确认这道门整个移除）。' +
+    '请先启用访问令牌（mingdao web --auth-token <令牌>，或 config.json 的 web.token / 环境变量 MINGDAO_WEB_TOKEN）；' +
+    '或在 config.json 里显式写 permission=auto 后重试。'
+  );
 }
 
 /** @param {any} res @param {any} code @param {any} obj */
@@ -975,7 +1020,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
     let chatPreset = /** @type {any} */ (null);
     let presetBlock = '';
     let chatCfg = cfg;
-    let turnPerm = resolveTurnPermission({ explicit: explicitPermission, configPermission: cfg.permission ?? 'ask' });
+    let turnPerm = resolveTurnPermission({ explicit: explicitPermission, configPermission: cfg.permission ?? 'ask', authEnabled });
     if (typeof body.preset === 'string' && body.preset) {
       const { loadPreset, presetConfigOverrides, presetSystemBlock } = await import('../presets.js');
       chatPreset = loadPreset(taskDir, body.preset);
@@ -987,7 +1032,7 @@ export async function runWebServer({ host = '127.0.0.1', port = 3820, authToken,
         }
         const over = presetConfigOverrides(chatPreset);
         // P0（v0.4.1）：预设 permission 提权防护——不得把 ask/readonly 静默改成 auto
-        turnPerm = resolveTurnPermission({ preset: chatPreset, explicit: explicitPermission, configPermission: cfg.permission ?? 'ask' });
+        turnPerm = resolveTurnPermission({ preset: chatPreset, explicit: explicitPermission, configPermission: cfg.permission ?? 'ask', authEnabled });
         if (turnPerm.escalated) {
           send({
             type: 'banner',

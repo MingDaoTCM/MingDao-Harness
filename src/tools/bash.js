@@ -36,6 +36,32 @@ export function buildChildEnv(/** @type {any} */ ctx, /** @type {any} */ filterS
 
 let /** @type {any} */ sandboxSupport = null;
 
+// ── v0.10.1（遗留安全批：v0.8.1 审计 H-1）沙箱降级必须**用户可见** ──────────────────────
+//
+// 旧行为：沙箱不可用时只往结果里塞一句 `note` 就继续直接执行。问题是 note 只在 JSON 结果里，
+// CLI 的 bash 展示只读 stdout/stderr、WebUI 的工具卡也只呈现命令输出——**用户界面上一个字都看不到**：
+// 用户以为自己选了 safe/readonly，实际命令是全权限直跑的。这是"控制存在、状态被隐藏"的典型
+// （审计原话：用户以为在 safe 沙箱里，实际全权限执行）。
+//
+// 现在同一句披露**同时**出现在两处，来源只有这一个常量（避免两处文案漂移）：
+//   ① 结果 stdout 首行（用户可见；也进模型上下文，模型能据此判断命令没被隔离）；
+//   ② 结果 note（状态/日志/账本取证可查）。
+// 判定是纯函数 + 导出，便于单测覆盖"降级时出现 / 正常时不出现"两侧。
+export const SANDBOX_DEGRADED_NOTICE = '⚠ 沙箱不可用：本次命令未隔离执行';
+
+/**
+ * 沙箱降级披露文案：请求了 sandbox（非 off）但最终落到 off 时返回披露行，否则返回空串。
+ * **正常路径必须返回空串**——沙箱可用时多一行噪音同样会让用户怀疑披露的可信度。
+ * @param {any} mode 配置/显式请求的沙箱模式
+ * @param {any} sandbox 实际生效的模式（'off' = 未隔离）
+ * @returns {string}
+ */
+export function sandboxDegradedDisclosure(/** @type {any} */ mode, /** @type {any} */ sandbox) {
+  const m = String(mode ?? '').trim();
+  const s = String(sandbox ?? 'off').trim() || 'off';
+  return m && m !== 'off' && s === 'off' ? SANDBOX_DEGRADED_NOTICE : '';
+}
+
 export function detectSandbox() {
   if (/** @type {any} */ sandboxSupport !== null) return /** @type {any} */ sandboxSupport;
   sandboxSupport = 'none';
@@ -246,9 +272,15 @@ export function runBash(/** @type {any} */ args, /** @type {any} */ ctx) {
     spawnArgs = base;
     sandbox = mode;
   } else if (mode !== 'off') {
-    note = `沙箱模式 "${mode}" 不可用（需要 Linux + bubblewrap），已降级为直接执行。`;
+    // 降级：note 与 stdout 披露在下面统一生成（单一来源 SANDBOX_DEGRADED_NOTICE）
     sandbox = 'off';
   }
+  // v0.10.1（审计 H-1）：降级时把披露写进 stdout 首行（用户可见）+ note（状态可查）；
+  // 正常（沙箱生效或本来就没请求沙箱）时 disclosure 为空串，结果与旧版逐字一致。
+  const disclosure = sandboxDegradedDisclosure(mode, sandbox);
+  if (disclosure) note = `${disclosure}（请求的 "${mode}" 沙箱不可用：需要 Linux + bubblewrap，已降级为直接执行）。`;
+  /** @param {string} text */
+  const withDisclosure = (text) => (disclosure ? `${disclosure}\n${text}` : text);
 
   return new Promise((resolve) => {
     const child = spawn(spawnCmd, spawnArgs, {
@@ -295,7 +327,7 @@ export function runBash(/** @type {any} */ args, /** @type {any} */ ctx) {
         timedOut,
         sandbox,
         note: timedOut ? '命令超时，已强杀进程组' : '输出管道未释放，已清理子进程组',
-        stdout: tail(outCap.text(), MAX_OUTPUT),
+        stdout: withDisclosure(tail(outCap.text(), MAX_OUTPUT)),
         stderr: tail(errCap.text(), MAX_OUTPUT),
       });
     }, timeoutSec * 1000 + 3000);
@@ -320,7 +352,7 @@ export function runBash(/** @type {any} */ args, /** @type {any} */ ctx) {
         timedOut,
         sandbox,
         note: note || undefined,
-        stdout: tail(outCap.text(), MAX_OUTPUT),
+        stdout: withDisclosure(tail(outCap.text(), MAX_OUTPUT)),
         stderr: tail(errCap.text(), MAX_OUTPUT),
       });
     });

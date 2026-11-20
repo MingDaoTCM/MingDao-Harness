@@ -63,17 +63,37 @@ export function splitShellSegments(/** @type {any} */ cmd) {
 // 明确的边界：`find / -delete`、脚本文件（`bash evil.sh`）、`$VAR` 展开、自定义包装器
 // 仍然判不出来——它们在字符串层面**不可静态判定**。这里的承诺是「同一 argv 的常见书写
 // 形态不漏」，不是「语义级沙箱」；需要硬边界请用 denyStrict + 沙箱（见 docs/CONFIG.md）。
+//
+// v0.10.1（遗留安全批：v0.8.1 报告 H-2/H-3，连续两个版本未修）补两个缺口：
+//   ① **提权型包装器**（su/runuser/pkexec/chroot/nsenter/unshare/capsh）此前不在前缀表里，
+//      `pkexec rm -rf /`、`su -c 'rm -rf /'`、`chroot /srv rm -rf /` 归一后 argv[0] 仍是包装器，
+//      deny 规则全部失配 → 直达执行；其中 `-c`/`--command` 的值是命令串，走 visitText 再分词。
+//   ② **Windows shell 写法**：命令名大小写不敏感（`CMD.EXE`）、`cmd /c` / `cmd.exe /C`、
+//      powershell `-Command` 的 /c 之后才是真命令，此前完全不归一 → 软 deny 失配。
 
 /** shell 可执行名：`sh -c '<真命令>'` 一类写法要把参数里的命令再归一一次。 */
 const SHELL_NAMES = new Set(['sh', 'bash', 'zsh', 'dash', 'ksh', 'mksh', 'ash', 'fish', 'csh', 'tcsh', 'pwsh', 'powershell', 'cmd']);
 
 /**
- * 包装器前缀表：键是包装器的 basename。
+ * 包装器前缀表：键是包装器的 basename（**大小写不敏感**，见 visitTokens 的 baseLower）。
  *  `shortValue`：需要**独立下一个参数**作值的短选项（`-u x`、`-n 5`）；
  *  `longValue`：需要独立下一个参数作值的长选项（`--user x`；`--user=x` 自带值，不消耗下一个）；
- *  `skipOperand`：剥完选项后再跳过一个操作数（`timeout 5 rm` 里的 `5`）。
- * 只列「会改变真命令位置」的选项；其余选项按无值选项跳过（保守：宁可少判一个参数，不能错位）。
- * @type {Record<string, { shortValue?: string[], longValue?: string[], skipOperand?: boolean }>}
+ *  `optionalValue`：**参数可选**的选项（`nsenter -m[=file]`）。两种解释都要试——见下方原则；
+ *  `commandValue`：值是**一条命令串**的选项（`su -c '<命令>'`、`env -S '<命令>'`），必须像 shell
+ *    文本那样**再分词归一化**（否则引号里的 `rm -rf /` 永远只是包装器的参数）；
+ *  `skipOperand`：剥完选项后再跳过一个操作数（`timeout 5 rm` 里的 `5`、`chroot NEWROOT`）；
+ *  `shellStyle`：选项之后是 `[--] -c '<命令>'` 形态（capsh），`-c` 的值才是真命令。
+ *
+ * 取值方向的**原则（fail-closed）**：不确定某个选项是否吃一个值时就**当作吃值**，或两种解释都试；
+ * 只列会改变真命令位置的选项。**确定不吃值**的选项（如 `pkexec --disable-internal-agent`、
+ * `unshare -m` 的短形态）绝不登记成吃值——否则会把后面的真命令当成它的值吞掉。
+ * 对参数可选的选项（nsenter 的 `-m[=file]`）这里不做单边猜测：扫描器会**同时**产出「带值 /
+ * 不带值」两条候选路径，任一条命中 deny 即拒——单边"当作吃值"会把 `nsenter -m rm -rf /` 的 rm
+ * 吞掉（漏判），单边"当作不吃值"会把 `nsenter -m /proc/1/ns/mnt rm -rf /` 的文件名当命令（同样漏判）。
+ * @type {Record<string, {
+ *   shortValue?: string[], longValue?: string[], optionalValue?: { short?: string[], long?: string[] },
+ *   commandValue?: { short?: string[], long?: string[] }, skipOperand?: boolean, shellStyle?: boolean,
+ * }>}
  */
 const WRAPPER_PREFIXES = {
   env: { shortValue: ['-u', '-C'], longValue: ['--unset', '--chdir'] },
@@ -98,6 +118,49 @@ const WRAPPER_PREFIXES = {
   },
   watch: { shortValue: ['-n'], longValue: ['--interval'] },
   busybox: {},
+  // ── v0.10.1（遗留安全批，v0.8.1 报告 H-3 / 报告一 P1）：提权型包装器 ──────────────
+  // 这组缺项不是"少判一个参数"，而是 **deny 规则看不见真正要执行的命令**：
+  // `pkexec rm -rf /`、`su -c 'rm -rf /'`、`chroot /srv rm -rf /`、`runuser -u x -- rm -rf /`
+  // 归一化后 argv[0] 仍是包装器本身，于是 `deny:['bash:rm *']` 全部失配 → auto 档零确认执行。
+  //
+  // su / runuser：`-c` / `--command` / `--session-command` 的值是**一条命令串**，走 commandValue
+  // （与 env -S 同一条通道再分词）；`-s/-g/-G/-u/-w` 与对应长选项吃值；`-l/-p/-m` 不吃值。
+  su: {
+    shortValue: ['-s', '-g', '-G', '-u', '-w'],
+    longValue: ['--shell', '--group', '--supplementary-group', '--supp-group', '--user', '--whitelist-environment'],
+    commandValue: { short: ['-c', '-C'], long: ['--command', '--session-command'] },
+  },
+  runuser: {
+    shortValue: ['-s', '-g', '-G', '-u', '-w'],
+    longValue: ['--shell', '--group', '--supplementary-group', '--supp-group', '--user', '--whitelist-environment'],
+    commandValue: { short: ['-c', '-C'], long: ['--command', '--session-command'] },
+  },
+  // pkexec [--user username] [--disable-internal-agent] PROGRAM [ARG...]：PROGRAM 是**第一个操作数**
+  // （没有 skipOperand）。--disable-internal-agent 确定不吃值——登记成吃值会吞掉 PROGRAM。
+  pkexec: { longValue: ['--user'] },
+  // chroot [OPTION] NEWROOT [COMMAND [ARG]...]：NEWROOT 是操作数（skipOperand），
+  // COMMAND 及其后才是要归一的真命令；--skip-chdir 不吃值。
+  chroot: { longValue: ['--userspec', '--groups'], skipOperand: true },
+  // nsenter [options] [program [arguments]]：-m/-u/-i/-n/-p/-U/-C/-T 的文件名**可选**（optionalValue，
+  // 两条路径都试）；-t/-S/-G/-r/-w 必吃值；--all/--preserve-credentials/--no-fork 不吃值。
+  nsenter: {
+    shortValue: ['-t', '-S', '-G', '-r', '-w'],
+    longValue: ['--target', '--setuid', '--setgid', '--root', '--wd'],
+    optionalValue: { short: ['-m', '-u', '-i', '-n', '-p', '-U', '-C', '-T'], long: ['--mount', '--uts', '--ipc', '--net', '--pid', '--user', '--cgroup', '--time'] },
+  },
+  // unshare [options] [program [arguments]]：短选项 -m/-u/-i/-n/-p/-U/-C/-T 是**无值开关**
+  // （与 nsenter 不同！），-S/-G/-R/-w 吃值；--mount-proc/--kill-child 的文件/信号可选。
+  unshare: {
+    shortValue: ['-S', '-G', '-R', '-w'],
+    longValue: ['--setuid', '--setgid', '--root', '--wd', '--map-user', '--map-group', '--map-users', '--map-groups', '--setgroups', '--propagation'],
+    optionalValue: { long: ['--mount-proc', '--kill-child'] },
+  },
+  // capsh [options] [-- ARGS]：`-- ARGS` 交给 shell 执行；`capsh -- -c 'rm -rf /'` 的 -c 值才是真命令
+  // （shellStyle）。不带 `--` 时只剩选项，没有可执行命令。
+  capsh: {
+    longValue: ['--user', '--uid', '--gid', '--groups', '--cap-set', '--drop', '--inh', '--addamb', '--caps', '--keep', '--decode', '--shell', '--suppress', '--explain', '--mode'],
+    shellStyle: true,
+  },
 };
 
 /** 递归归一深度上限：超过就停（避免病态嵌套把这里变成 CPU 热点）。 */
@@ -211,13 +274,29 @@ export function canonicalizeCommand(/** @type {any} */ cmd, /** @type {any} */ o
     while (toks.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[0])) toks = toks.slice(1);
     if (!toks.length) return;
     const base = basenameOfCommand(toks[0]);
+    // v0.10.1（v0.8.1 审计 H-2）：命令名比较**大小写不敏感**（与 deny 匹配同口径）。
+    // Windows 的 `CMD.EXE`、`BASH` 都必须识别为同一个可执行文件——否则换个大写就能绕过归一化。
+    const baseLower = base.toLowerCase();
     // ② shell 的 -c（含 -lc / -xc 等捆绑形态）与 eval：真命令在参数里，递归拆
-    if (SHELL_NAMES.has(base)) {
+    if (SHELL_NAMES.has(baseLower)) {
       if (!shellScripts) {
         add(toks);
         return;
       }
-      const ci = toks.findIndex((t, i) => i > 0 && /^-[A-Za-z]*c[A-Za-z]*$/.test(t));
+      // v0.10.1（v0.8.1 审计 H-2）：此前只认小写 `-c` 形态，不认 Windows 的 `cmd /c` / `cmd.exe /C`，
+      // 于是 `cmd /c "rm -rf /"`、`CMD /C "..."` 的真命令完全不被归一 —— 软 deny（auto 档唯一防线）
+      // 直接失配。判据按 shell 家族区分，避免"一律忽略大小写"把 POSIX 的其它短选项误当 -c：
+      //   · POSIX shell：小写 `-c`（含 -lc/-xc 捆绑）；`-C` 在 bash 里是 noclobber，不是执行命令，
+      //     若把它当 -c，`bash -C -c 'rm -rf /'` 会归一错位（反而漏判）。
+      //   · cmd：`/c`（大小写不敏感，也要认 `cmd.exe`；/d /s /c 这类前置开关不影响找 /c）。
+      //   · powershell/pwsh：`-Command`/`-c` 大小写不敏感（PowerShell 参数本身就不区分大小写）。
+      const ci = toks.findIndex((t, i) => {
+        if (i === 0) return false;
+        if (/^-[A-Za-z]*c[A-Za-z]*$/.test(t)) return true;
+        if (baseLower === 'cmd') return /^\/[A-Za-z]*c[A-Za-z]*$/i.test(t);
+        if (baseLower === 'powershell' || baseLower === 'pwsh') return /^-[A-Za-z]*c[A-Za-z]*$/i.test(t);
+        return false;
+      });
       if (ci > 0 && toks[ci + 1] !== undefined) {
         visitText(toks.slice(ci + 1).join(' '), depth + 1);
         return;
@@ -225,7 +304,7 @@ export function canonicalizeCommand(/** @type {any} */ cmd, /** @type {any} */ o
       add(toks);
       return;
     }
-    if (base === 'eval') {
+    if (baseLower === 'eval') {
       if (!shellScripts) {
         add(toks);
         return;
@@ -235,48 +314,138 @@ export function canonicalizeCommand(/** @type {any} */ cmd, /** @type {any} */ o
       return;
     }
     // ③ 包装器前缀：跳过包装器自身的选项/赋值，再递归归一其后的真命令
-    const spec = WRAPPER_PREFIXES[base];
+    const spec = WRAPPER_PREFIXES[baseLower];
     if (spec) {
       // `env -S 'rm -rf /'`：值本身就是一条命令串（GNU coreutils 的 split-string）
-      if (base === 'env') {
+      if (baseLower === 'env') {
         const si = toks.findIndex((t) => t === '-S' || t === '--split-string');
         if (si > 0 && toks[si + 1] !== undefined) {
           visitText(toks[si + 1], depth + 1);
           toks = [...toks.slice(0, si), ...toks.slice(si + 2)];
         }
       }
-      let i = 1;
-      while (i < toks.length) {
-        const t = toks[i];
-        if (t === '--') {
-          i += 1;
-          break;
-        }
-        if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) {
-          i += 1;
-          continue;
-        }
-        if (t.startsWith('--')) {
-          const name = t.split('=')[0];
-          i += spec.longValue?.includes(name) && !t.includes('=') ? 2 : 1;
-          continue;
-        }
-        if (t.startsWith('-') && t !== '-') {
-          const chars = t.slice(1);
-          let needsValue = false;
-          for (let k = 0; k < chars.length; k++) {
-            if (spec.shortValue?.includes('-' + chars[k])) {
-              needsValue = k === chars.length - 1;
-              break;
+      // v0.10.1（v0.8.1 审计 H-3）：`-c`/`--command` 的值是**一条命令串**（su/runuser），
+      // 必须先整串扫一遍：用户名操作数可能出现在选项之前（`su root -c '…'`、`su - root -c '…'`），
+      // 按位置逐个剥选项会在第一个操作数处提前 break，从而漏掉 -c 的值。
+      // 与 env -S 走同一条 visitText（再按 shell 分词）通道。
+      if (spec.commandValue) {
+        const cvShort = spec.commandValue.short || [];
+        const cvLong = spec.commandValue.long || [];
+        for (let k = 1; k < toks.length; k++) {
+          const t = toks[k];
+          if (t === '--') break; // 选项区结束：之后的 -c 是传给目标 shell 的参数，不再当本命令的选项
+          if (t.startsWith('--')) {
+            const name = t.split('=')[0];
+            if (!cvLong.includes(name)) continue;
+            const eq = t.indexOf('=');
+            if (eq > 0) visitText(t.slice(eq + 1), depth + 1);
+            else if (toks[k + 1] !== undefined) {
+              visitText(toks[k + 1], depth + 1);
+              k += 1;
+            }
+            continue;
+          }
+          if (t.startsWith('-') && t !== '-' && /^-[A-Za-z]*c[A-Za-z]*$/.test(t)) {
+            // 只认登记过的短选项，且仅当它是捆绑形态的**末位**字符时才吃下一个参数
+            if (!cvShort.includes('-' + t.slice(-1))) continue;
+            if (toks[k + 1] !== undefined) {
+              visitText(toks[k + 1], depth + 1);
+              k += 1;
             }
           }
-          i += needsValue ? 2 : 1;
-          continue;
         }
-        break; // 第一个非选项 = 真命令
       }
-      if (spec.skipOperand && i < toks.length) i += 1;
-      visitTokens(toks.slice(i), depth + 1);
+      // 扫描所有可能的「真命令起始下标」。不用单边 break：参数可选的选项（nsenter 的
+      // `-m[=file]`）会产生「带值 / 不带值」两条分支，两条都归一并交给 deny 判定
+      // （fail-closed：任一条命中即拒；单边猜测两边都可能漏掉真命令）。
+      /** @type {number[]} */
+      const terminals = [];
+      /** @type {number[]} */
+      let starts = [1];
+      for (let guard = 0; guard < 32 && starts.length; guard++) {
+        /** @type {number[]} */
+        const next = [];
+        /** @param {number} i */
+        const push = (i) => {
+          if (next.length < 32 && !next.includes(i)) next.push(i);
+        };
+        for (const i of starts) {
+          if (i >= toks.length) {
+            terminals.push(i);
+            continue;
+          }
+          const t = toks[i];
+          if (t === '--') {
+            // `--` 之后全部是操作数/命令：直接收口（旧实现也是 break）。
+            // 对 capsh 尤其关键：`capsh -- -c 'rm'` 的 `-c` 在 `--` 之后，若继续按选项扫会把它跳过。
+            terminals.push(i + 1);
+            continue;
+          }
+          if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(t)) {
+            push(i + 1);
+            continue;
+          }
+          if (t.startsWith('--')) {
+            const name = t.split('=')[0];
+            const inline = t.includes('=');
+            if (inline) {
+              push(i + 1);
+              continue;
+            }
+            if ((spec.commandValue?.long || []).includes(name) || (spec.longValue || []).includes(name)) {
+              push(i + 2);
+              continue;
+            }
+            if ((spec.optionalValue?.long || []).includes(name)) {
+              push(i + 1);
+              push(i + 2);
+              continue;
+            }
+            push(i + 1);
+            continue;
+          }
+          if (t.startsWith('-') && t !== '-') {
+            const chars = t.slice(1);
+            /** @type {'none'|'value'|'optional'} */
+            let kind = 'none';
+            for (let k = 0; k < chars.length; k++) {
+              const opt = '-' + chars[k];
+              const last = k === chars.length - 1;
+              if ((spec.commandValue?.short || []).includes(opt) || (spec.shortValue || []).includes(opt)) {
+                kind = last ? 'value' : 'none';
+                break;
+              }
+              if ((spec.optionalValue?.short || []).includes(opt)) {
+                kind = last ? 'optional' : 'none';
+                break;
+              }
+            }
+            if (kind === 'value') push(i + 2);
+            else if (kind === 'optional') {
+              push(i + 1);
+              push(i + 2);
+            } else push(i + 1);
+            continue;
+          }
+          terminals.push(i); // 第一个非选项 = 真命令起点
+        }
+        starts = next;
+      }
+      for (const i of starts) terminals.push(i);
+      // skipOperand（timeout 的时长 / chroot 的 NEWROOT）只跳过**存在**的那个操作数
+      const cmdStarts = new Set(spec.skipOperand ? terminals.map((i) => (i < toks.length ? i + 1 : i)) : terminals);
+      for (const i of cmdStarts) {
+        if (i >= toks.length) continue;
+        if (spec.shellStyle) {
+          // capsh -- -c '<命令>'：`--` 之后交给 shell，-c 的值才是真命令
+          const ci2 = toks.findIndex((t, k) => k >= i && /^-[A-Za-z]*c[A-Za-z]*$/.test(t));
+          if (ci2 >= i) {
+            if (toks[ci2 + 1] !== undefined) visitText(toks.slice(ci2 + 1).join(' '), depth + 1);
+            continue;
+          }
+        }
+        visitTokens(toks.slice(i), depth + 1);
+      }
       return;
     }
     add(toks);
@@ -358,7 +527,14 @@ function ruleMatches(rule, name, args, forDeny = false, denyStrict = false) {
       // 要真正的硬拦截请显式开 `denyStrict: true`（见 normalizePermission 注释）。
       // 方向是 fail-closed：宁可多拦（多问一次），不可漏拦。
       const segs = splitShellSegments(have);
-      const literalHit = segs.some((seg) => (want.endsWith('*') ? seg.startsWith(want.slice(0, -1)) : seg === want));
+      // v0.10.1（v0.8.1 审计 H-2）：字面匹配也改为**大小写不敏感**，与归一化匹配（denyTextMatches）
+      // 同口径——Windows 命令名不区分大小写，deny 里写 `rm` 时 `RM -RF /` 必须同样被拦；
+      // 方向只收紧（原来能匹配的继续匹配，不会放行任何原先被拦的命令）。
+      const wantLow = want.toLowerCase();
+      const literalHit = segs.some((seg) => {
+        const s = seg.toLowerCase();
+        return wantLow.endsWith('*') ? s.startsWith(wantLow.slice(0, -1)) : s === wantLow;
+      });
       if (literalHit) return true;
       // v0.6.30（C1）：字面匹配之后**必须**再跑一遍归一化匹配——
       // 绝对路径 / 包装前缀 / 前缀赋值 / 引号转义 / `sh -c` 的绕过都在这一步被堵住。
@@ -426,7 +602,10 @@ export function normalizePermission(/** @type {any} */ rawMode) {
 // 语义上不该存在"换个写法就直达"的通道 —— 于是这里对包装形态直接拒绝。
 // v0.6.30（C1）：`-c` 的判定补上**捆绑形态**（`-lc` / `-xc` / `-ec`；Windows 的 `cmd /c`）——
 // 原正则只认 `-c`，`bash -lc 'rm -rf /x'` 因此在 denyStrict 下也不算"包装执行"（实测放行）。
-const SHELL_WRAPPER = /(^|\s|;|&&|\|\||\|)(sh|bash|zsh|dash|ksh|cmd|powershell|pwsh)\s+(-[A-Za-z]*c[A-Za-z]*|\/c)\b|(^|\s|;|&&|\|\||\|)eval\b|(^|\s|;|&&|\|\||\|)command\s+-v\b/i;
+// v0.10.1（v0.8.1 审计 H-2）：再补 Windows 的两处写法——`cmd.exe`/`powershell.exe`（带扩展名）与
+// `cmd /d /s /c`（/c 之前的开关）。大小写本来就有 /i（`CMD /C` 也认）；这条只用于 denyStrict 的
+// 「包装形态整体拒绝」，普通 deny 的归一化走 canonicalizeCommand（同一份 H-2 修复在那边）。
+const SHELL_WRAPPER = /(^|\s|;|&&|\|\||\|)(sh|bash|zsh|dash|ksh|cmd(?:\.exe)?|powershell(?:\.exe)?|pwsh)\s+(?:-[A-Za-z]*c[A-Za-z]*|(?:\/[A-Za-z]+\s+)*\/c)\b|(^|\s|;|&&|\|\||\|)eval\b|(^|\s|;|&&|\|\||\|)command\s+-v\b/i;
 
 /**
  * @param {any} rawMode @param {any} name @param {any} args
