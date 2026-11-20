@@ -63,6 +63,18 @@ export function sandboxDegradedDisclosure(/** @type {any} */ mode, /** @type {an
 }
 
 export function detectSandbox() {
+  // v0.10.1（可测试性注入缝，CI 逃逸根因的修复）：`MINGDAO_SANDBOX=none` 强制判定为"沙箱不可用"。
+  //
+  // 为什么必须有：沙箱降级披露只在"请求了 safe/readonly 但实际落到 off"时出现，而 CI 的
+  // ubuntu runner **自带 bwrap**——按宿主能力分支，这条降级路径在 CI 上永不执行，
+  // 变异闸门 batch93-security ⑧（删掉 stdout 披露）因此静默逃逸；本机 macOS 无 bwrap 所以
+  // 本地全中，两边结论相反。给测试一个**与环境无关**的确定性开关，才能让"降级必须披露"
+  // 在开发机与 CI 上都被真正验证。
+  //
+  // 边界：只认 `none`（其它值一律忽略，不做"强制 bwrap"之类的越权模拟）；只影响能力判定，
+  // 不改命令执行路径；不读用户配置，必须显式设环境变量，默认行为逐字不变。排障时也可用它
+  // 复现"无沙箱环境"的用户路径。
+  if (String(process.env.MINGDAO_SANDBOX || '').trim() === 'none') return 'none';
   if (/** @type {any} */ sandboxSupport !== null) return /** @type {any} */ sandboxSupport;
   sandboxSupport = 'none';
   if (process.platform === 'linux') {

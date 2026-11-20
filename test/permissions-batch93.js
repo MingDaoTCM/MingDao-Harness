@@ -202,19 +202,37 @@ async function testSandboxDisclosure() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mingdao-sbx93-'));
   try {
     await check('C-02 沙箱不可用：结果 stdout 首行 + note 必须披露"未隔离执行"', async () => {
-      const r = await TOOLS.dispatch('bash', { command: 'echo sandbox-disclosure-probe' }, { cwd: tmp, cfg: { sandbox: 'safe' } });
-      assert.equal(r.ok, true, `bash 应执行成功：${JSON.stringify(r).slice(0, 200)}`);
-      assert.ok(String(r.stdout).includes('sandbox-disclosure-probe'), '命令本身必须真的执行');
-      if (BASH.detectSandbox() === 'bwrap') {
-        // 沙箱真的可用（Linux + bwrap）：不得出现降级披露，且状态必须是请求的模式
-        assert.equal(r.sandbox, 'safe', '沙箱可用时 sandbox 状态必须是请求的 safe');
-        assert.equal(String(r.stdout).includes('沙箱不可用'), false, '沙箱可用时不得出现降级披露');
-        assert.equal(String(r.note || '').includes('沙箱不可用'), false, '沙箱可用时 note 不得出现降级披露');
-      } else {
+      // 用 `MINGDAO_SANDBOX=none` **强制**走"沙箱不可用"路径，不再按宿主能力分支。
+      // 根因（v0.10.1 重打 tag 的直接原因之二）：旧写法按 `detectSandbox()==='bwrap'` 分叉，
+      // 而 GitHub ubuntu runner 自带 bwrap → 降级路径在 CI 上永不执行 →
+      // 变异⑧「删掉 stdout 披露」在 Linux 三腿静默逃逸（本机 macOS 无 bwrap，本地全中）。
+      const prevInject = process.env.MINGDAO_SANDBOX;
+      process.env.MINGDAO_SANDBOX = 'none';
+      try {
+        const r = await TOOLS.dispatch('bash', { command: 'echo sandbox-disclosure-probe' }, { cwd: tmp, cfg: { sandbox: 'safe' } });
+        assert.equal(r.ok, true, `bash 应执行成功：${JSON.stringify(r).slice(0, 200)}`);
+        assert.ok(String(r.stdout).includes('sandbox-disclosure-probe'), '命令本身必须真的执行');
         assert.equal(r.sandbox, 'off', '无 bwrap 时必须如实报告降级为 off');
         assert.ok(String(r.stdout).startsWith(BASH.SANDBOX_DEGRADED_NOTICE), `降级披露必须是 stdout 首行（用户可见），实际：${JSON.stringify(String(r.stdout).slice(0, 120))}`);
         assert.ok(String(r.note || '').includes('未隔离执行'), `note 必须同时带上披露（状态可查），实际：${JSON.stringify(r.note)}`);
+      } finally {
+        if (prevInject === undefined) delete process.env.MINGDAO_SANDBOX;
+        else process.env.MINGDAO_SANDBOX = prevInject;
       }
+    });
+
+    await check('C-02b 反例：沙箱真的可用时不得出现降级披露（本机无 bwrap 时显式跳过）', async () => {
+      // 与 C-02 配对的反例：环境支持沙箱时必须走"正常路径"，不出现任何降级噪音。
+      // CI ubuntu（自带 bwrap）会真正执行这一支；macOS/无 bwrap 的机器显式跳过（不静默）。
+      if (BASH.detectSandbox() !== 'bwrap') {
+        console.log('  ⚠ 已跳过：本机沙箱不可用（需 Linux + bubblewrap）——C-02b 反例');
+        return;
+      }
+      const r = await TOOLS.dispatch('bash', { command: 'echo sandbox-normal-probe' }, { cwd: tmp, cfg: { sandbox: 'safe' } });
+      assert.equal(r.ok, true, `bash 应执行成功：${JSON.stringify(r).slice(0, 200)}`);
+      assert.equal(r.sandbox, 'safe', '沙箱可用时 sandbox 状态必须是请求的 safe');
+      assert.equal(String(r.stdout).includes('沙箱不可用'), false, '沙箱可用时不得出现降级披露');
+      assert.equal(String(r.note || '').includes('沙箱不可用'), false, '沙箱可用时 note 不得出现降级披露');
     });
 
     await check('C-03 正常路径（未请求沙箱）不得出现降级披露', async () => {

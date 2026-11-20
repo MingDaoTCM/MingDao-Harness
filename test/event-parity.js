@@ -59,7 +59,10 @@ const run = (home, scriptPath = script) => spawnSync(process.execPath, [scriptPa
   const home = fixture();
   const linkDir = fs.mkdtempSync(path.join(os.tmpdir(), 'parity-link-'));
   const link = path.join(linkDir, 'repo');
-  const linked = linkSupport.makeLink(root, link);
+  // 显式 type='dir'：目标是仓库根目录。默认 'file' 在 Windows 上会建出"文件型软链指向目录"，
+  // 建链本身不报错、lstat 也仍是符号链接，但后续 Node 解析该路径 stat 会 EPERM →
+  // CI Windows 腿实测「符号链接调用应 exit 0」假红（v0.10.1 重打 tag 的直接原因之一）。
+  const linked = linkSupport.makeLink(root, link, 'dir');
   if (linked) {
     const r = run(home, path.join(link, 'scripts/event-parity.mjs'));
     assert.equal(r.status, 0, `符号链接调用应 exit 0：${r.stderr}`);
