@@ -70,6 +70,20 @@ stdout 首行 + note 都出现「⚠ 沙箱不可用：本次命令未隔离执�
 `desktop:sync` 即该脚本，发布流程 `npm version && npm run desktop:sync` 会顺带改好；
 `postversion` 的 `git add` 纳入 `desktop/package.json` 与 `packs`，bump 后不再残留未提交改动。
 
+### 3.1 门禁空转根治（本版首次 tag 重打的原因）
+
+首次 tag（`92b19fa`）的 CI 五腿有 4 红，均为**测试缺陷**（产品代码无缺陷；npm 尚未发布、官网未部署），
+因此删除 tag/Release 后重打，tag 树重新全绿。
+
+| 红腿 | 根因 | 修法 |
+| --- | --- | --- |
+| Windows | `test/event-parity.js` 的软链用例调用 `makeLink(root, link)` 用了默认 `type='file'`，但目标是目录 → Windows 上建出"文件型软链指向目录"，建链不报错、`lstat` 仍是符号链接，后续 Node 解析却 EPERM → 断言「符号链接调用应 exit 0」假红 | 显式 `type='dir'`（与 `workspace-fence` 一致） |
+| Ubuntu ×3 | CI 变异闸门 `batch93-security` ⑧「沙箱降级披露不再写进结果 stdout」**逃逸**：`test/permissions-batch93.js` C-02 按 `detectSandbox()==='bwrap'` 分支，而 GitHub ubuntu runner 自带 bwrap → 降级路径在 CI 上永不执行（本机 macOS 无 bwrap，本地反而全中） | `detectSandbox()` 增加**只认 `none`** 的显式注入缝 `MINGDAO_SANDBOX=none`（见 `docs/CONFIG.md`）；C-02 用它**确定性**强制"沙箱不可用"，并补 C-02b 反例（沙箱可用时不得出现披露；无 bwrap 显式跳过） |
+
+注入缝**不是静默关沙箱**：它走既有的降级路径，因此仍会打印
+`⚠ 沙箱不可用：本次命令未隔离执行`（stdout 首行 + note），只用于测试/排障；
+默认（未设置）行为逐字不变。
+
 ## 4. 门禁
 
 | 门禁 | 结果 |
@@ -79,11 +93,13 @@ stdout 首行 + note 都出现「⚠ 沙箱不可用：本次命令未隔离执�
 | `node test/smoke.js`（私有 TMPDIR） | ✓ |
 | `node test/run-all.mjs` | **64 套全绿**（新增 5 套：`permissions-batch93` 等） |
 | `npm run mutate:shard` | 4 片全中，**883 条**（新增 `batch93-security`、`batch93-v0101` 共 20 条） |
-| `node scripts/doc-lint.mjs` | ✓ |
+| `node scripts/doc-lint.mjs` | ✓（② 分发 20 个） |
+| CI（tag 树五腿） | **全绿**（Windows/Ubuntu18/20/22/macOS；重打 tag 后复跑） |
 
 ## 5. 未验证 / 边界
 
 - **非管理员 Windows 的 EPERM 路径未在真机验证**（本机是 macOS；测试用注入 EPERM 覆盖逻辑，但没有真 Windows 账户）；
+  CI 的 Windows 腿是**管理员 runner**，只覆盖"能建链"的路径；本版修掉的软链 `type='file'` 缺陷是它暴露的，改后仍建议在标准账户实测一次；
 - 命令归一化仍**不可静态判定**：`find … -delete`、脚本文件（`bash foo.sh`）、`$VAR` 展开、自定义包装器；
   这是"静态分析的上限"，不是本版引入的缺陷；
 - 删/改名会话时**未持有会话锁**（写入路径有锁；删除是另一个维度的竞争，已记为后续项）；
